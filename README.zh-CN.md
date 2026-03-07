@@ -43,8 +43,12 @@ go build -o myworktree ./cmd/myworktree
 #（`mw` 默认会自动打开浏览器；可用 `-open=false` 关闭）
 go build -o mw ./cmd/mw
 
+# 注意：如果二进制就在当前目录，需要用 ./mw 运行（而不是 mw）
+# ./mw
+
 # 可选：放到 PATH 里，方便在任何项目中直接运行
 # mv ./myworktree ~/bin/myworktree
+# mv ./mw ~/bin/mw
 
 # 2）运行（进入你要管理的目标 git 仓库）
 cd /path/to/target/git/repo

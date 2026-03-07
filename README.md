@@ -43,8 +43,12 @@ go build -o myworktree ./cmd/myworktree
 # (by default, `mw` auto-opens the browser; disable with `-open=false`)
 go build -o mw ./cmd/mw
 
+# Note: if you built into the current directory, run it as ./mw (not mw)
+# ./mw
+
 # optional: move it into your PATH
 # mv ./myworktree ~/bin/myworktree
+# mv ./mw ~/bin/mw
 
 # 2) run (inside the target git repo you want to manage)
 cd /path/to/target/git/repo
