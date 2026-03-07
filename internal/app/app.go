@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -127,7 +128,18 @@ func (s *Server) Start() (string, error) {
 		scheme = "https"
 	}
 	addr := ln.Addr().String()
-	return fmt.Sprintf("%s://%s/", scheme, addr), nil
+	url := fmt.Sprintf("%s://%s/", scheme, addr)
+	if s.cfg.Open {
+		if err := openURL(url); err != nil {
+			s.logger.Printf("open browser failed: %v", err)
+		}
+	}
+	return url, nil
+}
+
+func openURL(url string) error {
+	cmd := exec.Command("open", url)
+	return cmd.Start()
 }
 
 func (s *Server) validateSecurity() error {

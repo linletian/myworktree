@@ -40,6 +40,7 @@ cd /path/to/myworktree
 go build -o myworktree ./cmd/myworktree
 
 # 可选：构建别名命令 `mw`（等效于 `myworktree`）
+#（`mw` 默认会自动打开浏览器；可用 `-open=false` 关闭）
 go build -o mw ./cmd/mw
 
 # 可选：放到 PATH 里，方便在任何项目中直接运行

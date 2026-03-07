@@ -40,6 +40,7 @@ cd /path/to/myworktree
 go build -o myworktree ./cmd/myworktree
 
 # optional: build an alias command `mw` (equivalent to `myworktree`)
+# (by default, `mw` auto-opens the browser; disable with `-open=false`)
 go build -o mw ./cmd/mw
 
 # optional: move it into your PATH
