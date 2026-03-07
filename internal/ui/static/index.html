@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>myworktree</title>
+    <style>
+      body { font-family: -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif; margin: 16px; color: #111; }
+      h1 { margin: 0 0 12px; }
+      .row { display: flex; gap: 16px; align-items: flex-start; }
+      .card { border: 1px solid #ddd; border-radius: 8px; padding: 12px; flex: 1; min-width: 320px; }
+      input, select, button { margin: 4px 0; padding: 6px 8px; }
+      button { cursor: pointer; }
+      table { width: 100%; border-collapse: collapse; font-size: 13px; }
+      th, td { border-bottom: 1px solid #eee; text-align: left; padding: 6px 4px; }
+      #log { width: 100%; height: 260px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; background: #0b1020; color: #f2f5ff; border-radius: 8px; padding: 10px; overflow: auto; }
+      .muted { color: #666; font-size: 12px; }
+    </style>
+  </head>
+  <body>
+    <h1>myworktree</h1>
+    <div class="muted">MVP UI: worktree / instance management + log replay</div>
+    <div class="row">
+      <div class="card">
+        <h3>Create worktree</h3>
+        <input id="wtTask" placeholder="task description" style="width:100%" />
+        <input id="wtBase" placeholder="base ref (optional)" style="width:100%" />
+        <button onclick="createWorktree()">Create</button>
+        <h3>Worktrees</h3>
+        <table id="wtTable"></table>
+      </div>
+      <div class="card">
+        <h3>Start instance</h3>
+        <select id="worktreeSelect" style="width:100%"></select>
+        <input id="tagId" placeholder="tag id (e.g. echo)" style="width:100%" />
+        <input id="instName" placeholder="instance name (optional)" style="width:100%" />
+        <button onclick="startInstance()">Start</button>
+        <h3>Instances</h3>
+        <table id="instTable"></table>
+      </div>
+    </div>
+    <div class="card" style="margin-top:16px">
+      <h3>Instance log replay</h3>
+      <select id="logSelect" style="width:100%"></select>
+      <button onclick="loadLog()">Load log</button>
+      <button onclick="autoRefresh()">Auto refresh</button>
+      <pre id="log"></pre>
+    </div>
+    <script>
+      const token = new URLSearchParams(location.search).get("token") || "";
+      const headers = token ? { Authorization: `Bearer ${token}` } : {};
+      let pollTimer = null;
+
+      async function api(path, opts = {}) {
+        const res = await fetch(path, {
+          ...opts,
+          headers: { "content-type": "application/json", ...headers, ...(opts.headers || {}) },
+        });
+        if (!res.ok) throw new Error(await res.text());
+        const ct = res.headers.get("content-type") || "";
+        return ct.includes("application/json") ? res.json() : res.text();
+      }
+
+      async function refresh() {
+        const wt = await api("/api/worktrees");
+        const ins = await api("/api/instances");
+        renderWorktrees(wt.worktrees || []);
+        renderInstances(ins.instances || []);
+      }
+
+      function renderWorktrees(items) {
+        const t = document.getElementById("wtTable");
+        t.innerHTML = "<tr><th>ID</th><th>Name</th><th>Branch</th><th></th></tr>" +
+          items.map(w => `<tr><td>${w.id}</td><td>${w.name}</td><td>${w.branch}</td><td><button onclick="deleteWorktree('${w.id}')">Delete</button></td></tr>`).join("");
+        const s = document.getElementById("worktreeSelect");
+        s.innerHTML = items.map(w => `<option value="${w.id}">${w.name} (${w.id})</option>`).join("");
+      }
+
+      function renderInstances(items) {
+        const t = document.getElementById("instTable");
+        t.innerHTML = "<tr><th>ID</th><th>WT</th><th>Tag</th><th>Status</th><th></th></tr>" +
+          items.map(i => `<tr><td>${i.id}</td><td>${i.worktree_id}</td><td>${i.tag_id}</td><td>${i.status}</td><td><button onclick="stopInstance('${i.id}')">Stop</button></td></tr>`).join("");
+        const s = document.getElementById("logSelect");
+        s.innerHTML = items.map(i => `<option value="${i.id}">${i.name || i.id} (${i.status})</option>`).join("");
+      }
+
+      async function createWorktree() {
+        try {
+          await api("/api/worktrees", { method: "POST", body: JSON.stringify({
+            task_description: document.getElementById("wtTask").value,
+            base_ref: document.getElementById("wtBase").value
+          })});
+          document.getElementById("wtTask").value = "";
+          await refresh();
+        } catch (e) { alert(String(e)); }
+      }
+
+      async function deleteWorktree(id) {
+        if (!confirm("Delete worktree " + id + "? (fails if dirty)")) return;
+        try {
+          await api("/api/worktrees/delete", { method: "POST", body: JSON.stringify({ id }) });
+          await refresh();
+        } catch (e) { alert(String(e)); }
+      }
+
+      async function startInstance() {
+        try {
+          await api("/api/instances", { method: "POST", body: JSON.stringify({
+            worktree_id: document.getElementById("worktreeSelect").value,
+            tag_id: document.getElementById("tagId").value,
+            name: document.getElementById("instName").value
+          })});
+          await refresh();
+        } catch (e) { alert(String(e)); }
+      }
+
+      async function stopInstance(id) {
+        try {
+          await api("/api/instances/stop", { method: "POST", body: JSON.stringify({ id }) });
+          await refresh();
+        } catch (e) { alert(String(e)); }
+      }
+
+      async function loadLog() {
+        try {
+          const id = document.getElementById("logSelect").value;
+          const text = await api(`/api/instances/log?id=${encodeURIComponent(id)}`);
+          document.getElementById("log").textContent = text;
+        } catch (e) { alert(String(e)); }
+      }
+
+      function autoRefresh() {
+        if (pollTimer) {
+          clearInterval(pollTimer);
+          pollTimer = null;
+          return;
+        }
+        pollTimer = setInterval(async () => {
+          await refresh();
+          await loadLog();
+        }, 2000);
+      }
+
+      refresh();
+    </script>
+  </body>
+</html>
