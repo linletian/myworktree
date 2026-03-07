@@ -47,7 +47,14 @@ go build -o mw ./cmd/mw
 
 # 2) run (inside the target git repo you want to manage)
 cd /path/to/target/git/repo
+
+# Port `0` means “pick any available port automatically”.
+# myworktree will print the full URL (including the chosen port).
 /path/to/myworktree/myworktree -listen 127.0.0.1:0
+
+# (optional) use a fixed port
+# /path/to/myworktree/myworktree -listen 127.0.0.1:50053
+
 # open the printed URL in a browser
 
 # create a tag config (project-scoped)

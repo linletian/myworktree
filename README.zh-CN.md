@@ -47,7 +47,14 @@ go build -o mw ./cmd/mw
 
 # 2）运行（进入你要管理的目标 git 仓库）
 cd /path/to/target/git/repo
+
+# 端口号写 `0` 表示“自动选择一个空闲端口”，避免端口冲突。
+# myworktree 会输出完整 URL（包含实际端口）。
 /path/to/myworktree/myworktree -listen 127.0.0.1:0
+
+# （可选）使用固定端口
+# /path/to/myworktree/myworktree -listen 127.0.0.1:50053
+
 # 用浏览器打开输出的 URL
 ```
 
