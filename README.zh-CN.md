@@ -46,13 +46,20 @@ go build -o mw ./cmd/mw
 # 注意：如果二进制就在当前目录，需要用 ./mw 运行（而不是 mw）
 # ./mw
 
-# 可选：放到 PATH 里，方便在任何项目中直接运行
-# mkdir -p ~/bin
-# mv ./myworktree ~/bin/myworktree
-# mv ./mw ~/bin/mw
-
 # 2）运行（进入你要管理的目标 git 仓库）
 cd /path/to/target/git/repo
+
+# 最简单：用绝对路径运行（无需配置 PATH）
+/path/to/myworktree/mw -listen 127.0.0.1:0
+
+# 可选：安装到 PATH（以下两种方式任选其一）
+# A）用户级目录
+# mkdir -p ~/bin
+# mv /path/to/myworktree/myworktree ~/bin/myworktree
+# mv /path/to/myworktree/mw ~/bin/mw
+# B）系统级目录（通常默认就在 PATH 里）
+# sudo install -m 755 /path/to/myworktree/myworktree /usr/local/bin/myworktree
+# sudo install -m 755 /path/to/myworktree/mw /usr/local/bin/mw
 
 # 端口号写 `0` 表示“自动选择一个空闲端口”，避免端口冲突。
 # myworktree 会输出完整 URL（包含实际端口）。

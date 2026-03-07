@@ -46,13 +46,20 @@ go build -o mw ./cmd/mw
 # Note: if you built into the current directory, run it as ./mw (not mw)
 # ./mw
 
-# optional: move it into your PATH
-# mkdir -p ~/bin
-# mv ./myworktree ~/bin/myworktree
-# mv ./mw ~/bin/mw
-
 # 2) run (inside the target git repo you want to manage)
 cd /path/to/target/git/repo
+
+# simplest: run via absolute path (no PATH setup needed)
+/path/to/myworktree/mw -listen 127.0.0.1:0
+
+# optional: install into PATH (pick ONE approach)
+# A) user-local bin
+# mkdir -p ~/bin
+# mv /path/to/myworktree/myworktree ~/bin/myworktree
+# mv /path/to/myworktree/mw ~/bin/mw
+# B) system-wide (usually already in PATH)
+# sudo install -m 755 /path/to/myworktree/myworktree /usr/local/bin/myworktree
+# sudo install -m 755 /path/to/myworktree/mw /usr/local/bin/mw
 
 # Port `0` means “pick any available port automatically”.
 # myworktree will print the full URL (including the chosen port).
