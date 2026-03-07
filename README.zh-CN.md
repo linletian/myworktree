@@ -47,6 +47,7 @@ go build -o mw ./cmd/mw
 # ./mw
 
 # 可选：放到 PATH 里，方便在任何项目中直接运行
+# mkdir -p ~/bin
 # mv ./myworktree ~/bin/myworktree
 # mv ./mw ~/bin/mw
 

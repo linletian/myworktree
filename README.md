@@ -47,6 +47,7 @@ go build -o mw ./cmd/mw
 # ./mw
 
 # optional: move it into your PATH
+# mkdir -p ~/bin
 # mv ./myworktree ~/bin/myworktree
 # mv ./mw ~/bin/mw
 
