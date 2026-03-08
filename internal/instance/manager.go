@@ -49,9 +49,6 @@ func (m *Manager) Start(in StartInput) (store.ManagedInstance, error) {
 	if strings.TrimSpace(in.WorktreeID) == "" {
 		return store.ManagedInstance{}, errors.New("worktree_id is required")
 	}
-	if strings.TrimSpace(in.TagID) == "" && strings.TrimSpace(in.Command) == "" {
-		return store.ManagedInstance{}, errors.New("tag_id or command is required")
-	}
 
 	st, err := m.Store.Load()
 	if err != nil {
@@ -98,6 +95,10 @@ func (m *Manager) Start(in StartInput) (store.ManagedInstance, error) {
 	} else {
 		effectiveTagID = "adhoc"
 		command = strings.TrimSpace(in.Command)
+		if command == "" {
+			effectiveTagID = "idle"
+			command = "echo \"myworktree: started an idle instance (MVP is non-interactive; provide a tag_id or command to run something useful).\"; tail -f /dev/null"
+		}
 		cwdRel = ""
 		preStart = ""
 		env = map[string]string{}

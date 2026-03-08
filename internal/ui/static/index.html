@@ -33,7 +33,7 @@
         <h3>Start instance</h3>
         <select id="worktreeSelect" style="width:100%"></select>
         <select id="tagSelect" style="width:100%"></select>
-        <input id="cmd" placeholder="command (optional if tag selected)" style="width:100%" />
+        <input id="cmd" placeholder="command (optional; leave empty for idle instance)" style="width:100%" />
         <input id="instName" placeholder="instance name (optional)" style="width:100%" />
         <button onclick="startInstance()">Start</button>
         <div class="muted">Pick a tag or type a command. Tags are loaded from tags.json (global + project).</div>
@@ -122,10 +122,6 @@
         try {
           const tagId = document.getElementById("tagSelect").value;
           const command = document.getElementById("cmd").value;
-          if (!tagId && !command.trim()) {
-            alert("Select a tag or type a command.");
-            return;
-          }
           await api("/api/instances", { method: "POST", body: JSON.stringify({
             worktree_id: document.getElementById("worktreeSelect").value,
             tag_id: tagId,

@@ -62,10 +62,12 @@ Response:
 ### Start
 `POST /api/instances`
 
-Body (either `tag_id` or `command` is required):
+Body:
 ```json
-{ "worktree_id": "<worktreeId>", "tag_id": "<tagId>", "command": "optional", "name": "optional" }
+{ "worktree_id": "<worktreeId>", "tag_id": "optional", "command": "optional", "name": "optional" }
 ```
+
+If both `tag_id` and `command` are empty, the server starts an **idle** instance (non-interactive MVP placeholder).
 
 Example (ad-hoc command without tags):
 ```json
