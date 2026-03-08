@@ -197,12 +197,46 @@ func (m *Manager) List() ([]store.ManagedInstance, error) {
 }
 
 func (m *Manager) Stop(id string) error {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return errors.New("id is required")
+	}
+
+	st, err := m.Store.Load()
+	if err != nil {
+		return err
+	}
+	var inst *store.ManagedInstance
+	for i := range st.Instances {
+		if st.Instances[i].ID == id {
+			inst = &st.Instances[i]
+			break
+		}
+	}
+	if inst == nil {
+		return fmt.Errorf("unknown instance id: %s", id)
+	}
+	if inst.Status != "running" {
+		// Idempotent: stopping an already-exited instance is a no-op.
+		return nil
+	}
+
 	m.mu.Lock()
 	cmd := m.running[id]
 	m.mu.Unlock()
-	if cmd == nil || cmd.Process == nil {
-		return fmt.Errorf("instance not running: %s", id)
+
+	// If server restarted, cmd may be missing; best-effort signal by PID.
+	if (cmd == nil || cmd.Process == nil) && inst.PID > 0 {
+		p, _ := os.FindProcess(inst.PID)
+		if p != nil {
+			_ = p.Signal(syscall.SIGTERM)
+		}
+		return nil
 	}
+	if cmd == nil || cmd.Process == nil {
+		return nil
+	}
+
 	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
 		return err
 	}

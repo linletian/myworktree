@@ -94,7 +94,10 @@
       function renderInstances(items) {
         const t = document.getElementById("instTable");
         t.innerHTML = "<tr><th>ID</th><th>WT</th><th>Tag</th><th>Status</th><th></th></tr>" +
-          items.map(i => `<tr><td>${i.id}</td><td>${i.worktree_id}</td><td>${i.tag_id}</td><td>${i.status}</td><td><button onclick="stopInstance('${i.id}')">Stop</button></td></tr>`).join("");
+          items.map(i => {
+            const btn = i.status === "running" ? `<button onclick="stopInstance('${i.id}')">Stop</button>` : "";
+            return `<tr><td>${i.id}</td><td>${i.worktree_id}</td><td>${i.tag_id}</td><td>${i.status}</td><td>${btn}</td></tr>`;
+          }).join("");
         const s = document.getElementById("logSelect");
         s.innerHTML = items.map(i => `<option value="${i.id}">${i.name || i.id} (${i.status})</option>`).join("");
       }
