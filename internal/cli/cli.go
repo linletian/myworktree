@@ -57,6 +57,7 @@ func startCmd(logger *log.Logger, prog string, args []string) error {
 	var tlsCert string
 	var tlsKey string
 	var open bool
+	var worktreesDir string
 
 	defaultOpen := filepath.Base(strings.TrimSpace(prog)) == "mw"
 
@@ -65,14 +66,16 @@ func startCmd(logger *log.Logger, prog string, args []string) error {
 	fs.StringVar(&tlsCert, "tls-cert", "", "path to TLS certificate PEM")
 	fs.StringVar(&tlsKey, "tls-key", "", "path to TLS private key PEM")
 	fs.BoolVar(&open, "open", defaultOpen, "open browser")
+	fs.StringVar(&worktreesDir, "worktrees-dir", "", "worktrees root dir (default: sibling <repo>-myworktree; set to 'data' for legacy DataDir/worktrees)")
 	_ = fs.Parse(args)
 
 	cfg := app.Config{
-		ListenAddr: listen,
-		AuthToken:  auth,
-		TLSCert:    tlsCert,
-		TLSKey:     tlsKey,
-		Open:       open,
+		ListenAddr:   listen,
+		AuthToken:    auth,
+		TLSCert:      tlsCert,
+		TLSKey:       tlsKey,
+		Open:         open,
+		WorktreesDir: worktreesDir,
 	}
 
 	srv, err := app.New(cfg, logger)
@@ -125,11 +128,14 @@ func worktreeCmd(logger *log.Logger, args []string) error {
 	case "new":
 		fs := flag.NewFlagSet("worktree new", flag.ContinueOnError)
 		var base string
+		var worktreesDir string
 		fs.StringVar(&base, "base", "", "base ref (default: current HEAD)")
+		fs.StringVar(&worktreesDir, "worktrees-dir", "", "worktrees root dir (default: sibling <repo>-myworktree; set to 'data' for legacy DataDir/worktrees)")
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
 		}
 		desc := strings.TrimSpace(strings.Join(fs.Args(), " "))
+		mgr.WorktreesDir = worktreesDir
 		wt, err := mgr.Create(desc, base)
 		if err != nil {
 			return err

@@ -83,6 +83,10 @@ cd /path/to/target/git/repo
 
 myworktree uses the **current working directory** to detect the target repo (git root) and derives an isolated per-project data dir from it, so you can manage other projects by running the same binary in a different repo directory.
 
+By default, newly created worktrees are placed next to your repo:
+`<repo-parent>/<repo-name>-myworktree/<worktree-name>/`.
+Use `-worktrees-dir=data` to use the legacy location under the per-project data dir, or set `-worktrees-dir` to a custom path.
+
 ## CLI examples
 ```bash
 # worktrees

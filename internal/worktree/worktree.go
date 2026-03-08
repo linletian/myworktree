@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
@@ -15,9 +16,10 @@ import (
 )
 
 type Manager struct {
-	GitRoot string
-	DataDir string
-	Store   store.FileStore
+	GitRoot      string
+	DataDir      string
+	WorktreesDir string // optional; "data" uses legacy DataDir/worktrees
+	Store        store.FileStore
 }
 
 func (m Manager) List() ([]store.ManagedWorktree, error) {
@@ -44,7 +46,19 @@ func (m Manager) Create(taskDesc string, baseRef string) (store.ManagedWorktree,
 
 	id := shortID()
 	branch := "wt/" + name
-	path := filepath.Join(m.DataDir, "worktrees", fmt.Sprintf("%s-%s", id, name))
+
+	root, legacy, err := m.worktreesRoot()
+	if err != nil {
+		return store.ManagedWorktree{}, err
+	}
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		return store.ManagedWorktree{}, err
+	}
+	pathName := name
+	if legacy {
+		pathName = fmt.Sprintf("%s-%s", id, name)
+	}
+	path := filepath.Join(root, pathName)
 
 	ref := strings.TrimSpace(baseRef)
 	if ref == "" {
@@ -129,6 +143,22 @@ func (m Manager) Import(name string) (store.ManagedWorktree, error) {
 		return store.ManagedWorktree{}, err
 	}
 	return wt, nil
+}
+
+func (m Manager) worktreesRoot() (root string, legacy bool, err error) {
+	v := strings.TrimSpace(m.WorktreesDir)
+	if v == "" {
+		repo := filepath.Base(filepath.Clean(m.GitRoot))
+		parent := filepath.Dir(filepath.Clean(m.GitRoot))
+		return filepath.Join(parent, repo+"-myworktree"), false, nil
+	}
+	if v == "data" || v == "datadir" {
+		return filepath.Join(m.DataDir, "worktrees"), true, nil
+	}
+	if filepath.IsAbs(v) {
+		return v, false, nil
+	}
+	return filepath.Join(m.GitRoot, v), false, nil
 }
 
 func (m Manager) Delete(id string) error {

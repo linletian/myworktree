@@ -27,11 +27,12 @@ import (
 )
 
 type Config struct {
-	ListenAddr string
-	AuthToken  string
-	TLSCert    string
-	TLSKey     string
-	Open       bool
+	ListenAddr   string
+	AuthToken    string
+	TLSCert      string
+	TLSKey       string
+	Open         bool
+	WorktreesDir string
 }
 
 type Server struct {
@@ -69,9 +70,10 @@ func New(cfg Config, logger *log.Logger) (*Server, error) {
 	}
 	st := store.FileStore{Path: filepath.Join(dataDir, "state.json")}
 	worktreeMgr := worktree.Manager{
-		GitRoot: root,
-		DataDir: dataDir,
-		Store:   st,
+		GitRoot:      root,
+		DataDir:      dataDir,
+		WorktreesDir: cfg.WorktreesDir,
+		Store:        st,
 	}
 	instanceMgr := &instance.Manager{
 		DataDir: dataDir,

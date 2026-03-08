@@ -23,6 +23,10 @@ It does **not** analyze project code or prevent concurrent write conflicts insid
 ### 3.1 Project-scoped user data directory
 - Stored under user-level config dir (no repo pollution), partitioned by `repoHash`.
 - Contains:
+
+### 3.1.1 Worktree directory layout
+- Default: worktrees are created next to the repo under `<repo-name>-myworktree/<worktree-name>/`.
+- Override: `-worktrees-dir=data` uses the legacy location under the per-project data dir; you can also set a custom path.
   - `state.json` — managed worktrees + managed instances
   - `tags.json` — project-level tags
   - `logs/<instanceId>.log` — rolling instance backlog

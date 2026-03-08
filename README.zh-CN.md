@@ -79,6 +79,10 @@ cd /path/to/target/git/repo
 
 myworktree 会用**当前工作目录**定位目标项目（git root），并基于该 git root 计算独立的数据目录，因此要管理其他项目时，只需要在另一个项目仓库目录下运行同一个 myworktree 二进制即可。
 
+默认情况下，新建 worktree 会放在主仓库的同级目录下：
+`<repo父目录>/<repo目录名>-myworktree/<worktree名>/`。
+如果你想切回旧行为（放在每个项目的数据目录下），用 `-worktrees-dir=data`；也可以把 `-worktrees-dir` 设置为自定义路径。
+
 ## 常用命令
 ```bash
 # worktree
