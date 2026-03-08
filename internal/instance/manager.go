@@ -35,6 +35,7 @@ type Manager struct {
 type StartInput struct {
 	WorktreeID string
 	TagID      string
+	Command    string // optional if TagID is set; required if TagID is empty
 	Name       string
 }
 
@@ -48,8 +49,8 @@ func (m *Manager) Start(in StartInput) (store.ManagedInstance, error) {
 	if strings.TrimSpace(in.WorktreeID) == "" {
 		return store.ManagedInstance{}, errors.New("worktree_id is required")
 	}
-	if strings.TrimSpace(in.TagID) == "" {
-		return store.ManagedInstance{}, errors.New("tag_id is required")
+	if strings.TrimSpace(in.TagID) == "" && strings.TrimSpace(in.Command) == "" {
+		return store.ManagedInstance{}, errors.New("tag_id or command is required")
 	}
 
 	st, err := m.Store.Load()
@@ -68,22 +69,44 @@ func (m *Manager) Start(in StartInput) (store.ManagedInstance, error) {
 		return store.ManagedInstance{}, fmt.Errorf("unknown worktree id: %s", in.WorktreeID)
 	}
 
-	tags, err := m.loadTags()
-	if err != nil {
-		return store.ManagedInstance{}, err
-	}
-	t, ok := tags[in.TagID]
-	if !ok {
-		return store.ManagedInstance{}, fmt.Errorf("unknown tag id: %s", in.TagID)
-	}
-	if strings.TrimSpace(t.Command) == "" {
-		return store.ManagedInstance{}, errors.New("tag command is required")
+	var (
+		t              tag.Tag
+		command        string
+		cwdRel         string
+		preStart       string
+		env            map[string]string
+		effectiveTagID = strings.TrimSpace(in.TagID)
+	)
+
+	if effectiveTagID != "" {
+		tags, err := m.loadTags()
+		if err != nil {
+			return store.ManagedInstance{}, err
+		}
+		var ok bool
+		t, ok = tags[effectiveTagID]
+		if !ok {
+			return store.ManagedInstance{}, fmt.Errorf("unknown tag id: %s", effectiveTagID)
+		}
+		if strings.TrimSpace(t.Command) == "" {
+			return store.ManagedInstance{}, errors.New("tag command is required")
+		}
+		command = t.Command
+		cwdRel = t.Cwd
+		preStart = t.PreStart
+		env = t.Env
+	} else {
+		effectiveTagID = "adhoc"
+		command = strings.TrimSpace(in.Command)
+		cwdRel = ""
+		preStart = ""
+		env = map[string]string{}
 	}
 
 	id := shortID()
 	instName := strings.TrimSpace(in.Name)
 	if instName == "" {
-		instName = in.TagID
+		instName = effectiveTagID
 	}
 	logDir := filepath.Join(m.DataDir, "logs")
 	if err := os.MkdirAll(logDir, 0o755); err != nil {
@@ -96,19 +119,19 @@ func (m *Manager) Start(in StartInput) (store.ManagedInstance, error) {
 	}
 
 	cwd := wt.Path
-	if strings.TrimSpace(t.Cwd) != "" && t.Cwd != "." {
-		cwd = filepath.Join(wt.Path, t.Cwd)
+	if strings.TrimSpace(cwdRel) != "" && cwdRel != "." {
+		cwd = filepath.Join(wt.Path, cwdRel)
 	}
 
-	cmd := exec.Command("zsh", "-lc", t.Command)
+	cmd := exec.Command("zsh", "-lc", command)
 	cmd.Dir = cwd
 	cmd.Env = os.Environ()
-	for k, v := range t.Env {
+	for k, v := range env {
 		cmd.Env = append(cmd.Env, k+"="+v)
 	}
 
-	if strings.TrimSpace(t.PreStart) != "" {
-		pre := exec.Command("zsh", "-lc", t.PreStart)
+	if strings.TrimSpace(preStart) != "" {
+		pre := exec.Command("zsh", "-lc", preStart)
 		pre.Dir = cwd
 		pre.Env = cmd.Env
 		if out, err := pre.CombinedOutput(); err != nil {
@@ -138,11 +161,11 @@ func (m *Manager) Start(in StartInput) (store.ManagedInstance, error) {
 	inst := store.ManagedInstance{
 		ID:         id,
 		WorktreeID: wt.ID,
-		TagID:      in.TagID,
+		TagID:      effectiveTagID,
 		Name:       instName,
-		Command:    t.Command,
+		Command:    command,
 		Cwd:        cwd,
-		Env:        sanitizedEnv(t.Env),
+		Env:        sanitizedEnv(env),
 		PID:        cmd.Process.Pid,
 		Status:     "running",
 		LogPath:    logPath,

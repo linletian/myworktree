@@ -263,6 +263,7 @@ func (s *Server) handleInstances(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			WorktreeID string `json:"worktree_id"`
 			TagID      string `json:"tag_id"`
+			Command    string `json:"command"`
 			Name       string `json:"name"`
 		}
 		if err := readJSON(r.Body, &req); err != nil {
@@ -272,6 +273,7 @@ func (s *Server) handleInstances(w http.ResponseWriter, r *http.Request) {
 		item, err := s.instanceMgr.Start(instance.StartInput{
 			WorktreeID: req.WorktreeID,
 			TagID:      req.TagID,
+			Command:    req.Command,
 			Name:       req.Name,
 		})
 		if err != nil {

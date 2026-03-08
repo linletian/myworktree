@@ -33,9 +33,10 @@
         <h3>Start instance</h3>
         <select id="worktreeSelect" style="width:100%"></select>
         <select id="tagSelect" style="width:100%"></select>
+        <input id="cmd" placeholder="command (optional if tag selected)" style="width:100%" />
         <input id="instName" placeholder="instance name (optional)" style="width:100%" />
         <button onclick="startInstance()">Start</button>
-        <div class="muted">Tags are loaded from tags.json (global + project).</div>
+        <div class="muted">Pick a tag or type a command. Tags are loaded from tags.json (global + project).</div>
         <h3>Instances</h3>
         <table id="instTable"></table>
       </div>
@@ -79,7 +80,7 @@
         }
         s.innerHTML = '<option value="">-- select tag --</option>' +
           items.map(t => `<option value="${t.id}">${t.id} — ${t.command}</option>`).join("");
-        if (!s.value) s.value = items[0].id;
+        // do not auto-select: allow starting with an ad-hoc command.
       }
 
       function renderWorktrees(items) {
@@ -120,13 +121,15 @@
       async function startInstance() {
         try {
           const tagId = document.getElementById("tagSelect").value;
-          if (!tagId) {
-            alert("Select a tag first (configure tags.json).");
+          const command = document.getElementById("cmd").value;
+          if (!tagId && !command.trim()) {
+            alert("Select a tag or type a command.");
             return;
           }
           await api("/api/instances", { method: "POST", body: JSON.stringify({
             worktree_id: document.getElementById("worktreeSelect").value,
             tag_id: tagId,
+            command,
             name: document.getElementById("instName").value
           })});
           await refresh();

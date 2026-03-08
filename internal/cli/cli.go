@@ -84,7 +84,10 @@ func startCmd(logger *log.Logger, prog string, args []string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Println(url)
+	// Print a friendly message with the server URL
+	fmt.Println("Server running at:")
+	fmt.Printf("  %s\n", url)
+	fmt.Println("\nPress Ctrl+C to stop the server")
 
 	select {}
 }
@@ -225,9 +228,11 @@ func instanceCmd(logger *log.Logger, args []string) error {
 		fs := flag.NewFlagSet("instance start", flag.ContinueOnError)
 		var worktreeID string
 		var tagID string
+		var command string
 		var name string
 		fs.StringVar(&worktreeID, "worktree", "", "managed worktree id")
-		fs.StringVar(&tagID, "tag", "", "tag id")
+		fs.StringVar(&tagID, "tag", "", "tag id (optional if --cmd is set)")
+		fs.StringVar(&command, "cmd", "", "ad-hoc command (optional if --tag is set)")
 		fs.StringVar(&name, "name", "", "instance display name")
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
@@ -235,6 +240,7 @@ func instanceCmd(logger *log.Logger, args []string) error {
 		item, err := mgr.Start(instance.StartInput{
 			WorktreeID: worktreeID,
 			TagID:      tagID,
+			Command:    command,
 			Name:       name,
 		})
 		if err != nil {

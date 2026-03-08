@@ -62,9 +62,14 @@ Response:
 ### Start
 `POST /api/instances`
 
-Body:
+Body (either `tag_id` or `command` is required):
 ```json
-{ "worktree_id": "<worktreeId>", "tag_id": "<tagId>", "name": "optional" }
+{ "worktree_id": "<worktreeId>", "tag_id": "<tagId>", "command": "optional", "name": "optional" }
+```
+
+Example (ad-hoc command without tags):
+```json
+{ "worktree_id": "<worktreeId>", "command": "echo hello && ls" }
 ```
 
 Response (201):
