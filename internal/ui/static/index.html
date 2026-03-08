@@ -151,6 +151,11 @@
           }).join("");
 
         const s = document.getElementById("logSelect");
+        if (!(items || []).length) {
+          s.innerHTML = '<option value="">(no instances)</option>';
+          document.getElementById("log").textContent = "";
+          return;
+        }
         s.innerHTML = (items || []).map(i => {
           const wtName = i.worktree_name || wtNameByID[i.worktree_id] || "";
           const wtPart = wtName ? ` — ${wtName}` : "";
@@ -221,6 +226,10 @@
       async function loadLog() {
         try {
           const id = document.getElementById("logSelect").value;
+          if (!id) {
+            document.getElementById("log").textContent = "";
+            return;
+          }
           const text = await api(`/api/instances/log?id=${encodeURIComponent(id)}`);
           document.getElementById("log").textContent = text;
         } catch (e) { alert(String(e)); }
