@@ -168,6 +168,8 @@ func (s *Server) registerAPIs(mux *http.ServeMux) {
 	mux.HandleFunc("/api/worktrees/delete", s.handleWorktreeDelete)
 	mux.HandleFunc("/api/instances", s.handleInstances)
 	mux.HandleFunc("/api/instances/stop", s.handleInstanceStop)
+	mux.HandleFunc("/api/instances/archive", s.handleInstanceArchive)
+	mux.HandleFunc("/api/instances/delete", s.handleInstanceDelete)
 	mux.HandleFunc("/api/instances/log", s.handleInstanceLog)
 	mux.HandleFunc("/api/tags", s.handleTags)
 	mux.HandleFunc("/api/branches", s.handleBranches)
@@ -340,6 +342,44 @@ func (s *Server) handleInstanceStop(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.instanceMgr.Stop(req.ID); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (s *Server) handleInstanceArchive(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		ID string `json:"id"`
+	}
+	if err := readJSON(r.Body, &req); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := s.instanceMgr.Archive(req.ID); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (s *Server) handleInstanceDelete(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		ID string `json:"id"`
+	}
+	if err := readJSON(r.Body, &req); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := s.instanceMgr.Delete(req.ID); err != nil {
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}

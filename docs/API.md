@@ -98,6 +98,26 @@ Body:
 { "id": "<instanceId>" }
 ```
 
+### Archive
+`POST /api/instances/archive`
+
+Body:
+```json
+{ "id": "<instanceId>" }
+```
+
+Archives a non-running instance (hides it from the main list).
+
+### Delete
+`POST /api/instances/delete`
+
+Body:
+```json
+{ "id": "<instanceId>" }
+```
+
+Deletes a non-running instance record (best-effort deletes the log file).
+
 ### Log replay (tail)
 `GET /api/instances/log?id=<instanceId>`
 

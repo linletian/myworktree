@@ -252,6 +252,68 @@ func (m *Manager) Stop(id string) error {
 	return nil
 }
 
+func (m *Manager) Archive(id string) error {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return errors.New("id is required")
+	}
+	st, err := m.Store.Load()
+	if err != nil {
+		return err
+	}
+	for i := range st.Instances {
+		if st.Instances[i].ID == id {
+			if st.Instances[i].Status == "running" {
+				return fmt.Errorf("instance is running: %s", id)
+			}
+			st.Instances[i].Archived = true
+			st.Instances[i].ArchivedAt = time.Now().UTC().Format(time.RFC3339)
+			return m.Store.Save(st)
+		}
+	}
+	return fmt.Errorf("unknown instance id: %s", id)
+}
+
+func (m *Manager) Delete(id string) error {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return errors.New("id is required")
+	}
+	st, err := m.Store.Load()
+	if err != nil {
+		return err
+	}
+	idx := -1
+	var logPath string
+	for i := range st.Instances {
+		if st.Instances[i].ID == id {
+			if st.Instances[i].Status == "running" {
+				return fmt.Errorf("instance is running: %s", id)
+			}
+			if !st.Instances[i].Archived {
+				return fmt.Errorf("instance is not archived: %s", id)
+			}
+			idx = i
+			logPath = st.Instances[i].LogPath
+			break
+		}
+	}
+	if idx == -1 {
+		return fmt.Errorf("unknown instance id: %s", id)
+	}
+	st.Instances = append(st.Instances[:idx], st.Instances[idx+1:]...)
+	if err := m.Store.Save(st); err != nil {
+		return err
+	}
+	if strings.TrimSpace(logPath) != "" {
+		_ = os.Remove(logPath)
+	}
+	m.mu.Lock()
+	delete(m.running, id)
+	m.mu.Unlock()
+	return nil
+}
+
 func (m *Manager) Tail(id string, n int64) (string, error) {
 	if n <= 0 {
 		n = 4096

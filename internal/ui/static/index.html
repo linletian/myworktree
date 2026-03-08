@@ -41,6 +41,10 @@
         <div class="muted">Pick a tag or type a command. Tags are loaded from tags.json (global + project).</div>
         <h3>Instances</h3>
         <table id="instTable"></table>
+        <details style="margin-top:10px">
+          <summary>Archived instances</summary>
+          <table id="archTable"></table>
+        </details>
       </div>
     </div>
     <div class="card" style="margin-top:16px">
@@ -126,18 +130,32 @@
       }
 
       function renderInstances(items) {
+        const active = (items || []).filter(i => !i.archived);
+        const archived = (items || []).filter(i => i.archived);
+
         const t = document.getElementById("instTable");
         t.innerHTML = "<tr><th>Instance ID</th><th>Worktree ID</th><th>Worktree Name</th><th>Tag</th><th>Status</th><th></th></tr>" +
-          items.map(i => {
-            const btn = i.status === "running" ? `<button onclick="stopInstance('${i.id}')">Stop</button>` : "";
+          active.map(i => {
             const wtName = i.worktree_name || wtNameByID[i.worktree_id] || "";
-            return `<tr><td>${i.id}</td><td>${i.worktree_id}</td><td>${wtName}</td><td>${i.tag_id}</td><td>${i.status}</td><td>${btn}</td></tr>`;
+            const stopBtn = i.status === "running" ? `<button onclick=\"stopInstance('${i.id}')\">Stop</button>` : "";
+            const archBtn = i.status !== "running" ? `<button onclick=\"archiveInstance('${i.id}')\">Archive</button>` : "";
+            return `<tr><td>${i.id}</td><td>${i.worktree_id}</td><td>${wtName}</td><td>${i.tag_id}</td><td>${i.status}</td><td>${stopBtn} ${archBtn}</td></tr>`;
           }).join("");
+
+        const at = document.getElementById("archTable");
+        at.innerHTML = "<tr><th>Instance ID</th><th>Worktree Name</th><th>Tag</th><th>Status</th><th>Archived At</th><th></th></tr>" +
+          archived.map(i => {
+            const wtName = i.worktree_name || wtNameByID[i.worktree_id] || "";
+            const delBtn = `<button onclick=\"deleteInstance('${i.id}')\">Delete</button>`;
+            return `<tr><td>${i.id}</td><td>${wtName}</td><td>${i.tag_id}</td><td>${i.status}</td><td>${i.archived_at || ""}</td><td>${delBtn}</td></tr>`;
+          }).join("");
+
         const s = document.getElementById("logSelect");
-        s.innerHTML = items.map(i => {
+        s.innerHTML = (items || []).map(i => {
           const wtName = i.worktree_name || wtNameByID[i.worktree_id] || "";
           const wtPart = wtName ? ` — ${wtName}` : "";
-          return `<option value="${i.id}">${i.name || i.id}${wtPart} (${i.status})</option>`;
+          const arch = i.archived ? " [archived]" : "";
+          return `<option value=\"${i.id}\">${i.name || i.id}${wtPart}${arch} (${i.status})</option>`;
         }).join("");
       }
 
@@ -181,6 +199,21 @@
       async function stopInstance(id) {
         try {
           await api("/api/instances/stop", { method: "POST", body: JSON.stringify({ id }) });
+          await refresh();
+        } catch (e) { alert(String(e)); }
+      }
+
+      async function archiveInstance(id) {
+        try {
+          await api("/api/instances/archive", { method: "POST", body: JSON.stringify({ id }) });
+          await refresh();
+        } catch (e) { alert(String(e)); }
+      }
+
+      async function deleteInstance(id) {
+        if (!confirm("Delete instance " + id + "? (This removes record and log file)") ) return;
+        try {
+          await api("/api/instances/delete", { method: "POST", body: JSON.stringify({ id }) });
           await refresh();
         } catch (e) { alert(String(e)); }
       }

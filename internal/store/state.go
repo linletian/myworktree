@@ -34,6 +34,8 @@ type ManagedInstance struct {
 	Env          map[string]string `json:"env,omitempty"`
 	PID          int               `json:"pid"`
 	Status       string            `json:"status"` // running|exited|stopped|failed
+	Archived     bool              `json:"archived,omitempty"`
+	ArchivedAt   string            `json:"archived_at,omitempty"`
 	LogPath      string            `json:"log_path"`
 	CreatedAt    string            `json:"created_at"`
 	StoppedAt    string            `json:"stopped_at,omitempty"`
