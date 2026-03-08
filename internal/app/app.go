@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -20,6 +21,7 @@ import (
 	"myworktree/internal/instance"
 	"myworktree/internal/mcp"
 	"myworktree/internal/store"
+	"myworktree/internal/tag"
 	"myworktree/internal/ui"
 	"myworktree/internal/worktree"
 )
@@ -165,7 +167,39 @@ func (s *Server) registerAPIs(mux *http.ServeMux) {
 	mux.HandleFunc("/api/instances", s.handleInstances)
 	mux.HandleFunc("/api/instances/stop", s.handleInstanceStop)
 	mux.HandleFunc("/api/instances/log", s.handleInstanceLog)
+	mux.HandleFunc("/api/tags", s.handleTags)
 	mux.HandleFunc("/api/mcp/tools", s.handleMCPTools)
+}
+
+func (s *Server) handleTags(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	base, err := os.UserConfigDir()
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	mgr := tag.Manager{
+		GlobalPath:  filepath.Join(base, "myworktree", "tags.json"),
+		ProjectPath: filepath.Join(s.dataDir, "tags.json"),
+	}
+	m, err := mgr.LoadMerged()
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	type item struct {
+		ID      string `json:"id"`
+		Command string `json:"command"`
+	}
+	items := make([]item, 0, len(m))
+	for id, t := range m {
+		items = append(items, item{ID: id, Command: t.Command})
+	}
+	sort.Slice(items, func(i, j int) bool { return items[i].ID < items[j].ID })
+	writeJSON(w, http.StatusOK, map[string]any{"tags": items})
 }
 
 func (s *Server) handleWorktrees(w http.ResponseWriter, r *http.Request) {

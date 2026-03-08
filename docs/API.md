@@ -41,7 +41,16 @@ Response:
 { "status": "ok" }
 ```
 
-## 2) Instances
+## 2) Tags
+### List (merged: global + project)
+`GET /api/tags`
+
+Response:
+```json
+{ "tags": [ {"id":"...","command":"..."} ] }
+```
+
+## 3) Instances
 ### List
 `GET /api/instances`
 

@@ -32,9 +32,10 @@
       <div class="card">
         <h3>Start instance</h3>
         <select id="worktreeSelect" style="width:100%"></select>
-        <input id="tagId" placeholder="tag id (e.g. echo)" style="width:100%" />
+        <select id="tagSelect" style="width:100%"></select>
         <input id="instName" placeholder="instance name (optional)" style="width:100%" />
         <button onclick="startInstance()">Start</button>
+        <div class="muted">Tags are loaded from tags.json (global + project).</div>
         <h3>Instances</h3>
         <table id="instTable"></table>
       </div>
@@ -64,8 +65,21 @@
       async function refresh() {
         const wt = await api("/api/worktrees");
         const ins = await api("/api/instances");
+        const tags = await api("/api/tags");
         renderWorktrees(wt.worktrees || []);
+        renderTags(tags.tags || []);
         renderInstances(ins.instances || []);
+      }
+
+      function renderTags(items) {
+        const s = document.getElementById("tagSelect");
+        if (!items.length) {
+          s.innerHTML = '<option value="">(no tags configured)</option>';
+          return;
+        }
+        s.innerHTML = '<option value="">-- select tag --</option>' +
+          items.map(t => `<option value="${t.id}">${t.id} — ${t.command}</option>`).join("");
+        if (!s.value) s.value = items[0].id;
       }
 
       function renderWorktrees(items) {
@@ -105,9 +119,14 @@
 
       async function startInstance() {
         try {
+          const tagId = document.getElementById("tagSelect").value;
+          if (!tagId) {
+            alert("Select a tag first (configure tags.json).");
+            return;
+          }
           await api("/api/instances", { method: "POST", body: JSON.stringify({
             worktree_id: document.getElementById("worktreeSelect").value,
-            tag_id: document.getElementById("tagId").value,
+            tag_id: tagId,
             name: document.getElementById("instName").value
           })});
           await refresh();
