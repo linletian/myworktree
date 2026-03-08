@@ -63,11 +63,14 @@ func (m Manager) Create(taskDesc string, baseRef string) (store.ManagedWorktree,
 	ref := strings.TrimSpace(baseRef)
 	if ref == "" {
 		ref = "HEAD"
-		verify := exec.Command("git", "rev-parse", "--verify", "HEAD")
-		verify.Dir = m.GitRoot
-		if out, err := verify.CombinedOutput(); err != nil {
-			return store.ManagedWorktree{}, fmt.Errorf("repository has no commits (HEAD not found); create an initial commit or pass --base: %s", strings.TrimSpace(string(out)))
+	}
+	verify := exec.Command("git", "rev-parse", "--verify", ref)
+	verify.Dir = m.GitRoot
+	if out, err := verify.CombinedOutput(); err != nil {
+		if ref == "HEAD" {
+			return store.ManagedWorktree{}, fmt.Errorf("repository has no commits (HEAD not found); create an initial commit or pass -base: %s", strings.TrimSpace(string(out)))
 		}
+		return store.ManagedWorktree{}, fmt.Errorf("base ref not found: %s", ref)
 	}
 
 	// git worktree add -b <branch> <path> <ref>
