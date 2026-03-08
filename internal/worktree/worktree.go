@@ -45,13 +45,18 @@ func (m Manager) Create(taskDesc string, baseRef string) (store.ManagedWorktree,
 		baseName = slug
 	}
 
-	name := baseName
-	for i := 2; branchExists(m.GitRoot, group+"/"+name); i++ {
-		name = fmt.Sprintf("%s-%d", baseName, i)
+	branchName := baseName
+	for i := 2; branchExists(m.GitRoot, group+"/"+branchName); i++ {
+		branchName = fmt.Sprintf("%s-%d", baseName, i)
+	}
+
+	name := branchName
+	if custom {
+		name = group + "-" + branchName
 	}
 
 	id := shortID()
-	branch := group + "/" + name
+	branch := group + "/" + branchName
 
 	root, legacy, err := m.worktreesRoot()
 	if err != nil {
@@ -113,9 +118,11 @@ func (m Manager) Import(name string) (store.ManagedWorktree, error) {
 		return store.ManagedWorktree{}, errors.New("worktree name is required")
 	}
 	// Accept either a full branch spec like "feature/foo" or a short name that defaults to "mwt/<name>".
+	displayName := name
 	branch := "mwt/" + name
 	if g, n, ok := parseBranchSpec(name); ok {
 		branch = g + "/" + n
+		displayName = g + "-" + n
 	}
 	items, err := listGitWorktrees(m.GitRoot)
 	if err != nil {
@@ -155,7 +162,7 @@ func (m Manager) Import(name string) (store.ManagedWorktree, error) {
 
 	wt := store.ManagedWorktree{
 		ID:        shortID(),
-		Name:      name,
+		Name:      displayName,
 		Path:      path,
 		Branch:    branch,
 		BaseRef:   "",
