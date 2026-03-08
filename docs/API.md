@@ -41,7 +41,18 @@ Response:
 { "status": "ok" }
 ```
 
-## 2) Tags
+## 2) Branches
+### List (default + top 10)
+`GET /api/branches`
+
+Returns local branches with default branch always first, then branches sorted by last commit time (newest → oldest), max 10.
+
+Response:
+```json
+{ "default": "main", "branches": [ {"name":"main","commit_unix":1700000000} ] }
+```
+
+## 3) Tags
 ### List (merged: global + project)
 `GET /api/tags`
 
@@ -50,7 +61,7 @@ Response:
 { "tags": [ {"id":"...","command":"..."} ] }
 ```
 
-## 3) Instances
+## 4) Instances
 ### List
 `GET /api/instances`
 
