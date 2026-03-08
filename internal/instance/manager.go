@@ -184,7 +184,7 @@ func (m *Manager) Start(in StartInput) (store.ManagedInstance, error) {
 	m.mu.Unlock()
 
 	go pumpLogs(stdout, stderr, logFile, logPath)
-	go m.wait(id, cmd, logFile)
+	go m.wait(id, cmd)
 	return inst, nil
 }
 
@@ -260,9 +260,8 @@ func (m *Manager) Tail(id string, n int64) (string, error) {
 	return string(b), nil
 }
 
-func (m *Manager) wait(id string, cmd *exec.Cmd, logFile *os.File) {
+func (m *Manager) wait(id string, cmd *exec.Cmd) {
 	err := cmd.Wait()
-	_ = logFile.Close()
 
 	m.mu.Lock()
 	delete(m.running, id)
@@ -287,6 +286,7 @@ func (m *Manager) wait(id string, cmd *exec.Cmd, logFile *os.File) {
 }
 
 func pumpLogs(stdout io.Reader, stderr io.Reader, out *os.File, logPath string) {
+	defer func() { _ = out.Close() }()
 	var wg sync.WaitGroup
 	wg.Add(2)
 	write := func(r io.Reader) {
