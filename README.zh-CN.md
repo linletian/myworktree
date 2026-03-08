@@ -58,8 +58,14 @@ cd /path/to/target/git/repo
 # mv /path/to/myworktree/myworktree ~/bin/myworktree
 # mv /path/to/myworktree/mw ~/bin/mw
 # B）系统级目录（通常默认就在 PATH 里）
+# 注意：install 需要的是“已编译好的二进制文件”，不是 Go 源码目录（所以不要写 cmd/mw）。
+# cd /path/to/myworktree && go build -o mw ./cmd/mw && go build -o myworktree ./cmd/myworktree
 # sudo install -m 755 /path/to/myworktree/myworktree /usr/local/bin/myworktree
 # sudo install -m 755 /path/to/myworktree/mw /usr/local/bin/mw
+
+# 替代方案：go install（安装到 GOBIN/GOPATH/bin）
+# go install ./cmd/mw
+# go install ./cmd/myworktree
 
 # 端口号写 `0` 表示“自动选择一个空闲端口”，避免端口冲突。
 # myworktree 会输出完整 URL（包含实际端口）。

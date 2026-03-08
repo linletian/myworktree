@@ -58,8 +58,14 @@ cd /path/to/target/git/repo
 # mv /path/to/myworktree/myworktree ~/bin/myworktree
 # mv /path/to/myworktree/mw ~/bin/mw
 # B) system-wide (usually already in PATH)
+# NOTE: install expects a *built binary*, not the Go source directory (so NOT cmd/mw).
+# cd /path/to/myworktree && go build -o mw ./cmd/mw && go build -o myworktree ./cmd/myworktree
 # sudo install -m 755 /path/to/myworktree/myworktree /usr/local/bin/myworktree
 # sudo install -m 755 /path/to/myworktree/mw /usr/local/bin/mw
+
+# Alternative: go install (installs into GOBIN/GOPATH/bin)
+# go install ./cmd/mw
+# go install ./cmd/myworktree
 
 # Port `0` means “pick any available port automatically”.
 # myworktree will print the full URL (including the chosen port).
