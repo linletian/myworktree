@@ -67,7 +67,7 @@ Response:
 
 Response:
 ```json
-{ "instances": [ {"id":"...","worktree_id":"...","worktree_name":"...","tag_id":"...","pid":123,"status":"running"} ] }
+{ "instances": [ {"id":"...","worktree_id":"...","worktree_name":"...","tag_id":"...","labels":{"purpose":"refactor"},"pid":123,"status":"running"} ] }
 ```
 
 ### Start
@@ -75,7 +75,7 @@ Response:
 
 Body:
 ```json
-{ "worktree_id": "<worktreeId>", "tag_id": "optional", "command": "optional", "name": "optional" }
+{ "worktree_id": "<worktreeId>", "tag_id": "optional", "command": "optional", "name": "optional", "labels": {"purpose":"refactor","priority":"P1"} }
 ```
 
 If both `tag_id` and `command` are empty, the server starts an **idle** instance (non-interactive MVP placeholder).
@@ -118,12 +118,24 @@ Body:
 
 Deletes a non-running instance record (best-effort deletes the log file).
 
-### Log replay (tail)
-`GET /api/instances/log?id=<instanceId>`
+### Log replay (tail / incremental)
+`GET /api/instances/log?id=<instanceId>[&since=<byteOffset>]`
+
+- Without `since`: returns recent tail as `text/plain`.
+- With `since`: returns incremental content from byte offset and includes response header `X-Log-Offset: <nextByteOffset>`.
 
 Response: `text/plain`
 
-## 3) MCP stub
+### Live log stream (SSE)
+`GET /api/instances/log/stream?id=<instanceId>[&since=<byteOffset>]`
+
+- Server-Sent Events stream.
+- Emits `event: log` with JSON payload:
+```json
+{"chunk":"...","next":12345}
+```
+
+## 3) MCP
 ### Tool names
 `GET /api/mcp/tools`
 
@@ -131,3 +143,21 @@ Response:
 ```json
 { "tools": ["worktree_list", "worktree_create", "..."] }
 ```
+
+### Tool call
+`POST /api/mcp/call`
+
+Body:
+```json
+{ "tool": "instance_list", "args": {} }
+```
+
+Response:
+```json
+{ "result": { "instances": [] } }
+```
+
+Supported tool names:
+- `worktree_list`, `worktree_create`, `worktree_delete`
+- `branch_list`, `tag_list`
+- `instance_list`, `instance_start`, `instance_stop`, `instance_archive`, `instance_delete`, `instance_log_tail`

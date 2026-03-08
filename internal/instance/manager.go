@@ -37,6 +37,7 @@ type StartInput struct {
 	TagID      string
 	Command    string // optional if TagID is set; required if TagID is empty
 	Name       string
+	Labels     map[string]string
 }
 
 func (m *Manager) Start(in StartInput) (store.ManagedInstance, error) {
@@ -165,6 +166,7 @@ func (m *Manager) Start(in StartInput) (store.ManagedInstance, error) {
 		WorktreeName: wt.Name,
 		TagID:        effectiveTagID,
 		Name:         instName,
+		Labels:       in.Labels,
 		Command:      command,
 		Cwd:          cwd,
 		Env:          sanitizedEnv(env),
@@ -322,13 +324,7 @@ func (m *Manager) Tail(id string, n int64) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	var path string
-	for _, it := range st.Instances {
-		if it.ID == id {
-			path = it.LogPath
-			break
-		}
-	}
+	path := logPathByID(st, id)
 	if path == "" {
 		return "", fmt.Errorf("unknown instance id: %s", id)
 	}
@@ -355,6 +351,51 @@ func (m *Manager) Tail(id string, n int64) (string, error) {
 		return "", err
 	}
 	return string(b), nil
+}
+
+// ReadSince returns log content starting at byte offset "since" (inclusive),
+// capped by maxBytes, and the next byte offset.
+func (m *Manager) ReadSince(id string, since int64, maxBytes int64) (string, int64, error) {
+	if since < 0 {
+		since = 0
+	}
+	if maxBytes <= 0 {
+		maxBytes = 64 * 1024
+	}
+	st, err := m.Store.Load()
+	if err != nil {
+		return "", since, err
+	}
+	path := logPathByID(st, id)
+	if path == "" {
+		return "", since, fmt.Errorf("unknown instance id: %s", id)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return "", since, err
+	}
+	defer f.Close()
+
+	fi, err := f.Stat()
+	if err != nil {
+		return "", since, err
+	}
+	size := fi.Size()
+	start := since
+	if start > size {
+		start = size
+	}
+	if size-start > maxBytes {
+		start = size - maxBytes
+	}
+	if _, err := f.Seek(start, io.SeekStart); err != nil {
+		return "", since, err
+	}
+	b, err := io.ReadAll(f)
+	if err != nil {
+		return "", since, err
+	}
+	return string(b), start + int64(len(b)), nil
 }
 
 func (m *Manager) wait(id string, cmd *exec.Cmd) {
@@ -442,6 +483,15 @@ func shortID() string {
 	b := make([]byte, 6)
 	_, _ = rand.Read(b)
 	return hex.EncodeToString(b)
+}
+
+func logPathByID(st store.State, id string) string {
+	for _, it := range st.Instances {
+		if it.ID == id {
+			return it.LogPath
+		}
+	}
+	return ""
 }
 
 func (m *Manager) loadTags() (map[string]tag.Tag, error) {

@@ -16,7 +16,7 @@ It does **not** analyze project code or prevent concurrent write conflicts insid
 - `internal/tag/` — Tag config loader (MVP: JSON).
 - `internal/store/` — persistent state store (`state.json`) with file locking + atomic writes.
 - `internal/redact/` — secret redaction for stored logs/backlog.
-- `internal/mcp/` — MCP adapter stub (tool list only), keeping core decoupled.
+- `internal/mcp/` — MCP adapter surface (tool names + app-level tool dispatch), keeping core decoupled.
 - `internal/ui/` — embedded static UI.
 
 ## 3. Data & persistence
@@ -37,7 +37,7 @@ It does **not** analyze project code or prevent concurrent write conflicts insid
 
 ## 4. Instance lifecycle & reconnect semantics
 - An instance is a server-managed process; UI windows are merely views.
-- UI reconnect enumerates instances via `GET /api/instances` and fetches backlog via `GET /api/instances/log?id=...`.
+- UI reconnect enumerates instances via `GET /api/instances`, fetches backlog via `GET /api/instances/log?id=...`, and can follow live output via SSE `GET /api/instances/log/stream?id=...`.
 - Backlog is stored on disk with a size cap (rolling truncate).
 
 > Note: current MVP captures stdout/stderr for replay. Full interactive PTY over WebSocket is a planned enhancement.
@@ -51,4 +51,4 @@ It does **not** analyze project code or prevent concurrent write conflicts insid
 
 ## 6. MCP extensibility
 - Core managers (worktree/instance) are transport-agnostic.
-- `internal/mcp` provides an adapter stub; future work can expose these capabilities as MCP tools without rewriting core.
+- `internal/mcp` exposes tool names; server dispatch maps tool calls to existing core managers without rewriting core.

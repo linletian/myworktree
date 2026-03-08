@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -171,9 +172,11 @@ func (s *Server) registerAPIs(mux *http.ServeMux) {
 	mux.HandleFunc("/api/instances/archive", s.handleInstanceArchive)
 	mux.HandleFunc("/api/instances/delete", s.handleInstanceDelete)
 	mux.HandleFunc("/api/instances/log", s.handleInstanceLog)
+	mux.HandleFunc("/api/instances/log/stream", s.handleInstanceLogStream)
 	mux.HandleFunc("/api/tags", s.handleTags)
 	mux.HandleFunc("/api/branches", s.handleBranches)
 	mux.HandleFunc("/api/mcp/tools", s.handleMCPTools)
+	mux.HandleFunc("/api/mcp/call", s.handleMCPCall)
 }
 
 func (s *Server) handleBranches(w http.ResponseWriter, r *http.Request) {
@@ -304,10 +307,11 @@ func (s *Server) handleInstances(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"instances": items})
 	case http.MethodPost:
 		var req struct {
-			WorktreeID string `json:"worktree_id"`
-			TagID      string `json:"tag_id"`
-			Command    string `json:"command"`
-			Name       string `json:"name"`
+			WorktreeID string            `json:"worktree_id"`
+			TagID      string            `json:"tag_id"`
+			Command    string            `json:"command"`
+			Name       string            `json:"name"`
+			Labels     map[string]string `json:"labels"`
 		}
 		if err := readJSON(r.Body, &req); err != nil {
 			writeErr(w, http.StatusBadRequest, err)
@@ -318,6 +322,7 @@ func (s *Server) handleInstances(w http.ResponseWriter, r *http.Request) {
 			TagID:      req.TagID,
 			Command:    req.Command,
 			Name:       req.Name,
+			Labels:     normalizeLabels(req.Labels),
 		})
 		if err != nil {
 			writeErr(w, http.StatusBadRequest, err)
@@ -392,6 +397,18 @@ func (s *Server) handleInstanceLog(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := strings.TrimSpace(r.URL.Query().Get("id"))
+	since := parseInt64Default(r.URL.Query().Get("since"), -1)
+	if since >= 0 {
+		body, next, err := s.instanceMgr.ReadSince(id, since, 64*1024)
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
+		w.Header().Set("X-Log-Offset", strconv.FormatInt(next, 10))
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		_, _ = io.WriteString(w, body)
+		return
+	}
 	body, err := s.instanceMgr.Tail(id, 64*1024)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err)
@@ -401,12 +418,257 @@ func (s *Server) handleInstanceLog(w http.ResponseWriter, r *http.Request) {
 	_, _ = io.WriteString(w, body)
 }
 
+func (s *Server) handleInstanceLogStream(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	id := strings.TrimSpace(r.URL.Query().Get("id"))
+	since := parseInt64Default(r.URL.Query().Get("since"), 0)
+
+	initial, next, err := s.instanceMgr.ReadSince(id, since, 64*1024)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+
+	if err := writeSSELogEvent(w, initial, next); err != nil {
+		return
+	}
+	flusher.Flush()
+
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+	cursor := next
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case <-ticker.C:
+			chunk, n, err := s.instanceMgr.ReadSince(id, cursor, 64*1024)
+			if err != nil {
+				return
+			}
+			if chunk == "" {
+				_, _ = io.WriteString(w, ": ping\n\n")
+				flusher.Flush()
+				continue
+			}
+			cursor = n
+			if err := writeSSELogEvent(w, chunk, cursor); err != nil {
+				return
+			}
+			flusher.Flush()
+		}
+	}
+}
+
 func (s *Server) handleMCPTools(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"tools": s.mcpAdapter.ToolNames()})
+}
+
+func (s *Server) handleMCPCall(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		Tool string          `json:"tool"`
+		Args json.RawMessage `json:"args"`
+	}
+	if err := readJSON(r.Body, &req); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	tool := strings.TrimSpace(req.Tool)
+	switch tool {
+	case "worktree_list":
+		items, err := s.worktreeMgr.List()
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"result": map[string]any{"worktrees": items}})
+	case "worktree_create":
+		var args struct {
+			TaskDescription string `json:"task_description"`
+			BaseRef         string `json:"base_ref"`
+		}
+		if err := decodeArgs(req.Args, &args); err != nil {
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
+		item, err := s.worktreeMgr.Create(args.TaskDescription, args.BaseRef)
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"result": item})
+	case "worktree_delete":
+		var args struct {
+			ID string `json:"id"`
+		}
+		if err := decodeArgs(req.Args, &args); err != nil {
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
+		if err := s.worktreeMgr.Delete(args.ID); err != nil {
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"result": map[string]string{"status": "ok"}})
+	case "branch_list":
+		def := gitx.DefaultBranch(s.root)
+		items, err := gitx.ListLocalBranchesByCommitTime(s.root, 50)
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, err)
+			return
+		}
+		out := make([]gitx.Branch, 0, 10)
+		if def != "" {
+			for _, b := range items {
+				if b.Name == def {
+					out = append(out, b)
+					break
+				}
+			}
+		}
+		for _, b := range items {
+			if len(out) >= 10 {
+				break
+			}
+			if def != "" && b.Name == def {
+				continue
+			}
+			out = append(out, b)
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"result": map[string]any{"default": def, "branches": out}})
+	case "tag_list":
+		base, err := os.UserConfigDir()
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, err)
+			return
+		}
+		mgr := tag.Manager{
+			GlobalPath:  filepath.Join(base, "myworktree", "tags.json"),
+			ProjectPath: filepath.Join(s.dataDir, "tags.json"),
+		}
+		m, err := mgr.LoadMerged()
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, err)
+			return
+		}
+		type item struct {
+			ID      string `json:"id"`
+			Command string `json:"command"`
+		}
+		items := make([]item, 0, len(m))
+		for id, t := range m {
+			items = append(items, item{ID: id, Command: t.Command})
+		}
+		sort.Slice(items, func(i, j int) bool { return items[i].ID < items[j].ID })
+		writeJSON(w, http.StatusOK, map[string]any{"result": map[string]any{"tags": items}})
+	case "instance_list":
+		items, err := s.instanceMgr.List()
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"result": map[string]any{"instances": items}})
+	case "instance_start":
+		var args struct {
+			WorktreeID string            `json:"worktree_id"`
+			TagID      string            `json:"tag_id"`
+			Command    string            `json:"command"`
+			Name       string            `json:"name"`
+			Labels     map[string]string `json:"labels"`
+		}
+		if err := decodeArgs(req.Args, &args); err != nil {
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
+		item, err := s.instanceMgr.Start(instance.StartInput{
+			WorktreeID: args.WorktreeID,
+			TagID:      args.TagID,
+			Command:    args.Command,
+			Name:       args.Name,
+			Labels:     normalizeLabels(args.Labels),
+		})
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"result": item})
+	case "instance_stop":
+		var args struct {
+			ID string `json:"id"`
+		}
+		if err := decodeArgs(req.Args, &args); err != nil {
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
+		if err := s.instanceMgr.Stop(args.ID); err != nil {
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"result": map[string]string{"status": "ok"}})
+	case "instance_archive":
+		var args struct {
+			ID string `json:"id"`
+		}
+		if err := decodeArgs(req.Args, &args); err != nil {
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
+		if err := s.instanceMgr.Archive(args.ID); err != nil {
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"result": map[string]string{"status": "ok"}})
+	case "instance_delete":
+		var args struct {
+			ID string `json:"id"`
+		}
+		if err := decodeArgs(req.Args, &args); err != nil {
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
+		if err := s.instanceMgr.Delete(args.ID); err != nil {
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"result": map[string]string{"status": "ok"}})
+	case "instance_log_tail":
+		var args struct {
+			ID string `json:"id"`
+			N  int64  `json:"n"`
+		}
+		if err := decodeArgs(req.Args, &args); err != nil {
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
+		body, err := s.instanceMgr.Tail(args.ID, args.N)
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"result": map[string]any{"text": body}})
+	default:
+		writeErr(w, http.StatusBadRequest, fmt.Errorf("unknown tool: %s", tool))
+	}
 }
 
 func (s *Server) withAuth(next http.Handler) http.Handler {
@@ -449,6 +711,66 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 
 func writeErr(w http.ResponseWriter, status int, err error) {
 	writeJSON(w, status, map[string]string{"error": err.Error()})
+}
+
+func parseInt64Default(s string, def int64) int64 {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return def
+	}
+	v, err := strconv.ParseInt(s, 10, 64)
+	if err != nil {
+		return def
+	}
+	return v
+}
+
+func decodeArgs(raw json.RawMessage, out any) error {
+	if len(raw) == 0 {
+		raw = []byte("{}")
+	}
+	return json.Unmarshal(raw, out)
+}
+
+func writeSSELogEvent(w io.Writer, chunk string, next int64) error {
+	payload := map[string]any{
+		"chunk": chunk,
+		"next":  next,
+	}
+	b, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	if _, err := io.WriteString(w, "event: log\n"); err != nil {
+		return err
+	}
+	if _, err := io.WriteString(w, "data: "); err != nil {
+		return err
+	}
+	if _, err := w.Write(b); err != nil {
+		return err
+	}
+	_, err = io.WriteString(w, "\n\n")
+	return err
+}
+
+func normalizeLabels(in map[string]string) map[string]string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := map[string]string{}
+	for k, v := range in {
+		key := strings.TrimSpace(k)
+		val := strings.TrimSpace(v)
+		if key == "" || val == "" {
+			continue
+		}
+		out[key] = val
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 func sameOriginHost(r *http.Request) bool {

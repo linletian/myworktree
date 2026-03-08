@@ -17,16 +17,17 @@ A common workflow looks like: GPT/GLM drafts docs, Claude/MiniMax implements cha
 myworktree is a thin management layer that:
 - Uses **git worktrees** to give each task an isolated directory (and typically a dedicated branch)
 - Runs multiple managed **instances** per worktree and keeps them alive on the backend
-- Provides a minimal Web UI to list worktrees/instances and **replay recent output**
+- Provides a minimal Web UI to list worktrees/instances and **replay/follow output**
 - Supports **Tag** templates (`command/env/preStart/cwd`) to start instances with the right setup, without baking project-specific logic into the manager
 
 ## Features (MVP)
 - Create/list/import/delete managed worktrees (strict delete: refuses if dirty)
 - Start/list/stop managed instances per worktree via **Tag** templates
-- Web UI can be closed/reopened; instances keep running; log replay supported
+- Optional instance labels (`k=v`) with UI filtering/search
+- Web UI can be closed/reopened; instances keep running; log replay + live follow supported
 - Optional built-in HTTPS (`--tls-cert/--tls-key`) and token auth for non-loopback
 - Stored backlog redaction for common secrets (e.g. `sk-...`)
-- MCP extensibility stub (`/api/mcp/tools`)
+- MCP tool endpoints (`/api/mcp/tools`, `/api/mcp/call`)
 
 ## Requirements
 - macOS 12+

@@ -17,9 +17,13 @@ func (a Adapter) ToolNames() []string {
 		"worktree_list",
 		"worktree_create",
 		"worktree_delete",
+		"branch_list",
+		"tag_list",
 		"instance_list",
 		"instance_start",
 		"instance_stop",
+		"instance_archive",
+		"instance_delete",
 		"instance_log_tail",
 	}
 }

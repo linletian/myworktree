@@ -37,9 +37,11 @@
         <select id="tagSelect" style="width:100%"></select>
         <input id="cmd" placeholder="command (optional; leave empty for idle instance)" style="width:100%" />
         <input id="instName" placeholder="instance name (optional)" style="width:100%" />
+        <input id="instLabels" placeholder="labels: k=v,team=ai (optional)" style="width:100%" />
         <button onclick="startInstance()">Start</button>
         <div class="muted">Pick a tag or type a command. Tags are loaded from tags.json (global + project).</div>
         <h3>Instances</h3>
+        <input id="instFilter" placeholder="filter by name/id/worktree/labels" style="width:100%" oninput="renderInstances(window.__lastInstances || [])" />
         <table id="instTable"></table>
         <details style="margin-top:10px">
           <summary>Archived instances</summary>
@@ -49,7 +51,7 @@
     </div>
     <div class="card" style="margin-top:16px">
       <h3>Instance log replay</h3>
-      <select id="logSelect" style="width:100%"></select>
+      <select id="logSelect" style="width:100%" onchange="onLogTargetChange()"></select>
       <button onclick="loadLog()">Load log</button>
       <button onclick="autoRefresh()">Auto refresh</button>
       <pre id="log"></pre>
@@ -58,6 +60,9 @@
       const token = new URLSearchParams(location.search).get("token") || "";
       const headers = token ? { Authorization: `Bearer ${token}` } : {};
       let pollTimer = null;
+      let logStream = null;
+      let liveEnabled = false;
+      let logCursor = 0;
       let wtNameByID = {};
 
       async function api(path, opts = {}) {
@@ -130,38 +135,53 @@
       }
 
       function renderInstances(items) {
-        const active = (items || []).filter(i => !i.archived);
-        const archived = (items || []).filter(i => i.archived);
+        window.__lastInstances = items || [];
+        const q = (document.getElementById("instFilter").value || "").trim().toLowerCase();
+        const filtered = (items || []).filter(i => matchesInstanceFilter(i, q));
+        const active = filtered.filter(i => !i.archived);
+        const archived = filtered.filter(i => i.archived);
 
         const t = document.getElementById("instTable");
-        t.innerHTML = "<tr><th>Instance ID</th><th>Worktree ID</th><th>Worktree Name</th><th>Tag</th><th>Status</th><th></th></tr>" +
+        t.innerHTML = "<tr><th>Instance ID</th><th>Worktree ID</th><th>Worktree Name</th><th>Tag</th><th>Labels</th><th>Status</th><th></th></tr>" +
           active.map(i => {
             const wtName = i.worktree_name || wtNameByID[i.worktree_id] || "";
             const stopBtn = i.status === "running" ? `<button onclick=\"stopInstance('${i.id}')\">Stop</button>` : "";
             const archBtn = i.status !== "running" ? `<button onclick=\"archiveInstance('${i.id}')\">Archive</button>` : "";
-            return `<tr><td>${i.id}</td><td>${i.worktree_id}</td><td>${wtName}</td><td>${i.tag_id}</td><td>${i.status}</td><td>${stopBtn} ${archBtn}</td></tr>`;
+            return `<tr><td>${i.id}</td><td>${i.worktree_id}</td><td>${wtName}</td><td>${i.tag_id}</td><td>${formatLabels(i.labels)}</td><td>${i.status}</td><td>${stopBtn} ${archBtn}</td></tr>`;
           }).join("");
 
         const at = document.getElementById("archTable");
-        at.innerHTML = "<tr><th>Instance ID</th><th>Worktree Name</th><th>Tag</th><th>Status</th><th>Archived At</th><th></th></tr>" +
+        at.innerHTML = "<tr><th>Instance ID</th><th>Worktree Name</th><th>Tag</th><th>Labels</th><th>Status</th><th>Archived At</th><th></th></tr>" +
           archived.map(i => {
             const wtName = i.worktree_name || wtNameByID[i.worktree_id] || "";
             const delBtn = `<button onclick=\"deleteInstance('${i.id}')\">Delete</button>`;
-            return `<tr><td>${i.id}</td><td>${wtName}</td><td>${i.tag_id}</td><td>${i.status}</td><td>${i.archived_at || ""}</td><td>${delBtn}</td></tr>`;
+            return `<tr><td>${i.id}</td><td>${wtName}</td><td>${i.tag_id}</td><td>${formatLabels(i.labels)}</td><td>${i.status}</td><td>${i.archived_at || ""}</td><td>${delBtn}</td></tr>`;
           }).join("");
 
         const s = document.getElementById("logSelect");
+        const prev = s.value;
         if (!(items || []).length) {
           s.innerHTML = '<option value="">(no instances)</option>';
           document.getElementById("log").textContent = "";
+          stopLogStream();
+          logCursor = 0;
           return;
         }
         s.innerHTML = (items || []).map(i => {
           const wtName = i.worktree_name || wtNameByID[i.worktree_id] || "";
           const wtPart = wtName ? ` — ${wtName}` : "";
           const arch = i.archived ? " [archived]" : "";
-          return `<option value=\"${i.id}\">${i.name || i.id}${wtPart}${arch} (${i.status})</option>`;
+          const labels = formatLabels(i.labels);
+          const labelPart = labels ? ` — ${labels}` : "";
+          return `<option value=\"${i.id}\">${i.name || i.id}${wtPart}${labelPart}${arch} (${i.status})</option>`;
         }).join("");
+        if (prev && (items || []).some(i => i.id === prev)) {
+          s.value = prev;
+        }
+        if (liveEnabled && window.EventSource && s.value !== prev) {
+          logCursor = 0;
+          startLogStream(true);
+        }
       }
 
       async function createWorktree() {
@@ -195,8 +215,10 @@
             worktree_id: document.getElementById("worktreeSelect").value,
             tag_id: tagId,
             command,
-            name: document.getElementById("instName").value
+            name: document.getElementById("instName").value,
+            labels: parseLabelsInput(document.getElementById("instLabels").value)
           })});
+          document.getElementById("instLabels").value = "";
           await refresh();
         } catch (e) { alert(String(e)); }
       }
@@ -228,23 +250,135 @@
           const id = document.getElementById("logSelect").value;
           if (!id) {
             document.getElementById("log").textContent = "";
+            logCursor = 0;
             return;
           }
-          const text = await api(`/api/instances/log?id=${encodeURIComponent(id)}`);
+          const res = await fetch(`/api/instances/log?id=${encodeURIComponent(id)}&since=0`, { headers });
+          if (!res.ok) throw new Error(await res.text());
+          const text = await res.text();
+          const next = parseInt(res.headers.get("X-Log-Offset") || "", 10);
+          logCursor = Number.isFinite(next) ? next : text.length;
           document.getElementById("log").textContent = text;
         } catch (e) { alert(String(e)); }
+      }
+
+      async function loadLogSince() {
+        try {
+          const id = document.getElementById("logSelect").value;
+          if (!id) return;
+          const res = await fetch(`/api/instances/log?id=${encodeURIComponent(id)}&since=${encodeURIComponent(String(logCursor))}`, { headers });
+          if (!res.ok) throw new Error(await res.text());
+          const text = await res.text();
+          const next = parseInt(res.headers.get("X-Log-Offset") || "", 10);
+          if (text) {
+            const el = document.getElementById("log");
+            el.textContent += text;
+            el.scrollTop = el.scrollHeight;
+          }
+          if (Number.isFinite(next)) logCursor = next;
+        } catch (e) { alert(String(e)); }
+      }
+
+      function stopLogStream() {
+        if (logStream) {
+          logStream.close();
+          logStream = null;
+        }
+      }
+
+      function startLogStream(reset = false) {
+        stopLogStream();
+        const id = document.getElementById("logSelect").value;
+        if (!id || !window.EventSource) return;
+        if (reset) {
+          document.getElementById("log").textContent = "";
+          logCursor = 0;
+        }
+        let url = `/api/instances/log/stream?id=${encodeURIComponent(id)}&since=${encodeURIComponent(String(logCursor))}`;
+        if (token) url += `&token=${encodeURIComponent(token)}`;
+        const es = new EventSource(url);
+        es.addEventListener("log", (ev) => {
+          let msg;
+          try {
+            msg = JSON.parse(ev.data);
+          } catch (_) {
+            return;
+          }
+          if (!msg || typeof msg.chunk !== "string") return;
+          if (typeof msg.next === "number") logCursor = msg.next;
+          if (!msg.chunk) return;
+          const el = document.getElementById("log");
+          el.textContent += msg.chunk;
+          el.scrollTop = el.scrollHeight;
+        });
+        es.onerror = () => {
+          es.close();
+          if (liveEnabled) {
+            setTimeout(() => {
+              if (liveEnabled) startLogStream(false);
+            }, 1000);
+          }
+        };
+        logStream = es;
+      }
+
+      function onLogTargetChange() {
+        logCursor = 0;
+        if (liveEnabled && window.EventSource) {
+          startLogStream(true);
+          return;
+        }
+        loadLog();
       }
 
       function autoRefresh() {
         if (pollTimer) {
           clearInterval(pollTimer);
           pollTimer = null;
+          liveEnabled = false;
+          stopLogStream();
           return;
+        }
+        liveEnabled = true;
+        if (window.EventSource) {
+          startLogStream(true);
+        } else {
+          loadLog();
         }
         pollTimer = setInterval(async () => {
           await refresh();
-          await loadLog();
+          if (!window.EventSource) {
+            await loadLogSince();
+          }
         }, 2000);
+      }
+
+      function parseLabelsInput(raw) {
+        const out = {};
+        for (const token of (raw || "").split(",")) {
+          const part = token.trim();
+          if (!part) continue;
+          const idx = part.indexOf("=");
+          if (idx <= 0 || idx === part.length - 1) continue;
+          const k = part.slice(0, idx).trim();
+          const v = part.slice(idx + 1).trim();
+          if (!k || !v) continue;
+          out[k] = v;
+        }
+        return out;
+      }
+
+      function formatLabels(labels) {
+        if (!labels || typeof labels !== "object") return "";
+        return Object.entries(labels).map(([k, v]) => `${k}=${v}`).join(", ");
+      }
+
+      function matchesInstanceFilter(i, q) {
+        if (!q) return true;
+        const wtName = i.worktree_name || wtNameByID[i.worktree_id] || "";
+        const labels = formatLabels(i.labels);
+        const text = [i.id, i.name || "", i.worktree_id || "", wtName, i.tag_id || "", labels].join(" ").toLowerCase();
+        return text.includes(q);
       }
 
       refresh();
