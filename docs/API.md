@@ -67,7 +67,7 @@ Response:
 
 Response:
 ```json
-{ "instances": [ {"id":"...","worktree_id":"...","tag_id":"...","pid":123,"status":"running"} ] }
+{ "instances": [ {"id":"...","worktree_id":"...","worktree_name":"...","tag_id":"...","pid":123,"status":"running"} ] }
 ```
 
 ### Start

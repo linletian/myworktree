@@ -130,12 +130,12 @@
         t.innerHTML = "<tr><th>Instance ID</th><th>Worktree ID</th><th>Worktree Name</th><th>Tag</th><th>Status</th><th></th></tr>" +
           items.map(i => {
             const btn = i.status === "running" ? `<button onclick="stopInstance('${i.id}')">Stop</button>` : "";
-            const wtName = wtNameByID[i.worktree_id] || "";
+            const wtName = i.worktree_name || wtNameByID[i.worktree_id] || "";
             return `<tr><td>${i.id}</td><td>${i.worktree_id}</td><td>${wtName}</td><td>${i.tag_id}</td><td>${i.status}</td><td>${btn}</td></tr>`;
           }).join("");
         const s = document.getElementById("logSelect");
         s.innerHTML = items.map(i => {
-          const wtName = wtNameByID[i.worktree_id] || "";
+          const wtName = i.worktree_name || wtNameByID[i.worktree_id] || "";
           const wtPart = wtName ? ` — ${wtName}` : "";
           return `<option value="${i.id}">${i.name || i.id}${wtPart} (${i.status})</option>`;
         }).join("");

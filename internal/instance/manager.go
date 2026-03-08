@@ -160,17 +160,18 @@ func (m *Manager) Start(in StartInput) (store.ManagedInstance, error) {
 
 	now := time.Now().UTC().Format(time.RFC3339)
 	inst := store.ManagedInstance{
-		ID:         id,
-		WorktreeID: wt.ID,
-		TagID:      effectiveTagID,
-		Name:       instName,
-		Command:    command,
-		Cwd:        cwd,
-		Env:        sanitizedEnv(env),
-		PID:        cmd.Process.Pid,
-		Status:     "running",
-		LogPath:    logPath,
-		CreatedAt:  now,
+		ID:           id,
+		WorktreeID:   wt.ID,
+		WorktreeName: wt.Name,
+		TagID:        effectiveTagID,
+		Name:         instName,
+		Command:      command,
+		Cwd:          cwd,
+		Env:          sanitizedEnv(env),
+		PID:          cmd.Process.Pid,
+		Status:       "running",
+		LogPath:      logPath,
+		CreatedAt:    now,
 	}
 	st.Instances = append(st.Instances, inst)
 	if err := m.Store.Save(st); err != nil {
