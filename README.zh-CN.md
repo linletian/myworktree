@@ -91,6 +91,8 @@ myworktree tag list
 
 # instance
 myworktree instance start --worktree <worktreeId> --tag <tagId>
+myworktree instance start --worktree <worktreeId> --cmd "echo hello && ls"
+myworktree instance start --worktree <worktreeId>  # 启动一个 idle（当前 MVP 非交互）instance
 myworktree instance list
 myworktree instance stop <instanceId>
 ```

@@ -95,6 +95,8 @@ myworktree tag list
 
 # instances
 myworktree instance start --worktree <worktreeId> --tag <tagId>
+myworktree instance start --worktree <worktreeId> --cmd "echo hello && ls"
+myworktree instance start --worktree <worktreeId>  # starts an idle (non-interactive) instance
 myworktree instance list
 myworktree instance stop <instanceId>
 ```
