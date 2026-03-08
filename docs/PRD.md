@@ -32,7 +32,10 @@
 ## 5. 关键规则
 - 后端必须保持：worktree 与 instance 的生命周期独立于前端。
 - 删除 worktree：若 `git status --porcelain` 非空（含 untracked），**拒绝删除**。
-- 命名冲突：创建 worktree 时如目标分支已存在，自动加 `-2/-3` 后缀避免冲突；并支持将既有 worktree **纳入管理（import）**。
+- 分支命名：
+  - 默认：创建 worktree 使用分支 `mwt/<slug>`（不再是 `wt/*`）。
+  - 自定义分组：当用户在 task description 里直接输入 `<group>/<name>`（例如 `feature/auth`）时，分支名就是 `<group>/<name>`，不会再额外加前缀。
+  - 命名冲突：如目标分支已存在，自动给 `<name>` 加 `-2/-3` 后缀避免冲突；并支持将既有 worktree **纳入管理（import）**。
 
 ## 6. 安全
 - 默认只监听 `127.0.0.1`。

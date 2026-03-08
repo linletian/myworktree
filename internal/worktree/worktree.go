@@ -39,13 +39,19 @@ func (m Manager) Create(taskDesc string, baseRef string) (store.ManagedWorktree,
 		slug = "worktree"
 	}
 
-	name := slug
-	for i := 2; branchExists(m.GitRoot, "wt/"+name); i++ {
-		name = fmt.Sprintf("%s-%d", slug, i)
+	group, baseName, custom := parseBranchSpec(taskDesc)
+	if !custom {
+		group = "mwt"
+		baseName = slug
+	}
+
+	name := baseName
+	for i := 2; branchExists(m.GitRoot, group+"/"+name); i++ {
+		name = fmt.Sprintf("%s-%d", baseName, i)
 	}
 
 	id := shortID()
-	branch := "wt/" + name
+	branch := group + "/" + name
 
 	root, legacy, err := m.worktreesRoot()
 	if err != nil {
@@ -106,7 +112,11 @@ func (m Manager) Import(name string) (store.ManagedWorktree, error) {
 	if name == "" {
 		return store.ManagedWorktree{}, errors.New("worktree name is required")
 	}
-	branch := "wt/" + name
+	// Accept either a full branch spec like "feature/foo" or a short name that defaults to "mwt/<name>".
+	branch := "mwt/" + name
+	if g, n, ok := parseBranchSpec(name); ok {
+		branch = g + "/" + n
+	}
 	items, err := listGitWorktrees(m.GitRoot)
 	if err != nil {
 		return store.ManagedWorktree{}, err
@@ -116,6 +126,17 @@ func (m Manager) Import(name string) (store.ManagedWorktree, error) {
 		if it.Branch == "refs/heads/"+branch {
 			path = it.Path
 			break
+		}
+	}
+	if path == "" {
+		// Backward-compat: older versions used wt/<name>.
+		legacy := "wt/" + name
+		for _, it := range items {
+			if it.Branch == "refs/heads/"+legacy {
+				path = it.Path
+				branch = legacy
+				break
+			}
 		}
 	}
 	if path == "" {
@@ -204,7 +225,27 @@ func (m Manager) Delete(id string) error {
 	return m.Store.Save(st)
 }
 
-var nonSlug = regexp.MustCompile(`[^a-z0-9]+`)
+var (
+	nonSlug     = regexp.MustCompile(`[^a-z0-9]+`)
+	branchToken = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
+)
+
+func parseBranchSpec(s string) (group string, name string, ok bool) {
+	s = strings.TrimSpace(s)
+	if s == "" || strings.ContainsAny(s, " \t\n") {
+		return "", "", false
+	}
+	parts := strings.Split(s, "/")
+	if len(parts) != 2 {
+		return "", "", false
+	}
+	g := strings.TrimSpace(parts[0])
+	n := strings.TrimSpace(parts[1])
+	if !branchToken.MatchString(g) || !branchToken.MatchString(n) {
+		return "", "", false
+	}
+	return g, n, true
+}
 
 func slugify(s string) string {
 	// Best-effort without external deps; if no ascii, caller will fallback.

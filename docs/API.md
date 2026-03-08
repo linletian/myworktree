@@ -25,7 +25,7 @@ Body:
 
 Response (201):
 ```json
-{ "id":"...","name":"fix-login","path":"...","branch":"wt/fix-login","created_at":"..." }
+{ "id":"...","name":"fix-login","path":"...","branch":"mwt/fix-login","created_at":"..." }
 ```
 
 ### Delete (strict: refuses if dirty)
