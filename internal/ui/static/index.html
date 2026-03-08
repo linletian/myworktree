@@ -54,6 +54,7 @@
       const token = new URLSearchParams(location.search).get("token") || "";
       const headers = token ? { Authorization: `Bearer ${token}` } : {};
       let pollTimer = null;
+      let wtNameByID = {};
 
       async function api(path, opts = {}) {
         const res = await fetch(path, {
@@ -70,6 +71,7 @@
         const ins = await api("/api/instances");
         const tags = await api("/api/tags");
         const branches = await api("/api/branches");
+        wtNameByID = Object.fromEntries((wt.worktrees || []).map(w => [w.id, w.name]));
         renderWorktrees(wt.worktrees || []);
         renderBaseRefs(branches.default || "", branches.branches || []);
         renderTags(tags.tags || []);
@@ -117,7 +119,7 @@
 
       function renderWorktrees(items) {
         const t = document.getElementById("wtTable");
-        t.innerHTML = "<tr><th>ID</th><th>Name</th><th>Branch</th><th></th></tr>" +
+        t.innerHTML = "<tr><th>Worktree ID</th><th>Name</th><th>Branch</th><th></th></tr>" +
           items.map(w => `<tr><td>${w.id}</td><td>${w.name}</td><td>${w.branch}</td><td><button onclick="deleteWorktree('${w.id}')">Delete</button></td></tr>`).join("");
         const s = document.getElementById("worktreeSelect");
         s.innerHTML = items.map(w => `<option value="${w.id}">${w.name} (${w.id})</option>`).join("");
@@ -125,13 +127,18 @@
 
       function renderInstances(items) {
         const t = document.getElementById("instTable");
-        t.innerHTML = "<tr><th>ID</th><th>WT</th><th>Tag</th><th>Status</th><th></th></tr>" +
+        t.innerHTML = "<tr><th>Instance ID</th><th>Worktree ID</th><th>Worktree Name</th><th>Tag</th><th>Status</th><th></th></tr>" +
           items.map(i => {
             const btn = i.status === "running" ? `<button onclick="stopInstance('${i.id}')">Stop</button>` : "";
-            return `<tr><td>${i.id}</td><td>${i.worktree_id}</td><td>${i.tag_id}</td><td>${i.status}</td><td>${btn}</td></tr>`;
+            const wtName = wtNameByID[i.worktree_id] || "";
+            return `<tr><td>${i.id}</td><td>${i.worktree_id}</td><td>${wtName}</td><td>${i.tag_id}</td><td>${i.status}</td><td>${btn}</td></tr>`;
           }).join("");
         const s = document.getElementById("logSelect");
-        s.innerHTML = items.map(i => `<option value="${i.id}">${i.name || i.id} (${i.status})</option>`).join("");
+        s.innerHTML = items.map(i => {
+          const wtName = wtNameByID[i.worktree_id] || "";
+          const wtPart = wtName ? ` — ${wtName}` : "";
+          return `<option value="${i.id}">${i.name || i.id}${wtPart} (${i.status})</option>`;
+        }).join("");
       }
 
       async function createWorktree() {
