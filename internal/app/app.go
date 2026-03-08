@@ -170,7 +170,46 @@ func (s *Server) registerAPIs(mux *http.ServeMux) {
 	mux.HandleFunc("/api/instances/stop", s.handleInstanceStop)
 	mux.HandleFunc("/api/instances/log", s.handleInstanceLog)
 	mux.HandleFunc("/api/tags", s.handleTags)
+	mux.HandleFunc("/api/branches", s.handleBranches)
 	mux.HandleFunc("/api/mcp/tools", s.handleMCPTools)
+}
+
+func (s *Server) handleBranches(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	def := gitx.DefaultBranch(s.root)
+	items, err := gitx.ListLocalBranchesByCommitTime(s.root, 50)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+
+	// Default branch always first; then newest -> oldest, total 10.
+	out := make([]gitx.Branch, 0, 10)
+	if def != "" {
+		for _, b := range items {
+			if b.Name == def {
+				out = append(out, b)
+				break
+			}
+		}
+	}
+	for _, b := range items {
+		if len(out) >= 10 {
+			break
+		}
+		if def != "" && b.Name == def {
+			continue
+		}
+		out = append(out, b)
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"default":  def,
+		"branches": out,
+	})
 }
 
 func (s *Server) handleTags(w http.ResponseWriter, r *http.Request) {

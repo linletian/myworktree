@@ -20,11 +20,13 @@
   <body>
     <h1>myworktree</h1>
     <div class="muted">MVP UI: worktree / instance management + log replay</div>
+    <div class="muted">Worktree base ref: top 10 branches (default first) + custom ref.</div>
     <div class="row">
       <div class="card">
         <h3>Create worktree</h3>
         <input id="wtTask" placeholder="task description" style="width:100%" />
-        <input id="wtBase" placeholder="base ref (optional)" style="width:100%" />
+        <select id="wtBaseSelect" style="width:100%" onchange="onBaseRefChange()"></select>
+        <input id="wtBaseCustom" placeholder="custom base ref (optional)" style="width:100%; display:none" />
         <button onclick="createWorktree()">Create</button>
         <h3>Worktrees</h3>
         <table id="wtTable"></table>
@@ -67,9 +69,39 @@
         const wt = await api("/api/worktrees");
         const ins = await api("/api/instances");
         const tags = await api("/api/tags");
+        const branches = await api("/api/branches");
         renderWorktrees(wt.worktrees || []);
+        renderBaseRefs(branches.default || "", branches.branches || []);
         renderTags(tags.tags || []);
         renderInstances(ins.instances || []);
+      }
+
+      function renderBaseRefs(def, items) {
+        const s = document.getElementById("wtBaseSelect");
+        const custom = document.getElementById("wtBaseCustom");
+        if (!items.length) {
+          s.innerHTML = '<option value="">(no branches)</option>';
+          custom.style.display = "none";
+          return;
+        }
+        s.innerHTML = items.map(b => {
+          const label = b.name === def ? `${b.name} (default)` : b.name;
+          return `<option value="${b.name}">${label}</option>`;
+        }).join("") + '<option value="__custom__">custom…</option>';
+        // default branch is always first in list; keep it selected.
+        custom.style.display = "none";
+        custom.value = "";
+      }
+
+      function onBaseRefChange() {
+        const s = document.getElementById("wtBaseSelect");
+        const custom = document.getElementById("wtBaseCustom");
+        if (s.value === "__custom__") {
+          custom.style.display = "block";
+          custom.focus();
+        } else {
+          custom.style.display = "none";
+        }
       }
 
       function renderTags(items) {
@@ -106,7 +138,11 @@
         try {
           await api("/api/worktrees", { method: "POST", body: JSON.stringify({
             task_description: document.getElementById("wtTask").value,
-            base_ref: document.getElementById("wtBase").value
+            base_ref: (() => {
+              const v = document.getElementById("wtBaseSelect").value;
+              if (v === "__custom__") return document.getElementById("wtBaseCustom").value;
+              return v;
+            })()
           })});
           document.getElementById("wtTask").value = "";
           await refresh();
