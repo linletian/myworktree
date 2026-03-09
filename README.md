@@ -24,7 +24,7 @@ myworktree is a thin management layer that:
 - Create/list/import/delete managed worktrees (strict delete: refuses if dirty)
 - Start/list/stop managed instances per worktree via **Tag** templates
 - Optional instance labels (`k=v`) with UI filtering/search
-- Web UI can be closed/reopened; instances keep running; log replay + live follow supported
+- Web UI can be closed/reopened; instances keep running; log replay + live follow + Web TTY supported
 - Optional built-in HTTPS (`--tls-cert/--tls-key`) and token auth for non-loopback
 - Stored backlog redaction for common secrets (e.g. `sk-...`)
 - MCP tool endpoints (`/api/mcp/tools`, `/api/mcp/call`)
@@ -101,10 +101,12 @@ myworktree tag list
 # instances
 myworktree instance start --worktree <worktreeId> --tag <tagId>
 myworktree instance start --worktree <worktreeId> --cmd "echo hello && ls"
-myworktree instance start --worktree <worktreeId>  # starts an idle (non-interactive) instance
+myworktree instance start --worktree <worktreeId>  # starts an interactive shell instance
 myworktree instance list
 myworktree instance stop <instanceId>
 ```
+
+Note: command starts are executed inside the instance shell, and you can continue sending input to the same running instance from the UI.
 
 ## Remote access
 - Default: binds to loopback only.

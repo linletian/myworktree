@@ -1,7 +1,6 @@
 package instance
 
 import (
-	"bufio"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
@@ -28,8 +27,11 @@ type Manager struct {
 	Store   store.FileStore
 	Logger  *log.Logger
 
-	mu      sync.Mutex
-	running map[string]*exec.Cmd
+	stateMu     sync.Mutex
+	mu          sync.Mutex
+	running     map[string]*exec.Cmd
+	inputs      map[string]io.WriteCloser
+	subscribers map[string]map[chan string]struct{}
 }
 
 type StartInput struct {
@@ -40,10 +42,46 @@ type StartInput struct {
 	Labels     map[string]string
 }
 
+// ReconcileRunningOnStartup marks stale "running" records as "stopped".
+// Process I/O channels are in-memory and cannot be resumed across server restarts.
+func (m *Manager) ReconcileRunningOnStartup() (int, error) {
+	m.stateMu.Lock()
+	defer m.stateMu.Unlock()
+	st, err := m.Store.Load()
+	if err != nil {
+		return 0, err
+	}
+	changed := 0
+	now := time.Now().UTC().Format(time.RFC3339)
+	for i := range st.Instances {
+		if st.Instances[i].Status != "running" {
+			continue
+		}
+		st.Instances[i].Status = "stopped"
+		if strings.TrimSpace(st.Instances[i].StoppedAt) == "" {
+			st.Instances[i].StoppedAt = now
+		}
+		changed++
+	}
+	if changed == 0 {
+		return 0, nil
+	}
+	if err := m.Store.Save(st); err != nil {
+		return 0, err
+	}
+	return changed, nil
+}
+
 func (m *Manager) Start(in StartInput) (store.ManagedInstance, error) {
 	m.mu.Lock()
 	if m.running == nil {
 		m.running = map[string]*exec.Cmd{}
+	}
+	if m.inputs == nil {
+		m.inputs = map[string]io.WriteCloser{}
+	}
+	if m.subscribers == nil {
+		m.subscribers = map[string]map[chan string]struct{}{}
 	}
 	m.mu.Unlock()
 
@@ -98,7 +136,7 @@ func (m *Manager) Start(in StartInput) (store.ManagedInstance, error) {
 		command = strings.TrimSpace(in.Command)
 		if command == "" {
 			effectiveTagID = "idle"
-			command = "echo \"myworktree: started an idle instance (MVP is non-interactive; provide a tag_id or command to run something useful).\"; tail -f /dev/null"
+			command = ""
 		}
 		cwdRel = ""
 		preStart = ""
@@ -125,8 +163,9 @@ func (m *Manager) Start(in StartInput) (store.ManagedInstance, error) {
 		cwd = filepath.Join(wt.Path, cwdRel)
 	}
 
-	cmd := exec.Command("zsh", "-lc", command)
+	cmd := exec.Command("script", "-q", "/dev/null", "zsh", "-f", "-i")
 	cmd.Dir = cwd
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Env = os.Environ()
 	for k, v := range env {
 		cmd.Env = append(cmd.Env, k+"="+v)
@@ -153,6 +192,11 @@ func (m *Manager) Start(in StartInput) (store.ManagedInstance, error) {
 		_ = logFile.Close()
 		return store.ManagedInstance{}, err
 	}
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		_ = logFile.Close()
+		return store.ManagedInstance{}, err
+	}
 
 	if err := cmd.Start(); err != nil {
 		_ = logFile.Close()
@@ -175,8 +219,14 @@ func (m *Manager) Start(in StartInput) (store.ManagedInstance, error) {
 		LogPath:      logPath,
 		CreatedAt:    now,
 	}
-	st.Instances = append(st.Instances, inst)
-	if err := m.Store.Save(st); err != nil {
+	m.stateMu.Lock()
+	st2, err := m.Store.Load()
+	if err == nil {
+		st2.Instances = append(st2.Instances, inst)
+		err = m.Store.Save(st2)
+	}
+	m.stateMu.Unlock()
+	if err != nil {
 		_ = cmd.Process.Kill()
 		_ = logFile.Close()
 		return store.ManagedInstance{}, err
@@ -184,9 +234,17 @@ func (m *Manager) Start(in StartInput) (store.ManagedInstance, error) {
 
 	m.mu.Lock()
 	m.running[id] = cmd
+	m.inputs[id] = stdin
 	m.mu.Unlock()
 
-	go pumpLogs(stdout, stderr, logFile, logPath)
+	if strings.TrimSpace(command) != "" {
+		go func() {
+			time.Sleep(150 * time.Millisecond)
+			_, _ = io.WriteString(stdin, command+"\n")
+		}()
+	}
+
+	go m.pumpLogs(id, stdout, stderr, logFile, logPath)
 	go m.wait(id, cmd)
 	return inst, nil
 }
@@ -226,21 +284,28 @@ func (m *Manager) Stop(id string) error {
 
 	m.mu.Lock()
 	cmd := m.running[id]
+	in := m.inputs[id]
 	m.mu.Unlock()
 
-	// If server restarted, cmd may be missing; best-effort signal by PID.
+	// If server restarted, cmd may be missing; best-effort signal by PID/process-group.
 	if (cmd == nil || cmd.Process == nil) && inst.PID > 0 {
-		p, _ := os.FindProcess(inst.PID)
-		if p != nil {
-			_ = p.Signal(syscall.SIGTERM)
-		}
+		terminatePID(inst.PID, syscall.SIGTERM)
+		go func(pid int) {
+			time.Sleep(5 * time.Second)
+			terminatePID(pid, syscall.SIGKILL)
+		}(inst.PID)
+		_ = m.markStopped(id, "stopped")
 		return nil
 	}
 	if cmd == nil || cmd.Process == nil {
+		_ = m.markStopped(id, "stopped")
 		return nil
 	}
+	if in != nil {
+		_ = in.Close()
+	}
 
-	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
+	if err := terminatePID(cmd.Process.Pid, syscall.SIGTERM); err != nil {
 		return err
 	}
 	go func() {
@@ -248,10 +313,136 @@ func (m *Manager) Stop(id string) error {
 		m.mu.Lock()
 		defer m.mu.Unlock()
 		if m.running[id] != nil && m.running[id].Process != nil {
-			_ = m.running[id].Process.Kill()
+			_ = terminatePID(m.running[id].Process.Pid, syscall.SIGKILL)
 		}
 	}()
+	_ = m.markStopped(id, "stopped")
 	return nil
+}
+
+func (m *Manager) SendInput(id string, input string) error {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return errors.New("id is required")
+	}
+	m.mu.Lock()
+	in := m.inputs[id]
+	m.mu.Unlock()
+	if in == nil {
+		return fmt.Errorf("instance input unavailable: %s", id)
+	}
+	if _, err := io.WriteString(in, input); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (m *Manager) Restart(id string) (store.ManagedInstance, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return store.ManagedInstance{}, errors.New("id is required")
+	}
+	st, err := m.Store.Load()
+	if err != nil {
+		return store.ManagedInstance{}, err
+	}
+	idx := -1
+	var old store.ManagedInstance
+	for i := range st.Instances {
+		if st.Instances[i].ID == id {
+			idx = i
+			old = st.Instances[i]
+			break
+		}
+	}
+	if idx == -1 {
+		return store.ManagedInstance{}, fmt.Errorf("unknown instance id: %s", id)
+	}
+	if old.Status == "running" {
+		return store.ManagedInstance{}, fmt.Errorf("instance is running: %s", id)
+	}
+
+	startIn := StartInput{
+		WorktreeID: old.WorktreeID,
+		Name:       old.Name,
+		Labels:     old.Labels,
+	}
+	if old.TagID != "" && old.TagID != "adhoc" && old.TagID != "idle" {
+		startIn.TagID = old.TagID
+	} else {
+		startIn.Command = old.Command
+	}
+
+	newInst, err := m.Start(startIn)
+	if err != nil {
+		return store.ManagedInstance{}, err
+	}
+
+	m.stateMu.Lock()
+	st2, err := m.Store.Load()
+	if err != nil {
+		m.stateMu.Unlock()
+		return newInst, nil
+	}
+	for i := range st2.Instances {
+		if st2.Instances[i].ID == id {
+			if !st2.Instances[i].Archived {
+				st2.Instances[i].Archived = true
+				st2.Instances[i].ArchivedAt = time.Now().UTC().Format(time.RFC3339)
+			}
+			st2.Instances[i].RestartedTo = newInst.ID
+			break
+		}
+	}
+	for i := range st2.Instances {
+		if st2.Instances[i].ID == newInst.ID {
+			st2.Instances[i].RestartedFrom = id
+			break
+		}
+	}
+	_ = m.Store.Save(st2)
+	m.stateMu.Unlock()
+	return newInst, nil
+}
+
+func (m *Manager) SubscribeOutput(id string) (<-chan string, func(), error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return nil, nil, errors.New("id is required")
+	}
+	st, err := m.Store.Load()
+	if err != nil {
+		return nil, nil, err
+	}
+	if logPathByID(st, id) == "" {
+		return nil, nil, fmt.Errorf("unknown instance id: %s", id)
+	}
+
+	m.mu.Lock()
+	if m.subscribers == nil {
+		m.subscribers = map[string]map[chan string]struct{}{}
+	}
+	if m.subscribers[id] == nil {
+		m.subscribers[id] = map[chan string]struct{}{}
+	}
+	ch := make(chan string, 64)
+	m.subscribers[id][ch] = struct{}{}
+	m.mu.Unlock()
+
+	cancel := func() {
+		m.mu.Lock()
+		if subs := m.subscribers[id]; subs != nil {
+			if _, ok := subs[ch]; ok {
+				delete(subs, ch)
+				close(ch)
+			}
+			if len(subs) == 0 {
+				delete(m.subscribers, id)
+			}
+		}
+		m.mu.Unlock()
+	}
+	return ch, cancel, nil
 }
 
 func (m *Manager) Archive(id string) error {
@@ -259,6 +450,8 @@ func (m *Manager) Archive(id string) error {
 	if id == "" {
 		return errors.New("id is required")
 	}
+	m.stateMu.Lock()
+	defer m.stateMu.Unlock()
 	st, err := m.Store.Load()
 	if err != nil {
 		return err
@@ -281,6 +474,8 @@ func (m *Manager) Delete(id string) error {
 	if id == "" {
 		return errors.New("id is required")
 	}
+	m.stateMu.Lock()
+	defer m.stateMu.Unlock()
 	st, err := m.Store.Load()
 	if err != nil {
 		return err
@@ -312,6 +507,8 @@ func (m *Manager) Delete(id string) error {
 	}
 	m.mu.Lock()
 	delete(m.running, id)
+	delete(m.inputs, id)
+	m.closeSubscribersLocked(id)
 	m.mu.Unlock()
 	return nil
 }
@@ -403,8 +600,12 @@ func (m *Manager) wait(id string, cmd *exec.Cmd) {
 
 	m.mu.Lock()
 	delete(m.running, id)
+	delete(m.inputs, id)
+	m.closeSubscribersLocked(id)
 	m.mu.Unlock()
 
+	m.stateMu.Lock()
+	defer m.stateMu.Unlock()
 	st, loadErr := m.Store.Load()
 	if loadErr != nil {
 		return
@@ -423,22 +624,52 @@ func (m *Manager) wait(id string, cmd *exec.Cmd) {
 	_ = m.Store.Save(st)
 }
 
-func pumpLogs(stdout io.Reader, stderr io.Reader, out *os.File, logPath string) {
+func (m *Manager) pumpLogs(id string, stdout io.Reader, stderr io.Reader, out *os.File, logPath string) {
 	defer func() { _ = out.Close() }()
 	var wg sync.WaitGroup
 	wg.Add(2)
 	write := func(r io.Reader) {
 		defer wg.Done()
-		s := bufio.NewScanner(r)
-		for s.Scan() {
-			line := redact.Text(s.Text())
-			_, _ = out.WriteString(line + "\n")
-			_ = enforceMaxLogSize(logPath, maxLogBytes)
+		buf := make([]byte, 1024)
+		for {
+			n, err := r.Read(buf)
+			if n > 0 {
+				chunk := redact.Text(string(buf[:n]))
+				_, _ = out.WriteString(chunk)
+				_ = enforceMaxLogSize(logPath, maxLogBytes)
+				m.broadcastOutput(id, chunk)
+			}
+			if err != nil {
+				return
+			}
 		}
 	}
 	go write(stdout)
 	go write(stderr)
 	wg.Wait()
+}
+
+func (m *Manager) broadcastOutput(id string, chunk string) {
+	if chunk == "" {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	subs := m.subscribers[id]
+	for ch := range subs {
+		select {
+		case ch <- chunk:
+		default:
+		}
+	}
+}
+
+func (m *Manager) closeSubscribersLocked(id string) {
+	subs := m.subscribers[id]
+	for ch := range subs {
+		close(ch)
+	}
+	delete(m.subscribers, id)
 }
 
 func sanitizedEnv(in map[string]string) map[string]string {
@@ -483,6 +714,45 @@ func shortID() string {
 	b := make([]byte, 6)
 	_, _ = rand.Read(b)
 	return hex.EncodeToString(b)
+}
+
+func terminatePID(pid int, sig syscall.Signal) error {
+	if pid <= 0 {
+		return errors.New("invalid pid")
+	}
+	// Prefer signaling the process group (-pid) so `script` and its child shell exit together.
+	if err := syscall.Kill(-pid, sig); err == nil || errors.Is(err, syscall.ESRCH) {
+		return nil
+	}
+	p, err := os.FindProcess(pid)
+	if err != nil || p == nil {
+		return err
+	}
+	if err := p.Signal(sig); err != nil && !errors.Is(err, syscall.ESRCH) {
+		return err
+	}
+	return nil
+}
+
+func (m *Manager) markStopped(id string, status string) error {
+	m.stateMu.Lock()
+	defer m.stateMu.Unlock()
+	st, err := m.Store.Load()
+	if err != nil {
+		return err
+	}
+	for i := range st.Instances {
+		if st.Instances[i].ID != id {
+			continue
+		}
+		if st.Instances[i].Status == "running" {
+			st.Instances[i].Status = status
+			st.Instances[i].StoppedAt = time.Now().UTC().Format(time.RFC3339)
+			return m.Store.Save(st)
+		}
+		return nil
+	}
+	return fmt.Errorf("unknown instance id: %s", id)
 }
 
 func logPathByID(st store.State, id string) string {

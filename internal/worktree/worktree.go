@@ -30,7 +30,16 @@ func (m Manager) List() ([]store.ManagedWorktree, error) {
 	return st.Worktrees, nil
 }
 
+type CreateOptions struct {
+	BaseRef       string
+	AdoptIfExists bool
+}
+
 func (m Manager) Create(taskDesc string, baseRef string) (store.ManagedWorktree, error) {
+	return m.CreateWithOptions(taskDesc, CreateOptions{BaseRef: baseRef})
+}
+
+func (m Manager) CreateWithOptions(taskDesc string, opts CreateOptions) (store.ManagedWorktree, error) {
 	if strings.TrimSpace(taskDesc) == "" {
 		return store.ManagedWorktree{}, errors.New("task description is required")
 	}
@@ -43,6 +52,18 @@ func (m Manager) Create(taskDesc string, baseRef string) (store.ManagedWorktree,
 	if !custom {
 		group = "mwt"
 		baseName = slug
+	}
+
+	if opts.AdoptIfExists {
+		importName := baseName
+		if custom {
+			importName = group + "/" + baseName
+		}
+		if branchExists(m.GitRoot, group+"/"+baseName) {
+			if wt, err := m.Import(importName); err == nil {
+				return wt, nil
+			}
+		}
 	}
 
 	branchName := baseName
@@ -71,7 +92,7 @@ func (m Manager) Create(taskDesc string, baseRef string) (store.ManagedWorktree,
 	}
 	path := filepath.Join(root, pathName)
 
-	ref := strings.TrimSpace(baseRef)
+	ref := strings.TrimSpace(opts.BaseRef)
 	if ref == "" {
 		ref = "HEAD"
 	}
@@ -98,7 +119,7 @@ func (m Manager) Create(taskDesc string, baseRef string) (store.ManagedWorktree,
 		Name:      name,
 		Path:      path,
 		Branch:    branch,
-		BaseRef:   baseRef,
+		BaseRef:   opts.BaseRef,
 		CreatedAt: time.Now().UTC().Format(time.RFC3339),
 	}
 	st, err := m.Store.Load()

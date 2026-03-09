@@ -25,6 +25,7 @@ import (
 	"myworktree/internal/tag"
 	"myworktree/internal/ui"
 	"myworktree/internal/worktree"
+	"myworktree/internal/ws"
 )
 
 type Config struct {
@@ -111,6 +112,11 @@ func (s *Server) Start() (string, error) {
 	if err := os.MkdirAll(s.dataDir, 0o755); err != nil {
 		return "", err
 	}
+	if n, err := s.instanceMgr.ReconcileRunningOnStartup(); err != nil {
+		s.logger.Printf("reconcile running instances failed: %v", err)
+	} else if n > 0 {
+		s.logger.Printf("reconciled %d stale running instances to stopped", n)
+	}
 
 	ln, err := net.Listen("tcp", s.cfg.ListenAddr)
 	if err != nil {
@@ -166,11 +172,15 @@ func (s *Server) validateSecurity() error {
 
 func (s *Server) registerAPIs(mux *http.ServeMux) {
 	mux.HandleFunc("/api/worktrees", s.handleWorktrees)
+	mux.HandleFunc("/api/worktrees/import", s.handleWorktreeImport)
 	mux.HandleFunc("/api/worktrees/delete", s.handleWorktreeDelete)
 	mux.HandleFunc("/api/instances", s.handleInstances)
 	mux.HandleFunc("/api/instances/stop", s.handleInstanceStop)
+	mux.HandleFunc("/api/instances/restart", s.handleInstanceRestart)
 	mux.HandleFunc("/api/instances/archive", s.handleInstanceArchive)
 	mux.HandleFunc("/api/instances/delete", s.handleInstanceDelete)
+	mux.HandleFunc("/api/instances/input", s.handleInstanceInput)
+	mux.HandleFunc("/api/instances/tty/ws", s.handleInstanceTTYWS)
 	mux.HandleFunc("/api/instances/log", s.handleInstanceLog)
 	mux.HandleFunc("/api/instances/log/stream", s.handleInstanceLogStream)
 	mux.HandleFunc("/api/tags", s.handleTags)
@@ -261,12 +271,13 @@ func (s *Server) handleWorktrees(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			TaskDescription string `json:"task_description"`
 			BaseRef         string `json:"base_ref"`
+			AdoptIfExists   bool   `json:"adopt_if_exists"`
 		}
 		if err := readJSON(r.Body, &req); err != nil {
 			writeErr(w, http.StatusBadRequest, err)
 			return
 		}
-		item, err := s.worktreeMgr.Create(req.TaskDescription, req.BaseRef)
+		item, err := s.worktreeMgr.CreateWithOptions(req.TaskDescription, worktree.CreateOptions{BaseRef: req.BaseRef, AdoptIfExists: req.AdoptIfExists})
 		if err != nil {
 			writeErr(w, http.StatusBadRequest, err)
 			return
@@ -275,6 +286,26 @@ func (s *Server) handleWorktrees(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
+}
+
+func (s *Server) handleWorktreeImport(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		Name string `json:"name"`
+	}
+	if err := readJSON(r.Body, &req); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	item, err := s.worktreeMgr.Import(req.Name)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, item)
 }
 
 func (s *Server) handleWorktreeDelete(w http.ResponseWriter, r *http.Request) {
@@ -353,6 +384,26 @@ func (s *Server) handleInstanceStop(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
+func (s *Server) handleInstanceRestart(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		ID string `json:"id"`
+	}
+	if err := readJSON(r.Body, &req); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	item, err := s.instanceMgr.Restart(req.ID)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, item)
+}
+
 func (s *Server) handleInstanceArchive(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -389,6 +440,98 @@ func (s *Server) handleInstanceDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (s *Server) handleInstanceInput(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		ID    string `json:"id"`
+		Input string `json:"input"`
+	}
+	if err := readJSON(r.Body, &req); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := s.instanceMgr.SendInput(req.ID, req.Input); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (s *Server) handleInstanceTTYWS(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	id := strings.TrimSpace(r.URL.Query().Get("id"))
+	if id == "" {
+		http.Error(w, "id is required", http.StatusBadRequest)
+		return
+	}
+	conn, err := ws.Upgrade(w, r)
+	if err != nil {
+		return
+	}
+	defer conn.Close()
+
+	initial, err := s.instanceMgr.Tail(id, 64*1024)
+	if err != nil {
+		_ = conn.WriteBinary([]byte(err.Error()))
+		return
+	}
+	if initial != "" {
+		_ = conn.WriteBinary([]byte(initial))
+	}
+
+	ch, cancel, err := s.instanceMgr.SubscribeOutput(id)
+	if err != nil {
+		_ = conn.WriteBinary([]byte(err.Error()))
+		return
+	}
+	defer cancel()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			op, data, err := conn.ReadMessage()
+			if err != nil {
+				return
+			}
+			if ws.IsClose(op) {
+				_ = conn.WriteClose(ws.CloseMessage(1000, "bye"))
+				return
+			}
+			if ws.IsPing(op) {
+				_ = conn.WritePong(data)
+				continue
+			}
+			if !ws.IsDataOpcode(op) {
+				continue
+			}
+			if err := s.instanceMgr.SendInput(id, string(data)); err != nil {
+				return
+			}
+		}
+	}()
+
+	for {
+		select {
+		case <-done:
+			return
+		case chunk, ok := <-ch:
+			if !ok {
+				return
+			}
+			if err := conn.WriteBinary([]byte(chunk)); err != nil {
+				return
+			}
+		}
+	}
 }
 
 func (s *Server) handleInstanceLog(w http.ResponseWriter, r *http.Request) {
@@ -621,6 +764,20 @@ func (s *Server) handleMCPCall(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err := s.instanceMgr.Stop(args.ID); err != nil {
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"result": map[string]string{"status": "ok"}})
+	case "instance_input":
+		var args struct {
+			ID    string `json:"id"`
+			Input string `json:"input"`
+		}
+		if err := decodeArgs(req.Args, &args); err != nil {
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
+		if err := s.instanceMgr.SendInput(args.ID, args.Input); err != nil {
 			writeErr(w, http.StatusBadRequest, err)
 			return
 		}

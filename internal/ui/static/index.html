@@ -4,6 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>myworktree</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm/css/xterm.css" />
     <style>
       body { font-family: -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif; margin: 16px; color: #111; }
       h1 { margin: 0 0 12px; }
@@ -13,21 +14,28 @@
       button { cursor: pointer; }
       table { width: 100%; border-collapse: collapse; font-size: 13px; }
       th, td { border-bottom: 1px solid #eee; text-align: left; padding: 6px 4px; }
-      #log { width: 100%; height: 260px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; background: #0b1020; color: #f2f5ff; border-radius: 8px; padding: 10px; overflow: auto; }
+      #log { display: none; }
+      #terminal { width: 100%; height: 320px; background: #0b1020; border-radius: 8px; }
       .muted { color: #666; font-size: 12px; }
     </style>
   </head>
   <body>
     <h1>myworktree</h1>
-    <div class="muted">MVP UI: worktree / instance management + log replay</div>
+    <div class="muted">MVP UI: worktree / instance management + live log + basic shell input</div>
     <div class="muted">Worktree base ref: top 10 branches (default first) + custom ref.</div>
     <div class="row">
       <div class="card">
         <h3>Create worktree</h3>
-        <input id="wtTask" placeholder="task description" style="width:100%" />
+        <input id="wtTask" placeholder="task description (or branch like mwt/foo)" style="width:100%" />
         <select id="wtBaseSelect" style="width:100%" onchange="onBaseRefChange()"></select>
         <input id="wtBaseCustom" placeholder="custom base ref (optional)" style="width:100%; display:none" />
+        <label class="muted" style="display:block;margin:6px 0">
+          <input type="checkbox" id="wtAdopt" /> adopt existing worktree if branch already exists
+        </label>
         <button onclick="createWorktree()">Create</button>
+        <h3>Import worktree</h3>
+        <input id="wtImportName" placeholder="name: foo (=> mwt/foo) or group/foo" style="width:100%" />
+        <button onclick="importWorktree()">Import</button>
         <h3>Worktrees</h3>
         <table id="wtTable"></table>
       </div>
@@ -54,16 +62,28 @@
       <select id="logSelect" style="width:100%" onchange="onLogTargetChange()"></select>
       <button onclick="loadLog()">Load log</button>
       <button onclick="autoRefresh()">Auto refresh</button>
+      <button onclick="reconnectTTY()">Reconnect WS</button>
+      <button onclick="focusTerminal()">Focus terminal</button>
+      <span id="transportStatus" class="muted" style="margin-left:8px">transport: idle</span>
+      <div id="terminal"></div>
       <pre id="log"></pre>
+      <input id="termInput" placeholder="type command and press Enter (e.g. ls -la)" style="width:100%" onkeydown="onTermInputKey(event)" />
+      <button onclick="sendTermInput()">Send input</button>
     </div>
+    <script src="https://cdn.jsdelivr.net/npm/xterm/lib/xterm.js"></script>
     <script>
       const token = new URLSearchParams(location.search).get("token") || "";
       const headers = token ? { Authorization: `Bearer ${token}` } : {};
       let pollTimer = null;
       let logStream = null;
+      let ttySocket = null;
       let liveEnabled = false;
       let logCursor = 0;
       let wtNameByID = {};
+      let term = null;
+      let termInputBuffer = "";
+      let termSendTimer = null;
+      let ttyReconnectTimer = null;
 
       async function api(path, opts = {}) {
         const res = await fetch(path, {
@@ -85,6 +105,59 @@
         renderBaseRefs(branches.default || "", branches.branches || []);
         renderTags(tags.tags || []);
         renderInstances(ins.instances || []);
+        ensureTerminal();
+      }
+
+      function ensureTerminal() {
+        if (term || !window.Terminal) return;
+        term = new Terminal({
+          convertEol: true,
+          cursorBlink: true,
+          fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+          fontSize: 13,
+          theme: { background: "#0b1020" }
+        });
+        term.open(document.getElementById("terminal"));
+        term.onData((data) => {
+          const id = document.getElementById("logSelect").value;
+          if (!id) return;
+          if (ttySocket && ttySocket.readyState === WebSocket.OPEN) {
+            ttySocket.send(data);
+            return;
+          }
+          enqueueTerminalInput(data);
+        });
+      }
+
+      function enqueueTerminalInput(data) {
+        termInputBuffer += data;
+        if (termSendTimer) return;
+        termSendTimer = setTimeout(async () => {
+          const payload = termInputBuffer;
+          termInputBuffer = "";
+          termSendTimer = null;
+          try {
+            const id = document.getElementById("logSelect").value;
+            if (!id || !payload) return;
+            await api("/api/instances/input", { method: "POST", body: JSON.stringify({ id, input: payload }) });
+          } catch (e) {
+            term && term.writeln(`\r\n[send input failed] ${String(e)}`);
+          }
+        }, 40);
+      }
+
+      function setTransportStatus(text) {
+        const el = document.getElementById("transportStatus");
+        if (el) el.textContent = `transport: ${text}`;
+      }
+
+      function scheduleTTYReconnect() {
+        if (ttyReconnectTimer) return;
+        ttyReconnectTimer = setTimeout(() => {
+          ttyReconnectTimer = null;
+          if (ttySocket && ttySocket.readyState === WebSocket.OPEN) return;
+          connectTTY();
+        }, 1000);
       }
 
       function renderBaseRefs(def, items) {
@@ -146,16 +219,18 @@
           active.map(i => {
             const wtName = i.worktree_name || wtNameByID[i.worktree_id] || "";
             const stopBtn = i.status === "running" ? `<button onclick=\"stopInstance('${i.id}')\">Stop</button>` : "";
+            const restartBtn = i.status !== "running" ? `<button onclick=\"restartInstance('${i.id}')\">Restart</button>` : "";
             const archBtn = i.status !== "running" ? `<button onclick=\"archiveInstance('${i.id}')\">Archive</button>` : "";
-            return `<tr><td>${i.id}</td><td>${i.worktree_id}</td><td>${wtName}</td><td>${i.tag_id}</td><td>${formatLabels(i.labels)}</td><td>${i.status}</td><td>${stopBtn} ${archBtn}</td></tr>`;
+            return `<tr><td>${i.id}</td><td>${i.worktree_id}</td><td>${wtName}</td><td>${i.tag_id}</td><td>${formatLabels(i.labels)}</td><td>${i.status}</td><td>${stopBtn} ${restartBtn} ${archBtn}</td></tr>`;
           }).join("");
 
         const at = document.getElementById("archTable");
         at.innerHTML = "<tr><th>Instance ID</th><th>Worktree Name</th><th>Tag</th><th>Labels</th><th>Status</th><th>Archived At</th><th></th></tr>" +
           archived.map(i => {
             const wtName = i.worktree_name || wtNameByID[i.worktree_id] || "";
+            const restartBtn = `<button onclick=\"restartInstance('${i.id}')\">Restart</button>`;
             const delBtn = `<button onclick=\"deleteInstance('${i.id}')\">Delete</button>`;
-            return `<tr><td>${i.id}</td><td>${wtName}</td><td>${i.tag_id}</td><td>${formatLabels(i.labels)}</td><td>${i.status}</td><td>${i.archived_at || ""}</td><td>${delBtn}</td></tr>`;
+            return `<tr><td>${i.id}</td><td>${wtName}</td><td>${i.tag_id}</td><td>${formatLabels(i.labels)}</td><td>${i.status}</td><td>${i.archived_at || ""}</td><td>${restartBtn} ${delBtn}</td></tr>`;
           }).join("");
 
         const s = document.getElementById("logSelect");
@@ -192,9 +267,20 @@
               const v = document.getElementById("wtBaseSelect").value;
               if (v === "__custom__") return document.getElementById("wtBaseCustom").value;
               return v;
-            })()
+            })(),
+            adopt_if_exists: !!document.getElementById("wtAdopt").checked,
           })});
           document.getElementById("wtTask").value = "";
+          await refresh();
+        } catch (e) { alert(String(e)); }
+      }
+
+      async function importWorktree() {
+        try {
+          await api("/api/worktrees/import", { method: "POST", body: JSON.stringify({
+            name: document.getElementById("wtImportName").value,
+          })});
+          document.getElementById("wtImportName").value = "";
           await refresh();
         } catch (e) { alert(String(e)); }
       }
@@ -230,6 +316,13 @@
         } catch (e) { alert(String(e)); }
       }
 
+      async function restartInstance(id) {
+        try {
+          await api("/api/instances/restart", { method: "POST", body: JSON.stringify({ id }) });
+          await refresh();
+        } catch (e) { alert(String(e)); }
+      }
+
       async function archiveInstance(id) {
         try {
           await api("/api/instances/archive", { method: "POST", body: JSON.stringify({ id }) });
@@ -245,11 +338,34 @@
         } catch (e) { alert(String(e)); }
       }
 
+      async function sendTermInput() {
+        try {
+          const id = document.getElementById("logSelect").value;
+          if (!id) return;
+          const inputEl = document.getElementById("termInput");
+          const line = inputEl.value;
+          inputEl.value = "";
+          if (ttySocket && ttySocket.readyState === WebSocket.OPEN) {
+            ttySocket.send(line + "\n");
+            focusTerminal();
+            return;
+          }
+          await api("/api/instances/input", { method: "POST", body: JSON.stringify({ id, input: line + "\n" }) });
+          focusTerminal();
+        } catch (e) { alert(String(e)); }
+      }
+
+      function onTermInputKey(ev) {
+        if (ev.key === "Enter") {
+          ev.preventDefault();
+          sendTermInput();
+        }
+      }
+
       async function loadLog() {
         try {
           const id = document.getElementById("logSelect").value;
           if (!id) {
-            document.getElementById("log").textContent = "";
             logCursor = 0;
             return;
           }
@@ -258,7 +374,10 @@
           const text = await res.text();
           const next = parseInt(res.headers.get("X-Log-Offset") || "", 10);
           logCursor = Number.isFinite(next) ? next : text.length;
-          document.getElementById("log").textContent = text;
+          if (term) {
+            term.reset();
+            term.write(text);
+          }
         } catch (e) { alert(String(e)); }
       }
 
@@ -271,9 +390,7 @@
           const text = await res.text();
           const next = parseInt(res.headers.get("X-Log-Offset") || "", 10);
           if (text) {
-            const el = document.getElementById("log");
-            el.textContent += text;
-            el.scrollTop = el.scrollHeight;
+            if (term) term.write(text);
           }
           if (Number.isFinite(next)) logCursor = next;
         } catch (e) { alert(String(e)); }
@@ -286,13 +403,68 @@
         }
       }
 
+      function disconnectTTY() {
+        if (ttyReconnectTimer) {
+          clearTimeout(ttyReconnectTimer);
+          ttyReconnectTimer = null;
+        }
+        if (ttySocket) {
+          ttySocket.close();
+          ttySocket = null;
+        }
+      }
+
+      function connectTTY() {
+        disconnectTTY();
+        stopLogStream();
+        const id = document.getElementById("logSelect").value;
+        if (!id) {
+          setTransportStatus("idle");
+          return;
+        }
+        if (!window.WebSocket) {
+          setTransportStatus("polling (no websocket)");
+          return;
+        }
+        setTransportStatus("websocket connecting");
+        const proto = location.protocol === "https:" ? "wss" : "ws";
+        let url = `${proto}://${location.host}/api/instances/tty/ws?id=${encodeURIComponent(id)}`;
+        if (token) url += `&token=${encodeURIComponent(token)}`;
+        const ws = new WebSocket(url);
+        ws.binaryType = "arraybuffer";
+        ws.onopen = () => {
+          if (ttySocket === ws) setTransportStatus("websocket live");
+        };
+        ws.onmessage = (ev) => {
+          if (ev.data instanceof ArrayBuffer) {
+            const bytes = new Uint8Array(ev.data);
+            if (bytes.length && term) term.write(bytes);
+            return;
+          }
+          const chunk = String(ev.data || "");
+          if (chunk && term) term.write(chunk);
+        };
+        ws.onerror = () => {
+          if (ttySocket === ws) setTransportStatus("websocket error");
+        };
+        ws.onclose = () => {
+          if (ttySocket === ws) {
+            ttySocket = null;
+            setTransportStatus("websocket reconnecting");
+            scheduleTTYReconnect();
+          }
+        };
+        ttySocket = ws;
+      }
+
       function startLogStream(reset = false) {
         stopLogStream();
         const id = document.getElementById("logSelect").value;
         if (!id || !window.EventSource) return;
+        setTransportStatus("sse live");
         if (reset) {
-          document.getElementById("log").textContent = "";
           logCursor = 0;
+          if (term) term.reset();
         }
         let url = `/api/instances/log/stream?id=${encodeURIComponent(id)}&since=${encodeURIComponent(String(logCursor))}`;
         if (token) url += `&token=${encodeURIComponent(token)}`;
@@ -307,9 +479,7 @@
           if (!msg || typeof msg.chunk !== "string") return;
           if (typeof msg.next === "number") logCursor = msg.next;
           if (!msg.chunk) return;
-          const el = document.getElementById("log");
-          el.textContent += msg.chunk;
-          el.scrollTop = el.scrollHeight;
+          if (term) term.write(msg.chunk);
         });
         es.onerror = () => {
           es.close();
@@ -323,12 +493,30 @@
       }
 
       function onLogTargetChange() {
+        disconnectTTY();
         logCursor = 0;
+        if (term) term.reset();
+        connectTTY();
+        if (window.WebSocket) {
+          loadLog();
+          return;
+        }
         if (liveEnabled && window.EventSource) {
           startLogStream(true);
           return;
         }
         loadLog();
+      }
+
+      function reconnectTTY() {
+        logCursor = 0;
+        if (term) term.reset();
+        loadLog().finally(() => connectTTY());
+      }
+
+      function focusTerminal() {
+        ensureTerminal();
+        if (term) term.focus();
       }
 
       function autoRefresh() {
@@ -337,12 +525,18 @@
           pollTimer = null;
           liveEnabled = false;
           stopLogStream();
+          disconnectTTY();
+          setTransportStatus("idle");
           return;
         }
         liveEnabled = true;
-        if (window.EventSource) {
+        if (window.WebSocket) {
+          reconnectTTY();
+        } else if (window.EventSource) {
+          setTransportStatus("sse + 2s refresh");
           startLogStream(true);
         } else {
+          setTransportStatus("polling 2s");
           loadLog();
         }
         pollTimer = setInterval(async () => {
@@ -382,6 +576,7 @@
       }
 
       refresh();
+      connectTTY();
     </script>
   </body>
 </html>

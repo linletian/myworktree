@@ -40,7 +40,7 @@ It does **not** analyze project code or prevent concurrent write conflicts insid
 - UI reconnect enumerates instances via `GET /api/instances`, fetches backlog via `GET /api/instances/log?id=...`, and can follow live output via SSE `GET /api/instances/log/stream?id=...`.
 - Backlog is stored on disk with a size cap (rolling truncate).
 
-> Note: current MVP captures stdout/stderr for replay. Full interactive PTY over WebSocket is a planned enhancement.
+> Note: current implementation supports Web TTY streaming via `/api/instances/tty/ws` plus HTTP input fallback (`/api/instances/input`).
 
 ## 5. Security model (single-user)
 - Default listen: loopback only.

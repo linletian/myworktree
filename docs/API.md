@@ -20,13 +20,28 @@ Response:
 
 Body:
 ```json
-{ "task_description": "fix login", "base_ref": "" }
+{ "task_description": "fix login", "base_ref": "", "adopt_if_exists": false }
 ```
+
+- If `adopt_if_exists` is true and the target branch already exists, the server will attempt to **import/adopt** an existing git worktree for that branch; if no existing worktree is found, it falls back to creating a new worktree with a numeric suffix.
 
 Response (201):
 ```json
 { "id":"...","name":"fix-login","path":"...","branch":"mwt/fix-login","created_at":"..." }
 ```
+
+### Import (adopt existing git worktree)
+`POST /api/worktrees/import`
+
+Body:
+```json
+{ "name": "foo" }
+```
+
+- `name: "foo"` maps to branch `mwt/foo`.
+- You can also pass a full spec like `"feature/foo"`.
+
+Response (201): same as create.
 
 ### Delete (strict: refuses if dirty)
 `POST /api/worktrees/delete`
@@ -78,7 +93,8 @@ Body:
 { "worktree_id": "<worktreeId>", "tag_id": "optional", "command": "optional", "name": "optional", "labels": {"purpose":"refactor","priority":"P1"} }
 ```
 
-If both `tag_id` and `command` are empty, the server starts an **idle** instance (non-interactive MVP placeholder).
+If both `tag_id` and `command` are empty, the server starts an **interactive shell** instance in the worktree.
+If `command` is provided, it is sent to the shell as the initial command and the shell remains available for further input.
 
 Example (ad-hoc command without tags):
 ```json
@@ -93,10 +109,37 @@ Response (201):
 ### Stop
 `POST /api/instances/stop`
 
+### Restart
+`POST /api/instances/restart`
+
 Body:
 ```json
 { "id": "<instanceId>" }
 ```
+
+- Creates a new instance with the same worktree + tag/command + labels.
+- If the old instance is not archived yet (and is not running), it will be archived automatically.
+- The old instance record is linked to the new one via `restarted_to` / `restarted_from`.
+
+Body:
+```json
+{ "id": "<instanceId>" }
+```
+
+### Send input
+`POST /api/instances/input`
+
+Body:
+```json
+{ "id": "<instanceId>", "input": "ls -la\n" }
+```
+
+### Web TTY stream (WebSocket)
+`GET /api/instances/tty/ws?id=<instanceId>`
+
+- Bi-directional stream for terminal output/input.
+- Client sends typed bytes as WebSocket text/binary frames.
+- Server pushes terminal output chunks as text frames.
 
 ### Archive
 `POST /api/instances/archive`
@@ -160,4 +203,4 @@ Response:
 Supported tool names:
 - `worktree_list`, `worktree_create`, `worktree_delete`
 - `branch_list`, `tag_list`
-- `instance_list`, `instance_start`, `instance_stop`, `instance_archive`, `instance_delete`, `instance_log_tail`
+- `instance_list`, `instance_start`, `instance_stop`, `instance_input`, `instance_archive`, `instance_delete`, `instance_log_tail`

@@ -24,22 +24,24 @@ type ManagedWorktree struct {
 }
 
 type ManagedInstance struct {
-	ID           string            `json:"id"`
-	WorktreeID   string            `json:"worktree_id"`
-	WorktreeName string            `json:"worktree_name,omitempty"`
-	TagID        string            `json:"tag_id"`
-	Name         string            `json:"name"`
-	Labels       map[string]string `json:"labels,omitempty"`
-	Command      string            `json:"command"`
-	Cwd          string            `json:"cwd"`
-	Env          map[string]string `json:"env,omitempty"`
-	PID          int               `json:"pid"`
-	Status       string            `json:"status"` // running|exited|stopped|failed
-	Archived     bool              `json:"archived,omitempty"`
-	ArchivedAt   string            `json:"archived_at,omitempty"`
-	LogPath      string            `json:"log_path"`
-	CreatedAt    string            `json:"created_at"`
-	StoppedAt    string            `json:"stopped_at,omitempty"`
+	ID            string            `json:"id"`
+	WorktreeID    string            `json:"worktree_id"`
+	WorktreeName  string            `json:"worktree_name,omitempty"`
+	TagID         string            `json:"tag_id"`
+	Name          string            `json:"name"`
+	Labels        map[string]string `json:"labels,omitempty"`
+	Command       string            `json:"command"`
+	Cwd           string            `json:"cwd"`
+	Env           map[string]string `json:"env,omitempty"`
+	PID           int               `json:"pid"`
+	Status        string            `json:"status"` // running|exited|stopped|failed
+	Archived      bool              `json:"archived,omitempty"`
+	ArchivedAt    string            `json:"archived_at,omitempty"`
+	RestartedFrom string            `json:"restarted_from,omitempty"`
+	RestartedTo   string            `json:"restarted_to,omitempty"`
+	LogPath       string            `json:"log_path"`
+	CreatedAt     string            `json:"created_at"`
+	StoppedAt     string            `json:"stopped_at,omitempty"`
 }
 
 type FileStore struct {
