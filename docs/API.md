@@ -109,6 +109,11 @@ Response (201):
 ### Stop
 `POST /api/instances/stop`
 
+Body:
+```json
+{ "id": "<instanceId>" }
+```
+
 ### Restart
 `POST /api/instances/restart`
 
@@ -120,11 +125,6 @@ Body:
 - Creates a new instance with the same worktree + tag/command + labels.
 - If the old instance is not archived yet (and is not running), it will be archived automatically.
 - The old instance record is linked to the new one via `restarted_to` / `restarted_from`.
-
-Body:
-```json
-{ "id": "<instanceId>" }
-```
 
 ### Send input
 `POST /api/instances/input`
@@ -139,7 +139,7 @@ Body:
 
 - Bi-directional stream for terminal output/input.
 - Client sends typed bytes as WebSocket text/binary frames.
-- Server pushes terminal output chunks as text frames.
+- Server pushes terminal output chunks as **binary frames**.
 
 ### Archive
 `POST /api/instances/archive`
@@ -178,7 +178,7 @@ Response: `text/plain`
 {"chunk":"...","next":12345}
 ```
 
-## 3) MCP
+## 5) MCP
 ### Tool names
 `GET /api/mcp/tools`
 

@@ -1,582 +1,862 @@
 <!doctype html>
 <html lang="en">
-  <head>
+<head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>myworktree</title>
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm/css/xterm.css" />
     <style>
-      body { font-family: -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif; margin: 16px; color: #111; }
-      h1 { margin: 0 0 12px; }
-      .row { display: flex; gap: 16px; align-items: flex-start; }
-      .card { border: 1px solid #ddd; border-radius: 8px; padding: 12px; flex: 1; min-width: 320px; }
-      input, select, button { margin: 4px 0; padding: 6px 8px; }
-      button { cursor: pointer; }
-      table { width: 100%; border-collapse: collapse; font-size: 13px; }
-      th, td { border-bottom: 1px solid #eee; text-align: left; padding: 6px 4px; }
-      #log { display: none; }
-      #terminal { width: 100%; height: 320px; background: #0b1020; border-radius: 8px; }
-      .muted { color: #666; font-size: 12px; }
+        :root {
+            --sidebar-width: 240px;
+            --header-height: 40px;
+            --bg-color: #f9f9f9;
+            --border-color: #e1e4e8;
+            --active-color: #005cc5;
+            --active-bg: #f1f8ff;
+            --hover-bg: #f6f8fa;
+            --term-bg: #0b1020;
+        }
+
+        body, html {
+            margin: 0;
+            padding: 0;
+            height: 100%;
+            overflow: hidden;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji";
+            font-size: 13px;
+            color: #24292e;
+        }
+
+        * {
+            box-sizing: border-box;
+        }
+
+        #app {
+            display: flex;
+            height: 100vh;
+            width: 100vw;
+        }
+
+        /* Sidebar */
+        #sidebar {
+            width: var(--sidebar-width);
+            background: var(--bg-color);
+            border-right: 1px solid var(--border-color);
+            display: flex;
+            flex-direction: column;
+        }
+
+        .sidebar-title {
+            padding: 12px;
+            font-weight: 600;
+            border-bottom: 1px solid var(--border-color);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .sidebar-actions {
+            display: flex;
+            gap: 8px;
+        }
+
+        .icon-btn {
+            cursor: pointer;
+            border: none;
+            background: none;
+            color: #586069;
+            padding: 2px;
+            border-radius: 4px;
+        }
+
+            .icon-btn:hover {
+                background: #e1e4e8;
+                color: #0366d6;
+            }
+
+        #wt-list {
+            flex: 1;
+            overflow-y: auto;
+            list-style: none;
+            padding: 0;
+            margin: 0;
+        }
+
+        .wt-item {
+            padding: 8px 12px;
+            cursor: pointer;
+            border-left: 3px solid transparent;
+            border-bottom: 1px solid #f0f0f0;
+            display: flex;
+            flex-direction: column;
+            gap: 2px;
+        }
+
+            .wt-item:hover {
+                background: var(--hover-bg);
+            }
+
+            .wt-item.active {
+                background: #fff;
+                border-left-color: var(--active-color);
+                font-weight: 500;
+                box-shadow: 0 1px 2px rgba(0,0,0,0.05);
+            }
+
+        .wt-name {
+            font-size: 13px;
+            word-break: break-all;
+        }
+
+        .wt-branch {
+            font-size: 11px;
+            color: #6a737d;
+            display: flex;
+            align-items: center;
+            gap: 4px;
+        }
+
+        /* Main Content */
+        #main {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            min-width: 0;
+            background: #fff;
+        }
+
+        /* Tabs Header */
+        #header {
+            height: var(--header-height);
+            border-bottom: 1px solid var(--border-color);
+            display: flex;
+            align-items: center;
+            padding: 0 8px;
+            gap: 4px;
+            background: #fbfbfb;
+        }
+
+        #tabs-container {
+            flex: 1;
+            display: flex;
+            overflow-x: auto;
+            height: 100%;
+            align-items: flex-end;
+            gap: 4px;
+        }
+
+        .tab {
+            padding: 6px 12px;
+            cursor: pointer;
+            border: 1px solid transparent;
+            border-bottom: none;
+            border-radius: 4px 4px 0 0;
+            color: #586069;
+            margin-bottom: -1px;
+            height: 32px;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+            .tab:hover {
+                background: #f6f8fa;
+            }
+
+            .tab.active {
+                background: #fff;
+                border-color: var(--border-color);
+                color: #24292e;
+                border-top: 2px solid var(--active-color);
+            }
+
+        .tab-status {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            display: inline-block;
+        }
+
+        .status-running {
+            background: #28a745;
+        }
+
+        .status-stopped {
+            background: #999;
+        }
+
+        .status-exited {
+            background: #6a737d;
+        }
+
+        .status-failed {
+            background: #cb2431;
+        }
+
+        .new-tab-btn {
+            padding: 4px 8px;
+            cursor: pointer;
+            color: #586069;
+            font-weight: bold;
+            font-size: 16px;
+            border-radius: 4px;
+            margin-left: 4px;
+            margin-bottom: 2px;
+        }
+
+            .new-tab-btn:hover {
+                background: #e1e4e8;
+                color: #0366d6;
+            }
+
+        /* Actions Toolbar (Hidden by default, shown when instance active) */
+        #instance-actions {
+            display: none;
+            gap: 8px;
+            align-items: center;
+            margin-left: 12px;
+        }
+
+            #instance-actions.visible {
+                display: flex;
+            }
+
+        /* Workspace */
+        #workspace {
+            flex: 1;
+            position: relative;
+            background: var(--term-bg);
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+        }
+
+        #terminal-container {
+            flex: 1;
+            width: 100%;
+            height: 100%;
+            position: relative;
+        }
+
+        #empty-state {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            color: #586069;
+            text-align: center;
+        }
+
+        /* Transport Status */
+        #status-bar {
+            position: absolute;
+            bottom: 0;
+            right: 0;
+            background: rgba(0,0,0,0.5);
+            color: #ccc;
+            padding: 2px 8px;
+            font-size: 11px;
+            z-index: 10;
+            pointer-events: none;
+            border-top-left-radius: 4px;
+        }
+
+        /* Dialogs */
+        dialog {
+            border: 1px solid #ddd;
+            border-radius: 6px;
+            padding: 20px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+            width: 400px;
+        }
+
+            dialog::backdrop {
+                background: rgba(0,0,0,0.3);
+            }
+
+        .form-group {
+            margin-bottom: 12px;
+        }
+
+            .form-group label {
+                display: block;
+                margin-bottom: 4px;
+                font-weight: 500;
+            }
+
+            .form-group input, .form-group select {
+                width: 100%;
+                padding: 6px;
+                border: 1px solid #ddd;
+                border-radius: 4px;
+            }
+
+        .form-actions {
+            text-align: right;
+            margin-top: 16px;
+            display: flex;
+            justify-content: flex-end;
+            gap: 8px;
+        }
+
+        .muted {
+            color: #6a737d;
+            font-size: 12px;
+            margin-top: 4px;
+        }
+
+        /* Utilities */
+        .hidden {
+            display: none !important;
+        }
+
+        button {
+            cursor: pointer;
+            padding: 6px 12px;
+            border: 1px solid #ddd;
+            background: #fafbfc;
+            border-radius: 4px;
+        }
+
+            button:hover {
+                background: #f3f4f6;
+                border-color: #ccc;
+            }
+
+            button.primary {
+                background: #2ea44f;
+                color: white;
+                border: 1px solid rgba(27,31,35,0.15);
+            }
+
+                button.primary:hover {
+                    background: #2c974b;
+                }
+
+            button.danger {
+                color: #cb2431;
+            }
+
+                button.danger:hover {
+                    background: #ffeef0;
+                    border-color: #cb2431;
+                }
     </style>
-  </head>
-  <body>
-    <h1>myworktree</h1>
-    <div class="muted">MVP UI: worktree / instance management + live log + basic shell input</div>
-    <div class="muted">Worktree base ref: top 10 branches (default first) + custom ref.</div>
-    <div class="row">
-      <div class="card">
-        <h3>Create worktree</h3>
-        <input id="wtTask" placeholder="task description (or branch like mwt/foo)" style="width:100%" />
-        <select id="wtBaseSelect" style="width:100%" onchange="onBaseRefChange()"></select>
-        <input id="wtBaseCustom" placeholder="custom base ref (optional)" style="width:100%; display:none" />
-        <label class="muted" style="display:block;margin:6px 0">
-          <input type="checkbox" id="wtAdopt" /> adopt existing worktree if branch already exists
-        </label>
-        <button onclick="createWorktree()">Create</button>
-        <h3>Import worktree</h3>
-        <input id="wtImportName" placeholder="name: foo (=> mwt/foo) or group/foo" style="width:100%" />
-        <button onclick="importWorktree()">Import</button>
-        <h3>Worktrees</h3>
-        <table id="wtTable"></table>
-      </div>
-      <div class="card">
-        <h3>Start instance</h3>
-        <select id="worktreeSelect" style="width:100%"></select>
-        <select id="tagSelect" style="width:100%"></select>
-        <input id="cmd" placeholder="command (optional; leave empty for idle instance)" style="width:100%" />
-        <input id="instName" placeholder="instance name (optional)" style="width:100%" />
-        <input id="instLabels" placeholder="labels: k=v,team=ai (optional)" style="width:100%" />
-        <button onclick="startInstance()">Start</button>
-        <div class="muted">Pick a tag or type a command. Tags are loaded from tags.json (global + project).</div>
-        <h3>Instances</h3>
-        <input id="instFilter" placeholder="filter by name/id/worktree/labels" style="width:100%" oninput="renderInstances(window.__lastInstances || [])" />
-        <table id="instTable"></table>
-        <details style="margin-top:10px">
-          <summary>Archived instances</summary>
-          <table id="archTable"></table>
-        </details>
-      </div>
+</head>
+<body>
+    <div id="app">
+        <!-- Sidebar: Worktrees -->
+        <div id="sidebar">
+            <div class="sidebar-title">
+                <span>Worktrees</span>
+                <div class="sidebar-actions">
+                    <button class="icon-btn" onclick="openModal('modal-create-wt')" title="New Worktree">+</button>
+                    <button class="icon-btn" onclick="openModal('modal-import-wt')" title="Import Worktree">↓</button>
+                </div>
+            </div>
+            <ul id="wt-list"></ul>
+        </div>
+
+        <!-- Main: Tabs + Terminal -->
+        <div id="main">
+            <div id="header">
+                <div id="tabs-container"></div>
+                <div class="new-tab-btn" onclick="promptStartInstance()" title="New Instance">+</div>
+
+                <div id="instance-actions">
+                    <button onclick="restartInstance()" title="Restart">Restart</button>
+                    <button onclick="stopInstance()" title="Stop">Stop</button>
+                    <button onclick="archiveInstance()" title="Archive">Archive</button>
+                    <button class="danger" onclick="deleteInstance()" title="Delete">Delete</button>
+                    <button onclick="reconnectWS()" title="Reconnect WebSocket">Reconnect</button>
+                </div>
+            </div>
+
+            <div id="workspace">
+                <div id="empty-state">Select a worktree and instance to start</div>
+                <div id="terminal-container"></div>
+                <div id="status-bar">Transport: idle</div>
+            </div>
+        </div>
     </div>
-    <div class="card" style="margin-top:16px">
-      <h3>Instance log replay</h3>
-      <select id="logSelect" style="width:100%" onchange="onLogTargetChange()"></select>
-      <button onclick="loadLog()">Load log</button>
-      <button onclick="autoRefresh()">Auto refresh</button>
-      <button onclick="reconnectTTY()">Reconnect WS</button>
-      <button onclick="focusTerminal()">Focus terminal</button>
-      <span id="transportStatus" class="muted" style="margin-left:8px">transport: idle</span>
-      <div id="terminal"></div>
-      <pre id="log"></pre>
-      <input id="termInput" placeholder="type command and press Enter (e.g. ls -la)" style="width:100%" onkeydown="onTermInputKey(event)" />
-      <button onclick="sendTermInput()">Send input</button>
-    </div>
+
+    <!-- Modal: Create Worktree -->
+    <dialog id="modal-create-wt">
+        <h3>Create Worktree</h3>
+        <div class="form-group">
+            <label>Task Description</label>
+            <input id="wtTask" placeholder="e.g. fix login bug" />
+            <div class="muted">Creates branch mwt/fix-login-bug</div>
+        </div>
+        <div class="form-group">
+            <label>Base Ref</label>
+            <select id="wtBaseSelect" onchange="onBaseRefChange()"></select>
+            <input id="wtBaseCustom" placeholder="custom ref" style="display:none; margin-top:4px" />
+        </div>
+        <div class="form-group">
+            <label><input type="checkbox" id="wtAdopt" /> Adopt existing branch/worktree if exists</label>
+        </div>
+        <div class="form-actions">
+            <button onclick="closeModal('modal-create-wt')">Cancel</button>
+            <button class="primary" onclick="doCreateWorktree()">Create</button>
+        </div>
+    </dialog>
+
+    <!-- Modal: Import Worktree -->
+    <dialog id="modal-import-wt">
+        <h3>Import Worktree</h3>
+        <div class="form-group">
+            <label>Branch/Name</label>
+            <input id="wtImportName" placeholder="e.g. feature/foo" />
+        </div>
+        <div class="form-actions">
+            <button onclick="closeModal('modal-import-wt')">Cancel</button>
+            <button class="primary" onclick="doImportWorktree()">Import</button>
+        </div>
+    </dialog>
+
+    <!-- Modal: Start Instance -->
+    <dialog id="modal-start-instance">
+        <h3>Start Instance</h3>
+        <div class="form-group">
+            <label>Tag (Template)</label>
+            <select id="tagSelect"></select>
+        </div>
+        <div class="form-group">
+            <label>Or Custom Command</label>
+            <input id="cmd" placeholder="e.g. echo hello && zsh" />
+        </div>
+        <div class="form-group">
+            <label>Name (Optional)</label>
+            <input id="instName" placeholder="e.g. build-server" />
+        </div>
+        <div class="form-group">
+            <label>Labels (Optional)</label>
+            <input id="instLabels" placeholder="k=v,role=backend" />
+        </div>
+        <div class="form-actions">
+            <button onclick="closeModal('modal-start-instance')">Cancel</button>
+            <button class="primary" onclick="doStartInstance()">Start</button>
+        </div>
+    </dialog>
+
     <script src="https://cdn.jsdelivr.net/npm/xterm/lib/xterm.js"></script>
     <script>
-      const token = new URLSearchParams(location.search).get("token") || "";
-      const headers = token ? { Authorization: `Bearer ${token}` } : {};
-      let pollTimer = null;
-      let logStream = null;
-      let ttySocket = null;
-      let liveEnabled = false;
-      let logCursor = 0;
-      let wtNameByID = {};
-      let term = null;
-      let termInputBuffer = "";
-      let termSendTimer = null;
-      let ttyReconnectTimer = null;
+        const token = new URLSearchParams(location.search).get("token") || "";
+        const headers = token ? { Authorization: `Bearer ${token}` } : {};
 
-      async function api(path, opts = {}) {
-        const res = await fetch(path, {
-          ...opts,
-          headers: { "content-type": "application/json", ...headers, ...(opts.headers || {}) },
-        });
-        if (!res.ok) throw new Error(await res.text());
-        const ct = res.headers.get("content-type") || "";
-        return ct.includes("application/json") ? res.json() : res.text();
-      }
+        // Global State
+        let state = {
+            worktrees: [],
+            instances: [], // filtered flat list? no, full list.
+            tags: [],
+            branches: [],
+            activeWT: null,
+            activeInst: null
+        };
 
-      async function refresh() {
-        const wt = await api("/api/worktrees");
-        const ins = await api("/api/instances");
-        const tags = await api("/api/tags");
-        const branches = await api("/api/branches");
-        wtNameByID = Object.fromEntries((wt.worktrees || []).map(w => [w.id, w.name]));
-        renderWorktrees(wt.worktrees || []);
-        renderBaseRefs(branches.default || "", branches.branches || []);
-        renderTags(tags.tags || []);
-        renderInstances(ins.instances || []);
-        ensureTerminal();
-      }
+        // Terminal & Transport
+        let term = null;
+        let ttySocket = null;
+        let logStream = null;
+        let pollTimer = null;
+        let logCursor = 0;
+        let ttyReconnectTimer = null;
+        let termInputBuffer = "";
+        let termSendTimer = null;
 
-      function ensureTerminal() {
-        if (term || !window.Terminal) return;
-        term = new Terminal({
-          convertEol: true,
-          cursorBlink: true,
-          fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
-          fontSize: 13,
-          theme: { background: "#0b1020" }
-        });
-        term.open(document.getElementById("terminal"));
-        term.onData((data) => {
-          const id = document.getElementById("logSelect").value;
-          if (!id) return;
-          if (ttySocket && ttySocket.readyState === WebSocket.OPEN) {
-            ttySocket.send(data);
-            return;
-          }
-          enqueueTerminalInput(data);
-        });
-      }
-
-      function enqueueTerminalInput(data) {
-        termInputBuffer += data;
-        if (termSendTimer) return;
-        termSendTimer = setTimeout(async () => {
-          const payload = termInputBuffer;
-          termInputBuffer = "";
-          termSendTimer = null;
-          try {
-            const id = document.getElementById("logSelect").value;
-            if (!id || !payload) return;
-            await api("/api/instances/input", { method: "POST", body: JSON.stringify({ id, input: payload }) });
-          } catch (e) {
-            term && term.writeln(`\r\n[send input failed] ${String(e)}`);
-          }
-        }, 40);
-      }
-
-      function setTransportStatus(text) {
-        const el = document.getElementById("transportStatus");
-        if (el) el.textContent = `transport: ${text}`;
-      }
-
-      function scheduleTTYReconnect() {
-        if (ttyReconnectTimer) return;
-        ttyReconnectTimer = setTimeout(() => {
-          ttyReconnectTimer = null;
-          if (ttySocket && ttySocket.readyState === WebSocket.OPEN) return;
-          connectTTY();
-        }, 1000);
-      }
-
-      function renderBaseRefs(def, items) {
-        const s = document.getElementById("wtBaseSelect");
-        const custom = document.getElementById("wtBaseCustom");
-        if (!items.length) {
-          s.innerHTML = '<option value="">(no branches)</option>';
-          custom.style.display = "none";
-          return;
+        // API
+        async function api(path, opts = {}) {
+            const res = await fetch(path, {
+                ...opts,
+                headers: { "content-type": "application/json", ...headers, ...(opts.headers || {}) },
+            });
+            if (!res.ok) throw new Error(await res.text());
+            const ct = res.headers.get("content-type") || "";
+            return ct.includes("application/json") ? res.json() : res.text();
         }
-        s.innerHTML = items.map(b => {
-          const label = b.name === def ? `${b.name} (default)` : b.name;
-          return `<option value="${b.name}">${label}</option>`;
-        }).join("") + '<option value="__custom__">custom…</option>';
-        // default branch is always first in list; keep it selected.
-        custom.style.display = "none";
-        custom.value = "";
-      }
 
-      function onBaseRefChange() {
-        const s = document.getElementById("wtBaseSelect");
-        const custom = document.getElementById("wtBaseCustom");
-        if (s.value === "__custom__") {
-          custom.style.display = "block";
-          custom.focus();
-        } else {
-          custom.style.display = "none";
+        // Lifecycle
+        async function refresh() {
+            try {
+                const [wt, ins, tags, branches] = await Promise.all([
+                    api("/api/worktrees"),
+                    api("/api/instances"),
+                    api("/api/tags"),
+                    api("/api/branches")
+                ]);
+                state.worktrees = wt.worktrees || [];
+                state.instances = ins.instances || [];
+                state.tags = tags.tags || [];
+                state.branches = branches;
+                render();
+            } catch (e) { console.error(e); }
         }
-      }
 
-      function renderTags(items) {
-        const s = document.getElementById("tagSelect");
-        if (!items.length) {
-          s.innerHTML = '<option value="">(no tags configured)</option>';
-          return;
+        function init() {
+            ensureTerminal();
+            refresh();
+            // Polling for status updates (2s)
+            setInterval(refresh, 2000);
         }
-        s.innerHTML = '<option value="">-- select tag --</option>' +
-          items.map(t => `<option value="${t.id}">${t.id} — ${t.command}</option>`).join("");
-        // do not auto-select: allow starting with an ad-hoc command.
-      }
 
-      function renderWorktrees(items) {
-        const t = document.getElementById("wtTable");
-        t.innerHTML = "<tr><th>Worktree ID</th><th>Name</th><th>Branch</th><th></th></tr>" +
-          items.map(w => `<tr><td>${w.id}</td><td>${w.name}</td><td>${w.branch}</td><td><button onclick="deleteWorktree('${w.id}')">Delete</button></td></tr>`).join("");
-        const s = document.getElementById("worktreeSelect");
-        s.innerHTML = items.map(w => `<option value="${w.id}">${w.name} (${w.id})</option>`).join("");
-      }
-
-      function renderInstances(items) {
-        window.__lastInstances = items || [];
-        const q = (document.getElementById("instFilter").value || "").trim().toLowerCase();
-        const filtered = (items || []).filter(i => matchesInstanceFilter(i, q));
-        const active = filtered.filter(i => !i.archived);
-        const archived = filtered.filter(i => i.archived);
-
-        const t = document.getElementById("instTable");
-        t.innerHTML = "<tr><th>Instance ID</th><th>Worktree ID</th><th>Worktree Name</th><th>Tag</th><th>Labels</th><th>Status</th><th></th></tr>" +
-          active.map(i => {
-            const wtName = i.worktree_name || wtNameByID[i.worktree_id] || "";
-            const stopBtn = i.status === "running" ? `<button onclick=\"stopInstance('${i.id}')\">Stop</button>` : "";
-            const restartBtn = i.status !== "running" ? `<button onclick=\"restartInstance('${i.id}')\">Restart</button>` : "";
-            const archBtn = i.status !== "running" ? `<button onclick=\"archiveInstance('${i.id}')\">Archive</button>` : "";
-            return `<tr><td>${i.id}</td><td>${i.worktree_id}</td><td>${wtName}</td><td>${i.tag_id}</td><td>${formatLabels(i.labels)}</td><td>${i.status}</td><td>${stopBtn} ${restartBtn} ${archBtn}</td></tr>`;
-          }).join("");
-
-        const at = document.getElementById("archTable");
-        at.innerHTML = "<tr><th>Instance ID</th><th>Worktree Name</th><th>Tag</th><th>Labels</th><th>Status</th><th>Archived At</th><th></th></tr>" +
-          archived.map(i => {
-            const wtName = i.worktree_name || wtNameByID[i.worktree_id] || "";
-            const restartBtn = `<button onclick=\"restartInstance('${i.id}')\">Restart</button>`;
-            const delBtn = `<button onclick=\"deleteInstance('${i.id}')\">Delete</button>`;
-            return `<tr><td>${i.id}</td><td>${wtName}</td><td>${i.tag_id}</td><td>${formatLabels(i.labels)}</td><td>${i.status}</td><td>${i.archived_at || ""}</td><td>${restartBtn} ${delBtn}</td></tr>`;
-          }).join("");
-
-        const s = document.getElementById("logSelect");
-        const prev = s.value;
-        if (!(items || []).length) {
-          s.innerHTML = '<option value="">(no instances)</option>';
-          document.getElementById("log").textContent = "";
-          stopLogStream();
-          logCursor = 0;
-          return;
+        // Render
+        function render() {
+            renderSidebar();
+            renderTabs();
+            renderWorkspace();
+            renderModals(); // Update options inside modals
         }
-        s.innerHTML = (items || []).map(i => {
-          const wtName = i.worktree_name || wtNameByID[i.worktree_id] || "";
-          const wtPart = wtName ? ` — ${wtName}` : "";
-          const arch = i.archived ? " [archived]" : "";
-          const labels = formatLabels(i.labels);
-          const labelPart = labels ? ` — ${labels}` : "";
-          return `<option value=\"${i.id}\">${i.name || i.id}${wtPart}${labelPart}${arch} (${i.status})</option>`;
-        }).join("");
-        if (prev && (items || []).some(i => i.id === prev)) {
-          s.value = prev;
+
+        function renderSidebar() {
+            const list = document.getElementById("wt-list");
+            list.innerHTML = state.worktrees.map(w => {
+                const isActive = state.activeWT === w.id;
+                return `
+            <li class="wt-item ${isActive ? 'active' : ''}" onclick="selectWorktree('${w.id}')">
+              <div class="wt-name">${w.name}</div>
+              <div class="wt-branch">
+                <span>🌱</span> ${w.branch}
+                ${isActive ? `<span style="margin-left:auto;font-size:10px;cursor:pointer" onclick="deleteWorktree('${w.id}', event)">✕</span>` : ''}
+              </div>
+            </li>
+          `;
+            }).join("");
+
+            // If no active WT and we have some, select first
+            if (!state.activeWT && state.worktrees.length > 0) {
+                selectWorktree(state.worktrees[0].id);
+            }
         }
-        if (liveEnabled && window.EventSource && s.value !== prev) {
-          logCursor = 0;
-          startLogStream(true);
+
+        function renderTabs() {
+            const container = document.getElementById("tabs-container");
+            if (!state.activeWT) {
+                container.innerHTML = "";
+                return;
+            }
+
+            // Filter instances for current WT
+            const instances = state.instances.filter(i => i.worktree_id === state.activeWT && !i.archived);
+            instances.sort((a, b) => a.created_at.localeCompare(b.created_at));
+
+            container.innerHTML = instances.map(i => {
+                const isActive = state.activeInst === i.id;
+                const statusClass = `status-${i.status}`;
+                const name = i.name || i.tag_id || i.id.substring(0, 6);
+                return `
+            <div class="tab ${isActive ? 'active' : ''}" onclick="selectInstance('${i.id}')">
+              <span class="tab-status ${statusClass}"></span>
+              ${name}
+            </div>
+          `;
+            }).join("");
+
+            // Auto-select logic
+            if (state.activeWT && !state.activeInst && instances.length > 0) {
+                // Prefer running, else first
+                const running = instances.find(i => i.status === "running");
+                selectInstance(running ? running.id : instances[0].id);
+            } else if (state.activeWT && instances.length === 0) {
+                selectInstance(null); // Clear selection if no instances
+            }
         }
-      }
 
-      async function createWorktree() {
-        try {
-          await api("/api/worktrees", { method: "POST", body: JSON.stringify({
-            task_description: document.getElementById("wtTask").value,
-            base_ref: (() => {
-              const v = document.getElementById("wtBaseSelect").value;
-              if (v === "__custom__") return document.getElementById("wtBaseCustom").value;
-              return v;
-            })(),
-            adopt_if_exists: !!document.getElementById("wtAdopt").checked,
-          })});
-          document.getElementById("wtTask").value = "";
-          await refresh();
-        } catch (e) { alert(String(e)); }
-      }
+        function renderWorkspace() {
+            const empty = document.getElementById("empty-state");
+            const termContainer = document.getElementById("terminal-container");
+            const actions = document.getElementById("instance-actions");
 
-      async function importWorktree() {
-        try {
-          await api("/api/worktrees/import", { method: "POST", body: JSON.stringify({
-            name: document.getElementById("wtImportName").value,
-          })});
-          document.getElementById("wtImportName").value = "";
-          await refresh();
-        } catch (e) { alert(String(e)); }
-      }
-
-      async function deleteWorktree(id) {
-        if (!confirm("Delete worktree " + id + "? (fails if dirty)")) return;
-        try {
-          await api("/api/worktrees/delete", { method: "POST", body: JSON.stringify({ id }) });
-          await refresh();
-        } catch (e) { alert(String(e)); }
-      }
-
-      async function startInstance() {
-        try {
-          const tagId = document.getElementById("tagSelect").value;
-          const command = document.getElementById("cmd").value;
-          await api("/api/instances", { method: "POST", body: JSON.stringify({
-            worktree_id: document.getElementById("worktreeSelect").value,
-            tag_id: tagId,
-            command,
-            name: document.getElementById("instName").value,
-            labels: parseLabelsInput(document.getElementById("instLabels").value)
-          })});
-          document.getElementById("instLabels").value = "";
-          await refresh();
-        } catch (e) { alert(String(e)); }
-      }
-
-      async function stopInstance(id) {
-        try {
-          await api("/api/instances/stop", { method: "POST", body: JSON.stringify({ id }) });
-          await refresh();
-        } catch (e) { alert(String(e)); }
-      }
-
-      async function restartInstance(id) {
-        try {
-          await api("/api/instances/restart", { method: "POST", body: JSON.stringify({ id }) });
-          await refresh();
-        } catch (e) { alert(String(e)); }
-      }
-
-      async function archiveInstance(id) {
-        try {
-          await api("/api/instances/archive", { method: "POST", body: JSON.stringify({ id }) });
-          await refresh();
-        } catch (e) { alert(String(e)); }
-      }
-
-      async function deleteInstance(id) {
-        if (!confirm("Delete instance " + id + "? (This removes record and log file)") ) return;
-        try {
-          await api("/api/instances/delete", { method: "POST", body: JSON.stringify({ id }) });
-          await refresh();
-        } catch (e) { alert(String(e)); }
-      }
-
-      async function sendTermInput() {
-        try {
-          const id = document.getElementById("logSelect").value;
-          if (!id) return;
-          const inputEl = document.getElementById("termInput");
-          const line = inputEl.value;
-          inputEl.value = "";
-          if (ttySocket && ttySocket.readyState === WebSocket.OPEN) {
-            ttySocket.send(line + "\n");
-            focusTerminal();
-            return;
-          }
-          await api("/api/instances/input", { method: "POST", body: JSON.stringify({ id, input: line + "\n" }) });
-          focusTerminal();
-        } catch (e) { alert(String(e)); }
-      }
-
-      function onTermInputKey(ev) {
-        if (ev.key === "Enter") {
-          ev.preventDefault();
-          sendTermInput();
+            if (state.activeInst) {
+                empty.style.display = "none";
+                termContainer.style.display = "block";
+                actions.classList.add("visible");
+            } else {
+                empty.style.display = "block";
+                empty.textContent = state.activeWT ? "No instances. Click + to start one." : "Select a worktree.";
+                termContainer.style.display = "none";
+                actions.classList.remove("visible");
+            }
         }
-      }
 
-      async function loadLog() {
-        try {
-          const id = document.getElementById("logSelect").value;
-          if (!id) {
+        function renderModals() {
+            // Update BaseRef select
+            const s = document.getElementById("wtBaseSelect");
+            if (state.branches && state.branches.branches) {
+                const items = state.branches.branches;
+                const def = state.branches.default;
+                const opts = items.map(b => `<option value="${b.name}">${b.name}${b.name === def ? ' (default)' : ''}</option>`).join("");
+                if (s.innerHTML === "" || s.options.length <= 1) { // simple dirty check
+                    s.innerHTML = opts + '<option value="__custom__">custom…</option>';
+                }
+            }
+            // Update Tags select
+            const ts = document.getElementById("tagSelect");
+            if (state.tags) {
+                const opts = '<option value="">-- select --</option>' +
+                    state.tags.map(t => `<option value="${t.id}">${t.id} — ${t.command}</option>`).join("");
+                if (ts.innerHTML !== opts) ts.innerHTML = opts;
+            }
+        }
+
+        // Interaction
+        function selectWorktree(id) {
+            if (state.activeWT === id) return;
+            state.activeWT = id;
+            state.activeInst = null; // Reset instance selection
+            refresh(); // Will trigger auto-select instance in renderTabs
+        }
+
+        function selectWorktreeByID(id) {
+            state.activeWT = id;
+            refresh();
+        }
+
+        function selectInstance(id) {
+            if (state.activeInst === id) return;
+            state.activeInst = id;
+
+            // Switch Terminal Context
+            disconnectTTY();
             logCursor = 0;
-            return;
-          }
-          const res = await fetch(`/api/instances/log?id=${encodeURIComponent(id)}&since=0`, { headers });
-          if (!res.ok) throw new Error(await res.text());
-          const text = await res.text();
-          const next = parseInt(res.headers.get("X-Log-Offset") || "", 10);
-          logCursor = Number.isFinite(next) ? next : text.length;
-          if (term) {
-            term.reset();
-            term.write(text);
-          }
-        } catch (e) { alert(String(e)); }
-      }
+            if (term) term.reset();
 
-      async function loadLogSince() {
-        try {
-          const id = document.getElementById("logSelect").value;
-          if (!id) return;
-          const res = await fetch(`/api/instances/log?id=${encodeURIComponent(id)}&since=${encodeURIComponent(String(logCursor))}`, { headers });
-          if (!res.ok) throw new Error(await res.text());
-          const text = await res.text();
-          const next = parseInt(res.headers.get("X-Log-Offset") || "", 10);
-          if (text) {
-            if (term) term.write(text);
-          }
-          if (Number.isFinite(next)) logCursor = next;
-        } catch (e) { alert(String(e)); }
-      }
+            render(); // update UI highlights
 
-      function stopLogStream() {
-        if (logStream) {
-          logStream.close();
-          logStream = null;
+            if (id) {
+                loadLog().finally(() => connectTTY());
+            }
         }
-      }
 
-      function disconnectTTY() {
-        if (ttyReconnectTimer) {
-          clearTimeout(ttyReconnectTimer);
-          ttyReconnectTimer = null;
+        // Actions
+        function openModal(id) { document.getElementById(id).showModal(); }
+        function closeModal(id) { document.getElementById(id).close(); }
+
+        function onBaseRefChange() {
+            const s = document.getElementById("wtBaseSelect");
+            const c = document.getElementById("wtBaseCustom");
+            c.style.display = s.value === "__custom__" ? "block" : "none";
         }
-        if (ttySocket) {
-          ttySocket.close();
-          ttySocket = null;
+
+        function promptStartInstance() {
+            if (!state.activeWT) { alert("Select a worktree first"); return; }
+            document.getElementById("instLabels").value = "";
+            document.getElementById("cmd").value = "";
+            document.getElementById("instName").value = "";
+            openModal("modal-start-instance");
         }
-      }
 
-      function connectTTY() {
-        disconnectTTY();
-        stopLogStream();
-        const id = document.getElementById("logSelect").value;
-        if (!id) {
-          setTransportStatus("idle");
-          return;
+        // API Calls
+        async function doCreateWorktree() {
+            try {
+                const body = {
+                    task_description: document.getElementById("wtTask").value,
+                    base_ref: document.getElementById("wtBaseSelect").value === "__custom__"
+                        ? document.getElementById("wtBaseCustom").value
+                        : document.getElementById("wtBaseSelect").value,
+                    adopt_if_exists: document.getElementById("wtAdopt").checked
+                };
+                const res = await api("/api/worktrees", { method: "POST", body: JSON.stringify(body) });
+                closeModal("modal-create-wt");
+                document.getElementById("wtTask").value = "";
+                await refresh();
+                selectWorktreeByID(res.id);
+            } catch (e) { alert(e); }
         }
-        if (!window.WebSocket) {
-          setTransportStatus("polling (no websocket)");
-          return;
+
+        async function doImportWorktree() {
+            try {
+                const name = document.getElementById("wtImportName").value;
+                const res = await api("/api/worktrees/import", { method: "POST", body: JSON.stringify({ name }) });
+                closeModal("modal-import-wt");
+                document.getElementById("wtImportName").value = "";
+                await refresh();
+                selectWorktreeByID(res.id);
+            } catch (e) { alert(e); }
         }
-        setTransportStatus("websocket connecting");
-        const proto = location.protocol === "https:" ? "wss" : "ws";
-        let url = `${proto}://${location.host}/api/instances/tty/ws?id=${encodeURIComponent(id)}`;
-        if (token) url += `&token=${encodeURIComponent(token)}`;
-        const ws = new WebSocket(url);
-        ws.binaryType = "arraybuffer";
-        ws.onopen = () => {
-          if (ttySocket === ws) setTransportStatus("websocket live");
-        };
-        ws.onmessage = (ev) => {
-          if (ev.data instanceof ArrayBuffer) {
-            const bytes = new Uint8Array(ev.data);
-            if (bytes.length && term) term.write(bytes);
-            return;
-          }
-          const chunk = String(ev.data || "");
-          if (chunk && term) term.write(chunk);
-        };
-        ws.onerror = () => {
-          if (ttySocket === ws) setTransportStatus("websocket error");
-        };
-        ws.onclose = () => {
-          if (ttySocket === ws) {
-            ttySocket = null;
-            setTransportStatus("websocket reconnecting");
-            scheduleTTYReconnect();
-          }
-        };
-        ttySocket = ws;
-      }
 
-      function startLogStream(reset = false) {
-        stopLogStream();
-        const id = document.getElementById("logSelect").value;
-        if (!id || !window.EventSource) return;
-        setTransportStatus("sse live");
-        if (reset) {
-          logCursor = 0;
-          if (term) term.reset();
+        async function deleteWorktree(id, ev) {
+            ev.stopPropagation();
+            if (!confirm("Delete worktree?")) return;
+            try {
+                await api("/api/worktrees/delete", { method: "POST", body: JSON.stringify({ id }) });
+                if (state.activeWT === id) state.activeWT = null;
+                await refresh();
+            } catch (e) { alert(e); }
         }
-        let url = `/api/instances/log/stream?id=${encodeURIComponent(id)}&since=${encodeURIComponent(String(logCursor))}`;
-        if (token) url += `&token=${encodeURIComponent(token)}`;
-        const es = new EventSource(url);
-        es.addEventListener("log", (ev) => {
-          let msg;
-          try {
-            msg = JSON.parse(ev.data);
-          } catch (_) {
-            return;
-          }
-          if (!msg || typeof msg.chunk !== "string") return;
-          if (typeof msg.next === "number") logCursor = msg.next;
-          if (!msg.chunk) return;
-          if (term) term.write(msg.chunk);
-        });
-        es.onerror = () => {
-          es.close();
-          if (liveEnabled) {
-            setTimeout(() => {
-              if (liveEnabled) startLogStream(false);
-            }, 1000);
-          }
-        };
-        logStream = es;
-      }
 
-      function onLogTargetChange() {
-        disconnectTTY();
-        logCursor = 0;
-        if (term) term.reset();
-        connectTTY();
-        if (window.WebSocket) {
-          loadLog();
-          return;
+        async function doStartInstance() {
+            try {
+                const body = {
+                    worktree_id: state.activeWT,
+                    tag_id: document.getElementById("tagSelect").value,
+                    command: document.getElementById("cmd").value,
+                    name: document.getElementById("instName").value,
+                    labels: parseLabelsInput(document.getElementById("instLabels").value)
+                };
+                const res = await api("/api/instances", { method: "POST", body: JSON.stringify(body) });
+                closeModal("modal-start-instance");
+                await refresh();
+                selectInstance(res.id);
+            } catch (e) { alert(e); }
         }
-        if (liveEnabled && window.EventSource) {
-          startLogStream(true);
-          return;
+
+        async function stopInstance() {
+            if (!state.activeInst) return;
+            try { await api("/api/instances/stop", { method: "POST", body: JSON.stringify({ id: state.activeInst }) }); refresh(); } catch (e) { alert(e); }
         }
-        loadLog();
-      }
-
-      function reconnectTTY() {
-        logCursor = 0;
-        if (term) term.reset();
-        loadLog().finally(() => connectTTY());
-      }
-
-      function focusTerminal() {
-        ensureTerminal();
-        if (term) term.focus();
-      }
-
-      function autoRefresh() {
-        if (pollTimer) {
-          clearInterval(pollTimer);
-          pollTimer = null;
-          liveEnabled = false;
-          stopLogStream();
-          disconnectTTY();
-          setTransportStatus("idle");
-          return;
+        async function restartInstance() {
+            if (!state.activeInst) return;
+            try {
+                const res = await api("/api/instances/restart", { method: "POST", body: JSON.stringify({ id: state.activeInst }) });
+                await refresh();
+                selectInstance(res.id); // Switch to new instance
+            } catch (e) { alert(e); }
         }
-        liveEnabled = true;
-        if (window.WebSocket) {
-          reconnectTTY();
-        } else if (window.EventSource) {
-          setTransportStatus("sse + 2s refresh");
-          startLogStream(true);
-        } else {
-          setTransportStatus("polling 2s");
-          loadLog();
+        async function archiveInstance() {
+            if (!state.activeInst) return;
+            try { await api("/api/instances/archive", { method: "POST", body: JSON.stringify({ id: state.activeInst }) }); refresh(); } catch (e) { alert(e); }
         }
-        pollTimer = setInterval(async () => {
-          await refresh();
-          if (!window.EventSource) {
-            await loadLogSince();
-          }
-        }, 2000);
-      }
-
-      function parseLabelsInput(raw) {
-        const out = {};
-        for (const token of (raw || "").split(",")) {
-          const part = token.trim();
-          if (!part) continue;
-          const idx = part.indexOf("=");
-          if (idx <= 0 || idx === part.length - 1) continue;
-          const k = part.slice(0, idx).trim();
-          const v = part.slice(idx + 1).trim();
-          if (!k || !v) continue;
-          out[k] = v;
+        async function deleteInstance() {
+            if (!state.activeInst || !confirm("Delete instance log?")) return;
+            try { await api("/api/instances/delete", { method: "POST", body: JSON.stringify({ id: state.activeInst }) }); refresh(); } catch (e) { alert(e); }
         }
-        return out;
-      }
+        function reconnectWS() { connectTTY(); }
 
-      function formatLabels(labels) {
-        if (!labels || typeof labels !== "object") return "";
-        return Object.entries(labels).map(([k, v]) => `${k}=${v}`).join(", ");
-      }
+        function parseLabelsInput(raw) {
+            const out = {};
+            for (const token of (raw || "").split(",")) {
+                const [k, v] = token.split("=").map(s => s.trim());
+                if (k && v) out[k] = v;
+            }
+            return out;
+        }
 
-      function matchesInstanceFilter(i, q) {
-        if (!q) return true;
-        const wtName = i.worktree_name || wtNameByID[i.worktree_id] || "";
-        const labels = formatLabels(i.labels);
-        const text = [i.id, i.name || "", i.worktree_id || "", wtName, i.tag_id || "", labels].join(" ").toLowerCase();
-        return text.includes(q);
-      }
+        // Terminal Logic (Shared)
+        function ensureTerminal() {
+            if (term || !window.Terminal) return;
+            term = new Terminal({
+                convertEol: true, cursorBlink: true,
+                fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+                fontSize: 13, theme: { background: "#0b1020" }
+            });
+            // Fit logic ideally, but for now 100% width/height CSS handles container
+            const el = document.getElementById("terminal-container");
+            term.open(el);
 
-      refresh();
-      connectTTY();
+            // Resize observer
+            new ResizeObserver(() => {
+                // Simple fit calc if fit addon missing
+                if (term) term.resize(Math.floor(el.clientWidth / 9), Math.floor(el.clientHeight / 17));
+            }).observe(el);
+
+            term.onData(data => {
+                if (!state.activeInst) return;
+                if (ttySocket && ttySocket.readyState === WebSocket.OPEN) {
+                    ttySocket.send(data);
+                } else {
+                    // Fallback HTTP input
+                    termInputBuffer += data;
+                    if (!termSendTimer) {
+                        termSendTimer = setTimeout(async () => {
+                            const input = termInputBuffer;
+                            termInputBuffer = "";
+                            termSendTimer = null;
+                            try {
+                                await api("/api/instances/input", { method: "POST", body: JSON.stringify({ id: state.activeInst, input }) });
+                            } catch (e) { term.writeln(`\r\n[input error] ${e}`); }
+                        }, 40);
+                    }
+                }
+            });
+        }
+
+        function updateStatus(msg) {
+            document.getElementById("status-bar").textContent = "Transport: " + msg;
+        }
+
+        async function loadLog() {
+            if (!state.activeInst) return;
+            try {
+                const res = await fetch(`/api/instances/log?id=${state.activeInst}&since=0`, { headers });
+                if (!res.ok) throw new Error(await res.text());
+                const text = await res.text();
+                const next = parseInt(res.headers.get("X-Log-Offset") || "0", 10);
+                logCursor = next || text.length;
+                if (term) { term.reset(); term.write(text); }
+            } catch (e) { term && term.write(`\r\n[load log error] ${e}`); }
+        }
+
+        async function loadLogSince() {
+            if (!state.activeInst) return;
+            try {
+                const res = await fetch(`/api/instances/log?id=${state.activeInst}&since=${logCursor}`, { headers });
+                if (!res.ok) throw new Error();
+                const text = await res.text();
+                const next = parseInt(res.headers.get("X-Log-Offset") || "0", 10);
+                if (text && term) term.write(text);
+                if (next) logCursor = next;
+            } catch (e) { }
+        }
+
+        function disconnectTTY() {
+            if (ttyReconnectTimer) clearTimeout(ttyReconnectTimer);
+            if (logStream) { logStream.close(); logStream = null; }
+            if (ttySocket) { ttySocket.close(); ttySocket = null; }
+        }
+
+        function connectTTY() {
+            disconnectTTY();
+            const id = state.activeInst;
+            if (!id) { updateStatus("idle"); return; }
+
+            if (window.WebSocket) {
+                updateStatus("connecting ws...");
+                const proto = location.protocol === "https:" ? "wss" : "ws";
+                let url = `${proto}://${location.host}/api/instances/tty/ws?id=${encodeURIComponent(id)}`;
+                if (token) url += `&token=${encodeURIComponent(token)}`;
+
+                const ws = new WebSocket(url);
+                ws.binaryType = "arraybuffer";
+                ws.onopen = () => { if (ttySocket === ws) updateStatus("websocket live"); };
+                ws.onmessage = (ev) => {
+                    if (ev.data instanceof ArrayBuffer) {
+                        const u8 = new Uint8Array(ev.data);
+                        if (u8.length && term) term.write(u8);
+                    } else if (term) term.write(ev.data);
+                };
+                ws.onclose = () => {
+                    if (ttySocket === ws) {
+                        updateStatus("ws closed, retrying...");
+                        ttyReconnectTimer = setTimeout(connectTTY, 1000);
+                    }
+                };
+                ttySocket = ws;
+            } else {
+                // Fallback SSE
+                startSSE();
+            }
+        }
+
+        function startSSE() {
+            updateStatus("sse live");
+            // Simplified SSE logic for brevity, reused from before
+            let url = `/api/instances/log/stream?id=${encodeURIComponent(state.activeInst)}&since=${logCursor}`;
+            if (token) url += `&token=${encodeURIComponent(token)}`;
+            const es = new EventSource(url);
+            es.onmessage = (ev) => {
+                try {
+                    const msg = JSON.parse(ev.data);
+                    if (msg.chunk && term) term.write(msg.chunk);
+                    if (msg.next) logCursor = msg.next;
+                } catch (e) { }
+            };
+            es.onerror = () => { es.close(); setTimeout(startSSE, 2000); };
+            logStream = es;
+        }
+
+        // Boot
+        init();
     </script>
-  </body>
+</body>
 </html>

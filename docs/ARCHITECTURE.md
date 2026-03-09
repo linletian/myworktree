@@ -37,10 +37,11 @@ It does **not** analyze project code or prevent concurrent write conflicts insid
 
 ## 4. Instance lifecycle & reconnect semantics
 - An instance is a server-managed process; UI windows are merely views.
-- UI reconnect enumerates instances via `GET /api/instances`, fetches backlog via `GET /api/instances/log?id=...`, and can follow live output via SSE `GET /api/instances/log/stream?id=...`.
+- Default interactive path is WebSocket TTY: `GET /api/instances/tty/ws?id=...` (bi-directional terminal stream).
+- Fallback path remains available: HTTP input `POST /api/instances/input` + replay/SSE logs (`GET /api/instances/log`, `GET /api/instances/log/stream`).
+- UI shows transport state (`websocket/sse/polling`) and supports manual WS reconnect.
 - Backlog is stored on disk with a size cap (rolling truncate).
-
-> Note: current implementation supports Web TTY streaming via `/api/instances/tty/ws` plus HTTP input fallback (`/api/instances/input`).
+- On server startup, stale persisted `running` records are reconciled to `stopped` because in-memory stdin/stdout bindings cannot be resumed after process restart.
 
 ## 5. Security model (single-user)
 - Default listen: loopback only.

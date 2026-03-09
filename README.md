@@ -1,9 +1,14 @@
 # myworktree
 
-A lightweight single-user manager for **git worktrees** and **long-running coding CLI instances**, with a minimal Web UI and output replay.
+A lightweight agents team management tool: fully leveraging the independent workspace feature of git worktree, diversifying the capabilities of coding CLI instances (long-running processes), and providing a minimal viable Web UI and output playback.
 
 - 中文说明: [README.zh-CN.md](./README.zh-CN.md)
 - Docs: [PRD](./docs/PRD.md) · [Architecture](./docs/ARCHITECTURE.md) · [API](./docs/API.md)
+
+![](docs/codecliteams.png)
+
+![](docs/webui.png)
+
 
 ## Background & pain points
 When you’re juggling multiple coding tasks in the same repo (often with multiple AI coding CLIs collaborating/reviewing each other), it’s easy to end up with:
@@ -23,37 +28,38 @@ myworktree is a thin management layer that:
 ## Features (MVP)
 - Create/list/import/delete managed worktrees (strict delete: refuses if dirty)
 - Start/list/stop managed instances per worktree via **Tag** templates
+- Instance restart support (keeps worktree/tag-or-command/labels and links old/new instance records)
 - Optional instance labels (`k=v`) with UI filtering/search
-- Web UI can be closed/reopened; instances keep running; log replay + live follow + Web TTY supported
+- Web UI can be closed/reopened; instances keep running; WebSocket Web TTY is default (with SSE/HTTP fallback)
+- UI shows transport status (`websocket/sse/polling`) and provides WS reconnect action
+- Startup reconcile: stale persisted `running` instances are auto-marked `stopped` after mw restart
 - Optional built-in HTTPS (`--tls-cert/--tls-key`) and token auth for non-loopback
 - Stored backlog redaction for common secrets (e.g. `sk-...`)
 - MCP tool endpoints (`/api/mcp/tools`, `/api/mcp/call`)
 
 ## Requirements
-- macOS 12+
+- macOS 12+ (other platforms are not validated yet)
 - `git`
 - Go toolchain to build (no external Go dependencies)
 
 ## Quick start
+
+### Build & install
+
 ```bash
-# 1) build (in the myworktree source repo)
+# Build (in the myworktree source repo)
 cd /path/to/myworktree
-go build -o myworktree ./cmd/myworktree
+# go build -o myworktree ./cmd/myworktree
 
-# optional: build an alias command `mw` (equivalent to `myworktree`)
-# (by default, `mw` auto-opens the browser; disable with `-open=false`)
+# Optional: build alias command `mw` (equivalent to `myworktree`)
+# (`mw` auto-opens browser by default; disable with `-open=false`)
 go build -o mw ./cmd/mw
+```
 
-# Note: if you built into the current directory, run it as ./mw (not mw)
-# ./mw
+Strongly recommended: install built binary into your user/system PATH (example for macOS):
 
-# 2) run (inside the target git repo you want to manage)
-cd /path/to/target/git/repo
-
-# simplest: run via absolute path (no PATH setup needed)
-/path/to/myworktree/mw -listen 127.0.0.1:0
-
-# optional: install into PATH (pick ONE approach)
+```bash
+# Optional: install into PATH (pick ONE approach)
 # A) user-local bin
 # mkdir -p ~/bin
 # mv /path/to/myworktree/myworktree ~/bin/myworktree
@@ -61,26 +67,34 @@ cd /path/to/target/git/repo
 # B) system-wide (usually already in PATH)
 # NOTE: install expects a *built binary*, not the Go source directory (so NOT cmd/mw).
 # cd /path/to/myworktree && go build -o mw ./cmd/mw && go build -o myworktree ./cmd/myworktree
-# sudo install -m 755 /path/to/myworktree/myworktree /usr/local/bin/myworktree
-# sudo install -m 755 /path/to/myworktree/mw /usr/local/bin/mw
+# sudo install -m 755 ./myworktree /usr/local/bin/myworktree
+sudo install -m 755 ./mw /usr/local/bin/mw
 
 # Alternative: go install (installs into GOBIN/GOPATH/bin)
 # go install ./cmd/mw
 # go install ./cmd/myworktree
-
-# Port `0` means “pick any available port automatically”.
-# myworktree will print the full URL (including the chosen port).
-/path/to/myworktree/myworktree -listen 127.0.0.1:0
-
-# (optional) use a fixed port
-# /path/to/myworktree/myworktree -listen 127.0.0.1:50053
-
-# open the printed URL in a browser
-
-# create a tag config (project-scoped)
-# location: ~/Library/Application Support/myworktree/<repoHash>/tags.json
-# (see docs/ARCHITECTURE.md for how repoHash is derived)
 ```
+
+### Run
+
+```bash
+# Run (inside target git repository)
+cd /path/to/target/git/repo
+
+# Run via absolute path if PATH is not configured
+# /path/to/myworktree/mw -listen 127.0.0.1:0
+
+# `-listen` is optional; using port `0` means auto-select an available port.
+# myworktree prints the full URL with actual port.
+# /path/to/myworktree/myworktree -listen 127.0.0.1:0
+# /path/to/myworktree/mw -listen 127.0.0.1:0
+mw
+
+# Optional: use a fixed port
+# /path/to/myworktree/myworktree -listen 127.0.0.1:50053
+```
+
+When startup succeeds, the web page opens automatically at the serving URL.
 
 myworktree uses the **current working directory** to detect the target repo (git root) and derives an isolated per-project data dir from it, so you can manage other projects by running the same binary in a different repo directory.
 
