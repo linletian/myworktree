@@ -28,5 +28,5 @@ func Register(mux *http.ServeMux) {
 
 	// Static assets.
 	fs := http.FS(staticFS)
-	mux.Handle("/static/", http.StripPrefix("/static/", http.FileServer(fs)))
+	mux.Handle("/static/", http.FileServer(fs))
 }

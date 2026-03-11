@@ -148,6 +148,35 @@ func (s *Server) Start() (string, error) {
 	return url, nil
 }
 
+func (s *Server) listTopBranches() (string, []gitx.Branch, error) {
+	def := gitx.DefaultBranch(s.root)
+	items, err := gitx.ListLocalBranchesByCommitTime(s.root, 50)
+	if err != nil {
+		return "", nil, err
+	}
+
+	// Default branch always first; then newest -> oldest, total 10.
+	out := make([]gitx.Branch, 0, 10)
+	if def != "" {
+		for _, b := range items {
+			if b.Name == def {
+				out = append(out, b)
+				break
+			}
+		}
+	}
+	for _, b := range items {
+		if len(out) >= 10 {
+			break
+		}
+		if def != "" && b.Name == def {
+			continue
+		}
+		out = append(out, b)
+	}
+	return def, out, nil
+}
+
 func openURL(url string) error {
 	cmd := exec.Command("open", url)
 	return cmd.Start()
@@ -172,6 +201,7 @@ func (s *Server) validateSecurity() error {
 
 func (s *Server) registerAPIs(mux *http.ServeMux) {
 	mux.HandleFunc("/api/worktrees", s.handleWorktrees)
+	mux.HandleFunc("/api/worktrees/unmanaged", s.handleWorktreesUnmanaged)
 	mux.HandleFunc("/api/worktrees/import", s.handleWorktreeImport)
 	mux.HandleFunc("/api/worktrees/delete", s.handleWorktreeDelete)
 	mux.HandleFunc("/api/instances", s.handleInstances)
@@ -194,33 +224,11 @@ func (s *Server) handleBranches(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	def := gitx.DefaultBranch(s.root)
-	items, err := gitx.ListLocalBranchesByCommitTime(s.root, 50)
+	def, out, err := s.listTopBranches()
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
-
-	// Default branch always first; then newest -> oldest, total 10.
-	out := make([]gitx.Branch, 0, 10)
-	if def != "" {
-		for _, b := range items {
-			if b.Name == def {
-				out = append(out, b)
-				break
-			}
-		}
-	}
-	for _, b := range items {
-		if len(out) >= 10 {
-			break
-		}
-		if def != "" && b.Name == def {
-			continue
-		}
-		out = append(out, b)
-	}
-
 	writeJSON(w, http.StatusOK, map[string]any{
 		"default":  def,
 		"branches": out,
@@ -246,13 +254,9 @@ func (s *Server) handleTags(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
-	type item struct {
-		ID      string `json:"id"`
-		Command string `json:"command"`
-	}
-	items := make([]item, 0, len(m))
-	for id, t := range m {
-		items = append(items, item{ID: id, Command: t.Command})
+	items := make([]tag.Tag, 0, len(m))
+	for _, t := range m {
+		items = append(items, t)
 	}
 	sort.Slice(items, func(i, j int) bool { return items[i].ID < items[j].ID })
 	writeJSON(w, http.StatusOK, map[string]any{"tags": items})
@@ -286,6 +290,19 @@ func (s *Server) handleWorktrees(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
+}
+
+func (s *Server) handleWorktreesUnmanaged(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	items, err := s.worktreeMgr.ListUnmanaged()
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"candidates": items})
 }
 
 func (s *Server) handleWorktreeImport(w http.ResponseWriter, r *http.Request) {
@@ -674,29 +691,10 @@ func (s *Server) handleMCPCall(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"result": map[string]string{"status": "ok"}})
 	case "branch_list":
-		def := gitx.DefaultBranch(s.root)
-		items, err := gitx.ListLocalBranchesByCommitTime(s.root, 50)
+		def, out, err := s.listTopBranches()
 		if err != nil {
 			writeErr(w, http.StatusInternalServerError, err)
 			return
-		}
-		out := make([]gitx.Branch, 0, 10)
-		if def != "" {
-			for _, b := range items {
-				if b.Name == def {
-					out = append(out, b)
-					break
-				}
-			}
-		}
-		for _, b := range items {
-			if len(out) >= 10 {
-				break
-			}
-			if def != "" && b.Name == def {
-				continue
-			}
-			out = append(out, b)
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"result": map[string]any{"default": def, "branches": out}})
 	case "tag_list":

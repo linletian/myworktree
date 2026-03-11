@@ -30,6 +30,45 @@ func (m Manager) List() ([]store.ManagedWorktree, error) {
 	return st.Worktrees, nil
 }
 
+type UnmanagedWorktree struct {
+	Path   string `json:"path"`
+	Branch string `json:"branch"`
+}
+
+func (m Manager) ListUnmanaged() ([]UnmanagedWorktree, error) {
+	st, err := m.Store.Load()
+	if err != nil {
+		return nil, err
+	}
+	managed := make(map[string]bool)
+	for _, w := range st.Worktrees {
+		managed[filepath.Clean(w.Path)] = true
+	}
+
+	raw, err := listGitWorktrees(m.GitRoot)
+	if err != nil {
+		return nil, err
+	}
+
+	var out []UnmanagedWorktree
+	for _, r := range raw {
+		clean := filepath.Clean(r.Path)
+		if clean == filepath.Clean(m.GitRoot) {
+			continue
+		}
+		if managed[clean] {
+			continue
+		}
+		// Branch is like "refs/heads/foo", simplify
+		br := strings.TrimPrefix(r.Branch, "refs/heads/")
+		if br == "" || br == "HEAD" {
+			continue
+		}
+		out = append(out, UnmanagedWorktree{Path: r.Path, Branch: br})
+	}
+	return out, nil
+}
+
 type CreateOptions struct {
 	BaseRef       string
 	AdoptIfExists bool
@@ -133,42 +172,61 @@ func (m Manager) CreateWithOptions(taskDesc string, opts CreateOptions) (store.M
 	return wt, nil
 }
 
-func (m Manager) Import(name string) (store.ManagedWorktree, error) {
-	name = strings.TrimSpace(name)
-	if name == "" {
-		return store.ManagedWorktree{}, errors.New("worktree name is required")
+func (m Manager) Import(nameOrPath string) (store.ManagedWorktree, error) {
+	nameOrPath = strings.TrimSpace(nameOrPath)
+	if nameOrPath == "" {
+		return store.ManagedWorktree{}, errors.New("worktree name or path is required")
 	}
-	// Accept either a full branch spec like "feature/foo" or a short name that defaults to "mwt/<name>".
-	displayName := name
-	branch := "mwt/" + name
-	if g, n, ok := parseBranchSpec(name); ok {
-		branch = g + "/" + n
-		displayName = g + "-" + n
-	}
+
 	items, err := listGitWorktrees(m.GitRoot)
 	if err != nil {
 		return store.ManagedWorktree{}, err
 	}
-	var path string
-	for _, it := range items {
-		if it.Branch == "refs/heads/"+branch {
-			path = it.Path
-			break
-		}
-	}
-	if path == "" {
-		// Backward-compat: older versions used wt/<name>.
-		legacy := "wt/" + name
+
+	var path, branch, displayName string
+	
+	// Check if input is an absolute path match
+	if filepath.IsAbs(nameOrPath) {
+		cleanInput := filepath.Clean(nameOrPath)
 		for _, it := range items {
-			if it.Branch == "refs/heads/"+legacy {
+			if filepath.Clean(it.Path) == cleanInput {
 				path = it.Path
-				branch = legacy
+				branch = strings.TrimPrefix(it.Branch, "refs/heads/")
+				displayName = filepath.Base(path)
 				break
 			}
 		}
-	}
-	if path == "" {
-		return store.ManagedWorktree{}, fmt.Errorf("no existing git worktree found for branch %s", branch)
+		if path == "" {
+			return store.ManagedWorktree{}, fmt.Errorf("no git worktree found at path %s", nameOrPath)
+		}
+	} else {
+		// Name-based lookup
+		displayName = nameOrPath
+		branch = "mwt/" + nameOrPath
+		if g, n, ok := parseBranchSpec(nameOrPath); ok {
+			branch = g + "/" + n
+			displayName = g + "-" + n
+		}
+		for _, it := range items {
+			if it.Branch == "refs/heads/"+branch {
+				path = it.Path
+				break
+			}
+		}
+		if path == "" {
+			// Backward-compat: older versions used wt/<name>.
+			legacy := "wt/" + nameOrPath
+			for _, it := range items {
+				if it.Branch == "refs/heads/"+legacy {
+					path = it.Path
+					branch = legacy
+					break
+				}
+			}
+		}
+		if path == "" {
+			return store.ManagedWorktree{}, fmt.Errorf("no existing git worktree found for branch %s", branch)
+		}
 	}
 
 	st, err := m.Store.Load()

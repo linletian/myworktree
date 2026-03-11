@@ -128,4 +128,4 @@ Note: command starts are executed inside the instance shell, and you can continu
 - For HTTPS, provide `--tls-cert` and `--tls-key`.
 
 ## License
-TBD.
+MIT. See [LICENSE](./LICENSE).
