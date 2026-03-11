@@ -676,9 +676,9 @@
                     } else {
                         list.innerHTML = items.map(c => `
                             <div style="padding: 8px; border-bottom: 1px solid #21262d; display: flex; align-items: center; gap: 8px; cursor: pointer;" onclick="document.getElementById('wtImportName').value='${c.path}'">
-                                <span style="font-family:monospace; background: #21262d; padding: 2px 4px; border-radius: 4px;">${c.branch}</span>
-                                <span style="font-size: 12px; color: #8b949e; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${c.path}</span>
-                                <button style="margin-left: auto; padding: 2px 8px; font-size: 11px;" onclick="doImportWorktreePath('${c.path}')">Import</button>
+                                <span style="font-family:monospace; background: #21262d; color: #adbac7; padding: 2px 4px; border-radius: 4px;">${c.branch}</span>
+                                <span style="font-size: 12px; color: #768390; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left;" title="${c.path}">&lrm;${c.path}</span>
+                                <button style="padding: 2px 8px; font-size: 11px; white-space: nowrap;" onclick="doImportWorktreePath('${c.path}')">Import</button>
                             </div>
                         `).join("");
                     }
