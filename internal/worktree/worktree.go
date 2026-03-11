@@ -289,22 +289,35 @@ func (m Manager) Delete(id string) error {
 		return fmt.Errorf("unknown worktree id: %s", id)
 	}
 
-	// Strict: refuse to delete if dirty.
-	cmdStatus := exec.Command("git", "status", "--porcelain")
-	cmdStatus.Dir = wt.Path
-	out, err := cmdStatus.Output()
-	if err != nil {
-		return fmt.Errorf("git status failed: %w", err)
-	}
-	if strings.TrimSpace(string(out)) != "" {
-		return errors.New("worktree has uncommitted or untracked changes; delete is refused")
-	}
+	if _, err := os.Stat(wt.Path); err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("stat worktree failed: %w", err)
+		}
 
-	cmd := exec.Command("git", "worktree", "remove", wt.Path)
-	cmd.Dir = m.GitRoot
-	out2, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("git worktree remove failed: %w: %s", err, strings.TrimSpace(string(out2)))
+		cmd := exec.Command("git", "worktree", "prune", "--expire", "now")
+		cmd.Dir = m.GitRoot
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("git worktree prune failed: %w: %s", err, strings.TrimSpace(string(out)))
+		}
+	} else {
+		// Strict: refuse to delete if dirty.
+		cmdStatus := exec.Command("git", "status", "--porcelain")
+		cmdStatus.Dir = wt.Path
+		statusOut, err := cmdStatus.Output()
+		if err != nil {
+			return fmt.Errorf("git status failed: %w", err)
+		}
+		if strings.TrimSpace(string(statusOut)) != "" {
+			return errors.New("worktree has uncommitted or untracked changes; delete is refused")
+		}
+
+		cmd := exec.Command("git", "worktree", "remove", wt.Path)
+		cmd.Dir = m.GitRoot
+		removeOut, err := cmd.CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("git worktree remove failed: %w: %s", err, strings.TrimSpace(string(removeOut)))
+		}
 	}
 
 	st.Worktrees = append(st.Worktrees[:idx], st.Worktrees[idx+1:]...)

@@ -45,6 +45,54 @@ func TestCreateDeleteWorktreeIntegration(t *testing.T) {
 	}
 }
 
+func TestDeleteMissingWorktreeRemovesState(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is required")
+	}
+	repo := initGitRepo(t)
+	dataDir := t.TempDir()
+	fs := store.FileStore{Path: filepath.Join(dataDir, "state.json")}
+	m := Manager{
+		GitRoot: repo,
+		DataDir: dataDir,
+		Store:   fs,
+	}
+
+	wt, err := m.Create("feature/ui improvements", "HEAD")
+	if err != nil {
+		t.Fatalf("Create failed: %v", err)
+	}
+
+	if err := os.RemoveAll(wt.Path); err != nil {
+		t.Fatalf("remove worktree path failed: %v", err)
+	}
+	if _, err := os.Stat(wt.Path); !os.IsNotExist(err) {
+		t.Fatalf("worktree path should be gone, got err=%v", err)
+	}
+
+	if err := m.Delete(wt.ID); err != nil {
+		t.Fatalf("Delete failed for missing worktree: %v", err)
+	}
+
+	st, err := fs.Load()
+	if err != nil {
+		t.Fatalf("load state failed: %v", err)
+	}
+	if len(st.Worktrees) != 0 {
+		t.Fatalf("worktree should be removed from state, got %#v", st.Worktrees)
+	}
+
+	items, err := listGitWorktrees(repo)
+	if err != nil {
+		t.Fatalf("list git worktrees failed: %v", err)
+	}
+	for _, item := range items {
+		if filepath.Clean(item.Path) == filepath.Clean(wt.Path) {
+			t.Fatalf("missing worktree should be pruned from git metadata, still found %#v", item)
+		}
+	}
+}
+
 func initGitRepo(t *testing.T) string {
 	t.Helper()
 	repo := t.TempDir()
