@@ -973,7 +973,8 @@
             if (fitAddon) fitAddon.fit();
 
             // Resize observer
-            new ResizeObserver(entries => {
+            let lastResizeTime = 0;
+            const resizeObserver = new ResizeObserver(entries => {
                 if (!term) return;
                 // Only act if the element has non-zero dimensions
                 const entry = entries[0];
@@ -987,7 +988,15 @@
                     const h = entry ? entry.contentRect.height : el.clientHeight;
                     term.resize(Math.floor(w / 9), Math.floor(h / 17));
                 }
-            }).observe(el);
+
+                // Send resize to backend (debounced)
+                const now = Date.now();
+                if (now - lastResizeTime > 100 && term.cols > 0 && term.rows > 0) {
+                    lastResizeTime = now;
+                    sendResize(term.cols, term.rows);
+                }
+            });
+            resizeObserver.observe(el);
 
             term.onData(data => {
                 if (!state.activeInst) return;
@@ -1039,6 +1048,13 @@
 
         function updateStatus(msg) {
             document.getElementById("status-bar").textContent = "Transport: " + msg;
+        }
+
+        function sendResize(cols, rows) {
+            if (!ttySocket || ttySocket.readyState !== WebSocket.OPEN) return;
+            if (cols <= 0 || rows <= 0) return;
+            const msg = JSON.stringify({ type: "resize", cols, rows });
+            ttySocket.send(msg);
         }
 
         async function loadLog() {
@@ -1117,6 +1133,10 @@
                         updateStatus("websocket live");
                         focusTerminalIfPossible();
                     }
+                    // Send initial resize on connect
+                    if (term && term.cols > 0 && term.rows > 0) {
+                        sendResize(term.cols, term.rows);
+                    }
                 };
                 ws.onmessage = (ev) => {
                     if (ev.data instanceof ArrayBuffer) {
@@ -1133,7 +1153,8 @@
                                 const cols = term.cols;
                                 const rows = term.rows;
                                 if (cols > 0 && rows > 0) {
-                                    // Trigger resize to force program redraw
+                                    // Send resize to backend and trigger local redraw
+                                    sendResize(cols, rows);
                                     term.resize(cols, rows);
                                 }
                             }
