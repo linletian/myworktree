@@ -595,9 +595,21 @@
             const actions = document.getElementById("instance-actions");
 
             if (state.activeInst) {
+                const inst = state.instances.find(i => i.id === state.activeInst);
                 empty.style.display = "none";
                 termContainer.style.display = "block";
                 actions.classList.add("visible");
+                
+                // Styling for stopped instance
+                if (inst && inst.status !== 'running') {
+                    termContainer.style.opacity = "0.6";
+                    termContainer.style.filter = "grayscale(100%)";
+                    if (term) term.options.cursorBlink = false;
+                } else {
+                    termContainer.style.opacity = "1";
+                    termContainer.style.filter = "none";
+                    if (term) term.options.cursorBlink = true;
+                }
             } else {
                 empty.style.display = "block";
                 empty.textContent = state.activeWT ? "No instances. Click + to start one." : "Select a worktree.";
@@ -653,12 +665,22 @@
             // Switch Terminal Context
             disconnectTTY();
             logCursor = 0;
-            if (term) term.reset();
+            if (term) {
+                term.reset();
+                term.write('\x1b[2J\x1b[3J\x1b[H'); // Clear screen and scrollback
+            }
 
             render(); // update UI highlights
 
             if (id) {
-                loadLog().finally(() => connectTTY());
+                // If stopped, just load log once. If running, load log then connect TTY.
+                const inst = state.instances.find(i => i.id === id);
+                if (inst && inst.status !== 'running') {
+                    loadLog();
+                    updateStatus("stopped");
+                } else {
+                    loadLog().finally(() => connectTTY());
+                }
             }
         }
 
@@ -836,6 +858,9 @@
 
             term.onData(data => {
                 if (!state.activeInst) return;
+                const inst = state.instances.find(i => i.id === state.activeInst);
+                if (inst && inst.status !== 'running') return; // Disable input if not running
+
                 if (ttySocket && ttySocket.readyState === WebSocket.OPEN) {
                     ttySocket.send(data);
                 } else {
@@ -893,6 +918,12 @@
             disconnectTTY();
             const id = state.activeInst;
             if (!id) { updateStatus("idle"); return; }
+            
+            const inst = state.instances.find(i => i.id === id);
+            if (inst && inst.status !== 'running') {
+                updateStatus("stopped");
+                return;
+            }
 
             if (window.WebSocket) {
                 updateStatus("connecting ws...");
