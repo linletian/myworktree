@@ -1,5 +1,7 @@
 # myworktree — HTTP API
 
+> **Note**: This document covers the HTTP API. Terminal-related client-side settings (e.g., scrollback buffer size, font size, theme) are handled by the Web UI and are not part of the backend API.
+
 Base URL: printed when starting `myworktree` or `mw`, e.g. `http://127.0.0.1:50053/`.
 `mw` opens the browser automatically by default; `myworktree` prints the URL unless you pass `-open=true`.
 

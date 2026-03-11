@@ -959,7 +959,8 @@
             term = new Terminal({
                 convertEol: true, cursorBlink: true,
                 fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
-                fontSize: 13, theme: { background: "#0b1020" }
+                fontSize: 13, theme: { background: "#0b1020" },
+                scrollback: 10000
             });
             
             if (window.FitAddon) {
