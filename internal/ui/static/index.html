@@ -678,6 +678,7 @@
                 if (inst && inst.status !== 'running') {
                     loadLog();
                     updateStatus("stopped");
+                    // Style handled in renderWorkspace
                 } else {
                     loadLog().finally(() => connectTTY());
                 }
@@ -794,7 +795,11 @@
             if (!state.activeInst) return;
             try { 
                 await api("/api/instances/stop", { method: "POST", body: JSON.stringify({ id: state.activeInst }) }); 
+                // Render stop banner immediately before refresh/reload
+                if (term) term.write("\r\n\r\n\x1b[41;37m[Process Stopped]\x1b[0m\r\n");
                 await refresh(); 
+                // Refresh will trigger re-render, which might re-load logs. 
+                // Ideally loadLog() handles the banner too, so it persists on reload.
             } catch (e) { alert(e); }
         }
         async function restartInstance() {
@@ -892,7 +897,16 @@
                 const text = await res.text();
                 const next = parseInt(res.headers.get("X-Log-Offset") || "0", 10);
                 logCursor = next || text.length;
-                if (term) { term.reset(); term.write(text); }
+                if (term) { 
+                    term.reset(); 
+                    term.write(text);
+                    
+                    // Check if stopped and append banner
+                    const inst = state.instances.find(i => i.id === state.activeInst);
+                    if (inst && inst.status !== 'running') {
+                        term.write("\r\n\r\n\x1b[41;37m[Process Stopped]\x1b[0m\r\n");
+                    }
+                }
             } catch (e) { term && term.write(`\r\n[load log error] ${e}`); }
         }
 
