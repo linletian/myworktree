@@ -148,6 +148,35 @@ func (s *Server) Start() (string, error) {
 	return url, nil
 }
 
+func (s *Server) listTopBranches() (string, []gitx.Branch, error) {
+	def := gitx.DefaultBranch(s.root)
+	items, err := gitx.ListLocalBranchesByCommitTime(s.root, 50)
+	if err != nil {
+		return "", nil, err
+	}
+
+	// Default branch always first; then newest -> oldest, total 10.
+	out := make([]gitx.Branch, 0, 10)
+	if def != "" {
+		for _, b := range items {
+			if b.Name == def {
+				out = append(out, b)
+				break
+			}
+		}
+	}
+	for _, b := range items {
+		if len(out) >= 10 {
+			break
+		}
+		if def != "" && b.Name == def {
+			continue
+		}
+		out = append(out, b)
+	}
+	return def, out, nil
+}
+
 func openURL(url string) error {
 	cmd := exec.Command("open", url)
 	return cmd.Start()
@@ -195,33 +224,11 @@ func (s *Server) handleBranches(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	def := gitx.DefaultBranch(s.root)
-	items, err := gitx.ListLocalBranchesByCommitTime(s.root, 50)
+	def, out, err := s.listTopBranches()
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
-
-	// Default branch always first; then newest -> oldest, total 10.
-	out := make([]gitx.Branch, 0, 10)
-	if def != "" {
-		for _, b := range items {
-			if b.Name == def {
-				out = append(out, b)
-				break
-			}
-		}
-	}
-	for _, b := range items {
-		if len(out) >= 10 {
-			break
-		}
-		if def != "" && b.Name == def {
-			continue
-		}
-		out = append(out, b)
-	}
-
 	writeJSON(w, http.StatusOK, map[string]any{
 		"default":  def,
 		"branches": out,
@@ -684,29 +691,10 @@ func (s *Server) handleMCPCall(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"result": map[string]string{"status": "ok"}})
 	case "branch_list":
-		def := gitx.DefaultBranch(s.root)
-		items, err := gitx.ListLocalBranchesByCommitTime(s.root, 50)
+		def, out, err := s.listTopBranches()
 		if err != nil {
 			writeErr(w, http.StatusInternalServerError, err)
 			return
-		}
-		out := make([]gitx.Branch, 0, 10)
-		if def != "" {
-			for _, b := range items {
-				if b.Name == def {
-					out = append(out, b)
-					break
-				}
-			}
-		}
-		for _, b := range items {
-			if len(out) >= 10 {
-				break
-			}
-			if def != "" && b.Name == def {
-				continue
-			}
-			out = append(out, b)
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"result": map[string]any{"default": def, "branches": out}})
 	case "tag_list":
