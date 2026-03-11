@@ -892,13 +892,19 @@
             if (fitAddon) fitAddon.fit();
 
             // Resize observer
-            new ResizeObserver(() => {
+            new ResizeObserver(entries => {
                 if (!term) return;
+                // Only act if the element has non-zero dimensions
+                const entry = entries[0];
+                if (entry && (entry.contentRect.width === 0 || entry.contentRect.height === 0)) return;
+
                 if (fitAddon) {
-                    try { fitAddon.fit(); } catch (e) { }
+                    try { fitAddon.fit(); } catch (e) { console.error("xterm fit error:", e); }
                 } else {
-                    // Fallback
-                    term.resize(Math.floor(el.clientWidth / 9), Math.floor(el.clientHeight / 17));
+                    // Fallback calculation
+                    const w = entry ? entry.contentRect.width : el.clientWidth;
+                    const h = entry ? entry.contentRect.height : el.clientHeight;
+                    term.resize(Math.floor(w / 9), Math.floor(h / 17));
                 }
             }).observe(el);
 
