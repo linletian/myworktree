@@ -506,6 +506,25 @@
             renderTabs();
             renderWorkspace();
             renderModals(); // Update options inside modals
+            tryFocusInstance();
+        }
+
+        function tryFocusInstance() {
+            // 1. Check window focus
+            if (!document.hasFocus()) return;
+
+            // 2. Check modals
+            const openModal = document.querySelector('dialog[open]');
+            if (openModal) return;
+
+            // 3. Check active instance and terminal
+            if (!state.activeInst || !term) return;
+
+            // 4. Check instance status
+            const inst = state.instances.find(i => i.id === state.activeInst);
+            if (inst && inst.status === "running") {
+                term.focus();
+            }
         }
 
         function renderSidebar() {
@@ -630,7 +649,10 @@
 
         // Actions
         function openModal(id) { document.getElementById(id).showModal(); }
-        function closeModal(id) { document.getElementById(id).close(); }
+        function closeModal(id) { 
+            document.getElementById(id).close(); 
+            tryFocusInstance();
+        }
 
         function onBaseRefChange() {
             const s = document.getElementById("wtBaseSelect");
@@ -857,6 +879,7 @@
 
         // Boot
         init();
+        window.addEventListener("focus", tryFocusInstance);
     </script>
 </body>
 </html>
