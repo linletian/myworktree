@@ -14,33 +14,32 @@ type Branch struct {
 }
 
 func DefaultBranch(gitRoot string) string {
-	// 1) origin/HEAD symbolic ref
-	cmd := exec.Command("git", "symbolic-ref", "--quiet", "refs/remotes/origin/HEAD")
+	// 1) origin/HEAD symbolic ref (fastest, local metadata)
+	cmd := exec.Command("git", "symbolic-ref", "--short", "refs/remotes/origin/HEAD")
 	cmd.Dir = gitRoot
 	if out, err := cmd.Output(); err == nil {
-		ref := strings.TrimSpace(string(out)) // refs/remotes/origin/main
-		ref = strings.TrimPrefix(ref, "refs/remotes/origin/")
+		// "origin/main" -> "main"
+		ref := strings.TrimSpace(string(out))
+		ref = strings.TrimPrefix(ref, "origin/")
 		if ref != "" {
 			return ref
 		}
 	}
 
-	// 2) parse `git remote show origin`
-	cmd = exec.Command("git", "remote", "show", "origin")
+	// 2) git rev-parse --abbrev-ref origin/HEAD (fallback for local symbolic ref)
+	cmd = exec.Command("git", "rev-parse", "--abbrev-ref", "origin/HEAD")
 	cmd.Dir = gitRoot
 	if out, err := cmd.Output(); err == nil {
-		for _, line := range strings.Split(string(out), "\n") {
-			line = strings.TrimSpace(line)
-			if strings.HasPrefix(line, "HEAD branch:") {
-				b := strings.TrimSpace(strings.TrimPrefix(line, "HEAD branch:"))
-				if b != "" {
-					return b
-				}
-			}
+		ref := strings.TrimSpace(string(out))
+		ref = strings.TrimPrefix(ref, "origin/")
+		if ref != "" && ref != "HEAD" {
+			return ref
 		}
 	}
 
-	// 3) common fallbacks
+	// 3) Slow network check removed (git remote show origin) - causes 3-5s blocking delay!
+
+	// 4) Common names
 	if branchExists(gitRoot, "main") {
 		return "main"
 	}
@@ -48,7 +47,7 @@ func DefaultBranch(gitRoot string) string {
 		return "master"
 	}
 
-	// 4) current branch
+	// 5) current branch
 	cmd = exec.Command("git", "rev-parse", "--abbrev-ref", "HEAD")
 	cmd.Dir = gitRoot
 	if out, err := cmd.Output(); err == nil {

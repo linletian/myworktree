@@ -4,7 +4,6 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>myworktree</title>
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm/css/xterm.css" />
     <style>
         :root {
             --sidebar-width: 240px;
@@ -345,6 +344,11 @@
 </head>
 <body>
     <div id="app">
+        <div id="connection-overlay" style="display:none; position:fixed; top:0; left:0; right:0; bottom:0; background:rgba(0,0,0,0.7); color:white; z-index:9999; align-items:center; justify-content:center; flex-direction:column; font-family:sans-serif;">
+            <div style="font-size: 24px; font-weight: bold; margin-bottom: 10px;">Connection Lost</div>
+            <div style="color: #ccc;">Backend server unreachable. Retrying...</div>
+        </div>
+
         <!-- Sidebar: Worktrees -->
         <div id="sidebar">
             <div class="sidebar-title">
@@ -361,8 +365,7 @@
         <div id="main">
             <div id="header">
                 <div id="tabs-container"></div>
-                <div class="new-tab-btn" onclick="promptStartInstance()" title="New Instance">+</div>
-
+                
                 <div id="instance-actions">
                     <button onclick="restartInstance()" title="Restart">Restart</button>
                     <button onclick="stopInstance()" title="Stop">Stop</button>
@@ -403,11 +406,14 @@
     </dialog>
 
     <!-- Modal: Import Worktree -->
-    <dialog id="modal-import-wt">
+    <dialog id="modal-import-wt" style="width: 80vw; max-width: 900px;">
         <h3>Import Worktree</h3>
+        <div id="import-candidates" style="margin-bottom: 15px; max-height: 200px; overflow-y: auto; border: 1px solid #30363d; border-radius: 6px; display: none;">
+            <!-- filled by JS -->
+        </div>
         <div class="form-group">
-            <label>Branch/Name</label>
-            <input id="wtImportName" placeholder="e.g. feature/foo" />
+            <label>Or manually by Branch/Name/Path</label>
+            <input id="wtImportName" placeholder="e.g. feature/foo or /abs/path" />
         </div>
         <div class="form-actions">
             <button onclick="closeModal('modal-import-wt')">Cancel</button>
@@ -440,10 +446,16 @@
         </div>
     </dialog>
 
-    <script src="https://cdn.jsdelivr.net/npm/xterm/lib/xterm.js"></script>
+    <link rel="stylesheet" href="/static/vendor/xterm/xterm.css" />
+    <script src="/static/vendor/xterm/xterm.js"></script>
+    <script src="/static/vendor/xterm-addon-fit/xterm-addon-fit.js"></script>
     <script>
         const token = new URLSearchParams(location.search).get("token") || "";
         const headers = token ? { Authorization: `Bearer ${token}` } : {};
+        const SERVER_REV_HEADER = "x-myworktree-server-rev";
+        const SERVER_UPGRADED_FLAG = "myworktree-server-upgraded";
+        let knownServerRev = "";
+        let serverRevReloading = false;
 
         // Global State
         let state = {
@@ -452,7 +464,8 @@
             tags: [],
             branches: [],
             activeWT: null,
-            activeInst: null
+            activeInst: null,
+            showArchived: false
         };
 
         // Terminal & Transport
@@ -466,11 +479,25 @@
         let termSendTimer = null;
 
         // API
+        function rememberServerRevision(res) {
+            const rev = (res.headers.get(SERVER_REV_HEADER) || "").trim();
+            if (!rev) return;
+            if (!knownServerRev) {
+                knownServerRev = rev;
+                return;
+            }
+            if (knownServerRev === rev || serverRevReloading) return;
+            sessionStorage.setItem(SERVER_UPGRADED_FLAG, "1");
+            serverRevReloading = true;
+            location.reload();
+        }
+
         async function api(path, opts = {}) {
             const res = await fetch(path, {
                 ...opts,
                 headers: { "content-type": "application/json", ...headers, ...(opts.headers || {}) },
             });
+            rememberServerRevision(res);
             if (!res.ok) throw new Error(await res.text());
             const ct = res.headers.get("content-type") || "";
             return ct.includes("application/json") ? res.json() : res.text();
@@ -478,6 +505,7 @@
 
         // Lifecycle
         async function refresh() {
+            const overlay = document.getElementById("connection-overlay");
             try {
                 const [wt, ins, tags, branches] = await Promise.all([
                     api("/api/worktrees"),
@@ -489,15 +517,36 @@
                 state.instances = ins.instances || [];
                 state.tags = tags.tags || [];
                 state.branches = branches;
+                
+                if (overlay.style.display !== "none") {
+                    overlay.style.display = "none";
+                    if (state.activeInst) {
+                        // Re-hook terminal if we came back
+                        connectTTY();
+                    }
+                }
                 render();
-            } catch (e) { console.error(e); }
+            } catch (e) { 
+                console.error(e);
+                overlay.style.display = "flex";
+            }
         }
 
         function init() {
+            if (sessionStorage.getItem(SERVER_UPGRADED_FLAG) === "1") {
+                sessionStorage.removeItem(SERVER_UPGRADED_FLAG);
+                alert("Backend upgraded. Frontend has been refreshed automatically.");
+            }
             ensureTerminal();
             refresh();
             // Polling for status updates (2s)
-            setInterval(refresh, 2000);
+            if (pollTimer) clearInterval(pollTimer);
+            pollTimer = setInterval(refresh, 2000);
+        }
+
+        function toggleArchived(el) {
+            state.showArchived = el.checked;
+            renderTabs();
         }
 
         // Render
@@ -537,20 +586,61 @@
             }
 
             // Filter instances for current WT
-            const instances = state.instances.filter(i => i.worktree_id === state.activeWT && !i.archived);
+            let instances = state.instances.filter(i => i.worktree_id === state.activeWT);
+            if (!state.showArchived) {
+                instances = instances.filter(i => !i.archived);
+            }
             instances.sort((a, b) => a.created_at.localeCompare(b.created_at));
 
-            container.innerHTML = instances.map(i => {
+            // Fix invalid selection (e.g. archived/deleted)
+            if (state.activeInst && !instances.find(i => i.id === state.activeInst)) {
+                let newId = null;
+                const oldInst = state.instances.find(i => i.id === state.activeInst);
+                // If old instance still exists (e.g. archived), try to select neighbors
+                if (oldInst) {
+                    const left = instances.filter(i => i.created_at < oldInst.created_at);
+                    if (left.length > 0) newId = left[left.length - 1].id;
+                    else {
+                        const right = instances.filter(i => i.created_at > oldInst.created_at);
+                        if (right.length > 0) newId = right[0].id;
+                    }
+                }
+                
+                if (newId) {
+                    selectInstance(newId);
+                    return; 
+                } else {
+                    // No valid neighbor or old instance gone; clear selection.
+                    // If instances exist, bottom logic will pick one.
+                    selectInstance(null);
+                }
+            }
+
+            let html = "";
+            // Add New Instance button
+            html += `<div class="new-tab-btn" onclick="promptStartInstance()" title="New Instance" style="margin-left: 0; margin-right: 8px;">+</div>`;
+
+            html += instances.map(i => {
                 const isActive = state.activeInst === i.id;
                 const statusClass = `status-${i.status}`;
                 const name = i.name || i.tag_id || i.id.substring(0, 6);
+                const archivedMark = i.archived ? '<span style="opacity:0.6; font-size:11px; margin-left:6px">[archived]</span>' : '';
                 return `
             <div class="tab ${isActive ? 'active' : ''}" onclick="selectInstance('${i.id}')">
               <span class="tab-status ${statusClass}"></span>
-              ${name}
+              ${name} ${archivedMark}
             </div>
           `;
             }).join("");
+
+            // Add archived toggle
+            html += `<div style="margin-left: auto; padding: 0 12px; font-size: 12px; display: flex; align-items: center; height: 32px; color: #8b949e;">
+                <label style="cursor: pointer; display: flex; align-items: center; gap: 6px; white-space: nowrap;">
+                    <input type="checkbox" ${state.showArchived ? "checked" : ""} onchange="toggleArchived(this)"> Show archived
+                </label>
+            </div>`;
+
+            container.innerHTML = html;
 
             // Auto-select logic
             if (state.activeWT && !state.activeInst && instances.length > 0) {
@@ -568,9 +658,21 @@
             const actions = document.getElementById("instance-actions");
 
             if (state.activeInst) {
+                const inst = state.instances.find(i => i.id === state.activeInst);
                 empty.style.display = "none";
                 termContainer.style.display = "block";
                 actions.classList.add("visible");
+                
+                // Styling for stopped instance
+                if (inst && inst.status !== 'running') {
+                    termContainer.style.opacity = "0.6";
+                    termContainer.style.filter = "grayscale(100%)";
+                    if (term) term.options.cursorBlink = false;
+                } else {
+                    termContainer.style.opacity = "1";
+                    termContainer.style.filter = "none";
+                    if (term) term.options.cursorBlink = true;
+                }
             } else {
                 empty.style.display = "block";
                 empty.textContent = state.activeWT ? "No instances. Click + to start one." : "Select a worktree.";
@@ -594,7 +696,14 @@
             const ts = document.getElementById("tagSelect");
             if (state.tags) {
                 const opts = '<option value="">-- select --</option>' +
-                    state.tags.map(t => `<option value="${t.id}">${t.id} — ${t.command}</option>`).join("");
+                    state.tags.map(t => {
+                        let details = [];
+                        if (t.cwd) details.push(`cwd: ${t.cwd}`);
+                        if (t.preStart) details.push(`pre: ${t.preStart}`);
+                        if (t.env && Object.keys(t.env).length > 0) details.push(`env: ${Object.keys(t.env).join(",")}`);
+                        const title = details.length ? ` (${details.join("; ")})` : "";
+                        return `<option value="${t.id}" title="${t.command}${title}">${t.id} — ${t.command}</option>`;
+                    }).join("");
                 if (ts.innerHTML !== opts) ts.innerHTML = opts;
             }
         }
@@ -619,17 +728,79 @@
             // Switch Terminal Context
             disconnectTTY();
             logCursor = 0;
-            if (term) term.reset();
+            if (term) {
+                term.reset();
+                term.write('\x1b[2J\x1b[3J\x1b[H'); // Clear screen and scrollback
+            }
 
             render(); // update UI highlights
 
             if (id) {
-                loadLog().finally(() => connectTTY());
+                // If stopped, just load log once. If running, load log then connect TTY.
+                const inst = state.instances.find(i => i.id === id);
+                if (inst && inst.status !== 'running') {
+                    loadLog();
+                    updateStatus("stopped");
+                    // Style handled in renderWorkspace
+                } else {
+                    loadLog().finally(() => connectTTY());
+                }
             }
         }
 
         // Actions
-        function openModal(id) { document.getElementById(id).showModal(); }
+        async function openModal(id) {
+            const el = document.getElementById(id);
+            if (id === 'modal-import-wt') {
+                // Pre-load candidates
+                const list = document.getElementById("import-candidates");
+                list.style.display = 'none';
+                list.innerHTML = '<div style="padding:8px;color:#8b949e">Scanning...</div>';
+                try {
+                    const res = await api("/api/worktrees/unmanaged");
+                    const items = res.candidates || [];
+                    if (items.length === 0) {
+                        list.innerHTML = '<div style="padding:8px;color:#8b949e;text-align:center">No unmanaged worktrees found</div>';
+                    } else {
+                        list.innerHTML = "";
+                        for (const c of items) {
+                            const row = document.createElement("div");
+                            row.style.cssText = "padding: 8px; border-bottom: 1px solid #21262d; display: flex; align-items: center; gap: 8px; cursor: pointer;";
+                            row.addEventListener("click", () => {
+                                document.getElementById("wtImportName").value = c.path;
+                            });
+
+                            const badge = document.createElement("span");
+                            badge.style.cssText = "font-family:monospace; background: #21262d; color: #adbac7; padding: 2px 4px; border-radius: 4px;";
+                            badge.textContent = c.branch;
+
+                            const path = document.createElement("span");
+                            path.style.cssText = "font-size: 12px; color: #768390; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left;";
+                            path.title = c.path;
+                            path.textContent = c.path;
+
+                            const btn = document.createElement("button");
+                            btn.style.cssText = "padding: 2px 8px; font-size: 11px; white-space: nowrap;";
+                            btn.textContent = "Import";
+                            btn.addEventListener("click", (evt) => {
+                                evt.stopPropagation();
+                                doImportWorktreePath(c.path);
+                            });
+
+                            row.appendChild(badge);
+                            row.appendChild(path);
+                            row.appendChild(btn);
+                            list.appendChild(row);
+                        }
+                    }
+                    list.style.display = 'block';
+                } catch (e) {
+                    list.innerHTML = `<div style="padding:8px;color:#cb2431">Error: ${e.message}</div>`;
+                    list.style.display = 'block';
+                }
+            }
+            el.showModal();
+        }
         function closeModal(id) { document.getElementById(id).close(); }
 
         function onBaseRefChange() {
@@ -662,6 +833,11 @@
                 await refresh();
                 selectWorktreeByID(res.id);
             } catch (e) { alert(e); }
+        }
+
+        async function doImportWorktreePath(path) {
+            document.getElementById("wtImportName").value = path;
+            await doImportWorktree();
         }
 
         async function doImportWorktree() {
@@ -703,7 +879,14 @@
 
         async function stopInstance() {
             if (!state.activeInst) return;
-            try { await api("/api/instances/stop", { method: "POST", body: JSON.stringify({ id: state.activeInst }) }); refresh(); } catch (e) { alert(e); }
+            try { 
+                await api("/api/instances/stop", { method: "POST", body: JSON.stringify({ id: state.activeInst }) }); 
+                // Render stop banner immediately before refresh/reload
+                if (term) term.write("\r\n\r\n\x1b[41;37m[Process Stopped]\x1b[0m\r\n");
+                await refresh(); 
+                // Refresh will trigger re-render, which might re-load logs. 
+                // Ideally loadLog() handles the banner too, so it persists on reload.
+            } catch (e) { alert(e); }
         }
         async function restartInstance() {
             if (!state.activeInst) return;
@@ -733,6 +916,8 @@
         }
 
         // Terminal Logic (Shared)
+        let fitAddon = null;
+
         function ensureTerminal() {
             if (term || !window.Terminal) return;
             term = new Terminal({
@@ -740,18 +925,39 @@
                 fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
                 fontSize: 13, theme: { background: "#0b1020" }
             });
+            
+            if (window.FitAddon) {
+                fitAddon = new FitAddon.FitAddon();
+                term.loadAddon(fitAddon);
+            }
+
             // Fit logic ideally, but for now 100% width/height CSS handles container
             const el = document.getElementById("terminal-container");
             term.open(el);
+            if (fitAddon) fitAddon.fit();
 
             // Resize observer
-            new ResizeObserver(() => {
-                // Simple fit calc if fit addon missing
-                if (term) term.resize(Math.floor(el.clientWidth / 9), Math.floor(el.clientHeight / 17));
+            new ResizeObserver(entries => {
+                if (!term) return;
+                // Only act if the element has non-zero dimensions
+                const entry = entries[0];
+                if (entry && (entry.contentRect.width === 0 || entry.contentRect.height === 0)) return;
+
+                if (fitAddon) {
+                    try { fitAddon.fit(); } catch (e) { console.error("xterm fit error:", e); }
+                } else {
+                    // Fallback calculation
+                    const w = entry ? entry.contentRect.width : el.clientWidth;
+                    const h = entry ? entry.contentRect.height : el.clientHeight;
+                    term.resize(Math.floor(w / 9), Math.floor(h / 17));
+                }
             }).observe(el);
 
             term.onData(data => {
                 if (!state.activeInst) return;
+                const inst = state.instances.find(i => i.id === state.activeInst);
+                if (inst && inst.status !== 'running') return; // Disable input if not running
+
                 if (ttySocket && ttySocket.readyState === WebSocket.OPEN) {
                     ttySocket.send(data);
                 } else {
@@ -779,11 +985,21 @@
             if (!state.activeInst) return;
             try {
                 const res = await fetch(`/api/instances/log?id=${state.activeInst}&since=0`, { headers });
+                rememberServerRevision(res);
                 if (!res.ok) throw new Error(await res.text());
                 const text = await res.text();
                 const next = parseInt(res.headers.get("X-Log-Offset") || "0", 10);
                 logCursor = next || text.length;
-                if (term) { term.reset(); term.write(text); }
+                if (term) { 
+                    term.reset(); 
+                    term.write(text);
+                    
+                    // Check if stopped and append banner
+                    const inst = state.instances.find(i => i.id === state.activeInst);
+                    if (inst && inst.status !== 'running') {
+                        term.write("\r\n\r\n\x1b[41;37m[Process Stopped]\x1b[0m\r\n");
+                    }
+                }
             } catch (e) { term && term.write(`\r\n[load log error] ${e}`); }
         }
 
@@ -791,6 +1007,7 @@
             if (!state.activeInst) return;
             try {
                 const res = await fetch(`/api/instances/log?id=${state.activeInst}&since=${logCursor}`, { headers });
+                rememberServerRevision(res);
                 if (!res.ok) throw new Error();
                 const text = await res.text();
                 const next = parseInt(res.headers.get("X-Log-Offset") || "0", 10);
@@ -809,6 +1026,12 @@
             disconnectTTY();
             const id = state.activeInst;
             if (!id) { updateStatus("idle"); return; }
+            
+            const inst = state.instances.find(i => i.id === id);
+            if (inst && inst.status !== 'running') {
+                updateStatus("stopped");
+                return;
+            }
 
             if (window.WebSocket) {
                 updateStatus("connecting ws...");
@@ -844,13 +1067,18 @@
             let url = `/api/instances/log/stream?id=${encodeURIComponent(state.activeInst)}&since=${logCursor}`;
             if (token) url += `&token=${encodeURIComponent(token)}`;
             const es = new EventSource(url);
-            es.onmessage = (ev) => {
+            const onLog = (ev) => {
                 try {
                     const msg = JSON.parse(ev.data);
                     if (msg.chunk && term) term.write(msg.chunk);
                     if (msg.next) logCursor = msg.next;
                 } catch (e) { }
             };
+            // Backend sends 'event: log'
+            es.addEventListener("log", onLog);
+            // Fallback for default message just in case
+            es.onmessage = onLog;
+            
             es.onerror = () => { es.close(); setTimeout(startSSE, 2000); };
             logStream = es;
         }

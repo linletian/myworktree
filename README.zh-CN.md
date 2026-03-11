@@ -38,6 +38,8 @@ myworktree 只做管理，不碰项目具体内容：
 ## 运行环境
 - macOS 12+ 其他平台未验证
 - `git`
+- `zsh`
+- `script`（用于托管可交互 shell）
 - Go 工具链（构建用；无外部 Go 依赖）
 
 ## 快速开始
@@ -47,7 +49,7 @@ myworktree 只做管理，不碰项目具体内容：
 ```bash
 构建（在 myworktree 源码仓库内）
 cd /path/to/myworktree
-# go build -o myworktree ./cmd/myworktree
+go build -o myworktree ./cmd/myworktree
 
 # 可选：构建别名命令 `mw`（等效于 `myworktree`）
 #（`mw` 默认会自动打开浏览器；可用 `-open=false` 关闭）
@@ -73,6 +75,13 @@ sudo install -m 755 ./mw /usr/local/bin/mw
 # go install ./cmd/myworktree
 ```
 
+查看当前构建版本信息：
+
+```bash
+myworktree --version
+mw version
+```
+
 ### Run
 
 ```bash
@@ -83,7 +92,8 @@ cd /path/to/target/git/repo
 # /path/to/myworktree/mw -listen 127.0.0.1:0
 
 
-# -listen 是选填参数，端口号写 `0` 表示“自动选择一个空闲端口”，避免端口冲突。
+# -listen 是选填参数，端口号写 `0` 表示“自动选择并持久化一个与当前 repo 绑定的端口”。
+# 同一 repo 后续启动会优先复用该端口（若端口可用）。
 # myworktree 会输出完整 URL（包含实际端口）。
 # /path/to/myworktree/myworktree -listen 127.0.0.1:0
 # /path/to/myworktree/mw -listen 127.0.0.1:0
@@ -91,8 +101,10 @@ mw
 
 # （可选）使用固定端口
 # /path/to/myworktree/myworktree -listen 127.0.0.1:50053
+# /path/to/myworktree/myworktree -open=true
 ```
-运行成功后，会自动弹出网页访问对应端口的 URL。
+运行成功后，`mw` 默认会自动打开浏览器访问对应 URL。
+`myworktree` 默认只打印 URL；如果也想自动打开浏览器，可传 `-open=true`。
 
 myworktree 会用**当前工作目录**定位目标项目（git root），并基于该 git root 计算独立的数据目录，因此要管理其他项目时，只需要在另一个项目仓库目录下运行同一个 myworktree 二进制即可。
 
@@ -102,6 +114,10 @@ myworktree 会用**当前工作目录**定位目标项目（git root），并基
 
 ## 常用命令
 ```bash
+# version
+myworktree --version
+mw version
+
 # worktree
 myworktree worktree new "修复登录 401 并补测试"
 myworktree worktree list
@@ -118,10 +134,54 @@ myworktree instance list
 myworktree instance stop <instanceId>
 ```
 
+## Tag 配置
+
+Tag 会从以下位置合并加载：
+- 全局：`$(os.UserConfigDir())/myworktree/tags.json`
+- 项目：`$(os.UserConfigDir())/myworktree/<repoHash>/tags.json`
+
+示例：
+
+```json
+{
+  "tags": [
+    {
+      "id": "backend-dev",
+      "command": "npm run dev",
+      "preStart": "npm install",
+      "cwd": "apps/backend",
+      "env": {
+        "NODE_ENV": "development"
+      }
+    }
+  ]
+}
+```
+
+## 本地测试与 CI
+
+建议在发起 PR 前先执行本地检查：
+
+```bash
+test -z "$(gofmt -l .)"
+go test ./...
+go build -o myworktree ./cmd/myworktree
+go build -o mw ./cmd/mw
+```
+
+GitHub Actions（`.github/workflows/go-ci.yml`）会在以下场景运行：
+- push 到 `develop` 和 `main`
+- 目标分支为 `develop` 或 `main` 的 Pull Request（`opened`、`synchronize`、`reopened`、`ready_for_review`）
+
+工作流会在 Ubuntu 和 macOS 上校验 `gofmt`、执行 `go test ./...`，并构建两个二进制。
+
+带 `v*` 标签的发布会触发 `.github/workflows/release.yml`，产出 darwin `amd64` / `arm64` 压缩包和 SHA256 校验文件。
+
 ## 远程访问
 - 默认只监听本机回环地址。
 - 监听到非 loopback（如 `0.0.0.0` 或局域网 IP）时必须提供 `--auth`。
 - 需要 HTTPS 时提供 `--tls-cert` 与 `--tls-key`。
+- 简单客户端可用 `?token=<token>`，但更推荐 `Authorization: Bearer <token>`，避免 token 落入浏览器历史或 shell 历史。
 
 ## License
 MIT 协议，详见 [LICENSE](./LICENSE)。

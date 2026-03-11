@@ -40,6 +40,8 @@ myworktree is a thin management layer that:
 ## Requirements
 - macOS 12+ (other platforms are not validated yet)
 - `git`
+- `zsh`
+- `script` (used to host managed interactive shells)
 - Go toolchain to build (no external Go dependencies)
 
 ## Quick start
@@ -49,7 +51,7 @@ myworktree is a thin management layer that:
 ```bash
 # Build (in the myworktree source repo)
 cd /path/to/myworktree
-# go build -o myworktree ./cmd/myworktree
+go build -o myworktree ./cmd/myworktree
 
 # Optional: build alias command `mw` (equivalent to `myworktree`)
 # (`mw` auto-opens browser by default; disable with `-open=false`)
@@ -75,6 +77,13 @@ sudo install -m 755 ./mw /usr/local/bin/mw
 # go install ./cmd/myworktree
 ```
 
+Check the build metadata:
+
+```bash
+myworktree --version
+mw version
+```
+
 ### Run
 
 ```bash
@@ -84,7 +93,8 @@ cd /path/to/target/git/repo
 # Run via absolute path if PATH is not configured
 # /path/to/myworktree/mw -listen 127.0.0.1:0
 
-# `-listen` is optional; using port `0` means auto-select an available port.
+# `-listen` is optional; using port `0` means auto-select and persist a repo-bound port.
+# For the same repo, future runs will reuse that port when available.
 # myworktree prints the full URL with actual port.
 # /path/to/myworktree/myworktree -listen 127.0.0.1:0
 # /path/to/myworktree/mw -listen 127.0.0.1:0
@@ -92,9 +102,11 @@ mw
 
 # Optional: use a fixed port
 # /path/to/myworktree/myworktree -listen 127.0.0.1:50053
+# /path/to/myworktree/myworktree -open=true
 ```
 
-When startup succeeds, the web page opens automatically at the serving URL.
+When startup succeeds, `mw` opens the web page automatically at the serving URL by default.
+`myworktree` prints the URL without opening a browser unless you pass `-open=true`.
 
 myworktree uses the **current working directory** to detect the target repo (git root) and derives an isolated per-project data dir from it, so you can manage other projects by running the same binary in a different repo directory.
 
@@ -104,6 +116,10 @@ Use `-worktrees-dir=data` to use the legacy location under the per-project data 
 
 ## CLI examples
 ```bash
+# version
+myworktree --version
+mw version
+
 # worktrees
 myworktree worktree new "fix login 401 and add tests"
 myworktree worktree list
@@ -122,10 +138,54 @@ myworktree instance stop <instanceId>
 
 Note: command starts are executed inside the instance shell, and you can continue sending input to the same running instance from the UI.
 
+## Tag config
+
+Tags are loaded from:
+- Global: `$(os.UserConfigDir())/myworktree/tags.json`
+- Project: `$(os.UserConfigDir())/myworktree/<repoHash>/tags.json`
+
+Example:
+
+```json
+{
+  "tags": [
+    {
+      "id": "backend-dev",
+      "command": "npm run dev",
+      "preStart": "npm install",
+      "cwd": "apps/backend",
+      "env": {
+        "NODE_ENV": "development"
+      }
+    }
+  ]
+}
+```
+
+## Local testing & CI
+
+Run local checks before opening a PR:
+
+```bash
+test -z "$(gofmt -l .)"
+go test ./...
+go build -o myworktree ./cmd/myworktree
+go build -o mw ./cmd/mw
+```
+
+GitHub Actions (`.github/workflows/go-ci.yml`) runs on:
+- pushes to `develop` and `main`
+- pull requests targeting `develop` and `main` (`opened`, `synchronize`, `reopened`, `ready_for_review`)
+
+The workflow verifies `gofmt`, runs `go test ./...`, and builds both binaries on Ubuntu and macOS.
+
+Tagged releases (`v*`) run `.github/workflows/release.yml`, which produces darwin `amd64` / `arm64` archives plus SHA256 checksums.
+
 ## Remote access
 - Default: binds to loopback only.
 - If you listen on a non-loopback address, you must set `--auth`.
 - For HTTPS, provide `--tls-cert` and `--tls-key`.
+- `?token=<token>` works for simple clients, but prefer `Authorization: Bearer <token>` to avoid leaving tokens in browser history or shell history.
 
 ## License
 MIT. See [LICENSE](./LICENSE).

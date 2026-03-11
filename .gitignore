@@ -1,6 +1,7 @@
 .DS_Store
-myworktree
-mw
+/myworktree
+/mw
 *.log
 .gitnexus
-.claude/skills/gitnexus
+.claude/
+.archive/
