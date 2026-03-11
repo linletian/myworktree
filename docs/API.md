@@ -151,9 +151,43 @@ Body:
 ### Web TTY stream (WebSocket)
 `GET /api/instances/tty/ws?id=<instanceId>`
 
-- Bi-directional stream for terminal output/input.
-- Client sends typed bytes as WebSocket text/binary frames.
-- Server pushes terminal output chunks as **binary frames**.
+Bi-directional stream for terminal output/input with PTY support.
+
+**Handshake Protocol:**
+1. Server sends `{"type":"ready"}` immediately after connection
+2. Client should wait for this message before sending resize
+3. Client sends `{"type":"resize","cols":80,"rows":24}` to start data flow
+4. Server sends initial log + real-time output as binary frames
+
+**Message Types:**
+
+*Client → Server:*
+- Input: text/binary frames (raw bytes)
+- Resize: `{"type":"resize","cols":<number>,"rows":<number>}`
+
+*Server → Client:*
+- Ready: `{"type":"ready"}` (text frame)
+- Output: binary frames (terminal output chunks)
+
+**Timeout & Fallback:**
+- Client should implement handshake timeout (recommended: 5s)
+- On timeout, close WebSocket and fallback to SSE: `GET /api/instances/log/stream?id=<instanceId>`
+
+**Example Flow:**
+```
+Client                    Server
+   |                         |
+   |--- Connect ------------>|
+   |<-- {"type":"ready"} ----|  Handshake
+   |                         |
+   |-- {"type":"resize", --->|  Notify terminal size
+   |    "cols":80,"rows":24} |
+   |                         |
+   |<-- binary output -------|  Initial log + realtime
+   |                         |
+   |--- input bytes -------->|  User input
+   |<-- binary output -------|  Process output
+```
 
 ### Archive
 `POST /api/instances/archive`

@@ -518,6 +518,11 @@ func (s *Server) handleInstanceTTYWS(w http.ResponseWriter, r *http.Request) {
 	}
 	defer conn.Close()
 
+	readyMsg := []byte(`{"type":"ready"}`)
+	if err := conn.WriteText(readyMsg); err != nil {
+		return
+	}
+
 	initial, err := s.instanceMgr.Tail(id, 64*1024)
 	if err != nil {
 		_ = conn.WriteBinary([]byte(err.Error()))

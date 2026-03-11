@@ -47,7 +47,12 @@
 
 ## 7. 当前实现状态（与愿景差异）
 - 已实现：worktree/instance 管理、Web UI、API、输出回放、脱敏、认证与可选 HTTPS、MCP tools 列表接口。
-- 规划增强：将 instance 升级为真正 PTY 并通过 WebSocket 实现交互式 Web TTY（xterm.js）。Web TTY 的终端缓冲区、主题、字体等参数由前端灵活配置，以适应不同的调试和使用场景。
+- **已实现 PTY + Web TTY**：instance 通过 PTY 启动，支持真正的交互式终端（vim/htop/less 等 TUI 程序）。
+  - WebSocket 握手协议：服务端发送 `{"type":"ready"}`，客户端等待后发送 resize 开始数据流。
+  - 窗口尺寸传递：前端监听窗口 resize 并通知后端 PTY，确保 TUI 程序正确重绘。
+  - 超时降级：5 秒握手超时后自动降级到 SSE 方案。
+  - 终端配置：Web TTY 的缓冲区（scrollback）、主题、字体等参数由前端灵活配置，以适应不同的调试和使用场景。
+- 规划增强：无（PTY + Web TTY 已完成）。
 
 ## 8. 验收标准（MVP）
 - 可创建/列出/删除 worktree（dirty 删除被拒绝）。

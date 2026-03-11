@@ -1127,34 +1127,63 @@
                 const ws = new WebSocket(url);
                 ws.binaryType = "arraybuffer";
 
-                let isFirstMessage = true;
+                let isReady = false;
+                let isFirstData = true;
+                let handshakeTimeout = null;
 
                 ws.onopen = () => {
-                    if (ttySocket === ws) {
-                        updateStatus("websocket live");
-                        focusTerminalIfPossible();
-                    }
-                    // Send initial resize on connect
-                    if (term && term.cols > 0 && term.rows > 0) {
-                        sendResize(term.cols, term.rows);
-                    }
+                    // Set handshake timeout (5 seconds)
+                    handshakeTimeout = setTimeout(() => {
+                        if (!isReady && ws === ttySocket) {
+                            console.error('WebSocket handshake timeout: no "ready" message received');
+                            updateStatus("handshake timeout");
+                            ws.close();
+                            // Fallback to SSE after timeout
+                            setTimeout(() => startSSE(), 500);
+                        }
+                    }, 5000);
                 };
                 ws.onmessage = (ev) => {
+                    // Handle handshake: wait for "ready" message first
+                    if (!isReady) {
+                        try {
+                            const msg = JSON.parse(ev.data);
+                            if (msg.type === 'ready') {
+                                isReady = true;
+                                // Clear handshake timeout
+                                if (handshakeTimeout) {
+                                    clearTimeout(handshakeTimeout);
+                                    handshakeTimeout = null;
+                                }
+                                if (ttySocket === ws) {
+                                    updateStatus("websocket live");
+                                    focusTerminalIfPossible();
+                                }
+                                // Send initial resize to backend
+                                if (term && term.cols > 0 && term.rows > 0) {
+                                    sendResize(term.cols, term.rows);
+                                }
+                                return;
+                            }
+                        } catch (e) {
+                            // Not JSON, treat as data
+                        }
+                    }
+
+                    // Handle binary/text data
                     if (ev.data instanceof ArrayBuffer) {
                         const u8 = new Uint8Array(ev.data);
                         if (u8.length && term) term.write(u8);
                     } else if (term) term.write(ev.data);
                     
-                    // After receiving first message (initial log), trigger resize
-                    // This helps TUI programs redraw their interface
-                    if (isFirstMessage && term) {
-                        isFirstMessage = false;
+                    // After receiving first data (after ready), trigger resize for TUI redraw
+                    if (isFirstData && isReady && term) {
+                        isFirstData = false;
                         setTimeout(() => {
                             if (term && ws === ttySocket && ws.readyState === WebSocket.OPEN) {
                                 const cols = term.cols;
                                 const rows = term.rows;
                                 if (cols > 0 && rows > 0) {
-                                    // Send resize to backend and trigger local redraw
                                     sendResize(cols, rows);
                                     term.resize(cols, rows);
                                 }
@@ -1164,6 +1193,11 @@
                 };
                 
                 ws.onclose = () => {
+                    // Clear handshake timeout on close
+                    if (handshakeTimeout) {
+                        clearTimeout(handshakeTimeout);
+                        handshakeTimeout = null;
+                    }
                     if (ttySocket === ws) {
                         updateStatus("ws closed, retrying...");
                         ttyReconnectTimer = setTimeout(connectTTY, 1000);
