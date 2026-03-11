@@ -728,22 +728,38 @@
             // Switch Terminal Context
             disconnectTTY();
             logCursor = 0;
+            
+            // Check if the new instance is running
+            const inst = id ? state.instances.find(i => i.id === id) : null;
+            const isRunning = inst && inst.status === 'running';
+            
             if (term) {
-                term.reset();
-                term.write('\x1b[2J\x1b[3J\x1b[H'); // Clear screen and scrollback
+                if (isRunning) {
+                    // For running instances with TUI programs:
+                    // Exit alternate buffer, clear normal buffer, re-enter alternate buffer
+                    // This gives TUI programs a clean slate while maintaining buffer mode
+                    term.write('\x1b[?1049l'); // Exit alternate buffer
+                    term.write('\x1b[2J\x1b[H'); // Clear normal buffer and home cursor
+                    term.write('\x1b[?1049h'); // Re-enter alternate buffer (now clean)
+                } else {
+                    // For stopped instances, do a full reset and clear
+                    term.reset();
+                    term.write('\x1b[2J\x1b[3J\x1b[H'); // Clear screen and scrollback
+                }
             }
 
             render(); // update UI highlights
 
             if (id) {
-                // If stopped, just load log once. If running, load log then connect TTY.
-                const inst = state.instances.find(i => i.id === id);
+                // If stopped, just load log once. If running, connect TTY directly.
                 if (inst && inst.status !== 'running') {
                     loadLog();
                     updateStatus("stopped");
                     // Style handled in renderWorkspace
                 } else {
-                    loadLog().finally(() => connectTTY());
+                    // For running instances, directly connect TTY
+                    // The WebSocket will send initial log, then we trigger resize for redraw
+                    connectTTY();
                 }
             }
         }
@@ -991,11 +1007,19 @@
                 const next = parseInt(res.headers.get("X-Log-Offset") || "0", 10);
                 logCursor = next || text.length;
                 if (term) { 
-                    term.reset(); 
+                    // Check if instance is running - don't reset terminal for running instances
+                    // to preserve TUI state (alternate screen buffer, cursor position, etc.)
+                    const inst = state.instances.find(i => i.id === state.activeInst);
+                    const isRunning = inst && inst.status === 'running';
+                    
+                    if (!isRunning) {
+                        // Only reset for stopped instances
+                        term.reset(); 
+                    }
+                    
                     term.write(text);
                     
                     // Check if stopped and append banner
-                    const inst = state.instances.find(i => i.id === state.activeInst);
                     if (inst && inst.status !== 'running') {
                         term.write("\r\n\r\n\x1b[41;37m[Process Stopped]\x1b[0m\r\n");
                     }
@@ -1041,13 +1065,36 @@
 
                 const ws = new WebSocket(url);
                 ws.binaryType = "arraybuffer";
-                ws.onopen = () => { if (ttySocket === ws) updateStatus("websocket live"); };
+                
+                let isFirstMessage = true;
+                
+                ws.onopen = () => { 
+                    if (ttySocket === ws) updateStatus("websocket live"); 
+                };
+                
                 ws.onmessage = (ev) => {
                     if (ev.data instanceof ArrayBuffer) {
                         const u8 = new Uint8Array(ev.data);
                         if (u8.length && term) term.write(u8);
                     } else if (term) term.write(ev.data);
+                    
+                    // After receiving first message (initial log), trigger resize
+                    // This helps TUI programs redraw their interface
+                    if (isFirstMessage && term) {
+                        isFirstMessage = false;
+                        setTimeout(() => {
+                            if (term && ws === ttySocket && ws.readyState === WebSocket.OPEN) {
+                                const cols = term.cols;
+                                const rows = term.rows;
+                                if (cols > 0 && rows > 0) {
+                                    // Trigger resize to force program redraw
+                                    term.resize(cols, rows);
+                                }
+                            }
+                        }, 50);
+                    }
                 };
+                
                 ws.onclose = () => {
                     if (ttySocket === ws) {
                         updateStatus("ws closed, retrying...");
