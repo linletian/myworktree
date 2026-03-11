@@ -506,7 +506,6 @@
             renderTabs();
             renderWorkspace();
             renderModals(); // Update options inside modals
-            tryFocusInstance();
         }
 
         function tryFocusInstance() {
@@ -879,7 +878,21 @@
 
         // Boot
         init();
-        window.addEventListener("focus", tryFocusInstance);
+
+        // Debounce utility
+        function debounce(fn, delay) {
+            let timeout;
+            return function(...args) {
+                clearTimeout(timeout);
+                timeout = setTimeout(() => fn.apply(this, args), delay);
+            };
+        }
+
+        const debouncedFocus = debounce(tryFocusInstance, 100);
+        window.addEventListener("focus", debouncedFocus);
+        window.addEventListener("visibilitychange", () => {
+            if (!document.hidden) debouncedFocus();
+        });
     </script>
 </body>
 </html>
