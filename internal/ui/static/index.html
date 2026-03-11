@@ -571,6 +571,30 @@
             }
             instances.sort((a, b) => a.created_at.localeCompare(b.created_at));
 
+            // Fix invalid selection (e.g. archived/deleted)
+            if (state.activeInst && !instances.find(i => i.id === state.activeInst)) {
+                let newId = null;
+                const oldInst = state.instances.find(i => i.id === state.activeInst);
+                // If old instance still exists (e.g. archived), try to select neighbors
+                if (oldInst) {
+                    const left = instances.filter(i => i.created_at < oldInst.created_at);
+                    if (left.length > 0) newId = left[left.length - 1].id;
+                    else {
+                        const right = instances.filter(i => i.created_at > oldInst.created_at);
+                        if (right.length > 0) newId = right[0].id;
+                    }
+                }
+                
+                if (newId) {
+                    selectInstance(newId);
+                    return; 
+                } else {
+                    // No valid neighbor or old instance gone; clear selection.
+                    // If instances exist, bottom logic will pick one.
+                    selectInstance(null);
+                }
+            }
+
             let html = "";
             // Add New Instance button
             html += `<div class="new-tab-btn" onclick="promptStartInstance()" title="New Instance" style="margin-left: 0; margin-right: 8px;">+</div>`;
