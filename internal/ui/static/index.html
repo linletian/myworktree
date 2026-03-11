@@ -519,7 +519,8 @@
             ensureTerminal();
             refresh();
             // Polling for status updates (2s)
-            setInterval(refresh, 2000);
+            if (pollTimer) clearInterval(pollTimer);
+            pollTimer = setInterval(refresh, 2000);
         }
 
         function toggleArchived(el) {
