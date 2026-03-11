@@ -440,7 +440,9 @@
         </div>
     </dialog>
 
-    <script src="https://cdn.jsdelivr.net/npm/xterm/lib/xterm.js"></script>
+    <link rel="stylesheet" href="/static/vendor/xterm/xterm.css" />
+    <script src="/static/vendor/xterm/xterm.js"></script>
+    <script src="/static/vendor/xterm-addon-fit/xterm-addon-fit.js"></script>
     <script>
         const token = new URLSearchParams(location.search).get("token") || "";
         const headers = token ? { Authorization: `Bearer ${token}` } : {};
@@ -452,7 +454,8 @@
             tags: [],
             branches: [],
             activeWT: null,
-            activeInst: null
+            activeInst: null,
+            showArchived: false
         };
 
         // Terminal & Transport
@@ -500,6 +503,11 @@
             setInterval(refresh, 2000);
         }
 
+        function toggleArchived(el) {
+            state.showArchived = el.checked;
+            renderTabs();
+        }
+
         // Render
         function render() {
             renderSidebar();
@@ -537,20 +545,34 @@
             }
 
             // Filter instances for current WT
-            const instances = state.instances.filter(i => i.worktree_id === state.activeWT && !i.archived);
+            let instances = state.instances.filter(i => i.worktree_id === state.activeWT);
+            if (!state.showArchived) {
+                instances = instances.filter(i => !i.archived);
+            }
             instances.sort((a, b) => a.created_at.localeCompare(b.created_at));
 
-            container.innerHTML = instances.map(i => {
+            let html = "";
+            // Add archived toggle
+            html += `<div style="padding: 8px 12px; font-size: 12px; border-bottom: 1px solid #30363d; display: flex; align-items: center;">
+                <label style="cursor: pointer; display: flex; align-items: center; gap: 6px; color: #8b949e;">
+                    <input type="checkbox" ${state.showArchived ? "checked" : ""} onchange="toggleArchived(this)"> Show archived
+                </label>
+            </div>`;
+
+            html += instances.map(i => {
                 const isActive = state.activeInst === i.id;
                 const statusClass = `status-${i.status}`;
                 const name = i.name || i.tag_id || i.id.substring(0, 6);
+                const archivedMark = i.archived ? '<span style="opacity:0.6; font-size:11px; margin-left:6px">[archived]</span>' : '';
                 return `
             <div class="tab ${isActive ? 'active' : ''}" onclick="selectInstance('${i.id}')">
               <span class="tab-status ${statusClass}"></span>
-              ${name}
+              ${name} ${archivedMark}
             </div>
           `;
             }).join("");
+
+            container.innerHTML = html;
 
             // Auto-select logic
             if (state.activeWT && !state.activeInst && instances.length > 0) {
@@ -594,7 +616,14 @@
             const ts = document.getElementById("tagSelect");
             if (state.tags) {
                 const opts = '<option value="">-- select --</option>' +
-                    state.tags.map(t => `<option value="${t.id}">${t.id} — ${t.command}</option>`).join("");
+                    state.tags.map(t => {
+                        let details = [];
+                        if (t.cwd) details.push(`cwd: ${t.cwd}`);
+                        if (t.preStart) details.push(`pre: ${t.preStart}`);
+                        if (t.env && Object.keys(t.env).length > 0) details.push(`env: ${Object.keys(t.env).join(",")}`);
+                        const title = details.length ? ` (${details.join("; ")})` : "";
+                        return `<option value="${t.id}" title="${t.command}${title}">${t.id} — ${t.command}</option>`;
+                    }).join("");
                 if (ts.innerHTML !== opts) ts.innerHTML = opts;
             }
         }
@@ -733,6 +762,8 @@
         }
 
         // Terminal Logic (Shared)
+        let fitAddon = null;
+
         function ensureTerminal() {
             if (term || !window.Terminal) return;
             term = new Terminal({
@@ -740,14 +771,26 @@
                 fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
                 fontSize: 13, theme: { background: "#0b1020" }
             });
+            
+            if (window.FitAddon) {
+                fitAddon = new FitAddon.FitAddon();
+                term.loadAddon(fitAddon);
+            }
+
             // Fit logic ideally, but for now 100% width/height CSS handles container
             const el = document.getElementById("terminal-container");
             term.open(el);
+            if (fitAddon) fitAddon.fit();
 
             // Resize observer
             new ResizeObserver(() => {
-                // Simple fit calc if fit addon missing
-                if (term) term.resize(Math.floor(el.clientWidth / 9), Math.floor(el.clientHeight / 17));
+                if (!term) return;
+                if (fitAddon) {
+                    try { fitAddon.fit(); } catch (e) { }
+                } else {
+                    // Fallback
+                    term.resize(Math.floor(el.clientWidth / 9), Math.floor(el.clientHeight / 17));
+                }
             }).observe(el);
 
             term.onData(data => {
@@ -844,13 +887,18 @@
             let url = `/api/instances/log/stream?id=${encodeURIComponent(state.activeInst)}&since=${logCursor}`;
             if (token) url += `&token=${encodeURIComponent(token)}`;
             const es = new EventSource(url);
-            es.onmessage = (ev) => {
+            const onLog = (ev) => {
                 try {
                     const msg = JSON.parse(ev.data);
                     if (msg.chunk && term) term.write(msg.chunk);
                     if (msg.next) logCursor = msg.next;
                 } catch (e) { }
             };
+            // Backend sends 'event: log'
+            es.addEventListener("log", onLog);
+            // Fallback for default message just in case
+            es.onmessage = onLog;
+            
             es.onerror = () => { es.close(); setTimeout(startSSE, 2000); };
             logStream = es;
         }

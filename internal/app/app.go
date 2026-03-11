@@ -246,13 +246,9 @@ func (s *Server) handleTags(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
-	type item struct {
-		ID      string `json:"id"`
-		Command string `json:"command"`
-	}
-	items := make([]item, 0, len(m))
-	for id, t := range m {
-		items = append(items, item{ID: id, Command: t.Command})
+	items := make([]tag.Tag, 0, len(m))
+	for _, t := range m {
+		items = append(items, t)
 	}
 	sort.Slice(items, func(i, j int) bool { return items[i].ID < items[j].ID })
 	writeJSON(w, http.StatusOK, map[string]any{"tags": items})
