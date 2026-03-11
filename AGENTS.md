@@ -1,7 +1,7 @@
 <!-- gitnexus:start -->
 # GitNexus MCP
 
-This project is indexed by GitNexus as **myworktree** (166 symbols, 446 relationships, 20 execution flows).
+This project is indexed by GitNexus as **myworktree** (221 symbols, 611 relationships, 20 execution flows).
 
 ## Always Start Here
 

@@ -84,7 +84,8 @@ cd /path/to/target/git/repo
 # Run via absolute path if PATH is not configured
 # /path/to/myworktree/mw -listen 127.0.0.1:0
 
-# `-listen` is optional; using port `0` means auto-select an available port.
+# `-listen` is optional; using port `0` means auto-select and persist a repo-bound port.
+# For the same repo, future runs will reuse that port when available.
 # myworktree prints the full URL with actual port.
 # /path/to/myworktree/myworktree -listen 127.0.0.1:0
 # /path/to/myworktree/mw -listen 127.0.0.1:0

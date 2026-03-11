@@ -83,7 +83,8 @@ cd /path/to/target/git/repo
 # /path/to/myworktree/mw -listen 127.0.0.1:0
 
 
-# -listen 是选填参数，端口号写 `0` 表示“自动选择一个空闲端口”，避免端口冲突。
+# -listen 是选填参数，端口号写 `0` 表示“自动选择并持久化一个与当前 repo 绑定的端口”。
+# 同一 repo 后续启动会优先复用该端口（若端口可用）。
 # myworktree 会输出完整 URL（包含实际端口）。
 # /path/to/myworktree/myworktree -listen 127.0.0.1:0
 # /path/to/myworktree/mw -listen 127.0.0.1:0

@@ -453,6 +453,10 @@
     <script>
         const token = new URLSearchParams(location.search).get("token") || "";
         const headers = token ? { Authorization: `Bearer ${token}` } : {};
+        const SERVER_REV_HEADER = "x-myworktree-server-rev";
+        const SERVER_UPGRADED_FLAG = "myworktree-server-upgraded";
+        let knownServerRev = "";
+        let serverRevReloading = false;
 
         // Global State
         let state = {
@@ -476,11 +480,25 @@
         let termSendTimer = null;
 
         // API
+        function rememberServerRevision(res) {
+            const rev = (res.headers.get(SERVER_REV_HEADER) || "").trim();
+            if (!rev) return;
+            if (!knownServerRev) {
+                knownServerRev = rev;
+                return;
+            }
+            if (knownServerRev === rev || serverRevReloading) return;
+            sessionStorage.setItem(SERVER_UPGRADED_FLAG, "1");
+            serverRevReloading = true;
+            location.reload();
+        }
+
         async function api(path, opts = {}) {
             const res = await fetch(path, {
                 ...opts,
                 headers: { "content-type": "application/json", ...headers, ...(opts.headers || {}) },
             });
+            rememberServerRevision(res);
             if (!res.ok) throw new Error(await res.text());
             const ct = res.headers.get("content-type") || "";
             return ct.includes("application/json") ? res.json() : res.text();
@@ -516,6 +534,10 @@
         }
 
         function init() {
+            if (sessionStorage.getItem(SERVER_UPGRADED_FLAG) === "1") {
+                sessionStorage.removeItem(SERVER_UPGRADED_FLAG);
+                alert("Backend upgraded. Frontend has been refreshed automatically.");
+            }
             ensureTerminal();
             refresh();
             // Polling for status updates (2s)
@@ -964,6 +986,7 @@
             if (!state.activeInst) return;
             try {
                 const res = await fetch(`/api/instances/log?id=${state.activeInst}&since=0`, { headers });
+                rememberServerRevision(res);
                 if (!res.ok) throw new Error(await res.text());
                 const text = await res.text();
                 const next = parseInt(res.headers.get("X-Log-Offset") || "0", 10);
@@ -985,6 +1008,7 @@
             if (!state.activeInst) return;
             try {
                 const res = await fetch(`/api/instances/log?id=${state.activeInst}&since=${logCursor}`, { headers });
+                rememberServerRevision(res);
                 if (!res.ok) throw new Error();
                 const text = await res.text();
                 const next = parseInt(res.headers.get("X-Log-Offset") || "0", 10);
