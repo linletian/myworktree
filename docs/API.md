@@ -1,14 +1,22 @@
 # myworktree — HTTP API
 
-Base URL: printed by `myworktree start`, e.g. `http://127.0.0.1:50053/`.
+Base URL: printed when starting `myworktree` or `mw`, e.g. `http://127.0.0.1:50053/`.
+`mw` opens the browser automatically by default; `myworktree` prints the URL unless you pass `-open=true`.
 
 Auth:
 - If `--auth <token>` is set, send `Authorization: Bearer <token>`.
 - Alternatively, pass `?token=<token>` for simple clients.
+- Prefer the `Authorization` header when possible so tokens do not end up in browser history or shell history.
 
 Common response header:
 - `X-Myworktree-Server-Rev: <rev>` is returned by API and UI responses.
 - Clients can treat this value as a backend revision fingerprint; if it changes after reconnect, reload the page to align frontend assets/runtime with the upgraded backend.
+
+Version commands:
+- `myworktree --version`
+- `myworktree version`
+- `mw --version`
+- `mw version`
 
 ## 1) Worktrees
 ### List
