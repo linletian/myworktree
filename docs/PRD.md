@@ -47,7 +47,7 @@
 
 ## 7. 当前实现状态（与愿景差异）
 - 已实现：worktree/instance 管理、Web UI、API、输出回放、脱敏、认证与可选 HTTPS、MCP tools 列表接口。
-- 规划增强：将 instance 升级为真正 PTY 并通过 WebSocket 实现交互式 Web TTY（xterm.js）。
+- 规划增强：将 instance 升级为真正 PTY 并通过 WebSocket 实现交互式 Web TTY（xterm.js）。Web TTY 的终端缓冲区、主题、字体等参数由前端灵活配置，以适应不同的调试和使用场景。
 
 ## 8. 验收标准（MVP）
 - 可创建/列出/删除 worktree（dirty 删除被拒绝）。
