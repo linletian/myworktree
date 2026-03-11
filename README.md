@@ -123,6 +123,21 @@ myworktree instance stop <instanceId>
 
 Note: command starts are executed inside the instance shell, and you can continue sending input to the same running instance from the UI.
 
+## Local testing & CI
+
+Run local checks before opening a PR:
+
+```bash
+go test ./...
+go build -o myworktree ./cmd/myworktree
+go build -o mw ./cmd/mw
+```
+
+GitHub Actions (`.github/workflows/go-ci.yml`) runs on:
+- pull requests targeting `develop` and `main` (`opened`, `synchronize`, `reopened`, `ready_for_review`)
+
+The workflow verifies `gofmt`, runs `go test ./...`, and builds both binaries.
+
 ## Remote access
 - Default: binds to loopback only.
 - If you listen on a non-loopback address, you must set `--auth`.

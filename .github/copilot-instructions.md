@@ -1,16 +1,13 @@
 # Copilot instructions for myworktree
 
 ## Build, test, lint
-- Build (primary binary):
-  - `go build -o myworktree ./cmd/myworktree`
-- Build (alias command, equivalent):
-  - `go build -o mw ./cmd/mw`
-- Run server (during development):
-  - `go run ./cmd/myworktree -listen 127.0.0.1:0`
-- Compile/test (there are currently no unit tests; this mainly validates builds):
-  - `go test ./...`
-- Lint:
-  - No linter is configured in this repo.
+- Build (primary binary): `go build -o myworktree ./cmd/myworktree`
+- Build (alias command): `go build -o mw ./cmd/mw`
+- Run server (inside the target repo): `go run ./cmd/myworktree -listen 127.0.0.1:0`
+- Run full test suite: `go test ./...`
+- Run one package: `go test ./internal/worktree -v`
+- Run one test: `go test ./internal/app -run TestNormalizeLabels -v`
+- Lint/format check used by CI: `test -z "$(gofmt -l .)"`
 
 ## High-level architecture
 myworktree is a lightweight single-user manager for **git worktrees** and **long-running CLI instances**, with a minimal Web UI and HTTP API.
@@ -19,7 +16,8 @@ Key flows:
 - **Target repo detection**: the server and CLI commands use the current working directory to find the target git repo root via `gitx.GitRoot(".")`.
 - **Per-project state**: state is stored outside the repo under the user config dir, partitioned by a hash of the git root.
   - Data dir (conceptually): `$(os.UserConfigDir())/myworktree/<repoHash>/`
-  - Contains: `state.json`, `tags.json`, `logs/<instanceId>.log`, and `worktrees/`.
+  - Contains: `state.json`, `tags.json`, `logs/<instanceId>.log`, and per-project metadata.
+- **Transport model**: UI prefers WebSocket TTY (`/api/instances/tty/ws`) with SSE/HTTP fallback for output replay/input.
 
 Core packages:
 - `internal/app/`: HTTP server + routing + auth/security checks; wires managers and serves the embedded UI.
@@ -32,7 +30,8 @@ Core packages:
 - `internal/mcp/`: MCP adapter stub (tool listing; keep boundaries clean for future MCP server work).
 
 Important behavior notes:
-- Instances are started as `zsh -lc <command>` (see `internal/instance/manager.go`) and are **not** a fully interactive PTY/WebTTY yet; the UI currently focuses on management + output replay.
+- Instances are launched via `script -q /dev/null zsh -f -i`; startup commands are fed to stdin. Output is redacted and appended to log files for replay.
+- On server startup, stale persisted instances with status `running` are reconciled to `stopped`.
 
 ## Key conventions
 - **Run location matters**: the server is started by the default command (e.g. `myworktree -listen ...`) and should be executed *inside the target git repo* you want to manage, because repo detection and the per-project data dir derive from CWD.
@@ -45,6 +44,9 @@ Important behavior notes:
 - **State storage discipline**:
   - Persisted state lives in `state.json` via `store.FileStore` and is protected with `flock` + atomic rename.
   - Avoid writing state directly; go through the store to preserve locking/atomicity.
+- **Worktree placement**:
+  - Default path is next to the main repo: `<repo-parent>/<repo-name>-myworktree/<worktree-name>/`.
+  - `-worktrees-dir=data` switches to legacy data-dir placement.
 - **Tag configuration**:
   - Tag schema (JSON): `id`, `command`, `env`, `preStart`, `cwd`.
   - Tags are merged from:
