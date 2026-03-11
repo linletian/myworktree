@@ -124,4 +124,4 @@ myworktree instance stop <instanceId>
 - 需要 HTTPS 时提供 `--tls-cert` 与 `--tls-key`。
 
 ## License
-TBD.
+MIT 协议，详见 [LICENSE](./LICENSE)。
