@@ -553,6 +553,19 @@ func (s *Server) handleInstanceTTYWS(w http.ResponseWriter, r *http.Request) {
 			if !ws.IsDataOpcode(op) {
 				continue
 			}
+			// Check if it's a resize message
+			var resizeMsg struct {
+				Type string `json:"type"`
+				Cols int    `json:"cols"`
+				Rows int    `json:"rows"`
+			}
+			if err := json.Unmarshal(data, &resizeMsg); err == nil && resizeMsg.Type == "resize" {
+				if resizeMsg.Cols > 0 && resizeMsg.Rows > 0 {
+					_ = s.instanceMgr.Resize(id, resizeMsg.Cols, resizeMsg.Rows)
+				}
+				continue
+			}
+			// Otherwise, treat as input
 			if err := s.instanceMgr.SendInput(id, string(data)); err != nil {
 				return
 			}

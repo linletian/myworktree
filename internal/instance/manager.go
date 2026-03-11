@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/creack/pty"
 	"myworktree/internal/redact"
 	"myworktree/internal/store"
 	"myworktree/internal/tag"
@@ -31,6 +32,7 @@ type Manager struct {
 	mu          sync.Mutex
 	running     map[string]*exec.Cmd
 	inputs      map[string]io.WriteCloser
+	ptys        map[string]*os.File
 	subscribers map[string]map[chan string]struct{}
 }
 
@@ -79,6 +81,9 @@ func (m *Manager) Start(in StartInput) (store.ManagedInstance, error) {
 	}
 	if m.inputs == nil {
 		m.inputs = map[string]io.WriteCloser{}
+	}
+	if m.ptys == nil {
+		m.ptys = map[string]*os.File{}
 	}
 	if m.subscribers == nil {
 		m.subscribers = map[string]map[chan string]struct{}{}
@@ -163,9 +168,8 @@ func (m *Manager) Start(in StartInput) (store.ManagedInstance, error) {
 		cwd = filepath.Join(wt.Path, cwdRel)
 	}
 
-	cmd := exec.Command("script", "-q", "/dev/null", "zsh", "-f", "-i")
+	cmd := exec.Command("zsh", "-f", "-i")
 	cmd.Dir = cwd
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Env = os.Environ()
 	for k, v := range env {
 		cmd.Env = append(cmd.Env, k+"="+v)
@@ -182,23 +186,8 @@ func (m *Manager) Start(in StartInput) (store.ManagedInstance, error) {
 		}
 	}
 
-	stdout, err := cmd.StdoutPipe()
+	ptmx, err := pty.Start(cmd)
 	if err != nil {
-		_ = logFile.Close()
-		return store.ManagedInstance{}, err
-	}
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		_ = logFile.Close()
-		return store.ManagedInstance{}, err
-	}
-	stdin, err := cmd.StdinPipe()
-	if err != nil {
-		_ = logFile.Close()
-		return store.ManagedInstance{}, err
-	}
-
-	if err := cmd.Start(); err != nil {
 		_ = logFile.Close()
 		return store.ManagedInstance{}, err
 	}
@@ -228,23 +217,25 @@ func (m *Manager) Start(in StartInput) (store.ManagedInstance, error) {
 	m.stateMu.Unlock()
 	if err != nil {
 		_ = cmd.Process.Kill()
+		_ = ptmx.Close()
 		_ = logFile.Close()
 		return store.ManagedInstance{}, err
 	}
 
 	m.mu.Lock()
 	m.running[id] = cmd
-	m.inputs[id] = stdin
+	m.inputs[id] = ptmx
+	m.ptys[id] = ptmx
 	m.mu.Unlock()
 
 	if strings.TrimSpace(command) != "" {
 		go func() {
 			time.Sleep(150 * time.Millisecond)
-			_, _ = io.WriteString(stdin, command+"\n")
+			_, _ = io.WriteString(ptmx, command+"\n")
 		}()
 	}
 
-	go m.pumpLogs(id, stdout, stderr, logFile, logPath)
+	go m.pumpLogs(id, ptmx, ptmx, logFile, logPath)
 	go m.wait(id, cmd)
 	return inst, nil
 }
@@ -335,6 +326,26 @@ func (m *Manager) SendInput(id string, input string) error {
 		return err
 	}
 	return nil
+}
+
+func (m *Manager) Resize(id string, cols, rows int) error {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return errors.New("id is required")
+	}
+	if cols <= 0 || rows <= 0 {
+		return errors.New("invalid terminal size")
+	}
+	m.mu.Lock()
+	ptmx := m.ptys[id]
+	m.mu.Unlock()
+	if ptmx == nil {
+		return fmt.Errorf("instance pty unavailable: %s", id)
+	}
+	return pty.Setsize(ptmx, &pty.Winsize{
+		Cols: uint16(cols),
+		Rows: uint16(rows),
+	})
 }
 
 func (m *Manager) Restart(id string) (store.ManagedInstance, error) {
@@ -508,6 +519,10 @@ func (m *Manager) Delete(id string) error {
 	m.mu.Lock()
 	delete(m.running, id)
 	delete(m.inputs, id)
+	if ptmx, ok := m.ptys[id]; ok {
+		_ = ptmx.Close()
+		delete(m.ptys, id)
+	}
 	m.closeSubscribersLocked(id)
 	m.mu.Unlock()
 	return nil
@@ -601,6 +616,10 @@ func (m *Manager) wait(id string, cmd *exec.Cmd) {
 	m.mu.Lock()
 	delete(m.running, id)
 	delete(m.inputs, id)
+	if ptmx, ok := m.ptys[id]; ok {
+		_ = ptmx.Close()
+		delete(m.ptys, id)
+	}
 	m.closeSubscribersLocked(id)
 	m.mu.Unlock()
 
@@ -644,8 +663,14 @@ func (m *Manager) pumpLogs(id string, stdout io.Reader, stderr io.Reader, out *o
 			}
 		}
 	}
-	go write(stdout)
-	go write(stderr)
+	// For PTY mode, stdout and stderr are the same, so we only read once
+	if stdout == stderr {
+		wg.Done()
+		write(stdout)
+	} else {
+		go write(stdout)
+		go write(stderr)
+	}
 	wg.Wait()
 }
 
