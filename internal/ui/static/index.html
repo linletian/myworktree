@@ -361,8 +361,7 @@
         <div id="main">
             <div id="header">
                 <div id="tabs-container"></div>
-                <div class="new-tab-btn" onclick="promptStartInstance()" title="New Instance">+</div>
-
+                
                 <div id="instance-actions">
                     <button onclick="restartInstance()" title="Restart">Restart</button>
                     <button onclick="stopInstance()" title="Stop">Stop</button>
@@ -555,12 +554,8 @@
             instances.sort((a, b) => a.created_at.localeCompare(b.created_at));
 
             let html = "";
-            // Add archived toggle
-            html += `<div style="padding: 8px 12px; font-size: 12px; border-bottom: 1px solid #30363d; display: flex; align-items: center;">
-                <label style="cursor: pointer; display: flex; align-items: center; gap: 6px; color: #8b949e;">
-                    <input type="checkbox" ${state.showArchived ? "checked" : ""} onchange="toggleArchived(this)"> Show archived
-                </label>
-            </div>`;
+            // Add New Instance button
+            html += `<div class="new-tab-btn" onclick="promptStartInstance()" title="New Instance" style="margin-left: 0; margin-right: 8px;">+</div>`;
 
             html += instances.map(i => {
                 const isActive = state.activeInst === i.id;
@@ -574,6 +569,13 @@
             </div>
           `;
             }).join("");
+
+            // Add archived toggle
+            html += `<div style="margin-left: auto; padding: 0 12px; font-size: 12px; display: flex; align-items: center; height: 32px; color: #8b949e;">
+                <label style="cursor: pointer; display: flex; align-items: center; gap: 6px; white-space: nowrap;">
+                    <input type="checkbox" ${state.showArchived ? "checked" : ""} onchange="toggleArchived(this)"> Show archived
+                </label>
+            </div>`;
 
             container.innerHTML = html;
 
