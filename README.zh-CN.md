@@ -130,8 +130,7 @@ go build -o mw ./cmd/mw
 ```
 
 GitHub Actions（`.github/workflows/go-ci.yml`）会在以下场景运行：
-- 推送到 `develop`、`main`
-- 目标分支为 `develop` 或 `main` 的 Pull Request
+- 目标分支为 `develop` 或 `main` 的 Pull Request（`opened`、`synchronize`、`reopened`、`ready_for_review`）
 
 工作流会校验 `gofmt`、执行 `go test ./...`，并构建两个二进制。
 

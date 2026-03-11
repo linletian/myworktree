@@ -134,8 +134,7 @@ go build -o mw ./cmd/mw
 ```
 
 GitHub Actions (`.github/workflows/go-ci.yml`) runs on:
-- pushes to `develop` and `main`
-- pull requests targeting `develop` and `main`
+- pull requests targeting `develop` and `main` (`opened`, `synchronize`, `reopened`, `ready_for_review`)
 
 The workflow verifies `gofmt`, runs `go test ./...`, and builds both binaries.
 
