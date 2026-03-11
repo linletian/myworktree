@@ -345,6 +345,11 @@
 </head>
 <body>
     <div id="app">
+        <div id="connection-overlay" style="display:none; position:fixed; top:0; left:0; right:0; bottom:0; background:rgba(0,0,0,0.7); color:white; z-index:9999; align-items:center; justify-content:center; flex-direction:column; font-family:sans-serif;">
+            <div style="font-size: 24px; font-weight: bold; margin-bottom: 10px;">Connection Lost</div>
+            <div style="color: #ccc;">Backend server unreachable. Retrying...</div>
+        </div>
+
         <!-- Sidebar: Worktrees -->
         <div id="sidebar">
             <div class="sidebar-title">
@@ -483,6 +488,7 @@
 
         // Lifecycle
         async function refresh() {
+            const overlay = document.getElementById("connection-overlay");
             try {
                 const [wt, ins, tags, branches] = await Promise.all([
                     api("/api/worktrees"),
@@ -494,8 +500,19 @@
                 state.instances = ins.instances || [];
                 state.tags = tags.tags || [];
                 state.branches = branches;
+                
+                if (overlay.style.display !== "none") {
+                    overlay.style.display = "none";
+                    if (state.activeInst) {
+                        // Re-hook terminal if we came back
+                        connectTTY();
+                    }
+                }
                 render();
-            } catch (e) { console.error(e); }
+            } catch (e) { 
+                console.error(e);
+                overlay.style.display = "flex";
+            }
         }
 
         function init() {
