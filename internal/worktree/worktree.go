@@ -184,7 +184,7 @@ func (m Manager) Import(nameOrPath string) (store.ManagedWorktree, error) {
 	}
 
 	var path, branch, displayName string
-	
+
 	// Check if input is an absolute path match
 	if filepath.IsAbs(nameOrPath) {
 		cleanInput := filepath.Clean(nameOrPath)

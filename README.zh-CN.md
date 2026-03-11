@@ -119,6 +119,22 @@ myworktree instance list
 myworktree instance stop <instanceId>
 ```
 
+## 本地测试与 CI
+
+建议在发起 PR 前先执行本地检查：
+
+```bash
+go test ./...
+go build -o myworktree ./cmd/myworktree
+go build -o mw ./cmd/mw
+```
+
+GitHub Actions（`.github/workflows/go-ci.yml`）会在以下场景运行：
+- 推送到 `develop`、`main`
+- 目标分支为 `develop` 或 `main` 的 Pull Request
+
+工作流会校验 `gofmt`、执行 `go test ./...`，并构建两个二进制。
+
 ## 远程访问
 - 默认只监听本机回环地址。
 - 监听到非 loopback（如 `0.0.0.0` 或局域网 IP）时必须提供 `--auth`。
