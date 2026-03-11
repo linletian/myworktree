@@ -172,6 +172,7 @@ func (s *Server) validateSecurity() error {
 
 func (s *Server) registerAPIs(mux *http.ServeMux) {
 	mux.HandleFunc("/api/worktrees", s.handleWorktrees)
+	mux.HandleFunc("/api/worktrees/unmanaged", s.handleWorktreesUnmanaged)
 	mux.HandleFunc("/api/worktrees/import", s.handleWorktreeImport)
 	mux.HandleFunc("/api/worktrees/delete", s.handleWorktreeDelete)
 	mux.HandleFunc("/api/instances", s.handleInstances)
@@ -282,6 +283,19 @@ func (s *Server) handleWorktrees(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
+}
+
+func (s *Server) handleWorktreesUnmanaged(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	items, err := s.worktreeMgr.ListUnmanaged()
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"candidates": items})
 }
 
 func (s *Server) handleWorktreeImport(w http.ResponseWriter, r *http.Request) {

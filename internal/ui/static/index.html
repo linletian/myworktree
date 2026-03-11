@@ -403,11 +403,14 @@
     </dialog>
 
     <!-- Modal: Import Worktree -->
-    <dialog id="modal-import-wt">
+    <dialog id="modal-import-wt" style="min-width: 400px;">
         <h3>Import Worktree</h3>
+        <div id="import-candidates" style="margin-bottom: 15px; max-height: 200px; overflow-y: auto; border: 1px solid #30363d; border-radius: 6px; display: none;">
+            <!-- filled by JS -->
+        </div>
         <div class="form-group">
-            <label>Branch/Name</label>
-            <input id="wtImportName" placeholder="e.g. feature/foo" />
+            <label>Or manually by Branch/Name/Path</label>
+            <input id="wtImportName" placeholder="e.g. feature/foo or /abs/path" />
         </div>
         <div class="form-actions">
             <button onclick="closeModal('modal-import-wt')">Cancel</button>
@@ -658,7 +661,35 @@
         }
 
         // Actions
-        function openModal(id) { document.getElementById(id).showModal(); }
+        async function openModal(id) {
+            const el = document.getElementById(id);
+            if (id === 'modal-import-wt') {
+                // Pre-load candidates
+                const list = document.getElementById("import-candidates");
+                list.style.display = 'none';
+                list.innerHTML = '<div style="padding:8px;color:#8b949e">Scanning...</div>';
+                try {
+                    const res = await api("/api/worktrees/unmanaged");
+                    const items = res.candidates || [];
+                    if (items.length === 0) {
+                        list.innerHTML = '<div style="padding:8px;color:#8b949e;text-align:center">No unmanaged worktrees found</div>';
+                    } else {
+                        list.innerHTML = items.map(c => `
+                            <div style="padding: 8px; border-bottom: 1px solid #21262d; display: flex; align-items: center; gap: 8px; cursor: pointer;" onclick="document.getElementById('wtImportName').value='${c.path}'">
+                                <span style="font-family:monospace; background: #21262d; padding: 2px 4px; border-radius: 4px;">${c.branch}</span>
+                                <span style="font-size: 12px; color: #8b949e; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${c.path}</span>
+                                <button style="margin-left: auto; padding: 2px 8px; font-size: 11px;" onclick="doImportWorktreePath('${c.path}')">Import</button>
+                            </div>
+                        `).join("");
+                    }
+                    list.style.display = 'block';
+                } catch (e) {
+                    list.innerHTML = `<div style="padding:8px;color:#cb2431">Error: ${e.message}</div>`;
+                    list.style.display = 'block';
+                }
+            }
+            el.showModal();
+        }
         function closeModal(id) { document.getElementById(id).close(); }
 
         function onBaseRefChange() {
@@ -691,6 +722,11 @@
                 await refresh();
                 selectWorktreeByID(res.id);
             } catch (e) { alert(e); }
+        }
+
+        async function doImportWorktreePath(path) {
+            document.getElementById("wtImportName").value = path;
+            await doImportWorktree();
         }
 
         async function doImportWorktree() {
