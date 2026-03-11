@@ -542,6 +542,9 @@
             // Polling for status updates (2s)
             if (pollTimer) clearInterval(pollTimer);
             pollTimer = setInterval(refresh, 2000);
+            
+            // Initial focus attempt after a short delay
+            setTimeout(() => focusTerminalIfPossible(), 100);
         }
 
         function toggleArchived(el) {
@@ -672,6 +675,7 @@
                     termContainer.style.opacity = "1";
                     termContainer.style.filter = "none";
                     if (term) term.options.cursorBlink = true;
+                    focusTerminalIfPossible();
                 }
             } else {
                 empty.style.display = "block";
@@ -757,9 +761,12 @@
                     updateStatus("stopped");
                     // Style handled in renderWorkspace
                 } else {
-                    // For running instances, directly connect TTY
+                    // For running instances, load initial log then connect TTY
                     // The WebSocket will send initial log, then we trigger resize for redraw
-                    connectTTY();
+                    loadLog().finally(() => {
+                        connectTTY();
+                        focusTerminalIfPossible();
+                    });
                 }
             }
         }
@@ -933,6 +940,19 @@
 
         // Terminal Logic (Shared)
         let fitAddon = null;
+        let windowHasFocus = true;
+        let openDialogs = new Set();
+
+        function focusTerminalIfPossible() {
+            if (!term) return;
+            if (!windowHasFocus) return;
+            if (openDialogs.size > 0) return;
+            if (!state.activeInst) return;
+            const inst = state.instances.find(i => i.id === state.activeInst);
+            if (inst && inst.status !== 'running') return;
+            
+            term.focus();
+        }
 
         function ensureTerminal() {
             if (term || !window.Terminal) return;
@@ -992,6 +1012,30 @@
                 }
             });
         }
+
+        // Auto-focus terminal when window gains focus and no dialogs are open
+        window.addEventListener('focus', () => {
+            windowHasFocus = true;
+            focusTerminalIfPossible();
+        });
+
+        window.addEventListener('blur', () => {
+            windowHasFocus = false;
+        });
+
+        // Track dialog open/close
+        const originalShowModal = HTMLDialogElement.prototype.showModal;
+        HTMLDialogElement.prototype.showModal = function() {
+            openDialogs.add(this.id);
+            originalShowModal.call(this);
+        };
+
+        const originalClose = HTMLDialogElement.prototype.close;
+        HTMLDialogElement.prototype.close = function() {
+            openDialogs.delete(this.id);
+            originalClose.call(this);
+            setTimeout(() => focusTerminalIfPossible(), 10);
+        };
 
         function updateStatus(msg) {
             document.getElementById("status-bar").textContent = "Transport: " + msg;
@@ -1065,13 +1109,15 @@
 
                 const ws = new WebSocket(url);
                 ws.binaryType = "arraybuffer";
-                
+
                 let isFirstMessage = true;
-                
-                ws.onopen = () => { 
-                    if (ttySocket === ws) updateStatus("websocket live"); 
+
+                ws.onopen = () => {
+                    if (ttySocket === ws) {
+                        updateStatus("websocket live");
+                        focusTerminalIfPossible();
+                    }
                 };
-                
                 ws.onmessage = (ev) => {
                     if (ev.data instanceof ArrayBuffer) {
                         const u8 = new Uint8Array(ev.data);
