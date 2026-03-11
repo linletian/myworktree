@@ -716,13 +716,36 @@
                     if (items.length === 0) {
                         list.innerHTML = '<div style="padding:8px;color:#8b949e;text-align:center">No unmanaged worktrees found</div>';
                     } else {
-                        list.innerHTML = items.map(c => `
-                            <div style="padding: 8px; border-bottom: 1px solid #21262d; display: flex; align-items: center; gap: 8px; cursor: pointer;" onclick="document.getElementById('wtImportName').value='${c.path}'">
-                                <span style="font-family:monospace; background: #21262d; color: #adbac7; padding: 2px 4px; border-radius: 4px;">${c.branch}</span>
-                                <span style="font-size: 12px; color: #768390; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left;" title="${c.path}">&lrm;${c.path}</span>
-                                <button style="padding: 2px 8px; font-size: 11px; white-space: nowrap;" onclick="doImportWorktreePath('${c.path}')">Import</button>
-                            </div>
-                        `).join("");
+                        list.innerHTML = "";
+                        for (const c of items) {
+                            const row = document.createElement("div");
+                            row.style.cssText = "padding: 8px; border-bottom: 1px solid #21262d; display: flex; align-items: center; gap: 8px; cursor: pointer;";
+                            row.addEventListener("click", () => {
+                                document.getElementById("wtImportName").value = c.path;
+                            });
+
+                            const badge = document.createElement("span");
+                            badge.style.cssText = "font-family:monospace; background: #21262d; color: #adbac7; padding: 2px 4px; border-radius: 4px;";
+                            badge.textContent = c.branch;
+
+                            const path = document.createElement("span");
+                            path.style.cssText = "font-size: 12px; color: #768390; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left;";
+                            path.title = c.path;
+                            path.textContent = c.path;
+
+                            const btn = document.createElement("button");
+                            btn.style.cssText = "padding: 2px 8px; font-size: 11px; white-space: nowrap;";
+                            btn.textContent = "Import";
+                            btn.addEventListener("click", (evt) => {
+                                evt.stopPropagation();
+                                doImportWorktreePath(c.path);
+                            });
+
+                            row.appendChild(badge);
+                            row.appendChild(path);
+                            row.appendChild(btn);
+                            list.appendChild(row);
+                        }
                     }
                     list.style.display = 'block';
                 } catch (e) {
