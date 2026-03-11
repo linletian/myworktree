@@ -133,8 +133,8 @@ func TestResize_NotFound(t *testing.T) {
 
 func TestResize_Success(t *testing.T) {
 	// Create a real PTY to test Resize functionality
-	// Use a shell that exists on macOS
-	cmd := exec.Command("zsh", "-c", "sleep 60")
+	// Use bash which is available on both macOS and Linux
+	cmd := exec.Command("bash", "-c", "sleep 60")
 	ptmx, err := pty.Start(cmd)
 	if err != nil {
 		t.Fatalf("failed to start pty: %v", err)
