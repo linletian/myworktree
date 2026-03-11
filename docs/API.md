@@ -6,6 +6,10 @@ Auth:
 - If `--auth <token>` is set, send `Authorization: Bearer <token>`.
 - Alternatively, pass `?token=<token>` for simple clients.
 
+Common response header:
+- `X-Myworktree-Server-Rev: <rev>` is returned by API and UI responses.
+- Clients can treat this value as a backend revision fingerprint; if it changes after reconnect, reload the page to align frontend assets/runtime with the upgraded backend.
+
 ## 1) Worktrees
 ### List
 `GET /api/worktrees`

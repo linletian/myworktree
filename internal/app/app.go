@@ -1,6 +1,8 @@
 package app
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,10 +14,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime/debug"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"myworktree/internal/gitx"
@@ -38,12 +42,13 @@ type Config struct {
 }
 
 type Server struct {
-	cfg     Config
-	logger  *log.Logger
-	ln      net.Listener
-	mux     *http.ServeMux
-	root    string
-	dataDir string
+	cfg       Config
+	logger    *log.Logger
+	ln        net.Listener
+	mux       *http.ServeMux
+	root      string
+	dataDir   string
+	serverRev string
 
 	store       store.FileStore
 	worktreeMgr worktree.Manager
@@ -57,6 +62,8 @@ type authFail struct {
 	Count     int
 	WindowEnd time.Time
 }
+
+var errInvalidRepoListenPort = errors.New("invalid persisted listen_port")
 
 func New(cfg Config, logger *log.Logger) (*Server, error) {
 	if logger == nil {
@@ -90,6 +97,7 @@ func New(cfg Config, logger *log.Logger) (*Server, error) {
 		mux:         mux,
 		root:        root,
 		dataDir:     dataDir,
+		serverRev:   computeServerRevision(),
 		store:       st,
 		worktreeMgr: worktreeMgr,
 		instanceMgr: instanceMgr,
@@ -118,13 +126,28 @@ func (s *Server) Start() (string, error) {
 		s.logger.Printf("reconciled %d stale running instances to stopped", n)
 	}
 
+	listenAddr, err := resolveRepoListenAddr(s.cfg.ListenAddr, s.dataDir, s.logger)
+	if err != nil {
+		return "", err
+	}
+	s.cfg.ListenAddr = listenAddr
 	ln, err := net.Listen("tcp", s.cfg.ListenAddr)
+	if err != nil {
+		if errors.Is(err, syscall.EADDRINUSE) {
+			if altAddr, altErr := allocateRepoListenAddr(s.cfg.ListenAddr, s.dataDir); altErr == nil {
+				ln, err = net.Listen("tcp", altAddr)
+				if err == nil {
+					s.cfg.ListenAddr = altAddr
+				}
+			}
+		}
+	}
 	if err != nil {
 		return "", err
 	}
 	s.ln = ln
 
-	h := s.withAuth(s.mux)
+	h := s.withServerRevision(s.withAuth(s.mux))
 
 	go func() {
 		if s.cfg.TLSCert != "" || s.cfg.TLSKey != "" {
@@ -852,6 +875,15 @@ func (s *Server) withAuth(next http.Handler) http.Handler {
 	})
 }
 
+func (s *Server) withServerRevision(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if s.serverRev != "" {
+			w.Header().Set("X-Myworktree-Server-Rev", s.serverRev)
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 func readJSON(r io.Reader, out any) error {
 	dec := json.NewDecoder(r)
 	dec.DisallowUnknownFields()
@@ -974,4 +1006,111 @@ func userProjectDataDir(gitRoot string) (string, error) {
 	}
 	repoHash := gitx.HashPath(gitRoot)
 	return filepath.Join(base, "myworktree", repoHash), nil
+}
+
+func resolveRepoListenAddr(listenAddr, dataDir string, logger *log.Logger) (string, error) {
+	host, port, err := net.SplitHostPort(listenAddr)
+	if err != nil || strings.TrimSpace(port) != "0" {
+		return listenAddr, nil
+	}
+	persisted, err := readRepoListenPort(dataDir)
+	if err != nil {
+		if errors.Is(err, errInvalidRepoListenPort) {
+			if logger != nil {
+				logger.Printf("ignore invalid repo listen port config: %v", err)
+			}
+			return allocateRepoListenAddr(listenAddr, dataDir)
+		}
+		return "", err
+	}
+	if persisted > 0 {
+		addr := net.JoinHostPort(host, strconv.Itoa(persisted))
+		if canListenTCP(addr) {
+			return addr, nil
+		}
+	}
+	return allocateRepoListenAddr(listenAddr, dataDir)
+}
+
+func allocateRepoListenAddr(listenAddr, dataDir string) (string, error) {
+	host, _, err := net.SplitHostPort(listenAddr)
+	if err != nil {
+		return "", err
+	}
+	probe, err := net.Listen("tcp", net.JoinHostPort(host, "0"))
+	if err != nil {
+		return "", err
+	}
+	defer probe.Close()
+	p := probe.Addr().(*net.TCPAddr).Port
+	if err := writeRepoListenPort(dataDir, p); err != nil {
+		return "", err
+	}
+	return net.JoinHostPort(host, strconv.Itoa(p)), nil
+}
+
+func canListenTCP(addr string) bool {
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return false
+	}
+	_ = ln.Close()
+	return true
+}
+
+func readRepoListenPort(dataDir string) (int, error) {
+	type config struct {
+		ListenPort int `json:"listen_port"`
+	}
+	b, err := os.ReadFile(filepath.Join(dataDir, "server.json"))
+	if errors.Is(err, os.ErrNotExist) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	var cfg config
+	if err := json.Unmarshal(b, &cfg); err != nil {
+		return 0, err
+	}
+	if cfg.ListenPort < 1 || cfg.ListenPort > 65535 {
+		return 0, fmt.Errorf("%w: %d", errInvalidRepoListenPort, cfg.ListenPort)
+	}
+	return cfg.ListenPort, nil
+}
+
+func writeRepoListenPort(dataDir string, port int) error {
+	type config struct {
+		ListenPort int `json:"listen_port"`
+	}
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		return err
+	}
+	b, err := json.MarshalIndent(config{ListenPort: port}, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(dataDir, "server.json"), b, 0o600)
+}
+
+func computeServerRevision() string {
+	parts := []string{}
+	if bi, ok := debug.ReadBuildInfo(); ok {
+		parts = append(parts, bi.Main.Path, bi.Main.Version, bi.GoVersion)
+		for _, key := range []string{"vcs.revision", "vcs.modified", "vcs.time"} {
+			for _, s := range bi.Settings {
+				if s.Key == key {
+					parts = append(parts, key+"="+s.Value)
+					break
+				}
+			}
+		}
+	}
+	if exe, err := os.Executable(); err == nil {
+		if fi, err := os.Stat(exe); err == nil {
+			parts = append(parts, exe, fi.ModTime().UTC().Format(time.RFC3339Nano), strconv.FormatInt(fi.Size(), 10))
+		}
+	}
+	sum := sha256.Sum256([]byte(strings.Join(parts, "|")))
+	return hex.EncodeToString(sum[:8])
 }
