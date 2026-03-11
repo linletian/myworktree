@@ -44,6 +44,34 @@ myworktree 只做管理，不碰项目具体内容：
 
 ## 快速开始
 
+### 发布版使用
+
+如果你只是想直接使用 `myworktree`，推荐从 GitHub Releases 下载已打包的发布版：
+
+- Apple Silicon Mac：`myworktree_vX.Y.Z_darwin_arm64.tar.gz`
+- Intel Mac：`myworktree_vX.Y.Z_darwin_amd64.tar.gz`
+- 校验文件：`checksums.txt`
+
+示例：
+
+```bash
+# 根据你的 Mac 机型选择对应压缩包，然后校验并解压
+curl -LO https://github.com/linletian/myworktree/releases/download/v0.1.0/myworktree_v0.1.0_darwin_arm64.tar.gz
+curl -LO https://github.com/linletian/myworktree/releases/download/v0.1.0/checksums.txt
+shasum -a 256 -c checksums.txt --ignore-missing
+tar -xzf myworktree_v0.1.0_darwin_arm64.tar.gz
+
+# 可选：安装到 PATH
+sudo install -m 755 ./mw /usr/local/bin/mw
+sudo install -m 755 ./myworktree /usr/local/bin/myworktree
+
+# 验证下载下来的二进制
+mw --version
+```
+
+每个发布压缩包内都包含 `mw`、`myworktree`、`README.md`、`LICENSE` 和 `CHANGELOG.md`。
+如果当前还没有预发布/正式发布压缩包，或者你的平台暂无对应产物，就直接使用下面的源码编译步骤。
+
 ### Build & install
 
 ```bash
