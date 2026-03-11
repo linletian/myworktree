@@ -1,6 +1,10 @@
 name: Go CI
 
 on:
+  push:
+    branches:
+      - develop
+      - main
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
     branches:
@@ -9,7 +13,13 @@ on:
 
 jobs:
   test-build:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -21,7 +31,13 @@ jobs:
           cache: true
 
       - name: Verify gofmt
-        run: test -z "$(gofmt -l .)"
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "${unformatted}" ]; then
+            echo "These files need gofmt:"
+            echo "${unformatted}"
+            exit 1
+          fi
 
       - name: Run tests
         run: go test ./...

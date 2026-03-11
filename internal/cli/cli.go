@@ -13,6 +13,7 @@ import (
 	"myworktree/internal/instance"
 	"myworktree/internal/store"
 	"myworktree/internal/tag"
+	"myworktree/internal/version"
 	"myworktree/internal/worktree"
 )
 
@@ -21,6 +22,9 @@ import (
 func Run(args []string, logger *log.Logger) int {
 	if len(args) >= 2 {
 		switch args[1] {
+		case "version", "--version", "-version":
+			fmt.Println(version.Info(filepath.Base(strings.TrimSpace(args[0]))))
+			return 0
 		case "worktree":
 			if err := worktreeCmd(logger, args[2:]); err != nil {
 				logger.Print(err)
