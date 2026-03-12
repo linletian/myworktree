@@ -1158,14 +1158,14 @@
                                     updateStatus("websocket live");
                                     focusTerminalIfPossible();
                                 }
-                                // Send initial resize to backend
+                                // Send initial resize to start data flow
                                 if (term && term.cols > 0 && term.rows > 0) {
                                     sendResize(term.cols, term.rows);
                                 }
                                 return;
                             }
                         } catch (e) {
-                            // Not JSON, treat as data
+                            // Not JSON, treat as data (shouldn't happen before ready)
                         }
                     }
 
@@ -1183,6 +1183,7 @@
                                 const cols = term.cols;
                                 const rows = term.rows;
                                 if (cols > 0 && rows > 0) {
+                                    // Send resize to backend and trigger local redraw
                                     sendResize(cols, rows);
                                     term.resize(cols, rows);
                                 }

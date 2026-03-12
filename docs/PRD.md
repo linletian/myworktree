@@ -50,6 +50,7 @@
 - **已实现 PTY + Web TTY**：instance 通过 PTY 启动，支持真正的交互式终端（vim/htop/less 等 TUI 程序）。
   - WebSocket 握手协议：服务端发送 `{"type":"ready"}`，客户端等待后发送 resize 开始数据流。
   - 窗口尺寸传递：前端监听窗口 resize 并通知后端 PTY，确保 TUI 程序正确重绘。
+  - 智能重绘：前端在收到第一条数据后延迟 50ms 再次发送 resize，确保 TUI 完整刷新。
   - 超时降级：5 秒握手超时后自动降级到 SSE 方案。
 - 规划增强：无（PTY + Web TTY 已完成）。
 

@@ -39,8 +39,9 @@ It does **not** analyze project code or prevent concurrent write conflicts insid
 - An instance is a server-managed process; UI windows are merely views.
 - Default interactive path is WebSocket TTY: `GET /api/instances/tty/ws?id=...` (bi-directional terminal stream).
   - **Handshake Protocol**: Server sends `{"type":"ready"}` on connect; client must wait for this before sending resize to start data flow.
-  - **Timeout Handling**: Client should implement 5s handshake timeout with SSE fallback.
+  - **Timeout Handling**: Client implements 5s handshake timeout with SSE fallback.
   - **Resize Support**: Client sends `{"type":"resize","cols":80,"rows":24}` to update PTY size, triggering TUI programs to redraw.
+  - **Dual Resize**: First resize starts data flow, second resize (50ms after first data) ensures complete TUI redraw.
 - Fallback path remains available: HTTP input `POST /api/instances/input` + replay/SSE logs (`GET /api/instances/log`, `GET /api/instances/log/stream`).
 - UI shows transport state (`websocket/sse/polling`) and supports manual WS reconnect.
 - Backlog is stored on disk with a size cap (rolling truncate).
