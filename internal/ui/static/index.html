@@ -942,12 +942,15 @@
         let fitAddon = null;
         let windowHasFocus = true;
         let openDialogs = new Set();
+        let ttyState = 'IDLE'; // IDLE | CONNECTING | HANDSHAKING | READY | DISCONNECTING
+        let ttyStateCheckInterval = null; // For polling state transitions
 
         function focusTerminalIfPossible() {
             if (!term) return;
             if (!windowHasFocus) return;
             if (openDialogs.size > 0) return;
             if (!state.activeInst) return;
+            if (ttyState !== 'READY') return; // CRITICAL: Only focus when connection is ready
             const inst = state.instances.find(i => i.id === state.activeInst);
             if (inst && inst.status !== 'running') return;
             
@@ -1102,13 +1105,58 @@
         }
 
         function disconnectTTY() {
+            // Clear any pending state check interval
+            if (ttyStateCheckInterval) {
+                clearInterval(ttyStateCheckInterval);
+                ttyStateCheckInterval = null;
+            }
+            // Set DISCONNECTING if there's an active socket, otherwise IDLE
+            // The onclose handler will transition to IDLE after socket closes
+            if (ttySocket) {
+                ttyState = 'DISCONNECTING';
+            } else {
+                ttyState = 'IDLE';
+            }
             if (ttyReconnectTimer) clearTimeout(ttyReconnectTimer);
             if (logStream) { logStream.close(); logStream = null; }
             if (ttySocket) { ttySocket.close(); ttySocket = null; }
         }
 
         function connectTTY() {
+            // Phase 1: Disconnect Previous (already done in disconnectTTY)
             disconnectTTY();
+
+            // Phase 3.1: Validate state before establishing new connection
+            // Must be IDLE before transitioning to CONNECTING (per §5.3)
+            if (ttyState !== 'IDLE') {
+                console.warn('connectTTY: invalid state transition from', ttyState, '- waiting for IDLE');
+                // Wait for state to become IDLE before proceeding, with max 10 retries (1 second)
+                let retries = 0;
+                const maxRetries = 10;
+                ttyStateCheckInterval = setInterval(() => {
+                    retries++;
+                    if (ttyState === 'IDLE' || ttyState === undefined) {
+                        clearInterval(ttyStateCheckInterval);
+                        ttyStateCheckInterval = null;
+                        // Retry connection
+                        if (state.activeInst) {
+                            setTimeout(() => connectTTY(), 50);
+                        }
+                    } else if (retries >= maxRetries) {
+                        clearInterval(ttyStateCheckInterval);
+                        ttyStateCheckInterval = null;
+                        console.error('connectTTY: state did not become IDLE after max retries, forcing IDLE');
+                        ttyState = 'IDLE';
+                        // Retry connection once after forcing IDLE
+                        if (state.activeInst) {
+                            setTimeout(() => connectTTY(), 50);
+                        }
+                    }
+                }, 100);
+                return;
+            }
+
+            ttyState = 'CONNECTING';
             const id = state.activeInst;
             if (!id) { updateStatus("idle"); return; }
             
@@ -1127,16 +1175,17 @@
                 const ws = new WebSocket(url);
                 ws.binaryType = "arraybuffer";
 
-                let isReady = false;
                 let isFirstData = true;
                 let handshakeTimeout = null;
 
                 ws.onopen = () => {
+                    ttyState = 'HANDSHAKING';
                     // Set handshake timeout (5 seconds)
                     handshakeTimeout = setTimeout(() => {
-                        if (!isReady && ws === ttySocket) {
+                        if (ttyState !== 'READY' && ws === ttySocket) {
                             console.error('WebSocket handshake timeout: no "ready" message received');
                             updateStatus("handshake timeout");
+                            ttyState = 'DISCONNECTING';
                             ws.close();
                             // Fallback to SSE after timeout
                             setTimeout(() => startSSE(), 500);
@@ -1145,11 +1194,11 @@
                 };
                 ws.onmessage = (ev) => {
                     // Handle handshake: wait for "ready" message first
-                    if (!isReady) {
+                    if (ttyState !== 'READY') {
                         try {
                             const msg = JSON.parse(ev.data);
                             if (msg.type === 'ready') {
-                                isReady = true;
+                                ttyState = 'READY';
                                 // Clear handshake timeout
                                 if (handshakeTimeout) {
                                     clearTimeout(handshakeTimeout);
@@ -1177,7 +1226,7 @@
                     } else if (term) term.write(ev.data);
                     
                     // After receiving first data (after ready), trigger resize for TUI redraw
-                    if (isFirstData && isReady && term) {
+                    if (isFirstData && ttyState === 'READY' && term) {
                         isFirstData = false;
                         setTimeout(() => {
                             if (term && ws === ttySocket && ws.readyState === WebSocket.OPEN) {
@@ -1198,6 +1247,7 @@
                         clearTimeout(handshakeTimeout);
                         handshakeTimeout = null;
                     }
+                    ttyState = 'IDLE';
                     if (ttySocket === ws) {
                         updateStatus("ws closed, retrying...");
                         ttyReconnectTimer = setTimeout(connectTTY, 1000);
