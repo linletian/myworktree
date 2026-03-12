@@ -11,10 +11,20 @@ var (
 	// Generic bearer-like secrets in logs.
 	bearerPattern = regexp.MustCompile(`\bBearer\s+[A-Za-z0-9._-]{16,}\b`)
 	// Terminal control sequence remnants (without ESC prefix)
-	// Matches patterns like [<35;55;34M, [535;52;38M, [<row;col;modifierM, etc.
-	// These are typically cursor/position reports or mouse event reports
-	// The < is optional to handle both [<...M and [...M formats
-	controlSeqRemnant = regexp.MustCompile(`\[<?\d+(?:;\d+)+[MmRr]`)
+	// Matches mouse events and cursor position reports from TUI programs.
+	// Uses heuristics to avoid false positives:
+	// - At least one parameter must be >= 10 (large coord or button)
+	// - Must end with M/m (mouse) or R/r (cursor report)
+	// - Optional leading [ and < for SGR mode
+	// Examples matched: [<0;107;35M (mouse), 35;107;1M (no prefix), [35;107R (cursor)
+	// Examples NOT matched: [1;2;3] (array), [0] (index), normal text
+	controlSeqRemnant = regexp.MustCompile(`(?:\[)?(?:<)?(?:` +
+		`\d{2,};\d+[MmRr]|` + // big;any (2 params: cursor or mouse)
+		`\d+;\d{2,}[MmRr]|` + // any;big (2 params)
+		`\d{2,};\d{2,};\d+[MmRr]|` + // big;big;any (3 params: mouse)
+		`\d{2,};\d+;\d{2,}[MmRr]|` + // big;any;big
+		`\d+;\d{2,};\d{2,}[MmRr]` + // any;big;big
+		`)`)
 )
 
 func Text(s string) string {
