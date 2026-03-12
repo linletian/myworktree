@@ -325,26 +325,33 @@ func (m *Manager) SendInput(id string, input string) error {
 	}
 
 	// Process control characters (Ctrl+C/Z/\)
-	// These send signals to the process group and return immediately.
-	// Any characters after the control character in the same input are discarded.
-	// This matches real terminal behavior where Ctrl+C interrupts immediately.
-	// Rationale: once a signal is sent, the process state changes (may exit/suspend),
-	// and sending additional input is usually not meaningful.
+	// These send signals to the process group for immediate termination.
+	// We also write the character to stdin as a fallback, matching real terminal behavior.
 	for _, ch := range input {
 		switch ch {
 		case 0x03:
 			if cmd != nil && cmd.Process != nil {
 				_ = terminatePID(cmd.Process.Pid, syscall.SIGINT)
 			}
+			// Also write to stdin as fallback (original behavior in v0.1.0)
+			if _, err := io.WriteString(in, string(ch)); err != nil {
+				return err
+			}
 			return nil
 		case 0x1A:
 			if cmd != nil && cmd.Process != nil {
 				_ = terminatePID(cmd.Process.Pid, syscall.SIGTSTP)
 			}
+			if _, err := io.WriteString(in, string(ch)); err != nil {
+				return err
+			}
 			return nil
 		case 0x1C:
 			if cmd != nil && cmd.Process != nil {
 				_ = terminatePID(cmd.Process.Pid, syscall.SIGQUIT)
+			}
+			if _, err := io.WriteString(in, string(ch)); err != nil {
+				return err
 			}
 			return nil
 		}
