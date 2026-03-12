@@ -57,6 +57,61 @@ func TestControlSequenceRemnants(t *testing.T) {
 			in:   "array[0] and array[1]",
 			want: "array[0] and array[1]",
 		},
+		{
+			name: "mouse event without leading bracket",
+			in:   "text35;107;1Mmore",
+			want: "textmore",
+		},
+		{
+			name: "multiple mouse events without brackets",
+			in:   "35;107;1M35;106;2M35;105;3M",
+			want: "",
+		},
+		{
+			name: "SGR mouse with single digit button",
+			in:   "[<0;100;50M",
+			want: "",
+		},
+		{
+			name: "cursor position report",
+			in:   "[35;107R",
+			want: "",
+		},
+		{
+			name: "cursor report without bracket",
+			in:   "35;107R",
+			want: "",
+		},
+		{
+			name: "scroll wheel events",
+			in:   "64;80;24M65;80;24M",
+			want: "",
+		},
+		{
+			name: "mixed with text",
+			in:   "Error: 35;107;1M occurred",
+			want: "Error:  occurred",
+		},
+		{
+			name: "RGB color (no terminator)",
+			in:   "color: [255;0;0]",
+			want: "color: [255;0;0]",
+		},
+		{
+			name: "small ambiguous coords (preserve)",
+			in:   "pos: [0;5;9M",
+			want: "pos: [0;5;9M",
+		},
+		{
+			name: "JSON array",
+			in:   `{"data": [100, 200]}`,
+			want: `{"data": [100, 200]}`,
+		},
+		{
+			name: "CSS rgb notation",
+			in:   "background: rgb(255, 0, 0)",
+			want: "background: rgb(255, 0, 0)",
+		},
 	}
 
 	for _, tt := range tests {
