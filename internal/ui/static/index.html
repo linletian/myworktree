@@ -942,12 +942,15 @@
         let fitAddon = null;
         let windowHasFocus = true;
         let openDialogs = new Set();
+        let ttyState = 'IDLE'; // IDLE | CONNECTING | HANDSHAKING | READY | DISCONNECTING
+        let ttyStateCheckInterval = null; // For waiting state transitions
 
         function focusTerminalIfPossible() {
             if (!term) return;
             if (!windowHasFocus) return;
             if (openDialogs.size > 0) return;
             if (!state.activeInst) return;
+            if (ttyState !== 'READY') return; // CRITICAL: Only focus when connection is ready
             const inst = state.instances.find(i => i.id === state.activeInst);
             if (inst && inst.status !== 'running') return;
             
@@ -1004,6 +1007,39 @@
                 const inst = state.instances.find(i => i.id === state.activeInst);
                 if (inst && inst.status !== 'running') return; // Disable input if not running
 
+                // =====================================================================
+                // Terminal Query Response Filtering
+                // =====================================================================
+                // 
+                // Background: When xterm.js receives terminal query sequences (e.g.,
+                // ESC[c for Device Attributes), it generates responses and sends them
+                // via this onData() callback. If forwarded to PTY, these responses
+                // appear as garbage text in the shell.
+                //
+                // Problem: After TUI programs exit, the shell may send capability
+                // queries. xterm.js responds, and the response is displayed as
+                // unwanted text like: ;1R, rgb:0b0b/1010/2020, ?2027;0$y
+                //
+                // Current Solution: Filter detected responses before forwarding.
+                //
+                // Known Limitations (see docs/TERMINAL_FILTER_REVIEW.md):
+                // 1. Cannot distinguish user intent - user's intentional ESC sequences
+                //    (e.g., scripts testing terminal) may be incorrectly filtered.
+                // 2. Regex may miss edge cases or cause false positives.
+                // 3. Small coordinate reports may be incorrectly filtered.
+                // 4. Some response types (DSR, etc.) not explicitly covered.
+                // 5. Filter is in input path; see review doc for alternative approaches.
+                //
+                // If issues arise, refer to:
+                // - docs/TERMINAL_FILTER_REVIEW.md for detailed analysis
+                // - docs/TERMINAL_IO_ANALYSIS.md for architecture
+                // =====================================================================
+                
+                if (isTerminalQueryResponse(data)) {
+                    console.debug('Filtered terminal response:', data.length, 'bytes');
+                    return;
+                }
+
                 if (ttySocket && ttySocket.readyState === WebSocket.OPEN) {
                     ttySocket.send(data);
                 } else {
@@ -1021,6 +1057,68 @@
                     }
                 }
             });
+        }
+
+        // Minimum length for terminal response detection
+        const MIN_RESPONSE_LENGTH = 2;
+
+        // =====================================================================
+        // Terminal Query Response Detection
+        // =====================================================================
+        // 
+        // Detects xterm.js auto-generated responses that should NOT be forwarded
+        // to the PTY. These responses are generated when xterm.js receives
+        // terminal query sequences.
+        //
+        // Response Types Handled:
+        // - OSC responses: ESC]11;rgb:... (background color), ESC]4;... (palette)
+        // - CSI responses: ESC[?1;2c (Device Attributes), ESC[?2027;0$y (DEC mode)
+        // - Cursor Position: ESC[row;colR or fragment ;colR
+        // - Partial fragments: Missing ESC prefix due to data split
+        //
+        // CRITICAL LIMITATIONS:
+        // - User-sent sequences matching these patterns WILL BE FILTERED
+        // - Some legitimate sequences may be caught (false positives)
+        // - See docs/TERMINAL_FILTER_REVIEW.md for complete analysis
+        //
+        // DO NOT MODIFY without reviewing:
+        // - docs/TERMINAL_FILTER_REVIEW.md (Section 3: Coverage Gap Analysis)
+        // - docs/TERMINAL_IO_ANALYSIS.md (Section 2.2: ESC Prefix Handling)
+        // =====================================================================
+        
+        function isTerminalQueryResponse(data) {
+            if (!data || data.length < MIN_RESPONSE_LENGTH) return false;
+            
+            // Check for ESC prefix
+            if (data.charCodeAt(0) !== 0x1b) {
+                // No ESC - check for partial response patterns (missing ESC[ prefix)
+                // Pattern: ;1R, 1;1R, ;1;1R (cursor position report suffix)
+                // These appear when ESC[ is stripped from the response
+                if (/^;?\d+(;\d+)?R$/i.test(data)) return true;
+                // Pattern: ?1;1$y (DEC mode report suffix)
+                if (/^\?\d+(;\d+)*\$y$/i.test(data)) return true;
+                // Pattern: rgb:hex/hex/hex (OSC color response suffix)
+                if (/^rgb:/i.test(data)) return true;
+                return false;
+            }
+            
+            // OSC responses: \x1b]... (color queries, etc.)
+            if (data[1] === ']' || data[1] === 'P') return true;
+            
+            // CSI responses starting with ? (private mode reports)
+            if (data[1] === '[' && data.length > 2 && data[2] === '?') {
+                // DEC private mode report: ?...$y
+                if (/\$\d*y$/.test(data)) return true;
+                // Device attributes: ?...c
+                if (/\?[\d;]+c$/.test(data)) return true;
+                // Cursor position report: ?...R
+                if (/\?[\d;]+R$/i.test(data)) return true;
+            }
+            
+            // Standard CSI cursor position: \x1b[row;colR
+            if (data[1] === '[' && /\[\d+;\d+R$/i.test(data)) return true;
+            
+            return false;
         }
 
         // Auto-focus terminal when window gains focus and no dialogs are open
@@ -1102,18 +1200,64 @@
         }
 
         function disconnectTTY() {
+            // Clear any pending state check interval
+            if (ttyStateCheckInterval) {
+                clearInterval(ttyStateCheckInterval);
+                ttyStateCheckInterval = null;
+            }
+            // Set DISCONNECTING if there's an active socket, otherwise IDLE
+            // The onclose handler will transition to IDLE after socket closes
+            if (ttySocket) {
+                ttyState = 'DISCONNECTING';
+            } else {
+                ttyState = 'IDLE';
+            }
             if (ttyReconnectTimer) clearTimeout(ttyReconnectTimer);
             if (logStream) { logStream.close(); logStream = null; }
             if (ttySocket) { ttySocket.close(); ttySocket = null; }
         }
 
         function connectTTY() {
+            // Phase 1: Disconnect Previous (already done in disconnectTTY)
             disconnectTTY();
+
+            // Phase 3.1: Validate state before establishing new connection
+            // Must be IDLE before transitioning to CONNECTING (per §5.3)
+            if (ttyState !== 'IDLE') {
+                console.warn('connectTTY: invalid state transition from', ttyState, '- waiting for IDLE');
+                // Wait for state to become IDLE before proceeding, with max 10 retries (1 second)
+                let retries = 0;
+                const maxRetries = 10;
+                ttyStateCheckInterval = setInterval(() => {
+                    retries++;
+                    if (ttyState === 'IDLE' || ttyState === undefined) {
+                        clearInterval(ttyStateCheckInterval);
+                        ttyStateCheckInterval = null;
+                        // Retry connection
+                        if (state.activeInst) {
+                            setTimeout(() => connectTTY(), 50);
+                        }
+                    } else if (retries >= maxRetries) {
+                        clearInterval(ttyStateCheckInterval);
+                        ttyStateCheckInterval = null;
+                        console.error('connectTTY: state did not become IDLE after max retries, forcing IDLE');
+                        ttyState = 'IDLE';
+                        // Retry connection once after forcing IDLE
+                        if (state.activeInst) {
+                            setTimeout(() => connectTTY(), 50);
+                        }
+                    }
+                }, 100);
+                return;
+            }
+
+            ttyState = 'CONNECTING';
             const id = state.activeInst;
             if (!id) { updateStatus("idle"); return; }
             
             const inst = state.instances.find(i => i.id === id);
             if (inst && inst.status !== 'running') {
+                ttyState = 'IDLE'; // Reset state before returning
                 updateStatus("stopped");
                 return;
             }
@@ -1127,16 +1271,17 @@
                 const ws = new WebSocket(url);
                 ws.binaryType = "arraybuffer";
 
-                let isReady = false;
                 let isFirstData = true;
                 let handshakeTimeout = null;
 
                 ws.onopen = () => {
+                    ttyState = 'HANDSHAKING';
                     // Set handshake timeout (5 seconds)
                     handshakeTimeout = setTimeout(() => {
-                        if (!isReady && ws === ttySocket) {
+                        if (ttyState !== 'READY' && ws === ttySocket) {
                             console.error('WebSocket handshake timeout: no "ready" message received');
                             updateStatus("handshake timeout");
+                            ttyState = 'DISCONNECTING';
                             ws.close();
                             // Fallback to SSE after timeout
                             setTimeout(() => startSSE(), 500);
@@ -1145,11 +1290,11 @@
                 };
                 ws.onmessage = (ev) => {
                     // Handle handshake: wait for "ready" message first
-                    if (!isReady) {
+                    if (ttyState !== 'READY') {
                         try {
                             const msg = JSON.parse(ev.data);
                             if (msg.type === 'ready') {
-                                isReady = true;
+                                ttyState = 'READY';
                                 // Clear handshake timeout
                                 if (handshakeTimeout) {
                                     clearTimeout(handshakeTimeout);
@@ -1177,7 +1322,7 @@
                     } else if (term) term.write(ev.data);
                     
                     // After receiving first data (after ready), trigger resize for TUI redraw
-                    if (isFirstData && isReady && term) {
+                    if (isFirstData && ttyState === 'READY' && term) {
                         isFirstData = false;
                         setTimeout(() => {
                             if (term && ws === ttySocket && ws.readyState === WebSocket.OPEN) {
@@ -1198,9 +1343,16 @@
                         clearTimeout(handshakeTimeout);
                         handshakeTimeout = null;
                     }
+                    ttyState = 'IDLE';
                     if (ttySocket === ws) {
-                        updateStatus("ws closed, retrying...");
-                        ttyReconnectTimer = setTimeout(connectTTY, 1000);
+                        // Only reconnect if instance is still running
+                        const inst = state.instances.find(i => i.id === state.activeInst);
+                        if (inst && inst.status === 'running') {
+                            updateStatus("ws closed, retrying...");
+                            ttyReconnectTimer = setTimeout(connectTTY, 1000);
+                        } else {
+                            updateStatus("stopped");
+                        }
                     }
                 };
                 ttySocket = ws;
