@@ -477,6 +477,7 @@
         let ttyReconnectTimer = null;
         let termInputBuffer = "";
         let termSendTimer = null;
+        let ttyOutputDecoder = null;
 
         // API
         function rememberServerRevision(res) {
@@ -945,6 +946,40 @@
         let ttyState = 'IDLE'; // IDLE | CONNECTING | HANDSHAKING | READY | DISCONNECTING
         let ttyStateCheckInterval = null; // For waiting state transitions
 
+        function resetTTYOutputDecoder() {
+            ttyOutputDecoder = null;
+        }
+
+        function sanitizeTerminalOutput(text) {
+            if (!text) return "";
+            text = text.replace(/\x1b?\]11;[^\x07\x1b]*(\x07|\x1b\\|($|[\r\n]))/g, '');
+            text = text.replace(/\x1b?\]4;[^\x07\x1b]*(\x07|\x1b\\|($|[\r\n]))/g, '');
+            text = text.replace(/\x1b?\](\d+;)?rgb:[^\x07\x1b\r\n]+/g, '');
+            text = text.replace(/\x1b?\[\?[\d;]*\$y/g, '');
+            text = text.replace(/\x1b?\[\?[\d;]+c/g, '');
+            text = text.replace(/\x1b?\[;?\d+(;\d+)?R/g, '');
+            text = text.replace(/;?\d+(;\d+)*;rgb:[^\r\n]+/g, '');
+            text = text.replace(/;?\d+(;\d+)+\$y/g, '');
+            text = text.replace(/\d+;\d+\$y/g, '');
+            text = text.replace(/;?\d+(;\d+)*R(?!\w)/g, '');
+            text = text.replace(/\d+;\d+c(?!\w)/g, '');
+            return text;
+        }
+
+        function writeSanitizedTerminalOutput(text) {
+            if (!term) return;
+            text = sanitizeTerminalOutput(text);
+            if (text) term.write(text);
+        }
+
+        function decodeTTYOutputChunk(bytes) {
+            if (!bytes || !bytes.length) return "";
+            if (!ttyOutputDecoder) {
+                ttyOutputDecoder = new TextDecoder();
+            }
+            return ttyOutputDecoder.decode(bytes, { stream: true });
+        }
+
         function focusTerminalIfPossible() {
             if (!term) return;
             if (!windowHasFocus) return;
@@ -1180,25 +1215,7 @@
                         // Only reset for stopped instances
                         term.reset();
                     }
-                    
-                    // Filter out terminal query responses from ALL log content
-                    // These appear after TUI programs exit and confuse the shell
-                    // OSC responses (color queries) - with or without ESC prefix
-                    text = text.replace(/\x1b?\]11;[^\x07\x1b]*(\x07|\x1b\\|($|[\r\n]))/g, '');
-                    text = text.replace(/\x1b?\]4;[^\x07\x1b]*(\x07|\x1b\\|($|[\r\n]))/g, '');
-                    text = text.replace(/\x1b?\](\d+;)?rgb:[^\x07\x1b\r\n]+/g, '');
-                    // CSI responses - with or without ESC prefix
-                    text = text.replace(/\x1b?\[\?[\d;]*\$y/g, '');      // DEC mode report
-                    text = text.replace(/\x1b?\[\?[\d;]+c/g, '');           // Device attributes
-                    text = text.replace(/\x1b?\[;?\d+(;\d+)?R/g, '');      // Cursor position report
-                    // Standalone responses (missing ESC and [)
-                    text = text.replace(/;?\d+(;\d+)*;rgb:[^\r\n]+/g, '');  // Partial OSC
-                    text = text.replace(/;?\d+(;\d+)+\$y/g, '');             // Partial DEC mode (10;16;2$y)
-                    text = text.replace(/\d+;\d+\$y/g, '');                   // Standalone DEC mode (2027;0$y)
-                    text = text.replace(/;?\d+(;\d+)*R(?!\w)/g, '');         // Partial cursor report
-                    text = text.replace(/\d+;\d+c(?!\w)/g, '');               // Standalone Device Attr (1;2c)
-                    
-                    term.write(text);
+                    writeSanitizedTerminalOutput(text);
                     
                     // Check if stopped and append banner
                     if (inst && inst.status !== 'running') {
@@ -1216,27 +1233,13 @@
                 if (!res.ok) throw new Error();
                 let text = await res.text();
                 const next = parseInt(res.headers.get("X-Log-Offset") || "0", 10);
-                // Filter terminal query responses from ALL incremental log updates
-                // Same filtering as loadLog() for consistency
-                if (text) {
-                    text = text.replace(/\x1b?\]11;[^\x07\x1b]*(\x07|\x1b\\|($|[\r\n]))/g, '');
-                    text = text.replace(/\x1b?\]4;[^\x07\x1b]*(\x07|\x1b\\|($|[\r\n]))/g, '');
-                    text = text.replace(/\x1b?\](\d+;)?rgb:[^\x07\x1b\r\n]+/g, '');
-                    text = text.replace(/\x1b?\[\?[\d;]*\$y/g, '');
-                    text = text.replace(/\x1b?\[\?[\d;]+c/g, '');
-                    text = text.replace(/\x1b?\[;?\d+(;\d+)?R/g, '');
-                    text = text.replace(/;?\d+(;\d+)*;rgb:[^\r\n]+/g, '');
-                    text = text.replace(/;?\d+(;\d+)+\$y/g, '');
-                    text = text.replace(/\d+;\d+\$y/g, '');
-                    text = text.replace(/;?\d+(;\d+)*R(?!\w)/g, '');
-                    text = text.replace(/\d+;\d+c(?!\w)/g, '');
-                }
-                if (text && term) term.write(text);
+                writeSanitizedTerminalOutput(text);
                 if (next) logCursor = next;
             } catch (e) { }
         }
 
         function disconnectTTY() {
+            resetTTYOutputDecoder();
             // Clear any pending state check interval
             if (ttyStateCheckInterval) {
                 clearInterval(ttyStateCheckInterval);
@@ -1305,6 +1308,7 @@
                 let url = `${proto}://${location.host}/api/instances/tty/ws?id=${encodeURIComponent(id)}`;
                 if (token) url += `&token=${encodeURIComponent(token)}`;
 
+                resetTTYOutputDecoder();
                 const ws = new WebSocket(url);
                 ws.binaryType = "arraybuffer";
 
@@ -1356,35 +1360,10 @@
                     if (ev.data instanceof ArrayBuffer) {
                         const u8 = new Uint8Array(ev.data);
                         if (u8.length && term) {
-                            // Decode and filter terminal query responses
-                            let text = new TextDecoder().decode(u8);
-                            text = text.replace(/\x1b?\]11;[^\x07\x1b]*(\x07|\x1b\\|($|[\r\n]))/g, '');
-                            text = text.replace(/\x1b?\]4;[^\x07\x1b]*(\x07|\x1b\\|($|[\r\n]))/g, '');
-                            text = text.replace(/\x1b?\](\d+;)?rgb:[^\x07\x1b\r\n]+/g, '');
-                            text = text.replace(/\x1b?\[\?[\d;]*\$y/g, '');
-                            text = text.replace(/\x1b?\[\?[\d;]+c/g, '');
-                            text = text.replace(/\x1b?\[;?\d+(;\d+)?R/g, '');
-                            text = text.replace(/;?\d+(;\d+)*;rgb:[^\r\n]+/g, '');
-                            text = text.replace(/;?\d+(;\d+)+\$y/g, '');
-                            text = text.replace(/\d+;\d+\$y/g, '');
-                            text = text.replace(/;?\d+(;\d+)*R(?!\w)/g, '');
-                            text = text.replace(/\d+;\d+c(?!\w)/g, '');
-                            term.write(text);
+                            writeSanitizedTerminalOutput(decodeTTYOutputChunk(u8));
                         }
                     } else if (term) {
-                        let text = ev.data;
-                        text = text.replace(/\x1b?\]11;[^\x07\x1b]*(\x07|\x1b\\|($|[\r\n]))/g, '');
-                        text = text.replace(/\x1b?\]4;[^\x07\x1b]*(\x07|\x1b\\|($|[\r\n]))/g, '');
-                        text = text.replace(/\x1b?\](\d+;)?rgb:[^\x07\x1b\r\n]+/g, '');
-                        text = text.replace(/\x1b?\[\?[\d;]*\$y/g, '');
-                        text = text.replace(/\x1b?\[\?[\d;]+c/g, '');
-                        text = text.replace(/\x1b?\[;?\d+(;\d+)?R/g, '');
-                        text = text.replace(/;?\d+(;\d+)*;rgb:[^\r\n]+/g, '');
-                        text = text.replace(/;?\d+(;\d+)+\$y/g, '');
-                        text = text.replace(/\d+;\d+\$y/g, '');
-                        text = text.replace(/;?\d+(;\d+)*R(?!\w)/g, '');
-                        text = text.replace(/\d+;\d+c(?!\w)/g, '');
-                        term.write(text);
+                        writeSanitizedTerminalOutput(ev.data);
                     }
                     
                     // After receiving first data (after ready), trigger resize for TUI redraw
@@ -1405,6 +1384,7 @@
                 };
                 
                 ws.onclose = () => {
+                    resetTTYOutputDecoder();
                     // Clear handshake timeout on close
                     if (handshakeTimeout) {
                         clearTimeout(handshakeTimeout);
@@ -1438,7 +1418,7 @@
             const onLog = (ev) => {
                 try {
                     const msg = JSON.parse(ev.data);
-                    if (msg.chunk && term) term.write(msg.chunk);
+                    if (msg.chunk && term) writeSanitizedTerminalOutput(msg.chunk);
                     if (msg.next) logCursor = msg.next;
                 } catch (e) { }
             };
