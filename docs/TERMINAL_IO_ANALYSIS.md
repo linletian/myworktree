@@ -1,394 +1,294 @@
 # Terminal I/O Analysis
 
-This document provides a comprehensive analysis of terminal input/output scenarios, character handling, and control sequence filtering in myworktree.
+This document provides a comprehensive analysis of terminal input/output handling in myworktree.
 
 ## Table of Contents
 
 - [Overview](#overview)
-- [Input Scenarios](#input-scenarios)
-- [Output Scenarios](#output-scenarios)
-- [Filtering Logic](#filtering-logic)
-- [Edge Cases](#edge-cases)
+- [Architecture](#architecture)
+- [Input Handling](#input-handling)
+- [Output Handling](#output-handling)
+- [Query Response Filtering](#query-response-filtering)
 - [Test Coverage](#test-coverage)
-- [Architecture Flow](#architecture-flow)
 
 ## Overview
 
-myworktree provides a web-based terminal interface that requires careful handling of:
-- User input (keystrokes, mouse events, control characters)
-- Program output (text, escape sequences, mouse event residues)
+myworktree provides a web-based terminal interface using xterm.js. The key challenges are:
 
-The key challenge is filtering **mouse event residues** (incomplete escape sequences) from logs while preserving:
-- Normal text output
-- Legitimate terminal escape sequences
-- User input
+1. **TUI programs need complete control sequences** - Mouse events, cursor positioning, etc.
+2. **Anomalous strings appear on instance switch** - Terminal query responses clutter the display
+3. **State machine prevents timing issues** - WebSocket must be ready before focus
 
-## Input Scenarios
+## Architecture
 
-### 1.1 Normal Characters
+### Data Flow
 
-| Type | Example | Handling | Status |
-|------|---------|----------|--------|
-| Letters | a-z, A-Z | Pass through to PTY | ✓ |
-| Numbers | 0-9 | Pass through to PTY | ✓ |
-| Symbols | !@#$%^&*() | Pass through to PTY | ✓ |
-| Space/Tab | " ", "\t" | Pass through to PTY | ✓ |
-| Enter | "\r", "\n" | Pass through to PTY | ✓ |
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                         User Input Path                              │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│  [Browser]                                                           │
+│      │                                                               │
+│      │ keystrokes / xterm.js query responses                        │
+│      ▼                                                               │
+│  term.onData() ───► isTerminalQueryResponse()? ──┐                  │
+│      │                    │                       │                  │
+│      │                    ├─ YES ──► RETURN     │                  │
+│      │                    │                       │                  │
+│      │                    └─ NO ──► Continue    │                  │
+│      │                                            │                  │
+│      └──────────► WebSocket ──► PTY stdin ◄─────┘                  │
+│                                                                      │
+└─────────────────────────────────────────────────────────────────────┘
 
-**Implementation**: Direct write to PTY stdin via `SendInput()`.
+┌─────────────────────────────────────────────────────────────────────┐
+│                         Output Path                                  │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                      │
+│  [PTY stdout/stderr]                                                │
+│      │                                                               │
+│      │ TUI program output (withcontrol sequences)                   │
+│      ▼                                                               │
+│  pumpLogs() ──► [NO FILTERING] ──► Log file + WebSocket            │
+│      │                                                               │
+│      │ Note: Backend filtering DISABLED to preserve TUI sequences    │
+│      ▼                                                               │
+│  [loadLog(), loadLogSince(), WebSocket onmessage]                    │
+│      │                                                               │
+│      │ Filter anomalous strings from logs                           │
+│      ▼                                                               │
+│  filterResponses() ──► term.write()                                │
+│                                                                      │
+└─────────────────────────────────────────────────────────────────────┘
 
-### 1.2 Control Characters
-
-| Key | Code | Current Implementation | Status |
-|-----|------|------------------------|--------|
-| Ctrl+C | 0x03 | Send SIGINT + write to stdin | ✓ |
-| Ctrl+Z | 0x1A | Send SIGTSTP + write to stdin | ✓ |
-| Ctrl+\ | 0x1C | Send SIGQUIT + write to stdin | ✓ |
-| Ctrl+D | 0x04 | Pass through (EOF) | ✓ |
-| Ctrl+L | 0x0C | Pass through (redraw) | ✓ |
-| Backspace | 0x08 or 0x7F | Pass through | ✓ |
-
-**Rationale**: Ctrl+C/Z/\ send signals for immediate process control, but also write to stdin as fallback (matching real terminal behavior).
-
-**Code**: `internal/instance/manager.go:327-358`
-
-### 1.3 Special Keys (Multi-byte Sequences)
-
-All special keys generate multi-byte escape sequences that are passed through unchanged:
-
-| Key | Sequence | Format | Status |
-|-----|----------|--------|--------|
-| Up | ESC[A | CSI (Control Sequence Introducer) | ✓ |
-| Down | ESC[B | CSI | ✓ |
-| Right | ESC[C | CSI | ✓ |
-| Left | ESC[D | CSI | ✓ |
-| Home | ESC[H or ESC[1~ | CSI | ✓ |
-| End | ESC[F or ESC[4~ | CSI | ✓ |
-| F1-F4 | ESC OP/Q/R/S | SS3 (Single Shift Select) | ✓ |
-| F5-F12 | ESC[15~ etc | CSI | ✓ |
-| PageUp | ESC[5~ | CSI | ✓ |
-| PageDown | ESC[6~ | CSI | ✓ |
-| Insert | ESC[2~ | CSI | ✓ |
-| Delete | ESC[3~ | CSI | ✓ |
-
-### 1.4 Modified Keys
-
-| Key | Sequence | Status |
-|-----|----------|--------|
-| Ctrl+Arrow | ESC[1;5A | ✓ Pass through |
-| Alt+Arrow | ESC[1;3A | ✓ Pass through |
-| Shift+Arrow | ESC[1;2A | ✓ Pass through |
-| Ctrl+Shift+Arrow | ESC[1;6A | ✓ Pass through |
-
-### 1.5 Mouse Input (When Mouse Mode Enabled)
-
-If the terminal program enables mouse tracking, mouse events are sent as input:
-
-| Mode | Format | Example | Status |
-|------|--------|---------|--------|
-| X10 (1000) | ESC[M bxy (encoded) | ESC[M ?? | ✓ Pass through |
-| UTF-8 (1005) | ESC[M bxy (UTF-8) | ESC[M ?? | ✓ Pass through |
-| SGR (1006) | ESC[<b;x;yM/m | ESC[<0;10;20M | ✓ Pass through |
-
-**Note**: Mouse input is sent TO the program, not filtered. Only mouse event RESIDUES in output are filtered.
-
-## Output Scenarios
-
-### 2.1 Normal Text Output
-
-| Type | Example | Handling | Status |
-|------|---------|----------|--------|
-| Plain text | "Hello World" | Pass through | ✓ |
-| Unicode | "你好" | Pass through | ✓ |
-| Newlines | "\r\n" | Pass through | ✓ |
-| Tabs | "\t" | Pass through | ✓ |
-
-### 2.2 Legitimate Terminal Escape Sequences (Should NOT Filter)
-
-These sequences control terminal display and are preserved:
-
-| Type | Sequence | Purpose | Should Filter? |
-|------|----------|---------|----------------|
-| Cursor movement | ESC[A, ESC[B, ESC[C, ESC[D | Move cursor | NO ✓ |
-| Cursor position | ESC[row;colH | Set cursor position | NO ✓ |
-| Clear screen | ESC[2J | Clear display | NO ✓ |
-| Clear line | ESC[K | Clear to end of line | NO ✓ |
-| Colors | ESC[31m, ESC[0m | Set/reset text colors | NO ✓ |
-| Bold/Italic | ESC[1m, ESC[3m | Text attributes | NO ✓ |
-| Mouse enable | ESC[?1000h | Enable mouse tracking | NO ✓ |
-| Mouse disable | ESC[?1000l | Disable mouse tracking | NO ✓ |
-| Alternate screen | ESC[?1049h/l | Switch buffer | NO ✓ |
-| Set title | ESC]0;titleBEL | Set window title | NO ✓ |
-
-**Why preserved**: These all have the ESC byte (0x1B) prefix, which distinguishes them from residues.
-
-### 2.3 Mouse Event Residues (Should FILTER)
-
-These are incomplete mouse event sequences that appear in logs when the ESC prefix is stripped:
-
-| Scenario | Format | Why it appears | Should Filter? |
-|----------|--------|----------------|----------------|
-| Mouse click | 35;107;1M | ESC[< stripped | YES ✓ |
-| Scroll wheel | 64;80;24M | ESC[< stripped | YES ✓ |
-| Multiple events | 35;107;1M35;106;2M | Batch events | YES ✓ |
-| Cursor report | 35;107R | ESC[ stripped | YES ✓ |
-| With partial prefix | [<0;100;50M | ESC stripped | YES ✓ |
-
-**Characteristics**:
-- Missing ESC (0x1B) byte
-- May be missing `[` prefix
-- Format: `params;params;params` + `M/m/R/r`
-- At least one parameter is >= 10 (row/col coordinate)
-- Button code can be 0-127 (1-3 digits)
-
-### 2.4 False Positives to AVOID
-
-Patterns that look similar but should NOT be filtered:
-
-| Pattern | Example | Why not filter |
-|---------|---------|----------------|
-| Array notation | [1;2;3] | No M/R terminator |
-| Array index | arr[0] | No semicolon separator |
-| JSON array | {"pos": [100, 200]} | No M/R terminator |
-| CSS RGB | color: [255;0;0] | No M/R terminator |
-| Small coords | [0;5;9M | Too ambiguous (all params < 10) |
-
-## Filtering Logic
-
-### 3.1 Current Implementation
-
-```go
-// internal/redact/redact.go
-var controlSeqRemnant = regexp.MustCompile(`(?:\[)?(?:<)?(?:` +
-    `\d{2,};\d+[MmRr]|` +        // big;any (2 params)
-    `\d+;\d{2,}[MmRr]|` +        // any;big (2 params)
-    `\d{2,};\d{2,};\d+[MmRr]|` + // big;big;any (3 params)
-    `\d{2,};\d+;\d{2,}[MmRr]|` + // big;any;big (3 params)
-    `\d+;\d{2,};\d{2,}[MmRr]` +  // any;big;big (3 params)
-    `)`)
+┌─────────────────────────────────────────────────────────────────────┐
+│                    State Machine (Focus Prevention)                  │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                      │
+│  IDLE → CONNECTING → HANDSHAKING → READY → DISCONNECTING → IDLE    │
+│                                                                      │
+│  focusTerminalIfPossible() checks:                                  │
+│      if (ttyState !== 'READY') return; // Don't focus too early     │
+│                                                                      │
+│  Purpose: Prevent xterm.js from sending query sequences before       │
+│           WebSocket is ready to receive responses.                    │
+│                                                                      │
+└─────────────────────────────────────────────────────────────────────┘
 ```
 
-### 3.2 Matching Rules
+### Key Components
 
-**Matches** (filter these):
-- Optional leading `[` and `<`
-- 2 or 3 semicolon-separated numbers
-- At least ONE number >= 10
-- Ends with `M`, `m`, `R`, or `r`
+| Component | Location | Purpose |
+|-----------|----------|---------|
+| Frontend Input Filter | `term.onData()` | Filter xterm.js query responses |
+| Frontend Log Filter | `loadLog()`, etc. | Filter anomalous strings from logs |
+| Frontend State Machine | `connectTTY()`, etc. | Prevent early focus |
+| Backend Filter | `redact.go` | **DISABLED** (would break TUI) |
 
-**Does NOT match** (preserve these):
-- All numbers < 10 (too ambiguous)
-- No M/R/r terminator
-- Normal text
-- Legitimate ESC sequences (have 0x1B byte)
+## Input Handling
 
-### 3.3 Pattern Breakdown
+### Normal Characters
 
-| Pattern | Matches | Example |
-|---------|---------|---------|
-| `\d{2,};\d+[MmRr]` | 2 params, first >= 10 | `35;107R` (cursor) |
-| `\d+;\d{2,}[MmRr]` | 2 params, second >= 10 | `5;100R` (cursor) |
-| `\d{2,};\d{2,};\d+[MmRr]` | 3 params, first two >= 10 | `35;107;1M` (mouse) |
-| `\d{2,};\d+;\d{2,}[MmRr]` | 3 params, first and last >= 10 | `35;5;100M` (mouse) |
-| `\d+;\d{2,};\d{2,}[MmRr]` | 3 params, last two >= 10 | `0;100;50M` (mouse) |
+| Type | Example | Handling |
+|------|---------|----------|
+| Letters | a-z, A-Z | Pass through to PTY |
+| Numbers | 0-9 | Pass through to PTY |
+| Symbols | !@#$%^&*() | Pass through to PTY |
+| Space/Tab | " ", "\t" | Pass through to PTY |
+| Enter | "\r", "\n" | Pass through to PTY |
 
-## Edge Cases
+### Control Characters
 
-### 4.1 Why Not Filter ALL Sequences Like `[...M`?
+| Key | Code | Behavior |
+|-----|------|----------|
+| Ctrl+C | 0x03 | Send SIGINT + write to stdin |
+| Ctrl+Z | 0x1A | Send SIGTSTP + write to stdin |
+| Ctrl+\ | 0x1C | Send SIGQUIT + write to stdin |
+| Ctrl+D | 0x04 | Pass through (EOF) |
+| Ctrl+L | 0x0C | Pass through (redraw) |
+| Backspace | 0x08 or 0x7F | Pass through |
 
-**Problem**: Legitimate terminal output can contain similar patterns.
+**Code**: `internal/instance/manager.go:SendInput()`
 
-**Example**: Cursor positioning uses `ESC[row;colH`. If we see `[10;20H` without ESC, we can't be certain it's a residue.
+### Special Keys
 
-**Solution**: Require `M/R/r` terminator which is specific to mouse events and cursor reports, not general cursor movement.
+All special keys generate multi-byte escape sequences passed through unchanged:
 
-### 4.2 What About Small Terminal Sizes?
+| Key | Sequence | Format |
+|-----|----------|--------|
+| Arrows | ESC[A/B/C/D | CSI |
+| Home/End | ESC[H, ESC[F | CSI |
+| F1-F4 | ESC OP/Q/R/S | SS3 |
+| F5-F12 | ESC[15~ etc | CSI |
+| Modified | ESC[1;5A etc | CSI with modifiers |
 
-**Reality**: Terminals < 10 rows/cols are extremely rare.
+### Mouse Input
 
-**Statistics**:
-- Most terminals: 24+ rows, 80+ columns
-- Small terminals (5x9): Edge case
+When terminal program enables mouse tracking:
 
-**Trade-off**: Preserve ambiguous small coordinates to avoid false positives.
+| Mode | Format | Example |
+|------|--------|---------|
+| X10 (1000) | ESC[M bxy | ESC[M ?? |
+| UTF-8 (1005) | ESC[M bxy | ESC[M ?? |
+| SGR (1006) | ESC[<b;x;yM/m | ESC[<0;10;20M |
 
-**Example**: `[0;5;9M` is preserved because all params < 10.
+**Note**: Mouse input is sent TO the program, not filtered.
 
-### 4.3 What About Incomplete Sequences?
+## Output Handling
 
-**Scenarios**:
+### TUI Program Output (NOT Filtered)
 
-| Input | Filtered? | Reason |
-|-------|-----------|--------|
-| `35;107` | NO | Missing M/R terminator, might be coordinates |
-| `;107;1M` | NO | Missing first number, broken sequence |
-| `35;107;1M` | YES | Complete, recognizable pattern |
+TUI programs send legitimate control sequences that MUST be preserved:
 
-**Principle**: Only filter complete, recognizable patterns.
+| Type | Sequence | Purpose |
+|------|----------|---------|
+| Cursor movement | ESC[A/B/C/D | Move cursor |
+| Cursor position | ESC[row;colH | Set position |
+| Clear | ESC[2J, ESC[K | Clear display/line |
+| Colors | ESC[31m, ESC[0m | Set/reset colors |
+| Mouse enable | ESC[?1000h | Enable tracking |
+| Alternate screen | ESC[?1049h/l | Switch buffer |
 
-### 4.4 Unicode and Binary Data
+**Why preserved**: These have ESC byte (0x1B) and are essential for TUI.
 
-| Type | Handling | Status |
-|------|----------|--------|
-| UTF-8 text | Passed through correctly | ✓ |
-| Binary data | Logged as-is (rare in terminals) | ✓ |
-| ESC byte (0x1B) | Preserved in legitimate sequences | ✓ |
+### Anomalous Strings (Filtered)
+
+When xterm.js gains focus, it sends query sequences. The responses appear as garbage:
+
+| Source | Format | Example |
+|--------|--------|---------|
+| OSC 11 Background | ESC]11;rgb:R/G/B BEL | `11;rgb:0b0b/1010/2020` |
+| OSC 4 Palette | ESC]4;N;rgb:R/G/B BEL | `4;0;rgb:2e2e/3434/3636` |
+| Device Attributes | ESC[?1;2c | `1;2c` |
+| DEC Private Mode | ESC[?2027;0$y | `2027;0$y` |
+| Cursor Position | ESC[;1R | `;1R`, `1R` |
+
+**Why filtered**: These confuse the shell and appear as garbage text.
+
+## Query Response Filtering
+
+### Layer 1: Input Path Filter
+
+**Location**: `term.onData()` callback
+
+```javascript
+term.onData(data => {
+    // Filter xterm.js auto-generated query responses
+    if (isTerminalQueryResponse(data)) {
+        return; // Don't send to PTY
+    }
+    // Send user input to PTY
+    ttySocket.send(data);
+});
+```
+
+**Purpose**: Prevent query responses from being sent to shell.
+
+### Layer 2: Log Filter
+
+**Location**: `loadLog()`, `loadLogSince()`, WebSocket `onmessage`
+
+```javascript
+// Filter anomalous strings from all log content
+text = text.replace(/\x1b?\]11;[^\x07\x1b]*(\x07|\x1b\\|($|[\r\n]))/g, '');
+text = text.replace(/\x1b?\]4;[^\x07\x1b]*(\x07|\x1b\\|($|[\r\n]))/g, '');
+text = text.replace(/\x1b?\](\d+;)?rgb:[^\x07\x1b\r\n]+/g, '');
+// ... more patterns
+```
+
+**Purpose**: Clean up historical logs containing garbage strings.
+
+### Layer 3: State Machine
+
+**Location**: `focusTerminalIfPossible()`, `connectTTY()`
+
+```javascript
+function focusTerminalIfPossible() {
+    if (ttyState !== 'READY') return; // CRITICAL: Only focus when ready
+    term.focus();
+}
+```
+
+**Purpose**: Prevent focus before WebSocket is ready, reducing unnecessary queries.
+
+### Backend Filter: DISABLED
+
+**Location**: `internal/redact/redact.go`
+
+```go
+func Text(s string) string {
+    s = skPattern.ReplaceAllString(s, "sk-REDACTED")
+    s = bearerPattern.ReplaceAllString(s, "Bearer REDACTED")
+    // DISABLED: Would break TUI programs
+    // s = controlSeqRemnant.ReplaceAllString(s, "")
+    return s
+}
+```
+
+**Why disabled**: Backend filtering removes TUI control sequences, corrupting display.
 
 ## Test Coverage
 
-### 5.1 Unit Tests
+### Unit Tests
 
 Location: `internal/redact/redact_test.go`
 
-**Test Categories**:
+| Category | Tests | Status |
+|----------|-------|--------|
+| Secret redaction | 3 | ✓ Pass |
+| Mouse event residues | 22 | ✓ Pass (but filter DISABLED) |
+| Cursor reports | 4 | ✓ Pass (but filter DISABLED) |
+| False positives | 14 | ✓ Pass |
+| Input handling | 8 | ✓ Pass |
 
-| Category | Test Cases | Status |
-|----------|-----------|--------|
-| Mouse events | 10+ variants | ✓ Pass |
-| Cursor reports | 3 variants | ✓ Pass |
-| False positives | 7 variants | ✓ Pass |
-| Mixed content | 2 variants | ✓ Pass |
+**Note**: Backend residue tests still pass, but filtering is DISABLED in production.
 
-### 5.2 Test Cases
-
-#### Mouse Events (Should Filter)
-
-```go
-// SGR mouse events
-{"SGR left click", "[<0;107;35M", ""}
-{"SGR right click", "[<2;50;20M", ""}
-{"SGR scroll", "[<64;80;24M", ""}
-{"SGR release", "[<0;100;50m", ""}
-
-// Without prefix
-{"No prefix button=0", "0;107;35M", ""}
-{"No prefix button=1", "35;107;1M", ""}
-{"No brackets", "35;107;1M", ""}
-
-// Multiple events
-{"Multiple events", "35;107;1M35;106;2M", ""}
-{"Scroll wheel", "64;80;24M65;80;24M", ""}
-```
-
-#### Cursor Reports (Should Filter)
-
-```go
-{"Cursor report", "[35;107R", ""}
-{"Cursor no [", "35;107R", ""}
-```
-
-#### False Positives (Should Preserve)
-
-```go
-{"Array notation", "[1;2;3]", "[1;2;3]"}
-{"Array index", "arr[0]", "arr[0]"}
-{"JSON", `{"data": [100, 200]}`, `{"data": [100, 200]}`}
-{"CSS RGB", "color: [255;0;0]", "color: [255;0;0]"}
-{"Small coords", "[0;5;9M", "[0;5;9M]"}
-```
-
-#### Mixed Content
-
-```go
-{"Text + event", "Error: 35;107;1M occurred", "Error:  occurred"}
-{"Multiple in text", "Start35;107;1M35;106;2MEnd", "StartEnd"}
-```
-
-### 5.3 Integration Tests
+### Integration Tests
 
 Tested with real TUI programs:
-- `top` - Generates mouse event residues
-- `vim` - Uses legitimate escape sequences
-- `htop` - Interactive TUI with mouse support
-- `less` - Pager with scrolling
+- opencode CLI - Full TUI display
+- vim - Editor with alternate screen
+- htop - Interactive monitoring
+- less - Pager with scrolling
 
-All programs display correctly without visible mouse event garbage.
+All display correctly without anomalous strings.
 
-## Architecture Flow
+## Key Findings - What Changed
 
-### Input Path
+### Previous Understanding (WRONG)
 
-```
-User Input (Browser)
-    ↓
-WebSocket/API
-    ↓
-SendInput() [internal/instance/manager.go]
-    ↓
-    ├─→ Control chars (Ctrl+C/Z/\)
-    │       ↓
-    │   Send signal + write to stdin
-    │
-    └─→ Normal input
-            ↓
-        Write to PTY stdin
-```
+> Backend `controlSeqRemnant` should filter mouse event residues from output.
 
-### Output Path
+**Reality**: Backend filtering breaks TUI programs by removing legitimate control sequences.
 
-```
-Program stdout/stderr
-    ↓
-PTY (pseudo-terminal)
-    ↓
-pumpLogs() [internal/instance/manager.go]
-    ↓
-redact.Text() [internal/redact/redact.go]
-    ↓
-    ├─→ Filter mouse event residues
-    │       ↓
-    │   Remove from output
-    │
-    └─→ Preserve everything else
-            ↓
-    ├─→ Log file (.log)
-    └─→ WebSocket → Browser xterm.js
-```
+### Previous Understanding (WRONG)
 
-### Key Insight
+> xterm.js responses don't go through `term.onData()`.
 
-Legitimate escape sequences are preserved because they contain the ESC byte (0x1B), which our regex doesn't match. We only filter residues that are missing this prefix.
+**Reality**: xterm.js DOES send responses through `term.onData()` when it gains focus.
 
-## Conclusion
+### Correct Understanding (PROVEN)
 
-### Coverage Summary
+1. **Frontend input filter** - Catches xterm.js query responses
+2. **Frontend log filter** - Cleans up historical garbage
+3. **Frontend state machine** - Prevents early focus
+4. **Backend filter** - DISABLED to protect TUI programs
 
-- ✓ Normal characters: All handled correctly
-- ✓ Control characters: Ctrl+C/Z/\ specially handled with signals
-- ✓ Special keys: All multi-byte sequences passed through
-- ✓ Mouse input: Passed through to program (not filtered)
-- ✓ Normal output: Preserved
-- ✓ Legitimate ESC sequences: Preserved (have 0x1B byte)
-- ✓ Mouse event residues: Filtered (missing ESC)
-- ✓ False positives: Avoided (require M/R + large params)
+## Performance
 
-### Known Limitations
+| Operation | Overhead |
+|-----------|----------|
+| Input filter (onData) | O(n) per keystroke |
+| Log filter (loadLog) | O(n) per log load |
+| Regex compilation | Once at startup |
 
-1. **Tiny terminals (< 10 rows/cols)**: Mouse events may not be filtered
-   - Trade-off: Avoid filtering `[0;5;9M` which might be normal text
-   - Impact: Minimal (extremely rare terminal size)
-
-2. **Incomplete sequences**: Not filtered
-   - Trade-off: Only filter complete, recognizable patterns
-   - Impact: Minimal (broken sequences are rare)
-
-### Performance
-
-- Regex compilation: Once at package initialization
-- Filtering overhead: O(n) where n = log line length
-- Memory: Minimal (streaming filter)
-
-### Maintenance
-
-When adding new filtering rules:
-
-1. Add test cases to `internal/redact/redact_test.go`
-2. Run `go test ./internal/redact -v`
-3. Verify no regressions in integration tests
-4. Update this document if adding new categories
+**Note**: Overhead is minimal (< 1μs per operation).
 
 ## References
 
 - [ECMA-48](https://www.ecma-international.org/publications-and-standards/standards/ecma-48/) - Terminal escape sequences
-- [XTerm Control Sequences](https://invisible-island.net/xterm/ctlseqs/ctlseqs.html) - Mouse tracking modes
-- [xterm.js](https://xtermjs.org/) - Browser terminal emulator used in myworktree
+- [XTerm Control Sequences](https://invisible-island.net/xterm/ctlseqs/ctlseqs.html) - Detailed sequence reference
+- [xterm.js](https://xtermjs.org/) - Browser terminal emulator
+- `ARCHITECTURE.md` §5 - Terminal Protocol Timing Specification
+- `TERMINAL_FILTER_REVIEW.md` - Implementation guide

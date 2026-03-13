@@ -158,6 +158,7 @@ Bi-directional stream for terminal output/input with PTY support.
 2. Client should wait for this message before sending resize
 3. Client sends `{"type":"resize","cols":80,"rows":24}` to start data flow
 4. Server sends initial log + real-time output as binary frames
+5. Client receives first data and triggers second resize (50ms delay) for TUI redraw
 
 **Message Types:**
 
@@ -184,6 +185,11 @@ Client                    Server
    |    "cols":80,"rows":24} |
    |                         |
    |<-- binary output -------|  Initial log + realtime
+   |                         |
+   |--- (50ms delay) -------|
+   |                         |
+   |-- {"type":"resize", --->|  Trigger TUI redraw
+   |    "cols":80,"rows":24} |
    |                         |
    |--- input bytes -------->|  User input
    |<-- binary output -------|  Process output

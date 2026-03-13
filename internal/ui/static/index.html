@@ -1035,8 +1035,13 @@
                 // - docs/TERMINAL_IO_ANALYSIS.md for architecture
                 // =====================================================================
                 
+                // Filter xterm.js auto-generated query responses from user input
+                // When xterm.js gains focus, it sends queries and generates responses.
+                // These responses appear in term.onData() and should NOT be sent to PTY.
+                // See docs/TERMINAL_FILTER_REVIEW.md for analysis.
+                // Known limitations: May filter user's intentional ESC sequences (rare).
                 if (isTerminalQueryResponse(data)) {
-                    console.debug('Filtered terminal response:', data.length, 'bytes');
+                    // console.debug('Filtered terminal response:', data.length, 'bytes');
                     return;
                 }
 
@@ -1162,7 +1167,7 @@
                 const res = await fetch(`/api/instances/log?id=${state.activeInst}&since=0`, { headers });
                 rememberServerRevision(res);
                 if (!res.ok) throw new Error(await res.text());
-                const text = await res.text();
+                let text = await res.text();
                 const next = parseInt(res.headers.get("X-Log-Offset") || "0", 10);
                 logCursor = next || text.length;
                 if (term) { 
@@ -1173,8 +1178,25 @@
                     
                     if (!isRunning) {
                         // Only reset for stopped instances
-                        term.reset(); 
+                        term.reset();
                     }
+                    
+                    // Filter out terminal query responses from ALL log content
+                    // These appear after TUI programs exit and confuse the shell
+                    // OSC responses (color queries) - with or without ESC prefix
+                    text = text.replace(/\x1b?\]11;[^\x07\x1b]*(\x07|\x1b\\|($|[\r\n]))/g, '');
+                    text = text.replace(/\x1b?\]4;[^\x07\x1b]*(\x07|\x1b\\|($|[\r\n]))/g, '');
+                    text = text.replace(/\x1b?\](\d+;)?rgb:[^\x07\x1b\r\n]+/g, '');
+                    // CSI responses - with or without ESC prefix
+                    text = text.replace(/\x1b?\[\?[\d;]*\$y/g, '');      // DEC mode report
+                    text = text.replace(/\x1b?\[\?[\d;]+c/g, '');           // Device attributes
+                    text = text.replace(/\x1b?\[;?\d+(;\d+)?R/g, '');      // Cursor position report
+                    // Standalone responses (missing ESC and [)
+                    text = text.replace(/;?\d+(;\d+)*;rgb:[^\r\n]+/g, '');  // Partial OSC
+                    text = text.replace(/;?\d+(;\d+)+\$y/g, '');             // Partial DEC mode (10;16;2$y)
+                    text = text.replace(/\d+;\d+\$y/g, '');                   // Standalone DEC mode (2027;0$y)
+                    text = text.replace(/;?\d+(;\d+)*R(?!\w)/g, '');         // Partial cursor report
+                    text = text.replace(/\d+;\d+c(?!\w)/g, '');               // Standalone Device Attr (1;2c)
                     
                     term.write(text);
                     
@@ -1192,8 +1214,23 @@
                 const res = await fetch(`/api/instances/log?id=${state.activeInst}&since=${logCursor}`, { headers });
                 rememberServerRevision(res);
                 if (!res.ok) throw new Error();
-                const text = await res.text();
+                let text = await res.text();
                 const next = parseInt(res.headers.get("X-Log-Offset") || "0", 10);
+                // Filter terminal query responses from ALL incremental log updates
+                // Same filtering as loadLog() for consistency
+                if (text) {
+                    text = text.replace(/\x1b?\]11;[^\x07\x1b]*(\x07|\x1b\\|($|[\r\n]))/g, '');
+                    text = text.replace(/\x1b?\]4;[^\x07\x1b]*(\x07|\x1b\\|($|[\r\n]))/g, '');
+                    text = text.replace(/\x1b?\](\d+;)?rgb:[^\x07\x1b\r\n]+/g, '');
+                    text = text.replace(/\x1b?\[\?[\d;]*\$y/g, '');
+                    text = text.replace(/\x1b?\[\?[\d;]+c/g, '');
+                    text = text.replace(/\x1b?\[;?\d+(;\d+)?R/g, '');
+                    text = text.replace(/;?\d+(;\d+)*;rgb:[^\r\n]+/g, '');
+                    text = text.replace(/;?\d+(;\d+)+\$y/g, '');
+                    text = text.replace(/\d+;\d+\$y/g, '');
+                    text = text.replace(/;?\d+(;\d+)*R(?!\w)/g, '');
+                    text = text.replace(/\d+;\d+c(?!\w)/g, '');
+                }
                 if (text && term) term.write(text);
                 if (next) logCursor = next;
             } catch (e) { }
@@ -1304,22 +1341,51 @@
                                     updateStatus("websocket live");
                                     focusTerminalIfPossible();
                                 }
-                                // Send initial resize to backend
+                                // Send initial resize to start data flow
                                 if (term && term.cols > 0 && term.rows > 0) {
                                     sendResize(term.cols, term.rows);
                                 }
                                 return;
                             }
                         } catch (e) {
-                            // Not JSON, treat as data
+                            // Not JSON, treat as data (shouldn't happen before ready)
                         }
                     }
 
                     // Handle binary/text data
                     if (ev.data instanceof ArrayBuffer) {
                         const u8 = new Uint8Array(ev.data);
-                        if (u8.length && term) term.write(u8);
-                    } else if (term) term.write(ev.data);
+                        if (u8.length && term) {
+                            // Decode and filter terminal query responses
+                            let text = new TextDecoder().decode(u8);
+                            text = text.replace(/\x1b?\]11;[^\x07\x1b]*(\x07|\x1b\\|($|[\r\n]))/g, '');
+                            text = text.replace(/\x1b?\]4;[^\x07\x1b]*(\x07|\x1b\\|($|[\r\n]))/g, '');
+                            text = text.replace(/\x1b?\](\d+;)?rgb:[^\x07\x1b\r\n]+/g, '');
+                            text = text.replace(/\x1b?\[\?[\d;]*\$y/g, '');
+                            text = text.replace(/\x1b?\[\?[\d;]+c/g, '');
+                            text = text.replace(/\x1b?\[;?\d+(;\d+)?R/g, '');
+                            text = text.replace(/;?\d+(;\d+)*;rgb:[^\r\n]+/g, '');
+                            text = text.replace(/;?\d+(;\d+)+\$y/g, '');
+                            text = text.replace(/\d+;\d+\$y/g, '');
+                            text = text.replace(/;?\d+(;\d+)*R(?!\w)/g, '');
+                            text = text.replace(/\d+;\d+c(?!\w)/g, '');
+                            term.write(text);
+                        }
+                    } else if (term) {
+                        let text = ev.data;
+                        text = text.replace(/\x1b?\]11;[^\x07\x1b]*(\x07|\x1b\\|($|[\r\n]))/g, '');
+                        text = text.replace(/\x1b?\]4;[^\x07\x1b]*(\x07|\x1b\\|($|[\r\n]))/g, '');
+                        text = text.replace(/\x1b?\](\d+;)?rgb:[^\x07\x1b\r\n]+/g, '');
+                        text = text.replace(/\x1b?\[\?[\d;]*\$y/g, '');
+                        text = text.replace(/\x1b?\[\?[\d;]+c/g, '');
+                        text = text.replace(/\x1b?\[;?\d+(;\d+)?R/g, '');
+                        text = text.replace(/;?\d+(;\d+)*;rgb:[^\r\n]+/g, '');
+                        text = text.replace(/;?\d+(;\d+)+\$y/g, '');
+                        text = text.replace(/\d+;\d+\$y/g, '');
+                        text = text.replace(/;?\d+(;\d+)*R(?!\w)/g, '');
+                        text = text.replace(/\d+;\d+c(?!\w)/g, '');
+                        term.write(text);
+                    }
                     
                     // After receiving first data (after ready), trigger resize for TUI redraw
                     if (isFirstData && ttyState === 'READY' && term) {
@@ -1329,6 +1395,7 @@
                                 const cols = term.cols;
                                 const rows = term.rows;
                                 if (cols > 0 && rows > 0) {
+                                    // Send resize to backend and trigger local redraw
                                     sendResize(cols, rows);
                                     term.resize(cols, rows);
                                 }

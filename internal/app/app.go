@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -518,70 +519,116 @@ func (s *Server) handleInstanceTTYWS(w http.ResponseWriter, r *http.Request) {
 	}
 	defer conn.Close()
 
+	// Step 1: Send handshake ready message
 	readyMsg := []byte(`{"type":"ready"}`)
 	if err := conn.WriteText(readyMsg); err != nil {
 		return
 	}
 
-	initial, err := s.instanceMgr.Tail(id, 64*1024)
-	if err != nil {
-		_ = conn.WriteBinary([]byte(err.Error()))
-		return
+	// Step 2: Start single goroutine to read all messages
+	type wsMessage struct {
+		op   byte
+		data []byte
 	}
-	if initial != "" {
-		_ = conn.WriteBinary([]byte(initial))
-	}
-
-	ch, cancel, err := s.instanceMgr.SubscribeOutput(id)
-	if err != nil {
-		_ = conn.WriteBinary([]byte(err.Error()))
-		return
-	}
-	defer cancel()
-
-	done := make(chan struct{})
+	msgChan := make(chan wsMessage, 64)
 	go func() {
-		defer close(done)
+		defer close(msgChan)
 		for {
 			op, data, err := conn.ReadMessage()
 			if err != nil {
 				return
 			}
-			if ws.IsClose(op) {
+			msgChan <- wsMessage{op: op, data: data}
+		}
+	}()
+
+	// Step 3: Wait for first resize message (with timeout)
+	handshakeComplete := false
+	var outputChan <-chan string
+	var cancel context.CancelFunc
+	defer func() {
+		if cancel != nil {
+			cancel()
+		}
+	}()
+
+	handshakeTimer := time.NewTimer(5 * time.Second)
+	defer handshakeTimer.Stop()
+
+	completeHandshake := func() bool {
+		initial, err := s.instanceMgr.Tail(id, 64*1024)
+		if err != nil {
+			_ = conn.WriteBinary([]byte(err.Error()))
+			return false
+		}
+		if initial != "" {
+			_ = conn.WriteBinary([]byte(initial))
+		}
+
+		ch, cancelFn, err := s.instanceMgr.SubscribeOutput(id)
+		if err != nil {
+			_ = conn.WriteBinary([]byte(err.Error()))
+			return false
+		}
+		cancel = cancelFn
+		outputChan = ch
+		return true
+	}
+
+	for {
+		select {
+		case msg, ok := <-msgChan:
+			if !ok {
+				return
+			}
+
+			if ws.IsClose(msg.op) {
 				_ = conn.WriteClose(ws.CloseMessage(1000, "bye"))
 				return
 			}
-			if ws.IsPing(op) {
-				_ = conn.WritePong(data)
+			if ws.IsPing(msg.op) {
+				_ = conn.WritePong(msg.data)
 				continue
 			}
-			if !ws.IsDataOpcode(op) {
+			if !ws.IsDataOpcode(msg.op) {
 				continue
 			}
-			// Check if it's a resize message
+
 			var resizeMsg struct {
 				Type string `json:"type"`
 				Cols int    `json:"cols"`
 				Rows int    `json:"rows"`
 			}
-			if err := json.Unmarshal(data, &resizeMsg); err == nil && resizeMsg.Type == "resize" {
-				if resizeMsg.Cols > 0 && resizeMsg.Rows > 0 {
-					_ = s.instanceMgr.Resize(id, resizeMsg.Cols, resizeMsg.Rows)
+			isResize := json.Unmarshal(msg.data, &resizeMsg) == nil && resizeMsg.Type == "resize"
+
+			if isResize && resizeMsg.Cols > 0 && resizeMsg.Rows > 0 {
+				_ = s.instanceMgr.Resize(id, resizeMsg.Cols, resizeMsg.Rows)
+			}
+
+			if !handshakeComplete && isResize {
+				handshakeComplete = true
+				handshakeTimer.Stop()
+				if !completeHandshake() {
+					return
 				}
 				continue
 			}
-			// Otherwise, treat as input
-			if err := s.instanceMgr.SendInput(id, string(data)); err != nil {
-				return
-			}
-		}
-	}()
 
-	for {
-		select {
-		case <-done:
-			return
-		case chunk, ok := <-ch:
+			if handshakeComplete && !isResize {
+				if err := s.instanceMgr.SendInput(id, string(msg.data)); err != nil {
+					return
+				}
+			}
+
+		case <-handshakeTimer.C:
+			if !handshakeComplete {
+				handshakeComplete = true
+				if !completeHandshake() {
+					return
+				}
+			}
+
+		case chunk, ok := <-outputChan:
 			if !ok {
 				return
 			}
