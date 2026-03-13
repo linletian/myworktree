@@ -30,8 +30,10 @@ var (
 func Text(s string) string {
 	s = skPattern.ReplaceAllString(s, "sk-REDACTED")
 	s = bearerPattern.ReplaceAllString(s, "Bearer REDACTED")
-	// Remove terminal control sequence remnants (e.g., from TUI programs like top)
-	s = controlSeqRemnant.ReplaceAllString(s, "")
+	// DISABLED: Backend control sequence filtering breaks TUI programs
+	// This filter removes sequences in real-time, corrupting TUI display.
+	// Sequences are filtered in frontend (loadLog) only for stopped instances.
+	// s = controlSeqRemnant.ReplaceAllString(s, "")
 	return s
 }
 
