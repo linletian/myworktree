@@ -190,6 +190,109 @@ When implementing or modifying terminal connection code, verify:
 - [ ] Dialog close delays focus until connection is ready
 - [ ] Window focus event respects connection state
 
+### 5.9 Terminal Query Response Filtering
+
+#### Background & Problem Statement
+
+When xterm.js receives terminal query sequences (e.g., `ESC[c` for Device Attributes), it generates responses (e.g., `ESC[?1;2c`) and sends them via the `term.onData()` callback. These responses are intended to be forwarded to the PTY, which then interprets them.
+
+However, in certain scenarios, these responses may:
+1. Be displayed as garbage text in the terminal
+2. Confuse shell programs (zsh, bash) that receive unexpected input
+3. Appear as split sequences due to data fragmentation
+
+#### Observed Behavior
+
+After a TUI program (like `opencode` CLI) exits and returns to the shell prompt:
+- The shell may send terminal capability queries
+- xterm.js responds to these queries
+- The responses are sent to PTY via `term.onData()`
+- The shell displays these responses as text: `;1R`, `rgb:0b0b/1010/2020`, `?2027;0$y`
+
+#### Root Cause Analysis
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                     Data Flow Diagram                               │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│  [Shell in PTY]                                                     │
+│       │                                                             │
+│       │ sends query: ESC[c (Device Attributes)                     │
+│       ▼                                                             │
+│  [PTY stdout] ──► [WebSocket] ──► [xterm.js term.write()]           │
+│                                           │                         │
+│                                           │ xterm.js generates      │
+│                                           │ response: ESC[?1;2c    │
+│                                           ▼                         │
+│                                    [term.onData()]                  │
+│                                           │                         │
+│                                           │ forwarded back          │
+│                                           ▼                         │
+│  [Shell in PTY] ◄── [WebSocket] ◄── [SendInput]                    │
+│       │                                                             │
+│       │ shell receives unexpected input                             │
+│       ▼                                                             │
+│  [Displayed as garbage text]                                        │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+The issue occurs because:
+1. Shell sends terminal query to check capabilities (normal behavior)
+2. xterm.js receives query and generates response
+3. Response is forwarded back to PTY via `term.onData()` → `SendInput()`
+4. Shell receives response as keyboard input and displays it
+
+#### Current Mitigation
+
+The frontend implements a response filter in `term.onData()`:
+
+```javascript
+term.onData(data => {
+    // Filter out terminal query responses
+    if (isTerminalQueryResponse(data)) {
+        console.debug('Filtered terminal response:', data.length, 'bytes');
+        return;
+    }
+    // ... forward to WebSocket
+});
+```
+
+The `isTerminalQueryResponse()` function detects:
+- Complete sequences with ESC prefix: `ESC]11;rgb:...`, `ESC[?1;2c`, `ESC[?2027;0$y`
+- Partial sequences (split or fragmented): `;1R`, `rgb:...`, `?2027;0$y`
+
+#### Known Limitations & Risks
+
+**⚠️ This implementation has limitations documented in `docs/TERMINAL_FILTER_REVIEW.md`:**
+
+1. **Cannot distinguish user intent**: If a user intentionally sends `ESC[c` to query terminal attributes, it will be filtered as well.
+
+2. **Regex limitations**: CSI patterns may have edge cases not covered.
+
+3. **False positives on small coordinates**: Cursor position reports with small coordinates may be incorrectly filtered.
+
+4. **Incomplete coverage**: Some terminal response types (DSR, etc.) are not explicitly handled.
+
+5. **Architecture consideration**: The filter is placed in the input path (`term.onData`), which handles user keystrokes. See the review document for detailed analysis of input vs output path considerations.
+
+#### Future Considerations
+
+If issues arise with the current filtering approach:
+1. Refer to `docs/TERMINAL_FILTER_REVIEW.md` for detailed analysis
+2. Consider alternative approaches:
+   - Move filtering to the output path (log filtering)
+   - Configure xterm.js to suppress automatic query responses
+   - Add user intent detection (keyed sequences vs automatic responses)
+3. Update `docs/TERMINAL_IO_ANALYSIS.md` with any new findings
+
+#### Related Documents
+
+- `docs/TERMINAL_FILTER_REVIEW.md` - Detailed review of current implementation
+- `docs/TERMINAL_IO_ANALYSIS.md` - Terminal I/O architecture and filtering
+- `docs/TERMINAL_TEST_CASES.md` - Test cases for terminal behavior
+
 ## 6. Security model (single-user)
 - Default listen: loopback only.
 - Non-loopback requires `--auth`.
