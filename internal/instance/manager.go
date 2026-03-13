@@ -318,10 +318,45 @@ func (m *Manager) SendInput(id string, input string) error {
 	}
 	m.mu.Lock()
 	in := m.inputs[id]
+	cmd := m.running[id]
 	m.mu.Unlock()
 	if in == nil {
 		return fmt.Errorf("instance input unavailable: %s", id)
 	}
+
+	// Process control characters (Ctrl+C/Z/\)
+	// These send signals to the process group for immediate termination.
+	// We also write the character to stdin as a fallback, matching real terminal behavior.
+	for _, ch := range input {
+		switch ch {
+		case 0x03:
+			if cmd != nil && cmd.Process != nil {
+				_ = terminatePID(cmd.Process.Pid, syscall.SIGINT)
+			}
+			// Also write to stdin as fallback (original behavior in v0.1.0)
+			if _, err := io.WriteString(in, string(ch)); err != nil {
+				return err
+			}
+			return nil
+		case 0x1A:
+			if cmd != nil && cmd.Process != nil {
+				_ = terminatePID(cmd.Process.Pid, syscall.SIGTSTP)
+			}
+			if _, err := io.WriteString(in, string(ch)); err != nil {
+				return err
+			}
+			return nil
+		case 0x1C:
+			if cmd != nil && cmd.Process != nil {
+				_ = terminatePID(cmd.Process.Pid, syscall.SIGQUIT)
+			}
+			if _, err := io.WriteString(in, string(ch)); err != nil {
+				return err
+			}
+			return nil
+		}
+	}
+
 	if _, err := io.WriteString(in, input); err != nil {
 		return err
 	}
