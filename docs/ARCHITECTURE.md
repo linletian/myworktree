@@ -95,14 +95,19 @@ When switching between instances (worktree or instance tabs), the following sequ
 Phase 1: Disconnect Previous
 ├── 1.1 Call disconnectTTY() - close old WebSocket
 ├── 1.2 Reset logCursor = 0
-└── 1.3 Clear terminal buffers (if terminal exists)
-    ├── For running instances:
-    │   ├── Write '\x1b[?1049l' (exit alternate buffer)
-    │   ├── Write '\x1b[2J\x1b[H' (clear normal buffer, home cursor)
-    │   └── Write '\x1b[?1049h' (re-enter alternate buffer, now clean)
-    └── For stopped instances:
-        ├── Call term.reset()
-        └── Write '\x1b[2J\x1b[3J\x1b[H' (clear screen and scrollback)
+└── 1.3 Reset terminal modes (if terminal exists)
+    │   ├── Write '\x1b[?1000l' (disable mouse button press/release)
+    │   ├── Write '\x1b[?1002l' (disable mouse drag)
+    │   ├── Write '\x1b[?1003l' (disable mouse all motion)
+    │   └── Write '\x1b[?1006l' (disable SGR extended mouse mode)
+    └── 1.4 Clear terminal buffers
+        ├── For running instances:
+        │   ├── Write '\x1b[?1049l' (exit alternate buffer)
+        │   ├── Write '\x1b[2J\x1b[H' (clear normal buffer, home cursor)
+        │   └── Write '\x1b[?1049h' (re-enter alternate buffer, now clean)
+        └── For stopped instances:
+            ├── Call term.reset()
+            └── Write '\x1b[2J\x1b[3J\x1b[H' (clear screen and scrollback)
 
 Phase 2: Load Initial Data
 ├── 2.1 If stopped: loadLog() once, update status to "stopped", DONE
@@ -117,10 +122,13 @@ Phase 3: Establish New Connection (running instances only)
 ├── 3.3 Wait for server {"type": "ready"} message
 ├── 3.4 Set state to READY
 ├── 3.5 Send initial resize: {"type": "resize", "cols": N, "rows": M}
+│   └── TUI programs receive SIGWINCH and re-initialize (including mouse modes)
 └── 3.6 NOW and ONLY NOW: Call focusTerminalIfPossible()
 ```
 
-**Critical Timing Rule:** The terminal MUST NOT receive focus until Phase 3.6 (after `ready` message is received and resize is sent).
+**Critical Timing Rules:**
+1. Terminal modes MUST be reset before switching to prevent mode leakage from previous TUI programs.
+2. The terminal MUST NOT receive focus until Phase 3.6 (after `ready` message is received and resize is sent).
 
 ### 5.4 Focus Management Rules
 
