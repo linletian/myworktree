@@ -739,6 +739,13 @@
             const isRunning = inst && inst.status === 'running';
             
             if (term) {
+                // Reset terminal modes before switching to prevent mode leakage
+                // from previous instance's TUI program (e.g., opencode with mouse tracking)
+                term.write('\x1b[?1000l'); // Disable mouse button press/release
+                term.write('\x1b[?1002l'); // Disable mouse drag
+                term.write('\x1b[?1003l'); // Disable mouse all motion
+                term.write('\x1b[?1006l'); // Disable SGR extended mouse mode
+                
                 if (isRunning) {
                     // For running instances with TUI programs:
                     // Exit alternate buffer, clear normal buffer, re-enter alternate buffer
