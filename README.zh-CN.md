@@ -27,6 +27,8 @@ myworktree 只做管理，不碰项目具体内容：
 ## 功能（MVP）
 - 受管 worktree：创建/列表/纳入管理(import)/删除（严格删除：dirty 则拒绝）
 - 受管 instance：基于 Tag 启动模板启动/停止/重启/列表
+- instance 重启会保留 worktree、tag/命令、labels，并串联旧/新实例记录
+- 支持可选 instance labels（`k=v`），可用于 UI 过滤与搜索
 - 默认 WebSocket Web TTY 交互（并保留 SSE/HTTP 兜底）
 - 前端页面关闭/刷新后：后端 instance 继续运行；重新打开可回放输出并继续交互
 - UI 提供传输状态标记（websocket/sse/polling）和 WS 重连按钮
@@ -56,10 +58,10 @@ myworktree 只做管理，不碰项目具体内容：
 
 ```bash
 # 根据你的 Mac 机型选择对应压缩包，然后校验并解压
-curl -LO https://github.com/linletian/myworktree/releases/download/v0.1.0/myworktree_v0.1.0_darwin_arm64.tar.gz
-curl -LO https://github.com/linletian/myworktree/releases/download/v0.1.0/checksums.txt
+curl -LO https://github.com/linletian/myworktree/releases/download/v0.1.1/myworktree_v0.1.1_darwin_arm64.tar.gz
+curl -LO https://github.com/linletian/myworktree/releases/download/v0.1.1/checksums.txt
 shasum -a 256 -c checksums.txt --ignore-missing
-tar -xzf myworktree_v0.1.0_darwin_arm64.tar.gz
+tar -xzf myworktree_v0.1.1_darwin_arm64.tar.gz
 
 # 可选：安装到 PATH
 sudo install -m 755 ./mw /usr/local/bin/mw
@@ -68,6 +70,8 @@ sudo install -m 755 ./myworktree /usr/local/bin/myworktree
 # 验证下载下来的二进制
 mw --version
 ```
+
+建议从 `v0.1.1` 或更新版本开始使用公开发布版二进制。更早的 `v0.1.0` GitHub Release 资产在补充实测中发现严重终端交互问题后已撤回。
 
 每个发布压缩包内都包含 `mw`、`myworktree`、`README.md`、`LICENSE` 和 `CHANGELOG.md`。
 如果当前还没有预发布/正式发布压缩包，或者你的平台暂无对应产物，就直接使用下面的源码编译步骤。

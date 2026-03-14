@@ -58,10 +58,10 @@ Example:
 
 ```bash
 # Pick the archive that matches your Mac, then verify and unpack it.
-curl -LO https://github.com/linletian/myworktree/releases/download/v0.1.0/myworktree_v0.1.0_darwin_arm64.tar.gz
-curl -LO https://github.com/linletian/myworktree/releases/download/v0.1.0/checksums.txt
+curl -LO https://github.com/linletian/myworktree/releases/download/v0.1.1/myworktree_v0.1.1_darwin_arm64.tar.gz
+curl -LO https://github.com/linletian/myworktree/releases/download/v0.1.1/checksums.txt
 shasum -a 256 -c checksums.txt --ignore-missing
-tar -xzf myworktree_v0.1.0_darwin_arm64.tar.gz
+tar -xzf myworktree_v0.1.1_darwin_arm64.tar.gz
 
 # Optional: install into PATH
 sudo install -m 755 ./mw /usr/local/bin/mw
@@ -70,6 +70,8 @@ sudo install -m 755 ./myworktree /usr/local/bin/myworktree
 # Verify the downloaded binary
 mw --version
 ```
+
+Start from `v0.1.1` or newer for public release binaries. The earlier `v0.1.0` GitHub Release assets were withdrawn after post-release validation uncovered severe terminal interaction issues.
 
 Each release archive contains `mw`, `myworktree`, `README.md`, `LICENSE`, and `CHANGELOG.md`.
 If there is no prerelease/release asset yet, or you need a platform we do not publish, follow the source build steps below.
