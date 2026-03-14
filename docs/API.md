@@ -1,5 +1,7 @@
 # myworktree — HTTP API
 
+> **Note**: This document covers the HTTP API. Terminal-related client-side settings (e.g., scrollback buffer size, font size, theme) are handled by the Web UI and are not part of the backend API.
+
 Base URL: printed when starting `myworktree` or `mw`, e.g. `http://127.0.0.1:50053/`.
 `mw` opens the browser automatically by default; `myworktree` prints the URL unless you pass `-open=true`.
 
@@ -149,9 +151,49 @@ Body:
 ### Web TTY stream (WebSocket)
 `GET /api/instances/tty/ws?id=<instanceId>`
 
-- Bi-directional stream for terminal output/input.
-- Client sends typed bytes as WebSocket text/binary frames.
-- Server pushes terminal output chunks as **binary frames**.
+Bi-directional stream for terminal output/input with PTY support.
+
+**Handshake Protocol:**
+1. Server sends `{"type":"ready"}` immediately after connection
+2. Client should wait for this message before sending resize
+3. Client sends `{"type":"resize","cols":80,"rows":24}` to start data flow
+4. Server sends initial log + real-time output as binary frames
+5. Client receives first data and triggers second resize (50ms delay) for TUI redraw
+
+**Message Types:**
+
+*Client → Server:*
+- Input: text/binary frames (raw bytes)
+- Resize: `{"type":"resize","cols":<number>,"rows":<number>}`
+
+*Server → Client:*
+- Ready: `{"type":"ready"}` (text frame)
+- Output: binary frames (terminal output chunks)
+
+**Timeout & Fallback:**
+- Client should implement handshake timeout (recommended: 5s)
+- On timeout, close WebSocket and fallback to SSE: `GET /api/instances/log/stream?id=<instanceId>`
+
+**Example Flow:**
+```
+Client                    Server
+   |                         |
+   |--- Connect ------------>|
+   |<-- {"type":"ready"} ----|  Handshake
+   |                         |
+   |-- {"type":"resize", --->|  Notify terminal size
+   |    "cols":80,"rows":24} |
+   |                         |
+   |<-- binary output -------|  Initial log + realtime
+   |                         |
+   |--- (50ms delay) -------|
+   |                         |
+   |-- {"type":"resize", --->|  Trigger TUI redraw
+   |    "cols":80,"rows":24} |
+   |                         |
+   |--- input bytes -------->|  User input
+   |<-- binary output -------|  Process output
+```
 
 ### Archive
 `POST /api/instances/archive`

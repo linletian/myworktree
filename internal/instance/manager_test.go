@@ -2,10 +2,12 @@ package instance
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/creack/pty"
 	"myworktree/internal/store"
 )
 
@@ -89,5 +91,76 @@ func TestMarkStopped(t *testing.T) {
 	}
 	if strings.TrimSpace(st.Instances[0].StoppedAt) == "" {
 		t.Fatalf("StoppedAt should be set")
+	}
+}
+
+func TestResize_InvalidParams(t *testing.T) {
+	m := &Manager{}
+
+	// Test empty id
+	if err := m.Resize("", 80, 24); err == nil {
+		t.Fatalf("empty id should return error")
+	}
+
+	// Test whitespace-only id
+	if err := m.Resize("   ", 80, 24); err == nil {
+		t.Fatalf("whitespace-only id should return error")
+	}
+
+	// Test invalid cols
+	if err := m.Resize("test-id", 0, 24); err == nil {
+		t.Fatalf("zero cols should return error")
+	}
+	if err := m.Resize("test-id", -1, 24); err == nil {
+		t.Fatalf("negative cols should return error")
+	}
+
+	// Test invalid rows
+	if err := m.Resize("test-id", 80, 0); err == nil {
+		t.Fatalf("zero rows should return error")
+	}
+	if err := m.Resize("test-id", 80, -1); err == nil {
+		t.Fatalf("negative rows should return error")
+	}
+}
+
+func TestResize_NotFound(t *testing.T) {
+	m := &Manager{}
+	if err := m.Resize("nonexistent-instance", 80, 24); err == nil {
+		t.Fatalf("nonexistent instance should return error")
+	}
+}
+
+func TestResize_Success(t *testing.T) {
+	// Create a real PTY to test Resize functionality
+	// Use bash which is available on both macOS and Linux
+	cmd := exec.Command("bash", "-c", "sleep 60")
+	ptmx, err := pty.Start(cmd)
+	if err != nil {
+		t.Fatalf("failed to start pty: %v", err)
+	}
+	defer ptmx.Close()
+	defer cmd.Process.Kill()
+
+	// Create a manager and inject the PTY
+	m := &Manager{
+		ptys: map[string]*os.File{
+			"test-pty": ptmx,
+		},
+	}
+
+	// Test successful resize
+	if err := m.Resize("test-pty", 120, 40); err != nil {
+		t.Fatalf("Resize failed: %v", err)
+	}
+
+	// Verify the size was set correctly
+	// Note: pty.Getsize returns (rows, cols), not (cols, rows)
+	rows, cols, err := pty.Getsize(ptmx)
+	if err != nil {
+		t.Fatalf("Getsize failed: %v", err)
+	}
+	if cols != 120 || rows != 40 {
+		t.Fatalf("unexpected size: cols=%d, rows=%d, expected cols=120, rows=40", cols, rows)
 	}
 }
