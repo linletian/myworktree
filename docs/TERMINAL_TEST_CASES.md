@@ -129,18 +129,18 @@ These verify terminal state is properly reset when switching instances.
 
 | ID | Test Name | Scenario | Expected Behavior |
 |----|-----------|----------|-------------------|
-| R1 | Mouse mode reset | Instance A has mouse tracking, switch to B | Mousemodesdisabled before switch |
-| R2 | Alternate buffer reset | Instance A in alternate buffer, switch to B | Exit and re-enter alternate buffer |
-| R3 | Stopped instance switch | Instance A stopped, switch to B | Full terminal reset |
-| R4 | Running instance switch | Instance A running TUI, switch to running B | Buffer cleared, modes reset |
-| R5 | Mode re-initialization | Switch to instance with TUI | TUI receives SIGWINCH, re-enables modes |
+| R1 | Full xterm reset | Switch away from any running/stopped instance | Shared xterm state is reset locally before replay/reattach |
+| R2 | Running TUI switch | Instance A running TUI, switch to running B | Buffer is cleared locally; B redraws after resize |
+| R3 | Stopped instance switch | Instance A stopped, switch to B | Screen and scrollback are cleared before log replay |
+| R4 | Mode re-initialization | Switch to instance with TUI | TUI receives SIGWINCH, re-enables modes |
+| R5 | Copilot CLI reattach input | Copilot CLI TUI → other instance → back | Cursor accepts input without requiring Ctrl+C/re-enter |
 
-**Sequences sent on instance switch:**
+**Frontend reset done on instance switch:**
 ```
-\x1b[?1000l  # Disable mouse button press/release
-\x1b[?1002l  # Disable mouse drag
-\x1b[?1003l  # Disable mouse all motion
-\x1b[?1006l  # Disable SGR extended mouse mode
+term.blur()               # release focus from previous attachment
+term.reset()              # clear local xterm modes/private state
+term.clear()              # clear shared scrollback
+\x1b[2J\x1b[3J\x1b[H      # clear display and home cursor
 ```
 
 **Code**: `internal/ui/static/index.html:selectInstance()`
@@ -219,26 +219,39 @@ open http://localhost:8080
    - Switch between A and B multiple times
    - Each TUI should display correctly without artifacts
 
-3. **Chinese output in TUI**:
+3. **Copilot CLI input recovery**:
+   - Create Instance A: run a Copilot CLI TUI command that keeps the cursor active
+   - Create Instance B: run `bash`
+   - Switch A → B → A multiple times
+   - Verify the cursor in A still accepts typing immediately
+   - Verify recovery does not require `Ctrl+C` and re-entering the CLI
+
+4. **Chinese output in TUI**:
    - Create Instance A: run `opencode`
    - Have opencode output Chinese text
    - Switch to Instance B, then back to Instance A
    - Chinese characters should display correctly (no replacement characters)
 
-4. **ESC key handling**:
+5. **ESC key handling**:
    - Create Instance A: run `vim`
    - Press ESC key - should work as expected (exit insert mode)
    - Press sequences like ESC+[ (should not be filtered)
 
+6. **Wheel-to-arrow regression guard**:
+   - In an instance shell, run a TUI that may enable alternate scroll mode, then exit back to shell
+   - Use mouse wheel over terminal
+   - Wheel should scroll history only; shell must not receive `↑/↓` input
+
 ### Expected Behavior on Switch
 
 When switching from Instance A (with TUI) to Instance B:
-1. Terminal sends mouse disable sequences
-2. Terminal exits/re-enters alternate buffer
+1. Frontend xterm is blurred and fully reset locally
+2. Screen and scrollback are cleared
 3. WebSocket disconnects from A
 4. WebSocket connects to B
-5. Resize sent to B → TUI in B receives SIGWINCH
-6. TUI in B re-initializes (re-enables mouse if needed)
+5. Server sends `ready`
+6. Resize sent to B → TUI in B receives SIGWINCH
+7. Terminal is focused after the resize-driven redraw path is established
 
 ## Related Documents
 

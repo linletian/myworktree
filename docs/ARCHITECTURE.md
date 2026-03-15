@@ -95,19 +95,11 @@ When switching between instances (worktree or instance tabs), the following sequ
 Phase 1: Disconnect Previous
 ├── 1.1 Call disconnectTTY() - close old WebSocket
 ├── 1.2 Reset logCursor = 0
-└── 1.3 Reset terminal modes (if terminal exists)
-    │   ├── Write '\x1b[?1000l' (disable mouse button press/release)
-    │   ├── Write '\x1b[?1002l' (disable mouse drag)
-    │   ├── Write '\x1b[?1003l' (disable mouse all motion)
-    │   └── Write '\x1b[?1006l' (disable SGR extended mouse mode)
-    └── 1.4 Clear terminal buffers
-        ├── For running instances:
-        │   ├── Write '\x1b[?1049l' (exit alternate buffer)
-        │   ├── Write '\x1b[2J\x1b[H' (clear normal buffer, home cursor)
-        │   └── Write '\x1b[?1049h' (re-enter alternate buffer, now clean)
-        └── For stopped instances:
-            ├── Call term.reset()
-            └── Write '\x1b[2J\x1b[3J\x1b[H' (clear screen and scrollback)
+└── 1.3 Reset local terminal state (if terminal exists)
+    ├── Blur the current xterm instance so the old attachment stops owning focus
+    ├── Call term.reset() to clear local xterm modes/private state
+    ├── Call term.clear() to drop scrollback in the shared frontend terminal
+    └── Write '\x1b[2J\x1b[3J\x1b[H' to clear display and home cursor
 
 Phase 2: Load Initial Data
 ├── 2.1 If stopped: loadLog() once, update status to "stopped", DONE
@@ -123,11 +115,11 @@ Phase 3: Establish New Connection (running instances only)
 ├── 3.4 Set state to READY
 ├── 3.5 Send initial resize: {"type": "resize", "cols": N, "rows": M}
 │   └── TUI programs receive SIGWINCH and re-initialize (including mouse modes)
-└── 3.6 NOW and ONLY NOW: Call focusTerminalIfPossible()
+└── 3.6 NOW and ONLY NOW: Call focusTerminalIfPossible() on the next tick
 ```
 
 **Critical Timing Rules:**
-1. Terminal modes MUST be reset before switching to prevent mode leakage from previous TUI programs.
+1. The shared frontend xterm instance MUST be fully reset before switching to prevent mode leakage from previous TUI programs.
 2. The terminal MUST NOT receive focus until Phase 3.6 (after `ready` message is received and resize is sent).
 
 ### 5.4 Focus Management Rules
@@ -275,6 +267,8 @@ term.onData(data => {
 The `isTerminalQueryResponse()` function detects:
 - Complete sequences with ESC prefix: `ESC]11;rgb:...`, `ESC[?1;2c`, `ESC[?2027;0$y`
 - Partial sequences (split or fragmented): `;1R`, `rgb:...`, `?2027;0$y`
+
+Additionally, output sanitization strips `ESC[?1007h` (DECSET alternate scroll mode) so wheel events are not translated into Up/Down key input when returning to shell contexts.
 
 #### Known Limitations & Risks
 
