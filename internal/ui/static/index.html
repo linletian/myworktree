@@ -478,6 +478,7 @@
         let termInputBuffer = "";
         let termSendTimer = null;
         let ttyOutputDecoder = null;
+        let refreshInFlight = null;
 
         // API
         function rememberServerRevision(res) {
@@ -505,32 +506,59 @@
         }
 
         // Lifecycle
+        function getActiveInstance() {
+            if (!state.activeInst) return null;
+            return state.instances.find(i => i.id === state.activeInst) || null;
+        }
+
+        function hasLiveTTYConnection() {
+            if (!ttySocket) return false;
+            if (ttySocket.readyState !== WebSocket.OPEN) return false;
+            return ttyState === 'HANDSHAKING' || ttyState === 'READY';
+        }
+
         async function refresh() {
+            if (refreshInFlight) return refreshInFlight;
+
             const overlay = document.getElementById("connection-overlay");
-            try {
-                const [wt, ins, tags, branches] = await Promise.all([
-                    api("/api/worktrees"),
-                    api("/api/instances"),
-                    api("/api/tags"),
-                    api("/api/branches")
-                ]);
-                state.worktrees = wt.worktrees || [];
-                state.instances = ins.instances || [];
-                state.tags = tags.tags || [];
-                state.branches = branches;
-                
-                if (overlay.style.display !== "none") {
-                    overlay.style.display = "none";
-                    if (state.activeInst) {
-                        // Re-hook terminal if we came back
-                        connectTTY();
+            refreshInFlight = (async () => {
+                try {
+                    const [wt, ins, tags, branches] = await Promise.all([
+                        api("/api/worktrees"),
+                        api("/api/instances"),
+                        api("/api/tags"),
+                        api("/api/branches")
+                    ]);
+                    state.worktrees = wt.worktrees || [];
+                    state.instances = ins.instances || [];
+                    state.tags = tags.tags || [];
+                    state.branches = branches;
+                    
+                    const recovered = overlay.style.display !== "none";
+                    if (recovered) {
+                        overlay.style.display = "none";
+                        const inst = getActiveInstance();
+                        if (inst && inst.status === 'running' && !hasLiveTTYConnection()) {
+                            // Only reconnect after a real transport loss. Reconnecting a
+                            // healthy TTY causes long-output TUIs to replay and flicker.
+                            connectTTY();
+                        }
                     }
+                    render();
+                } catch (e) {
+                    console.error(e);
+                    const inst = getActiveInstance();
+                    if (inst && inst.status === 'running' && hasLiveTTYConnection()) {
+                        updateStatus("websocket live (status refresh failed)");
+                        return;
+                    }
+                    overlay.style.display = "flex";
+                } finally {
+                    refreshInFlight = null;
                 }
-                render();
-            } catch (e) { 
-                console.error(e);
-                overlay.style.display = "flex";
-            }
+            })();
+
+            await refreshInFlight;
         }
 
         function init() {
@@ -736,28 +764,9 @@
             
             // Check if the new instance is running
             const inst = id ? state.instances.find(i => i.id === id) : null;
-            const isRunning = inst && inst.status === 'running';
             
             if (term) {
-                // Reset terminal modes before switching to prevent mode leakage
-                // from previous instance's TUI program (e.g., opencode with mouse tracking)
-                term.write('\x1b[?1000l'); // Disable mouse button press/release
-                term.write('\x1b[?1002l'); // Disable mouse drag
-                term.write('\x1b[?1003l'); // Disable mouse all motion
-                term.write('\x1b[?1006l'); // Disable SGR extended mouse mode
-                
-                if (isRunning) {
-                    // For running instances with TUI programs:
-                    // Exit alternate buffer, clear normal buffer, re-enter alternate buffer
-                    // This gives TUI programs a clean slate while maintaining buffer mode
-                    term.write('\x1b[?1049l'); // Exit alternate buffer
-                    term.write('\x1b[2J\x1b[H'); // Clear normal buffer and home cursor
-                    term.write('\x1b[?1049h'); // Re-enter alternate buffer (now clean)
-                } else {
-                    // For stopped instances, do a full reset and clear
-                    term.reset();
-                    term.write('\x1b[2J\x1b[3J\x1b[H'); // Clear screen and scrollback
-                }
+                resetTerminalForSwitch();
             }
 
             render(); // update UI highlights
@@ -959,6 +968,9 @@
 
         function sanitizeTerminalOutput(text) {
             if (!text) return "";
+            // Block DECSET 1007 (alternate scroll mode), which maps mouse wheel
+            // to Up/Down key input in shell contexts.
+            text = text.replace(/\x1b\[\?1007h/g, '');
             text = text.replace(/\x1b?\]11;[^\x07\x1b]*(\x07|\x1b\\|($|[\r\n]))/g, '');
             text = text.replace(/\x1b?\]4;[^\x07\x1b]*(\x07|\x1b\\|($|[\r\n]))/g, '');
             text = text.replace(/\x1b?\](\d+;)?rgb:[^\x07\x1b\r\n]+/g, '');
@@ -985,6 +997,16 @@
                 ttyOutputDecoder = new TextDecoder();
             }
             return ttyOutputDecoder.decode(bytes, { stream: true });
+        }
+
+        function resetTerminalForSwitch() {
+            if (!term) return;
+            // A full local reset is more reliable than clearing a subset of modes.
+            // Some TUIs (including Copilot CLI) keep private modes/alternate-buffer
+            // state that otherwise survives instance switches inside the shared xterm.
+            term.reset();
+            term.clear();
+            term.write('\x1b[2J\x1b[3J\x1b[H');
         }
 
         function focusTerminalIfPossible() {
@@ -1247,6 +1269,9 @@
 
         function disconnectTTY() {
             resetTTYOutputDecoder();
+            if (term && typeof term.blur === "function") {
+                term.blur();
+            }
             // Clear any pending state check interval
             if (ttyStateCheckInterval) {
                 clearInterval(ttyStateCheckInterval);
@@ -1350,12 +1375,16 @@
                                 }
                                 if (ttySocket === ws) {
                                     updateStatus("websocket live");
-                                    focusTerminalIfPossible();
                                 }
                                 // Send initial resize to start data flow
                                 if (term && term.cols > 0 && term.rows > 0) {
                                     sendResize(term.cols, term.rows);
                                 }
+                                setTimeout(() => {
+                                    if (ttySocket === ws) {
+                                        focusTerminalIfPossible();
+                                    }
+                                }, 0);
                                 return;
                             }
                         } catch (e) {
