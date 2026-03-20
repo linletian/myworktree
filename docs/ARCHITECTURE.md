@@ -43,6 +43,8 @@ It does **not** analyze project code or prevent concurrent write conflicts insid
   - **Resize Support**: Client sends `{"type":"resize","cols":80,"rows":24}` to update PTY size, triggering TUI programs to redraw.
   - **Dual Resize**: First resize starts data flow, second resize (50ms after first data) ensures complete TUI redraw.
   - **Client-side Config**: Frontend uses xterm.js for terminal rendering. Terminal buffer size (`scrollback`) is configurable on the client side to control how much history is retained in memory for scrolling. This is a client-side setting and does not affect server-side log persistence.
+- The frontend keeps a **per-instance terminal session** for running instances. Each running instance owns its own xterm.js instance, transport state, timers, and reconnect logic.
+- Switching between running instances hides inactive terminal containers instead of tearing down their PTY attachment. This avoids detaching long-lived TUI programs such as Copilot CLI while they remain running.
 - Fallback path remains available: HTTP input `POST /api/instances/input` + replay/SSE logs (`GET /api/instances/log`, `GET /api/instances/log/stream`).
 - UI shows transport state (`websocket/sse/polling`) and supports manual WS reconnect.
 - Backlog is stored on disk with a size cap (rolling truncate).
@@ -89,38 +91,36 @@ The client MUST wait for this message before:
 
 ### 5.3 Instance Switch Protocol
 
-When switching between instances (worktree or instance tabs), the following sequence MUST be followed strictly:
+When switching between instances (worktree or instance tabs), the frontend distinguishes between stopped and running instances:
 
 ```
-Phase 1: Disconnect Previous
-├── 1.1 Call disconnectTTY() - close old WebSocket
-├── 1.2 Reset logCursor = 0
-└── 1.3 Reset local terminal state (if terminal exists)
-    ├── Blur the current xterm instance so the old attachment stops owning focus
-    ├── Call term.reset() to clear local xterm modes/private state
-    ├── Call term.clear() to drop scrollback in the shared frontend terminal
-    └── Write '\x1b[2J\x1b[3J\x1b[H' to clear display and home cursor
+Stopped instance
+├── 1. Ensure terminal session exists for the instance
+├── 2. Disconnect live transport for that stopped session
+├── 3. Replay persisted log into that session
+└── 4. Show stopped styling/banner
 
-Phase 2: Load Initial Data
-├── 2.1 If stopped: loadLog() once, update status to "stopped", DONE
-└── 2.2 If running: loadLog() then proceed to Phase 3
+Running instance with healthy session
+├── 1. Keep the existing per-instance xterm/WS session alive
+├── 2. Hide previously active terminal containers
+├── 3. Show the selected instance container
+├── 4. Re-fit and resize the active terminal
+└── 5. Focus only after the session is READY
 
-Phase 3: Establish New Connection (running instances only)
-├── 3.1 Call connectTTY()
-│   ├── Create new WebSocket
-│   ├── Set state to CONNECTING
-│   └── Register onopen handler
-├── 3.2 Wait for WebSocket.onopen
-├── 3.3 Wait for server {"type": "ready"} message
-├── 3.4 Set state to READY
-├── 3.5 Send initial resize: {"type": "resize", "cols": N, "rows": M}
-│   └── TUI programs receive SIGWINCH and re-initialize (including mouse modes)
-└── 3.6 NOW and ONLY NOW: Call focusTerminalIfPossible() on the next tick
+Running instance without healthy session
+├── 1. Ensure terminal session exists for the instance
+├── 2. Reset that instance's local terminal state
+├── 3. Replay recent log once into that same instance session
+├── 4. Establish WebSocket/SSE transport for that session
+├── 5. Wait for server {"type":"ready"} message
+├── 6. Send resize: {"type":"resize","cols":N,"rows":M}
+└── 7. Focus only after the session is READY
 ```
 
 **Critical Timing Rules:**
-1. The shared frontend xterm instance MUST be fully reset before switching to prevent mode leakage from previous TUI programs.
-2. The terminal MUST NOT receive focus until Phase 3.6 (after `ready` message is received and resize is sent).
+1. Running instances MUST NOT be detached purely because another instance becomes active.
+2. Each running instance owns its own frontend terminal session; TUI modes are isolated by session rather than cleared out of a shared xterm.
+3. The terminal MUST NOT receive focus until that instance session is READY (after `ready` is received and resize is sent).
 
 ### 5.4 Focus Management Rules
 
@@ -191,7 +191,7 @@ When implementing or modifying terminal connection code, verify:
 - [ ] `focusTerminalIfPossible()` checks connection state before focusing
 - [ ] WebSocket handshake timeout (5s) is implemented
 - [ ] `ready` message triggers resize BEFORE focus
-- [ ] Instance switch follows Phase 1 → 2 → 3 sequence
+- [ ] Running instance switch preserves inactive session attachments
 - [ ] Dialog close delays focus until connection is ready
 - [ ] Window focus event respects connection state
 
