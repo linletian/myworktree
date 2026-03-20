@@ -469,15 +469,8 @@
         };
 
         // Terminal & Transport
-        let term = null;
-        let ttySocket = null;
-        let logStream = null;
+        let terminalSessions = {};
         let pollTimer = null;
-        let logCursor = 0;
-        let ttyReconnectTimer = null;
-        let termInputBuffer = "";
-        let termSendTimer = null;
-        let ttyOutputDecoder = null;
         let refreshInFlight = null;
 
         // API
@@ -511,10 +504,20 @@
             return state.instances.find(i => i.id === state.activeInst) || null;
         }
 
-        function hasLiveTTYConnection() {
-            if (!ttySocket) return false;
-            if (ttySocket.readyState !== WebSocket.OPEN) return false;
-            return ttyState === 'HANDSHAKING' || ttyState === 'READY';
+        function getTerminalSession(id) {
+            if (!id) return null;
+            return terminalSessions[id] || null;
+        }
+
+        function getActiveTerminalSession() {
+            return getTerminalSession(state.activeInst);
+        }
+
+        function hasLiveTTYConnection(id = state.activeInst) {
+            const session = getTerminalSession(id);
+            if (!session || !session.ttySocket) return false;
+            if (session.ttySocket.readyState !== WebSocket.OPEN) return false;
+            return session.ttyState === 'HANDSHAKING' || session.ttyState === 'READY';
         }
 
         async function refresh() {
@@ -533,22 +536,18 @@
                     state.instances = ins.instances || [];
                     state.tags = tags.tags || [];
                     state.branches = branches;
+                    reconcileTerminalSessions();
                     
                     const recovered = overlay.style.display !== "none";
                     if (recovered) {
                         overlay.style.display = "none";
-                        const inst = getActiveInstance();
-                        if (inst && inst.status === 'running' && !hasLiveTTYConnection()) {
-                            // Only reconnect after a real transport loss. Reconnecting a
-                            // healthy TTY causes long-output TUIs to replay and flicker.
-                            connectTTY();
-                        }
+                        reconnectRunningTerminalSessions();
                     }
                     render();
                 } catch (e) {
                     console.error(e);
                     const inst = getActiveInstance();
-                    if (inst && inst.status === 'running' && hasLiveTTYConnection()) {
+                    if (inst && inst.status === 'running' && hasLiveTTYConnection(inst.id)) {
                         updateStatus("websocket live (status refresh failed)");
                         return;
                     }
@@ -566,7 +565,6 @@
                 sessionStorage.removeItem(SERVER_UPGRADED_FLAG);
                 alert("Backend upgraded. Frontend has been refreshed automatically.");
             }
-            ensureTerminal();
             refresh();
             // Polling for status updates (2s)
             if (pollTimer) clearInterval(pollTimer);
@@ -699,11 +697,13 @@
                 if (inst && inst.status !== 'running') {
                     termContainer.style.opacity = "0.6";
                     termContainer.style.filter = "grayscale(100%)";
-                    if (term) term.options.cursorBlink = false;
+                    const session = getActiveTerminalSession();
+                    if (session && session.term) session.term.options.cursorBlink = false;
                 } else {
                     termContainer.style.opacity = "1";
                     termContainer.style.filter = "none";
-                    if (term) term.options.cursorBlink = true;
+                    const session = getActiveTerminalSession();
+                    if (session && session.term) session.term.options.cursorBlink = true;
                     focusTerminalIfPossible();
                 }
             } else {
@@ -712,6 +712,7 @@
                 termContainer.style.display = "none";
                 actions.classList.remove("visible");
             }
+            renderTerminalSessions();
         }
 
         function renderModals() {
@@ -744,8 +745,11 @@
         // Interaction
         function selectWorktree(id) {
             if (state.activeWT === id) return;
+            const previousID = state.activeInst;
             state.activeWT = id;
             state.activeInst = null; // Reset instance selection
+            maybeDestroyInactiveStoppedSession(previousID);
+            render();
             refresh(); // Will trigger auto-select instance in renderTabs
         }
 
@@ -756,36 +760,38 @@
 
         function selectInstance(id) {
             if (state.activeInst === id) return;
+            const previousID = state.activeInst;
             state.activeInst = id;
-
-            // Switch Terminal Context
-            disconnectTTY();
-            logCursor = 0;
             
             // Check if the new instance is running
             const inst = id ? state.instances.find(i => i.id === id) : null;
-            
-            if (term) {
-                resetTerminalForSwitch();
-            }
 
             render(); // update UI highlights
 
             if (id) {
                 // If stopped, just load log once. If running, connect TTY directly.
                 if (inst && inst.status !== 'running') {
-                    loadLog();
+                    const session = ensureTerminalSession(id);
+                    disconnectTTY(session);
+                    loadLog(session);
                     updateStatus("stopped");
                     // Style handled in renderWorkspace
                 } else {
-                    // For running instances, load initial log then connect TTY
-                    // The WebSocket will send initial log, then we trigger resize for redraw
-                    loadLog().finally(() => {
-                        connectTTY();
+                    const session = ensureTerminalSession(id);
+                    if (hasLiveTTYConnection(id)) {
+                        updateStatus("websocket live");
                         focusTerminalIfPossible();
-                    });
+                    } else {
+                        resetTerminalForSwitch(session);
+                        session.logCursor = 0;
+                        loadLog(session).finally(() => {
+                            connectTTY(session);
+                            focusTerminalIfPossible();
+                        });
+                    }
                 }
             }
+            maybeDestroyInactiveStoppedSession(previousID);
         }
 
         // Actions
@@ -922,7 +928,8 @@
             try { 
                 await api("/api/instances/stop", { method: "POST", body: JSON.stringify({ id: state.activeInst }) }); 
                 // Render stop banner immediately before refresh/reload
-                if (term) term.write("\r\n\r\n\x1b[41;37m[Process Stopped]\x1b[0m\r\n");
+                const session = getActiveTerminalSession();
+                if (session && session.term) session.term.write("\r\n\r\n\x1b[41;37m[Process Stopped]\x1b[0m\r\n");
                 await refresh(); 
                 // Refresh will trigger re-render, which might re-load logs. 
                 // Ideally loadLog() handles the banner too, so it persists on reload.
@@ -944,7 +951,10 @@
             if (!state.activeInst || !confirm("Delete instance log?")) return;
             try { await api("/api/instances/delete", { method: "POST", body: JSON.stringify({ id: state.activeInst }) }); refresh(); } catch (e) { alert(e); }
         }
-        function reconnectWS() { connectTTY(); }
+        function reconnectWS() {
+            const session = getActiveTerminalSession();
+            if (session) connectTTY(session);
+        }
 
         function parseLabelsInput(raw) {
             const out = {};
@@ -955,16 +965,9 @@
             return out;
         }
 
-        // Terminal Logic (Shared)
-        let fitAddon = null;
+        // Terminal Logic (Per Instance)
         let windowHasFocus = true;
         let openDialogs = new Set();
-        let ttyState = 'IDLE'; // IDLE | CONNECTING | HANDSHAKING | READY | DISCONNECTING
-        let ttyStateCheckInterval = null; // For waiting state transitions
-
-        function resetTTYOutputDecoder() {
-            ttyOutputDecoder = null;
-        }
 
         function sanitizeTerminalOutput(text) {
             if (!text) return "";
@@ -985,212 +988,245 @@
             return text;
         }
 
-        function writeSanitizedTerminalOutput(text) {
-            if (!term) return;
-            text = sanitizeTerminalOutput(text);
-            if (text) term.write(text);
+        function createTerminalHost(id) {
+            const host = document.createElement("div");
+            host.dataset.instanceId = id;
+            host.style.cssText = "position:absolute; inset:0; display:none;";
+            document.getElementById("terminal-container").appendChild(host);
+            return host;
         }
 
-        function decodeTTYOutputChunk(bytes) {
-            if (!bytes || !bytes.length) return "";
-            if (!ttyOutputDecoder) {
-                ttyOutputDecoder = new TextDecoder();
-            }
-            return ttyOutputDecoder.decode(bytes, { stream: true });
-        }
+        function createTerminalSession(id) {
+            if (!window.Terminal) return null;
+            const host = createTerminalHost(id);
+            const session = {
+                id,
+                container: host,
+                term: null,
+                termDataDisposable: null,
+                fitAddon: null,
+                logStream: null,
+                logCursor: 0,
+                ttySocket: null,
+                ttyReconnectTimer: null,
+                termInputBuffer: "",
+                termSendTimer: null,
+                ttyOutputDecoder: null,
+                ttyState: 'IDLE',
+                ttyStateCheckInterval: null,
+                resizeObserver: null,
+                lastResizeTime: 0,
+            };
 
-        function resetTerminalForSwitch() {
-            if (!term) return;
-            // A full local reset is more reliable than clearing a subset of modes.
-            // Some TUIs (including Copilot CLI) keep private modes/alternate-buffer
-            // state that otherwise survives instance switches inside the shared xterm.
-            term.reset();
-            term.clear();
-            term.write('\x1b[2J\x1b[3J\x1b[H');
-        }
-
-        function focusTerminalIfPossible() {
-            if (!term) return;
-            if (!windowHasFocus) return;
-            if (openDialogs.size > 0) return;
-            if (!state.activeInst) return;
-            if (ttyState !== 'READY') return; // CRITICAL: Only focus when connection is ready
-            const inst = state.instances.find(i => i.id === state.activeInst);
-            if (inst && inst.status !== 'running') return;
-            
-            term.focus();
-        }
-
-        function ensureTerminal() {
-            if (term || !window.Terminal) return;
-            term = new Terminal({
+            session.term = new Terminal({
                 convertEol: true, cursorBlink: true,
                 fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
                 fontSize: 13, theme: { background: "#0b1020" },
                 scrollback: 10000
             });
-            
+
             if (window.FitAddon) {
-                fitAddon = new FitAddon.FitAddon();
-                term.loadAddon(fitAddon);
+                session.fitAddon = new FitAddon.FitAddon();
+                session.term.loadAddon(session.fitAddon);
             }
 
-            // Fit logic ideally, but for now 100% width/height CSS handles container
-            const el = document.getElementById("terminal-container");
-            term.open(el);
-            if (fitAddon) fitAddon.fit();
+            session.term.open(host);
+            if (session.fitAddon) session.fitAddon.fit();
 
-            // Resize observer
-            let lastResizeTime = 0;
-            const resizeObserver = new ResizeObserver(entries => {
-                if (!term) return;
-                // Only act if the element has non-zero dimensions
+            session.resizeObserver = new ResizeObserver(entries => {
+                if (!session.term) return;
                 const entry = entries[0];
                 if (entry && (entry.contentRect.width === 0 || entry.contentRect.height === 0)) return;
 
-                if (fitAddon) {
-                    try { fitAddon.fit(); } catch (e) { console.error("xterm fit error:", e); }
+                if (session.fitAddon) {
+                    try { session.fitAddon.fit(); } catch (e) { console.error("xterm fit error:", e); }
                 } else {
-                    // Fallback calculation
-                    const w = entry ? entry.contentRect.width : el.clientWidth;
-                    const h = entry ? entry.contentRect.height : el.clientHeight;
-                    term.resize(Math.floor(w / 9), Math.floor(h / 17));
+                    const w = entry ? entry.contentRect.width : host.clientWidth;
+                    const h = entry ? entry.contentRect.height : host.clientHeight;
+                    session.term.resize(Math.floor(w / 9), Math.floor(h / 17));
                 }
 
-                // Send resize to backend (debounced)
                 const now = Date.now();
-                if (now - lastResizeTime > 100 && term.cols > 0 && term.rows > 0) {
-                    lastResizeTime = now;
-                    sendResize(term.cols, term.rows);
+                if (now - session.lastResizeTime > 100 && session.term.cols > 0 && session.term.rows > 0) {
+                    session.lastResizeTime = now;
+                    sendResize(session, session.term.cols, session.term.rows);
                 }
             });
-            resizeObserver.observe(el);
+            session.resizeObserver.observe(host);
 
-            term.onData(data => {
-                if (!state.activeInst) return;
-                const inst = state.instances.find(i => i.id === state.activeInst);
-                if (inst && inst.status !== 'running') return; // Disable input if not running
+            session.termDataDisposable = session.term.onData(data => {
+                const inst = state.instances.find(i => i.id === session.id);
+                if (inst && inst.status !== 'running') return;
 
-                // =====================================================================
-                // Terminal Query Response Filtering
-                // =====================================================================
-                // 
-                // Background: When xterm.js receives terminal query sequences (e.g.,
-                // ESC[c for Device Attributes), it generates responses and sends them
-                // via this onData() callback. If forwarded to PTY, these responses
-                // appear as garbage text in the shell.
-                //
-                // Problem: After TUI programs exit, the shell may send capability
-                // queries. xterm.js responds, and the response is displayed as
-                // unwanted text like: ;1R, rgb:0b0b/1010/2020, ?2027;0$y
-                //
-                // Current Solution: Filter detected responses before forwarding.
-                //
-                // Known Limitations (see docs/TERMINAL_FILTER_REVIEW.md):
-                // 1. Cannot distinguish user intent - user's intentional ESC sequences
-                //    (e.g., scripts testing terminal) may be incorrectly filtered.
-                // 2. Regex may miss edge cases or cause false positives.
-                // 3. Small coordinate reports may be incorrectly filtered.
-                // 4. Some response types (DSR, etc.) not explicitly covered.
-                // 5. Filter is in input path; see review doc for alternative approaches.
-                //
-                // If issues arise, refer to:
-                // - docs/TERMINAL_FILTER_REVIEW.md for detailed analysis
-                // - docs/TERMINAL_IO_ANALYSIS.md for architecture
-                // =====================================================================
-                
-                // Filter xterm.js auto-generated query responses from user input
-                // When xterm.js gains focus, it sends queries and generates responses.
-                // These responses appear in term.onData() and should NOT be sent to PTY.
-                // See docs/TERMINAL_FILTER_REVIEW.md for analysis.
-                // Known limitations: May filter user's intentional ESC sequences (rare).
                 if (isTerminalQueryResponse(data)) {
-                    // console.debug('Filtered terminal response:', data.length, 'bytes');
                     return;
                 }
 
-                if (ttySocket && ttySocket.readyState === WebSocket.OPEN) {
-                    ttySocket.send(data);
+                if (session.ttySocket && session.ttySocket.readyState === WebSocket.OPEN) {
+                    session.ttySocket.send(data);
                 } else {
-                    // Fallback HTTP input
-                    termInputBuffer += data;
-                    if (!termSendTimer) {
-                        termSendTimer = setTimeout(async () => {
-                            const input = termInputBuffer;
-                            termInputBuffer = "";
-                            termSendTimer = null;
+                    session.termInputBuffer += data;
+                    if (!session.termSendTimer) {
+                        session.termSendTimer = setTimeout(async () => {
+                            const input = session.termInputBuffer;
+                            session.termInputBuffer = "";
+                            session.termSendTimer = null;
                             try {
-                                await api("/api/instances/input", { method: "POST", body: JSON.stringify({ id: state.activeInst, input }) });
-                            } catch (e) { term.writeln(`\r\n[input error] ${e}`); }
+                                await api("/api/instances/input", { method: "POST", body: JSON.stringify({ id: session.id, input }) });
+                            } catch (e) {
+                                reportSessionError(session, "input error", e);
+                            }
                         }, 40);
                     }
                 }
             });
+
+            terminalSessions[id] = session;
+            return session;
+        }
+
+        function ensureTerminalSession(id) {
+            return getTerminalSession(id) || createTerminalSession(id);
+        }
+
+        function destroyTerminalSession(id) {
+            const session = getTerminalSession(id);
+            if (!session) return;
+            disconnectTTY(session);
+            if (session.termDataDisposable && typeof session.termDataDisposable.dispose === "function") {
+                session.termDataDisposable.dispose();
+                session.termDataDisposable = null;
+            }
+            if (session.resizeObserver) {
+                session.resizeObserver.disconnect();
+                session.resizeObserver = null;
+            }
+            if (session.term && typeof session.term.dispose === "function") {
+                session.term.dispose();
+                session.term = null;
+            }
+            if (session.container && session.container.parentNode) {
+                session.container.parentNode.removeChild(session.container);
+            }
+            session.container = null;
+            session.fitAddon = null;
+            session.termInputBuffer = "";
+            session.lastResizeTime = 0;
+            delete terminalSessions[id];
+        }
+
+        function maybeDestroyInactiveStoppedSession(id) {
+            if (!id || id === state.activeInst) return;
+            const inst = state.instances.find(i => i.id === id);
+            if (inst && inst.status === 'running') return;
+            destroyTerminalSession(id);
+        }
+
+        function reconcileTerminalSessions() {
+            const instanceMap = new Map(state.instances.map(i => [i.id, i]));
+            for (const id of Object.keys(terminalSessions)) {
+                const inst = instanceMap.get(id);
+                if (!inst) {
+                    destroyTerminalSession(id);
+                    continue;
+                }
+                if (inst.status !== 'running') {
+                    if (id === state.activeInst) {
+                        disconnectTTY(terminalSessions[id]);
+                    } else {
+                        destroyTerminalSession(id);
+                    }
+                }
+            }
+        }
+
+        function reconnectRunningTerminalSessions() {
+            for (const [id, session] of Object.entries(terminalSessions)) {
+                const inst = state.instances.find(i => i.id === id);
+                if (inst && inst.status === 'running' && !hasLiveTTYConnection(id)) {
+                    connectTTY(session);
+                }
+            }
+        }
+
+        function renderTerminalSessions() {
+            const activeID = state.activeInst;
+            for (const session of Object.values(terminalSessions)) {
+                session.container.style.display = session.id === activeID ? "block" : "none";
+            }
+            const activeSession = getActiveTerminalSession();
+            if (!activeSession || !activeSession.term) return;
+            setTimeout(() => {
+                if (state.activeInst !== activeSession.id || !activeSession.term) return;
+                if (activeSession.fitAddon) {
+                    try { activeSession.fitAddon.fit(); } catch (e) { console.error("xterm fit error:", e); }
+                }
+                if (activeSession.term.cols > 0 && activeSession.term.rows > 0) {
+                    sendResize(activeSession, activeSession.term.cols, activeSession.term.rows);
+                }
+            }, 0);
+        }
+
+        function resetTTYOutputDecoder(session) {
+            if (!session) return;
+            session.ttyOutputDecoder = null;
+        }
+
+        function writeSanitizedTerminalOutput(session, text) {
+            if (!session || !session.term) return;
+            text = sanitizeTerminalOutput(text);
+            if (text) session.term.write(text);
+        }
+
+        function decodeTTYOutputChunk(session, bytes) {
+            if (!bytes || !bytes.length) return "";
+            if (!session.ttyOutputDecoder) {
+                session.ttyOutputDecoder = new TextDecoder();
+            }
+            return session.ttyOutputDecoder.decode(bytes, { stream: true });
+        }
+
+        function resetTerminalForSwitch(session) {
+            if (!session || !session.term) return;
+            session.term.reset();
+            session.term.clear();
+            session.term.write('\x1b[2J\x1b[3J\x1b[H');
+        }
+
+        function focusTerminalIfPossible() {
+            const session = getActiveTerminalSession();
+            if (!session || !session.term) return;
+            if (!windowHasFocus) return;
+            if (openDialogs.size > 0) return;
+            if (!state.activeInst) return;
+            if (session.ttyState !== 'READY') return;
+            const inst = state.instances.find(i => i.id === state.activeInst);
+            if (inst && inst.status !== 'running') return;
+
+            session.term.focus();
         }
 
         // Minimum length for terminal response detection
         const MIN_RESPONSE_LENGTH = 2;
 
-        // =====================================================================
-        // Terminal Query Response Detection
-        // =====================================================================
-        // 
-        // Detects xterm.js auto-generated responses that should NOT be forwarded
-        // to the PTY. These responses are generated when xterm.js receives
-        // terminal query sequences.
-        //
-        // Response Types Handled:
-        // - OSC responses: ESC]11;rgb:... (background color), ESC]4;... (palette)
-        // - CSI responses: ESC[?1;2c (Device Attributes), ESC[?2027;0$y (DEC mode)
-        // - Cursor Position: ESC[row;colR or fragment ;colR
-        // - Partial fragments: Missing ESC prefix due to data split
-        //
-        // CRITICAL LIMITATIONS:
-        // - User-sent sequences matching these patterns WILL BE FILTERED
-        // - Some legitimate sequences may be caught (false positives)
-        // - See docs/TERMINAL_FILTER_REVIEW.md for complete analysis
-        //
-        // DO NOT MODIFY without reviewing:
-        // - docs/TERMINAL_FILTER_REVIEW.md (Section 3: Coverage Gap Analysis)
-        // - docs/TERMINAL_IO_ANALYSIS.md (Section 2.2: ESC Prefix Handling)
-        // =====================================================================
-        
         function isTerminalQueryResponse(data) {
             if (!data || data.length < MIN_RESPONSE_LENGTH) return false;
-            
-            // Check for ESC prefix
             if (data.charCodeAt(0) !== 0x1b) {
-                // No ESC - check for partial response patterns (missing ESC[ prefix)
-                // Pattern: ;1R, 1;1R, ;1;1R (cursor position report suffix)
-                // These appear when ESC[ is stripped from the response
                 if (/^;?\d+(;\d+)?R$/i.test(data)) return true;
-                // Pattern: ?1;1$y (DEC mode report suffix)
                 if (/^\?\d+(;\d+)*\$y$/i.test(data)) return true;
-                // Pattern: rgb:hex/hex/hex (OSC color response suffix)
                 if (/^rgb:/i.test(data)) return true;
                 return false;
             }
-            
-            // OSC responses: \x1b]... (color queries, etc.)
             if (data[1] === ']' || data[1] === 'P') return true;
-            
-            // CSI responses starting with ? (private mode reports)
             if (data[1] === '[' && data.length > 2 && data[2] === '?') {
-                // DEC private mode report: ?...$y
                 if (/\$\d*y$/.test(data)) return true;
-                // Device attributes: ?...c
                 if (/\?[\d;]+c$/.test(data)) return true;
-                // Cursor position report: ?...R
                 if (/\?[\d;]+R$/i.test(data)) return true;
             }
-            
-            // Standard CSI cursor position: \x1b[row;colR
             if (data[1] === '[' && /\[\d+;\d+R$/i.test(data)) return true;
-            
             return false;
         }
 
-        // Auto-focus terminal when window gains focus and no dialogs are open
         window.addEventListener('focus', () => {
             windowHasFocus = true;
             focusTerminalIfPossible();
@@ -1200,7 +1236,6 @@
             windowHasFocus = false;
         });
 
-        // Track dialog open/close
         const originalShowModal = HTMLDialogElement.prototype.showModal;
         HTMLDialogElement.prototype.showModal = function() {
             openDialogs.add(this.id);
@@ -1218,129 +1253,143 @@
             document.getElementById("status-bar").textContent = "Transport: " + msg;
         }
 
-        function sendResize(cols, rows) {
-            if (!ttySocket || ttySocket.readyState !== WebSocket.OPEN) return;
-            if (cols <= 0 || rows <= 0) return;
-            const msg = JSON.stringify({ type: "resize", cols, rows });
-            ttySocket.send(msg);
+        function reportSessionError(session, prefix, err) {
+            if (!session) return;
+            const message = `${prefix} ${err}`;
+            if (session.term && state.activeInst === session.id) {
+                session.term.writeln(`\r\n[${message}]`);
+                return;
+            }
+            console.error(`[instance ${session.id}] ${message}`);
         }
 
-        async function loadLog() {
-            if (!state.activeInst) return;
+        function sendResize(session, cols, rows) {
+            if (!session || !session.ttySocket || session.ttySocket.readyState !== WebSocket.OPEN) return;
+            if (cols <= 0 || rows <= 0) return;
+            const msg = JSON.stringify({ type: "resize", cols, rows });
+            session.ttySocket.send(msg);
+        }
+
+        async function loadLog(session) {
+            if (!session) return;
             try {
-                const res = await fetch(`/api/instances/log?id=${state.activeInst}&since=0`, { headers });
+                const res = await fetch(`/api/instances/log?id=${session.id}&since=0`, { headers });
                 rememberServerRevision(res);
                 if (!res.ok) throw new Error(await res.text());
                 let text = await res.text();
                 const next = parseInt(res.headers.get("X-Log-Offset") || "0", 10);
-                logCursor = next || text.length;
-                if (term) { 
-                    // Check if instance is running - don't reset terminal for running instances
-                    // to preserve TUI state (alternate screen buffer, cursor position, etc.)
-                    const inst = state.instances.find(i => i.id === state.activeInst);
+                session.logCursor = next || text.length;
+                if (session.term) {
+                    const inst = state.instances.find(i => i.id === session.id);
                     const isRunning = inst && inst.status === 'running';
-                    
                     if (!isRunning) {
-                        // Only reset for stopped instances
-                        term.reset();
+                        session.term.reset();
                     }
-                    writeSanitizedTerminalOutput(text);
-                    
-                    // Check if stopped and append banner
+                    writeSanitizedTerminalOutput(session, text);
                     if (inst && inst.status !== 'running') {
-                        term.write("\r\n\r\n\x1b[41;37m[Process Stopped]\x1b[0m\r\n");
+                        session.term.write("\r\n\r\n\x1b[41;37m[Process Stopped]\x1b[0m\r\n");
                     }
                 }
-            } catch (e) { term && term.write(`\r\n[load log error] ${e}`); }
+            } catch (e) {
+                reportSessionError(session, "load log error", e);
+            }
         }
 
-        async function loadLogSince() {
-            if (!state.activeInst) return;
+        async function loadLogSince(session) {
+            if (!session) return;
             try {
-                const res = await fetch(`/api/instances/log?id=${state.activeInst}&since=${logCursor}`, { headers });
+                const res = await fetch(`/api/instances/log?id=${session.id}&since=${session.logCursor}`, { headers });
                 rememberServerRevision(res);
                 if (!res.ok) throw new Error();
                 let text = await res.text();
                 const next = parseInt(res.headers.get("X-Log-Offset") || "0", 10);
-                writeSanitizedTerminalOutput(text);
-                if (next) logCursor = next;
+                writeSanitizedTerminalOutput(session, text);
+                if (next) session.logCursor = next;
             } catch (e) { }
         }
 
-        function disconnectTTY() {
-            resetTTYOutputDecoder();
-            if (term && typeof term.blur === "function") {
-                term.blur();
+        function disconnectTTY(session) {
+            if (!session) return;
+            resetTTYOutputDecoder(session);
+            if (session.term && typeof session.term.blur === "function" && state.activeInst === session.id) {
+                session.term.blur();
             }
-            // Clear any pending state check interval
-            if (ttyStateCheckInterval) {
-                clearInterval(ttyStateCheckInterval);
-                ttyStateCheckInterval = null;
+            if (session.ttyStateCheckInterval) {
+                clearInterval(session.ttyStateCheckInterval);
+                session.ttyStateCheckInterval = null;
             }
-            // Set DISCONNECTING if there's an active socket, otherwise IDLE
-            // The onclose handler will transition to IDLE after socket closes
-            if (ttySocket) {
-                ttyState = 'DISCONNECTING';
+            if (session.termSendTimer) {
+                clearTimeout(session.termSendTimer);
+                session.termSendTimer = null;
+            }
+            if (session.ttySocket) {
+                session.ttySocket.onopen = null;
+                session.ttySocket.onmessage = null;
+                session.ttySocket.onclose = null;
+                session.ttySocket.onerror = null;
+                session.ttyState = 'DISCONNECTING';
             } else {
-                ttyState = 'IDLE';
+                session.ttyState = 'IDLE';
             }
-            if (ttyReconnectTimer) clearTimeout(ttyReconnectTimer);
-            if (logStream) { logStream.close(); logStream = null; }
-            if (ttySocket) { ttySocket.close(); ttySocket = null; }
+            if (session.ttyReconnectTimer) {
+                clearTimeout(session.ttyReconnectTimer);
+                session.ttyReconnectTimer = null;
+            }
+            if (session.logStream) {
+                session.logStream.onmessage = null;
+                session.logStream.onerror = null;
+                session.logStream.close();
+                session.logStream = null;
+            }
+            if (session.ttySocket) { session.ttySocket.close(); session.ttySocket = null; }
+            session.termInputBuffer = "";
         }
 
-        function connectTTY() {
-            // Phase 1: Disconnect Previous (already done in disconnectTTY)
-            disconnectTTY();
+        function connectTTY(session) {
+            if (!session) return;
+            disconnectTTY(session);
 
-            // Phase 3.1: Validate state before establishing new connection
-            // Must be IDLE before transitioning to CONNECTING (per §5.3)
-            if (ttyState !== 'IDLE') {
-                console.warn('connectTTY: invalid state transition from', ttyState, '- waiting for IDLE');
-                // Wait for state to become IDLE before proceeding, with max 10 retries (1 second)
+            if (session.ttyState !== 'IDLE') {
+                console.warn('connectTTY: invalid state transition from', session.ttyState, '- waiting for IDLE');
                 let retries = 0;
                 const maxRetries = 10;
-                ttyStateCheckInterval = setInterval(() => {
+                session.ttyStateCheckInterval = setInterval(() => {
                     retries++;
-                    if (ttyState === 'IDLE' || ttyState === undefined) {
-                        clearInterval(ttyStateCheckInterval);
-                        ttyStateCheckInterval = null;
-                        // Retry connection
-                        if (state.activeInst) {
-                            setTimeout(() => connectTTY(), 50);
-                        }
+                    if (session.ttyState === 'IDLE' || session.ttyState === undefined) {
+                        clearInterval(session.ttyStateCheckInterval);
+                        session.ttyStateCheckInterval = null;
+                        setTimeout(() => connectTTY(session), 50);
                     } else if (retries >= maxRetries) {
-                        clearInterval(ttyStateCheckInterval);
-                        ttyStateCheckInterval = null;
+                        clearInterval(session.ttyStateCheckInterval);
+                        session.ttyStateCheckInterval = null;
                         console.error('connectTTY: state did not become IDLE after max retries, forcing IDLE');
-                        ttyState = 'IDLE';
-                        // Retry connection once after forcing IDLE
-                        if (state.activeInst) {
-                            setTimeout(() => connectTTY(), 50);
-                        }
+                        session.ttyState = 'IDLE';
+                        setTimeout(() => connectTTY(session), 50);
                     }
                 }, 100);
                 return;
             }
 
-            ttyState = 'CONNECTING';
-            const id = state.activeInst;
-            if (!id) { updateStatus("idle"); return; }
-            
+            session.ttyState = 'CONNECTING';
+            const id = session.id;
             const inst = state.instances.find(i => i.id === id);
+            if (!id) {
+                if (state.activeInst === id) updateStatus("idle");
+                return;
+            }
             if (inst && inst.status !== 'running') {
-                ttyState = 'IDLE'; // Reset state before returning
-                updateStatus("stopped");
+                session.ttyState = 'IDLE';
+                if (state.activeInst === id) updateStatus("stopped");
                 return;
             }
 
             if (window.WebSocket) {
-                updateStatus("connecting ws...");
+                if (state.activeInst === id) updateStatus("connecting ws...");
                 const proto = location.protocol === "https:" ? "wss" : "ws";
                 let url = `${proto}://${location.host}/api/instances/tty/ws?id=${encodeURIComponent(id)}`;
                 if (token) url += `&token=${encodeURIComponent(token)}`;
 
-                resetTTYOutputDecoder();
+                resetTTYOutputDecoder(session);
                 const ws = new WebSocket(url);
                 ws.binaryType = "arraybuffer";
 
@@ -1348,123 +1397,110 @@
                 let handshakeTimeout = null;
 
                 ws.onopen = () => {
-                    ttyState = 'HANDSHAKING';
-                    // Set handshake timeout (5 seconds)
+                    session.ttyState = 'HANDSHAKING';
                     handshakeTimeout = setTimeout(() => {
-                        if (ttyState !== 'READY' && ws === ttySocket) {
+                        if (session.ttyState !== 'READY' && ws === session.ttySocket) {
                             console.error('WebSocket handshake timeout: no "ready" message received');
-                            updateStatus("handshake timeout");
-                            ttyState = 'DISCONNECTING';
+                            if (state.activeInst === id) updateStatus("handshake timeout");
+                            session.ttyState = 'DISCONNECTING';
                             ws.close();
-                            // Fallback to SSE after timeout
-                            setTimeout(() => startSSE(), 500);
+                            setTimeout(() => startSSE(session), 500);
                         }
                     }, 5000);
                 };
+
                 ws.onmessage = (ev) => {
-                    // Handle handshake: wait for "ready" message first
-                    if (ttyState !== 'READY') {
+                    if (session.ttyState !== 'READY') {
                         try {
                             const msg = JSON.parse(ev.data);
                             if (msg.type === 'ready') {
-                                ttyState = 'READY';
-                                // Clear handshake timeout
+                                session.ttyState = 'READY';
                                 if (handshakeTimeout) {
                                     clearTimeout(handshakeTimeout);
                                     handshakeTimeout = null;
                                 }
-                                if (ttySocket === ws) {
+                                if (state.activeInst === id) {
                                     updateStatus("websocket live");
                                 }
-                                // Send initial resize to start data flow
-                                if (term && term.cols > 0 && term.rows > 0) {
-                                    sendResize(term.cols, term.rows);
+                                if (session.term && session.term.cols > 0 && session.term.rows > 0) {
+                                    sendResize(session, session.term.cols, session.term.rows);
                                 }
                                 setTimeout(() => {
-                                    if (ttySocket === ws) {
+                                    if (state.activeInst === id && session.ttySocket === ws) {
                                         focusTerminalIfPossible();
                                     }
                                 }, 0);
                                 return;
                             }
                         } catch (e) {
-                            // Not JSON, treat as data (shouldn't happen before ready)
                         }
                     }
 
-                    // Handle binary/text data
                     if (ev.data instanceof ArrayBuffer) {
                         const u8 = new Uint8Array(ev.data);
-                        if (u8.length && term) {
-                            writeSanitizedTerminalOutput(decodeTTYOutputChunk(u8));
+                        if (u8.length && session.term) {
+                            writeSanitizedTerminalOutput(session, decodeTTYOutputChunk(session, u8));
                         }
-                    } else if (term) {
-                        writeSanitizedTerminalOutput(ev.data);
+                    } else if (session.term) {
+                        writeSanitizedTerminalOutput(session, ev.data);
                     }
-                    
-                    // After receiving first data (after ready), trigger resize for TUI redraw
-                    if (isFirstData && ttyState === 'READY' && term) {
+
+                    if (isFirstData && session.ttyState === 'READY' && session.term) {
                         isFirstData = false;
                         setTimeout(() => {
-                            if (term && ws === ttySocket && ws.readyState === WebSocket.OPEN) {
-                                const cols = term.cols;
-                                const rows = term.rows;
+                            if (session.term && ws === session.ttySocket && ws.readyState === WebSocket.OPEN) {
+                                const cols = session.term.cols;
+                                const rows = session.term.rows;
                                 if (cols > 0 && rows > 0) {
-                                    // Send resize to backend and trigger local redraw
-                                    sendResize(cols, rows);
-                                    term.resize(cols, rows);
+                                    sendResize(session, cols, rows);
+                                    session.term.resize(cols, rows);
                                 }
                             }
                         }, 50);
                     }
                 };
-                
+
                 ws.onclose = () => {
-                    resetTTYOutputDecoder();
-                    // Clear handshake timeout on close
+                    resetTTYOutputDecoder(session);
                     if (handshakeTimeout) {
                         clearTimeout(handshakeTimeout);
                         handshakeTimeout = null;
                     }
-                    ttyState = 'IDLE';
-                    if (ttySocket === ws) {
-                        // Only reconnect if instance is still running
-                        const inst = state.instances.find(i => i.id === state.activeInst);
-                        if (inst && inst.status === 'running') {
-                            updateStatus("ws closed, retrying...");
-                            ttyReconnectTimer = setTimeout(connectTTY, 1000);
-                        } else {
+                    session.ttyState = 'IDLE';
+                    if (session.ttySocket === ws) {
+                        const latest = state.instances.find(i => i.id === session.id);
+                        if (latest && latest.status === 'running') {
+                            if (state.activeInst === session.id) updateStatus("ws closed, retrying...");
+                            session.ttyReconnectTimer = setTimeout(() => connectTTY(session), 1000);
+                        } else if (state.activeInst === session.id) {
                             updateStatus("stopped");
                         }
                     }
                 };
-                ttySocket = ws;
+                session.ttySocket = ws;
             } else {
-                // Fallback SSE
-                startSSE();
+                startSSE(session);
             }
         }
 
-        function startSSE() {
-            updateStatus("sse live");
-            // Simplified SSE logic for brevity, reused from before
-            let url = `/api/instances/log/stream?id=${encodeURIComponent(state.activeInst)}&since=${logCursor}`;
+        function startSSE(session) {
+            if (!session) return;
+            if (state.activeInst === session.id) updateStatus("sse live");
+            let url = `/api/instances/log/stream?id=${encodeURIComponent(session.id)}&since=${session.logCursor}`;
             if (token) url += `&token=${encodeURIComponent(token)}`;
             const es = new EventSource(url);
             const onLog = (ev) => {
                 try {
                     const msg = JSON.parse(ev.data);
-                    if (msg.chunk && term) writeSanitizedTerminalOutput(msg.chunk);
-                    if (msg.next) logCursor = msg.next;
+                    if (msg.chunk && session.term) writeSanitizedTerminalOutput(session, msg.chunk);
+                    if (msg.next) session.logCursor = msg.next;
                 } catch (e) { }
             };
-            // Backend sends 'event: log'
             es.addEventListener("log", onLog);
-            // Fallback for default message just in case
             es.onmessage = onLog;
-            
-            es.onerror = () => { es.close(); setTimeout(startSSE, 2000); };
-            logStream = es;
+
+            es.onerror = () => { es.close(); setTimeout(() => startSSE(session), 2000); };
+            session.logStream = es;
         }
 
         // Boot

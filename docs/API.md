@@ -160,6 +160,11 @@ Bi-directional stream for terminal output/input with PTY support.
 4. Server sends initial log + real-time output as binary frames
 5. Client receives first data and triggers second resize (50ms delay) for TUI redraw
 
+**Frontend session model:**
+- The current UI keeps transport state per running instance rather than sharing a single terminal across tabs.
+- Switching tabs may leave other running instances connected in the background; hidden instances are not rendered, but their PTY attachment can remain alive.
+- Stopped instances still use the log replay endpoints as their primary display source.
+
 **Message Types:**
 
 *Client → Server:*
