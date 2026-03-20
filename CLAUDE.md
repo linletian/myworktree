@@ -3,23 +3,32 @@
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 <!-- gitnexus:start -->
-## GitNexus MCP
+# GitNexus MCP
 
-This project is indexed by GitNexus as **myworktree** (221 symbols, 611 relationships, 20 execution flows).
+This project is indexed by GitNexus as **feature-ui-update** (312 symbols, 871 relationships, 25 execution flows).
 
-### Skills
+## Always Start Here
+
+1. **Read `gitnexus://repo/{name}/context`** — codebase overview + check index freshness
+2. **Match your task to a skill below** and **read that skill file**
+3. **Follow the skill's workflow and checklist**
+
+> If step 1 warns the index is stale, run `npx gitnexus analyze` in the terminal first.
+
+## Skills
 
 | Task | Read this skill file |
 |------|---------------------|
-| Understand architecture | `.claude/skills/gitnexus/gitnexus-exploring/SKILL.md` |
-| Blast radius analysis | `.claude/skills/gitnexus/gitnexus-impact-analysis/SKILL.md` |
-| Debug/tracing | `.claude/skills/gitnexus/gitnexus-debugging/SKILL.md` |
-| Refactoring | `.claude/skills/gitnexus/gitnexus-refactoring/SKILL.md` |
+| Understand architecture / "How does X work?" | `.claude/skills/gitnexus/gitnexus-exploring/SKILL.md` |
+| Blast radius / "What breaks if I change X?" | `.claude/skills/gitnexus/gitnexus-impact-analysis/SKILL.md` |
+| Trace bugs / "Why is X failing?" | `.claude/skills/gitnexus/gitnexus-debugging/SKILL.md` |
+| Rename / extract / split / refactor | `.claude/skills/gitnexus/gitnexus-refactoring/SKILL.md` |
+| Tools, resources, schema reference | `.claude/skills/gitnexus/gitnexus-guide/SKILL.md` |
+| Index, status, clean, wiki CLI commands | `.claude/skills/gitnexus/gitnexus-cli/SKILL.md` |
 
-> If the index is stale, run `npx gitnexus analyze` first.
 <!-- gitnexus:end -->
 
-## Build, test, run
+## Build, test, lint
 
 ```bash
 # Build binaries
@@ -32,51 +41,76 @@ go test ./...
 # Run a single test
 go test -v ./internal/app -run TestParseInt64Default
 
-# Run dev server
+# Lint/format check (required to pass before commits)
+test -z "$(gofmt -l .)"
+
+# Pre-commit checklist
+test -z "$(gofmt -l .)" && go test ./... && go build -o myworktree ./cmd/myworktree && go build -o mw ./cmd/mw
+
+# Run dev server (MUST be inside the target git repo)
 go run ./cmd/myworktree -listen 127.0.0.1:0
 ```
 
-## Architecture overview
+## Architecture
 
 myworktree is a lightweight single-user manager for **git worktrees** and **long-running CLI instances**, with a Web UI and HTTP API.
 
 ### Core packages
 
-- `internal/app/` — HTTP server, auth, API routing
+- `internal/app/` — HTTP server, auth, API routing; wires all managers together
 - `internal/worktree/` — worktree lifecycle via `git` CLI
-- `internal/instance/` — instance lifecycle + output log files
-- `internal/store/` — `state.json` persistence with file locking
-- `internal/tag/` — Tag config loader (JSON)
-- `internal/redact/` — secret redaction for logs
-- `internal/mcp/` — MCP adapter surface
-
-### Key conventions
-
-- **Run location matters**: execute inside the target git repo. The server detects the repo from CWD.
-- **Branch naming**:
-  - Default: `mwt/<slug>` (e.g., "fix login" → branch `mwt/fix-login`)
-  - Custom grouping: `<group>/<name>` (e.g., "feature/auth" → branch `feature/auth`)
-  - Conflicts: appends `-2`, `-3`, etc.
-- **Strict deletion**: refuses to delete worktree if `git status --porcelain` is non-empty
-- **State storage**: `$(os.UserConfigDir())/myworktree/<repoHash>/state.json`
-- **Security**:
-  - Default: loopback only
-  - Non-loopback requires `--auth`
-  - Optional TLS via `--tls-cert/--tls-key`
-  - Env values with `TOKEN/SECRET/KEY/PASSWORD` are masked to `***`
-  - Output logs redact patterns like `sk-...`
+- `internal/instance/` — instance lifecycle (spawn/stop/list) + rolling log files
+- `internal/store/` — `state.json` persistence with `flock` + atomic rename
+- `internal/tag/` — Tag config loader (JSON), merged from global + project-level
+- `internal/redact/` — secret redaction for stored logs and sanitized env
+- `internal/mcp/` — MCP adapter surface (tool listing + dispatch to core managers)
+- `internal/ui/` — embedded static UI (`//go:embed static/*`)
+- `internal/ws/` — custom WebSocket server (no external dependency)
+- `internal/gitx/` — thin wrapper around git commands
 
 ### Data model
 
 - **Worktree**: id, name, path, branch, baseRef, createdAt
-- **Instance**: id, worktreeId, tagId, command, cwd, env (sanitized), pid, status, logPath
+- **Instance**: id, worktreeId, tagId, command, cwd, env (sanitized), pid, status, logPath, timestamps
 
 ### Instance lifecycle
 
-- Instances are server-managed processes; UI is just a view
-- Default transport: WebSocket TTY (`GET /api/instances/tty/ws?id=...`)
-- Fallback: HTTP input + SSE log stream
-- On restart, persisted `running` instances are reconciled to `stopped`
+Instances are server-managed PTY processes (`script -q /dev/null zsh -f -i`). The UI is just a view.
+
+- **Default transport**: WebSocket TTY (`GET /api/instances/tty/ws?id=...`) — bidirectional terminal stream
+- **Fallback**: HTTP input + SSE log stream (`POST /api/instances/input`, `GET /api/instances/log/stream`)
+- **Handshake**: Server sends `{"type":"ready"}` on connect; client must wait for this before sending `{"type":"resize",...}` or any input. This prevents xterm.js query sequences (DA, DEC Private Mode, OSC color queries) from leaking into the PTY as garbage text
+- **Instance switching**: Running instances keep their PTY attachment; inactive sessions are hidden, not torn down
+- **Startup reconcile**: Stale persisted `running` instances → `stopped` (in-memory stdin/stdout bindings cannot resume after restart)
+
+### Terminal query filtering (frontend)
+
+The UI filters terminal response sequences in the input path (`term.onData`) to prevent TUI programs from receiving xterm.js-generated responses as keyboard input. Known patterns: `ESC[?1;2c` (DA), `ESC]11;rgb:...` (OSC 11), `ESC[?2027;0$y` (DEC Private Mode), and their partial/fragmented forms. See `docs/TERMINAL_FILTER_REVIEW.md` for limitations.
+
+### State storage
+
+`$(os.UserConfigDir())/myworktree/<repoHash>/`:
+- `state.json` — worktrees + instances
+- `tags.json` — project-level tags
+- `logs/<instanceId>.log` — rolling instance backlog (10MB cap)
+- `server.json` — persisted listen port
+
+State always goes through `store.FileStore` (never write directly) to preserve locking and atomicity.
+
+### Key conventions
+
+- **Run location matters**: server detects the repo from CWD. Each repo gets its own data dir.
+- **Branch naming**:
+  - Default: `mwt/<slug>` (e.g., "fix login" → `mwt/fix-login`)
+  - Custom grouping: `<group>/<name>` if task starts with "group/name"
+  - Conflicts: append `-2`, `-3`, etc.
+- **Strict deletion**: refuses to delete worktree if `git status --porcelain` is non-empty
+- **Worktree placement**: default is `<repo-parent>/<repo-name>-myworktree/<worktree-name>/`; `-worktrees-dir=data` uses the data dir
+- **Security**:
+  - Default: loopback only; non-loopback requires `--auth`
+  - Optional TLS via `--tls-cert/--tls-key`
+  - Env values with `TOKEN/SECRET/KEY/PASSWORD` → `***`
+  - Logs redact patterns like `sk-...`
 
 ### Tags
 

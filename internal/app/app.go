@@ -109,7 +109,9 @@ func New(cfg Config, logger *log.Logger) (*Server, error) {
 		authFails: map[string]authFail{},
 	}
 	s.registerAPIs(mux)
-	ui.Register(mux)
+	if err := ui.Register(mux, filepath.Base(filepath.Clean(s.root))); err != nil {
+		return nil, fmt.Errorf("ui.Register: %w", err)
+	}
 
 	return s, nil
 }

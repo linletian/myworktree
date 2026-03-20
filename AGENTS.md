@@ -3,7 +3,7 @@
 <!-- gitnexus:start -->
 # GitNexus MCP
 
-This project is indexed by GitNexus as **myworktree** (221 symbols, 611 relationships, 20 execution flows).
+This project is indexed by GitNexus as **feature-ui-update** (312 symbols, 871 relationships, 25 execution flows).
 
 ## Always Start Here
 
