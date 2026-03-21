@@ -86,6 +86,26 @@ Response:
 { "status": "ok" }
 ```
 
+### Get worktree git status
+`GET /api/worktree/status?id=<worktreeId>`
+
+Returns the list of changed files (staged + unstaged relative to HEAD) for the specified worktree.
+
+- `id`: worktree ID (`"__main__"` for the main repo) or a managed worktree ID from `GET /api/worktrees`.
+- Uses `git diff --stat HEAD` with a 2-second timeout.
+- Returns an empty list if there are no changes or if the command fails.
+
+Response:
+```json
+{
+  "changes": [
+    { "path": "foo.go", "additions": 10, "deletions": 3 }
+  ],
+  "total": { "additions": 10, "deletions": 10 }
+}
+```
+- Returns HTTP 400 if `id` is missing or unknown.
+
 ## 3) Branches
 ### List (default + top 10)
 `GET /api/branches`

@@ -17,6 +17,8 @@
             --main-accent: #6f42c1;
             --main-accent-bg: #faf8ff;
             --main-accent-hover: #f3eeff;
+            --sidebar-top-min-height: 120px;
+            --sidebar-bottom-min-height: 100px;
         }
 
         body, html {
@@ -82,6 +84,116 @@
             list-style: none;
             padding: 0;
             margin: 0;
+        }
+
+        /* Sidebar split panels */
+        #sidebar-top-panel {
+            flex: 1;
+            min-height: var(--sidebar-top-min-height);
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+        }
+
+        #sidebar-top-panel #wt-list {
+            flex: 1;
+            overflow-y: auto;
+        }
+
+        #sidebar-resize-handle {
+            height: 4px;
+            cursor: ns-resize;
+            background: var(--border-color);
+            flex-shrink: 0;
+            transition: background 0.15s;
+        }
+
+        #sidebar-resize-handle:hover,
+        #sidebar-resize-handle.dragging {
+            background: var(--active-color);
+        }
+
+        #sidebar-bottom-panel {
+            flex: 1;
+            min-height: var(--sidebar-bottom-min-height);
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+            border-top: 1px solid var(--border-color);
+        }
+
+        #git-changes-header {
+            display: flex;
+            align-items: center;
+            padding: 6px 12px;
+            border-bottom: 1px solid var(--border-color);
+            gap: 8px;
+            flex-shrink: 0;
+            background: var(--bg-color);
+        }
+
+        .git-changes-title {
+            font-size: 11px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            color: #6a737d;
+        }
+
+        #git-changes-summary {
+            margin-left: auto;
+            font-size: 11px;
+            color: #6a737d;
+        }
+
+        #git-changes-summary .additions { color: #28a745; }
+        #git-changes-summary .deletions { color: #cb2431; }
+
+        #git-changes-list {
+            flex: 1;
+            overflow-y: auto;
+            list-style: none;
+            padding: 0;
+            margin: 0;
+        }
+
+        .git-change-item {
+            padding: 4px 12px;
+            font-size: 12px;
+            font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+            border-bottom: 1px solid #f0f0f0;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .git-change-item:hover {
+            background: var(--hover-bg);
+        }
+
+        .git-change-path {
+            flex: 1;
+            min-width: 0;
+            overflow: visible;
+            text-overflow: clip;
+            white-space: nowrap;
+        }
+
+        .git-change-stats {
+            flex-shrink: 0;
+            font-size: 11px;
+            display: flex;
+            gap: 4px;
+        }
+
+        .git-change-stats .additions { color: #28a745; }
+        .git-change-stats .deletions { color: #cb2431; }
+
+        .git-changes-empty {
+            padding: 16px 12px;
+            text-align: center;
+            color: #6a737d;
+            font-size: 12px;
         }
 
         .wt-item {
@@ -440,7 +552,17 @@
                     <button class="icon-btn" onclick="openModal('modal-import-wt')" title="Import Worktree">↓</button>
                 </div>
             </div>
-            <ul id="wt-list"></ul>
+            <div id="sidebar-top-panel">
+                <ul id="wt-list"></ul>
+            </div>
+            <div id="sidebar-resize-handle" onmousedown="startSidebarResize(event)"></div>
+            <div id="sidebar-bottom-panel">
+                <div id="git-changes-header">
+                    <span class="git-changes-title">Changes</span>
+                    <span id="git-changes-summary"></span>
+                </div>
+                <div id="git-changes-list"></div>
+            </div>
         </div>
 
         <!-- Main: Tabs + Terminal -->
@@ -571,6 +693,15 @@
         let refreshInFlight = null;
         let stateVersion = 0;
 
+        // Git Changes
+        let gitChanges = { changes: [], total: { additions: 0, deletions: 0 } };
+        let gitChangesTimer = null;
+        let gitChangesSeq = 0;
+        let gitChangesError = null;
+        let isResizingSidebar = false;
+        let sidebarResizeStartY = 0;
+        let sidebarTopPanelStartHeight = 0;
+
         // API
         function rememberServerRevision(res) {
             const rev = (res.headers.get(SERVER_REV_HEADER) || "").trim();
@@ -639,8 +770,13 @@
 
                     // Fetch main repo info independently — failure is non-blocking.
                     api("/api/main").then(main => {
+                        const prevBranch = state.mainRepo ? state.mainRepo.branch : null;
                         state.mainRepo = main;
                         renderSidebar(); // Only re-render sidebar, not the full UI.
+                        // If main repo branch changed while it's selected, refresh its git changes.
+                        if (state.activeWT === MAIN_WT_ID && prevBranch && prevBranch !== main.branch) {
+                            refreshGitChanges();
+                        }
                     }).catch(() => {
                         // Keep showing the last known value; don't overwrite with null.
                     });
@@ -723,6 +859,149 @@
             }
             // Success: refresh in background to sync version and any server-side bookkeeping.
             refresh();
+        }
+
+        // --- Git Changes ---
+        async function refreshGitChanges() {
+            if (!state.activeWT) return;
+            const seq = ++gitChangesSeq; // Stamp this request; stale responses are ignored.
+            try {
+                const resp = await fetch(`/api/worktree/status?id=${encodeURIComponent(state.activeWT)}`, { credentials: "include" });
+                const data = await resp.json();
+                if (seq !== gitChangesSeq) return; // Another request fired after this one; discard.
+                if (!resp.ok) {
+                    gitChangesError = (data.error || resp.statusText || "Unknown error");
+                    gitChanges = { changes: [], total: { additions: 0, deletions: 0 } };
+                } else {
+                    gitChangesError = null;
+                    gitChanges = data;
+                }
+                renderGitChanges();
+            } catch (e) {
+                console.error("failed to fetch git changes:", e);
+                if (seq !== gitChangesSeq) return;
+                gitChangesError = e.message || "Network error";
+                gitChanges = { changes: [], total: { additions: 0, deletions: 0 } };
+                renderGitChanges();
+            }
+        }
+
+        // Smart path truncation: preserve path structure, then filename.
+        // Returns the input path if it fits; otherwise progressively drops
+        // leading segments (replaced by "…/") until only the filename remains.
+        // If even the filename overflows, it is truncated from the right.
+        // Requires DOM to be rendered; call after list.innerHTML is set.
+        let _truncateSpan = null;
+        function truncatePath(path, avail) {
+            if (!_truncateSpan) {
+                const m = document.createElement('span');
+                m.style.cssText = 'position:fixed;visibility:hidden;pointer-events:none;font:inherit;white-space:nowrap';
+                document.body.appendChild(m);
+                _truncateSpan = m;
+            }
+            const s = _truncateSpan;
+            s.textContent = path;
+            const needed = s.getBoundingClientRect().width;
+            if (needed <= avail) return path;
+
+            const filename = path.includes('/') ? '…/' + path.split('/').pop() : path;
+            s.textContent = filename;
+            if (s.getBoundingClientRect().width <= avail) return filename;
+
+            // Truncate filename itself.
+            const prefix = path.includes('/') ? '…/' : '';
+            let lo = 0, hi = filename.length - prefix.length;
+            while (lo < hi) {
+                const mid = (lo + hi + 1) >> 1;
+                s.textContent = prefix + filename.slice(prefix.length, prefix.length + mid) + '…';
+                if (s.getBoundingClientRect().width <= avail) lo = mid;
+                else hi = mid - 1;
+            }
+            return prefix + (lo > 0 ? filename.slice(prefix.length, prefix.length + lo) + '…' : '…');
+        }
+
+        function renderGitChanges() {
+            const list = document.getElementById("git-changes-list");
+            const summary = document.getElementById("git-changes-summary");
+            if (!list) return;
+
+            if (gitChangesError) {
+                list.innerHTML = `<div class="git-changes-empty" style="color:#cb2431;">⚠ ${gitChangesError}</div>`;
+                if (summary) summary.innerHTML = '';
+                return;
+            }
+
+            if (!gitChanges.changes || gitChanges.changes.length === 0) {
+                list.innerHTML = '<div class="git-changes-empty">No changes</div>';
+                if (summary) summary.innerHTML = '';
+                return;
+            }
+
+            if (summary) {
+                const t = gitChanges.total;
+                let parts = [];
+                if (t.additions > 0) parts.push(`<span class="additions">+${t.additions}</span>`);
+                if (t.deletions > 0) parts.push(`<span class="deletions">-${t.deletions}</span>`);
+                summary.innerHTML = (parts.join(' ') + ' ' + gitChanges.changes.length + ' file(s)').trim();
+            }
+
+            // Compute available width once for the whole list.
+            const firstItem = list.querySelector('.git-change-item');
+            const firstStats = list.querySelector('.git-change-stats');
+            const itemWidth = firstItem ? firstItem.getBoundingClientRect().width : 200;
+            const statsWidth = firstStats ? firstStats.getBoundingClientRect().width : 0;
+            const avail = Math.max(itemWidth - statsWidth - 8, 40);
+
+            list.innerHTML = gitChanges.changes.map(c => {
+                const adds = c.additions > 0 ? `<span class="additions">+${c.additions}</span>` : '';
+                const dels = c.deletions > 0 ? `<span class="deletions">-${c.deletions}</span>` : '';
+                const stats = (adds || dels) ? `<div class="git-change-stats">${adds}${dels}</div>` : '';
+                const displayPath = truncatePath(c.path, avail);
+                return `<div class="git-change-item">
+                    <span class="git-change-path" title="${c.path}">${displayPath}</span>
+                    ${stats}
+                </div>`;
+            }).join('');
+        }
+
+        // --- Sidebar Resize ---
+        function startSidebarResize(e) {
+            isResizingSidebar = true;
+            sidebarResizeStartY = e.clientY;
+            const topPanel = document.getElementById("sidebar-top-panel");
+            sidebarTopPanelStartHeight = topPanel ? topPanel.offsetHeight : 0;
+            document.addEventListener("mousemove", handleSidebarResize);
+            document.addEventListener("mouseup", stopSidebarResize);
+            const handle = document.getElementById("sidebar-resize-handle");
+            if (handle) handle.classList.add("dragging");
+            e.preventDefault();
+        }
+
+        function handleSidebarResize(e) {
+            if (!isResizingSidebar) return;
+            const sidebar = document.getElementById("sidebar");
+            const topPanel = document.getElementById("sidebar-top-panel");
+            const bottomPanel = document.getElementById("sidebar-bottom-panel");
+            if (!sidebar || !topPanel || !bottomPanel) return;
+
+            const minTop = 120;
+            const minBottom = 100;
+            const sidebarContentHeight = sidebar.offsetHeight - sidebar.querySelector(".sidebar-title").offsetHeight;
+
+            let newTopHeight = sidebarTopPanelStartHeight + (e.clientY - sidebarResizeStartY);
+            newTopHeight = Math.max(minTop, Math.min(sidebarContentHeight - minBottom, newTopHeight));
+
+            topPanel.style.flex = "none";
+            topPanel.style.height = newTopHeight + "px";
+            bottomPanel.style.flex = "1";
+        }
+
+        function stopSidebarResize() {
+            isResizingSidebar = false;
+            document.removeEventListener("mousemove", handleSidebarResize);
+            document.removeEventListener("mouseup", stopSidebarResize);
+            const handle = document.getElementById("sidebar-resize-handle");
+            if (handle) handle.classList.remove("dragging");
         }
 
         // Render
@@ -1133,9 +1412,13 @@
             render();
             if (id === MAIN_WT_ID) {
                 // Main repo instances are already in state.instances; render() handles tabs.
-                return;
+            } else {
+                refresh(); // Will trigger auto-select instance in renderTabs
             }
-            refresh(); // Will trigger auto-select instance in renderTabs
+            // Reset and start git changes polling for the new worktree.
+            if (gitChangesTimer) clearInterval(gitChangesTimer);
+            refreshGitChanges();
+            gitChangesTimer = setInterval(refreshGitChanges, 10000);
         }
 
         function selectWorktreeByID(id) {
@@ -1621,6 +1904,20 @@
 
         window.addEventListener('blur', () => {
             windowHasFocus = false;
+        });
+
+        // Clean up timers and measurement span when the page is unloaded or hidden.
+        window.addEventListener('beforeunload', () => {
+            if (gitChangesTimer) clearInterval(gitChangesTimer);
+            if (_truncateSpan) { _truncateSpan.remove(); _truncateSpan = null; }
+        });
+        document.addEventListener('visibilitychange', () => {
+            if (document.visibilityState === 'hidden') {
+                if (gitChangesTimer) clearInterval(gitChangesTimer);
+            } else if (document.visibilityState === 'visible' && state.activeWT) {
+                refreshGitChanges();
+                gitChangesTimer = setInterval(refreshGitChanges, 10000);
+            }
         });
 
         const originalShowModal = HTMLDialogElement.prototype.showModal;

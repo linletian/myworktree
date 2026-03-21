@@ -47,6 +47,7 @@ The sidebar shows a pinned **Main Workspace** item at the top (purple accent), f
 - **Instance routing**: Use `worktree_id: "__main__"` (constant: `instance.MainWorktreeID`) in `POST /api/instances` to start an instance in the main repo root. The instance's `worktree_id` will be `"__main__"` and `worktree_name` will be the directory basename.
 - **Auto-select**: On first load, the UI auto-selects the first worktree; if no worktrees exist, it selects the main repo.
 - **Refresh**: All branch info (main repo + worktrees) updates via the existing 2-second polling.
+- **Git Changes panel**: Below the worktree list, a read-only panel shows all changed files (staged + unstaged) relative to HEAD for the currently selected worktree. The panel auto-refreshes every 10 seconds and on worktree selection change. The main repo's changes also refresh when its branch changes. Per-file addition/deletion counts are obtained via `git diff --stat HEAD` (2-second timeout).
 
 ## 4. Instance lifecycle & reconnect semantics
 - An instance is a server-managed process; UI windows are merely views.
