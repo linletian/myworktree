@@ -43,6 +43,8 @@ Response:
 { "worktrees": [ {"id":"...","name":"...","path":"...","branch":"..."} ] }
 ```
 
+- `branch`: **live** — queried on every call via `git rev-parse --abbrev-ref HEAD` from the worktree path. Reflects the currently checked-out branch, not the branch name used at creation time.
+
 ### Create
 `POST /api/worktrees`
 

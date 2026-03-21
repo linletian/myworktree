@@ -34,6 +34,17 @@ It does **not** analyze project code or prevent concurrent write conflicts insid
 ### 3.2 State model
 - Worktree: id, name, path, branch, baseRef, createdAt
 - Instance: id, worktreeId, tagId, command, cwd, env (sanitized), pid, status, logPath, timestamps
+- Main Repo: not persisted; served via `GET /api/main` with live git branch
+
+### 3.3 Main workspace (sidebar)
+
+The sidebar shows a pinned **Main Workspace** item at the top (purple accent), followed by a "Worktrees" divider and the managed worktree list.
+
+- **Main repo**: `GET /api/main` returns `{name, branch}`. The branch is live — queried via `git rev-parse --abbrev-ref HEAD` (via `gitx.CurrentBranch`). Returns HTTP 500 on error (e.g., git repo inaccessible, detached HEAD).
+- **Worktrees**: `GET /api/worktrees` also returns live branches — `worktree.Manager.List()` queries `git rev-parse --abbrev-ref HEAD` per worktree path on each call. The `branch` field reflects the currently checked-out branch, not the creation-time branch.
+- **Instance routing**: Use `worktree_id: "__main__"` (constant: `instance.MainWorktreeID`) in `POST /api/instances` to start an instance in the main repo root. The instance's `worktree_id` will be `"__main__"` and `worktree_name` will be the directory basename.
+- **Auto-select**: On first load, the UI auto-selects the first worktree; if no worktrees exist, it selects the main repo.
+- **Refresh**: All branch info (main repo + worktrees) updates via the existing 2-second polling.
 
 ## 4. Instance lifecycle & reconnect semantics
 - An instance is a server-managed process; UI windows are merely views.

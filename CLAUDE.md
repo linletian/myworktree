@@ -72,6 +72,17 @@ myworktree is a lightweight single-user manager for **git worktrees** and **long
 
 - **Worktree**: id, name, path, branch, baseRef, createdAt
 - **Instance**: id, worktreeId, tagId, command, cwd, env (sanitized), pid, status, logPath, timestamps
+- **Main Repo**: not persisted; served via `GET /api/main` with live git branch (`git rev-parse --abbrev-ref HEAD`)
+
+### Main workspace (sidebar)
+
+The sidebar shows a pinned **Main Workspace** item at the top (purple accent), followed by a "Worktrees" divider and the managed worktree list.
+
+- **Main repo**: `GET /api/main` returns `{name, branch}`. The branch is live — queried every refresh via `git rev-parse --abbrev-ref HEAD` (via `gitx.CurrentBranch`). Falls back to HTTP 500 on error (e.g., git repo inaccessible, detached HEAD).
+- **Worktrees**: `GET /api/worktrees` also returns live branches — `worktree.Manager.List()` queries `git rev-parse --abbrev-ref HEAD` per worktree path on each call.
+- **Auto-select**: On first load, the UI auto-selects the first worktree; if no worktrees exist, it selects the main repo.
+- **Instance routing**: Use `worktree_id: "__main__"` (constant: `instance.MainWorktreeID`) in `POST /api/instances` to start an instance in the main repo root. The instance's `worktree_id` field will be `"__main__"` and `worktree_name` will be the directory basename.
+- **Refresh**: All branch info updates via the existing 2-second polling (`refresh()` → `Promise.all`).
 
 ### Instance lifecycle
 
