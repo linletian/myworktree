@@ -14,6 +14,9 @@
             --active-bg: #f1f8ff;
             --hover-bg: #f6f8fa;
             --term-bg: #0b1020;
+            --main-accent: #6f42c1;
+            --main-accent-bg: #faf8ff;
+            --main-accent-hover: #f3eeff;
         }
 
         body, html {
@@ -96,11 +99,40 @@
             }
 
             .wt-item.active {
-                background: #fff;
+                background: var(--active-bg);
                 border-left-color: var(--active-color);
                 font-weight: 500;
                 box-shadow: 0 1px 2px rgba(0,0,0,0.05);
             }
+
+        .wt-item-main {
+            border-left-color: var(--main-accent);
+            background: var(--main-accent-bg);
+        }
+
+            .wt-item-main.active {
+                background: var(--main-accent-bg);
+                border-left-color: var(--main-accent);
+            }
+
+            .wt-item-main:hover {
+                background: var(--main-accent-hover);
+            }
+
+            .wt-item-main .wt-branch {
+                color: var(--main-accent);
+            }
+
+        .wt-divider {
+            padding: 6px 12px 2px;
+            font-size: 11px;
+            font-weight: 600;
+            color: #6a737d;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            border-bottom: 1px solid #f0f0f0;
+            cursor: default;
+        }
 
         .wt-name {
             font-size: 13px;
@@ -454,6 +486,7 @@
         const headers = token ? { Authorization: `Bearer ${token}` } : {};
         const SERVER_REV_HEADER = "x-myworktree-server-rev";
         const SERVER_UPGRADED_FLAG = "myworktree-server-upgraded";
+        const MAIN_WT_ID = "__main__";
         let knownServerRev = "";
         let serverRevReloading = false;
 
@@ -465,7 +498,8 @@
             branches: [],
             activeWT: null,
             activeInst: null,
-            showArchived: false
+            showArchived: false,
+            mainRepo: null
         };
 
         // Terminal & Transport
@@ -537,7 +571,15 @@
                     state.tags = tags.tags || [];
                     state.branches = branches;
                     reconcileTerminalSessions();
-                    
+
+                    // Fetch main repo info independently — failure is non-blocking.
+                    api("/api/main").then(main => {
+                        state.mainRepo = main;
+                        renderSidebar(); // Only re-render sidebar, not the full UI.
+                    }).catch(() => {
+                        // Keep showing the last known value; don't overwrite with null.
+                    });
+
                     const recovered = overlay.style.display !== "none";
                     if (recovered) {
                         overlay.style.display = "none";
@@ -589,7 +631,27 @@
 
         function renderSidebar() {
             const list = document.getElementById("wt-list");
-            list.innerHTML = state.worktrees.map(w => {
+            let html = "";
+
+            // Pinned main workspace item (always first, not deletable, clickable)
+            if (state.mainRepo) {
+                const branchLabel = state.mainRepo.branch;
+                const isMainActive = state.activeWT === MAIN_WT_ID;
+                html += `
+            <li class="wt-item wt-item-main ${isMainActive ? 'active' : ''}" onclick="selectWorktree(MAIN_WT_ID)">
+              <div class="wt-name">${state.mainRepo.name}</div>
+              <div class="wt-branch">
+                <span>🏠</span> ${branchLabel}
+              </div>
+            </li>
+            `;
+            }
+
+            // Divider
+            html += `<li class="wt-divider">Worktrees</li>`;
+
+            // Regular worktrees
+            html += state.worktrees.map(w => {
                 const isActive = state.activeWT === w.id;
                 return `
             <li class="wt-item ${isActive ? 'active' : ''}" onclick="selectWorktree('${w.id}')">
@@ -602,9 +664,15 @@
           `;
             }).join("");
 
-            // If no active WT and we have some, select first
-            if (!state.activeWT && state.worktrees.length > 0) {
-                selectWorktree(state.worktrees[0].id);
+            list.innerHTML = html;
+
+            // Auto-select: prefer first worktree, fall back to main repo if no worktrees exist.
+            if (!state.activeWT) {
+                if (state.worktrees.length > 0) {
+                    selectWorktree(state.worktrees[0].id);
+                } else if (state.mainRepo) {
+                    selectWorktree(MAIN_WT_ID);
+                }
             }
         }
 
@@ -750,6 +818,10 @@
             state.activeInst = null; // Reset instance selection
             maybeDestroyInactiveStoppedSession(previousID);
             render();
+            if (id === MAIN_WT_ID) {
+                // Main repo instances are already in state.instances; render() handles tabs.
+                return;
+            }
             refresh(); // Will trigger auto-select instance in renderTabs
         }
 

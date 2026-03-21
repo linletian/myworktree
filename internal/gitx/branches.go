@@ -2,6 +2,7 @@ package gitx
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"os/exec"
 	"strconv"
@@ -57,6 +58,23 @@ func DefaultBranch(gitRoot string) string {
 		}
 	}
 	return ""
+}
+
+// CurrentBranch returns the currently checked-out branch (e.g., "feature/ui-update").
+// Unlike DefaultBranch, it never falls back to origin/HEAD or common names.
+// Returns an error if the directory is not a git repo or HEAD is malformed.
+func CurrentBranch(gitRoot string) (string, error) {
+	cmd := exec.Command("git", "rev-parse", "--abbrev-ref", "HEAD")
+	cmd.Dir = gitRoot
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("git rev-parse failed: %w", err)
+	}
+	b := strings.TrimSpace(string(out))
+	if b != "" && b != "HEAD" {
+		return b, nil
+	}
+	return "", errors.New("git HEAD is detached or malformed")
 }
 
 func ListLocalBranchesByCommitTime(gitRoot string, limit int) ([]Branch, error) {

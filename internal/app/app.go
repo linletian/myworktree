@@ -243,6 +243,7 @@ func (s *Server) registerAPIs(mux *http.ServeMux) {
 	mux.HandleFunc("/api/branches", s.handleBranches)
 	mux.HandleFunc("/api/mcp/tools", s.handleMCPTools)
 	mux.HandleFunc("/api/mcp/call", s.handleMCPCall)
+	mux.HandleFunc("/api/main", s.handleMain)
 }
 
 func (s *Server) handleBranches(w http.ResponseWriter, r *http.Request) {
@@ -258,6 +259,23 @@ func (s *Server) handleBranches(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"default":  def,
 		"branches": out,
+	})
+}
+
+func (s *Server) handleMain(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	name := filepath.Base(filepath.Clean(s.root))
+	branch, err := gitx.CurrentBranch(s.root)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"name":   name,
+		"branch": branch,
 	})
 }
 
@@ -393,10 +411,16 @@ func (s *Server) handleInstances(w http.ResponseWriter, r *http.Request) {
 		}
 		item, err := s.instanceMgr.Start(instance.StartInput{
 			WorktreeID: req.WorktreeID,
-			TagID:      req.TagID,
-			Command:    req.Command,
-			Name:       req.Name,
-			Labels:     normalizeLabels(req.Labels),
+			Root: func() string {
+				if req.WorktreeID == instance.MainWorktreeID {
+					return s.root
+				}
+				return ""
+			}(),
+			TagID:   req.TagID,
+			Command: req.Command,
+			Name:    req.Name,
+			Labels:  normalizeLabels(req.Labels),
 		})
 		if err != nil {
 			writeErr(w, http.StatusBadRequest, err)

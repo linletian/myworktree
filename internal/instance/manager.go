@@ -21,7 +21,10 @@ import (
 	"myworktree/internal/tag"
 )
 
-const maxLogBytes int64 = 10 * 1024 * 1024
+const (
+	maxLogBytes    int64 = 10 * 1024 * 1024
+	MainWorktreeID       = "__main__"
+)
 
 type Manager struct {
 	DataDir string
@@ -38,6 +41,7 @@ type Manager struct {
 
 type StartInput struct {
 	WorktreeID string
+	Root       string // optional: absolute path, used instead of WorktreeID lookup
 	TagID      string
 	Command    string // optional if TagID is set; required if TagID is empty
 	Name       string
@@ -99,15 +103,27 @@ func (m *Manager) Start(in StartInput) (store.ManagedInstance, error) {
 		return store.ManagedInstance{}, err
 	}
 
-	var wt *store.ManagedWorktree
-	for i := range st.Worktrees {
-		if st.Worktrees[i].ID == in.WorktreeID {
-			wt = &st.Worktrees[i]
-			break
+	var wtPath string
+	var wtName string
+
+	if in.Root != "" {
+		// Main repo: use Root directly.
+		wtPath = in.Root
+		wtName = filepath.Base(filepath.Clean(in.Root))
+	} else {
+		// Normal worktree lookup.
+		var wt *store.ManagedWorktree
+		for i := range st.Worktrees {
+			if st.Worktrees[i].ID == in.WorktreeID {
+				wt = &st.Worktrees[i]
+				break
+			}
 		}
-	}
-	if wt == nil {
-		return store.ManagedInstance{}, fmt.Errorf("unknown worktree id: %s", in.WorktreeID)
+		if wt == nil {
+			return store.ManagedInstance{}, fmt.Errorf("unknown worktree id: %s", in.WorktreeID)
+		}
+		wtPath = wt.Path
+		wtName = wt.Name
 	}
 
 	var (
@@ -163,9 +179,9 @@ func (m *Manager) Start(in StartInput) (store.ManagedInstance, error) {
 		return store.ManagedInstance{}, err
 	}
 
-	cwd := wt.Path
+	cwd := wtPath
 	if strings.TrimSpace(cwdRel) != "" && cwdRel != "." {
-		cwd = filepath.Join(wt.Path, cwdRel)
+		cwd = filepath.Join(wtPath, cwdRel)
 	}
 
 	cmd := exec.Command("zsh", "-f", "-i")
@@ -195,8 +211,8 @@ func (m *Manager) Start(in StartInput) (store.ManagedInstance, error) {
 	now := time.Now().UTC().Format(time.RFC3339)
 	inst := store.ManagedInstance{
 		ID:           id,
-		WorktreeID:   wt.ID,
-		WorktreeName: wt.Name,
+		WorktreeID:   in.WorktreeID, // MainWorktreeID for main repo, or a real worktree ID
+		WorktreeName: wtName,
 		TagID:        effectiveTagID,
 		Name:         instName,
 		Labels:       in.Labels,

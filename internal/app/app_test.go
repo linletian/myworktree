@@ -1,6 +1,14 @@
 package app
 
-import "testing"
+import (
+	"encoding/json"
+	"log"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"testing"
+)
 
 func TestParseInt64Default(t *testing.T) {
 	if got := parseInt64Default("42", -1); got != 42 {
@@ -59,5 +67,63 @@ func TestClientIP(t *testing.T) {
 	}
 	if got := clientIP("not-a-host-port"); got != "not-a-host-port" {
 		t.Fatalf("invalid host:port should return original, got %q", got)
+	}
+}
+
+func TestHandleMain(t *testing.T) {
+	nullLogger := log.New(os.Stderr, "", 0)
+	srv, err := New(Config{}, nullLogger)
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+
+	// GET → 200 with correct JSON fields
+	req := httptest.NewRequest(http.MethodGet, "/api/main", nil)
+	w := httptest.NewRecorder()
+	srv.handleMain(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("GET /api/main: expected status 200, got %d", w.Code)
+	}
+
+	ct := w.Header().Get("Content-Type")
+	if ct != "application/json" {
+		t.Fatalf("GET /api/main: expected Content-Type application/json, got %q", ct)
+	}
+
+	var resp map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("GET /api/main: invalid JSON: %v", err)
+	}
+
+	name, ok := resp["name"].(string)
+	if !ok || name == "" {
+		t.Fatalf("GET /api/main: expected non-empty name field, got %v", resp["name"])
+	}
+	// Name should match the basename of the git root.
+	expectedName := filepath.Base(filepath.Clean(srv.root))
+	if name != expectedName {
+		t.Fatalf("GET /api/main: name = %q, want %q", name, expectedName)
+	}
+
+	// Branch must be present as a non-empty string (CurrentBranch errors otherwise).
+	if _, ok := resp["branch"]; !ok {
+		t.Fatalf("GET /api/main: missing branch field")
+	}
+
+	// POST → 405
+	reqPost := httptest.NewRequest(http.MethodPost, "/api/main", nil)
+	wPost := httptest.NewRecorder()
+	srv.handleMain(wPost, reqPost)
+	if wPost.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("POST /api/main: expected status 405, got %d", wPost.Code)
+	}
+
+	// PUT → 405
+	reqPut := httptest.NewRequest(http.MethodPut, "/api/main", nil)
+	wPut := httptest.NewRecorder()
+	srv.handleMain(wPut, reqPut)
+	if wPut.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("PUT /api/main: expected status 405, got %d", wPut.Code)
 	}
 }

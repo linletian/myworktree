@@ -20,7 +20,21 @@ Version commands:
 - `mw --version`
 - `mw version`
 
-## 1) Worktrees
+## 1) Main Workspace
+### Get main repo info
+`GET /api/main`
+
+Returns the main (host) git repository name and its currently checked-out branch. Useful for quickly identifying which project a myworktree tab belongs to.
+
+Response:
+```json
+{ "name": "myproject", "branch": "feature/ui-update" }
+```
+
+- `name`: basename of the git root directory
+- `branch`: currently checked-out branch (via `git rev-parse --abbrev-ref HEAD`). Returns HTTP 500 if the git repository is inaccessible or HEAD is malformed.
+
+## 2) Worktrees
 ### List
 `GET /api/worktrees`
 
@@ -70,7 +84,7 @@ Response:
 { "status": "ok" }
 ```
 
-## 2) Branches
+## 3) Branches
 ### List (default + top 10)
 `GET /api/branches`
 
@@ -81,7 +95,7 @@ Response:
 { "default": "main", "branches": [ {"name":"main","commit_unix":1700000000} ] }
 ```
 
-## 3) Tags
+## 4) Tags
 ### List (merged: global + project)
 `GET /api/tags`
 
@@ -90,7 +104,7 @@ Response:
 { "tags": [ {"id":"...","command":"..."} ] }
 ```
 
-## 4) Instances
+## 5) Instances
 ### List
 `GET /api/instances`
 
@@ -106,6 +120,8 @@ Body:
 ```json
 { "worktree_id": "<worktreeId>", "tag_id": "optional", "command": "optional", "name": "optional", "labels": {"purpose":"refactor","priority":"P1"} }
 ```
+
+- `worktree_id` can be a regular worktree ID, or `"__main__"` to run an instance in the main (host) git repository. For `"__main__"`, the instance starts in the main repo root directory.
 
 If both `tag_id` and `command` are empty, the server starts an **interactive shell** instance in the worktree.
 If `command` is provided, it is sent to the shell as the initial command and the shell remains available for further input.
@@ -237,7 +253,7 @@ Response: `text/plain`
 {"chunk":"...","next":12345}
 ```
 
-## 5) MCP
+## 6) MCP
 ### Tool names
 `GET /api/mcp/tools`
 
