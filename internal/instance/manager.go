@@ -689,6 +689,82 @@ func (m *Manager) Delete(id string) error {
 	return nil
 }
 
+// PurgeArchivedInstances deletes archived instances for a given worktree (or all worktrees if empty)
+// in a single atomic write, protected by optimistic locking via expectedVersion.
+func (m *Manager) PurgeArchivedInstances(worktreeID string, expectedVersion int64) error {
+	m.stateMu.Lock()
+	defer m.stateMu.Unlock()
+	st, err := m.Store.Load()
+	if err != nil {
+		return err
+	}
+
+	// Collect archived instances to purge and their log paths.
+	var toPurge []struct {
+		id      string
+		logPath string
+	}
+	for _, inst := range st.Instances {
+		if inst.Archived && (worktreeID == "" || inst.WorktreeID == worktreeID) {
+			toPurge = append(toPurge, struct {
+				id      string
+				logPath string
+			}{inst.ID, inst.LogPath})
+		}
+	}
+	if len(toPurge) == 0 {
+		return nil
+	}
+
+	// Filter out archived instances.
+	filtered := st.Instances[:0]
+	for _, inst := range st.Instances {
+		if !inst.Archived || (worktreeID != "" && inst.WorktreeID != worktreeID) {
+			filtered = append(filtered, inst)
+		}
+	}
+	st.Instances = filtered
+
+	// Also remove archived IDs from TabOrder.
+	archivedSet := make(map[string]bool, len(toPurge))
+	for _, p := range toPurge {
+		archivedSet[p.id] = true
+	}
+	for wtID, order := range st.TabOrder {
+		if worktreeID != "" && wtID != worktreeID {
+			continue
+		}
+		newOrder := order[:0]
+		for _, id := range order {
+			if !archivedSet[id] {
+				newOrder = append(newOrder, id)
+			}
+		}
+		st.TabOrder[wtID] = newOrder
+	}
+
+	if err := m.Store.SaveWithVersion(st, expectedVersion); err != nil {
+		return err
+	}
+
+	// Clean up log files and in-memory state.
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, p := range toPurge {
+		if strings.TrimSpace(p.logPath) != "" {
+			_ = os.Remove(p.logPath)
+		}
+		delete(m.running, p.id)
+		delete(m.inputs, p.id)
+		if ptmx, ok := m.ptys[p.id]; ok {
+			_ = ptmx.Close()
+			delete(m.ptys, p.id)
+		}
+		m.closeSubscribersLocked(p.id)
+	}
+	return nil
+}
+
 func (m *Manager) Tail(id string, n int64) (string, error) {
 	if n <= 0 {
 		n = 4096

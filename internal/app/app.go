@@ -236,6 +236,7 @@ func (s *Server) registerAPIs(mux *http.ServeMux) {
 	mux.HandleFunc("/api/instances/restart", s.handleInstanceRestart)
 	mux.HandleFunc("/api/instances/archive", s.handleInstanceArchive)
 	mux.HandleFunc("/api/instances/delete", s.handleInstanceDelete)
+	mux.HandleFunc("/api/instances/purge", s.handleInstancePurge)
 	mux.HandleFunc("/api/instances/input", s.handleInstanceInput)
 	mux.HandleFunc("/api/instances/tty/ws", s.handleInstanceTTYWS)
 	mux.HandleFunc("/api/instances/log", s.handleInstanceLog)
@@ -528,6 +529,35 @@ func (s *Server) handleInstanceDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.instanceMgr.Delete(req.ID); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (s *Server) handleInstancePurge(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		WorktreeID string `json:"worktree_id"`
+		Version    int64  `json:"version"`
+	}
+	if err := readJSON(r.Body, &req); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	err := s.instanceMgr.PurgeArchivedInstances(req.WorktreeID, req.Version)
+	if errors.Is(err, store.ErrVersionConflict) {
+		st, _ := s.store.Load()
+		writeJSON(w, http.StatusConflict, map[string]any{
+			"error":   "state changed, please refresh",
+			"version": st.Version,
+		})
+		return
+	}
+	if err != nil {
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
@@ -971,6 +1001,28 @@ func (s *Server) handleMCPCall(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err := s.instanceMgr.Delete(args.ID); err != nil {
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"result": map[string]string{"status": "ok"}})
+	case "instance_purge":
+		var args struct {
+			WorktreeID string `json:"worktree_id"`
+			Version    int64  `json:"version"`
+		}
+		if err := decodeArgs(req.Args, &args); err != nil {
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
+		if err := s.instanceMgr.PurgeArchivedInstances(args.WorktreeID, args.Version); err != nil {
+			if errors.Is(err, store.ErrVersionConflict) {
+				st, _ := s.store.Load()
+				writeJSON(w, http.StatusConflict, map[string]any{
+					"error":   "state changed, please refresh",
+					"version": st.Version,
+				})
+				return
+			}
 			writeErr(w, http.StatusBadRequest, err)
 			return
 		}

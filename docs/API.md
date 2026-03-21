@@ -287,6 +287,29 @@ Body:
 
 Deletes a non-running instance record (best-effort deletes the log file).
 
+### Purge archived
+`POST /api/instances/purge`
+
+Deletes archived instances for a given worktree in a single atomic write, protected by optimistic locking. Use an empty `worktree_id` to target all worktrees.
+
+Body:
+```json
+{ "worktree_id": "wt1", "version": 7 }
+```
+
+- `worktree_id`: the worktree whose archived instances to delete (omit or use empty string to target all worktrees).
+- `version`: the state version observed by the client (from `GET /api/instances`). Used for optimistic locking — if the state has changed since the client fetched it, the server returns HTTP 409 Conflict.
+
+Response (200):
+```json
+{ "status": "ok" }
+```
+
+- Returns HTTP 409 Conflict if the state version has changed. The response body includes the current version so the client can refresh and retry:
+```json
+{ "error": "state changed, please refresh", "version": 8 }
+```
+
 ### Log replay (tail / incremental)
 `GET /api/instances/log?id=<instanceId>[&since=<byteOffset>]`
 
@@ -329,4 +352,4 @@ Response:
 Supported tool names:
 - `worktree_list`, `worktree_create`, `worktree_delete`
 - `branch_list`, `tag_list`
-- `instance_list`, `instance_start`, `instance_stop`, `instance_input`, `instance_archive`, `instance_delete`, `instance_log_tail`
+- `instance_list`, `instance_start`, `instance_stop`, `instance_input`, `instance_archive`, `instance_delete`, `instance_purge`, `instance_log_tail`

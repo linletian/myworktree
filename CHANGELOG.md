@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.1.3
+
+UI polish and usability improvements.
+
+Highlights:
+- Moved "Show archived" checkbox out of the scrollable tab area into the static header row, so action buttons and the toggle remain visible without horizontal scrolling.
+- Added "Purge" button to bulk-delete all archived instances in one confirmation dialog, backed by a new atomic `POST /api/instances/purge` endpoint with optimistic locking.
+
 ## v0.1.2
 
 Focused follow-up release that tightens terminal switching and reconnect behavior after `v0.1.1`.

@@ -270,9 +270,29 @@
                 color: #0366d6;
             }
 
+        /* Show archived label — always visible, never scrolls away */
+        #show-archived-label {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            white-space: nowrap;
+            font-size: 12px;
+            color: #586069;
+            margin-left: 8px;
+            flex-shrink: 0;
+            cursor: pointer;
+        }
+
+        /* Purge button in header area */
+        #header button.danger {
+            flex-shrink: 0;
+            margin-left: 8px;
+        }
+
         /* Actions Toolbar (Hidden by default, shown when instance active) */
         #instance-actions {
             display: none;
+            flex-shrink: 0;
             gap: 8px;
             align-items: center;
             margin-left: 12px;
@@ -427,14 +447,19 @@
         <div id="main">
             <div id="header">
                 <div id="tabs-container"></div>
-                
+
                 <div id="instance-actions">
                     <button onclick="restartInstance()" title="Restart">Restart</button>
                     <button onclick="stopInstance()" title="Stop">Stop</button>
                     <button onclick="archiveInstance()" title="Archive">Archive</button>
-                    <button class="danger" onclick="deleteInstance()" title="Delete">Delete</button>
                     <button onclick="reconnectWS()" title="Reconnect WebSocket">Reconnect</button>
+                    <button class="danger" onclick="deleteInstance()" title="Delete">Delete</button>
+                    <button class="danger" onclick="purgeArchivedInstances()" title="Delete all archived instances">Purge</button>
                 </div>
+
+                <label id="show-archived-label">
+                    <input type="checkbox" id="show-archived-cb" onchange="toggleArchived(this)"> Show archived
+                </label>
             </div>
 
             <div id="workspace">
@@ -633,6 +658,8 @@
                         return;
                     }
                     render();
+                    const cb = document.getElementById("show-archived-cb");
+                    if (cb) cb.checked = state.showArchived;
                 } catch (e) {
                     console.error(e);
                     const inst = getActiveInstance();
@@ -666,6 +693,36 @@
         function toggleArchived(el) {
             state.showArchived = el.checked;
             renderTabs();
+        }
+
+        async function purgeArchivedInstances() {
+            const archived = state.instances.filter(i => i.archived && i.worktree_id === state.activeWT);
+            if (archived.length === 0) return;
+            if (!confirm(`Delete ${archived.length} archived instance(s) in current worktree?`)) return;
+
+            // Optimistic update: remove archived instances for this worktree from local state immediately.
+            const archivedIds = new Set(archived.map(i => i.id));
+            state.instances = state.instances.filter(i => !(i.archived && i.worktree_id === state.activeWT));
+            // Select a new active instance if the previously selected one was purged.
+            if (state.activeInst && archivedIds.has(state.activeInst)) {
+                selectInstance(null);
+            } else {
+                renderTabs();
+            }
+
+            // Fire the API call without blocking the UI.
+            const res = await api("/api/instances/purge", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ worktree_id: state.activeWT, version: stateVersion })
+            });
+            if (res.status === 409) {
+                // Conflict: server state changed; refresh to resync.
+                refresh();
+                return;
+            }
+            // Success: refresh in background to sync version and any server-side bookkeeping.
+            refresh();
         }
 
         // Render
@@ -858,13 +915,6 @@
             </div>
           `;
             }).join("");
-
-            // Add archived toggle
-            html += `<div style="margin-left: auto; padding: 0 12px; font-size: 12px; display: flex; align-items: center; height: 32px; color: #8b949e;">
-                <label style="cursor: pointer; display: flex; align-items: center; gap: 6px; white-space: nowrap;">
-                    <input type="checkbox" ${state.showArchived ? "checked" : ""} onchange="toggleArchived(this)"> Show archived
-                </label>
-            </div>`;
 
             container.innerHTML = html;
 

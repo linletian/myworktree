@@ -536,3 +536,137 @@ func TestUpdateName_VersionConflict(t *testing.T) {
 		t.Fatalf("name should be set, got empty")
 	}
 }
+
+func TestPurgeArchivedInstances(t *testing.T) {
+	t.Parallel()
+	st := store.State{
+		Instances: []store.ManagedInstance{
+			{ID: "A", WorktreeID: "wt1", Status: "stopped", Archived: false, LogPath: "/dev/null"},
+			{ID: "B", WorktreeID: "wt1", Status: "stopped", Archived: true, LogPath: "/dev/null"},
+			{ID: "C", WorktreeID: "wt1", Status: "running", Archived: true, LogPath: "/dev/null"},
+			{ID: "D", WorktreeID: "wt1", Status: "stopped", Archived: true, LogPath: "/dev/null"},
+			{ID: "X", WorktreeID: "wt2", Status: "stopped", Archived: true, LogPath: "/dev/null"},
+		},
+		TabOrder: map[string][]string{"wt1": {"A", "B", "C", "D"}, "wt2": {"X"}},
+		Version:  5,
+	}
+	m := newManagerWithState(t, st)
+
+	// Purge only wt1 — wt2 should be untouched.
+	err := m.PurgeArchivedInstances("wt1", 5)
+	if err != nil {
+		t.Fatalf("expected success, got: %v", err)
+	}
+
+	got, _ := m.Store.Load()
+	if len(got.Instances) != 2 {
+		t.Fatalf("expected 2 instances remaining (A and X), got %d: %v", len(got.Instances), got.Instances)
+	}
+	if got.Instances[0].ID != "A" || got.Instances[1].ID != "X" {
+		t.Fatalf("expected instances A and X to remain, got %v", got.Instances)
+	}
+	if got.Version != 6 {
+		t.Fatalf("expected version=6, got %d", got.Version)
+	}
+	// wt2 TabOrder should be untouched.
+	if order := got.TabOrder["wt2"]; len(order) != 1 || order[0] != "X" {
+		t.Fatalf("wt2 TabOrder should still contain X, got %v", order)
+	}
+}
+
+func TestPurgeArchivedInstances_VersionConflict(t *testing.T) {
+	t.Parallel()
+	st := store.State{
+		Instances: []store.ManagedInstance{
+			{ID: "B", WorktreeID: "wt1", Status: "stopped", Archived: true, LogPath: "/dev/null"},
+		},
+		Version: 3,
+	}
+	m := newManagerWithState(t, st)
+
+	// Stale version should be rejected.
+	err := m.PurgeArchivedInstances("wt1", 2)
+	if err == nil {
+		t.Fatal("expected conflict error, got nil")
+	}
+
+	// State should be unchanged.
+	got, _ := m.Store.Load()
+	if len(got.Instances) != 1 {
+		t.Fatalf("state should be unchanged, got %d instances", len(got.Instances))
+	}
+	if got.Version != 3 {
+		t.Fatalf("version should remain 3, got %d", got.Version)
+	}
+}
+
+func TestPurgeArchivedInstances_TabOrderCleanup(t *testing.T) {
+	t.Parallel()
+	st := store.State{
+		Instances: []store.ManagedInstance{
+			{ID: "A", WorktreeID: "wt1", Status: "stopped", Archived: false, LogPath: "/dev/null"},
+			{ID: "B", WorktreeID: "wt1", Status: "stopped", Archived: true, LogPath: "/dev/null"},
+			{ID: "C", WorktreeID: "wt1", Status: "stopped", Archived: true, LogPath: "/dev/null"},
+			{ID: "X", WorktreeID: "wt2", Status: "stopped", Archived: true, LogPath: "/dev/null"},
+		},
+		TabOrder: map[string][]string{
+			"wt1": {"A", "B", "C"},
+			"wt2": {"X"},
+		},
+		Version: 0,
+	}
+	m := newManagerWithState(t, st)
+
+	err := m.PurgeArchivedInstances("wt1", 0)
+	if err != nil {
+		t.Fatalf("expected success, got: %v", err)
+	}
+
+	got, _ := m.Store.Load()
+	// Only wt1 archived instances removed.
+	if len(got.Instances) != 2 {
+		t.Fatalf("expected 2 instances (A, X), got %d: %v", len(got.Instances), got.Instances)
+	}
+	if order := got.TabOrder["wt1"]; len(order) != 1 || order[0] != "A" {
+		t.Fatalf("wt1 TabOrder should only contain A, got %v", order)
+	}
+	// wt2 should be completely untouched.
+	if order := got.TabOrder["wt2"]; len(order) != 1 || order[0] != "X" {
+		t.Fatalf("wt2 TabOrder should be untouched, got %v", order)
+	}
+}
+
+func TestPurgeArchivedInstances_AllWorktrees(t *testing.T) {
+	t.Parallel()
+	st := store.State{
+		Instances: []store.ManagedInstance{
+			{ID: "A", WorktreeID: "wt1", Status: "stopped", Archived: false, LogPath: "/dev/null"},
+			{ID: "B", WorktreeID: "wt1", Status: "stopped", Archived: true, LogPath: "/dev/null"},
+			{ID: "X", WorktreeID: "wt2", Status: "stopped", Archived: true, LogPath: "/dev/null"},
+		},
+		TabOrder: map[string][]string{"wt1": {"A", "B"}, "wt2": {"X"}},
+		Version:  0,
+	}
+	m := newManagerWithState(t, st)
+
+	// Empty worktreeID means all worktrees.
+	err := m.PurgeArchivedInstances("", 0)
+	if err != nil {
+		t.Fatalf("expected success, got: %v", err)
+	}
+
+	got, _ := m.Store.Load()
+	if len(got.Instances) != 1 {
+		t.Fatalf("expected 1 instance (A) remaining, got %d: %v", len(got.Instances), got.Instances)
+	}
+	if got.Instances[0].ID != "A" {
+		t.Fatalf("expected only A to remain, got %v", got.Instances)
+	}
+	// Both TabOrders should be cleaned.
+	if order := got.TabOrder["wt1"]; len(order) != 1 || order[0] != "A" {
+		t.Fatalf("wt1 TabOrder should only contain A, got %v", order)
+	}
+	if len(got.TabOrder["wt2"]) != 0 {
+		t.Fatalf("wt2 TabOrder should be empty, got %v", got.TabOrder["wt2"])
+	}
+}
