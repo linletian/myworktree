@@ -112,7 +112,7 @@ Response:
 
 Response:
 ```json
-{ "instances": [ {"id":"...","worktree_id":"...","worktree_name":"...","tag_id":"...","labels":{"purpose":"refactor"},"pid":123,"status":"running"} ] }
+{ "instances": [ {"id":"...","worktree_id":"...","worktree_name":"...","tag_id":"...","name":"build-server","labels":{"purpose":"refactor"},"pid":123,"status":"running"} ] }
 ```
 
 ### Start
@@ -136,6 +136,25 @@ Example (ad-hoc command without tags):
 Response (201):
 ```json
 { "id":"...","pid":123,"status":"running","log_path":"..." }
+```
+
+### Rename
+`PATCH /api/instances`
+
+Updates mutable metadata of an existing instance. Currently only `name` is supported.
+
+Body:
+```json
+{ "id": "<instanceId>", "name": "build-server" }
+```
+
+- `name`: new display name (required). Empty/whitespace-only names are rejected.
+- Returns the full updated instance as JSON.
+- Returns HTTP 404 if instance not found, HTTP 400 if name is empty.
+
+Response (200):
+```json
+{ "id":"...","worktree_id":"...","worktree_name":"...","tag_id":"...","name":"build-server","labels":{},"pid":123,"status":"running","created_at":"..." }
 ```
 
 ### Stop

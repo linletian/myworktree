@@ -427,6 +427,25 @@ func (s *Server) handleInstances(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, http.StatusCreated, item)
+	case http.MethodPatch:
+		var req struct {
+			ID   string `json:"id"`
+			Name string `json:"name"`
+		}
+		if err := readJSON(r.Body, &req); err != nil {
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
+		updated, err := s.instanceMgr.UpdateName(req.ID, req.Name)
+		if err != nil {
+			if errors.Is(err, instance.ErrInstanceNotFound) {
+				writeErr(w, http.StatusNotFound, err)
+				return
+			}
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, updated)
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}

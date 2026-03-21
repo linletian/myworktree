@@ -201,6 +201,22 @@
                 border-top: 2px solid var(--active-color);
             }
 
+        /* Inline rename input */
+        .tab-rename-input {
+            background: var(--bg-primary);
+            border: 1px solid var(--border-color);
+            border-radius: 3px;
+            padding: 1px 4px;
+            font-size: inherit;
+            font-family: inherit;
+            color: inherit;
+            width: 100px;
+            outline: none;
+        }
+        .tab-rename-input:focus {
+            border-color: var(--active-color);
+        }
+
         .tab-status {
             width: 8px;
             height: 8px;
@@ -499,7 +515,9 @@
             activeWT: null,
             activeInst: null,
             showArchived: false,
-            mainRepo: null
+            mainRepo: null,
+            renamingInst: null,    // instance id currently being renamed
+            renamingInstValue: ""  // preserved value across re-renders
         };
 
         // Terminal & Transport
@@ -585,6 +603,13 @@
                         overlay.style.display = "none";
                         reconnectRunningTerminalSessions();
                     }
+
+                    // Skip full re-render during rename — preserve input DOM and IME composition.
+                    // State data (instances, etc.) is already updated above.
+                    if (state.renamingInst) {
+                        refreshInFlight = null;
+                        return;
+                    }
                     render();
                 } catch (e) {
                     console.error(e);
@@ -623,6 +648,7 @@
 
         // Render
         function render() {
+            // NOTE: refresh() skips render() during rename to preserve input DOM and IME composition.
             renderSidebar();
             renderTabs();
             renderWorkspace();
@@ -676,6 +702,64 @@
             }
         }
 
+        // Rename handlers
+        function startRename(id, event) {
+            event.stopPropagation();
+            state.renamingInst = id;
+            state.renamingInstValue = "";
+            renderTabs(); // Create the input DOM before focusing
+            requestAnimationFrame(() => {
+                const input = document.getElementById('rename-input-' + id);
+                if (input) {
+                    input.focus();
+                    input.select();
+                }
+            });
+        }
+
+        function commitRename(id, event) {
+            event.stopPropagation();
+            const input = document.getElementById('rename-input-' + id);
+            if (!input) return;
+            const newName = input.value.trim();
+            state.renamingInst = null;
+            state.renamingInstValue = "";
+            // Don't re-render during rename commit — caller will handle render after API response
+            renderTabs();
+            if (newName === '') {
+                return;
+            }
+            api('/api/instances', {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ id: id, name: newName })
+            }).then(updated => {
+                const idx = state.instances.findIndex(i => i.id === id);
+                if (idx >= 0) {
+                    state.instances[idx] = updated;
+                }
+                render();
+            }).catch(err => {
+                console.error('rename failed:', err);
+                refresh();
+            });
+        }
+
+        function cancelRename() {
+            state.renamingInst = null;
+            state.renamingInstValue = "";
+            renderTabs();
+        }
+
+        function handleRenameKeydown(id, event) {
+            if (event.key === 'Enter') {
+                commitRename(id, event);
+            } else if (event.key === 'Escape') {
+                cancelRename();
+            }
+            event.stopPropagation();
+        }
+
         function renderTabs() {
             const container = document.getElementById("tabs-container");
             if (!state.activeWT) {
@@ -721,12 +805,31 @@
             html += instances.map(i => {
                 const isActive = state.activeInst === i.id;
                 const statusClass = `status-${i.status}`;
-                const name = i.name || i.tag_id || i.id.substring(0, 6);
+                const displayName = i.name || i.tag_id || i.id.substring(0, 6);
                 const archivedMark = i.archived ? '<span style="opacity:0.6; font-size:11px; margin-left:6px">[archived]</span>' : '';
-                return `
+                const isRenaming = state.renamingInst === i.id;
+
+                const renameValue = isRenaming && state.renamingInstValue ? state.renamingInstValue : displayName;
+                if (isRenaming) {
+                    return `
             <div class="tab ${isActive ? 'active' : ''}" onclick="selectInstance('${i.id}')">
               <span class="tab-status ${statusClass}"></span>
-              ${name} ${archivedMark}
+              <input id="rename-input-${i.id}" class="tab-rename-input"
+                value="${renameValue}"
+                onkeydown="handleRenameKeydown('${i.id}', event)"
+                onblur="commitRename('${i.id}', event)"
+              />
+            </div>
+          `;
+                }
+
+                return `
+            <div class="tab ${isActive ? 'active' : ''}"
+                 onclick="selectInstance('${i.id}')"
+                 ondblclick="startRename('${i.id}', event)"
+                 title="Double-click to rename">
+              <span class="tab-status ${statusClass}"></span>
+              ${displayName} ${archivedMark}
             </div>
           `;
             }).join("");
@@ -1274,6 +1377,8 @@
             if (session.ttyState !== 'READY') return;
             const inst = state.instances.find(i => i.id === state.activeInst);
             if (inst && inst.status !== 'running') return;
+            // Don't steal focus from the rename input
+            if (state.renamingInst) return;
 
             session.term.focus();
         }

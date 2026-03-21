@@ -60,6 +60,7 @@ The sidebar shows a pinned **Main Workspace** item at the top (purple accent), f
 - UI shows transport state (`websocket/sse/polling`) and supports manual WS reconnect.
 - Backlog is stored on disk with a size cap (rolling truncate).
 - On server startup, stale persisted `running` records are reconciled to `stopped` because in-memory stdin/stdout bindings cannot be resumed after process restart.
+- **Rename**: `PATCH /api/instances` updates an instance's display name (`name` field). The rename takes effect immediately in the UI and persists to `state.json`.
 
 ## 5. Terminal Protocol Timing Specification
 

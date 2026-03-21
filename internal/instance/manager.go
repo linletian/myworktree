@@ -26,6 +26,9 @@ const (
 	MainWorktreeID       = "__main__"
 )
 
+// ErrInstanceNotFound is returned when an instance ID does not match any known instance.
+var ErrInstanceNotFound = errors.New("unknown instance id")
+
 type Manager struct {
 	DataDir string
 	Store   store.FileStore
@@ -262,6 +265,36 @@ func (m *Manager) List() ([]store.ManagedInstance, error) {
 		return nil, err
 	}
 	return st.Instances, nil
+}
+
+// UpdateName updates the display name of an existing instance.
+// Returns the updated instance on success.
+func (m *Manager) UpdateName(id string, name string) (store.ManagedInstance, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return store.ManagedInstance{}, errors.New("id is required")
+	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return store.ManagedInstance{}, errors.New("name cannot be empty")
+	}
+
+	m.stateMu.Lock()
+	defer m.stateMu.Unlock()
+	st, err := m.Store.Load()
+	if err != nil {
+		return store.ManagedInstance{}, err
+	}
+	for i := range st.Instances {
+		if st.Instances[i].ID == id {
+			st.Instances[i].Name = name
+			if err := m.Store.Save(st); err != nil {
+				return store.ManagedInstance{}, err
+			}
+			return st.Instances[i], nil
+		}
+	}
+	return store.ManagedInstance{}, fmt.Errorf("%w: %s", ErrInstanceNotFound, id)
 }
 
 func (m *Manager) Stop(id string) error {

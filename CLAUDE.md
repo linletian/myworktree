@@ -93,6 +93,7 @@ Instances are server-managed PTY processes (`script -q /dev/null zsh -f -i`). Th
 - **Handshake**: Server sends `{"type":"ready"}` on connect; client must wait for this before sending `{"type":"resize",...}` or any input. This prevents xterm.js query sequences (DA, DEC Private Mode, OSC color queries) from leaking into the PTY as garbage text
 - **Instance switching**: Running instances keep their PTY attachment; inactive sessions are hidden, not torn down
 - **Startup reconcile**: Stale persisted `running` instances → `stopped` (in-memory stdin/stdout bindings cannot resume after restart)
+- **Rename**: `PATCH /api/instances` with `{id, name}` to update display name; double-click the instance tab label in the UI for inline editing.
 
 ### Terminal query filtering (frontend)
 
