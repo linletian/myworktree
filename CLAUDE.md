@@ -72,6 +72,8 @@ myworktree is a lightweight single-user manager for **git worktrees** and **long
 
 - **Worktree**: id, name, path, branch, baseRef, createdAt
 - **Instance**: id, worktreeId, tagId, command, cwd, env (sanitized), pid, status, logPath, timestamps
+- **TabOrder**: map[worktreeID][]instanceID — tab display order per worktree
+- **Version**: int64 — monotonically increasing, used for optimistic locking
 - **Main Repo**: not persisted; served via `GET /api/main` with live git branch (`git rev-parse --abbrev-ref HEAD`)
 
 ### Main workspace (sidebar)
@@ -94,6 +96,7 @@ Instances are server-managed PTY processes (`script -q /dev/null zsh -f -i`). Th
 - **Instance switching**: Running instances keep their PTY attachment; inactive sessions are hidden, not torn down
 - **Startup reconcile**: Stale persisted `running` instances → `stopped` (in-memory stdin/stdout bindings cannot resume after restart)
 - **Rename**: `PATCH /api/instances` with `{id, name}` to update display name; double-click the instance tab label in the UI for inline editing.
+- **Tab ordering**: `PATCH /api/instances/reorder` with `{worktree_id, order: [id1, id2, ...], version}` persists per-worktree tab order with **optimistic locking** (HTTP 409 Conflict if state changed). The frontend tracks `version` from `GET /api/instances` and refreshes on conflict.
 
 ### Terminal query filtering (frontend)
 
@@ -102,12 +105,12 @@ The UI filters terminal response sequences in the input path (`term.onData`) to 
 ### State storage
 
 `$(os.UserConfigDir())/myworktree/<repoHash>/`:
-- `state.json` — worktrees + instances
+- `state.json` — worktrees + instances + tab_order + version (for optimistic locking)
 - `tags.json` — project-level tags
 - `logs/<instanceId>.log` — rolling instance backlog (10MB cap)
 - `server.json` — persisted listen port
 
-State always goes through `store.FileStore` (never write directly) to preserve locking and atomicity.
+State always goes through `store.FileStore` (never write directly) to preserve locking and atomicity. All write operations use `SaveWithVersion` for optimistic locking; `GET /api/instances` returns the current `version` so clients can detect concurrent modifications.
 
 ### Key conventions
 

@@ -231,6 +231,7 @@ func (s *Server) registerAPIs(mux *http.ServeMux) {
 	mux.HandleFunc("/api/worktrees/import", s.handleWorktreeImport)
 	mux.HandleFunc("/api/worktrees/delete", s.handleWorktreeDelete)
 	mux.HandleFunc("/api/instances", s.handleInstances)
+	mux.HandleFunc("/api/instances/reorder", s.handleInstanceReorder)
 	mux.HandleFunc("/api/instances/stop", s.handleInstanceStop)
 	mux.HandleFunc("/api/instances/restart", s.handleInstanceRestart)
 	mux.HandleFunc("/api/instances/archive", s.handleInstanceArchive)
@@ -396,7 +397,12 @@ func (s *Server) handleInstances(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusInternalServerError, err)
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"instances": items})
+		st, err := s.store.Load()
+		version := int64(0)
+		if err == nil {
+			version = st.Version
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"instances": items, "version": version})
 	case http.MethodPost:
 		var req struct {
 			WorktreeID string            `json:"worktree_id"`
@@ -522,6 +528,36 @@ func (s *Server) handleInstanceDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.instanceMgr.Delete(req.ID); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (s *Server) handleInstanceReorder(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPatch {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		WorktreeID string   `json:"worktree_id"`
+		Order      []string `json:"order"`
+		Version    int64    `json:"version"`
+	}
+	if err := readJSON(r.Body, &req); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	err := s.instanceMgr.ReorderInstances(req.WorktreeID, req.Order, req.Version)
+	if errors.Is(err, store.ErrVersionConflict) {
+		st, _ := s.store.Load()
+		writeJSON(w, http.StatusConflict, map[string]any{
+			"error":   "state changed, please refresh",
+			"version": st.Version,
+		})
+		return
+	}
+	if err != nil {
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}

@@ -27,13 +27,15 @@ It does **not** analyze project code or prevent concurrent write conflicts insid
 ### 3.1.1 Worktree directory layout
 - Default: worktrees are created next to the repo under `<repo-name>-myworktree/<worktree-name>/`.
 - Override: `-worktrees-dir=data` uses the legacy location under the per-project data dir; you can also set a custom path.
-  - `state.json` — managed worktrees + managed instances
+  - `state.json` — managed worktrees + managed instances + tab order + version
   - `tags.json` — project-level tags
   - `logs/<instanceId>.log` — rolling instance backlog
 
 ### 3.2 State model
 - Worktree: id, name, path, branch, baseRef, createdAt
 - Instance: id, worktreeId, tagId, command, cwd, env (sanitized), pid, status, logPath, timestamps
+- TabOrder (at State level): map of worktree_id to ordered list of instance IDs
+- **Version** (at State level): monotonically increasing int64, incremented on every write via `SaveWithVersion`. Used for optimistic locking on concurrent modification detection.
 - Main Repo: not persisted; served via `GET /api/main` with live git branch
 
 ### 3.3 Main workspace (sidebar)
@@ -61,6 +63,7 @@ The sidebar shows a pinned **Main Workspace** item at the top (purple accent), f
 - Backlog is stored on disk with a size cap (rolling truncate).
 - On server startup, stale persisted `running` records are reconciled to `stopped` because in-memory stdin/stdout bindings cannot be resumed after process restart.
 - **Rename**: `PATCH /api/instances` updates an instance's display name (`name` field). The rename takes effect immediately in the UI and persists to `state.json`.
+- **Tab ordering**: `PATCH /api/instances/reorder` persists per-worktree tab order to `state.json` (`tab_order` map + array order in `State.Instances`). Uses **optimistic locking** — the client sends the `version` observed from `GET /api/instances`. If the state has been modified since (e.g., another user started an instance), the server returns HTTP 409 Conflict and the client refreshes and retries.
 
 ## 5. Terminal Protocol Timing Specification
 

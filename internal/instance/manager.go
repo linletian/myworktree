@@ -75,8 +75,8 @@ func (m *Manager) ReconcileRunningOnStartup() (int, error) {
 	if changed == 0 {
 		return 0, nil
 	}
-	if err := m.Store.Save(st); err != nil {
-		return 0, err
+	if err := m.Store.SaveWithVersion(st, st.Version); err != nil {
+		return changed, err
 	}
 	return changed, nil
 }
@@ -231,7 +231,11 @@ func (m *Manager) Start(in StartInput) (store.ManagedInstance, error) {
 	st2, err := m.Store.Load()
 	if err == nil {
 		st2.Instances = append(st2.Instances, inst)
-		err = m.Store.Save(st2)
+		if st2.TabOrder == nil {
+			st2.TabOrder = make(map[string][]string)
+		}
+		st2.TabOrder[in.WorktreeID] = append(st2.TabOrder[in.WorktreeID], inst.ID)
+		err = m.Store.SaveWithVersion(st2, st2.Version)
 	}
 	m.stateMu.Unlock()
 	if err != nil {
@@ -288,13 +292,86 @@ func (m *Manager) UpdateName(id string, name string) (store.ManagedInstance, err
 	for i := range st.Instances {
 		if st.Instances[i].ID == id {
 			st.Instances[i].Name = name
-			if err := m.Store.Save(st); err != nil {
+			if err := m.Store.SaveWithVersion(st, st.Version); err != nil {
 				return store.ManagedInstance{}, err
 			}
 			return st.Instances[i], nil
 		}
 	}
 	return store.ManagedInstance{}, fmt.Errorf("%w: %s", ErrInstanceNotFound, id)
+}
+
+// ReorderInstances sets the tab order for a specific worktree.
+// orderIDs must contain all instance IDs for the given worktree (both active and archived).
+// expectedVersion is the version the caller observed; save is rejected if the state has changed.
+func (m *Manager) ReorderInstances(worktreeID string, orderIDs []string, expectedVersion int64) error {
+	worktreeID = strings.TrimSpace(worktreeID)
+	if worktreeID == "" {
+		return errors.New("worktree_id is required")
+	}
+
+	m.stateMu.Lock()
+	defer m.stateMu.Unlock()
+	st, err := m.Store.Load()
+	if err != nil {
+		return err
+	}
+
+	// Build maps for lookup.
+	idSet := make(map[string]bool, len(orderIDs))
+	for _, id := range orderIDs {
+		idSet[id] = true
+	}
+
+	// Validate: every instance for this worktree must be in orderIDs.
+	for _, inst := range st.Instances {
+		if inst.WorktreeID == worktreeID {
+			if !idSet[inst.ID] {
+				return fmt.Errorf("order list is missing instance: %s", inst.ID)
+			}
+		}
+	}
+
+	// Validate: every ID in orderIDs must belong to this worktree.
+	for _, id := range orderIDs {
+		found := false
+		for _, inst := range st.Instances {
+			if inst.ID == id && inst.WorktreeID == worktreeID {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return fmt.Errorf("instance %s does not belong to worktree %s", id, worktreeID)
+		}
+	}
+
+	// Update TabOrder index.
+	if st.TabOrder == nil {
+		st.TabOrder = make(map[string][]string)
+	}
+	st.TabOrder[worktreeID] = orderIDs
+
+	// Rebuild Instances slice to match desired order.
+	idToInst := make(map[string]store.ManagedInstance, len(st.Instances))
+	for _, inst := range st.Instances {
+		idToInst[inst.ID] = inst
+	}
+
+	newOrder := make([]store.ManagedInstance, 0, len(st.Instances))
+	// Instances from this worktree, in the new order.
+	for _, id := range orderIDs {
+		newOrder = append(newOrder, idToInst[id])
+	}
+	// Append instances from other worktrees (unchanged).
+	for _, inst := range st.Instances {
+		if inst.WorktreeID != worktreeID {
+			newOrder = append(newOrder, inst)
+		}
+	}
+	st.Instances = newOrder
+
+	return m.Store.SaveWithVersion(st, expectedVersion)
 }
 
 func (m *Manager) Stop(id string) error {
@@ -495,7 +572,7 @@ func (m *Manager) Restart(id string) (store.ManagedInstance, error) {
 			break
 		}
 	}
-	_ = m.Store.Save(st2)
+	_ = m.Store.SaveWithVersion(st2, st2.Version)
 	m.stateMu.Unlock()
 	return newInst, nil
 }
@@ -558,7 +635,7 @@ func (m *Manager) Archive(id string) error {
 			}
 			st.Instances[i].Archived = true
 			st.Instances[i].ArchivedAt = time.Now().UTC().Format(time.RFC3339)
-			return m.Store.Save(st)
+			return m.Store.SaveWithVersion(st, st.Version)
 		}
 	}
 	return fmt.Errorf("unknown instance id: %s", id)
@@ -594,7 +671,7 @@ func (m *Manager) Delete(id string) error {
 		return fmt.Errorf("unknown instance id: %s", id)
 	}
 	st.Instances = append(st.Instances[:idx], st.Instances[idx+1:]...)
-	if err := m.Store.Save(st); err != nil {
+	if err := m.Store.SaveWithVersion(st, st.Version); err != nil {
 		return err
 	}
 	if strings.TrimSpace(logPath) != "" {
@@ -724,7 +801,7 @@ func (m *Manager) wait(id string, cmd *exec.Cmd) {
 			break
 		}
 	}
-	_ = m.Store.Save(st)
+	_ = m.Store.SaveWithVersion(st, st.Version)
 }
 
 func (m *Manager) pumpLogs(id string, stdout io.Reader, stderr io.Reader, out *os.File, logPath string) {
@@ -857,7 +934,7 @@ func (m *Manager) markStopped(id string, status string) error {
 		if st.Instances[i].Status == "running" {
 			st.Instances[i].Status = status
 			st.Instances[i].StoppedAt = time.Now().UTC().Format(time.RFC3339)
-			return m.Store.Save(st)
+			return m.Store.SaveWithVersion(st, st.Version)
 		}
 		return nil
 	}

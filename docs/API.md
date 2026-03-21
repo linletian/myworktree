@@ -112,8 +112,10 @@ Response:
 
 Response:
 ```json
-{ "instances": [ {"id":"...","worktree_id":"...","worktree_name":"...","tag_id":"...","name":"build-server","labels":{"purpose":"refactor"},"pid":123,"status":"running"} ] }
+{ "instances": [ {"id":"...","worktree_id":"...","worktree_name":"...","tag_id":"...","name":"build-server","labels":{"purpose":"refactor"},"pid":123,"status":"running"} ], "version": 7 }
 ```
+
+- `version`: monotonically increasing state version. Incrementing `SaveWithVersion` calls cause this to grow. Clients should track it and send it back on operations that modify state (e.g., reorder) to detect concurrent modifications.
 
 ### Start
 `POST /api/instances`
@@ -156,6 +158,34 @@ Response (200):
 ```json
 { "id":"...","worktree_id":"...","worktree_name":"...","tag_id":"...","name":"build-server","labels":{},"pid":123,"status":"running","created_at":"..." }
 ```
+
+### Reorder tabs
+`PATCH /api/instances/reorder`
+
+Sets the tab display order for a specific worktree. The order persists across page reloads and server restarts.
+
+Body:
+```json
+{ "worktree_id": "<worktreeId>", "order": ["id1", "id2", "id3"], "version": 7 }
+```
+
+- `worktree_id`: the worktree whose tab order is being set (can be `"__main__"` for the main repo)
+- `order`: ordered list of ALL instance IDs belonging to that worktree (both active and archived). All instances must be included.
+- `version`: the state version observed by the client (from `GET /api/instances`). Used for optimistic locking — if the state has changed since the client fetched it, the server returns HTTP 409 Conflict.
+
+Response (200):
+```json
+{ "status": "ok" }
+```
+
+- Returns HTTP 400 if the order list is missing an instance or contains an ID that does not belong to the worktree.
+- Returns HTTP 409 Conflict if the state version has changed (concurrent modification). The response body includes the current version so the client can refresh and retry:
+
+```json
+{ "error": "state changed, please refresh", "version": 8 }
+```
+
+- The instance order is also stored as the array order in `state.json`, so `GET /api/instances` reflects the new order immediately.
 
 ### Stop
 `POST /api/instances/stop`

@@ -182,6 +182,20 @@
             border: 1px solid transparent;
             border-bottom: none;
             border-radius: 4px 4px 0 0;
+            user-select: none;
+        }
+
+        /* Drag and drop visual feedback */
+        .tab[draggable="true"] { cursor: grab; }
+        .tab[draggable="true"]:active { cursor: grabbing; }
+        .tab.dragging {
+            opacity: 0.4;
+            border-style: dashed;
+        }
+        .tab.drag-over {
+            box-shadow: inset 3px 0 0 var(--active-color);
+            background: var(--active-bg);
+        }
             color: #586069;
             margin-bottom: -1px;
             height: 32px;
@@ -520,10 +534,17 @@
             renamingInstValue: ""  // preserved value across re-renders
         };
 
+        // Drag and drop state
+        let dragState = {
+            sourceId: null,
+            targetId: null
+        };
+
         // Terminal & Transport
         let terminalSessions = {};
         let pollTimer = null;
         let refreshInFlight = null;
+        let stateVersion = 0;
 
         // API
         function rememberServerRevision(res) {
@@ -586,6 +607,7 @@
                     ]);
                     state.worktrees = wt.worktrees || [];
                     state.instances = ins.instances || [];
+                    stateVersion = ins.version || 0;
                     state.tags = tags.tags || [];
                     state.branches = branches;
                     reconcileTerminalSessions();
@@ -772,7 +794,6 @@
             if (!state.showArchived) {
                 instances = instances.filter(i => !i.archived);
             }
-            instances.sort((a, b) => a.created_at.localeCompare(b.created_at));
 
             // Fix invalid selection (e.g. archived/deleted)
             if (state.activeInst && !instances.find(i => i.id === state.activeInst)) {
@@ -780,17 +801,14 @@
                 const oldInst = state.instances.find(i => i.id === state.activeInst);
                 // If old instance still exists (e.g. archived), try to select neighbors
                 if (oldInst) {
-                    const left = instances.filter(i => i.created_at < oldInst.created_at);
-                    if (left.length > 0) newId = left[left.length - 1].id;
-                    else {
-                        const right = instances.filter(i => i.created_at > oldInst.created_at);
-                        if (right.length > 0) newId = right[0].id;
-                    }
+                    const currentIdx = instances.findIndex(i => i.id === oldInst.id);
+                    if (currentIdx > 0) newId = instances[currentIdx - 1].id;
+                    else if (currentIdx < instances.length - 1) newId = instances[currentIdx + 1].id;
                 }
-                
+
                 if (newId) {
                     selectInstance(newId);
-                    return; 
+                    return;
                 } else {
                     // No valid neighbor or old instance gone; clear selection.
                     // If instances exist, bottom logic will pick one.
@@ -825,9 +843,16 @@
 
                 return `
             <div class="tab ${isActive ? 'active' : ''}"
+                 draggable="true"
+                 data-instance-id="${i.id}"
                  onclick="selectInstance('${i.id}')"
                  ondblclick="startRename('${i.id}', event)"
-                 title="Double-click to rename">
+                 ondragstart="handleDragStart('${i.id}', event)"
+                 ondragend="handleDragEnd(event)"
+                 ondragover="handleDragOver(event)"
+                 ondragleave="handleDragLeave(event)"
+                 ondrop="handleDrop('${i.id}', event)"
+                 title="Drag to reorder; double-click to rename">
               <span class="tab-status ${statusClass}"></span>
               ${displayName} ${archivedMark}
             </div>
@@ -851,6 +876,141 @@
             } else if (state.activeWT && instances.length === 0) {
                 selectInstance(null); // Clear selection if no instances
             }
+        }
+
+        // Extract current order of instances for a worktree.
+        function getTabOrder(worktreeId) {
+            return state.instances
+                .filter(i => i.worktree_id === worktreeId)
+                .map(i => i.id);
+        }
+
+        // Stores the last server-confirmed order per worktree for rollback on conflict.
+        const lastConfirmedOrder = {};
+
+        // API call for reordering. Fire-and-forget — caller updates UI optimistically first.
+        async function reorderInstances(worktreeId, order) {
+            const res = await api("/api/instances/reorder", {
+                method: "PATCH",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ worktree_id: worktreeId, order: order, version: stateVersion })
+            });
+            if (res.status === 409) {
+                console.warn("reorder conflict, rolling back and refreshing...");
+                // Rollback: restore the previously confirmed order.
+                const confirmed = lastConfirmedOrder[worktreeId];
+                if (confirmed) {
+                    const idToInst = {};
+                    state.instances.forEach(inst => { idToInst[inst.id] = inst; });
+                    const thisWTOrder = confirmed
+                        .filter(id => idToInst[id] && idToInst[id].worktree_id === worktreeId)
+                        .map(id => idToInst[id]);
+                    const others = state.instances.filter(i => i.worktree_id !== worktreeId);
+                    state.instances = [...others, ...thisWTOrder];
+                    renderTabs();
+                }
+                refresh();
+                return;
+            }
+            if (!res.ok) throw new Error(await res.text());
+            stateVersion++;
+            // Record this as the last confirmed order.
+            lastConfirmedOrder[worktreeId] = order;
+        }
+
+        // --- Drag and Drop handlers ---
+
+        function handleDragStart(id, event) {
+            if (id === state.renamingInst) {
+                event.preventDefault();
+                return;
+            }
+            dragState.sourceId = id;
+            event.dataTransfer.effectAllowed = "move";
+            event.dataTransfer.setData("text/plain", id);
+            setTimeout(() => {
+                const el = document.querySelector(`[data-instance-id="${id}"]`);
+                if (el) el.classList.add("dragging");
+            }, 0);
+        }
+
+        function handleDragEnd(event) {
+            const el = document.querySelector(`[data-instance-id="${dragState.sourceId}"]`);
+            if (el) el.classList.remove("dragging");
+            document.querySelectorAll(".tab.drag-over").forEach(e => e.classList.remove("drag-over"));
+            dragState.sourceId = null;
+            dragState.targetId = null;
+        }
+
+        function handleDragOver(event) {
+            event.preventDefault();
+            event.dataTransfer.dropEffect = "move";
+            const tab = event.currentTarget;
+            const targetId = tab.dataset.instanceId;
+            if (targetId === dragState.sourceId) return;
+            document.querySelectorAll(".tab.drag-over").forEach(e => e.classList.remove("drag-over"));
+            tab.classList.add("drag-over");
+            dragState.targetId = targetId;
+        }
+
+        function handleDragLeave(event) {
+            const tab = event.currentTarget;
+            if (!tab.contains(event.relatedTarget)) {
+                tab.classList.remove("drag-over");
+                if (dragState.targetId === tab.dataset.instanceId) {
+                    dragState.targetId = null;
+                }
+            }
+        }
+
+        async function handleDrop(targetId, event) {
+            event.preventDefault();
+            event.stopPropagation();
+
+            const sourceId = dragState.sourceId;
+            if (!sourceId || sourceId === targetId) {
+                dragState.sourceId = null;
+                dragState.targetId = null;
+                return;
+            }
+
+            const worktreeId = state.activeWT;
+            const allIds = getTabOrder(worktreeId);
+
+            const srcIdx = allIds.indexOf(sourceId);
+            const tgtIdx = allIds.indexOf(targetId);
+            if (srcIdx < 0 || tgtIdx < 0) return;
+
+            // Save current confirmed order before optimistic update (for rollback).
+            lastConfirmedOrder[worktreeId] = [...allIds];
+
+            // Compute new order.
+            const newOrder = [...allIds];
+            newOrder.splice(srcIdx, 1);
+            newOrder.splice(tgtIdx, 0, sourceId);
+
+            // Optimistic update: immediately reorder state.instances.
+            const idToInst = {};
+            state.instances.forEach(inst => { idToInst[inst.id] = inst; });
+
+            const thisWTOrder = [];
+            for (const id of newOrder) {
+                if (idToInst[id] && idToInst[id].worktree_id === worktreeId) {
+                    thisWTOrder.push(idToInst[id]);
+                }
+            }
+            // Remove this WT's instances and re-insert in new order.
+            const others = state.instances.filter(i => i.worktree_id !== worktreeId);
+            state.instances = [...others, ...thisWTOrder];
+
+            renderTabs();
+
+            // Fire-and-forget: API call happens in background.
+            // On 409 conflict, reorderInstances() rolls back and refreshes.
+            reorderInstances(worktreeId, newOrder);
+
+            dragState.sourceId = null;
+            dragState.targetId = null;
         }
 
         function renderWorkspace() {

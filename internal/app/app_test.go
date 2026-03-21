@@ -139,6 +139,126 @@ func TestHandleInstanceUpdate(t *testing.T) {
 	}
 }
 
+func TestHandleInstanceReorder(t *testing.T) {
+	nullLogger := log.New(os.Stderr, "", 0)
+	srv, err := New(Config{}, nullLogger)
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+
+	// GET instances to find a worktree with 2+ instances.
+	reqList := httptest.NewRequest(http.MethodGet, "/api/instances", nil)
+	wList := httptest.NewRecorder()
+	srv.handleInstances(wList, reqList)
+	var listResp map[string]any
+	if err := json.Unmarshal(wList.Body.Bytes(), &listResp); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+	instancesRaw := listResp["instances"]
+	if instancesRaw == nil {
+		t.Skip("no instances available for reorder test")
+	}
+	instances, ok := instancesRaw.([]any)
+	if !ok || len(instances) < 2 {
+		t.Skip("need at least 2 instances for reorder test")
+	}
+
+	// Group by worktree_id.
+	type pair struct{ id, wt string }
+	var pairs []pair
+	for _, raw := range instances {
+		m := raw.(map[string]any)
+		pairs = append(pairs, pair{id: m["id"].(string), wt: m["worktree_id"].(string)})
+	}
+	wtCounts := map[string]int{}
+	wtIDs := map[string][]string{}
+	for _, p := range pairs {
+		wtCounts[p.wt]++
+		wtIDs[p.wt] = append(wtIDs[p.wt], p.id)
+	}
+	var wtID string
+	var ids []string
+	for w, c := range wtCounts {
+		if c >= 2 {
+			wtID = w
+			ids = wtIDs[w]
+			break
+		}
+	}
+	if wtID == "" {
+		t.Skip("no worktree with 2+ instances")
+	}
+
+	// Test 1: valid reorder — reverse the order.
+	reversed := make([]string, len(ids))
+	copy(reversed, ids)
+	for i, j := 0, len(reversed)-1; i < j; i, j = i+1, j-1 {
+		reversed[i], reversed[j] = reversed[j], reversed[i]
+	}
+	body := map[string]any{"worktree_id": wtID, "order": reversed}
+	bodyBytes, _ := json.Marshal(body)
+	req := httptest.NewRequest(http.MethodPatch, "/api/instances/reorder", bytes.NewReader(bodyBytes))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.handleInstanceReorder(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("PATCH /api/instances/reorder: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	// Verify order persisted: GET instances and check slice order.
+	reqGet := httptest.NewRequest(http.MethodGet, "/api/instances", nil)
+	wGet := httptest.NewRecorder()
+	srv.handleInstances(wGet, reqGet)
+	var getResp map[string]any
+	json.Unmarshal(wGet.Body.Bytes(), &getResp)
+	allInsts := getResp["instances"].([]any)
+	var gotOrder []string
+	for _, raw := range allInsts {
+		m := raw.(map[string]any)
+		if m["worktree_id"].(string) == wtID {
+			gotOrder = append(gotOrder, m["id"].(string))
+		}
+	}
+	if len(gotOrder) != len(reversed) {
+		t.Fatalf("reorder: got %d instances, want %d", len(gotOrder), len(reversed))
+	}
+	for i := range reversed {
+		if gotOrder[i] != reversed[i] {
+			t.Fatalf("reorder: position %d: got %s, want %s", i, gotOrder[i], reversed[i])
+		}
+	}
+
+	// Test 2: missing instance → 400.
+	badBody := map[string]any{"worktree_id": wtID, "order": []string{ids[0]}}
+	badBytes, _ := json.Marshal(badBody)
+	reqBad := httptest.NewRequest(http.MethodPatch, "/api/instances/reorder", bytes.NewReader(badBytes))
+	reqBad.Header.Set("Content-Type", "application/json")
+	wBad := httptest.NewRecorder()
+	srv.handleInstanceReorder(wBad, reqBad)
+	if wBad.Code != http.StatusBadRequest {
+		t.Fatalf("PATCH with missing instance: expected 400, got %d", wBad.Code)
+	}
+
+	// Test 3: instance from wrong worktree → 400.
+	wrongBody := map[string]any{"worktree_id": wtID, "order": []string{ids[0], ids[1], "nonexistent"}}
+	wrongBytes, _ := json.Marshal(wrongBody)
+	reqWrong := httptest.NewRequest(http.MethodPatch, "/api/instances/reorder", bytes.NewReader(wrongBytes))
+	reqWrong.Header.Set("Content-Type", "application/json")
+	wWrong := httptest.NewRecorder()
+	srv.handleInstanceReorder(wWrong, reqWrong)
+	if wWrong.Code != http.StatusBadRequest {
+		t.Fatalf("PATCH with invalid ID: expected 400, got %d", wWrong.Code)
+	}
+
+	// Test 4: wrong method → 405.
+	reqGet2 := httptest.NewRequest(http.MethodGet, "/api/instances/reorder", nil)
+	w405 := httptest.NewRecorder()
+	srv.handleInstanceReorder(w405, reqGet2)
+	if w405.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("GET /api/instances/reorder: expected 405, got %d", w405.Code)
+	}
+}
+
 func TestHandleMain(t *testing.T) {
 	nullLogger := log.New(os.Stderr, "", 0)
 	srv, err := New(Config{}, nullLogger)
