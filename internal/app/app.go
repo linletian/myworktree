@@ -65,6 +65,7 @@ type authFail struct {
 }
 
 var errInvalidRepoListenPort = errors.New("invalid persisted listen_port")
+var errWorktreeNotFound = errors.New("worktree not found")
 
 func New(cfg Config, logger *log.Logger) (*Server, error) {
 	if logger == nil {
@@ -215,8 +216,7 @@ func (s *Server) validateSecurity() error {
 		// We'll validate after Listen in later iteration.
 		return nil
 	}
-	isLoopback := host == "127.0.0.1" || host == "localhost" || host == "::1"
-	if !isLoopback && strings.TrimSpace(s.cfg.AuthToken) == "" {
+	if !isLoopbackHost(host) && strings.TrimSpace(s.cfg.AuthToken) == "" {
 		return errors.New("--auth is required when listening on a non-loopback address")
 	}
 	if (s.cfg.TLSCert == "") != (s.cfg.TLSKey == "") {
@@ -244,6 +244,8 @@ func (s *Server) registerAPIs(mux *http.ServeMux) {
 	mux.HandleFunc("/api/instances/log/stream", s.handleInstanceLogStream)
 	mux.HandleFunc("/api/tags", s.handleTags)
 	mux.HandleFunc("/api/branches", s.handleBranches)
+	mux.HandleFunc("/api/worktrees/open-terminal", s.handleWorktreeOpenTerminal)
+	mux.HandleFunc("/api/worktrees/open-finder", s.handleWorktreeOpenFinder)
 	mux.HandleFunc("/api/mcp/tools", s.handleMCPTools)
 	mux.HandleFunc("/api/mcp/call", s.handleMCPCall)
 	mux.HandleFunc("/api/main", s.handleMain)
@@ -1235,6 +1237,22 @@ func clientIP(remoteAddr string) string {
 	return host
 }
 
+func isLoopbackHost(host string) bool {
+	host = strings.TrimSpace(host)
+	if host == "" {
+		return false
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+func isLoopbackRequest(r *http.Request) bool {
+	return isLoopbackHost(clientIP(r.RemoteAddr))
+}
+
 func (s *Server) allowAuthAttempt(ip string) bool {
 	s.authMu.Lock()
 	defer s.authMu.Unlock()
@@ -1503,4 +1521,90 @@ func computeServerRevision() string {
 	}
 	sum := sha256.Sum256([]byte(strings.Join(parts, "|")))
 	return hex.EncodeToString(sum[:8])
+}
+
+func (s *Server) resolveOpenWorktreePath(id string) (string, error) {
+	if id == "__main__" {
+		return s.root, nil
+	}
+	items, err := s.worktreeMgr.List()
+	if err != nil {
+		return "", err
+	}
+	for _, it := range items {
+		if it.ID == id {
+			return it.Path, nil
+		}
+	}
+	return "", errWorktreeNotFound
+}
+
+func (s *Server) handleWorktreeOpen(w http.ResponseWriter, r *http.Request, args func(path string) []string) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !isLoopbackRequest(r) {
+		writeErr(w, http.StatusForbidden, errors.New("host GUI actions are only allowed from loopback clients"))
+		return
+	}
+	var req struct {
+		ID string `json:"id"`
+	}
+	if err := readJSON(r.Body, &req); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+
+	path, err := s.resolveOpenWorktreePath(req.ID)
+	if err != nil {
+		if errors.Is(err, errWorktreeNotFound) {
+			writeErr(w, http.StatusNotFound, err)
+			return
+		}
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+
+	if _, err := os.Stat(path); err != nil {
+		writeErr(w, http.StatusNotFound, fmt.Errorf("worktree path not found: %w", err))
+		return
+	}
+
+	cmdArgs := args(path)
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, cmdArgs[0], cmdArgs[1:]...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			err = fmt.Errorf("command timed out: %s", strings.Join(cmdArgs, " "))
+		} else {
+			detail := strings.TrimSpace(string(out))
+			if detail != "" {
+				err = fmt.Errorf("%w: %s", err, detail)
+			}
+		}
+		s.logger.Printf("open worktree command failed: args=%q err=%v", cmdArgs, err)
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (s *Server) handleWorktreeOpenTerminal(w http.ResponseWriter, r *http.Request) {
+	s.handleWorktreeOpen(w, r, func(path string) []string {
+		return []string{"open", "-a", "Terminal", path}
+	})
+}
+
+func (s *Server) handleWorktreeOpenFinder(w http.ResponseWriter, r *http.Request) {
+	s.handleWorktreeOpen(w, r, func(path string) []string {
+		return []string{
+			"osascript",
+			"-e", fmt.Sprintf(`tell application "Finder" to open POSIX file %q`, path),
+			"-e", `tell application "Finder" to activate`,
+		}
+	})
 }

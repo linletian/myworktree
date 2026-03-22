@@ -86,6 +86,52 @@ Response:
 { "status": "ok" }
 ```
 
+### Open Terminal (host macOS)
+`POST /api/worktrees/open-terminal`
+
+Opens the selected worktree path in the host machine's Terminal app. The UI should only expose this action for local browser sessions (`localhost` / `127.0.0.1`), because it affects the machine running `myworktree`, not the client device.
+
+Body:
+```json
+{ "id": "<worktreeId>" }
+```
+
+- `id` can be a managed worktree ID, or `"__main__"` to target the main repo root.
+- Uses `open -a Terminal <path>` on macOS.
+- The backend enforces a loopback-only boundary using the request remote address; non-loopback callers receive HTTP 403 even if they know the endpoint.
+
+Response:
+```json
+{ "status": "ok" }
+```
+
+- Returns HTTP 404 if the worktree ID is unknown or the resolved path no longer exists.
+- Returns HTTP 403 if the request does not originate from a loopback client.
+- Returns HTTP 500 if launching Terminal fails.
+
+### Open Finder (host macOS)
+`POST /api/worktrees/open-finder`
+
+Opens the selected worktree path in the host machine's Finder. As with `open-terminal`, this is a host-local side effect and should only be presented in the UI for local browser sessions.
+
+Body:
+```json
+{ "id": "<worktreeId>" }
+```
+
+- `id` can be a managed worktree ID, or `"__main__"` to target the main repo root.
+- Uses AppleScript (`osascript`) to tell Finder to open the path and activate the app, so the Finder window is brought to the foreground more reliably than plain `open <path>`.
+- The backend enforces a loopback-only boundary using the request remote address; non-loopback callers receive HTTP 403 even if they know the endpoint.
+
+Response:
+```json
+{ "status": "ok" }
+```
+
+- Returns HTTP 404 if the worktree ID is unknown or the resolved path no longer exists.
+- Returns HTTP 403 if the request does not originate from a loopback client.
+- Returns HTTP 500 if launching Finder fails.
+
 ### Get worktree git status
 `GET /api/worktree/status?id=<worktreeId>`
 

@@ -73,6 +73,59 @@ func TestClientIP(t *testing.T) {
 	}
 }
 
+func TestIsLoopbackHost(t *testing.T) {
+	tests := []struct {
+		name string
+		host string
+		want bool
+	}{
+		{name: "localhost", host: "localhost", want: true},
+		{name: "ipv4 loopback", host: "127.0.0.1", want: true},
+		{name: "ipv6 loopback", host: "::1", want: true},
+		{name: "remote ipv4", host: "203.0.113.10", want: false},
+		{name: "blank", host: "", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isLoopbackHost(tt.host); got != tt.want {
+				t.Fatalf("isLoopbackHost(%q) = %v, want %v", tt.host, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestWorktreeOpenEndpointsRejectNonLoopback(t *testing.T) {
+	nullLogger := log.New(os.Stderr, "", 0)
+	srv, err := New(Config{}, nullLogger)
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+
+	tests := []struct {
+		name    string
+		handler func(http.ResponseWriter, *http.Request)
+		path    string
+	}{
+		{name: "terminal", handler: srv.handleWorktreeOpenTerminal, path: "/api/worktrees/open-terminal"},
+		{name: "finder", handler: srv.handleWorktreeOpenFinder, path: "/api/worktrees/open-finder"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, tt.path, bytes.NewReader([]byte(`{"id":"__main__"}`)))
+			req.Header.Set("Content-Type", "application/json")
+			req.RemoteAddr = "203.0.113.5:12345"
+			w := httptest.NewRecorder()
+
+			tt.handler(w, req)
+
+			if w.Code != http.StatusForbidden {
+				t.Fatalf("expected 403, got %d: %s", w.Code, w.Body.String())
+			}
+		})
+	}
+}
+
 func TestHandleInstanceUpdate(t *testing.T) {
 	nullLogger := log.New(os.Stderr, "", 0)
 	srv, err := New(Config{}, nullLogger)

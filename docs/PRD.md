@@ -41,12 +41,15 @@
 - 默认只监听 `127.0.0.1`。
 - 监听非 loopback（例如 `0.0.0.0` 或局域网 IP）时：必须提供 `--auth`。
 - 可选内置 HTTPS：`--tls-cert/--tls-key`。
+- 涉及宿主机图形界面的快捷动作（例如从侧栏直接打开 Terminal / Finder）只在浏览器通过 `127.0.0.1` / `localhost` 访问时展示；远程访问时隐藏，避免误导用户在远端会话里触发本机 GUI 行为。
+- 对应后端接口也强制仅接受 loopback 客户端请求，不能只依赖前端隐藏来形成安全边界。
 - 日志/回放脱敏：
   - env 键名包含 `TOKEN/SECRET/KEY/PASSWORD` 的值写入状态时替换为 `***`。
   - 输出回放中按模式脱敏主流 AI key（如 `sk-***`）。
 
 ## 7. 当前实现状态（与愿景差异）
 - 已实现：worktree/instance 管理、Web UI、API、输出回放、脱敏、认证与可选 HTTPS、MCP tools 列表接口。
+- 已实现：侧栏主工作区/各 worktree 项提供两个快捷入口，可一键在宿主机打开对应目录的 Terminal（zsh）与 Finder 窗口，便于在 Web UI 与本机 GUI/CLI 间快速切换。
 - **已实现 PTY + Web TTY**：instance 通过 PTY 启动，支持真正的交互式终端（vim/htop/less 等 TUI 程序）。
   - WebSocket 握手协议：服务端发送 `{"type":"ready"}`，客户端等待后发送 resize 开始数据流。
   - 窗口尺寸传递：前端监听窗口 resize 并通知后端 PTY，确保 TUI 程序正确重绘。
@@ -60,4 +63,5 @@
 - 可创建/列出/删除 worktree（dirty 删除被拒绝）。
 - 可启动/列出/停止 instance，且前端关闭后 instance 仍继续运行。
 - UI 重连可看到所有已管理对象，并能回放 instance 近期输出。
+- 本机访问 Web UI 时，可从侧栏一键打开所选主工作区/worktree 的 Terminal 与 Finder；远程访问时不展示这两个快捷入口。
 - 非 loopback 无 `--auth` 时拒绝启动；输出回放对 `sk-...` 做脱敏。
