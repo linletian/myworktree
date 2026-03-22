@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"myworktree/internal/store"
 )
@@ -91,6 +92,136 @@ func TestIsLoopbackHost(t *testing.T) {
 				t.Fatalf("isLoopbackHost(%q) = %v, want %v", tt.host, got, tt.want)
 			}
 		})
+	}
+}
+
+func mustReadTTYSize(t *testing.T, ch <-chan ttySize) ttySize {
+	t.Helper()
+	select {
+	case size, ok := <-ch:
+		if !ok {
+			t.Fatal("tty size channel closed unexpectedly")
+		}
+		return size
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for tty size update")
+		return ttySize{}
+	}
+}
+
+func TestTTYSizeAggregationUsesMinimumAcrossClients(t *testing.T) {
+	srv := &Server{}
+	client1, updates1, err := srv.registerTTYClient("inst-1")
+	if err != nil {
+		t.Fatalf("register client1 failed: %v", err)
+	}
+	client2, updates2, err := srv.registerTTYClient("inst-1")
+	if err != nil {
+		t.Fatalf("register client2 failed: %v", err)
+	}
+
+	srv.updateTTYClientSize("inst-1", client1, 120, 40)
+	if got := mustReadTTYSize(t, updates1); got != (ttySize{Cols: 120, Rows: 40}) {
+		t.Fatalf("client1 first applied size = %#v", got)
+	}
+	if got := mustReadTTYSize(t, updates2); got != (ttySize{Cols: 120, Rows: 40}) {
+		t.Fatalf("client2 first applied size = %#v", got)
+	}
+
+	srv.updateTTYClientSize("inst-1", client2, 80, 50)
+	want := ttySize{Cols: 80, Rows: 40}
+	if got := mustReadTTYSize(t, updates1); got != want {
+		t.Fatalf("client1 aggregated size = %#v, want %#v", got, want)
+	}
+	if got := mustReadTTYSize(t, updates2); got != want {
+		t.Fatalf("client2 aggregated size = %#v, want %#v", got, want)
+	}
+
+	srv.updateTTYClientSize("inst-1", client1, 90, 30)
+	want = ttySize{Cols: 80, Rows: 30}
+	if got := mustReadTTYSize(t, updates1); got != want {
+		t.Fatalf("client1 updated aggregated size = %#v, want %#v", got, want)
+	}
+	if got := mustReadTTYSize(t, updates2); got != want {
+		t.Fatalf("client2 updated aggregated size = %#v, want %#v", got, want)
+	}
+	if got := srv.ttyApplied["inst-1"]; got != want {
+		t.Fatalf("server applied size = %#v, want %#v", got, want)
+	}
+}
+
+func TestTTYSizeAggregationRecomputesOnDisconnect(t *testing.T) {
+	srv := &Server{}
+	client1, updates1, err := srv.registerTTYClient("inst-2")
+	if err != nil {
+		t.Fatalf("register client1 failed: %v", err)
+	}
+	client2, updates2, err := srv.registerTTYClient("inst-2")
+	if err != nil {
+		t.Fatalf("register client2 failed: %v", err)
+	}
+
+	srv.updateTTYClientSize("inst-2", client1, 80, 24)
+	_ = mustReadTTYSize(t, updates1)
+	_ = mustReadTTYSize(t, updates2)
+
+	srv.updateTTYClientSize("inst-2", client2, 120, 40)
+	select {
+	case <-updates1:
+		t.Fatal("larger second client should not change aggregated size")
+	case <-updates2:
+		t.Fatal("larger second client should not change aggregated size")
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	srv.unregisterTTYClient("inst-2", client1)
+	want := ttySize{Cols: 120, Rows: 40}
+	if got := mustReadTTYSize(t, updates2); got != want {
+		t.Fatalf("remaining client size after disconnect = %#v, want %#v", got, want)
+	}
+
+	select {
+	case _, ok := <-updates1:
+		if ok {
+			t.Fatal("removed client channel should be closed")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for removed client channel to close")
+	}
+}
+
+func TestTTYClientHandleCloseIsIdempotent(t *testing.T) {
+	srv := &Server{}
+	handle, updates, err := srv.newTTYClientHandle("inst-3")
+	if err != nil {
+		t.Fatalf("newTTYClientHandle failed: %v", err)
+	}
+	handle.Close()
+	handle.Close()
+
+	select {
+	case _, ok := <-updates:
+		if ok {
+			t.Fatal("updates channel should be closed after handle close")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for updates channel to close")
+	}
+
+	if clients := srv.ttyClients["inst-3"]; len(clients) != 0 {
+		t.Fatalf("tty clients should be cleaned up, got %#v", clients)
+	}
+}
+
+func TestRegisterTTYClientRejectsExcessClients(t *testing.T) {
+	srv := &Server{}
+	for i := 0; i < maxTTYClientsPerInstance; i++ {
+		if _, _, err := srv.registerTTYClient("inst-4"); err != nil {
+			t.Fatalf("registerTTYClient(%d) failed unexpectedly: %v", i, err)
+		}
+	}
+	if _, _, err := srv.registerTTYClient("inst-4"); err == nil {
+		t.Fatal("expected tty client limit error")
 	}
 }
 

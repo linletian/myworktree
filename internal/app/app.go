@@ -59,11 +59,35 @@ type Server struct {
 	monitor     monitor.Collector
 	authMu      sync.Mutex
 	authFails   map[string]authFail
+	ttyMu       sync.Mutex
+	ttyClients  map[string]map[string]*ttyClientState
+	ttyApplied  map[string]ttySize
+	ttyNextID   uint64
 }
 
 type authFail struct {
 	Count     int
 	WindowEnd time.Time
+}
+
+type ttySize struct {
+	Cols int
+	Rows int
+}
+
+type ttyClientState struct {
+	size    ttySize
+	hasSize bool
+	updates chan ttySize
+}
+
+const maxTTYClientsPerInstance = 8
+
+type ttyClientHandle struct {
+	server     *Server
+	instanceID string
+	clientID   string
+	once       sync.Once
 }
 
 var errInvalidRepoListenPort = errors.New("invalid persisted listen_port")
@@ -119,6 +143,157 @@ func New(cfg Config, logger *log.Logger) (*Server, error) {
 	return s, nil
 }
 
+// registerTTYClient tracks one frontend terminal viewer for an instance and returns
+// a per-connection update stream with the server-applied shared size.
+func (s *Server) registerTTYClient(instanceID string) (string, <-chan ttySize, error) {
+	s.ttyMu.Lock()
+	defer s.ttyMu.Unlock()
+	if s.ttyClients == nil {
+		s.ttyClients = map[string]map[string]*ttyClientState{}
+	}
+	if s.ttyApplied == nil {
+		s.ttyApplied = map[string]ttySize{}
+	}
+	s.ttyNextID++
+	clientID := strconv.FormatUint(s.ttyNextID, 10)
+	updates := make(chan ttySize, 1)
+	if s.ttyClients[instanceID] == nil {
+		s.ttyClients[instanceID] = map[string]*ttyClientState{}
+	}
+	if len(s.ttyClients[instanceID]) >= maxTTYClientsPerInstance {
+		return "", nil, fmt.Errorf("too many tty clients for instance: %s", instanceID)
+	}
+	s.ttyClients[instanceID][clientID] = &ttyClientState{updates: updates}
+	if size, ok := s.ttyApplied[instanceID]; ok {
+		updates <- size
+	}
+	return clientID, updates, nil
+}
+
+func (s *Server) newTTYClientHandle(instanceID string) (*ttyClientHandle, <-chan ttySize, error) {
+	clientID, updates, err := s.registerTTYClient(instanceID)
+	if err != nil {
+		return nil, nil, err
+	}
+	return &ttyClientHandle{
+		server:     s,
+		instanceID: instanceID,
+		clientID:   clientID,
+	}, updates, nil
+}
+
+func (h *ttyClientHandle) Close() {
+	if h == nil || h.server == nil {
+		return
+	}
+	h.once.Do(func() {
+		h.server.unregisterTTYClient(h.instanceID, h.clientID)
+	})
+}
+
+// unregisterTTYClient removes a frontend terminal viewer and recomputes the shared
+// instance size so the remaining viewers stay in sync.
+func (s *Server) unregisterTTYClient(instanceID, clientID string) {
+	s.ttyMu.Lock()
+	var removed chan ttySize
+	if clients := s.ttyClients[instanceID]; clients != nil {
+		if state := clients[clientID]; state != nil {
+			removed = state.updates
+			delete(clients, clientID)
+		}
+		if len(clients) == 0 {
+			delete(s.ttyClients, instanceID)
+		}
+	}
+	applied, changed, notify := s.recomputeTTYSizeLocked(instanceID)
+	s.ttyMu.Unlock()
+
+	if removed != nil {
+		close(removed)
+	}
+	s.applyTTYSize(instanceID, applied, changed, notify)
+}
+
+// updateTTYClientSize records one viewer's proposed terminal size. The shared size
+// is the smallest width and smallest height across all connected viewers.
+func (s *Server) updateTTYClientSize(instanceID, clientID string, cols, rows int) {
+	s.ttyMu.Lock()
+	if s.ttyClients == nil || s.ttyClients[instanceID] == nil || s.ttyClients[instanceID][clientID] == nil {
+		s.ttyMu.Unlock()
+		return
+	}
+	s.ttyClients[instanceID][clientID].size = ttySize{Cols: cols, Rows: rows}
+	s.ttyClients[instanceID][clientID].hasSize = true
+	applied, changed, notify := s.recomputeTTYSizeLocked(instanceID)
+	s.ttyMu.Unlock()
+
+	s.applyTTYSize(instanceID, applied, changed, notify)
+}
+
+func (s *Server) recomputeTTYSizeLocked(instanceID string) (ttySize, bool, []chan ttySize) {
+	old, hadOld := s.ttyApplied[instanceID]
+	clients := s.ttyClients[instanceID]
+	var min ttySize
+	hasMin := false
+	notify := make([]chan ttySize, 0, len(clients))
+	for _, client := range clients {
+		notify = append(notify, client.updates)
+		if !client.hasSize {
+			continue
+		}
+		if !hasMin {
+			min = client.size
+			hasMin = true
+			continue
+		}
+		if client.size.Cols < min.Cols {
+			min.Cols = client.size.Cols
+		}
+		if client.size.Rows < min.Rows {
+			min.Rows = client.size.Rows
+		}
+	}
+	if !hasMin {
+		delete(s.ttyApplied, instanceID)
+		return ttySize{}, hadOld, nil
+	}
+	if hadOld && old == min {
+		return min, false, nil
+	}
+	s.ttyApplied[instanceID] = min
+	return min, true, notify
+}
+
+func (s *Server) applyTTYSize(instanceID string, size ttySize, changed bool, notify []chan ttySize) {
+	if !changed {
+		return
+	}
+	if s.instanceMgr != nil && size.Cols > 0 && size.Rows > 0 {
+		if err := s.instanceMgr.Resize(instanceID, size.Cols, size.Rows); err != nil {
+			if s.logger != nil {
+				s.logger.Printf("tty resize apply failed for %s: %v", instanceID, err)
+			}
+		}
+	}
+	for _, ch := range notify {
+		if ch == nil {
+			continue
+		}
+		select {
+		case ch <- size:
+		default:
+			select {
+			case <-ch:
+			default:
+			}
+			select {
+			case ch <- size:
+			default:
+			}
+		}
+	}
+}
+
 func (s *Server) Start() (string, error) {
 	if err := s.validateSecurity(); err != nil {
 		return "", err
@@ -170,7 +345,7 @@ func (s *Server) Start() (string, error) {
 	addr := ln.Addr().String()
 	url := fmt.Sprintf("%s://%s/", scheme, addr)
 	if s.cfg.Open {
-		if err := openURL(url); err != nil {
+		if err := OpenURL(url); err != nil {
 			s.logger.Printf("open browser failed: %v", err)
 		}
 	}
@@ -206,7 +381,7 @@ func (s *Server) listTopBranches() (string, []gitx.Branch, error) {
 	return def, out, nil
 }
 
-func openURL(url string) error {
+func OpenURL(url string) error {
 	cmd := exec.Command("open", url)
 	return cmd.Start()
 }
@@ -690,7 +865,19 @@ func (s *Server) handleInstanceTTYWS(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return
 	}
-	defer conn.Close()
+	clientHandle, resizeUpdates, err := s.newTTYClientHandle(id)
+	if err != nil {
+		_ = conn.WriteClose(ws.CloseMessage(1013, err.Error()))
+		_ = conn.Close()
+		return
+	}
+	defer func() {
+		clientHandle.Close()
+		_ = conn.Close()
+		if rec := recover(); rec != nil {
+			panic(rec)
+		}
+	}()
 
 	s.instanceMgr.SetConnectionType(id, "websocket")
 	defer s.instanceMgr.SetConnectionType(id, "")
@@ -778,7 +965,7 @@ func (s *Server) handleInstanceTTYWS(w http.ResponseWriter, r *http.Request) {
 			isResize := json.Unmarshal(msg.data, &resizeMsg) == nil && resizeMsg.Type == "resize"
 
 			if isResize && resizeMsg.Cols > 0 && resizeMsg.Rows > 0 {
-				_ = s.instanceMgr.Resize(id, resizeMsg.Cols, resizeMsg.Rows)
+				s.updateTTYClientSize(id, clientHandle.clientID, resizeMsg.Cols, resizeMsg.Rows)
 			}
 
 			if !handshakeComplete && isResize {
@@ -809,6 +996,26 @@ func (s *Server) handleInstanceTTYWS(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			if err := conn.WriteBinary([]byte(chunk)); err != nil {
+				return
+			}
+		case size, ok := <-resizeUpdates:
+			if !ok {
+				resizeUpdates = nil
+				continue
+			}
+			payload, err := json.Marshal(struct {
+				Type string `json:"type"`
+				Cols int    `json:"cols"`
+				Rows int    `json:"rows"`
+			}{
+				Type: "resize",
+				Cols: size.Cols,
+				Rows: size.Rows,
+			})
+			if err != nil {
+				return
+			}
+			if err := conn.WriteText(payload); err != nil {
 				return
 			}
 		}

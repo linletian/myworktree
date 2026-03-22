@@ -19,6 +19,8 @@
             --main-accent-hover: #f3eeff;
             --sidebar-top-min-height: 120px;
             --sidebar-bottom-min-height: 100px;
+            --term-ctrl-btn-size: 32px;
+            --term-ctrl-btn-gap: 10px;
         }
 
         body, html {
@@ -756,6 +758,45 @@
                     background: #ffeef0;
                     border-color: #cb2431;
                 }
+
+            #terminal-controls {
+                position: absolute;
+                top: 20px;
+                right: 20px;
+                display: flex;
+                flex-direction: column;
+                gap: var(--term-ctrl-btn-gap);
+                z-index: 20;
+            }
+
+            .term-ctrl-btn {
+                width: var(--term-ctrl-btn-size);
+                height: var(--term-ctrl-btn-size);
+                border-radius: 6px;
+                background: rgba(0,0,0,0.5);
+                border: none;
+                color: #ccc;
+                cursor: pointer;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                transition: background 0.2s, color 0.2s;
+            }
+
+            .term-ctrl-btn:hover {
+                background: rgba(255,255,255,0.2);
+                color: #fff;
+            }
+
+            .term-ctrl-btn svg {
+                width: 20px;
+                height: 20px;
+                fill: none;
+                stroke: currentColor;
+                stroke-width: 2;
+                stroke-linecap: round;
+                stroke-linejoin: round;
+            }
     </style>
 </head>
 <body>
@@ -809,6 +850,14 @@
             <div id="workspace">
                 <div id="empty-state">Select a worktree and instance to start</div>
                 <div id="terminal-container"></div>
+                <div id="terminal-controls">
+                    <button class="term-ctrl-btn" onclick="refreshCurrentInstance()" title="Refresh & Scroll to Bottom">
+                        <svg viewBox="0 0 24 24"><path d="M23 4v6h-6"></path><path d="M1 20v-6h6"></path><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg>
+                    </button>
+                    <button class="term-ctrl-btn" onclick="scrollCurrentInstanceToBottom()" title="Scroll to Bottom">
+                        <svg viewBox="0 0 24 24"><path d="M12 5v14"></path><path d="M19 12l-7 7-7-7"></path></svg>
+                    </button>
+                </div>
                 <div id="status-bar">Transport: idle</div>
             </div>
         </div>
@@ -1997,6 +2046,7 @@
                 ttyStateCheckInterval: null,
                 resizeObserver: null,
                 lastResizeTime: 0,
+                appliedTTYSize: null,
             };
 
             session.term = new Terminal({
@@ -2031,6 +2081,7 @@
                 if (now - session.lastResizeTime > 100 && session.term.cols > 0 && session.term.rows > 0) {
                     session.lastResizeTime = now;
                     sendResize(session, session.term.cols, session.term.rows);
+                    syncTerminalToAppliedSize(session);
                 }
             });
             session.resizeObserver.observe(host);
@@ -2144,6 +2195,7 @@
                 }
                 if (activeSession.term.cols > 0 && activeSession.term.rows > 0) {
                     sendResize(activeSession, activeSession.term.cols, activeSession.term.rows);
+                    syncTerminalToAppliedSize(activeSession);
                 }
             }, 0);
         }
@@ -2260,6 +2312,31 @@
             console.error(`[instance ${session.id}] ${message}`);
         }
 
+        function applyTTYSize(session, cols, rows) {
+            if (!session || !session.term) return;
+            if (cols <= 0 || rows <= 0) return;
+            session.appliedTTYSize = { cols, rows };
+            if (session.term.cols !== cols || session.term.rows !== rows) {
+                session.term.resize(cols, rows);
+            }
+        }
+
+        function syncTerminalToAppliedSize(session) {
+            if (!session || !session.appliedTTYSize) return;
+            applyTTYSize(session, session.appliedTTYSize.cols, session.appliedTTYSize.rows);
+        }
+
+        function parseTTYControlMessage(data) {
+            if (typeof data !== "string" || data.length === 0 || data[0] !== "{") return null;
+            try {
+                const msg = JSON.parse(data);
+                if (!msg || (msg.type !== "ready" && msg.type !== "resize")) return null;
+                return msg;
+            } catch (e) {
+                return null;
+            }
+        }
+
         function sendResize(session, cols, rows) {
             if (!session || !session.ttySocket || session.ttySocket.readyState !== WebSocket.OPEN) return;
             if (cols <= 0 || rows <= 0) return;
@@ -2267,10 +2344,23 @@
             session.ttySocket.send(msg);
         }
 
+        // Fetches logs from the server and writes them to the terminal.
+        // Uses AbortController to cancel any previous pending requests for this session
+        // to prevent out-of-order writes or race conditions.
         async function loadLog(session) {
             if (!session) return;
+            // Cancel previous load if any
+            if (session.loadLogController) {
+                session.loadLogController.abort();
+            }
+            const controller = new AbortController();
+            session.loadLogController = controller;
+
             try {
-                const res = await fetch(`/api/instances/log?id=${session.id}&since=0`, { headers });
+                const res = await fetch(`/api/instances/log?id=${session.id}&since=0`, { 
+                    headers, 
+                    signal: controller.signal 
+                });
                 rememberServerRevision(res);
                 if (!res.ok) throw new Error(await res.text());
                 let text = await res.text();
@@ -2288,7 +2378,12 @@
                     }
                 }
             } catch (e) {
+                if (e.name === 'AbortError') return; // Ignore cancelled requests
                 reportSessionError(session, "load log error", e);
+            } finally {
+                if (session.loadLogController === controller) {
+                    session.loadLogController = null;
+                }
             }
         }
 
@@ -2407,30 +2502,30 @@
                 };
 
                 ws.onmessage = (ev) => {
-                    if (session.ttyState !== 'READY') {
-                        try {
-                            const msg = JSON.parse(ev.data);
-                            if (msg.type === 'ready') {
-                                session.ttyState = 'READY';
-                                if (handshakeTimeout) {
-                                    clearTimeout(handshakeTimeout);
-                                    handshakeTimeout = null;
-                                }
-                                if (state.activeInst === id) {
-                                    updateStatus("websocket live");
-                                }
-                                if (session.term && session.term.cols > 0 && session.term.rows > 0) {
-                                    sendResize(session, session.term.cols, session.term.rows);
-                                }
-                                setTimeout(() => {
-                                    if (state.activeInst === id && session.ttySocket === ws) {
-                                        focusTerminalIfPossible();
-                                    }
-                                }, 0);
-                                return;
-                            }
-                        } catch (e) {
+                    const controlMsg = parseTTYControlMessage(ev.data);
+                    if (controlMsg && controlMsg.type === 'ready') {
+                        session.ttyState = 'READY';
+                        if (handshakeTimeout) {
+                            clearTimeout(handshakeTimeout);
+                            handshakeTimeout = null;
                         }
+                        if (state.activeInst === id) {
+                            updateStatus("websocket live");
+                        }
+                        if (session.term && session.term.cols > 0 && session.term.rows > 0) {
+                            sendResize(session, session.term.cols, session.term.rows);
+                            syncTerminalToAppliedSize(session);
+                        }
+                        setTimeout(() => {
+                            if (state.activeInst === id && session.ttySocket === ws) {
+                                focusTerminalIfPossible();
+                            }
+                        }, 0);
+                        return;
+                    }
+                    if (controlMsg && controlMsg.type === 'resize') {
+                        applyTTYSize(session, controlMsg.cols, controlMsg.rows);
+                        return;
                     }
 
                     if (ev.data instanceof ArrayBuffer) {
@@ -2450,7 +2545,7 @@
                                 const rows = session.term.rows;
                                 if (cols > 0 && rows > 0) {
                                     sendResize(session, cols, rows);
-                                    session.term.resize(cols, rows);
+                                    syncTerminalToAppliedSize(session);
                                 }
                             }
                         }, 50);
@@ -2680,6 +2775,49 @@
                 .replace(/</g, "&lt;")
                 .replace(/>/g, "&gt;")
                 .replace(/"/g, "&quot;");
+        }
+
+        // Reloads the current instance's terminal:
+        // 1. Disconnects live TTY to stop incoming data.
+        // 2. Cancels any in-flight log loads.
+        // 3. Clears the terminal.
+        // 4. Fetches full logs from the server.
+        // 5. Reconnects TTY to resume live updates.
+        async function refreshCurrentInstance() {
+            const session = getActiveTerminalSession();
+            if (!session) return;
+            
+            // Disconnect first to stop live updates during refresh
+            disconnectTTY(session);
+
+            // Cancel previous load if any
+            if (session.loadLogController) {
+                session.loadLogController.abort();
+            }
+
+            // Clear terminal to avoid duplication
+            if (session.term) {
+                session.term.reset();
+                session.term.clear();
+            }
+            
+            // Reload logs
+            await loadLog(session);
+
+            // Reconnect TTY if running
+            const inst = state.instances.find(i => i.id === session.id);
+            if (inst && inst.status === 'running') {
+                connectTTY(session);
+            }
+
+            // Scroll to bottom
+            if (session.term) session.term.scrollToBottom();
+        }
+
+        // Scrolls the active terminal to the bottom.
+        function scrollCurrentInstanceToBottom() {
+            const session = getActiveTerminalSession();
+            if (session && session.term) session.term.scrollToBottom();
         }
 
         // Boot
