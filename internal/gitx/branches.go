@@ -2,10 +2,12 @@ package gitx
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"os/exec"
 	"strconv"
 	"strings"
+	"time"
 )
 
 type Branch struct {
@@ -13,10 +15,17 @@ type Branch struct {
 	CommitUnix int64  `json:"commit_unix"`
 }
 
+// GitCommand creates an exec.Cmd with a wait deadline to prevent indefinite blocking.
+func GitCommand(timeout time.Duration, gitRoot string, args ...string) *exec.Cmd {
+	cmd := exec.Command("git", args...)
+	cmd.Dir = gitRoot
+	cmd.WaitDelay = timeout
+	return cmd
+}
+
 func DefaultBranch(gitRoot string) string {
 	// 1) origin/HEAD symbolic ref (fastest, local metadata)
-	cmd := exec.Command("git", "symbolic-ref", "--short", "refs/remotes/origin/HEAD")
-	cmd.Dir = gitRoot
+	cmd := GitCommand(2*time.Second, gitRoot, "symbolic-ref", "--short", "refs/remotes/origin/HEAD")
 	if out, err := cmd.Output(); err == nil {
 		// "origin/main" -> "main"
 		ref := strings.TrimSpace(string(out))
@@ -27,8 +36,7 @@ func DefaultBranch(gitRoot string) string {
 	}
 
 	// 2) git rev-parse --abbrev-ref origin/HEAD (fallback for local symbolic ref)
-	cmd = exec.Command("git", "rev-parse", "--abbrev-ref", "origin/HEAD")
-	cmd.Dir = gitRoot
+	cmd = GitCommand(2*time.Second, gitRoot, "rev-parse", "--abbrev-ref", "origin/HEAD")
 	if out, err := cmd.Output(); err == nil {
 		ref := strings.TrimSpace(string(out))
 		ref = strings.TrimPrefix(ref, "origin/")
@@ -48,8 +56,7 @@ func DefaultBranch(gitRoot string) string {
 	}
 
 	// 5) current branch
-	cmd = exec.Command("git", "rev-parse", "--abbrev-ref", "HEAD")
-	cmd.Dir = gitRoot
+	cmd = GitCommand(2*time.Second, gitRoot, "rev-parse", "--abbrev-ref", "HEAD")
 	if out, err := cmd.Output(); err == nil {
 		b := strings.TrimSpace(string(out))
 		if b != "" && b != "HEAD" {
@@ -59,9 +66,24 @@ func DefaultBranch(gitRoot string) string {
 	return ""
 }
 
+// CurrentBranch returns the currently checked-out branch (e.g., "feature/ui-update").
+// Unlike DefaultBranch, it never falls back to origin/HEAD or common names.
+// Returns an error if the directory is not a git repo or HEAD is malformed.
+func CurrentBranch(gitRoot string) (string, error) {
+	cmd := GitCommand(2*time.Second, gitRoot, "rev-parse", "--abbrev-ref", "HEAD")
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("git rev-parse failed: %w", err)
+	}
+	b := strings.TrimSpace(string(out))
+	if b != "" && b != "HEAD" {
+		return b, nil
+	}
+	return "", errors.New("git HEAD is detached or malformed")
+}
+
 func ListLocalBranchesByCommitTime(gitRoot string, limit int) ([]Branch, error) {
-	cmd := exec.Command("git", "for-each-ref", "--sort=-committerdate", "--format=%(refname:short)\t%(committerdate:unix)", "refs/heads/")
-	cmd.Dir = gitRoot
+	cmd := GitCommand(5*time.Second, gitRoot, "for-each-ref", "--sort=-committerdate", "--format=%(refname:short)\t%(committerdate:unix)", "refs/heads/")
 	out, err := cmd.Output()
 	if err != nil {
 		return nil, err
@@ -94,7 +116,6 @@ func branchExists(gitRoot, name string) bool {
 	if strings.TrimSpace(name) == "" {
 		return false
 	}
-	cmd := exec.Command("git", "show-ref", "--verify", "--quiet", fmt.Sprintf("refs/heads/%s", name))
-	cmd.Dir = gitRoot
+	cmd := GitCommand(2*time.Second, gitRoot, "show-ref", "--verify", "--quiet", fmt.Sprintf("refs/heads/%s", name))
 	return cmd.Run() == nil
 }

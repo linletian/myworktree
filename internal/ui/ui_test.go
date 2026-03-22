@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -11,7 +12,9 @@ import (
 func fetchIndexHTML(t *testing.T) string {
 	t.Helper()
 	mux := http.NewServeMux()
-	Register(mux)
+	if err := Register(mux, "myworktree"); err != nil {
+		t.Fatal(err)
+	}
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
@@ -55,7 +58,9 @@ func TestRegisterServesRootAndStatic(t *testing.T) {
 	}
 
 	mux := http.NewServeMux()
-	Register(mux)
+	if err := Register(mux, "myworktree"); err != nil {
+		t.Fatal(err)
+	}
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
@@ -71,7 +76,9 @@ func TestRegisterServesRootAndStatic(t *testing.T) {
 
 func TestRegisterReturnsNotFoundForUnknownPath(t *testing.T) {
 	mux := http.NewServeMux()
-	Register(mux)
+	if err := Register(mux, "myworktree"); err != nil {
+		t.Fatal(err)
+	}
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
@@ -82,6 +89,31 @@ func TestRegisterReturnsNotFoundForUnknownPath(t *testing.T) {
 	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("expected 404 for unknown path, got %d", resp.StatusCode)
+	}
+}
+
+func TestRegisterSubstitutesPageTitle(t *testing.T) {
+	mux := http.NewServeMux()
+	if err := Register(mux, "myproject"); err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/")
+	if err != nil {
+		t.Fatalf("GET / failed: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET / status: %d", resp.StatusCode)
+	}
+	if !strings.Contains(string(body), "<title>myproject - myworktree</title>") {
+		t.Fatalf("GET / should have substituted title, got: %s", string(body[:200]))
+	}
+	if strings.Contains(string(body), "<title>myworktree</title>") {
+		t.Fatalf("GET / should not contain default title")
 	}
 }
 
@@ -152,5 +184,87 @@ func TestIndexHTMLCoversPerSessionConnectionManagement(t *testing.T) {
 		if !strings.Contains(bodyText, check) {
 			t.Fatalf("GET / should include per-session connection management hook %q", check)
 		}
+	}
+}
+
+func TestRegisterReturnsErrorWhenIndexHTMLMissing(t *testing.T) {
+	mux := http.NewServeMux()
+	// Override the reader to simulate a missing file.
+	orig := indexHTMLReader
+	indexHTMLReader = func() ([]byte, error) {
+		return nil, fmt.Errorf("file not found")
+	}
+	defer func() { indexHTMLReader = orig }()
+
+	err := Register(mux, "test")
+	if err == nil {
+		t.Fatal("expected error when index.html is missing, got nil")
+	}
+	if !strings.Contains(err.Error(), "failed to read embedded index.html") {
+		t.Fatalf("error message should contain context, got: %v", err)
+	}
+}
+
+func TestRegisterTitleWithSpecialRepoNames(t *testing.T) {
+	cases := []struct {
+		name     string
+		repoName string
+		want     string
+		notWant  string
+	}{
+		{
+			name:     "empty string",
+			repoName: "",
+			want:     "<title> - myworktree</title>",
+			notWant:  "<title></title>",
+		},
+		{
+			name:     "very long name",
+			repoName: strings.Repeat("a", 10000),
+			want:     "<title>" + strings.Repeat("a", 10000) + " - myworktree</title>",
+		},
+		{
+			name:     "HTML entities escaped",
+			repoName: "<script>evil</script>",
+			want:     "<title>&lt;script&gt;evil&lt;/script&gt; - myworktree</title>",
+			notWant:  "<script>evil</script>",
+		},
+		{
+			name:     "ampersand escaped",
+			repoName: "foo & bar",
+			want:     "<title>foo &amp; bar - myworktree</title>",
+			notWant:  "foo & bar",
+		},
+		{
+			name:     "double quotes escaped",
+			repoName: `repo"with"quotes`,
+			want:     "<title>repo&#34;with&#34;quotes - myworktree</title>",
+			notWant:  `repo"with"quotes`,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			mux := http.NewServeMux()
+			if err := Register(mux, tc.repoName); err != nil {
+				t.Fatal(err)
+			}
+			srv := httptest.NewServer(mux)
+			defer srv.Close()
+
+			resp, err := http.Get(srv.URL + "/")
+			if err != nil {
+				t.Fatalf("GET / failed: %v", err)
+			}
+			body, _ := io.ReadAll(resp.Body)
+			_ = resp.Body.Close()
+
+			if !strings.Contains(string(body), tc.want) {
+				t.Fatalf("expected title %q, body preview: %s", tc.want, string(body[:200]))
+			}
+			if tc.notWant != "" && strings.Contains(string(body), tc.notWant) {
+				t.Fatalf("title should not contain unescaped %q", tc.notWant)
+			}
+		})
 	}
 }

@@ -3,7 +3,7 @@
 <!-- gitnexus:start -->
 # GitNexus MCP
 
-This project is indexed by GitNexus as **myworktree** (221 symbols, 611 relationships, 20 execution flows).
+This project is indexed by GitNexus as **feature-ui-update** (312 symbols, 871 relationships, 25 execution flows).
 
 ## Always Start Here
 
@@ -32,7 +32,7 @@ myworktree is a lightweight single-user manager for **git worktrees** and **long
 
 **Key Requirements:**
 - Go 1.25+ (see go.mod)
-- No external Go dependencies
+- Zero runtime dependencies (Go modules are statically linked at compile time into a single binary)
 - Target: macOS 12+ (other platforms not validated)
 - Requires: `git`, `zsh`, `script`
 

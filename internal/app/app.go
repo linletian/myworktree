@@ -26,6 +26,7 @@ import (
 	"myworktree/internal/gitx"
 	"myworktree/internal/instance"
 	"myworktree/internal/mcp"
+	"myworktree/internal/monitor"
 	"myworktree/internal/store"
 	"myworktree/internal/tag"
 	"myworktree/internal/ui"
@@ -55,8 +56,13 @@ type Server struct {
 	worktreeMgr worktree.Manager
 	instanceMgr *instance.Manager
 	mcpAdapter  mcp.Adapter
+	monitor     monitor.Collector
 	authMu      sync.Mutex
 	authFails   map[string]authFail
+	ttyMu       sync.Mutex
+	ttyClients  map[string]map[string]*ttyClientState
+	ttyApplied  map[string]ttySize
+	ttyNextID   uint64
 }
 
 type authFail struct {
@@ -64,7 +70,28 @@ type authFail struct {
 	WindowEnd time.Time
 }
 
+type ttySize struct {
+	Cols int
+	Rows int
+}
+
+type ttyClientState struct {
+	size    ttySize
+	hasSize bool
+	updates chan ttySize
+}
+
+const maxTTYClientsPerInstance = 8
+
+type ttyClientHandle struct {
+	server     *Server
+	instanceID string
+	clientID   string
+	once       sync.Once
+}
+
 var errInvalidRepoListenPort = errors.New("invalid persisted listen_port")
+var errWorktreeNotFound = errors.New("worktree not found")
 
 func New(cfg Config, logger *log.Logger) (*Server, error) {
 	if logger == nil {
@@ -109,9 +136,162 @@ func New(cfg Config, logger *log.Logger) (*Server, error) {
 		authFails: map[string]authFail{},
 	}
 	s.registerAPIs(mux)
-	ui.Register(mux)
+	if err := ui.Register(mux, filepath.Base(filepath.Clean(s.root))); err != nil {
+		return nil, fmt.Errorf("ui.Register: %w", err)
+	}
 
 	return s, nil
+}
+
+// registerTTYClient tracks one frontend terminal viewer for an instance and returns
+// a per-connection update stream with the server-applied shared size.
+func (s *Server) registerTTYClient(instanceID string) (string, <-chan ttySize, error) {
+	s.ttyMu.Lock()
+	defer s.ttyMu.Unlock()
+	if s.ttyClients == nil {
+		s.ttyClients = map[string]map[string]*ttyClientState{}
+	}
+	if s.ttyApplied == nil {
+		s.ttyApplied = map[string]ttySize{}
+	}
+	s.ttyNextID++
+	clientID := strconv.FormatUint(s.ttyNextID, 10)
+	updates := make(chan ttySize, 1)
+	if s.ttyClients[instanceID] == nil {
+		s.ttyClients[instanceID] = map[string]*ttyClientState{}
+	}
+	if len(s.ttyClients[instanceID]) >= maxTTYClientsPerInstance {
+		return "", nil, fmt.Errorf("too many tty clients for instance: %s", instanceID)
+	}
+	s.ttyClients[instanceID][clientID] = &ttyClientState{updates: updates}
+	if size, ok := s.ttyApplied[instanceID]; ok {
+		updates <- size
+	}
+	return clientID, updates, nil
+}
+
+func (s *Server) newTTYClientHandle(instanceID string) (*ttyClientHandle, <-chan ttySize, error) {
+	clientID, updates, err := s.registerTTYClient(instanceID)
+	if err != nil {
+		return nil, nil, err
+	}
+	return &ttyClientHandle{
+		server:     s,
+		instanceID: instanceID,
+		clientID:   clientID,
+	}, updates, nil
+}
+
+func (h *ttyClientHandle) Close() {
+	if h == nil || h.server == nil {
+		return
+	}
+	h.once.Do(func() {
+		h.server.unregisterTTYClient(h.instanceID, h.clientID)
+	})
+}
+
+// unregisterTTYClient removes a frontend terminal viewer and recomputes the shared
+// instance size so the remaining viewers stay in sync.
+func (s *Server) unregisterTTYClient(instanceID, clientID string) {
+	s.ttyMu.Lock()
+	var removed chan ttySize
+	if clients := s.ttyClients[instanceID]; clients != nil {
+		if state := clients[clientID]; state != nil {
+			removed = state.updates
+			delete(clients, clientID)
+		}
+		if len(clients) == 0 {
+			delete(s.ttyClients, instanceID)
+		}
+	}
+	applied, changed, notify := s.recomputeTTYSizeLocked(instanceID)
+	s.ttyMu.Unlock()
+
+	if removed != nil {
+		close(removed)
+	}
+	s.applyTTYSize(instanceID, applied, changed, notify)
+}
+
+// updateTTYClientSize records one viewer's proposed terminal size. The shared size
+// is the smallest width and smallest height across all connected viewers.
+func (s *Server) updateTTYClientSize(instanceID, clientID string, cols, rows int) {
+	s.ttyMu.Lock()
+	if s.ttyClients == nil || s.ttyClients[instanceID] == nil || s.ttyClients[instanceID][clientID] == nil {
+		s.ttyMu.Unlock()
+		return
+	}
+	s.ttyClients[instanceID][clientID].size = ttySize{Cols: cols, Rows: rows}
+	s.ttyClients[instanceID][clientID].hasSize = true
+	applied, changed, notify := s.recomputeTTYSizeLocked(instanceID)
+	s.ttyMu.Unlock()
+
+	s.applyTTYSize(instanceID, applied, changed, notify)
+}
+
+func (s *Server) recomputeTTYSizeLocked(instanceID string) (ttySize, bool, []chan ttySize) {
+	old, hadOld := s.ttyApplied[instanceID]
+	clients := s.ttyClients[instanceID]
+	var min ttySize
+	hasMin := false
+	notify := make([]chan ttySize, 0, len(clients))
+	for _, client := range clients {
+		notify = append(notify, client.updates)
+		if !client.hasSize {
+			continue
+		}
+		if !hasMin {
+			min = client.size
+			hasMin = true
+			continue
+		}
+		if client.size.Cols < min.Cols {
+			min.Cols = client.size.Cols
+		}
+		if client.size.Rows < min.Rows {
+			min.Rows = client.size.Rows
+		}
+	}
+	if !hasMin {
+		delete(s.ttyApplied, instanceID)
+		return ttySize{}, hadOld, nil
+	}
+	if hadOld && old == min {
+		return min, false, nil
+	}
+	s.ttyApplied[instanceID] = min
+	return min, true, notify
+}
+
+func (s *Server) applyTTYSize(instanceID string, size ttySize, changed bool, notify []chan ttySize) {
+	if !changed {
+		return
+	}
+	if s.instanceMgr != nil && size.Cols > 0 && size.Rows > 0 {
+		if err := s.instanceMgr.Resize(instanceID, size.Cols, size.Rows); err != nil {
+			if s.logger != nil {
+				s.logger.Printf("tty resize apply failed for %s: %v", instanceID, err)
+			}
+		}
+	}
+	for _, ch := range notify {
+		if ch == nil {
+			continue
+		}
+		select {
+		case ch <- size:
+		default:
+			select {
+			case <-ch:
+			default:
+			}
+			select {
+			case ch <- size:
+			default:
+			}
+		}
+	}
 }
 
 func (s *Server) Start() (string, error) {
@@ -165,7 +345,7 @@ func (s *Server) Start() (string, error) {
 	addr := ln.Addr().String()
 	url := fmt.Sprintf("%s://%s/", scheme, addr)
 	if s.cfg.Open {
-		if err := openURL(url); err != nil {
+		if err := OpenURL(url); err != nil {
 			s.logger.Printf("open browser failed: %v", err)
 		}
 	}
@@ -201,7 +381,7 @@ func (s *Server) listTopBranches() (string, []gitx.Branch, error) {
 	return def, out, nil
 }
 
-func openURL(url string) error {
+func OpenURL(url string) error {
 	cmd := exec.Command("open", url)
 	return cmd.Start()
 }
@@ -213,8 +393,7 @@ func (s *Server) validateSecurity() error {
 		// We'll validate after Listen in later iteration.
 		return nil
 	}
-	isLoopback := host == "127.0.0.1" || host == "localhost" || host == "::1"
-	if !isLoopback && strings.TrimSpace(s.cfg.AuthToken) == "" {
+	if !isLoopbackHost(host) && strings.TrimSpace(s.cfg.AuthToken) == "" {
 		return errors.New("--auth is required when listening on a non-loopback address")
 	}
 	if (s.cfg.TLSCert == "") != (s.cfg.TLSKey == "") {
@@ -228,19 +407,26 @@ func (s *Server) registerAPIs(mux *http.ServeMux) {
 	mux.HandleFunc("/api/worktrees/unmanaged", s.handleWorktreesUnmanaged)
 	mux.HandleFunc("/api/worktrees/import", s.handleWorktreeImport)
 	mux.HandleFunc("/api/worktrees/delete", s.handleWorktreeDelete)
+	mux.HandleFunc("/api/worktree/status", s.handleWorktreeStatus)
 	mux.HandleFunc("/api/instances", s.handleInstances)
+	mux.HandleFunc("/api/instances/reorder", s.handleInstanceReorder)
 	mux.HandleFunc("/api/instances/stop", s.handleInstanceStop)
 	mux.HandleFunc("/api/instances/restart", s.handleInstanceRestart)
 	mux.HandleFunc("/api/instances/archive", s.handleInstanceArchive)
 	mux.HandleFunc("/api/instances/delete", s.handleInstanceDelete)
+	mux.HandleFunc("/api/instances/purge", s.handleInstancePurge)
 	mux.HandleFunc("/api/instances/input", s.handleInstanceInput)
 	mux.HandleFunc("/api/instances/tty/ws", s.handleInstanceTTYWS)
 	mux.HandleFunc("/api/instances/log", s.handleInstanceLog)
 	mux.HandleFunc("/api/instances/log/stream", s.handleInstanceLogStream)
+	mux.HandleFunc("/api/instances/stats", s.handleInstanceStats)
 	mux.HandleFunc("/api/tags", s.handleTags)
 	mux.HandleFunc("/api/branches", s.handleBranches)
+	mux.HandleFunc("/api/worktrees/open-terminal", s.handleWorktreeOpenTerminal)
+	mux.HandleFunc("/api/worktrees/open-finder", s.handleWorktreeOpenFinder)
 	mux.HandleFunc("/api/mcp/tools", s.handleMCPTools)
 	mux.HandleFunc("/api/mcp/call", s.handleMCPCall)
+	mux.HandleFunc("/api/main", s.handleMain)
 }
 
 func (s *Server) handleBranches(w http.ResponseWriter, r *http.Request) {
@@ -256,6 +442,19 @@ func (s *Server) handleBranches(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"default":  def,
 		"branches": out,
+	})
+}
+
+func (s *Server) handleMain(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	name := filepath.Base(filepath.Clean(s.root))
+	branch, _ := gitx.CurrentBranch(s.root) // returns empty string on detached HEAD
+	writeJSON(w, http.StatusOK, map[string]any{
+		"name":   name,
+		"branch": branch,
 	})
 }
 
@@ -368,6 +567,62 @@ func (s *Server) handleWorktreeDelete(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
+func (s *Server) handleWorktreeStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	id := strings.TrimSpace(r.URL.Query().Get("id"))
+	if id == "" {
+		writeErr(w, http.StatusBadRequest, errors.New("id is required"))
+		return
+	}
+
+	var gitRoot string
+	if id == instance.MainWorktreeID {
+		gitRoot = s.root
+	} else {
+		worktrees, err := s.worktreeMgr.List()
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, err)
+			return
+		}
+		found := false
+		for _, wt := range worktrees {
+			if wt.ID == id {
+				gitRoot = wt.Path
+				found = true
+				break
+			}
+		}
+		if !found {
+			writeErr(w, http.StatusBadRequest, fmt.Errorf("unknown worktree id: %s", id))
+			return
+		}
+	}
+
+	cmd := gitx.GitCommand(2*time.Second, gitRoot, "diff", "--numstat", "HEAD")
+	out, err := cmd.Output()
+	if err != nil {
+		// "No changes" produces empty output; git error messages are non-empty.
+		if len(out) == 0 {
+			writeJSON(w, http.StatusOK, map[string]any{
+				"changes": []any{},
+				"total":   map[string]int{"additions": 0, "deletions": 0},
+			})
+		} else {
+			writeErr(w, http.StatusInternalServerError, fmt.Errorf("git diff failed: %s", strings.TrimSpace(string(out))))
+		}
+		return
+	}
+
+	changes, total := parseGitDiffNumStat(string(out))
+	writeJSON(w, http.StatusOK, map[string]any{
+		"changes": changes,
+		"total":   total,
+	})
+}
+
 func (s *Server) handleInstances(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
@@ -376,7 +631,12 @@ func (s *Server) handleInstances(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusInternalServerError, err)
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"instances": items})
+		st, err := s.store.Load()
+		version := int64(0)
+		if err == nil {
+			version = st.Version
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"instances": items, "version": version})
 	case http.MethodPost:
 		var req struct {
 			WorktreeID string            `json:"worktree_id"`
@@ -391,16 +651,41 @@ func (s *Server) handleInstances(w http.ResponseWriter, r *http.Request) {
 		}
 		item, err := s.instanceMgr.Start(instance.StartInput{
 			WorktreeID: req.WorktreeID,
-			TagID:      req.TagID,
-			Command:    req.Command,
-			Name:       req.Name,
-			Labels:     normalizeLabels(req.Labels),
+			Root: func() string {
+				if req.WorktreeID == instance.MainWorktreeID {
+					return s.root
+				}
+				return ""
+			}(),
+			TagID:   req.TagID,
+			Command: req.Command,
+			Name:    req.Name,
+			Labels:  normalizeLabels(req.Labels),
 		})
 		if err != nil {
 			writeErr(w, http.StatusBadRequest, err)
 			return
 		}
 		writeJSON(w, http.StatusCreated, item)
+	case http.MethodPatch:
+		var req struct {
+			ID   string `json:"id"`
+			Name string `json:"name"`
+		}
+		if err := readJSON(r.Body, &req); err != nil {
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
+		updated, err := s.instanceMgr.UpdateName(req.ID, req.Name)
+		if err != nil {
+			if errors.Is(err, instance.ErrInstanceNotFound) {
+				writeErr(w, http.StatusNotFound, err)
+				return
+			}
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, updated)
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
@@ -483,6 +768,65 @@ func (s *Server) handleInstanceDelete(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
+func (s *Server) handleInstancePurge(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		WorktreeID string `json:"worktree_id"`
+		Version    int64  `json:"version"`
+	}
+	if err := readJSON(r.Body, &req); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	err := s.instanceMgr.PurgeArchivedInstances(req.WorktreeID, req.Version)
+	if errors.Is(err, store.ErrVersionConflict) {
+		st, _ := s.store.Load()
+		writeJSON(w, http.StatusConflict, map[string]any{
+			"error":   "state changed, please refresh",
+			"version": st.Version,
+		})
+		return
+	}
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (s *Server) handleInstanceReorder(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPatch {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		WorktreeID string   `json:"worktree_id"`
+		Order      []string `json:"order"`
+		Version    int64    `json:"version"`
+	}
+	if err := readJSON(r.Body, &req); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	err := s.instanceMgr.ReorderInstances(req.WorktreeID, req.Order, req.Version)
+	if errors.Is(err, store.ErrVersionConflict) {
+		st, _ := s.store.Load()
+		writeJSON(w, http.StatusConflict, map[string]any{
+			"error":   "state changed, please refresh",
+			"version": st.Version,
+		})
+		return
+	}
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
 func (s *Server) handleInstanceInput(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -517,7 +861,22 @@ func (s *Server) handleInstanceTTYWS(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return
 	}
-	defer conn.Close()
+	clientHandle, resizeUpdates, err := s.newTTYClientHandle(id)
+	if err != nil {
+		_ = conn.WriteClose(ws.CloseMessage(1013, err.Error()))
+		_ = conn.Close()
+		return
+	}
+	defer func() {
+		clientHandle.Close()
+		_ = conn.Close()
+		if rec := recover(); rec != nil {
+			panic(rec)
+		}
+	}()
+
+	s.instanceMgr.SetConnectionType(id, "websocket")
+	defer s.instanceMgr.SetConnectionType(id, "")
 
 	// Step 1: Send handshake ready message
 	readyMsg := []byte(`{"type":"ready"}`)
@@ -602,7 +961,7 @@ func (s *Server) handleInstanceTTYWS(w http.ResponseWriter, r *http.Request) {
 			isResize := json.Unmarshal(msg.data, &resizeMsg) == nil && resizeMsg.Type == "resize"
 
 			if isResize && resizeMsg.Cols > 0 && resizeMsg.Rows > 0 {
-				_ = s.instanceMgr.Resize(id, resizeMsg.Cols, resizeMsg.Rows)
+				s.updateTTYClientSize(id, clientHandle.clientID, resizeMsg.Cols, resizeMsg.Rows)
 			}
 
 			if !handshakeComplete && isResize {
@@ -633,6 +992,26 @@ func (s *Server) handleInstanceTTYWS(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			if err := conn.WriteBinary([]byte(chunk)); err != nil {
+				return
+			}
+		case size, ok := <-resizeUpdates:
+			if !ok {
+				resizeUpdates = nil
+				continue
+			}
+			payload, err := json.Marshal(struct {
+				Type string `json:"type"`
+				Cols int    `json:"cols"`
+				Rows int    `json:"rows"`
+			}{
+				Type: "resize",
+				Cols: size.Cols,
+				Rows: size.Rows,
+			})
+			if err != nil {
+				return
+			}
+			if err := conn.WriteText(payload); err != nil {
 				return
 			}
 		}
@@ -689,6 +1068,9 @@ func (s *Server) handleInstanceLogStream(w http.ResponseWriter, r *http.Request)
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 
+	cleanupSSE := s.instanceMgr.RegisterSSEConnection(id)
+	defer cleanupSSE()
+
 	if err := writeSSELogEvent(w, initial, next); err != nil {
 		return
 	}
@@ -718,6 +1100,40 @@ func (s *Server) handleInstanceLogStream(w http.ResponseWriter, r *http.Request)
 			flusher.Flush()
 		}
 	}
+}
+
+func (s *Server) handleInstanceStats(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	instances, err := s.instanceMgr.List()
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+
+	// Build flat input for the collector. Only include running instances.
+	flat := make([]monitor.InputInstance, 0, len(instances))
+	for _, inst := range instances {
+		if inst.Status != "running" {
+			continue
+		}
+		flat = append(flat, monitor.InputInstance{
+			ID:           inst.ID,
+			Name:         inst.Name,
+			WorktreeID:   inst.WorktreeID,
+			WorktreeName: inst.WorktreeName,
+			PID:          inst.PID,
+			Status:       inst.Status,
+		})
+	}
+
+	connTypes := s.instanceMgr.AllConnectionTypes()
+	stats := s.monitor.Collect(flat, connTypes)
+
+	writeJSON(w, http.StatusOK, stats)
 }
 
 func (s *Server) handleMCPTools(w http.ResponseWriter, r *http.Request) {
@@ -894,6 +1310,28 @@ func (s *Server) handleMCPCall(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"result": map[string]string{"status": "ok"}})
+	case "instance_purge":
+		var args struct {
+			WorktreeID string `json:"worktree_id"`
+			Version    int64  `json:"version"`
+		}
+		if err := decodeArgs(req.Args, &args); err != nil {
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
+		if err := s.instanceMgr.PurgeArchivedInstances(args.WorktreeID, args.Version); err != nil {
+			if errors.Is(err, store.ErrVersionConflict) {
+				st, _ := s.store.Load()
+				writeJSON(w, http.StatusConflict, map[string]any{
+					"error":   "state changed, please refresh",
+					"version": st.Version,
+				})
+				return
+			}
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"result": map[string]string{"status": "ok"}})
 	case "instance_log_tail":
 		var args struct {
 			ID string `json:"id"`
@@ -1045,6 +1483,22 @@ func clientIP(remoteAddr string) string {
 	return host
 }
 
+func isLoopbackHost(host string) bool {
+	host = strings.TrimSpace(host)
+	if host == "" {
+		return false
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+func isLoopbackRequest(r *http.Request) bool {
+	return isLoopbackHost(clientIP(r.RemoteAddr))
+}
+
 func (s *Server) allowAuthAttempt(ip string) bool {
 	s.authMu.Lock()
 	defer s.authMu.Unlock()
@@ -1158,6 +1612,61 @@ func writeRepoListenPort(dataDir string, port int) error {
 	return os.WriteFile(filepath.Join(dataDir, "server.json"), b, 0o600)
 }
 
+// parseGitDiffNumStat parses the output of "git diff --numstat HEAD" and
+// returns per-file change info and totals.
+//
+// Git diff --numstat format per file line:
+//
+//	<additions>\t<deletions>\t<path>
+//
+// Binary files use "-" for additions and deletions, which we surface as 0/0.
+func parseGitDiffNumStat(output string) ([]map[string]any, map[string]int) {
+	var changes []map[string]any
+	totalAdds, totalDels := 0, 0
+
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+
+		parts := strings.SplitN(line, "\t", 3)
+		if len(parts) != 3 {
+			continue
+		}
+
+		adds, dels := 0, 0
+		var err error
+		if parts[0] != "-" {
+			adds, err = strconv.Atoi(parts[0])
+			if err != nil {
+				continue
+			}
+		}
+		if parts[1] != "-" {
+			dels, err = strconv.Atoi(parts[1])
+			if err != nil {
+				continue
+			}
+		}
+
+		path := strings.TrimSpace(parts[2])
+		if path == "" {
+			continue
+		}
+
+		totalAdds += adds
+		totalDels += dels
+		changes = append(changes, map[string]any{
+			"path":      path,
+			"additions": adds,
+			"deletions": dels,
+		})
+	}
+
+	return changes, map[string]int{"additions": totalAdds, "deletions": totalDels}
+}
+
 func computeServerRevision() string {
 	parts := []string{}
 	if bi, ok := debug.ReadBuildInfo(); ok {
@@ -1178,4 +1687,90 @@ func computeServerRevision() string {
 	}
 	sum := sha256.Sum256([]byte(strings.Join(parts, "|")))
 	return hex.EncodeToString(sum[:8])
+}
+
+func (s *Server) resolveOpenWorktreePath(id string) (string, error) {
+	if id == "__main__" {
+		return s.root, nil
+	}
+	items, err := s.worktreeMgr.List()
+	if err != nil {
+		return "", err
+	}
+	for _, it := range items {
+		if it.ID == id {
+			return it.Path, nil
+		}
+	}
+	return "", errWorktreeNotFound
+}
+
+func (s *Server) handleWorktreeOpen(w http.ResponseWriter, r *http.Request, args func(path string) []string) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !isLoopbackRequest(r) {
+		writeErr(w, http.StatusForbidden, errors.New("host GUI actions are only allowed from loopback clients"))
+		return
+	}
+	var req struct {
+		ID string `json:"id"`
+	}
+	if err := readJSON(r.Body, &req); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+
+	path, err := s.resolveOpenWorktreePath(req.ID)
+	if err != nil {
+		if errors.Is(err, errWorktreeNotFound) {
+			writeErr(w, http.StatusNotFound, err)
+			return
+		}
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+
+	if _, err := os.Stat(path); err != nil {
+		writeErr(w, http.StatusNotFound, fmt.Errorf("worktree path not found: %w", err))
+		return
+	}
+
+	cmdArgs := args(path)
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, cmdArgs[0], cmdArgs[1:]...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			err = fmt.Errorf("command timed out: %s", strings.Join(cmdArgs, " "))
+		} else {
+			detail := strings.TrimSpace(string(out))
+			if detail != "" {
+				err = fmt.Errorf("%w: %s", err, detail)
+			}
+		}
+		s.logger.Printf("open worktree command failed: args=%q err=%v", cmdArgs, err)
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (s *Server) handleWorktreeOpenTerminal(w http.ResponseWriter, r *http.Request) {
+	s.handleWorktreeOpen(w, r, func(path string) []string {
+		return []string{"open", "-a", "Terminal", path}
+	})
+}
+
+func (s *Server) handleWorktreeOpenFinder(w http.ResponseWriter, r *http.Request) {
+	s.handleWorktreeOpen(w, r, func(path string) []string {
+		return []string{
+			"osascript",
+			"-e", fmt.Sprintf(`tell application "Finder" to open POSIX file %q`, path),
+			"-e", `tell application "Finder" to activate`,
+		}
+	})
 }

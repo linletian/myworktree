@@ -17,6 +17,7 @@ It does **not** analyze project code or prevent concurrent write conflicts insid
 - `internal/store/` — persistent state store (`state.json`) with file locking + atomic writes.
 - `internal/redact/` — secret redaction for stored logs/backlog.
 - `internal/mcp/` — MCP adapter surface (tool names + app-level tool dispatch), keeping core decoupled.
+- `internal/monitor/` — resource stats collector (CPU delta via gopsutil/process.Times, memory via RSS)
 - `internal/ui/` — embedded static UI.
 
 ## 3. Data & persistence
@@ -27,13 +28,30 @@ It does **not** analyze project code or prevent concurrent write conflicts insid
 ### 3.1.1 Worktree directory layout
 - Default: worktrees are created next to the repo under `<repo-name>-myworktree/<worktree-name>/`.
 - Override: `-worktrees-dir=data` uses the legacy location under the per-project data dir; you can also set a custom path.
-  - `state.json` — managed worktrees + managed instances
+  - `state.json` — managed worktrees + managed instances + tab order + version
   - `tags.json` — project-level tags
   - `logs/<instanceId>.log` — rolling instance backlog
 
 ### 3.2 State model
 - Worktree: id, name, path, branch, baseRef, createdAt
 - Instance: id, worktreeId, tagId, command, cwd, env (sanitized), pid, status, logPath, timestamps
+- TabOrder (at State level): map of worktree_id to ordered list of instance IDs
+- **Version** (at State level): monotonically increasing int64, incremented on every write via `SaveWithVersion`. Used for optimistic locking on concurrent modification detection.
+- Main Repo: not persisted; served via `GET /api/main` with live git branch
+
+### 3.3 Main workspace (sidebar)
+
+The sidebar shows a pinned **Main Workspace** item at the top (purple accent), followed by a "Worktrees" divider and the managed worktree list.
+
+- **Main repo**: `GET /api/main` returns `{name, branch}`. The branch is live — queried via `git rev-parse --abbrev-ref HEAD` (via `gitx.CurrentBranch`). Returns empty string for `branch` on detached HEAD (e.g., CI shallow clones), otherwise returns the current branch name.
+- **Worktrees**: `GET /api/worktrees` also returns live branches — `worktree.Manager.List()` queries `git rev-parse --abbrev-ref HEAD` per worktree path on each call. The `branch` field reflects the currently checked-out branch, not the creation-time branch.
+- **Quick actions**: The main repo item and each managed worktree row render two SVG shortcut buttons when the UI is accessed via `localhost` or `127.0.0.1`: one opens Terminal at the target path, the other opens Finder. These buttons are intentionally hidden for remote/browser sessions because the action targets the host machine running `myworktree`, not the remote client device.
+- **Server-side boundary**: The backend does not trust the frontend visibility check. `POST /api/worktrees/open-terminal` and `POST /api/worktrees/open-finder` reject non-loopback clients based on the request's remote address, so remote callers cannot trigger host GUI actions by directly invoking the API.
+- **Host-side execution**: Clicking a quick action calls backend endpoints that resolve the target path (`"__main__"` maps to the repo root; managed IDs map to the persisted worktree path) and execute macOS host commands. Terminal uses `open -a Terminal <path>`. Finder uses `osascript` to ask Finder to open the POSIX path and activate the app, which is more reliable for visibly bringing a Finder window forward.
+- **Instance routing**: Use `worktree_id: "__main__"` (constant: `instance.MainWorktreeID`) in `POST /api/instances` to start an instance in the main repo root. The instance's `worktree_id` will be `"__main__"` and `worktree_name` will be the directory basename.
+- **Auto-select**: On first load, the UI auto-selects the first worktree; if no worktrees exist, it selects the main repo.
+- **Refresh**: All branch info (main repo + worktrees) updates via the existing 2-second polling.
+- **Git Changes panel**: Below the worktree list, a read-only panel shows all changed files (staged + unstaged) relative to HEAD for the currently selected worktree. The panel auto-refreshes every 10 seconds and on worktree selection change. The main repo's changes also refresh when its branch changes. Per-file addition/deletion counts are obtained via `git diff --stat HEAD` (2-second timeout).
 
 ## 4. Instance lifecycle & reconnect semantics
 - An instance is a server-managed process; UI windows are merely views.
@@ -49,6 +67,10 @@ It does **not** analyze project code or prevent concurrent write conflicts insid
 - UI shows transport state (`websocket/sse/polling`) and supports manual WS reconnect.
 - Backlog is stored on disk with a size cap (rolling truncate).
 - On server startup, stale persisted `running` records are reconciled to `stopped` because in-memory stdin/stdout bindings cannot be resumed after process restart.
+- **Rename**: `PATCH /api/instances` updates an instance's display name (`name` field). The rename takes effect immediately in the UI and persists to `state.json`.
+- **Tab ordering**: `PATCH /api/instances/reorder` persists per-worktree tab order to `state.json` (`tab_order` map + array order in `State.Instances`). Uses **optimistic locking** — the client sends the `version` observed from `GET /api/instances`. If the state has been modified since (e.g., another user started an instance), the server returns HTTP 409 Conflict and the client refreshes and retries.
+- **Resource monitoring**: A clickable transport status bar in the bottom-right of the workspace opens a resource monitor modal. The modal shows per-instance CPU%, memory RSS, and connection type (WebSocket/SSE) grouped by worktree, with subtotals and a global summary. Data is fetched via `GET /api/instances/stats` (1-second polling when open, stops when closed). CPU% uses delta calculation from `process.Times()` with a per-PID baseline stored in the `Collector` struct.
+- **Browser close protection**: The frontend registers a `beforeunload` event handler that unconditionally triggers a browser-native confirmation dialog on any page close/refresh/navigation attempt. This is purely a client-side UX safeguard — backend instances are unaffected and continue running.
 
 ## 5. Terminal Protocol Timing Specification
 
@@ -194,6 +216,7 @@ When implementing or modifying terminal connection code, verify:
 - [ ] Running instance switch preserves inactive session attachments
 - [ ] Dialog close delays focus until connection is ready
 - [ ] Window focus event respects connection state
+- [ ] `beforeunload` handler triggers browser confirmation on any page close/refresh/navigation
 
 ### 5.9 Terminal Query Response Filtering
 

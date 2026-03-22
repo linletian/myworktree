@@ -42,7 +42,7 @@ myworktree is a thin management layer that:
 - `git`
 - `zsh`
 - `script` (used to host managed interactive shells)
-- Go toolchain to build (no external Go dependencies)
+- Go toolchain to build (Go modules are statically linked at compile time; zero runtime dependencies)
 
 ## Quick start
 
