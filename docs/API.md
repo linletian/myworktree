@@ -439,6 +439,15 @@ Fields:
 - `connection_type`: `"websocket"` if the instance has an active WebSocket TTY connection, `"sse"` if using the SSE fallback, `"none"` otherwise.
 - Worktree subtotals and global totals aggregate only `running` instances.
 
+### 5.9 Instance lifecycle (frontend)
+
+All page close/refresh/navigation events trigger a browser-native confirmation dialog. This is a purely client-side UX feature:
+
+- **Trigger**: `beforeunload` event on `window`
+- **Behavior**: Calls `event.preventDefault()` and sets `event.returnValue = ''` to force the browser to show its native confirmation dialog
+- **No backend involvement**: Instances continue running regardless of the user's choice
+- **Condition**: Always triggered on any close action — no dependency on instance state
+
 ## 6) MCP
 ### Tool names
 `GET /api/mcp/tools`

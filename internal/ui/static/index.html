@@ -2271,8 +2271,12 @@
             windowHasFocus = false;
         });
 
-        // Clean up timers and measurement span when the page is unloaded or hidden.
-        window.addEventListener('beforeunload', () => {
+        // Trigger browser confirmation on any page close/refresh/navigation.
+        // Instances continue running regardless of user choice.
+        window.addEventListener('beforeunload', (event) => {
+            event.preventDefault();
+            event.returnValue = '';
+            // Clean up timers and measurement span when the page is unloaded or hidden.
             if (gitChangesTimer) clearInterval(gitChangesTimer);
             if (_truncateSpan) { _truncateSpan.remove(); _truncateSpan = null; }
         });

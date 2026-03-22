@@ -70,6 +70,7 @@ The sidebar shows a pinned **Main Workspace** item at the top (purple accent), f
 - **Rename**: `PATCH /api/instances` updates an instance's display name (`name` field). The rename takes effect immediately in the UI and persists to `state.json`.
 - **Tab ordering**: `PATCH /api/instances/reorder` persists per-worktree tab order to `state.json` (`tab_order` map + array order in `State.Instances`). Uses **optimistic locking** — the client sends the `version` observed from `GET /api/instances`. If the state has been modified since (e.g., another user started an instance), the server returns HTTP 409 Conflict and the client refreshes and retries.
 - **Resource monitoring**: A clickable transport status bar in the bottom-right of the workspace opens a resource monitor modal. The modal shows per-instance CPU%, memory RSS, and connection type (WebSocket/SSE) grouped by worktree, with subtotals and a global summary. Data is fetched via `GET /api/instances/stats` (1-second polling when open, stops when closed). CPU% uses delta calculation from `process.Times()` with a per-PID baseline stored in the `Collector` struct.
+- **Browser close protection**: The frontend registers a `beforeunload` event handler that unconditionally triggers a browser-native confirmation dialog on any page close/refresh/navigation attempt. This is purely a client-side UX safeguard — backend instances are unaffected and continue running.
 
 ## 5. Terminal Protocol Timing Specification
 
@@ -215,6 +216,7 @@ When implementing or modifying terminal connection code, verify:
 - [ ] Running instance switch preserves inactive session attachments
 - [ ] Dialog close delays focus until connection is ready
 - [ ] Window focus event respects connection state
+- [ ] `beforeunload` handler triggers browser confirmation on any page close/refresh/navigation
 
 ### 5.9 Terminal Query Response Filtering
 
