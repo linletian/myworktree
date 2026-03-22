@@ -64,6 +64,7 @@ myworktree is a lightweight single-user manager for **git worktrees** and **long
 - `internal/tag/` — Tag config loader (JSON), merged from global + project-level
 - `internal/redact/` — secret redaction for stored logs and sanitized env
 - `internal/mcp/` — MCP adapter surface (tool listing + dispatch to core managers)
+- `internal/monitor/` — resource stats collection (CPU%, memory RSS per process)
 - `internal/ui/` — embedded static UI (`//go:embed static/*`)
 - `internal/ws/` — custom WebSocket server (no external dependency)
 - `internal/gitx/` — thin wrapper around git commands
@@ -97,6 +98,7 @@ Instances are server-managed PTY processes (`script -q /dev/null zsh -f -i`). Th
 - **Startup reconcile**: Stale persisted `running` instances → `stopped` (in-memory stdin/stdout bindings cannot resume after restart)
 - **Rename**: `PATCH /api/instances` with `{id, name}` to update display name; double-click the instance tab label in the UI for inline editing.
 - **Tab ordering**: `PATCH /api/instances/reorder` with `{worktree_id, order: [id1, id2, ...], version}` persists per-worktree tab order with **optimistic locking** (HTTP 409 Conflict if state changed). The frontend tracks `version` from `GET /api/instances` and refreshes on conflict.
+- **Resource monitor**: Click the transport status bar to open a modal showing per-instance CPU%, memory RSS, and connection type (WebSocket/SSE). Data is grouped by worktree with subtotals and a global summary. The modal polls `GET /api/instances/stats` every 1 second when open and stops when closed.
 
 ### Terminal query filtering (frontend)
 

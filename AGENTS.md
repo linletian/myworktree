@@ -32,7 +32,7 @@ myworktree is a lightweight single-user manager for **git worktrees** and **long
 
 **Key Requirements:**
 - Go 1.25+ (see go.mod)
-- No external Go dependencies
+- Zero runtime dependencies (Go modules are statically linked at compile time into a single binary)
 - Target: macOS 12+ (other platforms not validated)
 - Requires: `git`, `zsh`, `script`
 

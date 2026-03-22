@@ -26,6 +26,7 @@ import (
 	"myworktree/internal/gitx"
 	"myworktree/internal/instance"
 	"myworktree/internal/mcp"
+	"myworktree/internal/monitor"
 	"myworktree/internal/store"
 	"myworktree/internal/tag"
 	"myworktree/internal/ui"
@@ -55,6 +56,7 @@ type Server struct {
 	worktreeMgr worktree.Manager
 	instanceMgr *instance.Manager
 	mcpAdapter  mcp.Adapter
+	monitor     monitor.Collector
 	authMu      sync.Mutex
 	authFails   map[string]authFail
 }
@@ -242,6 +244,7 @@ func (s *Server) registerAPIs(mux *http.ServeMux) {
 	mux.HandleFunc("/api/instances/tty/ws", s.handleInstanceTTYWS)
 	mux.HandleFunc("/api/instances/log", s.handleInstanceLog)
 	mux.HandleFunc("/api/instances/log/stream", s.handleInstanceLogStream)
+	mux.HandleFunc("/api/instances/stats", s.handleInstanceStats)
 	mux.HandleFunc("/api/tags", s.handleTags)
 	mux.HandleFunc("/api/branches", s.handleBranches)
 	mux.HandleFunc("/api/worktrees/open-terminal", s.handleWorktreeOpenTerminal)
@@ -689,6 +692,9 @@ func (s *Server) handleInstanceTTYWS(w http.ResponseWriter, r *http.Request) {
 	}
 	defer conn.Close()
 
+	s.instanceMgr.SetConnectionType(id, "websocket")
+	defer s.instanceMgr.SetConnectionType(id, "")
+
 	// Step 1: Send handshake ready message
 	readyMsg := []byte(`{"type":"ready"}`)
 	if err := conn.WriteText(readyMsg); err != nil {
@@ -859,6 +865,9 @@ func (s *Server) handleInstanceLogStream(w http.ResponseWriter, r *http.Request)
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 
+	cleanupSSE := s.instanceMgr.RegisterSSEConnection(id)
+	defer cleanupSSE()
+
 	if err := writeSSELogEvent(w, initial, next); err != nil {
 		return
 	}
@@ -888,6 +897,40 @@ func (s *Server) handleInstanceLogStream(w http.ResponseWriter, r *http.Request)
 			flusher.Flush()
 		}
 	}
+}
+
+func (s *Server) handleInstanceStats(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	instances, err := s.instanceMgr.List()
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+
+	// Build flat input for the collector. Only include running instances.
+	flat := make([]monitor.InputInstance, 0, len(instances))
+	for _, inst := range instances {
+		if inst.Status != "running" {
+			continue
+		}
+		flat = append(flat, monitor.InputInstance{
+			ID:           inst.ID,
+			Name:         inst.Name,
+			WorktreeID:   inst.WorktreeID,
+			WorktreeName: inst.WorktreeName,
+			PID:          inst.PID,
+			Status:       inst.Status,
+		})
+	}
+
+	connTypes := s.instanceMgr.AllConnectionTypes()
+	stats := s.monitor.Collect(flat, connTypes)
+
+	writeJSON(w, http.StatusOK, stats)
 }
 
 func (s *Server) handleMCPTools(w http.ResponseWriter, r *http.Request) {

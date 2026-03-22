@@ -17,6 +17,7 @@ It does **not** analyze project code or prevent concurrent write conflicts insid
 - `internal/store/` — persistent state store (`state.json`) with file locking + atomic writes.
 - `internal/redact/` — secret redaction for stored logs/backlog.
 - `internal/mcp/` — MCP adapter surface (tool names + app-level tool dispatch), keeping core decoupled.
+- `internal/monitor/` — resource stats collector (CPU delta via gopsutil/process.Times, memory via RSS)
 - `internal/ui/` — embedded static UI.
 
 ## 3. Data & persistence
@@ -68,6 +69,7 @@ The sidebar shows a pinned **Main Workspace** item at the top (purple accent), f
 - On server startup, stale persisted `running` records are reconciled to `stopped` because in-memory stdin/stdout bindings cannot be resumed after process restart.
 - **Rename**: `PATCH /api/instances` updates an instance's display name (`name` field). The rename takes effect immediately in the UI and persists to `state.json`.
 - **Tab ordering**: `PATCH /api/instances/reorder` persists per-worktree tab order to `state.json` (`tab_order` map + array order in `State.Instances`). Uses **optimistic locking** — the client sends the `version` observed from `GET /api/instances`. If the state has been modified since (e.g., another user started an instance), the server returns HTTP 409 Conflict and the client refreshes and retries.
+- **Resource monitoring**: A clickable transport status bar in the bottom-right of the workspace opens a resource monitor modal. The modal shows per-instance CPU%, memory RSS, and connection type (WebSocket/SSE) grouped by worktree, with subtotals and a global summary. Data is fetched via `GET /api/instances/stats` (1-second polling when open, stops when closed). CPU% uses delta calculation from `process.Times()` with a per-PID baseline stored in the `Collector` struct.
 
 ## 5. Terminal Protocol Timing Specification
 

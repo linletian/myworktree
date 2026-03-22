@@ -393,6 +393,52 @@ Response: `text/plain`
 {"chunk":"...","next":12345}
 ```
 
+### Instance resource stats
+`GET /api/instances/stats`
+
+Returns per-instance resource consumption and connection status, grouped by worktree.
+
+**Note**: This endpoint performs real-time process stat collection (via `gopsutil`). It only yields meaningful CPU% values after at least 1-2 seconds of server runtime, as CPU% requires a delta calculation from the previous measurement.
+
+Response:
+```json
+{
+  "instances": [
+    {
+      "id": "inst-abc123",
+      "name": "build-server",
+      "worktree_id": "wt-xyz",
+      "worktree_name": "feature-ui",
+      "pid": 12345,
+      "status": "running",
+      "cpu_percent": 3.5,
+      "memory_rss_bytes": 52428800,
+      "connection_type": "websocket"
+    }
+  ],
+  "worktrees": [
+    {
+      "worktree_id": "wt-xyz",
+      "name": "feature-ui",
+      "total_cpu": 5.2,
+      "total_memory": 104857600,
+      "instance_count": 2
+    }
+  ],
+  "global": {
+    "total_cpu": 8.7,
+    "total_memory": 209715200,
+    "instance_count": 3
+  }
+}
+```
+
+Fields:
+- `cpu_percent`: CPU utilization as a percentage of a single core. 0% on the first measurement (no prior baseline).
+- `memory_rss_bytes`: Resident Set Size — actual physical memory used by the process.
+- `connection_type`: `"websocket"` if the instance has an active WebSocket TTY connection, `"sse"` if using the SSE fallback, `"none"` otherwise.
+- Worktree subtotals and global totals aggregate only `running` instances.
+
 ## 6) MCP
 ### Tool names
 `GET /api/mcp/tools`

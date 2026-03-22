@@ -40,6 +40,8 @@ type Manager struct {
 	inputs      map[string]io.WriteCloser
 	ptys        map[string]*os.File
 	subscribers map[string]map[chan string]struct{}
+	conns       map[string]string // instance ID -> connection type ("websocket"/"sse"/"")
+	connsMu     sync.Mutex
 }
 
 type StartInput struct {
@@ -94,6 +96,9 @@ func (m *Manager) Start(in StartInput) (store.ManagedInstance, error) {
 	}
 	if m.subscribers == nil {
 		m.subscribers = map[string]map[chan string]struct{}{}
+	}
+	if m.conns == nil {
+		m.conns = map[string]string{}
 	}
 	m.mu.Unlock()
 
@@ -1036,4 +1041,52 @@ func (m *Manager) loadTags() (map[string]tag.Tag, error) {
 		ProjectPath: filepath.Join(m.DataDir, "tags.json"),
 	}
 	return tm.LoadMerged()
+}
+
+// SetConnectionType records the current transport type for an instance.
+// connType should be "websocket", "sse", or "" (disconnected).
+func (m *Manager) SetConnectionType(id, connType string) {
+	m.connsMu.Lock()
+	defer m.connsMu.Unlock()
+	if m.conns == nil {
+		m.conns = map[string]string{}
+	}
+	m.conns[id] = connType
+}
+
+// ConnectionType returns the current transport type for an instance.
+func (m *Manager) ConnectionType(id string) string {
+	m.connsMu.Lock()
+	defer m.connsMu.Unlock()
+	if m.conns == nil {
+		return ""
+	}
+	return m.conns[id]
+}
+
+// AllConnectionTypes returns a map of all instance connection types.
+func (m *Manager) AllConnectionTypes() map[string]string {
+	m.connsMu.Lock()
+	defer m.connsMu.Unlock()
+	if m.conns == nil {
+		return map[string]string{}
+	}
+	out := make(map[string]string, len(m.conns))
+	for k, v := range m.conns {
+		out[k] = v
+	}
+	return out
+}
+
+// RegisterSSEConnection marks an instance as having an active SSE connection
+// and returns a cleanup function that clears the mark on call.
+func (m *Manager) RegisterSSEConnection(id string) func() {
+	m.SetConnectionType(id, "sse")
+	return func() {
+		m.connsMu.Lock()
+		defer m.connsMu.Unlock()
+		if m.conns != nil && m.conns[id] == "sse" {
+			delete(m.conns, id)
+		}
+	}
 }
