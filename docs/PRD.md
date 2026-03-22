@@ -59,6 +59,7 @@
   - 终端配置：Web TTY 的缓冲区（scrollback）、主题、字体等参数由前端灵活配置，以适应不同的调试和使用场景。
 - 规划增强：无（PTY + Web TTY 已完成）。
 - 浏览器关闭保护：前端在 `beforeunload` 事件时，无论是否存在运行中实例，均触发浏览器原生确认对话框，防止误操作关闭页面。
+- **Main workspace 分支查询**：`GET /api/main` 返回 `{name, branch}`。branch 字段实时查询（`git rev-parse --abbrev-ref HEAD`），在 detached HEAD 场景（如 CI 浅克隆）下返回空字符串而非错误。
 
 ## 8. 验收标准（MVP）
 - 可创建/列出/删除 worktree（dirty 删除被拒绝）。

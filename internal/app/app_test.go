@@ -616,7 +616,7 @@ func TestHandleMain(t *testing.T) {
 		t.Fatalf("GET /api/main: name = %q, want %q", name, expectedName)
 	}
 
-	// Branch must be present as a non-empty string (CurrentBranch errors otherwise).
+	// Branch field is present (may be empty string on detached HEAD).
 	if _, ok := resp["branch"]; !ok {
 		t.Fatalf("GET /api/main: missing branch field")
 	}

@@ -32,7 +32,7 @@ Response:
 ```
 
 - `name`: basename of the git root directory
-- `branch`: currently checked-out branch (via `git rev-parse --abbrev-ref HEAD`). Returns HTTP 500 if the git repository is inaccessible or HEAD is malformed.
+- `branch`: currently checked-out branch (via `git rev-parse --abbrev-ref HEAD`). Returns empty string on detached HEAD (e.g., CI shallow clones).
 
 ## 2) Worktrees
 ### List

@@ -451,11 +451,7 @@ func (s *Server) handleMain(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	name := filepath.Base(filepath.Clean(s.root))
-	branch, err := gitx.CurrentBranch(s.root)
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err)
-		return
-	}
+	branch, _ := gitx.CurrentBranch(s.root) // returns empty string on detached HEAD
 	writeJSON(w, http.StatusOK, map[string]any{
 		"name":   name,
 		"branch": branch,
