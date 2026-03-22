@@ -443,28 +443,9 @@ func TestHandleInstanceReorder(t *testing.T) {
 	}
 }
 
-// TestParseGitDiffStat covers git diff --stat output parsing.
-// Git diff --stat format per file line:
-//
-//	<filename> | <stat>
-//
-// where <stat> is a mix of numbers and '+'/'-' bar characters.
-// The summary line (e.g. "3 files changed, 5 insertions(+), 3 deletions(-)")
-// provides authoritative totals. Per-file bars are proportional but may not
-// show exact counts when changes are large.
-//
-// Parsing strategy:
-//   - Split on "| " (filenames cannot contain this exact delimiter).
-//   - Extract totals from the summary line's "insertion"/"deletion" labels.
-//   - For per-file lines, count '+'/'-' bar chars when inline numbers absent.
-func TestParseGitDiffStat(t *testing.T) {
-	// Case 1: mixed additions and deletions. Per-file bar shows proportional counts.
-	// a.txt: "2 +-" = 2 total lines, bar has 1 '+' and 1 '-'
-	// b.txt: "10 ++++++++++--------" = 10 total, bar has 10 '+' and 8 '-'
-	out1 := ` a.txt | 2 +-
- b.txt | 10 ++++++++++--------
- 2 files changed, 11 insertions(+), 9 deletions(-)`
-	changes1, total1 := parseGitDiffStat(out1)
+func TestParseGitDiffNumStat(t *testing.T) {
+	out1 := "1\t1\ta.txt\n10\t8\tb.txt"
+	changes1, total1 := parseGitDiffNumStat(out1)
 	if len(changes1) != 2 {
 		t.Fatalf("case1: expected 2 changes, got %d", len(changes1))
 	}
@@ -484,11 +465,9 @@ func TestParseGitDiffStat(t *testing.T) {
 		t.Fatalf("case1 total: got additions=%d deletions=%d, want 11 and 9", total1["additions"], total1["deletions"])
 	}
 
-	// Case 2: additions only (new file).
-	// Bar: 20 '+' characters (proportional, not exact count).
-	out2 := `new_file.go | 20 ++++++++++++++++++++
- 1 file changed, 20 insertions(+)`
-	changes2, total2 := parseGitDiffStat(out2)
+	// Case 2: additions only.
+	out2 := "20\t0\tnew_file.go"
+	changes2, total2 := parseGitDiffNumStat(out2)
 	if len(changes2) != 1 {
 		t.Fatalf("case2: expected 1 change, got %d", len(changes2))
 	}
@@ -500,10 +479,8 @@ func TestParseGitDiffStat(t *testing.T) {
 	}
 
 	// Case 3: deletions only.
-	// Bar: 15 '-' characters (proportional).
-	out3 := `dead_code.go | 15 ---------------
- 1 file changed, 15 deletions(-)`
-	changes3, total3 := parseGitDiffStat(out3)
+	out3 := "0\t15\tdead_code.go"
+	changes3, total3 := parseGitDiffNumStat(out3)
 	if len(changes3) != 1 {
 		t.Fatalf("case3: expected 1 change, got %d", len(changes3))
 	}
@@ -515,21 +492,21 @@ func TestParseGitDiffStat(t *testing.T) {
 	}
 
 	// Case 4: binary file (no line stats).
-	out4 := `image.png | Bin 100 -> 200 bytes
- 1 file changed`
-	changes4, _ := parseGitDiffStat(out4)
+	out4 := "-\t-\timage.png"
+	changes4, total4 := parseGitDiffNumStat(out4)
 	if len(changes4) != 1 {
 		t.Fatalf("case4: expected 1 change, got %d", len(changes4))
 	}
 	if changes4[0]["additions"] != 0 || changes4[0]["deletions"] != 0 {
 		t.Fatalf("case4 binary: got additions=%v deletions=%v, want 0 and 0", changes4[0]["additions"], changes4[0]["deletions"])
 	}
+	if total4["additions"] != 0 || total4["deletions"] != 0 {
+		t.Fatalf("case4 total: got additions=%d deletions=%d, want 0 and 0", total4["additions"], total4["deletions"])
+	}
 
 	// Case 5: path with spaces.
-	out5 := `path with spaces/foo.go | 3 +++ 1 ---
- internal/pkg bar/main.go | 5 +++++
- 2 files changed, 8 insertions(+), 4 deletions(-)`
-	changes5, _ := parseGitDiffStat(out5)
+	out5 := "3\t3\tpath with spaces/foo.go\n5\t0\tinternal/pkg bar/main.go"
+	changes5, total5 := parseGitDiffNumStat(out5)
 	if len(changes5) != 2 {
 		t.Fatalf("case5: expected 2 changes, got %d", len(changes5))
 	}
@@ -545,9 +522,12 @@ func TestParseGitDiffStat(t *testing.T) {
 	if changes5[1]["additions"] != 5 || changes5[1]["deletions"] != 0 {
 		t.Fatalf("case5[1]: got additions=%v deletions=%v, want 5 and 0", changes5[1]["additions"], changes5[1]["deletions"])
 	}
+	if total5["additions"] != 8 || total5["deletions"] != 3 {
+		t.Fatalf("case5 total: got additions=%d deletions=%d, want 8 and 3", total5["additions"], total5["deletions"])
+	}
 
 	// Case 6: empty output.
-	changes6, total6 := parseGitDiffStat("")
+	changes6, total6 := parseGitDiffNumStat("")
 	if len(changes6) != 0 {
 		t.Fatalf("case6: expected 0 changes for empty output, got %d", len(changes6))
 	}
@@ -555,28 +535,41 @@ func TestParseGitDiffStat(t *testing.T) {
 		t.Fatalf("case6 total: got additions=%d deletions=%d, want 0 and 0", total6["additions"], total6["deletions"])
 	}
 
-	// Case 7: messy output with blank lines and summary without a file line.
-	out7 := `
-
- README.md | 2 +-
- 2 files changed, 5 insertions(+), 3 deletions(-)
-`
-	changes7, total7 := parseGitDiffStat(out7)
+	// Case 7: blank lines are ignored.
+	out7 := "\n\n2\t1\tREADME.md\n"
+	changes7, total7 := parseGitDiffNumStat(out7)
 	if len(changes7) != 1 {
 		t.Fatalf("case7: expected 1 change, got %d", len(changes7))
 	}
-	if total7["additions"] != 5 || total7["deletions"] != 3 {
-		t.Fatalf("case7 total: got additions=%d deletions=%d, want 5 and 3", total7["additions"], total7["deletions"])
+	if total7["additions"] != 2 || total7["deletions"] != 1 {
+		t.Fatalf("case7 total: got additions=%d deletions=%d, want 2 and 1", total7["additions"], total7["deletions"])
 	}
 
-	// Case 8: zero changes (empty diff).
-	out8 := ` 0 files changed`
-	changes8, total8 := parseGitDiffStat(out8)
-	if len(changes8) != 0 {
-		t.Fatalf("case8: expected 0 changes, got %d", len(changes8))
+	// Case 8: malformed lines are skipped without affecting totals.
+	out8 := "not-a-numstat-line\n4\t2\tok.go"
+	changes8, total8 := parseGitDiffNumStat(out8)
+	if len(changes8) != 1 {
+		t.Fatalf("case8: expected 1 valid change, got %d", len(changes8))
 	}
-	if total8["additions"] != 0 || total8["deletions"] != 0 {
-		t.Fatalf("case8 total: got additions=%d deletions=%d, want 0 and 0", total8["additions"], total8["deletions"])
+	if changes8[0]["path"] != "ok.go" {
+		t.Fatalf("case8[0]: got %q", changes8[0]["path"])
+	}
+	if total8["additions"] != 4 || total8["deletions"] != 2 {
+		t.Fatalf("case8 total: got additions=%d deletions=%d, want 4 and 2", total8["additions"], total8["deletions"])
+	}
+
+	// Case 9: large values remain exact; unlike --stat bars, numstat does not
+	// truncate per-file counts to terminal width.
+	out9 := "100\t25\tlarge-change.go"
+	changes9, total9 := parseGitDiffNumStat(out9)
+	if len(changes9) != 1 {
+		t.Fatalf("case9: expected 1 change, got %d", len(changes9))
+	}
+	if changes9[0]["additions"] != 100 || changes9[0]["deletions"] != 25 {
+		t.Fatalf("case9: got additions=%v deletions=%v, want 100 and 25", changes9[0]["additions"], changes9[0]["deletions"])
+	}
+	if total9["additions"] != 100 || total9["deletions"] != 25 {
+		t.Fatalf("case9 total: got additions=%d deletions=%d, want 100 and 25", total9["additions"], total9["deletions"])
 	}
 }
 

@@ -601,7 +601,7 @@ func (s *Server) handleWorktreeStatus(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	cmd := gitx.GitCommand(2*time.Second, gitRoot, "diff", "--stat", "HEAD")
+	cmd := gitx.GitCommand(2*time.Second, gitRoot, "diff", "--numstat", "HEAD")
 	out, err := cmd.Output()
 	if err != nil {
 		// "No changes" produces empty output; git error messages are non-empty.
@@ -616,7 +616,7 @@ func (s *Server) handleWorktreeStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	changes, total := parseGitDiffStat(string(out))
+	changes, total := parseGitDiffNumStat(string(out))
 	writeJSON(w, http.StatusOK, map[string]any{
 		"changes": changes,
 		"total":   total,
@@ -1612,131 +1612,51 @@ func writeRepoListenPort(dataDir string, port int) error {
 	return os.WriteFile(filepath.Join(dataDir, "server.json"), b, 0o600)
 }
 
-// parseGitDiffStat parses the output of "git diff --stat HEAD" and returns
-// per-file change info and totals.
+// parseGitDiffNumStat parses the output of "git diff --numstat HEAD" and
+// returns per-file change info and totals.
 //
-// Git diff --stat format per file line:
+// Git diff --numstat format per file line:
 //
-//	<filename> | <stat>
+//	<additions>\t<deletions>\t<path>
 //
-// where <stat> is a mix of numbers and '+'/'-' bar characters, e.g.:
-//
-//	"2 +-"     (2 lines changed: 1 addition, 1 deletion, bar only)
-//	"10 ++++--------"  (10 additions, 8 deletions, bar characters)
-//	"1 +"      (1 addition, no deletions)
-//	"1 -"      (1 deletion, no additions)
-//
-// The summary line (e.g. "3 files changed, 5 insertions(+), 3 deletions(-)")
-// provides authoritative totals. Per-file bars are proportional but may not
-// show exact counts when changes are large.
-//
-// The summary line's "insertion"/"deletion" labels only appear there, not in
-// per-file lines. Binary files show "Bin" instead of a bar.
-//
-// Parsing strategy:
-//   - Split on "| " (unique: filenames cannot contain this exact delimiter).
-//   - Extract totals from the summary line's "insertion"/"deletion" labels.
-//   - For per-file lines, count '+' and '-' bar characters as proportional
-//     counts when inline numbers are absent; use inline numbers when present.
-func parseGitDiffStat(output string) ([]map[string]any, map[string]int) {
+// Binary files use "-" for additions and deletions, which we surface as 0/0.
+func parseGitDiffNumStat(output string) ([]map[string]any, map[string]int) {
 	var changes []map[string]any
 	totalAdds, totalDels := 0, 0
 
-	// Parse the summary line to get authoritative totals.
-	// Git wraps at terminal width, so "changed" may appear on a different
-	// line than the insertion/deletion counts. We look for "insertion" and
-	// "deletion" labels independently in each non-empty line.
 	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
 		}
 
-		// Extract "N insertion(s)": skip non-digits to land on the last digit,
-		// then walk backwards to the first digit, then forward to determine the end.
-		if idx := strings.Index(line, "insertion"); idx > 0 {
-			i := idx - 1
-			for i >= 0 && (line[i] < '0' || line[i] > '9') {
-				i--
-			}
-			for i >= 0 && line[i] >= '0' && line[i] <= '9' {
-				i--
-			}
-			i++
-			end := i
-			for end < idx && line[end] >= '0' && line[end] <= '9' {
-				end++
-			}
-			if n, err := strconv.Atoi(line[i:end]); err == nil {
-				totalAdds = n
-			}
-		}
-
-		// Extract "N deletion(s)": same approach.
-		if idx := strings.Index(line, "deletion"); idx > 0 {
-			i := idx - 1
-			for i >= 0 && (line[i] < '0' || line[i] > '9') {
-				i--
-			}
-			for i >= 0 && line[i] >= '0' && line[i] <= '9' {
-				i--
-			}
-			i++
-			end := i
-			for end < idx && line[end] >= '0' && line[end] <= '9' {
-				end++
-			}
-			if n, err := strconv.Atoi(line[i:end]); err == nil {
-				totalDels = n
-			}
-		}
-	}
-
-	// Parse per-file lines. Git diff --stat format:
-	//  <filename> | <stat>
-	// where <stat> is either:
-	//   - "Bin OLD -> NEW bytes" for binary files, or
-	//   - N [+|−]* for regular files (visual proportional bars, may also
-	//     include inline numbers for small files).
-	for _, line := range strings.Split(output, "\n") {
-		if line == "" {
-			continue
-		}
-
-		// Split on "| " (filenames cannot contain this exact sequence).
-		sep := "| "
-		idx := strings.Index(line, sep)
-		if idx < 0 {
-			continue
-		}
-		path := strings.TrimSpace(line[:idx])
-		statPart := strings.TrimSpace(line[idx+len(sep):])
-		if statPart == "" {
+		parts := strings.SplitN(line, "\t", 3)
+		if len(parts) != 3 {
 			continue
 		}
 
 		adds, dels := 0, 0
-
-		if strings.HasPrefix(statPart, "Bin") {
-			// Binary file: no line-level stats.
-		} else {
-			// The stat part is: [N] [+|-]+ (number + proportional bar chars).
-			// Find where the number ends by scanning to the first non-digit.
-			numEnd := 0
-			for numEnd < len(statPart) && statPart[numEnd] >= '0' && statPart[numEnd] <= '9' {
-				numEnd++
+		var err error
+		if parts[0] != "-" {
+			adds, err = strconv.Atoi(parts[0])
+			if err != nil {
+				continue
 			}
-			// Extract the leading number if present.
-			if numEnd > 0 {
-				if n, err := strconv.Atoi(statPart[:numEnd]); err == nil {
-					adds = n
-				}
+		}
+		if parts[1] != "-" {
+			dels, err = strconv.Atoi(parts[1])
+			if err != nil {
+				continue
 			}
-			// Count bar characters in the remainder (after the number).
-			bar := statPart[numEnd:]
-			adds = strings.Count(bar, "+")
-			dels = strings.Count(bar, "-")
 		}
 
+		path := strings.TrimSpace(parts[2])
+		if path == "" {
+			continue
+		}
+
+		totalAdds += adds
+		totalDels += dels
 		changes = append(changes, map[string]any{
 			"path":      path,
 			"additions": adds,
