@@ -709,10 +709,9 @@
             }
 
         .form-actions {
-            text-align: right;
             margin-top: 16px;
             display: flex;
-            justify-content: flex-end;
+            align-items: center;
             gap: 8px;
         }
 
@@ -720,6 +719,20 @@
             color: #6a737d;
             font-size: 12px;
             margin-top: 4px;
+        }
+
+        /* LLM Settings Dialog */
+        #dialog-llm-settings {
+            width: 420px;
+            max-width: 90vw;
+            padding: 24px;
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            box-shadow: 0 4px 24px rgba(0,0,0,0.15);
+        }
+
+        #dialog-llm-settings::backdrop {
+            background: rgba(0,0,0,0.4);
         }
 
         /* Utilities */
@@ -866,40 +879,17 @@
     <!-- Modal: Create Worktree -->
     <dialog id="modal-create-wt">
         <h3>Create Worktree</h3>
-        <!-- LLM Settings Panel (shown when LLM mode is active or on error) -->
-        <div id="llm-settings-panel" style="display:none; background:#fff7e6; border:1px solid #f0a500; border-radius:6px; padding:12px; margin-bottom:16px;">
-            <div style="font-weight:600; margin-bottom:8px; color:#8a5a00;">LLM Branch Naming</div>
-            <div id="llm-error-msg" style="color:#c0392b; font-size:12px; margin-bottom:8px; display:none;"></div>
-            <div class="form-group" style="margin-bottom:8px;">
-                <label style="margin-bottom:4px;">Mode</label>
-                <div style="display:flex; gap:8px;">
-                    <label style="display:flex; align-items:center; gap:4px; font-weight:normal; cursor:pointer;">
-                        <input type="radio" name="llmMode" value="regex" onclick="onLLMModeChange()" /> Regex
-                    </label>
-                    <label style="display:flex; align-items:center; gap:4px; font-weight:normal; cursor:pointer;">
-                        <input type="radio" name="llmMode" value="openai" onclick="onLLMModeChange()" /> OpenAI
-                    </label>
-                    <label style="display:flex; align-items:center; gap:4px; font-weight:normal; cursor:pointer;">
-                        <input type="radio" name="llmMode" value="anthropic" onclick="onLLMModeChange()" /> Anthropic
-                    </label>
-                </div>
-            </div>
-            <div id="llm-api-key-group" class="form-group" style="margin-bottom:8px;">
-                <label style="margin-bottom:4px;">API Key</label>
-                <input id="llmApiKey" type="password" placeholder="sk-..." style="width:100%; padding:6px; border:1px solid #ddd; border-radius:4px;" />
-                <div id="llm-api-key-masked" style="color:#6a737d; font-size:12px; margin-top:2px;"></div>
-            </div>
-            <div style="display:flex; gap:8px; flex-wrap:wrap;">
-                <button onclick="testLLMConnection()" style="padding:4px 10px; border:1px solid #ddd; border-radius:4px; background:#f6f8fa; cursor:pointer; font-size:12px;">Test Connection</button>
-                <button onclick="retryWithLLM()" style="padding:4px 10px; border:1px solid #005cc5; border-radius:4px; background:#005cc5; color:#fff; cursor:pointer; font-size:12px;">Retry Create</button>
-                <button onclick="useRegexMode()" style="padding:4px 10px; border:1px solid #ddd; border-radius:4px; background:#f6f8fa; cursor:pointer; font-size:12px;">Use Regex Mode</button>
-            </div>
-            <div id="llm-test-result" style="margin-top:6px; font-size:12px;"></div>
-        </div>
         <div class="form-group">
             <label>Task Description</label>
-            <input id="wtTask" placeholder="e.g. fix login bug" />
-            <div class="muted">Creates branch mwt/fix-login-bug</div>
+            <div style="display:flex; gap:8px; align-items:center;">
+                <input id="wtTask" style="flex:1;" placeholder="e.g. fix login bug" oninput="onTaskDescChange()" />
+                <button type="button" id="btnAIGenerate" onclick="generateBranchName()">AI Generate</button>
+            </div>
+        </div>
+        <div class="form-group">
+            <label>Branch Name</label>
+            <input id="wtBranchName" placeholder="auto-generated or enter manually" />
+            <div class="muted" id="wtBranchPreview">Branch name preview</div>
         </div>
         <div class="form-group">
             <label>Base Ref</label>
@@ -910,8 +900,45 @@
             <label><input type="checkbox" id="wtAdopt" /> Adopt existing branch/worktree if exists</label>
         </div>
         <div class="form-actions">
+            <button type="button" id="btnLLMSettings" onclick="openLLMSettingsDialog()" style="display:none;">LLM Settings</button>
+            <div style="flex:1;"></div>
             <button onclick="closeModal('modal-create-wt')">Cancel</button>
             <button class="primary" onclick="doCreateWorktree()">Create</button>
+        </div>
+    </dialog>
+
+    <!-- LLM Settings Dialog -->
+    <dialog id="dialog-llm-settings">
+        <h3>LLM Settings</h3>
+        <div id="llm-settings-error" style="color:#c0392b;display:none;"></div>
+        <div class="form-group">
+            <label>Protocol</label>
+            <select id="llmProtocol" onchange="onLLMProtocolChange()">
+                <option value="openai">OpenAI</option>
+                <option value="anthropic">Anthropic</option>
+                <option value="openai_compatible">OpenAI Compatible</option>
+            </select>
+        </div>
+        <div class="form-group">
+            <label>Model</label>
+            <input id="llmModel" placeholder="e.g. gpt-4o-mini" />
+            <div class="muted" id="llm-model-hint">Default auto-filled based on protocol</div>
+        </div>
+        <div class="form-group">
+            <label>API Address</label>
+            <input id="llmAPIAddress" type="url" placeholder="https://..." />
+            <div class="muted">e.g. https://api.openai.com/v1/chat/completions</div>
+        </div>
+        <div class="form-group">
+            <label>API Key</label>
+            <input id="llmAPIKey" type="password" placeholder="sk-..." />
+            <div id="llm-api-key-masked" class="muted"></div>
+        </div>
+        <div class="form-actions">
+            <button type="button" onclick="testLLMConnection()">Test Connection</button>
+            <span id="llm-test-result" style="font-size:12px;flex:1;"></span>
+            <button onclick="closeLLMSettingsDialog()">Cancel</button>
+            <button class="primary" onclick="saveLLMSettings()">Save</button>
         </div>
     </dialog>
 
@@ -1931,8 +1958,10 @@
         async function openModal(id) {
             const el = document.getElementById(id);
             if (id === 'modal-create-wt') {
-                hideLLMSettingsPanel();
-                loadLLMConfig();
+                document.getElementById("wtTask").value = "";
+                document.getElementById("wtBranchName").value = "";
+                document.getElementById("wtBranchPreview").textContent = "Branch name preview";
+                document.getElementById("wtAdopt").checked = false;
             }
             if (id === 'modal-import-wt') {
                 // Pre-load candidates
@@ -2008,22 +2037,15 @@
                     base_ref: document.getElementById("wtBaseSelect").value === "__custom__"
                         ? document.getElementById("wtBaseCustom").value
                         : document.getElementById("wtBaseSelect").value,
-                    adopt_if_exists: document.getElementById("wtAdopt").checked
+                    adopt_if_exists: document.getElementById("wtAdopt").checked,
+                    branch_name: document.getElementById("wtBranchName").value.trim()
                 };
                 const res = await api("/api/worktrees", { method: "POST", body: JSON.stringify(body) });
-                hideLLMSettingsPanel();
                 closeModal("modal-create-wt");
-                document.getElementById("wtTask").value = "";
                 await refresh();
                 selectWorktreeByID(res.id);
             } catch (e) {
-                // Check if this is an LLM error (HTTP 400 with "LLM" in the message)
-                if (e.status === 400 && (e.message.includes("LLM") || e.message.includes("llm"))) {
-                    await loadLLMConfig();
-                    showLLMSettingsPanel(e.message);
-                } else {
-                    alert(e);
-                }
+                alert(e);
             }
         }
 
@@ -2942,89 +2964,129 @@
 
         // --- LLM Branch Naming ---
 
-        // Show the LLM settings panel with an optional error message.
-        function showLLMSettingsPanel(errorMsg) {
-            const panel = document.getElementById("llm-settings-panel");
-            const errorDiv = document.getElementById("llm-error-msg");
-            panel.style.display = "block";
-            if (errorMsg) {
-                errorDiv.textContent = errorMsg;
-                errorDiv.style.display = "block";
+        // Update the branch name preview text based on the current input.
+        function onTaskDescChange() {
+            const task = document.getElementById("wtTask").value.trim();
+            const preview = document.getElementById("wtBranchPreview");
+            if (task) {
+                preview.textContent = "Preview: " + task.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
             } else {
-                errorDiv.style.display = "none";
+                preview.textContent = "Branch name preview";
             }
         }
 
-        function hideLLMSettingsPanel() {
-            const panel = document.getElementById("llm-settings-panel");
-            panel.style.display = "none";
-            document.getElementById("llm-error-msg").style.display = "none";
-            document.getElementById("llm-test-result").textContent = "";
+        // Generate a branch name from the task description using the LLM.
+        async function generateBranchName() {
+            const task = document.getElementById("wtTask").value.trim();
+            if (!task) {
+                alert("Please enter a task description first.");
+                return;
+            }
+            const btn = document.getElementById("btnAIGenerate");
+            btn.disabled = true;
+            btn.textContent = "Generating...";
+            try {
+                const res = await api("/api/llm/generate", {
+                    method: "POST",
+                    body: JSON.stringify({ task_description: task })
+                });
+                document.getElementById("wtBranchName").value = res.branch_name;
+                document.getElementById("wtBranchPreview").textContent = "Preview: " + res.branch_name;
+            } catch (e) {
+                alert("AI generation failed: " + e.message);
+            } finally {
+                btn.disabled = false;
+                btn.textContent = "AI Generate";
+            }
         }
 
-        async function loadLLMConfig() {
+        // Open the LLM Settings dialog.
+        async function openLLMSettingsDialog() {
+            const dialog = document.getElementById("dialog-llm-settings");
+            const errorDiv = document.getElementById("llm-settings-error");
+            errorDiv.style.display = "none";
             try {
                 const cfg = await api("/api/llm/config");
-                const mode = cfg.mode || "regex";
-                const masked = cfg.api_key_masked || "";
-                document.querySelectorAll('input[name="llmMode"]').forEach(r => {
-                    r.checked = r.value === mode;
-                });
-                const apiKeyInput = document.getElementById("llmApiKey");
-                if (mode === "regex") {
-                    apiKeyInput.value = "";
-                } else {
-                    apiKeyInput.value = "";
-                }
+                document.getElementById("llmProtocol").value = cfg.protocol || "openai";
+                document.getElementById("llmAPIAddress").value = cfg.api_address || "";
+                document.getElementById("llmModel").value = cfg.model || "";
+                document.getElementById("llmAPIKey").value = "";
                 const maskedEl = document.getElementById("llm-api-key-masked");
-                if (masked) {
-                    maskedEl.textContent = "Current: " + masked;
+                if (cfg.api_key_masked) {
+                    maskedEl.textContent = "Current: " + cfg.api_key_masked;
                 } else {
                     maskedEl.textContent = "";
                 }
-                // Show panel if LLM mode is active (non-regex)
-                const panel = document.getElementById("llm-settings-panel");
-                if (mode !== "regex") {
-                    panel.style.display = "block";
-                }
-                onLLMModeChange();
+                onLLMProtocolChange();
             } catch (e) {
-                // Silently ignore - LLM config fetch failure shouldn't block the UI
-                onLLMModeChange();
+                errorDiv.textContent = "Failed to load config: " + e.message;
+                errorDiv.style.display = "block";
+            }
+            dialog.showModal();
+        }
+
+        // Close the LLM Settings dialog.
+        function closeLLMSettingsDialog() {
+            document.getElementById("dialog-llm-settings").close();
+        }
+
+        // Auto-fill model default when protocol changes.
+        function onLLMProtocolChange() {
+            const protocol = document.getElementById("llmProtocol").value;
+            const modelInput = document.getElementById("llmModel");
+            const modelHint = document.getElementById("llm-model-hint");
+            if (modelInput.value === "") {
+                modelInput.value = defaultModelForProtocol(protocol);
+                modelHint.textContent = "Default: " + defaultModelForProtocol(protocol);
             }
         }
 
-        function onLLMModeChange() {
-            const selected = document.querySelector('input[name="llmMode"]:checked')?.value || "regex";
-            const apiKeyGroup = document.getElementById("llm-api-key-group");
-            if (selected === "regex") {
-                apiKeyGroup.style.display = "none";
-            } else {
-                apiKeyGroup.style.display = "block";
+        function defaultModelForProtocol(protocol) {
+            switch (protocol) {
+                case "openai": return "gpt-4o-mini";
+                case "anthropic": return "claude-3-5-haiku-20241022";
+                case "openai_compatible": return "";
+                default: return "";
             }
         }
 
-        async function saveLLMConfig() {
-            const mode = document.querySelector('input[name="llmMode"]:checked')?.value || "regex";
-            const apiKey = document.getElementById("llmApiKey").value.trim();
+        // Save LLM settings.
+        async function saveLLMSettings() {
+            const protocol = document.getElementById("llmProtocol").value;
+            const apiKey = document.getElementById("llmAPIKey").value.trim();
+            const apiAddress = document.getElementById("llmAPIAddress").value.trim();
+            const model = document.getElementById("llmModel").value.trim();
+            const errorDiv = document.getElementById("llm-settings-error");
+            errorDiv.style.display = "none";
             try {
                 await api("/api/llm/config", {
                     method: "PATCH",
-                    body: JSON.stringify({ mode, api_key: apiKey })
+                    body: JSON.stringify({ protocol, api_key: apiKey, api_address: apiAddress, model })
                 });
+                // Update the LLM settings button visibility
+                await loadLLMSettingsVisibility();
+                closeLLMSettingsDialog();
             } catch (e) {
-                // Re-throw so callers can handle
-                throw e;
+                errorDiv.textContent = "Save failed: " + e.message;
+                errorDiv.style.display = "block";
             }
         }
 
+        // Test the LLM connection.
         async function testLLMConnection() {
             const resultEl = document.getElementById("llm-test-result");
             resultEl.textContent = "Testing...";
             resultEl.style.color = "#6a737d";
             try {
                 // First save current config
-                await saveLLMConfig();
+                const protocol = document.getElementById("llmProtocol").value;
+                const apiKey = document.getElementById("llmAPIKey").value.trim();
+                const apiAddress = document.getElementById("llmAPIAddress").value.trim();
+                const model = document.getElementById("llmModel").value.trim();
+                await api("/api/llm/config", {
+                    method: "PATCH",
+                    body: JSON.stringify({ protocol, api_key: apiKey, api_address: apiAddress, model })
+                });
                 const res = await api("/api/llm/test", { method: "POST" });
                 resultEl.textContent = "OK! Generated: " + res.branch_name;
                 resultEl.style.color = "#22863a";
@@ -3034,37 +3096,27 @@
             }
         }
 
-        async function retryWithLLM() {
-            const resultEl = document.getElementById("llm-test-result");
-            resultEl.textContent = "";
+        // Load and update the LLM Settings button visibility.
+        async function loadLLMSettingsVisibility() {
             try {
-                // Save config first
-                await saveLLMConfig();
-                // Then retry create
-                await doCreateWorktree();
+                const cfg = await api("/api/llm/config");
+                updateLLMSettingsButtonVisibility(cfg.is_secure);
             } catch (e) {
-                // doCreateWorktree handles LLM errors; other errors get alerted
-                if (!(e.status === 400 && (e.message.includes("LLM") || e.message.includes("llm")))) {
-                    alert(e);
-                }
+                updateLLMSettingsButtonVisibility(false);
             }
         }
 
-        async function useRegexMode() {
-            try {
-                await api("/api/llm/config", {
-                    method: "PATCH",
-                    body: JSON.stringify({ mode: "regex" })
-                });
-                hideLLMSettingsPanel();
-                await doCreateWorktree();
-            } catch (e) {
-                alert(e);
-            }
+        function updateLLMSettingsButtonVisibility(isSecure) {
+            const btn = document.getElementById("btnLLMSettings");
+            if (!btn) return;
+            const hostname = window.location.hostname;
+            const isLocalhost = hostname === "localhost" || hostname === "127.0.0.1";
+            btn.style.display = (isLocalhost || isSecure) ? "inline-block" : "none";
         }
 
         // Boot
         init();
+        loadLLMSettingsVisibility();
     </script>
 </body>
 </html>

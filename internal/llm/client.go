@@ -7,16 +7,18 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
-	"strings"
+	"os"
 	"time"
 )
 
 const (
-	timeout        = 10 * time.Second
-	openAIModel    = "gpt-4o-mini"
-	anthropicModel = "claude-3-5-haiku"
+	timeout = 10 * time.Second
 )
+
+// debugLLM controls verbose request/response logging. Set LLM_DEBUG=1 to enable.
+var debugLLM = os.Getenv("LLM_DEBUG") == "1"
 
 // ErrInvalidAPIKey indicates the API key is invalid (401 from the provider).
 var ErrInvalidAPIKey = errors.New("invalid API key")
@@ -37,17 +39,18 @@ func (e *ErrHTTPError) Is(target error) bool {
 	return target == ErrNetworkError // for backward compatibility with callers checking errors.Is(ErrNetworkError)
 }
 
-func callOpenAI(ctx context.Context, apiKey, prompt string) (string, error) {
+func callOpenAI(ctx context.Context, apiKey, url, model, prompt string) (string, error) {
 	reqBody := map[string]any{
-		"model": openAIModel,
+		"model": model,
 		"messages": []map[string]string{
 			{"role": "user", "content": prompt},
 		},
-		"max_tokens":  50,
-		"temperature": 0.3,
+		"max_tokens":      1024,
+		"temperature":     0.3,
+		"reasoning_split": true, // Separate thinking from final answer
 	}
 
-	body, status, err := doHTTPRequest(ctx, "https://api.openai.com/v1/chat/completions", apiKey, reqBody)
+	body, status, err := doHTTPRequest(ctx, url, apiKey, "openai", reqBody)
 	if err != nil {
 		return "", err
 	}
@@ -59,6 +62,7 @@ func callOpenAI(ctx context.Context, apiKey, prompt string) (string, error) {
 		return "", &ErrHTTPError{StatusCode: status}
 	}
 
+	// With reasoning_split: true, content field contains the final answer only
 	var resp struct {
 		Choices []struct {
 			Message struct {
@@ -67,24 +71,24 @@ func callOpenAI(ctx context.Context, apiKey, prompt string) (string, error) {
 		} `json:"choices"`
 	}
 	if err := json.Unmarshal(body, &resp); err != nil {
-		return "", fmt.Errorf("failed to parse OpenAI response: %w", err)
+		return "", fmt.Errorf("failed to parse response: %w", err)
 	}
 	if len(resp.Choices) == 0 {
-		return "", errors.New("OpenAI returned no choices")
+		return "", errors.New("no choices in response")
 	}
 	return resp.Choices[0].Message.Content, nil
 }
 
-func callAnthropic(ctx context.Context, apiKey, prompt string) (string, error) {
+func callAnthropic(ctx context.Context, apiKey, url, model, prompt string) (string, error) {
 	reqBody := map[string]any{
-		"model":      anthropicModel,
-		"max_tokens": 50,
+		"model":      model,
+		"max_tokens": 1024,
 		"messages": []map[string]string{
 			{"role": "user", "content": prompt},
 		},
 	}
 
-	body, status, err := doHTTPRequest(ctx, "https://api.anthropic.com/v1/messages", apiKey, reqBody)
+	body, status, err := doHTTPRequest(ctx, url, apiKey, "anthropic", reqBody)
 	if err != nil {
 		return "", err
 	}
@@ -110,10 +114,21 @@ func callAnthropic(ctx context.Context, apiKey, prompt string) (string, error) {
 	return resp.Content[0].Text, nil
 }
 
-func doHTTPRequest(ctx context.Context, url, apiKey string, reqBody map[string]any) ([]byte, int, error) {
+func doHTTPRequest(ctx context.Context, url, apiKey, authType string, reqBody map[string]any) ([]byte, int, error) {
 	jsonBody, err := json.Marshal(reqBody)
 	if err != nil {
 		return nil, 0, err
+	}
+
+	if debugLLM {
+		// Pretty-print request body (mask API key)
+		var maskedBody map[string]any
+		_ = json.Unmarshal(jsonBody, &maskedBody)
+		if m, ok := maskedBody["extra_body"].(map[string]any); ok {
+			delete(m, "api_key") // extra_body won't have api_key, but just in case
+		}
+		maskedJSON, _ := json.MarshalIndent(maskedBody, "", "  ")
+		log.Printf("[LLM DEBUG] --> POST %s\n%s", url, maskedJSON)
 	}
 
 	reqCtx, cancel := context.WithTimeout(ctx, timeout)
@@ -125,10 +140,10 @@ func doHTTPRequest(ctx context.Context, url, apiKey string, reqBody map[string]a
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	switch {
-	case strings.Contains(url, "openai.com"):
+	switch authType {
+	case "openai":
 		req.Header.Set("Authorization", "Bearer "+apiKey)
-	case strings.Contains(url, "anthropic.com"):
+	case "anthropic":
 		req.Header.Set("x-api-key", apiKey)
 		req.Header.Set("anthropic-version", "2023-06-01")
 	}
@@ -146,5 +161,10 @@ func doHTTPRequest(ctx context.Context, url, apiKey string, reqBody map[string]a
 	if err != nil {
 		return nil, resp.StatusCode, fmt.Errorf("failed to read response body: %w", err)
 	}
+
+	if debugLLM {
+		log.Printf("[LLM DEBUG] <-- %d\n%s", resp.StatusCode, string(body))
+	}
+
 	return body, resp.StatusCode, nil
 }

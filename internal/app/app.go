@@ -52,6 +52,7 @@ type Server struct {
 	root      string
 	dataDir   string
 	serverRev string
+	isSecure  bool
 
 	store       store.FileStore
 	worktreeMgr worktree.Manager
@@ -120,6 +121,7 @@ func New(cfg Config, logger *log.Logger) (*Server, error) {
 	}
 
 	mux := http.NewServeMux()
+	isSecure := cfg.TLSCert != "" && cfg.TLSKey != ""
 	s := &Server{
 		cfg:         cfg,
 		logger:      logger,
@@ -135,6 +137,7 @@ func New(cfg Config, logger *log.Logger) (*Server, error) {
 			Instances: instanceMgr,
 		},
 		authFails: map[string]authFail{},
+		isSecure:  isSecure,
 	}
 	s.registerAPIs(mux)
 	if err := ui.Register(mux, filepath.Base(filepath.Clean(s.root))); err != nil {
@@ -430,6 +433,7 @@ func (s *Server) registerAPIs(mux *http.ServeMux) {
 	mux.HandleFunc("/api/main", s.handleMain)
 	mux.HandleFunc("/api/llm/config", s.handleLLMConfig)
 	mux.HandleFunc("/api/llm/test", s.handleLLMTest)
+	mux.HandleFunc("/api/llm/generate", s.handleLLMGenerate)
 }
 
 func (s *Server) handleBranches(w http.ResponseWriter, r *http.Request) {
@@ -502,12 +506,17 @@ func (s *Server) handleWorktrees(w http.ResponseWriter, r *http.Request) {
 			TaskDescription string `json:"task_description"`
 			BaseRef         string `json:"base_ref"`
 			AdoptIfExists   bool   `json:"adopt_if_exists"`
+			BranchName      string `json:"branch_name"`
 		}
 		if err := readJSON(r.Body, &req); err != nil {
 			writeErr(w, http.StatusBadRequest, err)
 			return
 		}
-		item, err := s.worktreeMgr.CreateWithOptionsCtx(r.Context(), req.TaskDescription, worktree.CreateOptions{BaseRef: req.BaseRef, AdoptIfExists: req.AdoptIfExists})
+		opts := worktree.CreateOptions{BaseRef: req.BaseRef, AdoptIfExists: req.AdoptIfExists}
+		if req.BranchName != "" {
+			opts.BranchName = req.BranchName
+		}
+		item, err := s.worktreeMgr.CreateWithOptionsCtx(r.Context(), req.TaskDescription, opts)
 		if err != nil {
 			writeErr(w, http.StatusBadRequest, err)
 			return
@@ -1678,40 +1687,55 @@ func (s *Server) handleLLMConfig(w http.ResponseWriter, r *http.Request) {
 			apiKeyMasked = llm.MaskKey(cfg.APIKey)
 		}
 		writeJSON(w, http.StatusOK, map[string]any{
-			"mode":           cfg.Mode,
+			"protocol":       cfg.Protocol,
 			"api_key_masked": apiKeyMasked,
-			"available":      cfg.APIKey != "" && cfg.Mode != "regex",
+			"api_address":    cfg.APIAddress,
+			"model":          cfg.Model,
+			"is_secure":      s.isSecure,
+			"available":      llm.IsAvailable(),
 		})
 	case http.MethodPatch:
 		var req struct {
-			Mode   string `json:"mode"`
-			APIKey string `json:"api_key"`
+			Protocol   string `json:"protocol"`
+			APIKey     string `json:"api_key"`
+			APIAddress string `json:"api_address"`
+			Model      string `json:"model"`
 		}
 		if err := readJSON(r.Body, &req); err != nil {
 			writeErr(w, http.StatusBadRequest, err)
 			return
 		}
 		cfg := llm.Load()
-		if req.Mode != "" {
-			if req.Mode != "regex" && req.Mode != "openai" && req.Mode != "anthropic" {
-				writeErr(w, http.StatusBadRequest, fmt.Errorf("invalid mode: must be 'regex', 'openai', or 'anthropic'"))
+		if req.Protocol != "" {
+			if req.Protocol != "openai" && req.Protocol != "anthropic" && req.Protocol != "openai_compatible" {
+				writeErr(w, http.StatusBadRequest, fmt.Errorf("invalid protocol: must be 'openai', 'anthropic', or 'openai_compatible'"))
 				return
 			}
-			// Check if switching to openai/anthropic without an API key
-			if req.Mode != "regex" && req.APIKey == "" && cfg.APIKey == "" {
-				writeErr(w, http.StatusBadRequest, fmt.Errorf("API key is required for %s mode", req.Mode))
+			// Check if switching to a protocol without an API key
+			if req.APIKey == "" && cfg.APIKey == "" {
+				writeErr(w, http.StatusBadRequest, fmt.Errorf("API key is required for %s protocol", req.Protocol))
 				return
 			}
-			cfg.Mode = req.Mode
+			cfg.Protocol = req.Protocol
+			// Auto-fill default address if not provided
+			if req.APIAddress == "" && cfg.APIAddress == "" {
+				cfg.APIAddress = llm.DefaultAddress(req.Protocol)
+			}
 		}
 		if req.APIKey != "" {
 			cfg.APIKey = req.APIKey
+		}
+		if req.APIAddress != "" {
+			cfg.APIAddress = req.APIAddress
+		}
+		if req.Model != "" {
+			cfg.Model = req.Model
 		}
 		if err := llm.Save(cfg); err != nil {
 			writeErr(w, http.StatusInternalServerError, err)
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "mode": cfg.Mode})
+		writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "protocol": cfg.Protocol})
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
@@ -1722,8 +1746,7 @@ func (s *Server) handleLLMTest(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	cfg := llm.Load()
-	if cfg.Mode == "regex" || cfg.APIKey == "" {
+	if !llm.IsAvailable() {
 		writeErr(w, http.StatusBadRequest, fmt.Errorf("no LLM configured"))
 		return
 	}
@@ -1733,6 +1756,35 @@ func (s *Server) handleLLMTest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "branch_name": branchName})
+}
+
+func (s *Server) handleLLMGenerate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !llm.IsAvailable() {
+		writeErr(w, http.StatusBadRequest, fmt.Errorf("no LLM configured"))
+		return
+	}
+	var req struct {
+		TaskDescription string `json:"task_description"`
+	}
+	if err := readJSON(r.Body, &req); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	taskDesc := strings.TrimSpace(req.TaskDescription)
+	if taskDesc == "" {
+		writeErr(w, http.StatusBadRequest, fmt.Errorf("task description is required"))
+		return
+	}
+	branchName, err := llm.GenerateBranchName(r.Context(), taskDesc)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, fmt.Errorf("generation failed: %w", err))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"branch_name": branchName})
 }
 
 func computeServerRevision() string {

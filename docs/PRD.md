@@ -33,8 +33,9 @@
 - 后端必须保持：worktree 与 instance 的生命周期独立于前端。
 - 删除 worktree：若 `git status --porcelain` 非空（含 untracked），**拒绝删除**。
 - 分支命名：
-  - 默认：创建 worktree 使用分支 `mwt/<slug>`（不再是 `wt/*`）。
-  - 自定义分组：当用户在 task description 里直接输入 `<group>/<name>`（例如 `feature/auth`）时，分支名就是 `<group>/<name>`，不会再额外加前缀。
+  - 分支名直接使用用户在表单中输入的值（手动输入或 LLM 生成）。
+  - LLM 模式：调用 LLM 将任务描述转换为分支名（如 `fix/auth-bug`），保留 `/` 分组前缀（如 `feature/auth` → `feature/auth`）。
+  - 自定义输入：用户在 Branch Name 输入框直接输入时，直接使用该值作为分支名。
   - 命名冲突：如目标分支已存在，自动给 `<name>` 加 `-2/-3` 后缀避免冲突；并支持将既有 worktree **纳入管理（import）**。
 
 ## 6. 安全
@@ -72,34 +73,39 @@
 
 ### 9.1 模式选择
 - **正则模式**（默认）：使用 `slugify()` 正则转换，不调用任何 LLM API
-- **LLM 模式**：调用 LLM API（支持 OpenAI gpt-4o-mini 或 Anthropic claude-3-5-haiku，由配置决定用哪个）
+- **LLM 模式**：调用 LLM API（支持 OpenAI / Anthropic / OpenAI Compatible 三种协议，由配置决定）
 
 ### 9.2 配置方式
 配置文件：`~/.config/myworktree/config.json`（0o600 权限），示例：
 ```json
 {
-  "mode": "openai",
-  "api_key": "sk-..."
+  "protocol": "openai_compatible",
+  "api_address": "<provider_api_address>",
+  "api_key": "<api_key>",
+  "model": "<model_name>"
 }
 ```
 
-同时支持环境变量（优先级更高）：`OPENAI_API_KEY` 或 `ANTHROPIC_API_KEY`。同时设置时，以 `OPENAI_API_KEY` 为准。
+支持的 protocol：
+- `openai`：OpenAI 官方 API
+- `anthropic`：Anthropic API
+- `openai_compatible`：兼容 OpenAI 接口格式的第三方服务（如 SiliconFlow、MiniMax 等）
+
+同时支持环境变量（优先级更高）：`OPENAI_API_KEY` / `ANTHROPIC_API_KEY` / `OPENAI_COMPATIBLE_API_KEY`。
 
 ### 9.3 分支名规范（由 LLM 遵守）
 1. 长度不超过 100 个字符
-2. 只包含小写字母、数字和连字符
+2. 只包含小写字母、数字、连字符和斜杠（用于 git 分支分组，如 `feature/auth`）
 3. 符合 git 规范（以字母开头）
 4. 使用英文，可包含数字
 
-### 9.4 错误处理 + 内联设置
-- **正则模式**：无 LLM 调用，行为与现有版本一致，不会出错
-- **LLM 模式**：LLM 调用失败时**返回错误，不静默 fallback**，在 Create Worktree 弹窗上方叠加 LLM 设置面板
-  - 任务描述保留在输入框中，不丢失
-  - 面板提供：模式切换、API Key 输入、"测试连接"、"重试"、"使用正则模式"等操作
-  - API 返回 401（Invalid API Key）：在设置面板中提示用户检查 API Key
-  - 网络错误 / 超时：在设置面板中提示用户检查网络
-  - 用户可选择：修复 API Key，或切换到正则模式临时绕过
-- LLM 超时阈值：10 秒
+### 9.4 前端交互
+- **AI Generate 按钮**：在创建 worktree 弹窗中，输入任务描述后，点击 "AI Generate" 按钮调用 LLM 生成分支名，填入 Branch Name 输入框。
+- **Branch Name 输入框**：始终可见，用户可直接编辑 LLM 生成的结果，或手动输入自定义分支名。
+- **LLM Settings 按钮**：位于创建表单左下角，点击打开 LLM 配置对话框（仅在 localhost 或 HTTPS 环境下可见）。
+  - 支持配置：协议类型、API 地址、API Key、模型名称。
+  - 提供"测试连接"功能验证配置是否正确。
+- LLM 调用失败时显示错误提示，用户仍可手动输入或修改 Branch Name 输入框。
 
 ### 9.5 资源占用
 - 仅在调用 LLM 时产生网络请求，无本地资源占用

@@ -94,6 +94,8 @@ func TestCleanBranchName(t *testing.T) {
 		{"---test---", "test"},
 		{"a", "a"},
 		{"", ""},
+		{"fix/instance-ime", "fix/instance-ime"}, // forward slash preserved
+		{"Feature/Auth Bug", "feature/auth-bug"}, // slash preserved, spaces → hyphen
 	}
 
 	for _, tt := range tests {
@@ -120,6 +122,9 @@ func TestBranchNameRegex(t *testing.T) {
 		"fix-login-bug-123",
 		strings.Repeat("a", 100),
 		"a1",
+		"fix/instance-ime",   // forward slash for git branch grouping
+		"feature/auth/login", // multiple slashes
+		"fix/auth-bug",       // slash mixed with hyphen
 	}
 	invalid := []string{
 		"",
@@ -148,12 +153,12 @@ func TestGenerateBranchNameRegexMode(t *testing.T) {
 	orig := Load()
 	defer Save(orig)
 
-	// Set regex mode
-	Save(&Config{Mode: "regex", APIKey: ""})
+	// Set empty protocol (no LLM)
+	Save(&Config{Protocol: "", APIKey: ""})
 
 	_, err := GenerateBranchName(context.Background(), "test task")
 	if err == nil {
-		t.Errorf("GenerateBranchName with regex mode should return error")
+		t.Errorf("GenerateBranchName with no protocol should return error")
 	}
 }
 
@@ -162,12 +167,12 @@ func TestGenerateBranchNameInvalidMode(t *testing.T) {
 	orig := Load()
 	defer Save(orig)
 
-	// Set invalid mode
-	Save(&Config{Mode: "invalid", APIKey: "sk-test"})
+	// Set invalid protocol
+	Save(&Config{Protocol: "invalid", APIKey: "sk-test"})
 
 	_, err := GenerateBranchName(context.Background(), "test task")
 	if err == nil {
-		t.Errorf("GenerateBranchName with invalid mode should return error")
+		t.Errorf("GenerateBranchName with invalid protocol should return error")
 	}
 }
 
@@ -176,12 +181,11 @@ func TestGenerateBranchNameNoAPIKey(t *testing.T) {
 	orig := Load()
 	defer Save(orig)
 
-	// Set openai mode but no API key
-	Save(&Config{Mode: "openai", APIKey: ""})
+	// Set openai protocol but no API key
+	Save(&Config{Protocol: "openai", APIKey: ""})
 
 	_, err := GenerateBranchName(context.Background(), "test task")
-	// Should fail because there's no API key configured (or rather, empty key)
-	// The actual error comes from the HTTP request
+	// Should fail because there's no API key configured
 	if err == nil {
 		t.Errorf("GenerateBranchName with empty API key should return error")
 	}

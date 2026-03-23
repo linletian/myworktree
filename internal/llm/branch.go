@@ -23,7 +23,8 @@ Task description: %s
 Respond with only the branch name, no explanation.`
 
 // branchNameRegex validates the format of a generated branch name.
-var branchNameRegex = regexp.MustCompile(`^[a-z]([a-z0-9-]*[a-z0-9])?$`)
+// Git branch names can contain forward slashes for grouping (e.g. feature/auth).
+var branchNameRegex = regexp.MustCompile(`^[a-z]([a-z0-9/-]*[a-z0-9])?$`)
 
 // BuildPrompt formats the prompt with the given task description.
 func BuildPrompt(taskDesc string) string {
@@ -31,19 +32,40 @@ func BuildPrompt(taskDesc string) string {
 }
 
 // GenerateBranchName generates a branch name from a task description using the
-// configured LLM provider. It returns an error if the mode is "regex" or if the
+// configured LLM provider. It returns an error if no protocol is set or if the
 // LLM call fails.
 func GenerateBranchName(ctx context.Context, taskDesc string) (string, error) {
 	cfg := Load()
-	switch cfg.Mode {
-	case "regex":
-		return "", errors.New("LLM mode is 'regex', cannot generate branch name")
-	case "openai":
-		return callOpenAI(ctx, cfg.APIKey, taskDesc)
+	model := cfg.Model
+	if model == "" {
+		model = DefaultModel(cfg.Protocol)
+	}
+	prompt := BuildPrompt(taskDesc)
+	switch cfg.Protocol {
+	case "":
+		return "", errors.New("no LLM protocol configured")
+	case "openai", "openai_compatible":
+		url := cfg.APIAddress
+		if url == "" {
+			url = DefaultAddress(cfg.Protocol)
+		}
+		raw, err := callOpenAI(ctx, cfg.APIKey, url, model, prompt)
+		if err != nil {
+			return "", err
+		}
+		return parseBranchName(raw)
 	case "anthropic":
-		return callAnthropic(ctx, cfg.APIKey, taskDesc)
+		url := cfg.APIAddress
+		if url == "" {
+			url = DefaultAddress(cfg.Protocol)
+		}
+		raw, err := callAnthropic(ctx, cfg.APIKey, url, model, prompt)
+		if err != nil {
+			return "", err
+		}
+		return parseBranchName(raw)
 	default:
-		return "", fmt.Errorf("unsupported LLM mode: %s", cfg.Mode)
+		return "", fmt.Errorf("unsupported LLM protocol: %s", cfg.Protocol)
 	}
 }
 
@@ -90,10 +112,10 @@ func parseBranchName(response string) (string, error) {
 // cleanBranchName attempts to convert a response into a valid branch name
 // by removing invalid characters and trimming.
 func cleanBranchName(s string) string {
-	// Replace non-alphanumeric-hyphen chars with hyphens
+	// Replace underscores and spaces with hyphens, keep alphanumerics, hyphens, and forward slashes
 	var result strings.Builder
 	for i, r := range strings.ToLower(s) {
-		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '/' {
 			result.WriteRune(r)
 		} else if r == '-' || r == ' ' || r == '_' {
 			// Collapse consecutive hyphens

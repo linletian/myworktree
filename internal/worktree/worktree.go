@@ -96,6 +96,7 @@ func (m Manager) ListUnmanaged() ([]UnmanagedWorktree, error) {
 type CreateOptions struct {
 	BaseRef       string
 	AdoptIfExists bool
+	BranchName    string // if non-empty, use this branch name directly (skip LLM), parsed as group/name if contains "/"
 }
 
 func (m Manager) Create(taskDesc string, baseRef string) (store.ManagedWorktree, error) {
@@ -117,21 +118,27 @@ func (m Manager) CreateWithOptionsCtx(ctx context.Context, taskDesc string, opts
 
 	group, baseName, custom := parseBranchSpec(taskDesc)
 
-	// Use LLM to generate branch name if not in regex mode and not a custom spec.
-	// Custom specs (e.g., "feature/foo") are used as-is and not passed to LLM.
-	if !custom && llm.CurrentMode() != "regex" {
+	// If BranchName is provided, use it directly (skip LLM).
+	// Parse to extract group/baseName for worktree path.
+	if opts.BranchName != "" {
+		group, baseName, _ = parseBranchSpec(opts.BranchName)
+		custom = true
+	} else if !custom && llm.IsAvailable() {
+		// Use LLM to generate branch name if protocol is set and not a custom spec.
+		// Custom specs (e.g., "feature/foo") are used as-is and not passed to LLM.
 		generated, err := llm.GenerateBranchName(ctx, taskDesc)
 		if err != nil {
 			return store.ManagedWorktree{}, fmt.Errorf("LLM branch naming failed: %w", err)
 		}
-		// Use the LLM-generated name as the base name (without the "mwt/" prefix)
-		baseName = generated
-		group = "mwt"
-		custom = false
+		// Parse the generated branch name to extract group/baseName.
+		// e.g. "fix/instance-ime" -> group="fix", baseName="instance-ime"
+		// Worktree path will use "fix-instance-ime" (hyphen separator).
+		group, baseName, _ = parseBranchSpec(generated)
+		custom = true // Treat LLM output like a custom spec
 	}
 
 	if !custom {
-		group = "mwt"
+		group = "worktree"
 		baseName = slug
 	}
 
