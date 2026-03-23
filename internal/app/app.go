@@ -1680,7 +1680,7 @@ func (s *Server) handleLLMConfig(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{
 			"mode":           cfg.Mode,
 			"api_key_masked": apiKeyMasked,
-			"available":       cfg.APIKey != "" && cfg.Mode != "regex",
+			"available":      cfg.APIKey != "" && cfg.Mode != "regex",
 		})
 	case http.MethodPatch:
 		var req struct {

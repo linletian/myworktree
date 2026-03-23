@@ -43,7 +43,7 @@ func callOpenAI(ctx context.Context, apiKey, prompt string) (string, error) {
 		"messages": []map[string]string{
 			{"role": "user", "content": prompt},
 		},
-		"max_tokens": 50,
+		"max_tokens":  50,
 		"temperature": 0.3,
 	}
 

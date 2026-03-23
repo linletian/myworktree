@@ -10,7 +10,7 @@ import (
 
 // Config holds the LLM configuration.
 type Config struct {
-	Mode   string `json:"mode"`   // "regex", "openai", or "anthropic"
+	Mode   string `json:"mode"` // "regex", "openai", or "anthropic"
 	APIKey string `json:"api_key"`
 }
 

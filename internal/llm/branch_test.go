@@ -40,9 +40,9 @@ func TestPromptFormatting(t *testing.T) {
 
 func TestParseBranchName(t *testing.T) {
 	tests := []struct {
-		input    string
-		want     string
-		wantErr  bool
+		input   string
+		want    string
+		wantErr bool
 	}{
 		{"feature-auth", "feature-auth", false},
 		{"fix-login-bug", "fix-login-bug", false},
@@ -123,10 +123,10 @@ func TestBranchNameRegex(t *testing.T) {
 	}
 	invalid := []string{
 		"",
-		"Feature",       // uppercase
-		"feature_auth",  // underscore
-		"feature auth",  // space
-		"-feature",      // starts with hyphen
+		"Feature",      // uppercase
+		"feature_auth", // underscore
+		"feature auth", // space
+		"-feature",     // starts with hyphen
 		"feature-",     // ends with hyphen
 		"123test",      // starts with number
 	}
@@ -193,12 +193,12 @@ func TestMaskKey(t *testing.T) {
 		want string
 	}{
 		{"sk-abc123xyz", "sk-***xyz"},
-		{"sk-abc", "sk-***abc"},  // exactly 6 chars
+		{"sk-abc", "sk-***abc"},    // exactly 6 chars
 		{"sk-123456", "sk-***456"}, // exactly 6 chars
-		{"abc", "***"},      // < 6 chars
-		{"ab", "***"},       // < 6 chars
-		{"abcdef", "abc***def"}, // exactly 6 chars
-		{"", "***"},        // empty
+		{"abc", "***"},             // < 6 chars
+		{"ab", "***"},              // < 6 chars
+		{"abcdef", "abc***def"},    // exactly 6 chars
+		{"", "***"},                // empty
 	}
 
 	for _, tt := range tests {
