@@ -25,6 +25,7 @@ import (
 
 	"myworktree/internal/gitx"
 	"myworktree/internal/instance"
+	"myworktree/internal/llm"
 	"myworktree/internal/mcp"
 	"myworktree/internal/monitor"
 	"myworktree/internal/store"
@@ -51,6 +52,7 @@ type Server struct {
 	root      string
 	dataDir   string
 	serverRev string
+	isSecure  bool
 
 	store       store.FileStore
 	worktreeMgr worktree.Manager
@@ -119,6 +121,7 @@ func New(cfg Config, logger *log.Logger) (*Server, error) {
 	}
 
 	mux := http.NewServeMux()
+	isSecure := cfg.TLSCert != "" && cfg.TLSKey != ""
 	s := &Server{
 		cfg:         cfg,
 		logger:      logger,
@@ -134,6 +137,7 @@ func New(cfg Config, logger *log.Logger) (*Server, error) {
 			Instances: instanceMgr,
 		},
 		authFails: map[string]authFail{},
+		isSecure:  isSecure,
 	}
 	s.registerAPIs(mux)
 	if err := ui.Register(mux, filepath.Base(filepath.Clean(s.root))); err != nil {
@@ -427,6 +431,9 @@ func (s *Server) registerAPIs(mux *http.ServeMux) {
 	mux.HandleFunc("/api/mcp/tools", s.handleMCPTools)
 	mux.HandleFunc("/api/mcp/call", s.handleMCPCall)
 	mux.HandleFunc("/api/main", s.handleMain)
+	mux.HandleFunc("/api/llm/config", s.handleLLMConfig)
+	mux.HandleFunc("/api/llm/test", s.handleLLMTest)
+	mux.HandleFunc("/api/llm/generate", s.handleLLMGenerate)
 }
 
 func (s *Server) handleBranches(w http.ResponseWriter, r *http.Request) {
@@ -499,12 +506,17 @@ func (s *Server) handleWorktrees(w http.ResponseWriter, r *http.Request) {
 			TaskDescription string `json:"task_description"`
 			BaseRef         string `json:"base_ref"`
 			AdoptIfExists   bool   `json:"adopt_if_exists"`
+			BranchName      string `json:"branch_name"`
 		}
 		if err := readJSON(r.Body, &req); err != nil {
 			writeErr(w, http.StatusBadRequest, err)
 			return
 		}
-		item, err := s.worktreeMgr.CreateWithOptions(req.TaskDescription, worktree.CreateOptions{BaseRef: req.BaseRef, AdoptIfExists: req.AdoptIfExists})
+		opts := worktree.CreateOptions{BaseRef: req.BaseRef, AdoptIfExists: req.AdoptIfExists}
+		if req.BranchName != "" {
+			opts.BranchName = req.BranchName
+		}
+		item, err := s.worktreeMgr.CreateWithOptionsCtx(r.Context(), req.TaskDescription, opts)
 		if err != nil {
 			writeErr(w, http.StatusBadRequest, err)
 			return
@@ -1174,7 +1186,7 @@ func (s *Server) handleMCPCall(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusBadRequest, err)
 			return
 		}
-		item, err := s.worktreeMgr.Create(args.TaskDescription, args.BaseRef)
+		item, err := s.worktreeMgr.CreateWithOptionsCtx(r.Context(), args.TaskDescription, worktree.CreateOptions{BaseRef: args.BaseRef})
 		if err != nil {
 			writeErr(w, http.StatusBadRequest, err)
 			return
@@ -1664,6 +1676,115 @@ func parseGitDiffNumStat(output string) ([]map[string]any, map[string]int) {
 	}
 
 	return changes, map[string]int{"additions": totalAdds, "deletions": totalDels}
+}
+
+func (s *Server) handleLLMConfig(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		cfg := llm.Load()
+		apiKeyMasked := ""
+		if cfg.APIKey != "" {
+			apiKeyMasked = llm.MaskKey(cfg.APIKey)
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"protocol":       cfg.Protocol,
+			"api_key_masked": apiKeyMasked,
+			"api_address":    cfg.APIAddress,
+			"model":          cfg.Model,
+			"is_secure":      s.isSecure,
+			"available":      llm.IsAvailable(),
+		})
+	case http.MethodPatch:
+		var req struct {
+			Protocol   string `json:"protocol"`
+			APIKey     string `json:"api_key"`
+			APIAddress string `json:"api_address"`
+			Model      string `json:"model"`
+		}
+		if err := readJSON(r.Body, &req); err != nil {
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
+		cfg := llm.Load()
+		if req.Protocol != "" {
+			if req.Protocol != "openai" && req.Protocol != "anthropic" && req.Protocol != "openai_compatible" {
+				writeErr(w, http.StatusBadRequest, fmt.Errorf("invalid protocol: must be 'openai', 'anthropic', or 'openai_compatible'"))
+				return
+			}
+			// Check if switching to a protocol without an API key
+			if req.APIKey == "" && cfg.APIKey == "" {
+				writeErr(w, http.StatusBadRequest, fmt.Errorf("API key is required for %s protocol", req.Protocol))
+				return
+			}
+			cfg.Protocol = req.Protocol
+			// Auto-fill default address if not provided
+			if req.APIAddress == "" && cfg.APIAddress == "" {
+				cfg.APIAddress = llm.DefaultAddress(req.Protocol)
+			}
+		}
+		if req.APIKey != "" {
+			cfg.APIKey = req.APIKey
+		}
+		if req.APIAddress != "" {
+			cfg.APIAddress = req.APIAddress
+		}
+		if req.Model != "" {
+			cfg.Model = req.Model
+		}
+		if err := llm.Save(cfg); err != nil {
+			writeErr(w, http.StatusInternalServerError, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "protocol": cfg.Protocol})
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *Server) handleLLMTest(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !llm.IsAvailable() {
+		writeErr(w, http.StatusBadRequest, fmt.Errorf("no LLM configured"))
+		return
+	}
+	branchName, err := llm.TestConnection(r.Context())
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, fmt.Errorf("invalid API key or network error"))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "branch_name": branchName})
+}
+
+func (s *Server) handleLLMGenerate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !llm.IsAvailable() {
+		writeErr(w, http.StatusBadRequest, fmt.Errorf("no LLM configured"))
+		return
+	}
+	var req struct {
+		TaskDescription string `json:"task_description"`
+	}
+	if err := readJSON(r.Body, &req); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	taskDesc := strings.TrimSpace(req.TaskDescription)
+	if taskDesc == "" {
+		writeErr(w, http.StatusBadRequest, fmt.Errorf("task description is required"))
+		return
+	}
+	branchName, err := llm.GenerateBranchName(r.Context(), taskDesc)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, fmt.Errorf("generation failed: %w", err))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"branch_name": branchName})
 }
 
 func computeServerRevision() string {

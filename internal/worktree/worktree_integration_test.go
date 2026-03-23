@@ -6,8 +6,18 @@ import (
 	"path/filepath"
 	"testing"
 
+	"myworktree/internal/llm"
 	"myworktree/internal/store"
 )
+
+func init() {
+	// Wipe the global LLM config file before any test runs so that
+	// llm.Load() (via sync.Once) always starts from a clean default.
+	// This prevents state from a previous process run or an earlier test
+	// in the same binary from leaking into integration tests.
+	path, _ := llm.Path()
+	_ = os.Remove(path)
+}
 
 func TestCreateDeleteWorktreeIntegration(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {

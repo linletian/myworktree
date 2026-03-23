@@ -18,6 +18,7 @@ It does **not** analyze project code or prevent concurrent write conflicts insid
 - `internal/redact/` — secret redaction for stored logs/backlog.
 - `internal/mcp/` — MCP adapter surface (tool names + app-level tool dispatch), keeping core decoupled.
 - `internal/monitor/` — resource stats collector (CPU delta via gopsutil/process.Times, memory via RSS)
+- `internal/llm/` — LLM API client（OpenAI / Anthropic / OpenAI Compatible），可选，LLM Settings 通过 Web UI 对话框配置
 - `internal/ui/` — embedded static UI.
 
 ## 3. Data & persistence
@@ -31,6 +32,11 @@ It does **not** analyze project code or prevent concurrent write conflicts insid
   - `state.json` — managed worktrees + managed instances + tab order + version
   - `tags.json` — project-level tags
   - `logs/<instanceId>.log` — rolling instance backlog
+
+### 3.1.2 全局配置
+- 存储于用户级配置目录：`~/.config/myworktree/config.json`（按 OpenCode 方式，0o600 权限）
+- 包含 LLM 配置（protocol、api_key、api_address、model 等）
+- 不存于项目目录下，避免污染 git 仓库
 
 ### 3.2 State model
 - Worktree: id, name, path, branch, baseRef, createdAt
