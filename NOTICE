@@ -1,0 +1,50 @@
+NOTICE
+======
+
+This product includes software developed by the following third parties:
+
+Open Source Software
+--------------------
+
+gopsutil
+  Copyright (c) 2014, WAKAYAMA Shirou
+  BSD 3-Clause License
+
+creack/pty
+  Copyright (c) 2011 Keith Rarick
+  BSD 3-Clause License
+
+golang.org/x/sys
+  Copyright 2009 The Go Authors
+  BSD 3-Clause License
+
+tklauser/go-sysconf
+  Copyright (c) 2018-2022, Tobias Klauser
+  BSD 3-Clause License
+
+lufia/plan9stats
+  Copyright (c) 2019, KADOTA, Kyohei
+  BSD 3-Clause License
+
+power-devops/perfstat
+  Copyright (c) 2020 Power DevOps
+  MIT License
+
+ebitengine/purego
+  Copyright (c) Ebitengine Authors
+  Apache License 2.0
+
+tklauser/numcpus
+  Copyright (c) 2018-2022, Tobias Klauser
+  Apache License 2.0
+
+go-ole/go-ole
+  Copyright (c) 2013-2017 Yasuhiro Matsumoto
+  MIT License
+
+yusufpapurcu/wmi
+  Copyright (c) 2013 Stack Exchange
+  MIT License
+
+xterm.js (bundled)
+  MIT License

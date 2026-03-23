@@ -6,12 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
 
+	"myworktree/internal/gitx"
 	"myworktree/internal/store"
 )
 
@@ -27,7 +27,29 @@ func (m Manager) List() ([]store.ManagedWorktree, error) {
 	if err != nil {
 		return nil, err
 	}
-	return st.Worktrees, nil
+	out := make([]store.ManagedWorktree, len(st.Worktrees))
+	for i, wt := range st.Worktrees {
+		out[i] = wt
+		if branch, err := currentBranch(wt.Path); err == nil {
+			out[i].Branch = branch
+		}
+		// On error (path gone, detached HEAD), keep the stored Branch value.
+	}
+	return out, nil
+}
+
+// currentBranch returns the currently checked-out branch for the given git worktree path.
+func currentBranch(worktreePath string) (string, error) {
+	cmd := gitx.GitCommand(2*time.Second, worktreePath, "rev-parse", "--abbrev-ref", "HEAD")
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("git rev-parse failed: %w", err)
+	}
+	b := strings.TrimSpace(string(out))
+	if b == "HEAD" || b == "" {
+		return "", errors.New("git HEAD is detached or malformed")
+	}
+	return b, nil
 }
 
 type UnmanagedWorktree struct {
@@ -135,8 +157,7 @@ func (m Manager) CreateWithOptions(taskDesc string, opts CreateOptions) (store.M
 	if ref == "" {
 		ref = "HEAD"
 	}
-	verify := exec.Command("git", "rev-parse", "--verify", ref)
-	verify.Dir = m.GitRoot
+	verify := gitx.GitCommand(10*time.Second, m.GitRoot, "rev-parse", "--verify", ref)
 	if out, err := verify.CombinedOutput(); err != nil {
 		if ref == "HEAD" {
 			return store.ManagedWorktree{}, fmt.Errorf("repository has no commits (HEAD not found); create an initial commit or pass -base: %s", strings.TrimSpace(string(out)))
@@ -146,8 +167,7 @@ func (m Manager) CreateWithOptions(taskDesc string, opts CreateOptions) (store.M
 
 	// git worktree add -b <branch> <path> <ref>
 	args := []string{"worktree", "add", "-b", branch, path, ref}
-	cmd := exec.Command("git", args...)
-	cmd.Dir = m.GitRoot
+	cmd := gitx.GitCommand(10*time.Second, m.GitRoot, args...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return store.ManagedWorktree{}, fmt.Errorf("git %s failed: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
@@ -294,16 +314,14 @@ func (m Manager) Delete(id string) error {
 			return fmt.Errorf("stat worktree failed: %w", err)
 		}
 
-		cmd := exec.Command("git", "worktree", "prune", "--expire", "now")
-		cmd.Dir = m.GitRoot
+		cmd := gitx.GitCommand(10*time.Second, m.GitRoot, "worktree", "prune", "--expire", "now")
 		out, err := cmd.CombinedOutput()
 		if err != nil {
 			return fmt.Errorf("git worktree prune failed: %w: %s", err, strings.TrimSpace(string(out)))
 		}
 	} else {
 		// Strict: refuse to delete if dirty.
-		cmdStatus := exec.Command("git", "status", "--porcelain")
-		cmdStatus.Dir = wt.Path
+		cmdStatus := gitx.GitCommand(10*time.Second, wt.Path, "status", "--porcelain")
 		statusOut, err := cmdStatus.Output()
 		if err != nil {
 			return fmt.Errorf("git status failed: %w", err)
@@ -312,8 +330,7 @@ func (m Manager) Delete(id string) error {
 			return errors.New("worktree has uncommitted or untracked changes; delete is refused")
 		}
 
-		cmd := exec.Command("git", "worktree", "remove", wt.Path)
-		cmd.Dir = m.GitRoot
+		cmd := gitx.GitCommand(10*time.Second, m.GitRoot, "worktree", "remove", wt.Path)
 		removeOut, err := cmd.CombinedOutput()
 		if err != nil {
 			return fmt.Errorf("git worktree remove failed: %w: %s", err, strings.TrimSpace(string(removeOut)))

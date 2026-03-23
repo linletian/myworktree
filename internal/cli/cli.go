@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bufio"
 	"flag"
 	"fmt"
 	"log"
@@ -94,7 +95,23 @@ func startCmd(logger *log.Logger, prog string, args []string) error {
 	// Print a friendly message with the server URL
 	fmt.Println("Server running at:")
 	fmt.Printf("  %s\n", url)
-	fmt.Println("\nPress Ctrl+C to stop the server")
+	fmt.Println("\nPress 'o' + Enter to open browser")
+
+	go func() {
+		br := bufio.NewReader(os.Stdin)
+		for {
+			line, err := br.ReadString('\n')
+			if err != nil {
+				logger.Printf("stdin closed, browser shortcut disabled")
+				return
+			}
+			trimmed := strings.TrimSpace(line)
+			if trimmed == "o" || trimmed == "O" {
+				_ = app.OpenURL(url)
+				fmt.Println("Opening browser...")
+			}
+		}
+	}()
 
 	select {}
 }

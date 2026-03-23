@@ -3,8 +3,10 @@ package worktree
 import (
 	"bufio"
 	"fmt"
-	"os/exec"
 	"strings"
+	"time"
+
+	"myworktree/internal/gitx"
 )
 
 type gitWT struct {
@@ -13,8 +15,7 @@ type gitWT struct {
 }
 
 func listGitWorktrees(gitRoot string) ([]gitWT, error) {
-	cmd := exec.Command("git", "worktree", "list", "--porcelain")
-	cmd.Dir = gitRoot
+	cmd := gitx.GitCommand(2*time.Second, gitRoot, "worktree", "list", "--porcelain")
 	out, err := cmd.Output()
 	if err != nil {
 		return nil, fmt.Errorf("git worktree list failed: %w", err)
@@ -43,7 +44,6 @@ func listGitWorktrees(gitRoot string) ([]gitWT, error) {
 }
 
 func branchExists(gitRoot, branch string) bool {
-	cmd := exec.Command("git", "show-ref", "--verify", "--quiet", "refs/heads/"+branch)
-	cmd.Dir = gitRoot
+	cmd := gitx.GitCommand(2*time.Second, gitRoot, "show-ref", "--verify", "--quiet", "refs/heads/"+branch)
 	return cmd.Run() == nil
 }
