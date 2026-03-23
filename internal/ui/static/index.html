@@ -14,6 +14,13 @@
             --active-bg: #f1f8ff;
             --hover-bg: #f6f8fa;
             --term-bg: #0b1020;
+            --main-accent: #6f42c1;
+            --main-accent-bg: #faf8ff;
+            --main-accent-hover: #f3eeff;
+            --sidebar-top-min-height: 120px;
+            --sidebar-bottom-min-height: 100px;
+            --term-ctrl-btn-size: 32px;
+            --term-ctrl-btn-gap: 10px;
         }
 
         body, html {
@@ -81,6 +88,116 @@
             margin: 0;
         }
 
+        /* Sidebar split panels */
+        #sidebar-top-panel {
+            flex: 1;
+            min-height: var(--sidebar-top-min-height);
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+        }
+
+        #sidebar-top-panel #wt-list {
+            flex: 1;
+            overflow-y: auto;
+        }
+
+        #sidebar-resize-handle {
+            height: 4px;
+            cursor: ns-resize;
+            background: var(--border-color);
+            flex-shrink: 0;
+            transition: background 0.15s;
+        }
+
+        #sidebar-resize-handle:hover,
+        #sidebar-resize-handle.dragging {
+            background: var(--active-color);
+        }
+
+        #sidebar-bottom-panel {
+            flex: 1;
+            min-height: var(--sidebar-bottom-min-height);
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+            border-top: 1px solid var(--border-color);
+        }
+
+        #git-changes-header {
+            display: flex;
+            align-items: center;
+            padding: 6px 12px;
+            border-bottom: 1px solid var(--border-color);
+            gap: 8px;
+            flex-shrink: 0;
+            background: var(--bg-color);
+        }
+
+        .git-changes-title {
+            font-size: 11px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            color: #6a737d;
+        }
+
+        #git-changes-summary {
+            margin-left: auto;
+            font-size: 11px;
+            color: #6a737d;
+        }
+
+        #git-changes-summary .additions { color: #28a745; }
+        #git-changes-summary .deletions { color: #cb2431; }
+
+        #git-changes-list {
+            flex: 1;
+            overflow-y: auto;
+            list-style: none;
+            padding: 0;
+            margin: 0;
+        }
+
+        .git-change-item {
+            padding: 4px 12px;
+            font-size: 12px;
+            font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+            border-bottom: 1px solid #f0f0f0;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .git-change-item:hover {
+            background: var(--hover-bg);
+        }
+
+        .git-change-path {
+            flex: 1;
+            min-width: 0;
+            overflow: visible;
+            text-overflow: clip;
+            white-space: nowrap;
+        }
+
+        .git-change-stats {
+            flex-shrink: 0;
+            font-size: 11px;
+            display: flex;
+            gap: 4px;
+        }
+
+        .git-change-stats .additions { color: #28a745; }
+        .git-change-stats .deletions { color: #cb2431; }
+
+        .git-changes-empty {
+            padding: 16px 12px;
+            text-align: center;
+            color: #6a737d;
+            font-size: 12px;
+        }
+
         .wt-item {
             padding: 8px 12px;
             cursor: pointer;
@@ -96,11 +213,40 @@
             }
 
             .wt-item.active {
-                background: #fff;
+                background: var(--active-bg);
                 border-left-color: var(--active-color);
                 font-weight: 500;
                 box-shadow: 0 1px 2px rgba(0,0,0,0.05);
             }
+
+        .wt-item-main {
+            border-left-color: var(--main-accent);
+            background: var(--main-accent-bg);
+        }
+
+            .wt-item-main.active {
+                background: var(--main-accent-bg);
+                border-left-color: var(--main-accent);
+            }
+
+            .wt-item-main:hover {
+                background: var(--main-accent-hover);
+            }
+
+            .wt-item-main .wt-branch {
+                color: var(--main-accent);
+            }
+
+        .wt-divider {
+            padding: 6px 12px 2px;
+            font-size: 11px;
+            font-weight: 600;
+            color: #6a737d;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            border-bottom: 1px solid #f0f0f0;
+            cursor: default;
+        }
 
         .wt-name {
             font-size: 13px;
@@ -113,6 +259,47 @@
             display: flex;
             align-items: center;
             gap: 4px;
+        }
+
+        .wt-actions {
+            margin-left: auto;
+            display: flex;
+            gap: 4px;
+            opacity: 0;
+            transition: opacity 0.2s;
+        }
+
+        .wt-item:hover .wt-actions {
+            opacity: 1;
+        }
+
+        .wt-action-btn {
+            cursor: pointer;
+            padding: 2px;
+            border-radius: 3px;
+            color: #6a737d;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .wt-action-btn:hover {
+            background-color: rgba(0,0,0,0.1);
+            color: #24292e;
+        }
+
+        .wt-action-btn.loading {
+            pointer-events: none;
+            cursor: wait;
+        }
+
+        .spinner {
+            animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin {
+            from { transform: rotate(0deg); }
+            to { transform: rotate(360deg); }
         }
 
         /* Main Content */
@@ -150,6 +337,20 @@
             border: 1px solid transparent;
             border-bottom: none;
             border-radius: 4px 4px 0 0;
+            user-select: none;
+        }
+
+        /* Drag and drop visual feedback */
+        .tab[draggable="true"] { cursor: grab; }
+        .tab[draggable="true"]:active { cursor: grabbing; }
+        .tab.dragging {
+            opacity: 0.4;
+            border-style: dashed;
+        }
+        .tab.drag-over {
+            box-shadow: inset 3px 0 0 var(--active-color);
+            background: var(--active-bg);
+        }
             color: #586069;
             margin-bottom: -1px;
             height: 32px;
@@ -168,6 +369,22 @@
                 color: #24292e;
                 border-top: 2px solid var(--active-color);
             }
+
+        /* Inline rename input */
+        .tab-rename-input {
+            background: var(--bg-primary);
+            border: 1px solid var(--border-color);
+            border-radius: 3px;
+            padding: 1px 4px;
+            font-size: inherit;
+            font-family: inherit;
+            color: inherit;
+            width: 100px;
+            outline: none;
+        }
+        .tab-rename-input:focus {
+            border-color: var(--active-color);
+        }
 
         .tab-status {
             width: 8px;
@@ -208,9 +425,29 @@
                 color: #0366d6;
             }
 
+        /* Show archived label — always visible, never scrolls away */
+        #show-archived-label {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            white-space: nowrap;
+            font-size: 12px;
+            color: #586069;
+            margin-left: 8px;
+            flex-shrink: 0;
+            cursor: pointer;
+        }
+
+        /* Purge button in header area */
+        #header button.danger {
+            flex-shrink: 0;
+            margin-left: 8px;
+        }
+
         /* Actions Toolbar (Hidden by default, shown when instance active) */
         #instance-actions {
             display: none;
+            flex-shrink: 0;
             gap: 8px;
             align-items: center;
             margin-left: 12px;
@@ -256,8 +493,189 @@
             padding: 2px 8px;
             font-size: 11px;
             z-index: 10;
-            pointer-events: none;
+            pointer-events: auto;
+            cursor: pointer;
             border-top-left-radius: 4px;
+        }
+        #status-bar:hover {
+            background: rgba(0,0,0,0.7);
+            color: #fff;
+        }
+
+        /* Resource Monitor Modal */
+        #modal-monitor {
+            width: 680px;
+            max-width: 90vw;
+            padding: 0;
+            border: 1px solid #d0d7da;
+            border-radius: 10px;
+            box-shadow: 0 14px 28px rgba(0,0,0,0.25), 0 10px 10px rgba(0,0,0,0.22);
+        }
+        #modal-monitor::backdrop {
+            background: rgba(0,0,0,0.4);
+        }
+        #modal-monitor .monitor-titlebar {
+            display: flex;
+            align-items: center;
+            padding: 10px 12px;
+            border-bottom: 1px solid #e1e4e8;
+            background: #f6f8fa;
+            border-radius: 10px 10px 0 0;
+        }
+        #modal-monitor .monitor-close-btn {
+            width: 14px;
+            height: 14px;
+            border-radius: 50%;
+            background: #ff5f57;
+            border: none;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            color: rgba(0,0,0,0.5);
+            padding: 0;
+            flex-shrink: 0;
+            transition: opacity 0.15s;
+        }
+        #modal-monitor .monitor-close-btn:hover {
+            opacity: 0.85;
+        }
+        #modal-monitor .monitor-close-btn:active {
+            opacity: 0.7;
+        }
+        #modal-monitor .monitor-title {
+            margin-left: 10px;
+            font-size: 13px;
+            font-weight: 500;
+            color: #24292e;
+        }
+        #modal-monitor .monitor-summary {
+            display: flex;
+            gap: 12px;
+            margin-bottom: 16px;
+            flex-wrap: wrap;
+        }
+        #modal-monitor .monitor-summary-item {
+            background: #f6f8fa;
+            border: 1px solid #e1e4e8;
+            border-radius: 6px;
+            padding: 8px 12px;
+            flex: 1;
+            min-width: 120px;
+        }
+        #modal-monitor .monitor-summary-item .label {
+            font-size: 11px;
+            color: #586069;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        #modal-monitor .monitor-summary-item .value {
+            font-size: 16px;
+            font-weight: 600;
+            color: #24292e;
+            margin-top: 2px;
+        }
+        #modal-monitor table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 12px;
+        }
+        #modal-monitor th {
+            text-align: left;
+            padding: 6px 8px;
+            background: #f6f8fa;
+            border-bottom: 1px solid #e1e4e8;
+            color: #586069;
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        #modal-monitor td {
+            padding: 6px 8px;
+            border-bottom: 1px solid #f0f0f0;
+        }
+        #modal-monitor tr:last-child td {
+            border-bottom: none;
+        }
+        #modal-monitor .wt-group-header td {
+            background: #faf8ff;
+            font-weight: 600;
+            color: #6f42c1;
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        #modal-monitor .wt-group-header td {
+            border-top: 1px solid #e1e4e8;
+        }
+        #modal-monitor .wt-group-header td:first-child {
+            border-top-left-radius: 4px;
+        }
+        #modal-monitor .wt-group-header td:last-child {
+            border-top-right-radius: 4px;
+        }
+        #modal-monitor .conn-ws { color: #28a745; }
+        #modal-monitor .conn-sse { color: #e36209; }
+        #modal-monitor .conn-none { color: #999; }
+        #modal-monitor .empty-state {
+            text-align: center;
+            color: #586069;
+            padding: 20px;
+        }
+        #modal-monitor .monitor-licenses {
+            border-top: 1px solid #e1e4e8;
+            padding: 8px 14px;
+        }
+        #modal-monitor .monitor-licenses-toggle {
+            background: none;
+            border: none;
+            color: #586069;
+            font-size: 11px;
+            cursor: pointer;
+            padding: 2px 0;
+            display: flex;
+            align-items: center;
+            gap: 4px;
+        }
+        #modal-monitor .monitor-licenses-toggle:hover {
+            color: #24292e;
+        }
+        #modal-monitor .monitor-licenses-toggle svg {
+            transition: transform 0.2s;
+        }
+        #modal-monitor .monitor-licenses-toggle.open svg {
+            transform: rotate(90deg);
+        }
+        #modal-monitor .monitor-licenses-list {
+            display: none;
+            margin-top: 8px;
+            font-size: 11px;
+            color: #586069;
+            line-height: 1.6;
+            max-height: 200px;
+            overflow-y: auto;
+        }
+        #modal-monitor .monitor-licenses-list.open {
+            display: block;
+        }
+        #modal-monitor .license-item {
+            padding: 4px 0;
+            border-bottom: 1px solid #f0f0f0;
+        }
+        #modal-monitor .license-item:last-child {
+            border-bottom: none;
+        }
+        #modal-monitor .license-name {
+            font-weight: 600;
+            color: #24292e;
+        }
+        #modal-monitor .license-sppver {
+            color: #999;
+            margin-left: 4px;
+        }
+        #modal-monitor .license-type {
+            color: #6f42c1;
+            margin-left: 6px;
         }
 
         /* Dialogs */
@@ -340,6 +758,45 @@
                     background: #ffeef0;
                     border-color: #cb2431;
                 }
+
+            #terminal-controls {
+                position: absolute;
+                top: 20px;
+                right: 20px;
+                display: flex;
+                flex-direction: column;
+                gap: var(--term-ctrl-btn-gap);
+                z-index: 20;
+            }
+
+            .term-ctrl-btn {
+                width: var(--term-ctrl-btn-size);
+                height: var(--term-ctrl-btn-size);
+                border-radius: 6px;
+                background: rgba(0,0,0,0.5);
+                border: none;
+                color: #ccc;
+                cursor: pointer;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                transition: background 0.2s, color 0.2s;
+            }
+
+            .term-ctrl-btn:hover {
+                background: rgba(255,255,255,0.2);
+                color: #fff;
+            }
+
+            .term-ctrl-btn svg {
+                width: 20px;
+                height: 20px;
+                fill: none;
+                stroke: currentColor;
+                stroke-width: 2;
+                stroke-linecap: round;
+                stroke-linejoin: round;
+            }
     </style>
 </head>
 <body>
@@ -358,26 +815,49 @@
                     <button class="icon-btn" onclick="openModal('modal-import-wt')" title="Import Worktree">↓</button>
                 </div>
             </div>
-            <ul id="wt-list"></ul>
+            <div id="sidebar-top-panel">
+                <ul id="wt-list"></ul>
+            </div>
+            <div id="sidebar-resize-handle" onmousedown="startSidebarResize(event)"></div>
+            <div id="sidebar-bottom-panel">
+                <div id="git-changes-header">
+                    <span class="git-changes-title">Changes</span>
+                    <span id="git-changes-summary"></span>
+                </div>
+                <div id="git-changes-list"></div>
+            </div>
         </div>
 
         <!-- Main: Tabs + Terminal -->
         <div id="main">
             <div id="header">
                 <div id="tabs-container"></div>
-                
+
                 <div id="instance-actions">
                     <button onclick="restartInstance()" title="Restart">Restart</button>
                     <button onclick="stopInstance()" title="Stop">Stop</button>
                     <button onclick="archiveInstance()" title="Archive">Archive</button>
-                    <button class="danger" onclick="deleteInstance()" title="Delete">Delete</button>
                     <button onclick="reconnectWS()" title="Reconnect WebSocket">Reconnect</button>
+                    <button class="danger" onclick="deleteInstance()" title="Delete">Delete</button>
+                    <button class="danger" onclick="purgeArchivedInstances()" title="Delete all archived instances">Purge</button>
                 </div>
+
+                <label id="show-archived-label">
+                    <input type="checkbox" id="show-archived-cb" onchange="toggleArchived(this)"> Show archived
+                </label>
             </div>
 
             <div id="workspace">
                 <div id="empty-state">Select a worktree and instance to start</div>
                 <div id="terminal-container"></div>
+                <div id="terminal-controls">
+                    <button class="term-ctrl-btn" onclick="refreshCurrentInstance()" title="Refresh & Scroll to Bottom">
+                        <svg viewBox="0 0 24 24"><path d="M23 4v6h-6"></path><path d="M1 20v-6h6"></path><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg>
+                    </button>
+                    <button class="term-ctrl-btn" onclick="scrollCurrentInstanceToBottom()" title="Scroll to Bottom">
+                        <svg viewBox="0 0 24 24"><path d="M12 5v14"></path><path d="M19 12l-7 7-7-7"></path></svg>
+                    </button>
+                </div>
                 <div id="status-bar">Transport: idle</div>
             </div>
         </div>
@@ -446,6 +926,59 @@
         </div>
     </dialog>
 
+    <!-- Modal: Resource Monitor -->
+    <dialog id="modal-monitor">
+        <div class="monitor-titlebar">
+            <button class="monitor-close-btn" onclick="closeMonitorModal()" title="Close">
+                <svg width="10" height="10" viewBox="0 0 10 10" fill="none" xmlns="http://www.w3.org/2000/svg">
+                    <line x1="1" y1="1" x2="9" y2="9" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                    <line x1="9" y1="1" x2="1" y2="9" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                </svg>
+            </button>
+            <span class="monitor-title">Resource Monitor</span>
+        </div>
+        <div class="monitor-summary" id="monitor-summary">
+            <!-- filled by JS -->
+        </div>
+        <div style="max-height: 400px; overflow-y: auto;">
+            <table id="monitor-table">
+                <thead>
+                    <tr>
+                        <th>Instance</th>
+                        <th>PID</th>
+                        <th>Status</th>
+                        <th>Transport</th>
+                        <th style="text-align:right">CPU %</th>
+                        <th style="text-align:right">Memory</th>
+                    </tr>
+                </thead>
+                <tbody id="monitor-tbody">
+                </tbody>
+            </table>
+        </div>
+        <div class="monitor-licenses">
+            <button class="monitor-licenses-toggle" id="monitor-licenses-toggle" onclick="toggleMonitorLicenses()">
+                <svg width="8" height="8" viewBox="0 0 8 8" fill="none" xmlns="http://www.w3.org/2000/svg">
+                    <path d="M3 1L7 4L3 7" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
+                Open Source Licenses
+            </button>
+            <div class="monitor-licenses-list" id="monitor-licenses-list">
+                <div class="license-item"><span class="license-name">gopsutil</span><span class="license-sppver">v4.26.2</span><span class="license-type">BSD-3-Clause</span></div>
+                <div class="license-item"><span class="license-name">creack/pty</span><span class="license-sppver">v1.1.24</span><span class="license-type">BSD-3-Clause</span></div>
+                <div class="license-item"><span class="license-name">golang.org/x/sys</span><span class="license-sppver">v0.41.0</span><span class="license-type">BSD-3-Clause</span></div>
+                <div class="license-item"><span class="license-name">tklauser/go-sysconf</span><span class="license-sppver">v0.3.16</span><span class="license-type">BSD-3-Clause</span></div>
+                <div class="license-item"><span class="license-name">lufia/plan9stats</span><span class="license-sppver">-</span><span class="license-type">BSD-3-Clause</span></div>
+                <div class="license-item"><span class="license-name">power-devops/perfstat</span><span class="license-sppver">-</span><span class="license-type">MIT</span></div>
+                <div class="license-item"><span class="license-name">ebitengine/purego</span><span class="license-sppver">v0.10.0</span><span class="license-type">Apache-2.0</span></div>
+                <div class="license-item"><span class="license-name">tklauser/numcpus</span><span class="license-sppver">v0.11.0</span><span class="license-type">Apache-2.0</span></div>
+                <div class="license-item"><span class="license-name">go-ole/go-ole</span><span class="license-sppver">v1.2.6</span><span class="license-type">MIT</span></div>
+                <div class="license-item"><span class="license-name">yusufpapurcu/wmi</span><span class="license-sppver">v1.2.4</span><span class="license-type">MIT</span></div>
+                <div class="license-item"><span class="license-name">xterm.js</span><span class="license-sppver">(bundled)</span><span class="license-type">MIT</span></div>
+            </div>
+        </div>
+    </dialog>
+
     <link rel="stylesheet" href="/static/vendor/xterm/xterm.css" />
     <script src="/static/vendor/xterm/xterm.js"></script>
     <script src="/static/vendor/xterm-addon-fit/xterm-addon-fit.js"></script>
@@ -454,6 +987,7 @@
         const headers = token ? { Authorization: `Bearer ${token}` } : {};
         const SERVER_REV_HEADER = "x-myworktree-server-rev";
         const SERVER_UPGRADED_FLAG = "myworktree-server-upgraded";
+        const MAIN_WT_ID = "__main__";
         let knownServerRev = "";
         let serverRevReloading = false;
 
@@ -465,20 +999,34 @@
             branches: [],
             activeWT: null,
             activeInst: null,
-            showArchived: false
+            showArchived: false,
+            mainRepo: null,
+            renamingInst: null,    // instance id currently being renamed
+            renamingInstValue: ""  // preserved value across re-renders
+        };
+
+        let loadingActions = new Set(); // Stores keys like "term:<id>" or "finder:<id>"
+
+        // Drag and drop state
+        let dragState = {
+            sourceId: null,
+            targetId: null
         };
 
         // Terminal & Transport
-        let term = null;
-        let ttySocket = null;
-        let logStream = null;
+        let terminalSessions = {};
         let pollTimer = null;
-        let logCursor = 0;
-        let ttyReconnectTimer = null;
-        let termInputBuffer = "";
-        let termSendTimer = null;
-        let ttyOutputDecoder = null;
         let refreshInFlight = null;
+        let stateVersion = 0;
+
+        // Git Changes
+        let gitChanges = { changes: [], total: { additions: 0, deletions: 0 } };
+        let gitChangesTimer = null;
+        let gitChangesSeq = 0;
+        let gitChangesError = null;
+        let isResizingSidebar = false;
+        let sidebarResizeStartY = 0;
+        let sidebarTopPanelStartHeight = 0;
 
         // API
         function rememberServerRevision(res) {
@@ -494,15 +1042,35 @@
             location.reload();
         }
 
-        async function api(path, opts = {}) {
+        async function parseAPIResponse(res) {
+            const ct = res.headers.get("content-type") || "";
+            return ct.includes("application/json") ? res.json() : res.text();
+        }
+
+        async function newAPIError(res) {
+            const body = await parseAPIResponse(res);
+            const message = typeof body === "string"
+                ? (body || res.statusText || `HTTP ${res.status}`)
+                : ((body && body.error) || res.statusText || `HTTP ${res.status}`);
+            const err = new Error(message);
+            err.status = res.status;
+            err.body = body;
+            return err;
+        }
+
+        async function fetchAPI(path, opts = {}) {
             const res = await fetch(path, {
                 ...opts,
                 headers: { "content-type": "application/json", ...headers, ...(opts.headers || {}) },
             });
             rememberServerRevision(res);
-            if (!res.ok) throw new Error(await res.text());
-            const ct = res.headers.get("content-type") || "";
-            return ct.includes("application/json") ? res.json() : res.text();
+            return res;
+        }
+
+        async function api(path, opts = {}) {
+            const res = await fetchAPI(path, opts);
+            if (!res.ok) throw await newAPIError(res);
+            return parseAPIResponse(res);
         }
 
         // Lifecycle
@@ -511,10 +1079,20 @@
             return state.instances.find(i => i.id === state.activeInst) || null;
         }
 
-        function hasLiveTTYConnection() {
-            if (!ttySocket) return false;
-            if (ttySocket.readyState !== WebSocket.OPEN) return false;
-            return ttyState === 'HANDSHAKING' || ttyState === 'READY';
+        function getTerminalSession(id) {
+            if (!id) return null;
+            return terminalSessions[id] || null;
+        }
+
+        function getActiveTerminalSession() {
+            return getTerminalSession(state.activeInst);
+        }
+
+        function hasLiveTTYConnection(id = state.activeInst) {
+            const session = getTerminalSession(id);
+            if (!session || !session.ttySocket) return false;
+            if (session.ttySocket.readyState !== WebSocket.OPEN) return false;
+            return session.ttyState === 'HANDSHAKING' || session.ttyState === 'READY';
         }
 
         async function refresh() {
@@ -531,24 +1109,43 @@
                     ]);
                     state.worktrees = wt.worktrees || [];
                     state.instances = ins.instances || [];
+                    stateVersion = ins.version || 0;
                     state.tags = tags.tags || [];
                     state.branches = branches;
-                    
+                    reconcileTerminalSessions();
+
+                    // Fetch main repo info independently — failure is non-blocking.
+                    api("/api/main").then(main => {
+                        const prevBranch = state.mainRepo ? state.mainRepo.branch : null;
+                        state.mainRepo = main;
+                        renderSidebar(); // Only re-render sidebar, not the full UI.
+                        // If main repo branch changed while it's selected, refresh its git changes.
+                        if (state.activeWT === MAIN_WT_ID && prevBranch && prevBranch !== main.branch) {
+                            refreshGitChanges();
+                        }
+                    }).catch(() => {
+                        // Keep showing the last known value; don't overwrite with null.
+                    });
+
                     const recovered = overlay.style.display !== "none";
                     if (recovered) {
                         overlay.style.display = "none";
-                        const inst = getActiveInstance();
-                        if (inst && inst.status === 'running' && !hasLiveTTYConnection()) {
-                            // Only reconnect after a real transport loss. Reconnecting a
-                            // healthy TTY causes long-output TUIs to replay and flicker.
-                            connectTTY();
-                        }
+                        reconnectRunningTerminalSessions();
+                    }
+
+                    // Skip full re-render during rename — preserve input DOM and IME composition.
+                    // State data (instances, etc.) is already updated above.
+                    if (state.renamingInst) {
+                        refreshInFlight = null;
+                        return;
                     }
                     render();
+                    const cb = document.getElementById("show-archived-cb");
+                    if (cb) cb.checked = state.showArchived;
                 } catch (e) {
                     console.error(e);
                     const inst = getActiveInstance();
-                    if (inst && inst.status === 'running' && hasLiveTTYConnection()) {
+                    if (inst && inst.status === 'running' && hasLiveTTYConnection(inst.id)) {
                         updateStatus("websocket live (status refresh failed)");
                         return;
                     }
@@ -566,12 +1163,14 @@
                 sessionStorage.removeItem(SERVER_UPGRADED_FLAG);
                 alert("Backend upgraded. Frontend has been refreshed automatically.");
             }
-            ensureTerminal();
             refresh();
             // Polling for status updates (2s)
             if (pollTimer) clearInterval(pollTimer);
             pollTimer = setInterval(refresh, 2000);
-            
+
+            // Status bar click -> resource monitor
+            document.getElementById("status-bar").addEventListener("click", openModalMonitor);
+
             // Initial focus attempt after a short delay
             setTimeout(() => focusTerminalIfPossible(), 100);
         }
@@ -581,8 +1180,228 @@
             renderTabs();
         }
 
+        async function purgeArchivedInstances() {
+            const archived = state.instances.filter(i => i.archived && i.worktree_id === state.activeWT);
+            if (archived.length === 0) return;
+            if (!confirm(`Delete ${archived.length} archived instance(s) in current worktree?`)) return;
+
+            // Optimistic update: remove archived instances for this worktree from local state immediately.
+            const archivedIds = new Set(archived.map(i => i.id));
+            state.instances = state.instances.filter(i => !(i.archived && i.worktree_id === state.activeWT));
+            // Select a new active instance if the previously selected one was purged.
+            if (state.activeInst && archivedIds.has(state.activeInst)) {
+                selectInstance(null);
+            } else {
+                renderTabs();
+            }
+
+            try {
+                // Keep 409 handling here so optimistic UI state can resync cleanly.
+                await api("/api/instances/purge", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ worktree_id: state.activeWT, version: stateVersion })
+                });
+                // Success: refresh in background to sync version and any server-side bookkeeping.
+                refresh();
+            } catch (e) {
+                refresh();
+                if (e && e.status === 409) {
+                    return;
+                }
+                alert(e.message || e);
+            }
+        }
+
+        // --- Git Changes ---
+        async function refreshGitChanges() {
+            if (!state.activeWT) return;
+            const seq = ++gitChangesSeq; // Stamp this request; stale responses are ignored.
+            try {
+                // Reuse the shared API wrapper so auth headers and server revision
+                // tracking stay consistent with the rest of the UI.
+                const resp = await fetchAPI(`/api/worktree/status?id=${encodeURIComponent(state.activeWT)}`, { credentials: "include" });
+                const data = await parseAPIResponse(resp);
+                if (seq !== gitChangesSeq) return; // Another request fired after this one; discard.
+                if (!resp.ok) {
+                    gitChangesError = typeof data === "string"
+                        ? (data || resp.statusText || "Unknown error")
+                        : ((data && data.error) || resp.statusText || "Unknown error");
+                    gitChanges = { changes: [], total: { additions: 0, deletions: 0 } };
+                } else {
+                    gitChangesError = null;
+                    gitChanges = data;
+                }
+                renderGitChanges();
+            } catch (e) {
+                console.error("failed to fetch git changes:", e);
+                if (seq !== gitChangesSeq) return;
+                gitChangesError = e.message || "Network error";
+                gitChanges = { changes: [], total: { additions: 0, deletions: 0 } };
+                renderGitChanges();
+            }
+        }
+
+        // Smart path truncation: preserve path structure, then filename.
+        // Returns the input path if it fits; otherwise progressively drops
+        // leading segments (replaced by "…/") until only the filename remains.
+        // If even the filename overflows, it is truncated from the right.
+        // Requires DOM to be rendered; call after list.innerHTML is set.
+        let _truncateSpan = null;
+        function truncatePath(path, avail) {
+            if (!_truncateSpan) {
+                const m = document.createElement('span');
+                m.style.cssText = 'position:fixed;visibility:hidden;pointer-events:none;font:inherit;white-space:nowrap';
+                document.body.appendChild(m);
+                _truncateSpan = m;
+            }
+            const s = _truncateSpan;
+            s.textContent = path;
+            const needed = s.getBoundingClientRect().width;
+            if (needed <= avail) return path;
+
+            const filename = path.includes('/') ? '…/' + path.split('/').pop() : path;
+            s.textContent = filename;
+            if (s.getBoundingClientRect().width <= avail) return filename;
+
+            // Truncate filename itself.
+            const prefix = path.includes('/') ? '…/' : '';
+            let lo = 0, hi = filename.length - prefix.length;
+            while (lo < hi) {
+                const mid = (lo + hi + 1) >> 1;
+                s.textContent = prefix + filename.slice(prefix.length, prefix.length + mid) + '…';
+                if (s.getBoundingClientRect().width <= avail) lo = mid;
+                else hi = mid - 1;
+            }
+            return prefix + (lo > 0 ? filename.slice(prefix.length, prefix.length + lo) + '…' : '…');
+        }
+
+        function renderGitChanges() {
+            const list = document.getElementById("git-changes-list");
+            const summary = document.getElementById("git-changes-summary");
+            if (!list) return;
+            const firstItem = list.querySelector('.git-change-item');
+            const firstStats = list.querySelector('.git-change-stats');
+            const itemWidth = firstItem ? firstItem.getBoundingClientRect().width : 200;
+            const statsWidth = firstStats ? firstStats.getBoundingClientRect().width : 0;
+            const avail = Math.max(itemWidth - statsWidth - 8, 40);
+            list.replaceChildren();
+            if (summary) summary.replaceChildren();
+
+            if (gitChangesError) {
+                const empty = document.createElement("div");
+                empty.className = "git-changes-empty";
+                empty.style.color = "#cb2431";
+                empty.textContent = `⚠ ${gitChangesError}`;
+                list.appendChild(empty);
+                return;
+            }
+
+            if (!gitChanges.changes || gitChanges.changes.length === 0) {
+                const empty = document.createElement("div");
+                empty.className = "git-changes-empty";
+                empty.textContent = "No changes";
+                list.appendChild(empty);
+                return;
+            }
+
+            if (summary) {
+                const t = gitChanges.total;
+                if (t.additions > 0) {
+                    const adds = document.createElement("span");
+                    adds.className = "additions";
+                    adds.textContent = `+${t.additions}`;
+                    summary.appendChild(adds);
+                }
+                if (t.deletions > 0) {
+                    if (summary.childNodes.length > 0) summary.appendChild(document.createTextNode(" "));
+                    const dels = document.createElement("span");
+                    dels.className = "deletions";
+                    dels.textContent = `-${t.deletions}`;
+                    summary.appendChild(dels);
+                }
+                if (summary.childNodes.length > 0) summary.appendChild(document.createTextNode(" "));
+                summary.appendChild(document.createTextNode(`${gitChanges.changes.length} file(s)`));
+            }
+
+            // Paths and error text come from git output, so build the DOM with
+            // textContent/attributes instead of innerHTML to avoid XSS.
+            gitChanges.changes.forEach(c => {
+                const displayPath = truncatePath(c.path, avail);
+                const item = document.createElement("div");
+                item.className = "git-change-item";
+
+                const path = document.createElement("span");
+                path.className = "git-change-path";
+                path.title = c.path;
+                path.textContent = displayPath;
+                item.appendChild(path);
+
+                if (c.additions > 0 || c.deletions > 0) {
+                    const stats = document.createElement("div");
+                    stats.className = "git-change-stats";
+                    if (c.additions > 0) {
+                        const adds = document.createElement("span");
+                        adds.className = "additions";
+                        adds.textContent = `+${c.additions}`;
+                        stats.appendChild(adds);
+                    }
+                    if (c.deletions > 0) {
+                        const dels = document.createElement("span");
+                        dels.className = "deletions";
+                        dels.textContent = `-${c.deletions}`;
+                        stats.appendChild(dels);
+                    }
+                    item.appendChild(stats);
+                }
+
+                list.appendChild(item);
+            });
+        }
+
+        // --- Sidebar Resize ---
+        function startSidebarResize(e) {
+            isResizingSidebar = true;
+            sidebarResizeStartY = e.clientY;
+            const topPanel = document.getElementById("sidebar-top-panel");
+            sidebarTopPanelStartHeight = topPanel ? topPanel.offsetHeight : 0;
+            document.addEventListener("mousemove", handleSidebarResize);
+            document.addEventListener("mouseup", stopSidebarResize);
+            const handle = document.getElementById("sidebar-resize-handle");
+            if (handle) handle.classList.add("dragging");
+            e.preventDefault();
+        }
+
+        function handleSidebarResize(e) {
+            if (!isResizingSidebar) return;
+            const sidebar = document.getElementById("sidebar");
+            const topPanel = document.getElementById("sidebar-top-panel");
+            const bottomPanel = document.getElementById("sidebar-bottom-panel");
+            if (!sidebar || !topPanel || !bottomPanel) return;
+
+            const minTop = 120;
+            const minBottom = 100;
+            const sidebarContentHeight = sidebar.offsetHeight - sidebar.querySelector(".sidebar-title").offsetHeight;
+
+            let newTopHeight = sidebarTopPanelStartHeight + (e.clientY - sidebarResizeStartY);
+            newTopHeight = Math.max(minTop, Math.min(sidebarContentHeight - minBottom, newTopHeight));
+
+            topPanel.style.flex = "none";
+            topPanel.style.height = newTopHeight + "px";
+            bottomPanel.style.flex = "1";
+        }
+
+        function stopSidebarResize() {
+            isResizingSidebar = false;
+            document.removeEventListener("mousemove", handleSidebarResize);
+            document.removeEventListener("mouseup", stopSidebarResize);
+            const handle = document.getElementById("sidebar-resize-handle");
+            if (handle) handle.classList.remove("dragging");
+        }
+
         // Render
         function render() {
+            // NOTE: refresh() skips render() during rename to preserve input DOM and IME composition.
             renderSidebar();
             renderTabs();
             renderWorkspace();
@@ -591,23 +1410,140 @@
 
         function renderSidebar() {
             const list = document.getElementById("wt-list");
-            list.innerHTML = state.worktrees.map(w => {
+            let html = "";
+            const isLocal = window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1";
+
+            const shortcuts = (id) => {
+                if (!isLocal) return '';
+                const termKey = `term:${id}`;
+                const finderKey = `finder:${id}`;
+                const isTermLoading = loadingActions.has(termKey);
+                const isFinderLoading = loadingActions.has(finderKey);
+
+                const termIcon = isTermLoading
+                    ? `<svg class="spinner" viewBox="0 0 24 24" width="12" height="12" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="2" x2="12" y2="6"></line><line x1="12" y1="18" x2="12" y2="22"></line><line x1="4.93" y1="4.93" x2="7.76" y2="7.76"></line><line x1="16.24" y1="16.24" x2="19.07" y2="19.07"></line><line x1="2" y1="12" x2="6" y2="12"></line><line x1="18" y1="12" x2="22" y2="12"></line><line x1="4.93" y1="19.07" x2="7.76" y2="16.24"></line><line x1="16.24" y1="7.76" x2="19.07" y2="4.93"></line></svg>`
+                    : `<svg viewBox="0 0 24 24" width="12" height="12" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"></polyline><line x1="12" y1="19" x2="20" y2="19"></line></svg>`;
+
+                const finderIcon = isFinderLoading
+                    ? `<svg class="spinner" viewBox="0 0 24 24" width="12" height="12" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="2" x2="12" y2="6"></line><line x1="12" y1="18" x2="12" y2="22"></line><line x1="4.93" y1="4.93" x2="7.76" y2="7.76"></line><line x1="16.24" y1="16.24" x2="19.07" y2="19.07"></line><line x1="2" y1="12" x2="6" y2="12"></line><line x1="18" y1="12" x2="22" y2="12"></line><line x1="4.93" y1="19.07" x2="7.76" y2="16.24"></line><line x1="16.24" y1="7.76" x2="19.07" y2="4.93"></line></svg>`
+                    : `<svg viewBox="0 0 24 24" width="12" height="12" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg>`;
+
+                return `
+                <div class="wt-actions">
+                    <span class="wt-action-btn ${isTermLoading ? 'loading' : ''}" title="Open Terminal" onclick="openTerminal('${id}', event)">
+                        ${termIcon}
+                    </span>
+                    <span class="wt-action-btn ${isFinderLoading ? 'loading' : ''}" title="Open Finder" onclick="openFinder('${id}', event)">
+                        ${finderIcon}
+                    </span>
+                </div>`;
+            };
+
+            // Pinned main workspace item (always first, not deletable, clickable)
+            if (state.mainRepo) {
+                const branchLabel = state.mainRepo.branch;
+                const isMainActive = state.activeWT === MAIN_WT_ID;
+                html += `
+            <li class="wt-item wt-item-main ${isMainActive ? 'active' : ''}" onclick="selectWorktree(MAIN_WT_ID)">
+              <div class="wt-name">${state.mainRepo.name}</div>
+              <div class="wt-branch">
+                <span>🏠</span> ${branchLabel}
+                <div style="margin-left: auto; display: flex; gap: 4px; align-items: center;">
+                    ${shortcuts(MAIN_WT_ID)}
+                </div>
+              </div>
+            </li>
+            `;
+            }
+
+            // Divider
+            html += `<li class="wt-divider">Worktrees</li>`;
+
+            // Regular worktrees
+            html += state.worktrees.map(w => {
                 const isActive = state.activeWT === w.id;
                 return `
             <li class="wt-item ${isActive ? 'active' : ''}" onclick="selectWorktree('${w.id}')">
               <div class="wt-name">${w.name}</div>
               <div class="wt-branch">
                 <span>🌱</span> ${w.branch}
-                ${isActive ? `<span style="margin-left:auto;font-size:10px;cursor:pointer" onclick="deleteWorktree('${w.id}', event)">✕</span>` : ''}
+                <div style="margin-left: auto; display: flex; gap: 4px; align-items: center;">
+                    ${shortcuts(w.id)}
+                    ${isActive ? `<span style="font-size:10px;cursor:pointer;padding:2px 4px;" onclick="deleteWorktree('${w.id}', event)">✕</span>` : ''}
+                </div>
               </div>
             </li>
           `;
             }).join("");
 
-            // If no active WT and we have some, select first
-            if (!state.activeWT && state.worktrees.length > 0) {
-                selectWorktree(state.worktrees[0].id);
+            list.innerHTML = html;
+
+            // Auto-select: prefer first worktree, fall back to main repo if no worktrees exist.
+            if (!state.activeWT) {
+                if (state.worktrees.length > 0) {
+                    selectWorktree(state.worktrees[0].id);
+                } else if (state.mainRepo) {
+                    selectWorktree(MAIN_WT_ID);
+                }
             }
+        }
+
+        // Rename handlers
+        function startRename(id, event) {
+            event.stopPropagation();
+            state.renamingInst = id;
+            state.renamingInstValue = "";
+            renderTabs(); // Create the input DOM before focusing
+            requestAnimationFrame(() => {
+                const input = document.getElementById('rename-input-' + id);
+                if (input) {
+                    input.focus();
+                    input.select();
+                }
+            });
+        }
+
+        function commitRename(id, event) {
+            event.stopPropagation();
+            const input = document.getElementById('rename-input-' + id);
+            if (!input) return;
+            const newName = input.value.trim();
+            state.renamingInst = null;
+            state.renamingInstValue = "";
+            // Don't re-render during rename commit — caller will handle render after API response
+            renderTabs();
+            if (newName === '') {
+                return;
+            }
+            api('/api/instances', {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ id: id, name: newName })
+            }).then(updated => {
+                const idx = state.instances.findIndex(i => i.id === id);
+                if (idx >= 0) {
+                    state.instances[idx] = updated;
+                }
+                render();
+            }).catch(err => {
+                console.error('rename failed:', err);
+                refresh();
+            });
+        }
+
+        function cancelRename() {
+            state.renamingInst = null;
+            state.renamingInstValue = "";
+            renderTabs();
+        }
+
+        function handleRenameKeydown(id, event) {
+            if (event.key === 'Enter') {
+                commitRename(id, event);
+            } else if (event.key === 'Escape') {
+                cancelRename();
+            }
+            event.stopPropagation();
         }
 
         function renderTabs() {
@@ -622,7 +1558,6 @@
             if (!state.showArchived) {
                 instances = instances.filter(i => !i.archived);
             }
-            instances.sort((a, b) => a.created_at.localeCompare(b.created_at));
 
             // Fix invalid selection (e.g. archived/deleted)
             if (state.activeInst && !instances.find(i => i.id === state.activeInst)) {
@@ -630,17 +1565,14 @@
                 const oldInst = state.instances.find(i => i.id === state.activeInst);
                 // If old instance still exists (e.g. archived), try to select neighbors
                 if (oldInst) {
-                    const left = instances.filter(i => i.created_at < oldInst.created_at);
-                    if (left.length > 0) newId = left[left.length - 1].id;
-                    else {
-                        const right = instances.filter(i => i.created_at > oldInst.created_at);
-                        if (right.length > 0) newId = right[0].id;
-                    }
+                    const currentIdx = instances.findIndex(i => i.id === oldInst.id);
+                    if (currentIdx > 0) newId = instances[currentIdx - 1].id;
+                    else if (currentIdx < instances.length - 1) newId = instances[currentIdx + 1].id;
                 }
-                
+
                 if (newId) {
                     selectInstance(newId);
-                    return; 
+                    return;
                 } else {
                     // No valid neighbor or old instance gone; clear selection.
                     // If instances exist, bottom logic will pick one.
@@ -655,22 +1587,41 @@
             html += instances.map(i => {
                 const isActive = state.activeInst === i.id;
                 const statusClass = `status-${i.status}`;
-                const name = i.name || i.tag_id || i.id.substring(0, 6);
+                const displayName = i.name || i.tag_id || i.id.substring(0, 6);
                 const archivedMark = i.archived ? '<span style="opacity:0.6; font-size:11px; margin-left:6px">[archived]</span>' : '';
-                return `
+                const isRenaming = state.renamingInst === i.id;
+
+                const renameValue = isRenaming && state.renamingInstValue ? state.renamingInstValue : displayName;
+                if (isRenaming) {
+                    return `
             <div class="tab ${isActive ? 'active' : ''}" onclick="selectInstance('${i.id}')">
               <span class="tab-status ${statusClass}"></span>
-              ${name} ${archivedMark}
+              <input id="rename-input-${i.id}" class="tab-rename-input"
+                value="${renameValue}"
+                onkeydown="handleRenameKeydown('${i.id}', event)"
+                onblur="commitRename('${i.id}', event)"
+              />
+            </div>
+          `;
+                }
+
+                return `
+            <div class="tab ${isActive ? 'active' : ''}"
+                 draggable="true"
+                 data-instance-id="${i.id}"
+                 onclick="selectInstance('${i.id}')"
+                 ondblclick="startRename('${i.id}', event)"
+                 ondragstart="handleDragStart('${i.id}', event)"
+                 ondragend="handleDragEnd(event)"
+                 ondragover="handleDragOver(event)"
+                 ondragleave="handleDragLeave(event)"
+                 ondrop="handleDrop('${i.id}', event)"
+                 title="Drag to reorder; double-click to rename">
+              <span class="tab-status ${statusClass}"></span>
+              ${displayName} ${archivedMark}
             </div>
           `;
             }).join("");
-
-            // Add archived toggle
-            html += `<div style="margin-left: auto; padding: 0 12px; font-size: 12px; display: flex; align-items: center; height: 32px; color: #8b949e;">
-                <label style="cursor: pointer; display: flex; align-items: center; gap: 6px; white-space: nowrap;">
-                    <input type="checkbox" ${state.showArchived ? "checked" : ""} onchange="toggleArchived(this)"> Show archived
-                </label>
-            </div>`;
 
             container.innerHTML = html;
 
@@ -682,6 +1633,148 @@
             } else if (state.activeWT && instances.length === 0) {
                 selectInstance(null); // Clear selection if no instances
             }
+        }
+
+        // Extract current order of instances for a worktree.
+        function getTabOrder(worktreeId) {
+            return state.instances
+                .filter(i => i.worktree_id === worktreeId)
+                .map(i => i.id);
+        }
+
+        // Stores the last server-confirmed order per worktree for rollback on conflict.
+        const lastConfirmedOrder = {};
+
+        // API call for reordering. Fire-and-forget — caller updates UI optimistically first.
+        async function reorderInstances(worktreeId, order) {
+            try {
+                await api("/api/instances/reorder", {
+                    method: "PATCH",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ worktree_id: worktreeId, order: order, version: stateVersion })
+                });
+                stateVersion++;
+                // Record this as the last confirmed order.
+                lastConfirmedOrder[worktreeId] = order;
+            } catch (e) {
+                if (e && e.status === 409) {
+                    console.warn("reorder conflict, rolling back and refreshing...");
+                    // Rollback to the last server-confirmed order before reloading.
+                    const confirmed = lastConfirmedOrder[worktreeId];
+                    if (confirmed) {
+                        const idToInst = {};
+                        state.instances.forEach(inst => { idToInst[inst.id] = inst; });
+                        const thisWTOrder = confirmed
+                            .filter(id => idToInst[id] && idToInst[id].worktree_id === worktreeId)
+                            .map(id => idToInst[id]);
+                        const others = state.instances.filter(i => i.worktree_id !== worktreeId);
+                        state.instances = [...others, ...thisWTOrder];
+                        renderTabs();
+                    }
+                    refresh();
+                    return;
+                }
+                throw e;
+            }
+        }
+
+        // --- Drag and Drop handlers ---
+
+        function handleDragStart(id, event) {
+            if (id === state.renamingInst) {
+                event.preventDefault();
+                return;
+            }
+            dragState.sourceId = id;
+            event.dataTransfer.effectAllowed = "move";
+            event.dataTransfer.setData("text/plain", id);
+            setTimeout(() => {
+                const el = document.querySelector(`[data-instance-id="${id}"]`);
+                if (el) el.classList.add("dragging");
+            }, 0);
+        }
+
+        function handleDragEnd(event) {
+            const el = document.querySelector(`[data-instance-id="${dragState.sourceId}"]`);
+            if (el) el.classList.remove("dragging");
+            document.querySelectorAll(".tab.drag-over").forEach(e => e.classList.remove("drag-over"));
+            dragState.sourceId = null;
+            dragState.targetId = null;
+        }
+
+        function handleDragOver(event) {
+            event.preventDefault();
+            event.dataTransfer.dropEffect = "move";
+            const tab = event.currentTarget;
+            const targetId = tab.dataset.instanceId;
+            if (targetId === dragState.sourceId) return;
+            document.querySelectorAll(".tab.drag-over").forEach(e => e.classList.remove("drag-over"));
+            tab.classList.add("drag-over");
+            dragState.targetId = targetId;
+        }
+
+        function handleDragLeave(event) {
+            const tab = event.currentTarget;
+            if (!tab.contains(event.relatedTarget)) {
+                tab.classList.remove("drag-over");
+                if (dragState.targetId === tab.dataset.instanceId) {
+                    dragState.targetId = null;
+                }
+            }
+        }
+
+        async function handleDrop(targetId, event) {
+            event.preventDefault();
+            event.stopPropagation();
+
+            const sourceId = dragState.sourceId;
+            if (!sourceId || sourceId === targetId) {
+                dragState.sourceId = null;
+                dragState.targetId = null;
+                return;
+            }
+
+            const worktreeId = state.activeWT;
+            const allIds = getTabOrder(worktreeId);
+
+            const srcIdx = allIds.indexOf(sourceId);
+            const tgtIdx = allIds.indexOf(targetId);
+            if (srcIdx < 0 || tgtIdx < 0) return;
+
+            // Save current confirmed order before optimistic update (for rollback).
+            lastConfirmedOrder[worktreeId] = [...allIds];
+
+            // Compute new order.
+            const newOrder = [...allIds];
+            newOrder.splice(srcIdx, 1);
+            newOrder.splice(tgtIdx, 0, sourceId);
+
+            // Optimistic update: immediately reorder state.instances.
+            const idToInst = {};
+            state.instances.forEach(inst => { idToInst[inst.id] = inst; });
+
+            const thisWTOrder = [];
+            for (const id of newOrder) {
+                if (idToInst[id] && idToInst[id].worktree_id === worktreeId) {
+                    thisWTOrder.push(idToInst[id]);
+                }
+            }
+            // Remove this WT's instances and re-insert in new order.
+            const others = state.instances.filter(i => i.worktree_id !== worktreeId);
+            state.instances = [...others, ...thisWTOrder];
+
+            renderTabs();
+
+            // Fire-and-forget: API call happens in background.
+            // On 409 conflict, reorderInstances() rolls back and refreshes.
+            reorderInstances(worktreeId, newOrder).catch(err => {
+                console.error("reorder failed:", err);
+                refresh();
+                alert(err.message || err);
+            });
+
+            dragState.sourceId = null;
+            dragState.targetId = null;
         }
 
         function renderWorkspace() {
@@ -699,11 +1792,13 @@
                 if (inst && inst.status !== 'running') {
                     termContainer.style.opacity = "0.6";
                     termContainer.style.filter = "grayscale(100%)";
-                    if (term) term.options.cursorBlink = false;
+                    const session = getActiveTerminalSession();
+                    if (session && session.term) session.term.options.cursorBlink = false;
                 } else {
                     termContainer.style.opacity = "1";
                     termContainer.style.filter = "none";
-                    if (term) term.options.cursorBlink = true;
+                    const session = getActiveTerminalSession();
+                    if (session && session.term) session.term.options.cursorBlink = true;
                     focusTerminalIfPossible();
                 }
             } else {
@@ -712,6 +1807,7 @@
                 termContainer.style.display = "none";
                 actions.classList.remove("visible");
             }
+            renderTerminalSessions();
         }
 
         function renderModals() {
@@ -744,9 +1840,20 @@
         // Interaction
         function selectWorktree(id) {
             if (state.activeWT === id) return;
+            const previousID = state.activeInst;
             state.activeWT = id;
             state.activeInst = null; // Reset instance selection
-            refresh(); // Will trigger auto-select instance in renderTabs
+            maybeDestroyInactiveStoppedSession(previousID);
+            render();
+            if (id === MAIN_WT_ID) {
+                // Main repo instances are already in state.instances; render() handles tabs.
+            } else {
+                refresh(); // Will trigger auto-select instance in renderTabs
+            }
+            // Reset and start git changes polling for the new worktree.
+            if (gitChangesTimer) clearInterval(gitChangesTimer);
+            refreshGitChanges();
+            gitChangesTimer = setInterval(refreshGitChanges, 10000);
         }
 
         function selectWorktreeByID(id) {
@@ -756,36 +1863,38 @@
 
         function selectInstance(id) {
             if (state.activeInst === id) return;
+            const previousID = state.activeInst;
             state.activeInst = id;
-
-            // Switch Terminal Context
-            disconnectTTY();
-            logCursor = 0;
             
             // Check if the new instance is running
             const inst = id ? state.instances.find(i => i.id === id) : null;
-            
-            if (term) {
-                resetTerminalForSwitch();
-            }
 
             render(); // update UI highlights
 
             if (id) {
                 // If stopped, just load log once. If running, connect TTY directly.
                 if (inst && inst.status !== 'running') {
-                    loadLog();
+                    const session = ensureTerminalSession(id);
+                    disconnectTTY(session);
+                    loadLog(session);
                     updateStatus("stopped");
                     // Style handled in renderWorkspace
                 } else {
-                    // For running instances, load initial log then connect TTY
-                    // The WebSocket will send initial log, then we trigger resize for redraw
-                    loadLog().finally(() => {
-                        connectTTY();
+                    const session = ensureTerminalSession(id);
+                    if (hasLiveTTYConnection(id)) {
+                        updateStatus("websocket live");
                         focusTerminalIfPossible();
-                    });
+                    } else {
+                        resetTerminalForSwitch(session);
+                        session.logCursor = 0;
+                        loadLog(session).finally(() => {
+                            connectTTY(session);
+                            focusTerminalIfPossible();
+                        });
+                    }
                 }
             }
+            maybeDestroyInactiveStoppedSession(previousID);
         }
 
         // Actions
@@ -922,7 +2031,8 @@
             try { 
                 await api("/api/instances/stop", { method: "POST", body: JSON.stringify({ id: state.activeInst }) }); 
                 // Render stop banner immediately before refresh/reload
-                if (term) term.write("\r\n\r\n\x1b[41;37m[Process Stopped]\x1b[0m\r\n");
+                const session = getActiveTerminalSession();
+                if (session && session.term) session.term.write("\r\n\r\n\x1b[41;37m[Process Stopped]\x1b[0m\r\n");
                 await refresh(); 
                 // Refresh will trigger re-render, which might re-load logs. 
                 // Ideally loadLog() handles the banner too, so it persists on reload.
@@ -944,7 +2054,10 @@
             if (!state.activeInst || !confirm("Delete instance log?")) return;
             try { await api("/api/instances/delete", { method: "POST", body: JSON.stringify({ id: state.activeInst }) }); refresh(); } catch (e) { alert(e); }
         }
-        function reconnectWS() { connectTTY(); }
+        function reconnectWS() {
+            const session = getActiveTerminalSession();
+            if (session) connectTTY(session);
+        }
 
         function parseLabelsInput(raw) {
             const out = {};
@@ -955,16 +2068,9 @@
             return out;
         }
 
-        // Terminal Logic (Shared)
-        let fitAddon = null;
+        // Terminal Logic (Per Instance)
         let windowHasFocus = true;
         let openDialogs = new Set();
-        let ttyState = 'IDLE'; // IDLE | CONNECTING | HANDSHAKING | READY | DISCONNECTING
-        let ttyStateCheckInterval = null; // For waiting state transitions
-
-        function resetTTYOutputDecoder() {
-            ttyOutputDecoder = null;
-        }
 
         function sanitizeTerminalOutput(text) {
             if (!text) return "";
@@ -985,212 +2091,250 @@
             return text;
         }
 
-        function writeSanitizedTerminalOutput(text) {
-            if (!term) return;
-            text = sanitizeTerminalOutput(text);
-            if (text) term.write(text);
+        function createTerminalHost(id) {
+            const host = document.createElement("div");
+            host.dataset.instanceId = id;
+            host.style.cssText = "position:absolute; inset:0; display:none;";
+            document.getElementById("terminal-container").appendChild(host);
+            return host;
         }
 
-        function decodeTTYOutputChunk(bytes) {
-            if (!bytes || !bytes.length) return "";
-            if (!ttyOutputDecoder) {
-                ttyOutputDecoder = new TextDecoder();
-            }
-            return ttyOutputDecoder.decode(bytes, { stream: true });
-        }
+        function createTerminalSession(id) {
+            if (!window.Terminal) return null;
+            const host = createTerminalHost(id);
+            const session = {
+                id,
+                container: host,
+                term: null,
+                termDataDisposable: null,
+                fitAddon: null,
+                logStream: null,
+                logCursor: 0,
+                ttySocket: null,
+                ttyReconnectTimer: null,
+                termInputBuffer: "",
+                termSendTimer: null,
+                ttyOutputDecoder: null,
+                ttyState: 'IDLE',
+                ttyStateCheckInterval: null,
+                resizeObserver: null,
+                lastResizeTime: 0,
+                appliedTTYSize: null,
+            };
 
-        function resetTerminalForSwitch() {
-            if (!term) return;
-            // A full local reset is more reliable than clearing a subset of modes.
-            // Some TUIs (including Copilot CLI) keep private modes/alternate-buffer
-            // state that otherwise survives instance switches inside the shared xterm.
-            term.reset();
-            term.clear();
-            term.write('\x1b[2J\x1b[3J\x1b[H');
-        }
-
-        function focusTerminalIfPossible() {
-            if (!term) return;
-            if (!windowHasFocus) return;
-            if (openDialogs.size > 0) return;
-            if (!state.activeInst) return;
-            if (ttyState !== 'READY') return; // CRITICAL: Only focus when connection is ready
-            const inst = state.instances.find(i => i.id === state.activeInst);
-            if (inst && inst.status !== 'running') return;
-            
-            term.focus();
-        }
-
-        function ensureTerminal() {
-            if (term || !window.Terminal) return;
-            term = new Terminal({
+            session.term = new Terminal({
                 convertEol: true, cursorBlink: true,
                 fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
                 fontSize: 13, theme: { background: "#0b1020" },
                 scrollback: 10000
             });
-            
+
             if (window.FitAddon) {
-                fitAddon = new FitAddon.FitAddon();
-                term.loadAddon(fitAddon);
+                session.fitAddon = new FitAddon.FitAddon();
+                session.term.loadAddon(session.fitAddon);
             }
 
-            // Fit logic ideally, but for now 100% width/height CSS handles container
-            const el = document.getElementById("terminal-container");
-            term.open(el);
-            if (fitAddon) fitAddon.fit();
+            session.term.open(host);
+            if (session.fitAddon) session.fitAddon.fit();
 
-            // Resize observer
-            let lastResizeTime = 0;
-            const resizeObserver = new ResizeObserver(entries => {
-                if (!term) return;
-                // Only act if the element has non-zero dimensions
+            session.resizeObserver = new ResizeObserver(entries => {
+                if (!session.term) return;
                 const entry = entries[0];
                 if (entry && (entry.contentRect.width === 0 || entry.contentRect.height === 0)) return;
 
-                if (fitAddon) {
-                    try { fitAddon.fit(); } catch (e) { console.error("xterm fit error:", e); }
+                if (session.fitAddon) {
+                    try { session.fitAddon.fit(); } catch (e) { console.error("xterm fit error:", e); }
                 } else {
-                    // Fallback calculation
-                    const w = entry ? entry.contentRect.width : el.clientWidth;
-                    const h = entry ? entry.contentRect.height : el.clientHeight;
-                    term.resize(Math.floor(w / 9), Math.floor(h / 17));
+                    const w = entry ? entry.contentRect.width : host.clientWidth;
+                    const h = entry ? entry.contentRect.height : host.clientHeight;
+                    session.term.resize(Math.floor(w / 9), Math.floor(h / 17));
                 }
 
-                // Send resize to backend (debounced)
                 const now = Date.now();
-                if (now - lastResizeTime > 100 && term.cols > 0 && term.rows > 0) {
-                    lastResizeTime = now;
-                    sendResize(term.cols, term.rows);
+                if (now - session.lastResizeTime > 100 && session.term.cols > 0 && session.term.rows > 0) {
+                    session.lastResizeTime = now;
+                    sendResize(session, session.term.cols, session.term.rows);
+                    syncTerminalToAppliedSize(session);
                 }
             });
-            resizeObserver.observe(el);
+            session.resizeObserver.observe(host);
 
-            term.onData(data => {
-                if (!state.activeInst) return;
-                const inst = state.instances.find(i => i.id === state.activeInst);
-                if (inst && inst.status !== 'running') return; // Disable input if not running
+            session.termDataDisposable = session.term.onData(data => {
+                const inst = state.instances.find(i => i.id === session.id);
+                if (inst && inst.status !== 'running') return;
 
-                // =====================================================================
-                // Terminal Query Response Filtering
-                // =====================================================================
-                // 
-                // Background: When xterm.js receives terminal query sequences (e.g.,
-                // ESC[c for Device Attributes), it generates responses and sends them
-                // via this onData() callback. If forwarded to PTY, these responses
-                // appear as garbage text in the shell.
-                //
-                // Problem: After TUI programs exit, the shell may send capability
-                // queries. xterm.js responds, and the response is displayed as
-                // unwanted text like: ;1R, rgb:0b0b/1010/2020, ?2027;0$y
-                //
-                // Current Solution: Filter detected responses before forwarding.
-                //
-                // Known Limitations (see docs/TERMINAL_FILTER_REVIEW.md):
-                // 1. Cannot distinguish user intent - user's intentional ESC sequences
-                //    (e.g., scripts testing terminal) may be incorrectly filtered.
-                // 2. Regex may miss edge cases or cause false positives.
-                // 3. Small coordinate reports may be incorrectly filtered.
-                // 4. Some response types (DSR, etc.) not explicitly covered.
-                // 5. Filter is in input path; see review doc for alternative approaches.
-                //
-                // If issues arise, refer to:
-                // - docs/TERMINAL_FILTER_REVIEW.md for detailed analysis
-                // - docs/TERMINAL_IO_ANALYSIS.md for architecture
-                // =====================================================================
-                
-                // Filter xterm.js auto-generated query responses from user input
-                // When xterm.js gains focus, it sends queries and generates responses.
-                // These responses appear in term.onData() and should NOT be sent to PTY.
-                // See docs/TERMINAL_FILTER_REVIEW.md for analysis.
-                // Known limitations: May filter user's intentional ESC sequences (rare).
                 if (isTerminalQueryResponse(data)) {
-                    // console.debug('Filtered terminal response:', data.length, 'bytes');
                     return;
                 }
 
-                if (ttySocket && ttySocket.readyState === WebSocket.OPEN) {
-                    ttySocket.send(data);
+                if (session.ttySocket && session.ttySocket.readyState === WebSocket.OPEN) {
+                    session.ttySocket.send(data);
                 } else {
-                    // Fallback HTTP input
-                    termInputBuffer += data;
-                    if (!termSendTimer) {
-                        termSendTimer = setTimeout(async () => {
-                            const input = termInputBuffer;
-                            termInputBuffer = "";
-                            termSendTimer = null;
+                    session.termInputBuffer += data;
+                    if (!session.termSendTimer) {
+                        session.termSendTimer = setTimeout(async () => {
+                            const input = session.termInputBuffer;
+                            session.termInputBuffer = "";
+                            session.termSendTimer = null;
                             try {
-                                await api("/api/instances/input", { method: "POST", body: JSON.stringify({ id: state.activeInst, input }) });
-                            } catch (e) { term.writeln(`\r\n[input error] ${e}`); }
+                                await api("/api/instances/input", { method: "POST", body: JSON.stringify({ id: session.id, input }) });
+                            } catch (e) {
+                                reportSessionError(session, "input error", e);
+                            }
                         }, 40);
                     }
                 }
             });
+
+            terminalSessions[id] = session;
+            return session;
+        }
+
+        function ensureTerminalSession(id) {
+            return getTerminalSession(id) || createTerminalSession(id);
+        }
+
+        function destroyTerminalSession(id) {
+            const session = getTerminalSession(id);
+            if (!session) return;
+            disconnectTTY(session);
+            if (session.termDataDisposable && typeof session.termDataDisposable.dispose === "function") {
+                session.termDataDisposable.dispose();
+                session.termDataDisposable = null;
+            }
+            if (session.resizeObserver) {
+                session.resizeObserver.disconnect();
+                session.resizeObserver = null;
+            }
+            if (session.term && typeof session.term.dispose === "function") {
+                session.term.dispose();
+                session.term = null;
+            }
+            if (session.container && session.container.parentNode) {
+                session.container.parentNode.removeChild(session.container);
+            }
+            session.container = null;
+            session.fitAddon = null;
+            session.termInputBuffer = "";
+            session.lastResizeTime = 0;
+            delete terminalSessions[id];
+        }
+
+        function maybeDestroyInactiveStoppedSession(id) {
+            if (!id || id === state.activeInst) return;
+            const inst = state.instances.find(i => i.id === id);
+            if (inst && inst.status === 'running') return;
+            destroyTerminalSession(id);
+        }
+
+        function reconcileTerminalSessions() {
+            const instanceMap = new Map(state.instances.map(i => [i.id, i]));
+            for (const id of Object.keys(terminalSessions)) {
+                const inst = instanceMap.get(id);
+                if (!inst) {
+                    destroyTerminalSession(id);
+                    continue;
+                }
+                if (inst.status !== 'running') {
+                    if (id === state.activeInst) {
+                        disconnectTTY(terminalSessions[id]);
+                    } else {
+                        destroyTerminalSession(id);
+                    }
+                }
+            }
+        }
+
+        function reconnectRunningTerminalSessions() {
+            for (const [id, session] of Object.entries(terminalSessions)) {
+                const inst = state.instances.find(i => i.id === id);
+                if (inst && inst.status === 'running' && !hasLiveTTYConnection(id)) {
+                    connectTTY(session);
+                }
+            }
+        }
+
+        function renderTerminalSessions() {
+            const activeID = state.activeInst;
+            for (const session of Object.values(terminalSessions)) {
+                session.container.style.display = session.id === activeID ? "block" : "none";
+            }
+            const activeSession = getActiveTerminalSession();
+            if (!activeSession || !activeSession.term) return;
+            setTimeout(() => {
+                if (state.activeInst !== activeSession.id || !activeSession.term) return;
+                if (activeSession.fitAddon) {
+                    try { activeSession.fitAddon.fit(); } catch (e) { console.error("xterm fit error:", e); }
+                }
+                if (activeSession.term.cols > 0 && activeSession.term.rows > 0) {
+                    sendResize(activeSession, activeSession.term.cols, activeSession.term.rows);
+                    syncTerminalToAppliedSize(activeSession);
+                }
+            }, 0);
+        }
+
+        function resetTTYOutputDecoder(session) {
+            if (!session) return;
+            session.ttyOutputDecoder = null;
+        }
+
+        function writeSanitizedTerminalOutput(session, text) {
+            if (!session || !session.term) return;
+            text = sanitizeTerminalOutput(text);
+            if (text) session.term.write(text);
+        }
+
+        function decodeTTYOutputChunk(session, bytes) {
+            if (!bytes || !bytes.length) return "";
+            if (!session.ttyOutputDecoder) {
+                session.ttyOutputDecoder = new TextDecoder();
+            }
+            return session.ttyOutputDecoder.decode(bytes, { stream: true });
+        }
+
+        function resetTerminalForSwitch(session) {
+            if (!session || !session.term) return;
+            session.term.reset();
+            session.term.clear();
+            session.term.write('\x1b[2J\x1b[3J\x1b[H');
+        }
+
+        function focusTerminalIfPossible() {
+            const session = getActiveTerminalSession();
+            if (!session || !session.term) return;
+            if (!windowHasFocus) return;
+            if (openDialogs.size > 0) return;
+            if (!state.activeInst) return;
+            if (session.ttyState !== 'READY') return;
+            const inst = state.instances.find(i => i.id === state.activeInst);
+            if (inst && inst.status !== 'running') return;
+            // Don't steal focus from the rename input
+            if (state.renamingInst) return;
+
+            session.term.focus();
         }
 
         // Minimum length for terminal response detection
         const MIN_RESPONSE_LENGTH = 2;
 
-        // =====================================================================
-        // Terminal Query Response Detection
-        // =====================================================================
-        // 
-        // Detects xterm.js auto-generated responses that should NOT be forwarded
-        // to the PTY. These responses are generated when xterm.js receives
-        // terminal query sequences.
-        //
-        // Response Types Handled:
-        // - OSC responses: ESC]11;rgb:... (background color), ESC]4;... (palette)
-        // - CSI responses: ESC[?1;2c (Device Attributes), ESC[?2027;0$y (DEC mode)
-        // - Cursor Position: ESC[row;colR or fragment ;colR
-        // - Partial fragments: Missing ESC prefix due to data split
-        //
-        // CRITICAL LIMITATIONS:
-        // - User-sent sequences matching these patterns WILL BE FILTERED
-        // - Some legitimate sequences may be caught (false positives)
-        // - See docs/TERMINAL_FILTER_REVIEW.md for complete analysis
-        //
-        // DO NOT MODIFY without reviewing:
-        // - docs/TERMINAL_FILTER_REVIEW.md (Section 3: Coverage Gap Analysis)
-        // - docs/TERMINAL_IO_ANALYSIS.md (Section 2.2: ESC Prefix Handling)
-        // =====================================================================
-        
         function isTerminalQueryResponse(data) {
             if (!data || data.length < MIN_RESPONSE_LENGTH) return false;
-            
-            // Check for ESC prefix
             if (data.charCodeAt(0) !== 0x1b) {
-                // No ESC - check for partial response patterns (missing ESC[ prefix)
-                // Pattern: ;1R, 1;1R, ;1;1R (cursor position report suffix)
-                // These appear when ESC[ is stripped from the response
                 if (/^;?\d+(;\d+)?R$/i.test(data)) return true;
-                // Pattern: ?1;1$y (DEC mode report suffix)
                 if (/^\?\d+(;\d+)*\$y$/i.test(data)) return true;
-                // Pattern: rgb:hex/hex/hex (OSC color response suffix)
                 if (/^rgb:/i.test(data)) return true;
                 return false;
             }
-            
-            // OSC responses: \x1b]... (color queries, etc.)
             if (data[1] === ']' || data[1] === 'P') return true;
-            
-            // CSI responses starting with ? (private mode reports)
             if (data[1] === '[' && data.length > 2 && data[2] === '?') {
-                // DEC private mode report: ?...$y
                 if (/\$\d*y$/.test(data)) return true;
-                // Device attributes: ?...c
                 if (/\?[\d;]+c$/.test(data)) return true;
-                // Cursor position report: ?...R
                 if (/\?[\d;]+R$/i.test(data)) return true;
             }
-            
-            // Standard CSI cursor position: \x1b[row;colR
             if (data[1] === '[' && /\[\d+;\d+R$/i.test(data)) return true;
-            
             return false;
         }
 
-        // Auto-focus terminal when window gains focus and no dialogs are open
         window.addEventListener('focus', () => {
             windowHasFocus = true;
             focusTerminalIfPossible();
@@ -1200,7 +2344,24 @@
             windowHasFocus = false;
         });
 
-        // Track dialog open/close
+        // Trigger browser confirmation on any page close/refresh/navigation.
+        // Instances continue running regardless of user choice.
+        window.addEventListener('beforeunload', (event) => {
+            event.preventDefault();
+            event.returnValue = '';
+            // Clean up timers and measurement span when the page is unloaded or hidden.
+            if (gitChangesTimer) clearInterval(gitChangesTimer);
+            if (_truncateSpan) { _truncateSpan.remove(); _truncateSpan = null; }
+        });
+        document.addEventListener('visibilitychange', () => {
+            if (document.visibilityState === 'hidden') {
+                if (gitChangesTimer) clearInterval(gitChangesTimer);
+            } else if (document.visibilityState === 'visible' && state.activeWT) {
+                refreshGitChanges();
+                gitChangesTimer = setInterval(refreshGitChanges, 10000);
+            }
+        });
+
         const originalShowModal = HTMLDialogElement.prototype.showModal;
         HTMLDialogElement.prototype.showModal = function() {
             openDialogs.add(this.id);
@@ -1218,129 +2379,186 @@
             document.getElementById("status-bar").textContent = "Transport: " + msg;
         }
 
-        function sendResize(cols, rows) {
-            if (!ttySocket || ttySocket.readyState !== WebSocket.OPEN) return;
-            if (cols <= 0 || rows <= 0) return;
-            const msg = JSON.stringify({ type: "resize", cols, rows });
-            ttySocket.send(msg);
+        function reportSessionError(session, prefix, err) {
+            if (!session) return;
+            const message = `${prefix} ${err}`;
+            if (session.term && state.activeInst === session.id) {
+                session.term.writeln(`\r\n[${message}]`);
+                return;
+            }
+            console.error(`[instance ${session.id}] ${message}`);
         }
 
-        async function loadLog() {
-            if (!state.activeInst) return;
+        function applyTTYSize(session, cols, rows) {
+            if (!session || !session.term) return;
+            if (cols <= 0 || rows <= 0) return;
+            session.appliedTTYSize = { cols, rows };
+            if (session.term.cols !== cols || session.term.rows !== rows) {
+                session.term.resize(cols, rows);
+            }
+        }
+
+        function syncTerminalToAppliedSize(session) {
+            if (!session || !session.appliedTTYSize) return;
+            applyTTYSize(session, session.appliedTTYSize.cols, session.appliedTTYSize.rows);
+        }
+
+        function parseTTYControlMessage(data) {
+            if (typeof data !== "string" || data.length === 0 || data[0] !== "{") return null;
             try {
-                const res = await fetch(`/api/instances/log?id=${state.activeInst}&since=0`, { headers });
+                const msg = JSON.parse(data);
+                if (!msg || (msg.type !== "ready" && msg.type !== "resize")) return null;
+                return msg;
+            } catch (e) {
+                return null;
+            }
+        }
+
+        function sendResize(session, cols, rows) {
+            if (!session || !session.ttySocket || session.ttySocket.readyState !== WebSocket.OPEN) return;
+            if (cols <= 0 || rows <= 0) return;
+            const msg = JSON.stringify({ type: "resize", cols, rows });
+            session.ttySocket.send(msg);
+        }
+
+        // Fetches logs from the server and writes them to the terminal.
+        // Uses AbortController to cancel any previous pending requests for this session
+        // to prevent out-of-order writes or race conditions.
+        async function loadLog(session) {
+            if (!session) return;
+            // Cancel previous load if any
+            if (session.loadLogController) {
+                session.loadLogController.abort();
+            }
+            const controller = new AbortController();
+            session.loadLogController = controller;
+
+            try {
+                const res = await fetch(`/api/instances/log?id=${session.id}&since=0`, { 
+                    headers, 
+                    signal: controller.signal 
+                });
                 rememberServerRevision(res);
                 if (!res.ok) throw new Error(await res.text());
                 let text = await res.text();
                 const next = parseInt(res.headers.get("X-Log-Offset") || "0", 10);
-                logCursor = next || text.length;
-                if (term) { 
-                    // Check if instance is running - don't reset terminal for running instances
-                    // to preserve TUI state (alternate screen buffer, cursor position, etc.)
-                    const inst = state.instances.find(i => i.id === state.activeInst);
+                session.logCursor = next || text.length;
+                if (session.term) {
+                    const inst = state.instances.find(i => i.id === session.id);
                     const isRunning = inst && inst.status === 'running';
-                    
                     if (!isRunning) {
-                        // Only reset for stopped instances
-                        term.reset();
+                        session.term.reset();
                     }
-                    writeSanitizedTerminalOutput(text);
-                    
-                    // Check if stopped and append banner
+                    writeSanitizedTerminalOutput(session, text);
                     if (inst && inst.status !== 'running') {
-                        term.write("\r\n\r\n\x1b[41;37m[Process Stopped]\x1b[0m\r\n");
+                        session.term.write("\r\n\r\n\x1b[41;37m[Process Stopped]\x1b[0m\r\n");
                     }
                 }
-            } catch (e) { term && term.write(`\r\n[load log error] ${e}`); }
+            } catch (e) {
+                if (e.name === 'AbortError') return; // Ignore cancelled requests
+                reportSessionError(session, "load log error", e);
+            } finally {
+                if (session.loadLogController === controller) {
+                    session.loadLogController = null;
+                }
+            }
         }
 
-        async function loadLogSince() {
-            if (!state.activeInst) return;
+        async function loadLogSince(session) {
+            if (!session) return;
             try {
-                const res = await fetch(`/api/instances/log?id=${state.activeInst}&since=${logCursor}`, { headers });
+                const res = await fetch(`/api/instances/log?id=${session.id}&since=${session.logCursor}`, { headers });
                 rememberServerRevision(res);
                 if (!res.ok) throw new Error();
                 let text = await res.text();
                 const next = parseInt(res.headers.get("X-Log-Offset") || "0", 10);
-                writeSanitizedTerminalOutput(text);
-                if (next) logCursor = next;
+                writeSanitizedTerminalOutput(session, text);
+                if (next) session.logCursor = next;
             } catch (e) { }
         }
 
-        function disconnectTTY() {
-            resetTTYOutputDecoder();
-            if (term && typeof term.blur === "function") {
-                term.blur();
+        function disconnectTTY(session) {
+            if (!session) return;
+            resetTTYOutputDecoder(session);
+            if (session.term && typeof session.term.blur === "function" && state.activeInst === session.id) {
+                session.term.blur();
             }
-            // Clear any pending state check interval
-            if (ttyStateCheckInterval) {
-                clearInterval(ttyStateCheckInterval);
-                ttyStateCheckInterval = null;
+            if (session.ttyStateCheckInterval) {
+                clearInterval(session.ttyStateCheckInterval);
+                session.ttyStateCheckInterval = null;
             }
-            // Set DISCONNECTING if there's an active socket, otherwise IDLE
-            // The onclose handler will transition to IDLE after socket closes
-            if (ttySocket) {
-                ttyState = 'DISCONNECTING';
+            if (session.termSendTimer) {
+                clearTimeout(session.termSendTimer);
+                session.termSendTimer = null;
+            }
+            if (session.ttySocket) {
+                session.ttySocket.onopen = null;
+                session.ttySocket.onmessage = null;
+                session.ttySocket.onclose = null;
+                session.ttySocket.onerror = null;
+                session.ttyState = 'DISCONNECTING';
             } else {
-                ttyState = 'IDLE';
+                session.ttyState = 'IDLE';
             }
-            if (ttyReconnectTimer) clearTimeout(ttyReconnectTimer);
-            if (logStream) { logStream.close(); logStream = null; }
-            if (ttySocket) { ttySocket.close(); ttySocket = null; }
+            if (session.ttyReconnectTimer) {
+                clearTimeout(session.ttyReconnectTimer);
+                session.ttyReconnectTimer = null;
+            }
+            if (session.logStream) {
+                session.logStream.onmessage = null;
+                session.logStream.onerror = null;
+                session.logStream.close();
+                session.logStream = null;
+            }
+            if (session.ttySocket) { session.ttySocket.close(); session.ttySocket = null; }
+            session.termInputBuffer = "";
         }
 
-        function connectTTY() {
-            // Phase 1: Disconnect Previous (already done in disconnectTTY)
-            disconnectTTY();
+        function connectTTY(session) {
+            if (!session) return;
+            disconnectTTY(session);
 
-            // Phase 3.1: Validate state before establishing new connection
-            // Must be IDLE before transitioning to CONNECTING (per §5.3)
-            if (ttyState !== 'IDLE') {
-                console.warn('connectTTY: invalid state transition from', ttyState, '- waiting for IDLE');
-                // Wait for state to become IDLE before proceeding, with max 10 retries (1 second)
+            if (session.ttyState !== 'IDLE') {
+                console.warn('connectTTY: invalid state transition from', session.ttyState, '- waiting for IDLE');
                 let retries = 0;
                 const maxRetries = 10;
-                ttyStateCheckInterval = setInterval(() => {
+                session.ttyStateCheckInterval = setInterval(() => {
                     retries++;
-                    if (ttyState === 'IDLE' || ttyState === undefined) {
-                        clearInterval(ttyStateCheckInterval);
-                        ttyStateCheckInterval = null;
-                        // Retry connection
-                        if (state.activeInst) {
-                            setTimeout(() => connectTTY(), 50);
-                        }
+                    if (session.ttyState === 'IDLE' || session.ttyState === undefined) {
+                        clearInterval(session.ttyStateCheckInterval);
+                        session.ttyStateCheckInterval = null;
+                        setTimeout(() => connectTTY(session), 50);
                     } else if (retries >= maxRetries) {
-                        clearInterval(ttyStateCheckInterval);
-                        ttyStateCheckInterval = null;
+                        clearInterval(session.ttyStateCheckInterval);
+                        session.ttyStateCheckInterval = null;
                         console.error('connectTTY: state did not become IDLE after max retries, forcing IDLE');
-                        ttyState = 'IDLE';
-                        // Retry connection once after forcing IDLE
-                        if (state.activeInst) {
-                            setTimeout(() => connectTTY(), 50);
-                        }
+                        session.ttyState = 'IDLE';
+                        setTimeout(() => connectTTY(session), 50);
                     }
                 }, 100);
                 return;
             }
 
-            ttyState = 'CONNECTING';
-            const id = state.activeInst;
-            if (!id) { updateStatus("idle"); return; }
-            
+            session.ttyState = 'CONNECTING';
+            const id = session.id;
             const inst = state.instances.find(i => i.id === id);
+            if (!id) {
+                if (state.activeInst === id) updateStatus("idle");
+                return;
+            }
             if (inst && inst.status !== 'running') {
-                ttyState = 'IDLE'; // Reset state before returning
-                updateStatus("stopped");
+                session.ttyState = 'IDLE';
+                if (state.activeInst === id) updateStatus("stopped");
                 return;
             }
 
             if (window.WebSocket) {
-                updateStatus("connecting ws...");
+                if (state.activeInst === id) updateStatus("connecting ws...");
                 const proto = location.protocol === "https:" ? "wss" : "ws";
                 let url = `${proto}://${location.host}/api/instances/tty/ws?id=${encodeURIComponent(id)}`;
                 if (token) url += `&token=${encodeURIComponent(token)}`;
 
-                resetTTYOutputDecoder();
+                resetTTYOutputDecoder(session);
                 const ws = new WebSocket(url);
                 ws.binaryType = "arraybuffer";
 
@@ -1348,123 +2566,335 @@
                 let handshakeTimeout = null;
 
                 ws.onopen = () => {
-                    ttyState = 'HANDSHAKING';
-                    // Set handshake timeout (5 seconds)
+                    session.ttyState = 'HANDSHAKING';
                     handshakeTimeout = setTimeout(() => {
-                        if (ttyState !== 'READY' && ws === ttySocket) {
+                        if (session.ttyState !== 'READY' && ws === session.ttySocket) {
                             console.error('WebSocket handshake timeout: no "ready" message received');
-                            updateStatus("handshake timeout");
-                            ttyState = 'DISCONNECTING';
+                            if (state.activeInst === id) updateStatus("handshake timeout");
+                            session.ttyState = 'DISCONNECTING';
                             ws.close();
-                            // Fallback to SSE after timeout
-                            setTimeout(() => startSSE(), 500);
+                            setTimeout(() => startSSE(session), 500);
                         }
                     }, 5000);
                 };
+
                 ws.onmessage = (ev) => {
-                    // Handle handshake: wait for "ready" message first
-                    if (ttyState !== 'READY') {
-                        try {
-                            const msg = JSON.parse(ev.data);
-                            if (msg.type === 'ready') {
-                                ttyState = 'READY';
-                                // Clear handshake timeout
-                                if (handshakeTimeout) {
-                                    clearTimeout(handshakeTimeout);
-                                    handshakeTimeout = null;
-                                }
-                                if (ttySocket === ws) {
-                                    updateStatus("websocket live");
-                                }
-                                // Send initial resize to start data flow
-                                if (term && term.cols > 0 && term.rows > 0) {
-                                    sendResize(term.cols, term.rows);
-                                }
-                                setTimeout(() => {
-                                    if (ttySocket === ws) {
-                                        focusTerminalIfPossible();
-                                    }
-                                }, 0);
-                                return;
-                            }
-                        } catch (e) {
-                            // Not JSON, treat as data (shouldn't happen before ready)
+                    const controlMsg = parseTTYControlMessage(ev.data);
+                    if (controlMsg && controlMsg.type === 'ready') {
+                        session.ttyState = 'READY';
+                        if (handshakeTimeout) {
+                            clearTimeout(handshakeTimeout);
+                            handshakeTimeout = null;
                         }
+                        if (state.activeInst === id) {
+                            updateStatus("websocket live");
+                        }
+                        if (session.term && session.term.cols > 0 && session.term.rows > 0) {
+                            sendResize(session, session.term.cols, session.term.rows);
+                            syncTerminalToAppliedSize(session);
+                        }
+                        setTimeout(() => {
+                            if (state.activeInst === id && session.ttySocket === ws) {
+                                focusTerminalIfPossible();
+                            }
+                        }, 0);
+                        return;
+                    }
+                    if (controlMsg && controlMsg.type === 'resize') {
+                        applyTTYSize(session, controlMsg.cols, controlMsg.rows);
+                        return;
                     }
 
-                    // Handle binary/text data
                     if (ev.data instanceof ArrayBuffer) {
                         const u8 = new Uint8Array(ev.data);
-                        if (u8.length && term) {
-                            writeSanitizedTerminalOutput(decodeTTYOutputChunk(u8));
+                        if (u8.length && session.term) {
+                            writeSanitizedTerminalOutput(session, decodeTTYOutputChunk(session, u8));
                         }
-                    } else if (term) {
-                        writeSanitizedTerminalOutput(ev.data);
+                    } else if (session.term) {
+                        writeSanitizedTerminalOutput(session, ev.data);
                     }
-                    
-                    // After receiving first data (after ready), trigger resize for TUI redraw
-                    if (isFirstData && ttyState === 'READY' && term) {
+
+                    if (isFirstData && session.ttyState === 'READY' && session.term) {
                         isFirstData = false;
                         setTimeout(() => {
-                            if (term && ws === ttySocket && ws.readyState === WebSocket.OPEN) {
-                                const cols = term.cols;
-                                const rows = term.rows;
+                            if (session.term && ws === session.ttySocket && ws.readyState === WebSocket.OPEN) {
+                                const cols = session.term.cols;
+                                const rows = session.term.rows;
                                 if (cols > 0 && rows > 0) {
-                                    // Send resize to backend and trigger local redraw
-                                    sendResize(cols, rows);
-                                    term.resize(cols, rows);
+                                    sendResize(session, cols, rows);
+                                    syncTerminalToAppliedSize(session);
                                 }
                             }
                         }, 50);
                     }
                 };
-                
+
                 ws.onclose = () => {
-                    resetTTYOutputDecoder();
-                    // Clear handshake timeout on close
+                    resetTTYOutputDecoder(session);
                     if (handshakeTimeout) {
                         clearTimeout(handshakeTimeout);
                         handshakeTimeout = null;
                     }
-                    ttyState = 'IDLE';
-                    if (ttySocket === ws) {
-                        // Only reconnect if instance is still running
-                        const inst = state.instances.find(i => i.id === state.activeInst);
-                        if (inst && inst.status === 'running') {
-                            updateStatus("ws closed, retrying...");
-                            ttyReconnectTimer = setTimeout(connectTTY, 1000);
-                        } else {
+                    session.ttyState = 'IDLE';
+                    if (session.ttySocket === ws) {
+                        const latest = state.instances.find(i => i.id === session.id);
+                        if (latest && latest.status === 'running') {
+                            if (state.activeInst === session.id) updateStatus("ws closed, retrying...");
+                            session.ttyReconnectTimer = setTimeout(() => connectTTY(session), 1000);
+                        } else if (state.activeInst === session.id) {
                             updateStatus("stopped");
                         }
                     }
                 };
-                ttySocket = ws;
+                session.ttySocket = ws;
             } else {
-                // Fallback SSE
-                startSSE();
+                startSSE(session);
             }
         }
 
-        function startSSE() {
-            updateStatus("sse live");
-            // Simplified SSE logic for brevity, reused from before
-            let url = `/api/instances/log/stream?id=${encodeURIComponent(state.activeInst)}&since=${logCursor}`;
+        function startSSE(session) {
+            if (!session) return;
+            if (state.activeInst === session.id) updateStatus("sse live");
+            let url = `/api/instances/log/stream?id=${encodeURIComponent(session.id)}&since=${session.logCursor}`;
             if (token) url += `&token=${encodeURIComponent(token)}`;
             const es = new EventSource(url);
             const onLog = (ev) => {
                 try {
                     const msg = JSON.parse(ev.data);
-                    if (msg.chunk && term) writeSanitizedTerminalOutput(msg.chunk);
-                    if (msg.next) logCursor = msg.next;
+                    if (msg.chunk && session.term) writeSanitizedTerminalOutput(session, msg.chunk);
+                    if (msg.next) session.logCursor = msg.next;
                 } catch (e) { }
             };
-            // Backend sends 'event: log'
             es.addEventListener("log", onLog);
-            // Fallback for default message just in case
             es.onmessage = onLog;
+
+            es.onerror = () => { es.close(); setTimeout(() => startSSE(session), 2000); };
+            session.logStream = es;
+        }
+
+        async function openTerminal(id, event) {
+            event.stopPropagation();
+            const key = `term:${id}`;
+            if (loadingActions.has(key)) return;
+            loadingActions.add(key);
+            renderSidebar();
+
+            try {
+                const controller = new AbortController();
+                const timeoutId = setTimeout(() => controller.abort(), 10000);
+                try {
+                    await api("/api/worktrees/open-terminal", {
+                        method: "POST",
+                        body: JSON.stringify({ id: id }),
+                        signal: controller.signal
+                    });
+                } finally {
+                    clearTimeout(timeoutId);
+                }
+            } catch (e) {
+                console.error("Failed to open terminal:", e);
+                alert("Failed to open terminal: " + e.message);
+            } finally {
+                loadingActions.delete(key);
+                renderSidebar();
+            }
+        }
+
+        async function openFinder(id, event) {
+            event.stopPropagation();
+            const key = `finder:${id}`;
+            if (loadingActions.has(key)) return;
+            loadingActions.add(key);
+            renderSidebar();
+
+            try {
+                const controller = new AbortController();
+                const timeoutId = setTimeout(() => controller.abort(), 10000);
+                try {
+                    await api("/api/worktrees/open-finder", {
+                        method: "POST",
+                        body: JSON.stringify({ id: id }),
+                        signal: controller.signal
+                    });
+                } finally {
+                    clearTimeout(timeoutId);
+                }
+            } catch (e) {
+                console.error("Failed to open finder:", e);
+                alert("Failed to open finder: " + e.message);
+            } finally {
+                loadingActions.delete(key);
+                renderSidebar();
+            }
+        }
+
+        // Resource Monitor
+        let monitorTimer = null;
+
+        function openModalMonitor() {
+            const dlg = document.getElementById("modal-monitor");
+            dlg.showModal();
+            fetchMonitorStats();
+            monitorTimer = setInterval(fetchMonitorStats, 1000);
+        }
+
+        function closeMonitorModal() {
+            if (monitorTimer) {
+                clearInterval(monitorTimer);
+                monitorTimer = null;
+            }
+            const dlg = document.getElementById("modal-monitor");
+            if (dlg.open) dlg.close();
+        }
+
+        function toggleMonitorLicenses() {
+            const btn = document.getElementById("monitor-licenses-toggle");
+            const list = document.getElementById("monitor-licenses-list");
+            btn.classList.toggle("open");
+            list.classList.toggle("open");
+        }
+
+        async function fetchMonitorStats() {
+            try {
+                const data = await api("/api/instances/stats");
+                renderMonitorStats(data);
+            } catch (e) {
+                console.error("Failed to fetch monitor stats:", e);
+            }
+        }
+
+        function renderMonitorStats(data) {
+            // Render global summary
+            const summaryEl = document.getElementById("monitor-summary");
+            summaryEl.innerHTML = `
+                <div class="monitor-summary-item">
+                    <div class="label">Instances</div>
+                    <div class="value">${data.global ? data.global.instance_count : 0}</div>
+                </div>
+                <div class="monitor-summary-item">
+                    <div class="label">Total CPU</div>
+                    <div class="value">${data.global ? data.global.total_cpu.toFixed(1) : "0.0"}%</div>
+                </div>
+                <div class="monitor-summary-item">
+                    <div class="label">Total Memory</div>
+                    <div class="value">${data.global ? formatBytes(data.global.total_memory) : "0 B"}</div>
+                </div>
+            `;
+
+            // Render table grouped by worktree
+            const tbody = document.getElementById("monitor-tbody");
+            if (!data.instances || data.instances.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="6" class="empty-state">No instances</td></tr>';
+                return;
+            }
+
+            // Group instances by worktree_id
+            const groups = {};
+            for (const inst of data.instances) {
+                const key = inst.worktree_id;
+                if (!groups[key]) {
+                    groups[key] = {
+                        name: inst.worktree_name,
+                        instances: [],
+                        stat: null,
+                    };
+                }
+                groups[key].instances.push(inst);
+            }
+
+            // Fill in worktree stats
+            if (data.worktrees) {
+                for (const ws of data.worktrees) {
+                    if (groups[ws.worktree_id]) {
+                        groups[ws.worktree_id].stat = ws;
+                    }
+                }
+            }
+
+            let html = "";
+            for (const [wtId, group] of Object.entries(groups)) {
+                const wtStat = group.stat || {};
+                html += `<tr class="wt-group-header">
+                    <td>${escapeHTML(group.name || wtId)}</td>
+                    <td colspan="2">${group.instances.length} instance${group.instances.length !== 1 ? "s" : ""}</td>
+                    <td></td>
+                    <td style="text-align:right">${(wtStat.total_cpu || 0).toFixed(1)}%</td>
+                    <td style="text-align:right">${formatBytes(wtStat.total_memory || 0)}</td>
+                </tr>`;
+                for (const inst of group.instances) {
+                    const connClass = inst.connection_type === "websocket" ? "conn-ws" : inst.connection_type === "sse" ? "conn-sse" : "conn-none";
+                    const connLabel = inst.connection_type === "websocket" ? "WS" : inst.connection_type === "sse" ? "SSE" : "none";
+                    html += `<tr>
+                        <td>${escapeHTML(inst.name || inst.id)}</td>
+                        <td>${inst.pid > 0 ? inst.pid : "-"}</td>
+                        <td>${escapeHTML(inst.status)}</td>
+                        <td class="${connClass}">${escapeHTML(connLabel)}</td>
+                        <td style="text-align:right">${inst.cpu_percent.toFixed(1)}%</td>
+                        <td style="text-align:right">${formatBytes(inst.memory_rss_bytes)}</td>
+                    </tr>`;
+                }
+            }
+            tbody.innerHTML = html;
+        }
+
+        function formatBytes(bytes) {
+            if (bytes === 0 || bytes === undefined) return "0 B";
+            if (bytes < 1024) return bytes + " B";
+            if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + " KB";
+            if (bytes < 1024 * 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + " MB";
+            return (bytes / (1024 * 1024 * 1024)).toFixed(2) + " GB";
+        }
+
+        function escapeHTML(s) {
+            if (s === null || s === undefined) return "";
+            return String(s)
+                .replace(/&/g, "&amp;")
+                .replace(/</g, "&lt;")
+                .replace(/>/g, "&gt;")
+                .replace(/"/g, "&quot;");
+        }
+
+        // Reloads the current instance's terminal:
+        // 1. Disconnects live TTY to stop incoming data.
+        // 2. Cancels any in-flight log loads.
+        // 3. Clears the terminal.
+        // 4. Fetches full logs from the server.
+        // 5. Reconnects TTY to resume live updates.
+        async function refreshCurrentInstance() {
+            const session = getActiveTerminalSession();
+            if (!session) return;
             
-            es.onerror = () => { es.close(); setTimeout(startSSE, 2000); };
-            logStream = es;
+            // Disconnect first to stop live updates during refresh
+            disconnectTTY(session);
+
+            // Cancel previous load if any
+            if (session.loadLogController) {
+                session.loadLogController.abort();
+            }
+
+            // Clear terminal to avoid duplication
+            if (session.term) {
+                session.term.reset();
+                session.term.clear();
+            }
+            
+            // Reload logs
+            await loadLog(session);
+
+            // Reconnect TTY if running
+            const inst = state.instances.find(i => i.id === session.id);
+            if (inst && inst.status === 'running') {
+                connectTTY(session);
+            }
+
+            // Scroll to bottom
+            if (session.term) session.term.scrollToBottom();
+        }
+
+        // Scrolls the active terminal to the bottom.
+        function scrollCurrentInstanceToBottom() {
+            const session = getActiveTerminalSession();
+            if (session && session.term) session.term.scrollToBottom();
         }
 
         // Boot

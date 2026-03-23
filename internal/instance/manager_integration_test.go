@@ -45,6 +45,46 @@ func TestStartStopIntegration(t *testing.T) {
 	waitRuntimeReleased(t, m, inst.ID)
 }
 
+func TestStartMainRepoInstance(t *testing.T) {
+	requireRuntimeDeps(t)
+
+	dataDir := mustTempDir(t, "mw-data-")
+	mainDir := mustTempDir(t, "mw-main-")
+	fs := store.FileStore{Path: filepath.Join(dataDir, "state.json")}
+	if err := fs.Save(store.State{}); err != nil {
+		t.Fatalf("seed state failed: %v", err)
+	}
+
+	m := &Manager{DataDir: dataDir, Store: fs}
+	inst, err := m.Start(StartInput{
+		WorktreeID: MainWorktreeID,
+		Root:       mainDir,
+		Command:    "echo main",
+		Name:       "main-shell",
+	})
+	if err != nil {
+		t.Fatalf("Start with Root failed: %v", err)
+	}
+	if inst.ID == "" {
+		t.Fatalf("expected non-empty instance ID")
+	}
+	if inst.WorktreeID != MainWorktreeID {
+		t.Fatalf("WorktreeID = %q, want %q", inst.WorktreeID, MainWorktreeID)
+	}
+	if inst.WorktreeName != filepath.Base(mainDir) {
+		t.Fatalf("WorktreeName = %q, want %q", inst.WorktreeName, filepath.Base(mainDir))
+	}
+	if inst.Cwd != mainDir {
+		t.Fatalf("Cwd = %q, want %q", inst.Cwd, mainDir)
+	}
+
+	if err := m.Stop(inst.ID); err != nil {
+		t.Fatalf("Stop failed: %v", err)
+	}
+	waitInstanceNotRunning(t, fs, inst.ID)
+	waitRuntimeReleased(t, m, inst.ID)
+}
+
 func TestConcurrentMultiInstanceStartStop(t *testing.T) {
 	requireRuntimeDeps(t)
 

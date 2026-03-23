@@ -17,6 +17,7 @@ It does **not** analyze project code or prevent concurrent write conflicts insid
 - `internal/store/` — persistent state store (`state.json`) with file locking + atomic writes.
 - `internal/redact/` — secret redaction for stored logs/backlog.
 - `internal/mcp/` — MCP adapter surface (tool names + app-level tool dispatch), keeping core decoupled.
+- `internal/monitor/` — resource stats collector (CPU delta via gopsutil/process.Times, memory via RSS)
 - `internal/ui/` — embedded static UI.
 
 ## 3. Data & persistence
@@ -27,13 +28,30 @@ It does **not** analyze project code or prevent concurrent write conflicts insid
 ### 3.1.1 Worktree directory layout
 - Default: worktrees are created next to the repo under `<repo-name>-myworktree/<worktree-name>/`.
 - Override: `-worktrees-dir=data` uses the legacy location under the per-project data dir; you can also set a custom path.
-  - `state.json` — managed worktrees + managed instances
+  - `state.json` — managed worktrees + managed instances + tab order + version
   - `tags.json` — project-level tags
   - `logs/<instanceId>.log` — rolling instance backlog
 
 ### 3.2 State model
 - Worktree: id, name, path, branch, baseRef, createdAt
 - Instance: id, worktreeId, tagId, command, cwd, env (sanitized), pid, status, logPath, timestamps
+- TabOrder (at State level): map of worktree_id to ordered list of instance IDs
+- **Version** (at State level): monotonically increasing int64, incremented on every write via `SaveWithVersion`. Used for optimistic locking on concurrent modification detection.
+- Main Repo: not persisted; served via `GET /api/main` with live git branch
+
+### 3.3 Main workspace (sidebar)
+
+The sidebar shows a pinned **Main Workspace** item at the top (purple accent), followed by a "Worktrees" divider and the managed worktree list.
+
+- **Main repo**: `GET /api/main` returns `{name, branch}`. The branch is live — queried via `git rev-parse --abbrev-ref HEAD` (via `gitx.CurrentBranch`). Returns empty string for `branch` on detached HEAD (e.g., CI shallow clones), otherwise returns the current branch name.
+- **Worktrees**: `GET /api/worktrees` also returns live branches — `worktree.Manager.List()` queries `git rev-parse --abbrev-ref HEAD` per worktree path on each call. The `branch` field reflects the currently checked-out branch, not the creation-time branch.
+- **Quick actions**: The main repo item and each managed worktree row render two SVG shortcut buttons when the UI is accessed via `localhost` or `127.0.0.1`: one opens Terminal at the target path, the other opens Finder. These buttons are intentionally hidden for remote/browser sessions because the action targets the host machine running `myworktree`, not the remote client device.
+- **Server-side boundary**: The backend does not trust the frontend visibility check. `POST /api/worktrees/open-terminal` and `POST /api/worktrees/open-finder` reject non-loopback clients based on the request's remote address, so remote callers cannot trigger host GUI actions by directly invoking the API.
+- **Host-side execution**: Clicking a quick action calls backend endpoints that resolve the target path (`"__main__"` maps to the repo root; managed IDs map to the persisted worktree path) and execute macOS host commands. Terminal uses `open -a Terminal <path>`. Finder uses `osascript` to ask Finder to open the POSIX path and activate the app, which is more reliable for visibly bringing a Finder window forward.
+- **Instance routing**: Use `worktree_id: "__main__"` (constant: `instance.MainWorktreeID`) in `POST /api/instances` to start an instance in the main repo root. The instance's `worktree_id` will be `"__main__"` and `worktree_name` will be the directory basename.
+- **Auto-select**: On first load, the UI auto-selects the first worktree; if no worktrees exist, it selects the main repo.
+- **Refresh**: All branch info (main repo + worktrees) updates via the existing 2-second polling.
+- **Git Changes panel**: Below the worktree list, a read-only panel shows all changed files (staged + unstaged) relative to HEAD for the currently selected worktree. The panel auto-refreshes every 10 seconds and on worktree selection change. The main repo's changes also refresh when its branch changes. Per-file addition/deletion counts are obtained via `git diff --numstat HEAD` with the same authenticated API wrapper as the rest of the UI, and the git command is enforced with a real 2-second timeout.
 
 ## 4. Instance lifecycle & reconnect semantics
 - An instance is a server-managed process; UI windows are merely views.
@@ -43,10 +61,16 @@ It does **not** analyze project code or prevent concurrent write conflicts insid
   - **Resize Support**: Client sends `{"type":"resize","cols":80,"rows":24}` to update PTY size, triggering TUI programs to redraw.
   - **Dual Resize**: First resize starts data flow, second resize (50ms after first data) ensures complete TUI redraw.
   - **Client-side Config**: Frontend uses xterm.js for terminal rendering. Terminal buffer size (`scrollback`) is configurable on the client side to control how much history is retained in memory for scrolling. This is a client-side setting and does not affect server-side log persistence.
+- The frontend keeps a **per-instance terminal session** for running instances. Each running instance owns its own xterm.js instance, transport state, timers, and reconnect logic.
+- Switching between running instances hides inactive terminal containers instead of tearing down their PTY attachment. This avoids detaching long-lived TUI programs such as Copilot CLI while they remain running.
 - Fallback path remains available: HTTP input `POST /api/instances/input` + replay/SSE logs (`GET /api/instances/log`, `GET /api/instances/log/stream`).
 - UI shows transport state (`websocket/sse/polling`) and supports manual WS reconnect.
 - Backlog is stored on disk with a size cap (rolling truncate).
 - On server startup, stale persisted `running` records are reconciled to `stopped` because in-memory stdin/stdout bindings cannot be resumed after process restart.
+- **Rename**: `PATCH /api/instances` updates an instance's display name (`name` field). The rename takes effect immediately in the UI and persists to `state.json`.
+- **Tab ordering**: `PATCH /api/instances/reorder` persists per-worktree tab order to `state.json` (`tab_order` map + array order in `State.Instances`). Uses **optimistic locking** — the client sends the `version` observed from `GET /api/instances`. If the state has been modified since (e.g., another user started an instance), the server returns HTTP 409 Conflict and the client refreshes and retries.
+- **Resource monitoring**: A clickable transport status bar in the bottom-right of the workspace opens a resource monitor modal. The modal shows per-instance CPU%, memory RSS, and connection type (WebSocket/SSE) grouped by worktree, with subtotals and a global summary. Data is fetched via `GET /api/instances/stats` (1-second polling when open, stops when closed). CPU% uses delta calculation from `process.Times()` with a per-PID baseline stored in the `Collector` struct.
+- **Browser close protection**: The frontend registers a `beforeunload` event handler that unconditionally triggers a browser-native confirmation dialog on any page close/refresh/navigation attempt. This is purely a client-side UX safeguard — backend instances are unaffected and continue running.
 
 ## 5. Terminal Protocol Timing Specification
 
@@ -89,38 +113,36 @@ The client MUST wait for this message before:
 
 ### 5.3 Instance Switch Protocol
 
-When switching between instances (worktree or instance tabs), the following sequence MUST be followed strictly:
+When switching between instances (worktree or instance tabs), the frontend distinguishes between stopped and running instances:
 
 ```
-Phase 1: Disconnect Previous
-├── 1.1 Call disconnectTTY() - close old WebSocket
-├── 1.2 Reset logCursor = 0
-└── 1.3 Reset local terminal state (if terminal exists)
-    ├── Blur the current xterm instance so the old attachment stops owning focus
-    ├── Call term.reset() to clear local xterm modes/private state
-    ├── Call term.clear() to drop scrollback in the shared frontend terminal
-    └── Write '\x1b[2J\x1b[3J\x1b[H' to clear display and home cursor
+Stopped instance
+├── 1. Ensure terminal session exists for the instance
+├── 2. Disconnect live transport for that stopped session
+├── 3. Replay persisted log into that session
+└── 4. Show stopped styling/banner
 
-Phase 2: Load Initial Data
-├── 2.1 If stopped: loadLog() once, update status to "stopped", DONE
-└── 2.2 If running: loadLog() then proceed to Phase 3
+Running instance with healthy session
+├── 1. Keep the existing per-instance xterm/WS session alive
+├── 2. Hide previously active terminal containers
+├── 3. Show the selected instance container
+├── 4. Re-fit and resize the active terminal
+└── 5. Focus only after the session is READY
 
-Phase 3: Establish New Connection (running instances only)
-├── 3.1 Call connectTTY()
-│   ├── Create new WebSocket
-│   ├── Set state to CONNECTING
-│   └── Register onopen handler
-├── 3.2 Wait for WebSocket.onopen
-├── 3.3 Wait for server {"type": "ready"} message
-├── 3.4 Set state to READY
-├── 3.5 Send initial resize: {"type": "resize", "cols": N, "rows": M}
-│   └── TUI programs receive SIGWINCH and re-initialize (including mouse modes)
-└── 3.6 NOW and ONLY NOW: Call focusTerminalIfPossible() on the next tick
+Running instance without healthy session
+├── 1. Ensure terminal session exists for the instance
+├── 2. Reset that instance's local terminal state
+├── 3. Replay recent log once into that same instance session
+├── 4. Establish WebSocket/SSE transport for that session
+├── 5. Wait for server {"type":"ready"} message
+├── 6. Send resize: {"type":"resize","cols":N,"rows":M}
+└── 7. Focus only after the session is READY
 ```
 
 **Critical Timing Rules:**
-1. The shared frontend xterm instance MUST be fully reset before switching to prevent mode leakage from previous TUI programs.
-2. The terminal MUST NOT receive focus until Phase 3.6 (after `ready` message is received and resize is sent).
+1. Running instances MUST NOT be detached purely because another instance becomes active.
+2. Each running instance owns its own frontend terminal session; TUI modes are isolated by session rather than cleared out of a shared xterm.
+3. The terminal MUST NOT receive focus until that instance session is READY (after `ready` is received and resize is sent).
 
 ### 5.4 Focus Management Rules
 
@@ -191,9 +213,10 @@ When implementing or modifying terminal connection code, verify:
 - [ ] `focusTerminalIfPossible()` checks connection state before focusing
 - [ ] WebSocket handshake timeout (5s) is implemented
 - [ ] `ready` message triggers resize BEFORE focus
-- [ ] Instance switch follows Phase 1 → 2 → 3 sequence
+- [ ] Running instance switch preserves inactive session attachments
 - [ ] Dialog close delays focus until connection is ready
 - [ ] Window focus event respects connection state
+- [ ] `beforeunload` handler triggers browser confirmation on any page close/refresh/navigation
 
 ### 5.9 Terminal Query Response Filtering
 

@@ -42,7 +42,7 @@ myworktree 只做管理，不碰项目具体内容：
 - `git`
 - `zsh`
 - `script`（用于托管可交互 shell）
-- Go 工具链（构建用；无外部 Go 依赖）
+- Go 工具链（构建用；Go 模块在编译时静态链接到二进制文件中，运行时无外部依赖）
 
 ## 快速开始
 
@@ -58,10 +58,10 @@ myworktree 只做管理，不碰项目具体内容：
 
 ```bash
 # 根据你的 Mac 机型选择对应压缩包，然后校验并解压
-curl -LO https://github.com/linletian/myworktree/releases/download/v0.1.2/myworktree_v0.1.2_darwin_arm64.tar.gz
-curl -LO https://github.com/linletian/myworktree/releases/download/v0.1.2/checksums.txt
+curl -LO https://github.com/linletian/myworktree/releases/download/v0.2.0/myworktree_v0.2.0_darwin_arm64.tar.gz
+curl -LO https://github.com/linletian/myworktree/releases/download/v0.2.0/checksums.txt
 shasum -a 256 -c checksums.txt --ignore-missing
-tar -xzf myworktree_v0.1.2_darwin_arm64.tar.gz
+tar -xzf myworktree_v0.2.0_darwin_arm64.tar.gz
 
 # 可选：安装到 PATH
 sudo install -m 755 ./mw /usr/local/bin/mw
@@ -71,7 +71,7 @@ sudo install -m 755 ./myworktree /usr/local/bin/myworktree
 mw --version
 ```
 
-建议从 `v0.1.2` 或更新版本开始使用公开发布版二进制。更早的 `v0.1.0` GitHub Release 资产在补充实测中发现严重终端交互问题后已撤回，而 `v0.1.2` 是当前推荐的公开发布版本。
+建议从 `v0.2.0` 或更新版本开始使用公开发布版二进制。更早的 `v0.1.0` GitHub Release 资产在补充实测中发现严重终端交互问题后已撤回，而 `v0.2.0` 是当前推荐的公开发布版本。
 
 每个发布压缩包内都包含 `mw`、`myworktree`、`README.md`、`LICENSE` 和 `CHANGELOG.md`。
 如果当前还没有预发布/正式发布压缩包，或者你的平台暂无对应产物，就直接使用下面的源码编译步骤。

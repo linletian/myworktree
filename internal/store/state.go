@@ -9,9 +9,13 @@ import (
 	"syscall"
 )
 
+var ErrVersionConflict = errors.New("version conflict")
+
 type State struct {
-	Worktrees []ManagedWorktree `json:"worktrees"`
-	Instances []ManagedInstance `json:"instances"`
+	Worktrees []ManagedWorktree   `json:"worktrees"`
+	Instances []ManagedInstance   `json:"instances"`
+	TabOrder  map[string][]string `json:"tab_order"` // key=worktree_id, value=ordered instance IDs
+	Version   int64               `json:"version"`
 }
 
 type ManagedWorktree struct {
@@ -101,6 +105,46 @@ func (fs FileStore) Save(st State) error {
 		return err
 	}
 
+	tmp := fs.Path + ".tmp"
+	if err := os.WriteFile(tmp, b, 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, fs.Path)
+}
+
+// SaveWithVersion saves only if the current version matches expectedVersion.
+// Use expectedVersion < 0 to skip version check.
+func (fs FileStore) SaveWithVersion(st State, expectedVersion int64) error {
+	if fs.Path == "" {
+		return errors.New("store path is required")
+	}
+	if err := os.MkdirAll(filepath.Dir(fs.Path), 0o755); err != nil {
+		return err
+	}
+	lock, err := os.OpenFile(fs.Path+".lock", os.O_RDWR|os.O_CREATE, 0o600)
+	if err != nil {
+		return err
+	}
+	defer lock.Close()
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
+		return err
+	}
+	defer func() { _ = syscall.Flock(int(lock.Fd()), syscall.LOCK_UN) }()
+
+	// Re-load under exclusive lock to check version.
+	current, err := fs.Load()
+	if err != nil {
+		return err
+	}
+	if expectedVersion >= 0 && current.Version != expectedVersion {
+		return ErrVersionConflict
+	}
+
+	st.Version = current.Version + 1
+	b, err := json.MarshalIndent(st, "", "  ")
+	if err != nil {
+		return err
+	}
 	tmp := fs.Path + ".tmp"
 	if err := os.WriteFile(tmp, b, 0o600); err != nil {
 		return err

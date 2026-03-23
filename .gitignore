@@ -1,7 +1,10 @@
 .DS_Store
 /myworktree
 /mw
+myworktree_netgo
 *.log
 .gitnexus
 .claude/
 .archive/
+/AGENTS.md
+/CLAUDE.md
