@@ -2,6 +2,7 @@ package gitx
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"os/exec"
@@ -15,12 +16,49 @@ type Branch struct {
 	CommitUnix int64  `json:"commit_unix"`
 }
 
-// GitCommand creates an exec.Cmd with a wait deadline to prevent indefinite blocking.
-func GitCommand(timeout time.Duration, gitRoot string, args ...string) *exec.Cmd {
-	cmd := exec.Command("git", args...)
+type Cmd struct {
+	*exec.Cmd
+	cancel context.CancelFunc
+}
+
+func (c *Cmd) release() {
+	if c != nil && c.cancel != nil {
+		c.cancel()
+		c.cancel = nil
+	}
+}
+
+func (c *Cmd) Run() error {
+	defer c.release()
+	return c.Cmd.Run()
+}
+
+func (c *Cmd) Output() ([]byte, error) {
+	defer c.release()
+	return c.Cmd.Output()
+}
+
+func (c *Cmd) CombinedOutput() ([]byte, error) {
+	defer c.release()
+	return c.Cmd.CombinedOutput()
+}
+
+func (c *Cmd) Wait() error {
+	defer c.release()
+	return c.Cmd.Wait()
+}
+
+// GitCommand creates a git command with a real execution timeout.
+// WaitDelay only limits shutdown after cancellation; it does not stop a hung git
+// process on its own, so we use CommandContext here.
+func GitCommand(timeout time.Duration, gitRoot string, args ...string) *Cmd {
+	if timeout <= 0 {
+		timeout = 2 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = gitRoot
-	cmd.WaitDelay = timeout
-	return cmd
+	return &Cmd{Cmd: cmd, cancel: cancel}
 }
 
 func DefaultBranch(gitRoot string) string {

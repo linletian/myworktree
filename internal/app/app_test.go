@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -570,6 +571,27 @@ func TestParseGitDiffNumStat(t *testing.T) {
 	}
 	if total9["additions"] != 100 || total9["deletions"] != 25 {
 		t.Fatalf("case9 total: got additions=%d deletions=%d, want 100 and 25", total9["additions"], total9["deletions"])
+	}
+}
+
+func TestHandleWorktreeStatusGitFailureReturnsError(t *testing.T) {
+	dir := t.TempDir()
+	script := filepath.Join(dir, "git")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
+		t.Fatalf("write fake git: %v", err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	srv := &Server{root: t.TempDir()}
+	req := httptest.NewRequest(http.MethodGet, "/api/worktree/status?id=__main__", nil)
+	w := httptest.NewRecorder()
+	srv.handleWorktreeStatus(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500 for git failure, got %d", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "git diff failed") {
+		t.Fatalf("expected git diff failure message, got %q", w.Body.String())
 	}
 }
 

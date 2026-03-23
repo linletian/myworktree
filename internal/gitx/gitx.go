@@ -4,16 +4,14 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
 )
 
 func GitRoot(dir string) (string, error) {
-	cmd := exec.Command("git", "rev-parse", "--show-toplevel")
+	cmd := GitCommand(2*time.Second, dir, "rev-parse", "--show-toplevel")
 	cmd.Dir = dir
-	cmd.WaitDelay = 2 * time.Second
 	out, err := cmd.Output()
 	if err != nil {
 		return "", errors.New("not a git repository (or git not available)")

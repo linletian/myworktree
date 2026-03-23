@@ -604,15 +604,14 @@ func (s *Server) handleWorktreeStatus(w http.ResponseWriter, r *http.Request) {
 	cmd := gitx.GitCommand(2*time.Second, gitRoot, "diff", "--numstat", "HEAD")
 	out, err := cmd.Output()
 	if err != nil {
-		// "No changes" produces empty output; git error messages are non-empty.
-		if len(out) == 0 {
-			writeJSON(w, http.StatusOK, map[string]any{
-				"changes": []any{},
-				"total":   map[string]int{"additions": 0, "deletions": 0},
-			})
-		} else {
-			writeErr(w, http.StatusInternalServerError, fmt.Errorf("git diff failed: %s", strings.TrimSpace(string(out))))
+		// Empty output with a nil error is a clean tree. If err is non-nil, git
+		// failed or timed out and we should surface that instead of pretending the
+		// worktree has no changes.
+		msg := strings.TrimSpace(string(out))
+		if msg == "" {
+			msg = err.Error()
 		}
+		writeErr(w, http.StatusInternalServerError, fmt.Errorf("git diff failed: %s", msg))
 		return
 	}
 

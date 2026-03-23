@@ -1,9 +1,12 @@
 package gitx
 
 import (
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestCurrentBranch(t *testing.T) {
@@ -48,5 +51,24 @@ func TestDefaultBranch(t *testing.T) {
 	branch := DefaultBranch(root)
 	if branch == "" {
 		t.Fatalf("DefaultBranch returned empty string")
+	}
+}
+
+func TestGitCommandTimeoutStopsHungGit(t *testing.T) {
+	dir := t.TempDir()
+	script := filepath.Join(dir, "git")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nsleep 2\n"), 0o755); err != nil {
+		t.Fatalf("write fake git: %v", err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	start := time.Now()
+	err := GitCommand(100*time.Millisecond, ".", "status").Run()
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("expected git command timeout")
+	}
+	if elapsed > time.Second {
+		t.Fatalf("git command exceeded timeout window: %v", elapsed)
 	}
 }

@@ -139,7 +139,8 @@ Returns the list of changed files (staged + unstaged relative to HEAD) for the s
 
 - `id`: worktree ID (`"__main__"` for the main repo) or a managed worktree ID from `GET /api/worktrees`.
 - Uses `git diff --numstat HEAD` with a 2-second timeout.
-- Returns an empty list if there are no changes or if the command fails.
+- Returns an empty list if there are no changes.
+- Returns HTTP 500 if git reports an error while collecting the diff.
 
 Response:
 ```json
