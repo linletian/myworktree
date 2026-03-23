@@ -66,4 +66,41 @@
 - 可启动/列出/停止 instance，且前端关闭后 instance 仍继续运行。
 - UI 重连可看到所有已管理对象，并能回放 instance 近期输出。
 - 本机访问 Web UI 时，可从侧栏一键打开所选主工作区/worktree 的 Terminal 与 Finder；远程访问时不展示这两个快捷入口。
-- 非 loopback 无 `--auth` 时拒绝启动；输出回放对 `sk-...` 做脱敏。
+## 9. LLM 智能分支命名
+
+在 Create Worktree 时，可选使用 LLM 将任务描述转换为简洁、规范的分支名。
+
+### 9.1 模式选择
+- **正则模式**（默认）：使用 `slugify()` 正则转换，不调用任何 LLM API
+- **LLM 模式**：调用 LLM API（支持 OpenAI gpt-4o-mini 或 Anthropic claude-3-5-haiku，由配置决定用哪个）
+
+### 9.2 配置方式
+配置文件：`~/.config/myworktree/config.json`（0o600 权限），示例：
+```json
+{
+  "mode": "openai",
+  "api_key": "sk-..."
+}
+```
+
+同时支持环境变量（优先级更高）：`OPENAI_API_KEY` 或 `ANTHROPIC_API_KEY`。同时设置时，以 `OPENAI_API_KEY` 为准。
+
+### 9.3 分支名规范（由 LLM 遵守）
+1. 长度不超过 100 个字符
+2. 只包含小写字母、数字和连字符
+3. 符合 git 规范（以字母开头）
+4. 使用英文，可包含数字
+
+### 9.4 错误处理 + 内联设置
+- **正则模式**：无 LLM 调用，行为与现有版本一致，不会出错
+- **LLM 模式**：LLM 调用失败时**返回错误，不静默 fallback**，在 Create Worktree 弹窗上方叠加 LLM 设置面板
+  - 任务描述保留在输入框中，不丢失
+  - 面板提供：模式切换、API Key 输入、"测试连接"、"重试"、"使用正则模式"等操作
+  - API 返回 401（Invalid API Key）：在设置面板中提示用户检查 API Key
+  - 网络错误 / 超时：在设置面板中提示用户检查网络
+  - 用户可选择：修复 API Key，或切换到正则模式临时绕过
+- LLM 超时阈值：10 秒
+
+### 9.5 资源占用
+- 仅在调用 LLM 时产生网络请求，无本地资源占用
+- 不开启 LLM 时行为与现有版本完全一致

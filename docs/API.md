@@ -475,3 +475,53 @@ Supported tool names:
 - `worktree_list`, `worktree_create`, `worktree_delete`
 - `branch_list`, `tag_list`
 - `instance_list`, `instance_start`, `instance_stop`, `instance_input`, `instance_archive`, `instance_delete`, `instance_purge`, `instance_log_tail`
+
+## 7) LLM 配置
+### 获取当前配置
+`GET /api/llm/config`
+
+返回当前 LLM 配置（不包含明文 API Key）：
+```json
+{
+  "mode": "openai",
+  "api_key_masked": "sk-***xyz",
+  "available": true
+}
+```
+- `mode`: `"regex"` | `"openai"` | `"anthropic"`
+- `api_key_masked`: API Key 脱敏显示（仅显示前 3 字符 + `***` + 后 3 字符）
+- `available`: LLM 是否可用（API Key 已配置）
+
+### 更新配置
+`PATCH /api/llm/config`
+
+Body:
+```json
+{ "mode": "openai", "api_key": "sk-..." }
+```
+环境变量 `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` 优先级更高；两者同时存在时以 `OPENAI_API_KEY` 为准。
+
+Response (200):
+```json
+{ "status": "ok", "mode": "openai" }
+```
+
+- `mode` 可选 `"regex"` | `"openai"` | `"anthropic"`，不传则保持不变
+- `api_key` 可选，不传则保持现有配置
+- 返回 HTTP 400 如果 `mode` 为 `openai`/`anthropic` 但既无配置也无环境变量
+
+### 测试 LLM 连接
+`POST /api/llm/test`
+
+测试当前 LLM 配置是否有效（发送一个简单的 test 分支名请求）。
+用于用户在配置后验证 API Key 是否正确。
+
+Response (200):
+```json
+{ "status": "ok", "branch_name": "test-branch" }
+```
+
+Response (400):
+```json
+{ "error": "invalid API key or network error" }
+```

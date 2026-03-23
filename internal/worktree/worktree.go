@@ -1,6 +1,7 @@
 package worktree
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"myworktree/internal/gitx"
+	"myworktree/internal/llm"
 	"myworktree/internal/store"
 )
 
@@ -101,6 +103,10 @@ func (m Manager) Create(taskDesc string, baseRef string) (store.ManagedWorktree,
 }
 
 func (m Manager) CreateWithOptions(taskDesc string, opts CreateOptions) (store.ManagedWorktree, error) {
+	return m.CreateWithOptionsCtx(context.Background(), taskDesc, opts)
+}
+
+func (m Manager) CreateWithOptionsCtx(ctx context.Context, taskDesc string, opts CreateOptions) (store.ManagedWorktree, error) {
 	if strings.TrimSpace(taskDesc) == "" {
 		return store.ManagedWorktree{}, errors.New("task description is required")
 	}
@@ -110,6 +116,20 @@ func (m Manager) CreateWithOptions(taskDesc string, opts CreateOptions) (store.M
 	}
 
 	group, baseName, custom := parseBranchSpec(taskDesc)
+
+	// Use LLM to generate branch name if not in regex mode and not a custom spec.
+	// Custom specs (e.g., "feature/foo") are used as-is and not passed to LLM.
+	if !custom && llm.CurrentMode() != "regex" {
+		generated, err := llm.GenerateBranchName(ctx, taskDesc)
+		if err != nil {
+			return store.ManagedWorktree{}, fmt.Errorf("LLM branch naming failed: %w", err)
+		}
+		// Use the LLM-generated name as the base name (without the "mwt/" prefix)
+		baseName = generated
+		group = "mwt"
+		custom = false
+	}
+
 	if !custom {
 		group = "mwt"
 		baseName = slug
