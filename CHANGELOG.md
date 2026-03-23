@@ -1,12 +1,18 @@
 # Changelog
 
-## v0.1.3
+## v0.2.0
 
-UI polish and usability improvements.
+Feature release focused on workspace visibility, terminal continuity, and day-to-day usability improvements.
 
 Highlights:
-- Moved "Show archived" checkbox out of the scrollable tab area into the static header row, so action buttons and the toggle remain visible without horizontal scrolling.
-- Added "Purge" button to bulk-delete all archived instances in one confirmation dialog, backed by a new atomic `POST /api/instances/purge` endpoint with optimistic locking.
+- Added a pinned **Main Workspace** alongside managed worktrees, with live branch tracking and support for launching managed instances directly in the main repository.
+- Improved instance management with rename support, per-worktree tab reordering with optimistic locking, bulk purge for archived instances, and preserved per-instance terminal sessions when switching between running instances.
+- Expanded workspace tooling with localhost-only quick actions to open Terminal/Finder, a Git Changes panel with per-file diff stats, and a resource monitor modal showing CPU, memory RSS, and transport state per instance.
+- Hardened terminal and git integration with multi-client TTY resize sync, browser close protection, detached-HEAD-safe branch queries, timeout-protected git commands, and more reliable diff parsing/error handling.
+
+Documentation and validation:
+- Expanded API, architecture, and PRD docs to cover the main workspace, quick actions, git changes, resource stats, optimistic-locking instance operations, and terminal session behavior.
+- Release packaging continues to publish Darwin `amd64` / `arm64` archives plus SHA256 checksums via the tag-triggered GitHub Actions workflow.
 
 ## v0.1.2
 
