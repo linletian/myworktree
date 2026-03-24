@@ -50,14 +50,15 @@ Response:
 
 Body:
 ```json
-{ "task_description": "fix login", "base_ref": "", "adopt_if_exists": false }
+{ "task_description": "fix login", "base_ref": "", "adopt_if_exists": false, "branch_name": "" }
 ```
 
+- `branch_name`: optional. If provided, it is used directly as the branch name (no automatic prefix added). If omitted, LLM is used to generate a branch name if configured, otherwise slugified task description is used.
 - If `adopt_if_exists` is true and the target branch already exists, the server will attempt to **import/adopt** an existing git worktree for that branch; if no existing worktree is found, it falls back to creating a new worktree with a numeric suffix.
 
 Response (201):
 ```json
-{ "id":"...","name":"fix-login","path":"...","branch":"mwt/fix-login","created_at":"..." }
+{ "id":"...","name":"fix-login","path":"...","branch":"fix-login","created_at":"..." }
 ```
 
 ### Import (adopt existing git worktree)
@@ -68,8 +69,9 @@ Body:
 { "name": "foo" }
 ```
 
-- `name: "foo"` maps to branch `mwt/foo`.
+- `name: "foo"` maps to branch `foo`.
 - You can also pass a full spec like `"feature/foo"`.
+- For backward compatibility, `"foo"` also matches existing branches with `mwt/foo` prefix.
 
 Response (201): same as create.
 
@@ -475,3 +477,85 @@ Supported tool names:
 - `worktree_list`, `worktree_create`, `worktree_delete`
 - `branch_list`, `tag_list`
 - `instance_list`, `instance_start`, `instance_stop`, `instance_input`, `instance_archive`, `instance_delete`, `instance_purge`, `instance_log_tail`
+
+## 7) LLM 配置
+### 获取当前配置
+`GET /api/llm/config`
+
+返回当前 LLM 配置（不包含明文 API Key）：
+```json
+{
+  "protocol": "openai_compatible",
+  "api_address": "<provider_api_address>",
+  "api_key_masked": "<masked_api_key>",
+  "model": "<model_name>",
+  "is_secure": true,
+  "available": true
+}
+```
+- `protocol`: `"openai"` | `"anthropic"` | `"openai_compatible"`
+- `api_address`: API 地址（OpenAI Compatible 模式下需要包含完整路径如 `/v1/chat/completions`）
+- `api_key_masked`: API Key 脱敏显示（仅显示前 3 字符 + `***` + 后 3 字符）
+- `model`: 当前使用的模型名称
+- `is_secure`: 当前是否为 localhost 或 HTTPS 环境（影响 LLM Settings 按钮可见性）
+- `available`: LLM 是否可用（API Key 已配置）
+
+### 更新配置
+`PATCH /api/llm/config`
+
+Body:
+```json
+{ "protocol": "openai_compatible", "api_address": "<provider_api_address>", "api_key": "<api_key>", "model": "<model_name>" }
+```
+
+环境变量 `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` / `OPENAI_COMPATIBLE_API_KEY` 优先级更高。
+
+Response (200):
+```json
+{ "status": "ok", "protocol": "openai_compatible" }
+```
+
+### 测试 LLM 连接
+`POST /api/llm/test`
+
+测试当前 LLM 配置是否有效（发送一个简单的 test 分支名请求）。
+用于用户在配置后验证 API Key 是否正确。
+
+Response (200):
+```json
+{ "status": "ok", "branch_name": "<branch_name>" }
+```
+
+Response (400):
+```json
+{ "error": "no LLM configured" }
+```
+
+```json
+{ "error": "invalid API key or network error" }
+```
+
+### 生成分支名
+`POST /api/llm/generate`
+
+根据任务描述调用 LLM 生成分支名。
+
+Body:
+```json
+{ "task_description": "fix the login timeout issue" }
+```
+
+Response (200):
+```json
+{ "branch_name": "fix/login-timeout" }
+```
+
+Response (400):
+```json
+{ "error": "no LLM protocol configured" }
+```
+
+Response (500):
+```json
+{ "error": "generation failed: HTTP error: status 401" }
+```

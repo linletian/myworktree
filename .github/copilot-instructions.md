@@ -36,10 +36,10 @@ Important behavior notes:
 ## Key conventions
 - **Run location matters**: the server is started by the default command (e.g. `myworktree -listen ...`) and should be executed *inside the target git repo* you want to manage, because repo detection and the per-project data dir derive from CWD.
 - **Branch naming**:
-  - Default: managed worktrees are created on branches like `mwt/<slug>`.
-  - Custom grouping: if the task description is in the form `<group>/<name>` (e.g. `feature/auth`), the branch will be `<group>/<name>` (no extra prefix).
-  - `slugify()` is best-effort ASCII, max length ~48; if empty it falls back to `worktree`.
-  - If the target branch already exists, suffix `-2`, `-3`, ... is appended to `<name>`.
+  - Branch name is whatever the user provides in the form (manually entered or LLM-generated).
+  - LLM mode: calls LLM to convert task description into a branch name (e.g. `fix/auth-bug`).
+  - Custom input: when user directly enters a branch name, it is used as-is.
+  - No automatic prefix is added (previously `mwt/`).
 - **Strict deletion**: `worktree delete` refuses to delete if `git status --porcelain` is non-empty (includes untracked files).
 - **State storage discipline**:
   - Persisted state lives in `state.json` via `store.FileStore` and is protected with `flock` + atomic rename.

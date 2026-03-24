@@ -33,8 +33,9 @@
 - 后端必须保持：worktree 与 instance 的生命周期独立于前端。
 - 删除 worktree：若 `git status --porcelain` 非空（含 untracked），**拒绝删除**。
 - 分支命名：
-  - 默认：创建 worktree 使用分支 `mwt/<slug>`（不再是 `wt/*`）。
-  - 自定义分组：当用户在 task description 里直接输入 `<group>/<name>`（例如 `feature/auth`）时，分支名就是 `<group>/<name>`，不会再额外加前缀。
+  - 分支名直接使用用户在表单中输入的值（手动输入或 LLM 生成）。
+  - LLM 模式：调用 LLM 将任务描述转换为分支名（如 `fix/auth-bug`），保留 `/` 分组前缀（如 `feature/auth` → `feature/auth`）。
+  - 自定义输入：用户在 Branch Name 输入框直接输入时，直接使用该值作为分支名。
   - 命名冲突：如目标分支已存在，自动给 `<name>` 加 `-2/-3` 后缀避免冲突；并支持将既有 worktree **纳入管理（import）**。
 
 ## 6. 安全
@@ -66,4 +67,46 @@
 - 可启动/列出/停止 instance，且前端关闭后 instance 仍继续运行。
 - UI 重连可看到所有已管理对象，并能回放 instance 近期输出。
 - 本机访问 Web UI 时，可从侧栏一键打开所选主工作区/worktree 的 Terminal 与 Finder；远程访问时不展示这两个快捷入口。
-- 非 loopback 无 `--auth` 时拒绝启动；输出回放对 `sk-...` 做脱敏。
+## 9. LLM 智能分支命名
+
+在 Create Worktree 时，可选使用 LLM 将任务描述转换为简洁、规范的分支名。
+
+### 9.1 模式选择
+- **正则模式**（默认）：使用 `slugify()` 正则转换，不调用任何 LLM API
+- **LLM 模式**：调用 LLM API（支持 OpenAI / Anthropic / OpenAI Compatible 三种协议，由配置决定）
+
+### 9.2 配置方式
+配置文件：`~/.config/myworktree/config.json`（0o600 权限），示例：
+```json
+{
+  "protocol": "openai_compatible",
+  "api_address": "<provider_api_address>",
+  "api_key": "<api_key>",
+  "model": "<model_name>"
+}
+```
+
+支持的 protocol：
+- `openai`：OpenAI 官方 API
+- `anthropic`：Anthropic API
+- `openai_compatible`：兼容 OpenAI 接口格式的第三方服务（如 SiliconFlow、MiniMax 等）
+
+同时支持环境变量（优先级更高）：`OPENAI_API_KEY` / `ANTHROPIC_API_KEY` / `OPENAI_COMPATIBLE_API_KEY`。
+
+### 9.3 分支名规范（由 LLM 遵守）
+1. 长度不超过 100 个字符
+2. 只包含小写字母、数字、连字符和斜杠（用于 git 分支分组，如 `feature/auth`）
+3. 符合 git 规范（以字母开头）
+4. 使用英文，可包含数字
+
+### 9.4 前端交互
+- **AI Generate 按钮**：在创建 worktree 弹窗中，输入任务描述后，点击 "AI Generate" 按钮调用 LLM 生成分支名，填入 Branch Name 输入框。
+- **Branch Name 输入框**：始终可见，用户可直接编辑 LLM 生成的结果，或手动输入自定义分支名。
+- **LLM Settings 按钮**：位于创建表单左下角，点击打开 LLM 配置对话框（仅在 localhost 或 HTTPS 环境下可见）。
+  - 支持配置：协议类型、API 地址、API Key、模型名称。
+  - 提供"测试连接"功能验证配置是否正确。
+- LLM 调用失败时显示错误提示，用户仍可手动输入或修改 Branch Name 输入框。
+
+### 9.5 资源占用
+- 仅在调用 LLM 时产生网络请求，无本地资源占用
+- 不开启 LLM 时行为与现有版本完全一致
