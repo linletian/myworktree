@@ -574,7 +574,7 @@ func TestParseGitDiffNumStat(t *testing.T) {
 	}
 }
 
-func TestHandleWorktreeStatusGitFailureReturnsError(t *testing.T) {
+func TestHandleWorktreeStatusGitFailureBothFail(t *testing.T) {
 	dir := t.TempDir()
 	script := filepath.Join(dir, "git")
 	if err := os.WriteFile(script, []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
@@ -588,10 +588,51 @@ func TestHandleWorktreeStatusGitFailureReturnsError(t *testing.T) {
 	srv.handleWorktreeStatus(w, req)
 
 	if w.Code != http.StatusInternalServerError {
-		t.Fatalf("expected 500 for git failure, got %d", w.Code)
+		t.Fatalf("expected 500 when both git commands fail, got %d", w.Code)
 	}
 	if !strings.Contains(w.Body.String(), "git diff failed") {
-		t.Fatalf("expected git diff failure message, got %q", w.Body.String())
+		t.Fatalf("expected 'git diff failed' in error message, got %q", w.Body.String())
+	}
+}
+
+func TestHandleWorktreeStatusPartialFailure(t *testing.T) {
+	dir := t.TempDir()
+	script := filepath.Join(dir, "git")
+	// staged succeeds, unstaged fails
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nif echo \"$@\" | grep -q -- '--cached'; then echo '1\t0\ttest.go'; exit 0; else exit 1; fi\n"), 0o755); err != nil {
+		t.Fatalf("write fake git: %v", err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	srv := &Server{root: t.TempDir()}
+	req := httptest.NewRequest(http.MethodGet, "/api/worktree/status?id=__main__", nil)
+	w := httptest.NewRecorder()
+	srv.handleWorktreeStatus(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 for partial failure, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var resp map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+
+	staged, _ := resp["staged"].(map[string]any)
+	if staged["changes"] == nil {
+		t.Fatal("staged: missing changes")
+	}
+	if _, hasErr := staged["error"]; hasErr {
+		t.Fatal("staged: should not have error field")
+	}
+
+	unstaged, _ := resp["unstaged"].(map[string]any)
+	errMsg, _ := unstaged["error"].(string)
+	if errMsg == "" {
+		t.Fatal("unstaged: expected error field")
+	}
+	if !strings.Contains(errMsg, "git diff failed") {
+		t.Fatalf("unstaged: expected 'git diff failed' in error, got %q", errMsg)
 	}
 }
 

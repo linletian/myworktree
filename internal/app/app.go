@@ -601,25 +601,61 @@ func (s *Server) handleWorktreeStatus(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	cmd := gitx.GitCommand(2*time.Second, gitRoot, "diff", "--numstat", "HEAD")
-	out, err := cmd.Output()
-	if err != nil {
-		// Empty output with a nil error is a clean tree. If err is non-nil, git
-		// failed or timed out and we should surface that instead of pretending the
-		// worktree has no changes.
-		msg := strings.TrimSpace(string(out))
-		if msg == "" {
-			msg = err.Error()
+	type diffResult struct {
+		changes []map[string]any
+		total   map[string]int
+		errMsg  string
+	}
+
+	runDiff := func(args ...string) diffResult {
+		cmd := gitx.GitCommand(2*time.Second, gitRoot, args...)
+		out, err := cmd.Output()
+		if err != nil {
+			msg := strings.TrimSpace(string(out))
+			if msg == "" {
+				msg = err.Error()
+			}
+			return diffResult{
+				changes: []map[string]any{},
+				total:   map[string]int{"additions": 0, "deletions": 0},
+				errMsg:  fmt.Sprintf("git diff failed: %s", msg),
+			}
 		}
-		writeErr(w, http.StatusInternalServerError, fmt.Errorf("git diff failed: %s", msg))
+		changes, total := parseGitDiffNumStat(string(out))
+		return diffResult{changes: changes, total: total}
+	}
+
+	stagedCh := make(chan diffResult, 1)
+	unstagedCh := make(chan diffResult, 1)
+
+	go func() { stagedCh <- runDiff("diff", "--cached", "--numstat") }()
+	go func() { unstagedCh <- runDiff("diff", "--numstat") }()
+
+	staged := <-stagedCh
+	unstaged := <-unstagedCh
+
+	if staged.errMsg != "" && unstaged.errMsg != "" {
+		writeErr(w, http.StatusInternalServerError, fmt.Errorf("staged: %s; unstaged: %s", staged.errMsg, unstaged.errMsg))
 		return
 	}
 
-	changes, total := parseGitDiffNumStat(string(out))
-	writeJSON(w, http.StatusOK, map[string]any{
-		"changes": changes,
-		"total":   total,
-	})
+	resp := map[string]any{
+		"staged": map[string]any{
+			"changes": staged.changes,
+			"total":   staged.total,
+		},
+		"unstaged": map[string]any{
+			"changes": unstaged.changes,
+			"total":   unstaged.total,
+		},
+	}
+	if staged.errMsg != "" {
+		resp["staged"].(map[string]any)["error"] = staged.errMsg
+	}
+	if unstaged.errMsg != "" {
+		resp["unstaged"].(map[string]any)["error"] = unstaged.errMsg
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (s *Server) handleInstances(w http.ResponseWriter, r *http.Request) {

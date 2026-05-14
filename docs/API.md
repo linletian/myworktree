@@ -135,20 +135,48 @@ Response:
 ### Get worktree git status
 `GET /api/worktree/status?id=<worktreeId>`
 
-Returns the list of changed files (staged + unstaged relative to HEAD) for the specified worktree.
+Returns the list of changed files, split into staged and unstaged changes, for the specified worktree.
 
 - `id`: worktree ID (`"__main__"` for the main repo) or a managed worktree ID from `GET /api/worktrees`.
-- Uses `git diff --numstat HEAD` with a 2-second timeout.
-- Returns an empty list if there are no changes.
-- Returns HTTP 500 if git reports an error while collecting the diff.
+- Uses two concurrent git commands, each with a 2-second timeout:
+  - `git diff --cached --numstat` — staged changes (index vs HEAD)
+  - `git diff --numstat` — unstaged changes (working tree vs index)
+- Returns empty lists if there are no changes.
+- Returns HTTP 500 if both git commands fail.
+- On partial failure (one command fails), the failing section includes an `error` field describing the failure, while the successful section returns its results normally. HTTP 200 is returned in this case.
 
 Response:
 ```json
 {
-  "changes": [
-    { "path": "foo.go", "additions": 10, "deletions": 3 }
-  ],
-  "total": { "additions": 10, "deletions": 10 }
+  "staged": {
+    "changes": [
+      { "path": "foo.go", "additions": 10, "deletions": 3 }
+    ],
+    "total": { "additions": 10, "deletions": 3 }
+  },
+  "unstaged": {
+    "changes": [
+      { "path": "bar.go", "additions": 5, "deletions": 2 }
+    ],
+    "total": { "additions": 5, "deletions": 2 }
+  }
+}
+```
+
+Partial failure example (staged succeeded, unstaged failed):
+```json
+{
+  "staged": {
+    "changes": [
+      { "path": "foo.go", "additions": 10, "deletions": 3 }
+    ],
+    "total": { "additions": 10, "deletions": 3 }
+  },
+  "unstaged": {
+    "changes": [],
+    "total": { "additions": 0, "deletions": 0 },
+    "error": "git diff failed: context deadline exceeded"
+  }
 }
 ```
 - Returns HTTP 400 if `id` is missing or unknown.
