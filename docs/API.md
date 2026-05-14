@@ -265,7 +265,7 @@ Body:
 ```
 
 - `worktree_id`: the worktree whose tab order is being set (can be `"__main__"` for the main repo)
-- `order`: ordered list of ALL instance IDs belonging to that worktree (both active and archived). All instances must be included.
+- `order`: ordered list of ALL instance IDs belonging to that worktree. All instances must be included.
 - `version`: the state version observed by the client (from `GET /api/instances`). Used for optimistic locking — if the state has changed since the client fetched it, the server returns HTTP 409 Conflict.
 
 Response (200):
@@ -299,7 +299,7 @@ Body:
 ```
 
 - Creates a new instance with the same worktree + tag/command + labels.
-- If the old instance is not archived yet (and is not running), it will be archived automatically.
+- If the old instance is not running, it will be deleted automatically.
 - The old instance record is linked to the new one via `restarted_to` / `restarted_from`.
 
 ### Send input
@@ -362,16 +362,6 @@ Client                    Server
    |<-- binary output -------|  Process output
 ```
 
-### Archive
-`POST /api/instances/archive`
-
-Body:
-```json
-{ "id": "<instanceId>" }
-```
-
-Archives a non-running instance (hides it from the main list).
-
 ### Delete
 `POST /api/instances/delete`
 
@@ -380,30 +370,7 @@ Body:
 { "id": "<instanceId>" }
 ```
 
-Deletes a non-running instance record (best-effort deletes the log file).
-
-### Purge archived
-`POST /api/instances/purge`
-
-Deletes archived instances for a given worktree in a single atomic write, protected by optimistic locking. Use an empty `worktree_id` to target all worktrees.
-
-Body:
-```json
-{ "worktree_id": "wt1", "version": 7 }
-```
-
-- `worktree_id`: the worktree whose archived instances to delete (omit or use empty string to target all worktrees).
-- `version`: the state version observed by the client (from `GET /api/instances`). Used for optimistic locking — if the state has changed since the client fetched it, the server returns HTTP 409 Conflict.
-
-Response (200):
-```json
-{ "status": "ok" }
-```
-
-- Returns HTTP 409 Conflict if the state version has changed. The response body includes the current version so the client can refresh and retry:
-```json
-{ "error": "state changed, please refresh", "version": 8 }
-```
+Deletes a stopped (non-running) instance record (best-effort deletes the log file).
 
 ### Log replay (tail / incremental)
 `GET /api/instances/log?id=<instanceId>[&since=<byteOffset>]`
@@ -502,4 +469,4 @@ Response:
 Supported tool names:
 - `worktree_list`, `worktree_create`, `worktree_delete`
 - `branch_list`, `tag_list`
-- `instance_list`, `instance_start`, `instance_stop`, `instance_input`, `instance_archive`, `instance_delete`, `instance_purge`, `instance_log_tail`
+- `instance_list`, `instance_start`, `instance_stop`, `instance_input`, `instance_delete`, `instance_log_tail`
