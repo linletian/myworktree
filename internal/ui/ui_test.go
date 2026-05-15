@@ -178,7 +178,7 @@ func TestIndexHTMLCoversPerSessionConnectionManagement(t *testing.T) {
 		"if (session.ttySocket) { session.ttySocket.close(); session.ttySocket = null; }",
 		"session.ttySocket = ws;",
 		"if (session.ttySocket === ws) {",
-		"session.ttyReconnectTimer = setTimeout(() => connectTTY(session), 1000);",
+		"session.ttyReconnectTimer = setTimeout(() => connectTTY(session), 5000);",
 	}
 	for _, check := range checks {
 		if !strings.Contains(bodyText, check) {
