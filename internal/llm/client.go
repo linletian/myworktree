@@ -48,7 +48,7 @@ func callOpenAI(ctx context.Context, apiKey, url, model, prompt string, reasonin
 		},
 		"max_tokens":  1024,
 		"temperature": 0.3,
-		"thinking":    false, // Disable DeepSeek thinking mode; reasoning_split handled separately
+		"thinking":    map[string]string{"type": "disabled"},
 	}
 	if reasoningSplit {
 		reqBody["reasoning_split"] = true
@@ -91,7 +91,7 @@ func callAnthropic(ctx context.Context, apiKey, url, model, prompt string, reaso
 			{"role": "user", "content": prompt},
 		},
 		"max_tokens": 1024,
-		"thinking":   false, // Disable DeepSeek thinking mode
+		"thinking":   map[string]string{"type": "disabled"},
 	}
 	if reasoningSplit {
 		reqBody["reasoning_split"] = true
