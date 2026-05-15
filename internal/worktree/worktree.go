@@ -1,6 +1,7 @@
 package worktree
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"myworktree/internal/gitx"
+	"myworktree/internal/llm"
 	"myworktree/internal/store"
 )
 
@@ -94,6 +96,7 @@ func (m Manager) ListUnmanaged() ([]UnmanagedWorktree, error) {
 type CreateOptions struct {
 	BaseRef       string
 	AdoptIfExists bool
+	BranchName    string // if non-empty, use this branch name directly (skip LLM), parsed as group/name if contains "/"
 }
 
 func (m Manager) Create(taskDesc string, baseRef string) (store.ManagedWorktree, error) {
@@ -101,6 +104,10 @@ func (m Manager) Create(taskDesc string, baseRef string) (store.ManagedWorktree,
 }
 
 func (m Manager) CreateWithOptions(taskDesc string, opts CreateOptions) (store.ManagedWorktree, error) {
+	return m.CreateWithOptionsCtx(context.Background(), taskDesc, opts)
+}
+
+func (m Manager) CreateWithOptionsCtx(ctx context.Context, taskDesc string, opts CreateOptions) (store.ManagedWorktree, error) {
 	if strings.TrimSpace(taskDesc) == "" {
 		return store.ManagedWorktree{}, errors.New("task description is required")
 	}
@@ -110,8 +117,28 @@ func (m Manager) CreateWithOptions(taskDesc string, opts CreateOptions) (store.M
 	}
 
 	group, baseName, custom := parseBranchSpec(taskDesc)
+
+	// If BranchName is provided, use it directly (skip LLM).
+	// Parse to extract group/baseName for worktree path.
+	if opts.BranchName != "" {
+		group, baseName, _ = parseBranchSpec(opts.BranchName)
+		custom = true
+	} else if !custom && llm.IsAvailable() {
+		// Use LLM to generate branch name if protocol is set and not a custom spec.
+		// Custom specs (e.g., "feature/foo") are used as-is and not passed to LLM.
+		generated, err := llm.GenerateBranchName(ctx, taskDesc)
+		if err != nil {
+			return store.ManagedWorktree{}, fmt.Errorf("LLM branch naming failed: %w", err)
+		}
+		// Parse the generated branch name to extract group/baseName.
+		// e.g. "fix/instance-ime" -> group="fix", baseName="instance-ime"
+		// Worktree path will use "fix-instance-ime" (hyphen separator).
+		group, baseName, _ = parseBranchSpec(generated)
+		custom = true // Treat LLM output like a custom spec
+	}
+
 	if !custom {
-		group = "mwt"
+		group = "worktree"
 		baseName = slug
 	}
 
