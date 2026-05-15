@@ -684,11 +684,10 @@ func (s *Server) handleInstances(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"instances": items, "version": version})
 	case http.MethodPost:
 		var req struct {
-			WorktreeID string            `json:"worktree_id"`
-			TagID      string            `json:"tag_id"`
-			Command    string            `json:"command"`
-			Name       string            `json:"name"`
-			Labels     map[string]string `json:"labels"`
+			WorktreeID string `json:"worktree_id"`
+			TagID      string `json:"tag_id"`
+			Command    string `json:"command"`
+			Name       string `json:"name"`
 		}
 		if err := readJSON(r.Body, &req); err != nil {
 			writeErr(w, http.StatusBadRequest, err)
@@ -705,7 +704,6 @@ func (s *Server) handleInstances(w http.ResponseWriter, r *http.Request) {
 			TagID:   req.TagID,
 			Command: req.Command,
 			Name:    req.Name,
-			Labels:  normalizeLabels(req.Labels),
 		})
 		if err != nil {
 			writeErr(w, http.StatusBadRequest, err)
@@ -1232,11 +1230,10 @@ func (s *Server) handleMCPCall(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"result": map[string]any{"instances": items}})
 	case "instance_start":
 		var args struct {
-			WorktreeID string            `json:"worktree_id"`
-			TagID      string            `json:"tag_id"`
-			Command    string            `json:"command"`
-			Name       string            `json:"name"`
-			Labels     map[string]string `json:"labels"`
+			WorktreeID string `json:"worktree_id"`
+			TagID      string `json:"tag_id"`
+			Command    string `json:"command"`
+			Name       string `json:"name"`
 		}
 		if err := decodeArgs(req.Args, &args); err != nil {
 			writeErr(w, http.StatusBadRequest, err)
@@ -1247,7 +1244,6 @@ func (s *Server) handleMCPCall(w http.ResponseWriter, r *http.Request) {
 			TagID:      args.TagID,
 			Command:    args.Command,
 			Name:       args.Name,
-			Labels:     normalizeLabels(args.Labels),
 		})
 		if err != nil {
 			writeErr(w, http.StatusBadRequest, err)
@@ -1404,25 +1400,6 @@ func writeSSELogEvent(w io.Writer, chunk string, next int64) error {
 	}
 	_, err = io.WriteString(w, "\n\n")
 	return err
-}
-
-func normalizeLabels(in map[string]string) map[string]string {
-	if len(in) == 0 {
-		return nil
-	}
-	out := map[string]string{}
-	for k, v := range in {
-		key := strings.TrimSpace(k)
-		val := strings.TrimSpace(v)
-		if key == "" || val == "" {
-			continue
-		}
-		out[key] = val
-	}
-	if len(out) == 0 {
-		return nil
-	}
-	return out
 }
 
 func sameOriginHost(r *http.Request) bool {

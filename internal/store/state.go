@@ -32,9 +32,8 @@ type ManagedInstance struct {
 	WorktreeID    string            `json:"worktree_id"`
 	WorktreeName  string            `json:"worktree_name,omitempty"`
 	TagID         string            `json:"tag_id"`
-	Name          string            `json:"name"`
-	Labels        map[string]string `json:"labels,omitempty"`
-	Command       string            `json:"command"`
+	Name    string `json:"name"`
+	Command string `json:"command"`
 	Cwd           string            `json:"cwd"`
 	Env           map[string]string `json:"env,omitempty"`
 	PID           int               `json:"pid"`

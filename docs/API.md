@@ -209,7 +209,7 @@ Response:
 
 Response:
 ```json
-{ "instances": [ {"id":"...","worktree_id":"...","worktree_name":"...","tag_id":"...","name":"build-server","labels":{"purpose":"refactor"},"pid":123,"status":"running"} ], "version": 7 }
+{ "instances": [ {"id":"...","worktree_id":"...","worktree_name":"...","tag_id":"...","name":"build-server","pid":123,"status":"running"} ], "version": 7 }
 ```
 
 - `version`: monotonically increasing state version. Incrementing `SaveWithVersion` calls cause this to grow. Clients should track it and send it back on operations that modify state (e.g., reorder) to detect concurrent modifications.
@@ -219,7 +219,7 @@ Response:
 
 Body:
 ```json
-{ "worktree_id": "<worktreeId>", "tag_id": "optional", "command": "optional", "name": "optional", "labels": {"purpose":"refactor","priority":"P1"} }
+{ "worktree_id": "<worktreeId>", "tag_id": "optional", "command": "optional", "name": "optional" }
 ```
 
 - `worktree_id` can be a regular worktree ID, or `"__main__"` to run an instance in the main (host) git repository. For `"__main__"`, the instance starts in the main repo root directory.
@@ -253,7 +253,7 @@ Body:
 
 Response (200):
 ```json
-{ "id":"...","worktree_id":"...","worktree_name":"...","tag_id":"...","name":"build-server","labels":{},"pid":123,"status":"running","created_at":"..." }
+{ "id":"...","worktree_id":"...","worktree_name":"...","tag_id":"...","name":"build-server","pid":123,"status":"running","created_at":"..." }
 ```
 
 ### Reorder tabs
@@ -300,7 +300,7 @@ Body:
 { "id": "<instanceId>" }
 ```
 
-- Creates a new instance with the same worktree + tag/command + labels.
+- Creates a new instance with the same worktree + tag/command.
 - If the old instance is not running, it will be deleted automatically.
 - The old instance record is linked to the new one via `restarted_to` / `restarted_from`.
 

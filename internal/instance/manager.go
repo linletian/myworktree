@@ -50,7 +50,6 @@ type StartInput struct {
 	TagID      string
 	Command    string // optional if TagID is set; required if TagID is empty
 	Name       string
-	Labels     map[string]string
 }
 
 // ReconcileRunningOnStartup marks stale "running" records as "stopped".
@@ -223,7 +222,6 @@ func (m *Manager) Start(in StartInput) (store.ManagedInstance, error) {
 		WorktreeName: wtName,
 		TagID:        effectiveTagID,
 		Name:         instName,
-		Labels:       in.Labels,
 		Command:      command,
 		Cwd:          cwd,
 		Env:          sanitizedEnv(env),
@@ -542,7 +540,6 @@ func (m *Manager) Restart(id string) (store.ManagedInstance, error) {
 	startIn := StartInput{
 		WorktreeID: old.WorktreeID,
 		Name:       old.Name,
-		Labels:     old.Labels,
 	}
 	if old.TagID != "" && old.TagID != "adhoc" && old.TagID != "idle" {
 		startIn.TagID = old.TagID

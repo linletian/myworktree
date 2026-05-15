@@ -27,7 +27,6 @@
 - **Instance**：myworktree 托管启动的一个进程（通常运行 zsh + 某个命令）。
 - **Window**：前端对 instance 的渲染视图；Window 关闭不影响 instance。
 - **Tag**：启动模板（command/env/preStart/cwd）。
-- **Labels**：管理标签（键值对元数据），用于搜索/过滤/分组，不影响启动行为。
 
 ## 5. 关键规则
 - 后端必须保持：worktree 与 instance 的生命周期独立于前端。

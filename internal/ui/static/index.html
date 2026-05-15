@@ -1004,10 +1004,6 @@
             <label>Name (Optional)</label>
             <input id="instName" placeholder="e.g. build-server" />
         </div>
-        <div class="form-group">
-            <label>Labels (Optional)</label>
-            <input id="instLabels" placeholder="k=v,role=backend" />
-        </div>
         <div class="form-actions">
             <button onclick="closeModal('modal-start-instance')">Cancel</button>
             <button class="primary" onclick="doStartInstance()">Start</button>
@@ -2039,7 +2035,6 @@
 
         function promptStartInstance() {
             if (!state.activeWT) { alert("Select a worktree first"); return; }
-            document.getElementById("instLabels").value = "";
             document.getElementById("cmd").value = "";
             document.getElementById("instName").value = "";
             openModal("modal-start-instance");
@@ -2098,7 +2093,6 @@
                     tag_id: document.getElementById("tagSelect").value,
                     command: document.getElementById("cmd").value,
                     name: document.getElementById("instName").value,
-                    labels: parseLabelsInput(document.getElementById("instLabels").value)
                 };
                 const res = await api("/api/instances", { method: "POST", body: JSON.stringify(body) });
                 closeModal("modal-start-instance");
@@ -2134,15 +2128,6 @@
         function reconnectWS() {
             const session = getActiveTerminalSession();
             if (session) connectTTY(session);
-        }
-
-        function parseLabelsInput(raw) {
-            const out = {};
-            for (const token of (raw || "").split(",")) {
-                const [k, v] = token.split("=").map(s => s.trim());
-                if (k && v) out[k] = v;
-            }
-            return out;
         }
 
         // Terminal Logic (Per Instance)
