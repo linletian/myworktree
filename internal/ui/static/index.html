@@ -884,7 +884,6 @@
                 <div id="instance-actions">
                     <button onclick="restartInstance()" title="Restart">Restart</button>
                     <button onclick="stopInstance()" title="Stop">Stop</button>
-                    <button onclick="reconnectWS()" title="Reconnect WebSocket">Reconnect</button>
                     <button class="danger" onclick="deleteInstance()" title="Delete">Delete</button>
                 </div>
             </div>
@@ -2125,11 +2124,6 @@
             if (!state.activeInst || !confirm("Delete instance log?")) return;
             try { await api("/api/instances/delete", { method: "POST", body: JSON.stringify({ id: state.activeInst }) }); refresh(); } catch (e) { alert(e); }
         }
-        function reconnectWS() {
-            const session = getActiveTerminalSession();
-            if (session) connectTTY(session);
-        }
-
         // Terminal Logic (Per Instance)
         let windowHasFocus = true;
         let openDialogs = new Set();
@@ -2626,8 +2620,16 @@
 
                 let isFirstData = true;
                 let handshakeTimeout = null;
+                let connectTimeout = setTimeout(() => {
+                    if (session.ttySocket === ws && ws.readyState !== WebSocket.OPEN) {
+                        console.error('WebSocket connection timeout: could not open within 10s');
+                        if (state.activeInst === id) updateStatus("ws connect timeout");
+                        ws.close();
+                    }
+                }, 10000);
 
                 ws.onopen = () => {
+                    if (connectTimeout) { clearTimeout(connectTimeout); connectTimeout = null; }
                     session.ttyState = 'HANDSHAKING';
                     handshakeTimeout = setTimeout(() => {
                         if (session.ttyState !== 'READY' && ws === session.ttySocket) {
@@ -2693,16 +2695,14 @@
 
                 ws.onclose = () => {
                     resetTTYOutputDecoder(session);
-                    if (handshakeTimeout) {
-                        clearTimeout(handshakeTimeout);
-                        handshakeTimeout = null;
-                    }
+                    if (connectTimeout) { clearTimeout(connectTimeout); connectTimeout = null; }
+                    if (handshakeTimeout) { clearTimeout(handshakeTimeout); handshakeTimeout = null; }
                     session.ttyState = 'IDLE';
                     if (session.ttySocket === ws) {
                         const latest = state.instances.find(i => i.id === session.id);
                         if (latest && latest.status === 'running') {
                             if (state.activeInst === session.id) updateStatus("ws closed, retrying...");
-                            session.ttyReconnectTimer = setTimeout(() => connectTTY(session), 1000);
+                            session.ttyReconnectTimer = setTimeout(() => connectTTY(session), 5000);
                         } else if (state.activeInst === session.id) {
                             updateStatus("stopped");
                         }
