@@ -446,6 +446,7 @@ func (s *Server) registerAPIs(mux *http.ServeMux) {
 	mux.HandleFunc("/api/instances/log/stream", s.handleInstanceLogStream)
 	mux.HandleFunc("/api/instances/stats", s.handleInstanceStats)
 	mux.HandleFunc("/api/tags", s.handleTags)
+	mux.HandleFunc("/api/tags/open-dir", s.handleTagsOpenDir)
 	mux.HandleFunc("/api/branches", s.handleBranches)
 	mux.HandleFunc("/api/worktrees/open-terminal", s.handleWorktreeOpenTerminal)
 	mux.HandleFunc("/api/worktrees/open-finder", s.handleWorktreeOpenFinder)
@@ -511,6 +512,41 @@ func (s *Server) handleTags(w http.ResponseWriter, r *http.Request) {
 	}
 	sort.Slice(items, func(i, j int) bool { return items[i].ID < items[j].ID })
 	writeJSON(w, http.StatusOK, map[string]any{"tags": items})
+}
+
+func (s *Server) handleTagsOpenDir(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !isLoopbackRequest(r) {
+		writeErr(w, http.StatusForbidden, errors.New("host GUI actions are only allowed from loopback clients"))
+		return
+	}
+	base, err := os.UserConfigDir()
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	dir := filepath.Join(base, "myworktree")
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "open", dir)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			err = fmt.Errorf("command timed out: open %s", dir)
+		} else {
+			detail := strings.TrimSpace(string(out))
+			if detail != "" {
+				err = fmt.Errorf("%w: %s", err, detail)
+			}
+		}
+		s.logger.Printf("open tags dir command failed: args=%q err=%v", dir, err)
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
 func (s *Server) handleWorktrees(w http.ResponseWriter, r *http.Request) {
@@ -1799,11 +1835,6 @@ func (s *Server) handleWorktreeOpen(w http.ResponseWriter, r *http.Request, args
 			return
 		}
 		writeErr(w, http.StatusInternalServerError, err)
-		return
-	}
-
-	if _, err := os.Stat(path); err != nil {
-		writeErr(w, http.StatusNotFound, fmt.Errorf("worktree path not found: %w", err))
 		return
 	}
 

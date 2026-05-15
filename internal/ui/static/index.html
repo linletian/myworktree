@@ -992,8 +992,8 @@
     <dialog id="modal-start-instance">
         <h3>Start Instance</h3>
         <div class="form-group">
-            <label>Tag (Template)</label>
-            <select id="tagSelect"></select>
+            <label>Template <span id="template-edit-btn" class="wt-action-btn" style="display:inline-flex;vertical-align:middle;opacity:0.6" title="Edit templates" onclick="openTagsDir(event)"><svg viewBox="0 0 24 24" width="12" height="12" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path></svg></span></label>
+            <select id="tagSelect" onchange="onTagChange()"></select>
         </div>
         <div class="form-group">
             <label>Or Custom Command</label>
@@ -1902,6 +1902,9 @@
                     }).join("");
                 if (ts.innerHTML !== opts) ts.innerHTML = opts;
             }
+            const isLocal = window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1";
+            const editBtn = document.getElementById("template-edit-btn");
+            if (editBtn) editBtn.style.display = isLocal ? "inline-flex" : "none";
         }
 
         // Interaction
@@ -2036,7 +2039,17 @@
             if (!state.activeWT) { alert("Select a worktree first"); return; }
             document.getElementById("cmd").value = "";
             document.getElementById("instName").value = "";
+            document.getElementById("tagSelect").value = "";
             openModal("modal-start-instance");
+        }
+
+        function onTagChange() {
+            const ts = document.getElementById("tagSelect");
+            const tag = state.tags.find(t => t.id === ts.value);
+            if (tag) {
+                document.getElementById("cmd").value = tag.command || "";
+                document.getElementById("instName").value = tag.id || "";
+            }
         }
 
         // API Calls
@@ -2759,6 +2772,22 @@
             } finally {
                 loadingActions.delete(key);
                 renderSidebar();
+            }
+        }
+
+        async function openTagsDir(event) {
+            event.stopPropagation();
+            try {
+                const controller = new AbortController();
+                const timeoutId = setTimeout(() => controller.abort(), 10000);
+                try {
+                    await api("/api/tags/open-dir", { method: "POST", signal: controller.signal });
+                } finally {
+                    clearTimeout(timeoutId);
+                }
+            } catch (e) {
+                console.error("Failed to open tags dir:", e);
+                alert("Failed to open tags directory: " + e.message);
             }
         }
 
