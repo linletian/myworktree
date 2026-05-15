@@ -536,14 +536,13 @@ func TestParseGitDiffNumStat(t *testing.T) {
 }
 
 func TestHandleWorktreeStatusGitFailureBothFail(t *testing.T) {
-	dir := t.TempDir()
-	script := filepath.Join(dir, "git")
-	if err := os.WriteFile(script, []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
-		t.Fatalf("write fake git: %v", err)
+	srv := &Server{
+		root: t.TempDir(),
+		gitRunner: func(timeout time.Duration, gitRoot string, args ...string) ([]byte, error) {
+			return nil, os.ErrNotExist
+		},
 	}
-	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	srv := &Server{root: t.TempDir()}
 	req := httptest.NewRequest(http.MethodGet, "/api/worktree/status?id=__main__", nil)
 	w := httptest.NewRecorder()
 	srv.handleWorktreeStatus(w, req)
@@ -557,15 +556,17 @@ func TestHandleWorktreeStatusGitFailureBothFail(t *testing.T) {
 }
 
 func TestHandleWorktreeStatusPartialFailure(t *testing.T) {
-	dir := t.TempDir()
-	script := filepath.Join(dir, "git")
-	// staged succeeds, unstaged fails
-	if err := os.WriteFile(script, []byte("#!/bin/sh\nif echo \"$@\" | grep -q -- '--cached'; then echo '1\t0\ttest.go'; exit 0; else exit 1; fi\n"), 0o755); err != nil {
-		t.Fatalf("write fake git: %v", err)
+	srv := &Server{
+		root: t.TempDir(),
+		gitRunner: func(timeout time.Duration, gitRoot string, args ...string) ([]byte, error) {
+			for _, a := range args {
+				if a == "--cached" {
+					return []byte("1\t0\ttest.go"), nil
+				}
+			}
+			return nil, os.ErrNotExist
+		},
 	}
-	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
-
-	srv := &Server{root: t.TempDir()}
 	req := httptest.NewRequest(http.MethodGet, "/api/worktree/status?id=__main__", nil)
 	w := httptest.NewRecorder()
 	srv.handleWorktreeStatus(w, req)

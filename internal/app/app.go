@@ -65,6 +65,8 @@ type Server struct {
 	ttyClients  map[string]map[string]*ttyClientState
 	ttyApplied  map[string]ttySize
 	ttyNextID   uint64
+
+	gitRunner func(timeout time.Duration, gitRoot string, args ...string) ([]byte, error)
 }
 
 type authFail struct {
@@ -143,6 +145,11 @@ func New(cfg Config, logger *log.Logger) (*Server, error) {
 	s.registerAPIs(mux)
 	if err := ui.Register(mux, filepath.Base(filepath.Clean(s.root))); err != nil {
 		return nil, fmt.Errorf("ui.Register: %w", err)
+	}
+
+	s.gitRunner = func(timeout time.Duration, gitRoot string, args ...string) ([]byte, error) {
+		cmd := gitx.GitCommand(timeout, gitRoot, args...)
+		return cmd.Output()
 	}
 
 	return s, nil
@@ -677,8 +684,7 @@ func (s *Server) handleWorktreeStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	runDiff := func(args ...string) diffResult {
-		cmd := gitx.GitCommand(2*time.Second, gitRoot, args...)
-		out, err := cmd.Output()
+		out, err := s.gitRunner(2*time.Second, gitRoot, args...)
 		if err != nil {
 			msg := strings.TrimSpace(string(out))
 			if msg == "" {
