@@ -236,6 +236,7 @@ func instanceCmd(logger *log.Logger, args []string) error {
 	}
 	mgr := &instance.Manager{
 		DataDir: dataDir,
+		Root:    root,
 		Store:   store.FileStore{Path: filepath.Join(dataDir, "state.json")},
 		Logger:  logger,
 	}

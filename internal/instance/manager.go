@@ -31,6 +31,7 @@ var ErrInstanceNotFound = errors.New("unknown instance id")
 
 type Manager struct {
 	DataDir string
+	Root    string // git repo root, used for MainWorktreeID resolution
 	Store   store.FileStore
 	Logger  *log.Logger
 
@@ -540,6 +541,9 @@ func (m *Manager) Restart(id string) (store.ManagedInstance, error) {
 	startIn := StartInput{
 		WorktreeID: old.WorktreeID,
 		Name:       old.Name,
+	}
+	if old.WorktreeID == MainWorktreeID {
+		startIn.Root = m.Root
 	}
 	if old.TagID != "" && old.TagID != "adhoc" && old.TagID != "idle" {
 		startIn.TagID = old.TagID
