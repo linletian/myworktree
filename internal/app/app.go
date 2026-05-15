@@ -363,12 +363,33 @@ func (s *Server) listTopBranches() (string, []gitx.Branch, error) {
 		return "", nil, err
 	}
 
-	// Default branch always first; then newest -> oldest, total 10.
+	// Build a quick existence lookup for branch names
+	exists := make(map[string]bool, len(items))
+	for _, b := range items {
+		exists[b.Name] = true
+	}
+
+	// Priority order: default > main > develop; skip if same as default
+	priorities := make([]string, 0, 3)
+	priorities = append(priorities, def)
+	if def != "main" && exists["main"] {
+		priorities = append(priorities, "main")
+	}
+	if def != "develop" && exists["develop"] {
+		priorities = append(priorities, "develop")
+	}
+
+	// Build result: priority branches first, then the rest by commit time, total 10.
+	seen := make(map[string]bool, 10)
 	out := make([]gitx.Branch, 0, 10)
-	if def != "" {
+	for _, name := range priorities {
+		if seen[name] {
+			continue
+		}
 		for _, b := range items {
-			if b.Name == def {
+			if b.Name == name {
 				out = append(out, b)
+				seen[name] = true
 				break
 			}
 		}
@@ -377,10 +398,11 @@ func (s *Server) listTopBranches() (string, []gitx.Branch, error) {
 		if len(out) >= 10 {
 			break
 		}
-		if def != "" && b.Name == def {
+		if seen[b.Name] {
 			continue
 		}
 		out = append(out, b)
+		seen[b.Name] = true
 	}
 	return def, out, nil
 }
