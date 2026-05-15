@@ -116,6 +116,7 @@ func New(cfg Config, logger *log.Logger) (*Server, error) {
 	}
 	instanceMgr := &instance.Manager{
 		DataDir: dataDir,
+		Root:    root,
 		Store:   st,
 		Logger:  logger,
 	}
