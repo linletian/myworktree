@@ -27,7 +27,6 @@
 - **Instance**：myworktree 托管启动的一个进程（通常运行 zsh + 某个命令）。
 - **Window**：前端对 instance 的渲染视图；Window 关闭不影响 instance。
 - **Tag**：启动模板（command/env/preStart/cwd）。
-- **Labels**：管理标签（键值对元数据），用于搜索/过滤/分组，不影响启动行为。
 
 ## 5. 关键规则
 - 后端必须保持：worktree 与 instance 的生命周期独立于前端。
@@ -51,6 +50,8 @@
 ## 7. 当前实现状态（与愿景差异）
 - 已实现：worktree/instance 管理、Web UI、API、输出回放、脱敏、认证与可选 HTTPS、MCP tools 列表接口。
 - 已实现：侧栏主工作区/各 worktree 项提供两个快捷入口，可一键在宿主机打开对应目录的 Terminal（zsh）与 Finder 窗口，便于在 Web UI 与本机 GUI/CLI 间快速切换。
+- **已实现 Git Changes 面板暂存/未暂存分离**：侧栏底部 CHANGES 区域拆分为 Staged 和 Unstaged 两个互锁折叠 section。默认展开 Unstaged，点击任一标题栏展开当前 section 并自动折叠另一个。每个 section 独立显示暂存/未暂存的文件列表和行数汇总。
+  - 后端 `/api/worktree/status` 并发执行 `git diff --cached --numstat`（暂存）和 `git diff --numstat`（未暂存），复用同一解析器，响应中分别返回 `staged` 和 `unstaged` 两个字段。
 - **已实现 PTY + Web TTY**：instance 通过 PTY 启动，支持真正的交互式终端（vim/htop/less 等 TUI 程序）。
   - WebSocket 握手协议：服务端发送 `{"type":"ready"}`，客户端等待后发送 resize 开始数据流。
   - 窗口尺寸传递：前端监听窗口 resize 并通知后端 PTY，确保 TUI 程序正确重绘。
@@ -73,13 +74,13 @@
 
 ### 9.1 模式选择
 - **正则模式**（默认）：使用 `slugify()` 正则转换，不调用任何 LLM API
-- **LLM 模式**：调用 LLM API（支持 OpenAI / Anthropic / OpenAI Compatible 三种协议，由配置决定）
+- **LLM 模式**：调用 LLM API（支持 OpenAI / Anthropic 两种协议，由配置决定）
 
 ### 9.2 配置方式
 配置文件：`~/.config/myworktree/config.json`（0o600 权限），示例：
 ```json
 {
-  "protocol": "openai_compatible",
+  "protocol": "openai",
   "api_address": "<provider_api_address>",
   "api_key": "<api_key>",
   "model": "<model_name>"
@@ -87,11 +88,10 @@
 ```
 
 支持的 protocol：
-- `openai`：OpenAI 官方 API
-- `anthropic`：Anthropic API
-- `openai_compatible`：兼容 OpenAI 接口格式的第三方服务（如 SiliconFlow、MiniMax 等）
+- `openai`：OpenAI API 格式（适用于 OpenAI 及 DeepSeek 等兼容 OpenAI 格式的服务）
+- `anthropic`：Anthropic API 格式（适用于 Anthropic 及 DeepSeek 的 Anthropic 格式端点）
 
-同时支持环境变量（优先级更高）：`OPENAI_API_KEY` / `ANTHROPIC_API_KEY` / `OPENAI_COMPATIBLE_API_KEY`。
+同时支持环境变量（优先级更高）：`OPENAI_API_KEY` / `ANTHROPIC_API_KEY`。
 
 ### 9.3 分支名规范（由 LLM 遵守）
 1. 长度不超过 100 个字符

@@ -50,7 +50,6 @@ type StartInput struct {
 	TagID      string
 	Command    string // optional if TagID is set; required if TagID is empty
 	Name       string
-	Labels     map[string]string
 }
 
 // ReconcileRunningOnStartup marks stale "running" records as "stopped".
@@ -223,7 +222,6 @@ func (m *Manager) Start(in StartInput) (store.ManagedInstance, error) {
 		WorktreeName: wtName,
 		TagID:        effectiveTagID,
 		Name:         instName,
-		Labels:       in.Labels,
 		Command:      command,
 		Cwd:          cwd,
 		Env:          sanitizedEnv(env),
@@ -307,7 +305,7 @@ func (m *Manager) UpdateName(id string, name string) (store.ManagedInstance, err
 }
 
 // ReorderInstances sets the tab order for a specific worktree.
-// orderIDs must contain all instance IDs for the given worktree (both active and archived).
+// orderIDs must contain all instance IDs for the given worktree.
 // expectedVersion is the version the caller observed; save is rejected if the state has changed.
 func (m *Manager) ReorderInstances(worktreeID string, orderIDs []string, expectedVersion int64) error {
 	worktreeID = strings.TrimSpace(worktreeID)
@@ -542,7 +540,6 @@ func (m *Manager) Restart(id string) (store.ManagedInstance, error) {
 	startIn := StartInput{
 		WorktreeID: old.WorktreeID,
 		Name:       old.Name,
-		Labels:     old.Labels,
 	}
 	if old.TagID != "" && old.TagID != "adhoc" && old.TagID != "idle" {
 		startIn.TagID = old.TagID
@@ -561,15 +558,17 @@ func (m *Manager) Restart(id string) (store.ManagedInstance, error) {
 		m.stateMu.Unlock()
 		return newInst, nil
 	}
+	oldIdx := -1
+	var oldLogPath string
 	for i := range st2.Instances {
 		if st2.Instances[i].ID == id {
-			if !st2.Instances[i].Archived {
-				st2.Instances[i].Archived = true
-				st2.Instances[i].ArchivedAt = time.Now().UTC().Format(time.RFC3339)
-			}
-			st2.Instances[i].RestartedTo = newInst.ID
+			oldIdx = i
+			oldLogPath = st2.Instances[i].LogPath
 			break
 		}
+	}
+	if oldIdx >= 0 {
+		st2.Instances = append(st2.Instances[:oldIdx], st2.Instances[oldIdx+1:]...)
 	}
 	for i := range st2.Instances {
 		if st2.Instances[i].ID == newInst.ID {
@@ -579,6 +578,20 @@ func (m *Manager) Restart(id string) (store.ManagedInstance, error) {
 	}
 	_ = m.Store.SaveWithVersion(st2, st2.Version)
 	m.stateMu.Unlock()
+
+	if strings.TrimSpace(oldLogPath) != "" {
+		_ = os.Remove(oldLogPath)
+	}
+	m.mu.Lock()
+	delete(m.running, id)
+	delete(m.inputs, id)
+	if ptmx, ok := m.ptys[id]; ok {
+		_ = ptmx.Close()
+		delete(m.ptys, id)
+	}
+	m.closeSubscribersLocked(id)
+	m.mu.Unlock()
+
 	return newInst, nil
 }
 
@@ -622,30 +635,6 @@ func (m *Manager) SubscribeOutput(id string) (<-chan string, func(), error) {
 	return ch, cancel, nil
 }
 
-func (m *Manager) Archive(id string) error {
-	id = strings.TrimSpace(id)
-	if id == "" {
-		return errors.New("id is required")
-	}
-	m.stateMu.Lock()
-	defer m.stateMu.Unlock()
-	st, err := m.Store.Load()
-	if err != nil {
-		return err
-	}
-	for i := range st.Instances {
-		if st.Instances[i].ID == id {
-			if st.Instances[i].Status == "running" {
-				return fmt.Errorf("instance is running: %s", id)
-			}
-			st.Instances[i].Archived = true
-			st.Instances[i].ArchivedAt = time.Now().UTC().Format(time.RFC3339)
-			return m.Store.SaveWithVersion(st, st.Version)
-		}
-	}
-	return fmt.Errorf("unknown instance id: %s", id)
-}
-
 func (m *Manager) Delete(id string) error {
 	id = strings.TrimSpace(id)
 	if id == "" {
@@ -663,9 +652,6 @@ func (m *Manager) Delete(id string) error {
 		if st.Instances[i].ID == id {
 			if st.Instances[i].Status == "running" {
 				return fmt.Errorf("instance is running: %s", id)
-			}
-			if !st.Instances[i].Archived {
-				return fmt.Errorf("instance is not archived: %s", id)
 			}
 			idx = i
 			logPath = st.Instances[i].LogPath
@@ -691,82 +677,6 @@ func (m *Manager) Delete(id string) error {
 	}
 	m.closeSubscribersLocked(id)
 	m.mu.Unlock()
-	return nil
-}
-
-// PurgeArchivedInstances deletes archived instances for a given worktree (or all worktrees if empty)
-// in a single atomic write, protected by optimistic locking via expectedVersion.
-func (m *Manager) PurgeArchivedInstances(worktreeID string, expectedVersion int64) error {
-	m.stateMu.Lock()
-	defer m.stateMu.Unlock()
-	st, err := m.Store.Load()
-	if err != nil {
-		return err
-	}
-
-	// Collect archived instances to purge and their log paths.
-	var toPurge []struct {
-		id      string
-		logPath string
-	}
-	for _, inst := range st.Instances {
-		if inst.Archived && (worktreeID == "" || inst.WorktreeID == worktreeID) {
-			toPurge = append(toPurge, struct {
-				id      string
-				logPath string
-			}{inst.ID, inst.LogPath})
-		}
-	}
-	if len(toPurge) == 0 {
-		return nil
-	}
-
-	// Filter out archived instances.
-	filtered := st.Instances[:0]
-	for _, inst := range st.Instances {
-		if !inst.Archived || (worktreeID != "" && inst.WorktreeID != worktreeID) {
-			filtered = append(filtered, inst)
-		}
-	}
-	st.Instances = filtered
-
-	// Also remove archived IDs from TabOrder.
-	archivedSet := make(map[string]bool, len(toPurge))
-	for _, p := range toPurge {
-		archivedSet[p.id] = true
-	}
-	for wtID, order := range st.TabOrder {
-		if worktreeID != "" && wtID != worktreeID {
-			continue
-		}
-		newOrder := order[:0]
-		for _, id := range order {
-			if !archivedSet[id] {
-				newOrder = append(newOrder, id)
-			}
-		}
-		st.TabOrder[wtID] = newOrder
-	}
-
-	if err := m.Store.SaveWithVersion(st, expectedVersion); err != nil {
-		return err
-	}
-
-	// Clean up log files and in-memory state.
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	for _, p := range toPurge {
-		if strings.TrimSpace(p.logPath) != "" {
-			_ = os.Remove(p.logPath)
-		}
-		delete(m.running, p.id)
-		delete(m.inputs, p.id)
-		if ptmx, ok := m.ptys[p.id]; ok {
-			_ = ptmx.Close()
-			delete(m.ptys, p.id)
-		}
-		m.closeSubscribersLocked(p.id)
-	}
 	return nil
 }
 

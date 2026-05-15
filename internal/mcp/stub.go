@@ -23,9 +23,7 @@ func (a Adapter) ToolNames() []string {
 		"instance_start",
 		"instance_stop",
 		"instance_input",
-		"instance_archive",
 		"instance_delete",
-		"instance_purge",
 		"instance_log_tail",
 	}
 }

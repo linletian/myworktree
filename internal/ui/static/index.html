@@ -124,39 +124,70 @@
             border-top: 1px solid var(--border-color);
         }
 
-        #git-changes-header {
+        .git-section {
+            display: flex;
+            flex-direction: column;
+            flex-shrink: 0;
+        }
+
+        .git-section.expanded {
+            flex: 1;
+            min-height: 0;
+        }
+
+        .git-section-header {
             display: flex;
             align-items: center;
             padding: 6px 12px;
             border-bottom: 1px solid var(--border-color);
-            gap: 8px;
+            gap: 6px;
             flex-shrink: 0;
             background: var(--bg-color);
+            cursor: pointer;
+            user-select: none;
         }
 
-        .git-changes-title {
-            font-size: 11px;
-            font-weight: 600;
-            text-transform: uppercase;
-            letter-spacing: 0.5px;
+        .git-section-header:hover {
+            background: var(--hover-bg);
+        }
+
+        .git-section-chevron {
+            flex-shrink: 0;
+            transition: transform 0.2s;
             color: #6a737d;
         }
 
-        #git-changes-summary {
+        .git-section.expanded .git-section-chevron {
+            transform: rotate(90deg);
+        }
+
+        .git-section-title {
+            font-size: 11px;
+            font-weight: 600;
+            color: #6a737d;
+        }
+
+        .git-section-summary {
             margin-left: auto;
             font-size: 11px;
             color: #6a737d;
         }
 
-        #git-changes-summary .additions { color: #28a745; }
-        #git-changes-summary .deletions { color: #cb2431; }
+        .git-section-summary .additions { color: #28a745; }
+        .git-section-summary .deletions { color: #cb2431; }
 
-        #git-changes-list {
-            flex: 1;
+        .git-section-list {
             overflow-y: auto;
-            list-style: none;
             padding: 0;
             margin: 0;
+        }
+
+        .git-section.expanded .git-section-list {
+            flex: 1;
+        }
+
+        .git-section:not(.expanded) .git-section-list {
+            display: none;
         }
 
         .git-change-item {
@@ -191,7 +222,7 @@
         .git-change-stats .additions { color: #28a745; }
         .git-change-stats .deletions { color: #cb2431; }
 
-        .git-changes-empty {
+        .git-change-empty {
             padding: 16px 12px;
             text-align: center;
             color: #6a737d;
@@ -424,25 +455,6 @@
                 background: #e1e4e8;
                 color: #0366d6;
             }
-
-        /* Show archived label — always visible, never scrolls away */
-        #show-archived-label {
-            display: flex;
-            align-items: center;
-            gap: 6px;
-            white-space: nowrap;
-            font-size: 12px;
-            color: #586069;
-            margin-left: 8px;
-            flex-shrink: 0;
-            cursor: pointer;
-        }
-
-        /* Purge button in header area */
-        #header button.danger {
-            flex-shrink: 0;
-            margin-left: 8px;
-        }
 
         /* Actions Toolbar (Hidden by default, shown when instance active) */
         #instance-actions {
@@ -772,6 +784,14 @@
                     border-color: #cb2431;
                 }
 
+            #btnAIGenerate.muted {
+                opacity: 0.5;
+                background: #e8e8e8;
+                border-color: #d0d0d0;
+                color: #999;
+                cursor: pointer;
+            }
+
             #terminal-controls {
                 position: absolute;
                 top: 20px;
@@ -833,11 +853,26 @@
             </div>
             <div id="sidebar-resize-handle" onmousedown="startSidebarResize(event)"></div>
             <div id="sidebar-bottom-panel">
-                <div id="git-changes-header">
-                    <span class="git-changes-title">Changes</span>
-                    <span id="git-changes-summary"></span>
+                <div id="git-staged-section" class="git-section">
+                    <div class="git-section-header" onclick="toggleGitSection('staged')">
+                        <svg class="git-section-chevron" width="8" height="8" viewBox="0 0 8 8" fill="none" xmlns="http://www.w3.org/2000/svg">
+                            <path d="M3 1L7 4L3 7" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+                        </svg>
+                        <span class="git-section-title">Staged</span>
+                        <span class="git-section-summary" id="git-staged-summary"></span>
+                    </div>
+                    <div class="git-section-list" id="git-staged-list"></div>
                 </div>
-                <div id="git-changes-list"></div>
+                <div id="git-unstaged-section" class="git-section expanded">
+                    <div class="git-section-header" onclick="toggleGitSection('unstaged')">
+                        <svg class="git-section-chevron" width="8" height="8" viewBox="0 0 8 8" fill="none" xmlns="http://www.w3.org/2000/svg">
+                            <path d="M3 1L7 4L3 7" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+                        </svg>
+                        <span class="git-section-title">Unstaged</span>
+                        <span class="git-section-summary" id="git-unstaged-summary"></span>
+                    </div>
+                    <div class="git-section-list" id="git-unstaged-list"></div>
+                </div>
             </div>
         </div>
 
@@ -849,15 +884,9 @@
                 <div id="instance-actions">
                     <button onclick="restartInstance()" title="Restart">Restart</button>
                     <button onclick="stopInstance()" title="Stop">Stop</button>
-                    <button onclick="archiveInstance()" title="Archive">Archive</button>
                     <button onclick="reconnectWS()" title="Reconnect WebSocket">Reconnect</button>
                     <button class="danger" onclick="deleteInstance()" title="Delete">Delete</button>
-                    <button class="danger" onclick="purgeArchivedInstances()" title="Delete all archived instances">Purge</button>
                 </div>
-
-                <label id="show-archived-label">
-                    <input type="checkbox" id="show-archived-cb" onchange="toggleArchived(this)"> Show archived
-                </label>
             </div>
 
             <div id="workspace">
@@ -916,23 +945,25 @@
             <select id="llmProtocol" onchange="onLLMProtocolChange()">
                 <option value="openai">OpenAI</option>
                 <option value="anthropic">Anthropic</option>
-                <option value="openai_compatible">OpenAI Compatible</option>
             </select>
         </div>
         <div class="form-group">
             <label>Model</label>
-            <input id="llmModel" placeholder="e.g. gpt-4o-mini" />
-            <div class="muted" id="llm-model-hint">Default auto-filled based on protocol</div>
+            <input id="llmModel" placeholder="e.g. deepseek-chat" />
+            <div class="muted" id="llm-model-hint">Enter model name manually</div>
         </div>
         <div class="form-group">
             <label>API Address</label>
-            <input id="llmAPIAddress" type="url" placeholder="https://..." />
-            <div class="muted">e.g. https://api.openai.com/v1/chat/completions</div>
+            <input id="llmAPIAddress" type="url" placeholder="https://api.deepseek.com/v1/chat/completions" />
+            <div class="muted">Full URL including path</div>
         </div>
         <div class="form-group">
             <label>API Key</label>
             <input id="llmAPIKey" type="password" placeholder="sk-..." />
             <div id="llm-api-key-masked" class="muted"></div>
+        </div>
+        <div class="form-group">
+            <label><input type="checkbox" id="llmReasoningSplit" /> Enable reasoning_split (for providers that support it)</label>
         </div>
         <div class="form-actions">
             <button type="button" onclick="testLLMConnection()">Test Connection</button>
@@ -972,10 +1003,6 @@
         <div class="form-group">
             <label>Name (Optional)</label>
             <input id="instName" placeholder="e.g. build-server" />
-        </div>
-        <div class="form-group">
-            <label>Labels (Optional)</label>
-            <input id="instLabels" placeholder="k=v,role=backend" />
         </div>
         <div class="form-actions">
             <button onclick="closeModal('modal-start-instance')">Cancel</button>
@@ -1056,7 +1083,6 @@
             branches: [],
             activeWT: null,
             activeInst: null,
-            showArchived: false,
             mainRepo: null,
             renamingInst: null,    // instance id currently being renamed
             renamingInstValue: ""  // preserved value across re-renders
@@ -1077,10 +1103,11 @@
         let stateVersion = 0;
 
         // Git Changes
-        let gitChanges = { changes: [], total: { additions: 0, deletions: 0 } };
+        let gitChanges = { staged: { changes: [], total: { additions: 0, deletions: 0 } }, unstaged: { changes: [], total: { additions: 0, deletions: 0 } } };
         let gitChangesTimer = null;
         let gitChangesSeq = 0;
         let gitChangesError = null;
+        let gitExpandedSection = 'unstaged';
         let isResizingSidebar = false;
         let sidebarResizeStartY = 0;
         let sidebarTopPanelStartHeight = 0;
@@ -1197,8 +1224,6 @@
                         return;
                     }
                     render();
-                    const cb = document.getElementById("show-archived-cb");
-                    if (cb) cb.checked = state.showArchived;
                 } catch (e) {
                     console.error(e);
                     const inst = getActiveInstance();
@@ -1232,44 +1257,6 @@
             setTimeout(() => focusTerminalIfPossible(), 100);
         }
 
-        function toggleArchived(el) {
-            state.showArchived = el.checked;
-            renderTabs();
-        }
-
-        async function purgeArchivedInstances() {
-            const archived = state.instances.filter(i => i.archived && i.worktree_id === state.activeWT);
-            if (archived.length === 0) return;
-            if (!confirm(`Delete ${archived.length} archived instance(s) in current worktree?`)) return;
-
-            // Optimistic update: remove archived instances for this worktree from local state immediately.
-            const archivedIds = new Set(archived.map(i => i.id));
-            state.instances = state.instances.filter(i => !(i.archived && i.worktree_id === state.activeWT));
-            // Select a new active instance if the previously selected one was purged.
-            if (state.activeInst && archivedIds.has(state.activeInst)) {
-                selectInstance(null);
-            } else {
-                renderTabs();
-            }
-
-            try {
-                // Keep 409 handling here so optimistic UI state can resync cleanly.
-                await api("/api/instances/purge", {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ worktree_id: state.activeWT, version: stateVersion })
-                });
-                // Success: refresh in background to sync version and any server-side bookkeeping.
-                refresh();
-            } catch (e) {
-                refresh();
-                if (e && e.status === 409) {
-                    return;
-                }
-                alert(e.message || e);
-            }
-        }
-
         // --- Git Changes ---
         async function refreshGitChanges() {
             if (!state.activeWT) return;
@@ -1284,7 +1271,7 @@
                     gitChangesError = typeof data === "string"
                         ? (data || resp.statusText || "Unknown error")
                         : ((data && data.error) || resp.statusText || "Unknown error");
-                    gitChanges = { changes: [], total: { additions: 0, deletions: 0 } };
+                    gitChanges = { staged: { changes: [], total: { additions: 0, deletions: 0 } }, unstaged: { changes: [], total: { additions: 0, deletions: 0 } } };
                 } else {
                     gitChangesError = null;
                     gitChanges = data;
@@ -1294,7 +1281,7 @@
                 console.error("failed to fetch git changes:", e);
                 if (seq !== gitChangesSeq) return;
                 gitChangesError = e.message || "Network error";
-                gitChanges = { changes: [], total: { additions: 0, deletions: 0 } };
+                gitChanges = { staged: { changes: [], total: { additions: 0, deletions: 0 } }, unstaged: { changes: [], total: { additions: 0, deletions: 0 } } };
                 renderGitChanges();
             }
         }
@@ -1333,86 +1320,114 @@
             return prefix + (lo > 0 ? filename.slice(prefix.length, prefix.length + lo) + '…' : '…');
         }
 
+        function toggleGitSection(name) {
+            if (gitExpandedSection === name) return;
+            const prev = document.getElementById(`git-${gitExpandedSection}-section`);
+            const next = document.getElementById(`git-${name}-section`);
+            if (prev) prev.classList.remove('expanded');
+            if (next) next.classList.add('expanded');
+            gitExpandedSection = name;
+            renderGitChanges();
+        }
+
         function renderGitChanges() {
-            const list = document.getElementById("git-changes-list");
-            const summary = document.getElementById("git-changes-summary");
-            if (!list) return;
-            const firstItem = list.querySelector('.git-change-item');
-            const firstStats = list.querySelector('.git-change-stats');
+            const expanded = gitExpandedSection;
+            const expList = document.getElementById(`git-${expanded}-list`);
+            const firstItem = expList ? expList.querySelector('.git-change-item') : null;
+            const firstStats = expList ? expList.querySelector('.git-change-stats') : null;
             const itemWidth = firstItem ? firstItem.getBoundingClientRect().width : 200;
             const statsWidth = firstStats ? firstStats.getBoundingClientRect().width : 0;
             const avail = Math.max(itemWidth - statsWidth - 8, 40);
-            list.replaceChildren();
-            if (summary) summary.replaceChildren();
 
-            if (gitChangesError) {
-                const empty = document.createElement("div");
-                empty.className = "git-changes-empty";
-                empty.style.color = "#cb2431";
-                empty.textContent = `⚠ ${gitChangesError}`;
-                list.appendChild(empty);
-                return;
-            }
+            ['staged', 'unstaged'].forEach(section => {
+                const list = document.getElementById(`git-${section}-list`);
+                const summary = document.getElementById(`git-${section}-summary`);
+                if (!list) return;
+                list.replaceChildren();
+                if (summary) summary.replaceChildren();
 
-            if (!gitChanges.changes || gitChanges.changes.length === 0) {
-                const empty = document.createElement("div");
-                empty.className = "git-changes-empty";
-                empty.textContent = "No changes";
-                list.appendChild(empty);
-                return;
-            }
+                const data = gitChanges[section];
+                const changes = data ? data.changes : [];
+                const total = data ? data.total : { additions: 0, deletions: 0 };
+                const sectionErr = data ? data.error : null;
 
-            if (summary) {
-                const t = gitChanges.total;
-                if (t.additions > 0) {
-                    const adds = document.createElement("span");
-                    adds.className = "additions";
-                    adds.textContent = `+${t.additions}`;
-                    summary.appendChild(adds);
+                if (gitChangesError) {
+                    if (section === expanded) {
+                        const empty = document.createElement("div");
+                        empty.className = "git-change-empty";
+                        empty.style.color = "#cb2431";
+                        empty.textContent = `\u26a0 ${gitChangesError}`;
+                        list.appendChild(empty);
+                    }
+                    return;
                 }
-                if (t.deletions > 0) {
-                    if (summary.childNodes.length > 0) summary.appendChild(document.createTextNode(" "));
-                    const dels = document.createElement("span");
-                    dels.className = "deletions";
-                    dels.textContent = `-${t.deletions}`;
-                    summary.appendChild(dels);
+
+                if (sectionErr) {
+                    const empty = document.createElement("div");
+                    empty.className = "git-change-empty";
+                    empty.style.color = "#cb2431";
+                    empty.textContent = `\u26a0 ${sectionErr}`;
+                    list.appendChild(empty);
+                    return;
                 }
-                if (summary.childNodes.length > 0) summary.appendChild(document.createTextNode(" "));
-                summary.appendChild(document.createTextNode(`${gitChanges.changes.length} file(s)`));
-            }
 
-            // Paths and error text come from git output, so build the DOM with
-            // textContent/attributes instead of innerHTML to avoid XSS.
-            gitChanges.changes.forEach(c => {
-                const displayPath = truncatePath(c.path, avail);
-                const item = document.createElement("div");
-                item.className = "git-change-item";
+                if (!changes || changes.length === 0) {
+                    const empty = document.createElement("div");
+                    empty.className = "git-change-empty";
+                    empty.textContent = section === 'staged' ? "No staged changes" : "No unstaged changes";
+                    list.appendChild(empty);
+                    return;
+                }
 
-                const path = document.createElement("span");
-                path.className = "git-change-path";
-                path.title = c.path;
-                path.textContent = displayPath;
-                item.appendChild(path);
-
-                if (c.additions > 0 || c.deletions > 0) {
-                    const stats = document.createElement("div");
-                    stats.className = "git-change-stats";
-                    if (c.additions > 0) {
+                if (summary) {
+                    if (total.additions > 0) {
                         const adds = document.createElement("span");
                         adds.className = "additions";
-                        adds.textContent = `+${c.additions}`;
-                        stats.appendChild(adds);
+                        adds.textContent = `+${total.additions}`;
+                        summary.appendChild(adds);
                     }
-                    if (c.deletions > 0) {
+                    if (total.deletions > 0) {
+                        if (summary.childNodes.length > 0) summary.appendChild(document.createTextNode(" "));
                         const dels = document.createElement("span");
                         dels.className = "deletions";
-                        dels.textContent = `-${c.deletions}`;
-                        stats.appendChild(dels);
+                        dels.textContent = `-${total.deletions}`;
+                        summary.appendChild(dels);
                     }
-                    item.appendChild(stats);
+                    if (summary.childNodes.length > 0) summary.appendChild(document.createTextNode(" "));
+                    summary.appendChild(document.createTextNode(`${changes.length} file(s)`));
                 }
 
-                list.appendChild(item);
+                changes.forEach(c => {
+                    const displayPath = truncatePath(c.path, avail);
+                    const item = document.createElement("div");
+                    item.className = "git-change-item";
+
+                    const path = document.createElement("span");
+                    path.className = "git-change-path";
+                    path.title = c.path;
+                    path.textContent = displayPath;
+                    item.appendChild(path);
+
+                    if (c.additions > 0 || c.deletions > 0) {
+                        const stats = document.createElement("div");
+                        stats.className = "git-change-stats";
+                        if (c.additions > 0) {
+                            const adds = document.createElement("span");
+                            adds.className = "additions";
+                            adds.textContent = `+${c.additions}`;
+                            stats.appendChild(adds);
+                        }
+                        if (c.deletions > 0) {
+                            const dels = document.createElement("span");
+                            dels.className = "deletions";
+                            dels.textContent = `-${c.deletions}`;
+                            stats.appendChild(dels);
+                        }
+                        item.appendChild(stats);
+                    }
+
+                    list.appendChild(item);
+                });
             });
         }
 
@@ -1612,15 +1627,12 @@
 
             // Filter instances for current WT
             let instances = state.instances.filter(i => i.worktree_id === state.activeWT);
-            if (!state.showArchived) {
-                instances = instances.filter(i => !i.archived);
-            }
 
-            // Fix invalid selection (e.g. archived/deleted)
+            // Fix invalid selection (e.g. deleted)
             if (state.activeInst && !instances.find(i => i.id === state.activeInst)) {
                 let newId = null;
                 const oldInst = state.instances.find(i => i.id === state.activeInst);
-                // If old instance still exists (e.g. archived), try to select neighbors
+                // If old instance still exists, try to select neighbors
                 if (oldInst) {
                     const currentIdx = instances.findIndex(i => i.id === oldInst.id);
                     if (currentIdx > 0) newId = instances[currentIdx - 1].id;
@@ -1645,7 +1657,6 @@
                 const isActive = state.activeInst === i.id;
                 const statusClass = `status-${i.status}`;
                 const displayName = i.name || i.tag_id || i.id.substring(0, 6);
-                const archivedMark = i.archived ? '<span style="opacity:0.6; font-size:11px; margin-left:6px">[archived]</span>' : '';
                 const isRenaming = state.renamingInst === i.id;
 
                 const renameValue = isRenaming && state.renamingInstValue ? state.renamingInstValue : displayName;
@@ -1675,7 +1686,7 @@
                  ondrop="handleDrop('${i.id}', event)"
                  title="Drag to reorder; double-click to rename">
               <span class="tab-status ${statusClass}"></span>
-              ${displayName} ${archivedMark}
+               ${displayName}
             </div>
           `;
             }).join("");
@@ -1962,6 +1973,7 @@
                 document.getElementById("wtBranchName").value = "";
                 document.getElementById("wtBranchPreview").textContent = "Branch name preview";
                 document.getElementById("wtAdopt").checked = false;
+                updateAIGenerateButtonState();
             }
             if (id === 'modal-import-wt') {
                 // Pre-load candidates
@@ -2023,7 +2035,6 @@
 
         function promptStartInstance() {
             if (!state.activeWT) { alert("Select a worktree first"); return; }
-            document.getElementById("instLabels").value = "";
             document.getElementById("cmd").value = "";
             document.getElementById("instName").value = "";
             openModal("modal-start-instance");
@@ -2082,7 +2093,6 @@
                     tag_id: document.getElementById("tagSelect").value,
                     command: document.getElementById("cmd").value,
                     name: document.getElementById("instName").value,
-                    labels: parseLabelsInput(document.getElementById("instLabels").value)
                 };
                 const res = await api("/api/instances", { method: "POST", body: JSON.stringify(body) });
                 closeModal("modal-start-instance");
@@ -2111,10 +2121,6 @@
                 selectInstance(res.id); // Switch to new instance
             } catch (e) { alert(e); }
         }
-        async function archiveInstance() {
-            if (!state.activeInst) return;
-            try { await api("/api/instances/archive", { method: "POST", body: JSON.stringify({ id: state.activeInst }) }); refresh(); } catch (e) { alert(e); }
-        }
         async function deleteInstance() {
             if (!state.activeInst || !confirm("Delete instance log?")) return;
             try { await api("/api/instances/delete", { method: "POST", body: JSON.stringify({ id: state.activeInst }) }); refresh(); } catch (e) { alert(e); }
@@ -2122,15 +2128,6 @@
         function reconnectWS() {
             const session = getActiveTerminalSession();
             if (session) connectTTY(session);
-        }
-
-        function parseLabelsInput(raw) {
-            const out = {};
-            for (const token of (raw || "").split(",")) {
-                const [k, v] = token.split("=").map(s => s.trim());
-                if (k && v) out[k] = v;
-            }
-            return out;
         }
 
         // Terminal Logic (Per Instance)
@@ -2982,6 +2979,12 @@
                 alert("Please enter a task description first.");
                 return;
             }
+            // Check if LLM is configured; if not, open settings directly
+            const cfg = await api("/api/llm/config");
+            if (!cfg.available) {
+                openLLMSettingsDialog();
+                return;
+            }
             const btn = document.getElementById("btnAIGenerate");
             btn.disabled = true;
             btn.textContent = "Generating...";
@@ -3011,6 +3014,7 @@
                 document.getElementById("llmAPIAddress").value = cfg.api_address || "";
                 document.getElementById("llmModel").value = cfg.model || "";
                 document.getElementById("llmAPIKey").value = "";
+                document.getElementById("llmReasoningSplit").checked = cfg.reasoning_split || false;
                 const maskedEl = document.getElementById("llm-api-key-masked");
                 if (cfg.api_key_masked) {
                     maskedEl.textContent = "Current: " + cfg.api_key_masked;
@@ -3030,24 +3034,14 @@
             document.getElementById("dialog-llm-settings").close();
         }
 
-        // Auto-fill model default when protocol changes.
+        // Auto-fill model hint when protocol changes.
         function onLLMProtocolChange() {
-            const protocol = document.getElementById("llmProtocol").value;
-            const modelInput = document.getElementById("llmModel");
             const modelHint = document.getElementById("llm-model-hint");
-            if (modelInput.value === "") {
-                modelInput.value = defaultModelForProtocol(protocol);
-                modelHint.textContent = "Default: " + defaultModelForProtocol(protocol);
-            }
+            modelHint.textContent = "Enter model name manually";
         }
 
         function defaultModelForProtocol(protocol) {
-            switch (protocol) {
-                case "openai": return "gpt-4o-mini";
-                case "anthropic": return "claude-3-5-haiku-20241022";
-                case "openai_compatible": return "";
-                default: return "";
-            }
+            return "";
         }
 
         // Save LLM settings.
@@ -3056,12 +3050,13 @@
             const apiKey = document.getElementById("llmAPIKey").value.trim();
             const apiAddress = document.getElementById("llmAPIAddress").value.trim();
             const model = document.getElementById("llmModel").value.trim();
+            const reasoningSplit = document.getElementById("llmReasoningSplit").checked;
             const errorDiv = document.getElementById("llm-settings-error");
             errorDiv.style.display = "none";
             try {
                 await api("/api/llm/config", {
                     method: "PATCH",
-                    body: JSON.stringify({ protocol, api_key: apiKey, api_address: apiAddress, model })
+                    body: JSON.stringify({ protocol, api_key: apiKey, api_address: apiAddress, model, reasoning_split: reasoningSplit })
                 });
                 // Update the LLM settings button visibility
                 await loadLLMSettingsVisibility();
@@ -3083,9 +3078,10 @@
                 const apiKey = document.getElementById("llmAPIKey").value.trim();
                 const apiAddress = document.getElementById("llmAPIAddress").value.trim();
                 const model = document.getElementById("llmModel").value.trim();
+                const reasoningSplit = document.getElementById("llmReasoningSplit").checked;
                 await api("/api/llm/config", {
                     method: "PATCH",
-                    body: JSON.stringify({ protocol, api_key: apiKey, api_address: apiAddress, model })
+                    body: JSON.stringify({ protocol, api_key: apiKey, api_address: apiAddress, model, reasoning_split: reasoningSplit })
                 });
                 const res = await api("/api/llm/test", { method: "POST" });
                 resultEl.textContent = "OK! Generated: " + res.branch_name;
@@ -3096,13 +3092,15 @@
             }
         }
 
-        // Load and update the LLM Settings button visibility.
+        // Load and update the LLM Settings button visibility and AI Generate button state.
         async function loadLLMSettingsVisibility() {
             try {
                 const cfg = await api("/api/llm/config");
                 updateLLMSettingsButtonVisibility(cfg.is_secure);
+                updateAIGenerateButtonVisual(cfg.available);
             } catch (e) {
                 updateLLMSettingsButtonVisibility(false);
+                updateAIGenerateButtonVisual(false);
             }
         }
 
@@ -3112,6 +3110,30 @@
             const hostname = window.location.hostname;
             const isLocalhost = hostname === "localhost" || hostname === "127.0.0.1";
             btn.style.display = (isLocalhost || isSecure) ? "inline-block" : "none";
+        }
+
+        // Update the AI Generate button visual state and LLM availability.
+        // When LLM is not fully configured, the button appears muted but remains clickable
+        // to open the LLM Settings dialog.
+        async function updateAIGenerateButtonState() {
+            try {
+                const cfg = await api("/api/llm/config");
+                updateAIGenerateButtonVisual(cfg.available);
+            } catch (e) {
+                updateAIGenerateButtonVisual(false);
+            }
+        }
+
+        function updateAIGenerateButtonVisual(available) {
+            const btn = document.getElementById("btnAIGenerate");
+            if (!btn) return;
+            if (available) {
+                btn.classList.remove("muted");
+                btn.title = "";
+            } else {
+                btn.classList.add("muted");
+                btn.title = "Configure LLM settings to enable AI generation";
+            }
         }
 
         // Boot

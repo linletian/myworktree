@@ -10,6 +10,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -39,15 +40,18 @@ func (e *ErrHTTPError) Is(target error) bool {
 	return target == ErrNetworkError // for backward compatibility with callers checking errors.Is(ErrNetworkError)
 }
 
-func callOpenAI(ctx context.Context, apiKey, url, model, prompt string) (string, error) {
+func callOpenAI(ctx context.Context, apiKey, url, model, prompt string, reasoningSplit bool) (string, error) {
 	reqBody := map[string]any{
 		"model": model,
 		"messages": []map[string]string{
 			{"role": "user", "content": prompt},
 		},
-		"max_tokens":      1024,
-		"temperature":     0.3,
-		"reasoning_split": true, // Separate thinking from final answer
+		"max_tokens":  1024,
+		"temperature": 0.3,
+		"thinking":    map[string]string{"type": "disabled"},
+	}
+	if reasoningSplit {
+		reqBody["reasoning_split"] = true
 	}
 
 	body, status, err := doHTTPRequest(ctx, url, apiKey, "openai", reqBody)
@@ -62,7 +66,7 @@ func callOpenAI(ctx context.Context, apiKey, url, model, prompt string) (string,
 		return "", &ErrHTTPError{StatusCode: status}
 	}
 
-	// With reasoning_split: true, content field contains the final answer only
+	// With thinking: false, content field contains the final answer directly
 	var resp struct {
 		Choices []struct {
 			Message struct {
@@ -79,13 +83,18 @@ func callOpenAI(ctx context.Context, apiKey, url, model, prompt string) (string,
 	return resp.Choices[0].Message.Content, nil
 }
 
-func callAnthropic(ctx context.Context, apiKey, url, model, prompt string) (string, error) {
+func callAnthropic(ctx context.Context, apiKey, url, model, prompt string, reasoningSplit bool) (string, error) {
+	// Anthropic 格式（DeepSeek）：/v1/messages，无 temperature 参数
 	reqBody := map[string]any{
-		"model":      model,
-		"max_tokens": 1024,
+		"model": model,
 		"messages": []map[string]string{
 			{"role": "user", "content": prompt},
 		},
+		"max_tokens": 1024,
+		"thinking":   map[string]string{"type": "disabled"},
+	}
+	if reasoningSplit {
+		reqBody["reasoning_split"] = true
 	}
 
 	body, status, err := doHTTPRequest(ctx, url, apiKey, "anthropic", reqBody)
@@ -106,10 +115,10 @@ func callAnthropic(ctx context.Context, apiKey, url, model, prompt string) (stri
 		} `json:"content"`
 	}
 	if err := json.Unmarshal(body, &resp); err != nil {
-		return "", fmt.Errorf("failed to parse Anthropic response: %w", err)
+		return "", fmt.Errorf("failed to parse response: %w", err)
 	}
 	if len(resp.Content) == 0 {
-		return "", errors.New("Anthropic returned no content")
+		return "", errors.New("no content in response")
 	}
 	return resp.Content[0].Text, nil
 }
@@ -144,7 +153,11 @@ func doHTTPRequest(ctx context.Context, url, apiKey, authType string, reqBody ma
 	case "openai":
 		req.Header.Set("Authorization", "Bearer "+apiKey)
 	case "anthropic":
-		req.Header.Set("x-api-key", apiKey)
+		if strings.Contains(url, "api.anthropic.com") {
+			req.Header.Set("x-api-key", apiKey)
+		} else {
+			req.Header.Set("Authorization", "Bearer "+apiKey)
+		}
 		req.Header.Set("anthropic-version", "2023-06-01")
 	}
 

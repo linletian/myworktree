@@ -416,9 +416,7 @@ func (s *Server) registerAPIs(mux *http.ServeMux) {
 	mux.HandleFunc("/api/instances/reorder", s.handleInstanceReorder)
 	mux.HandleFunc("/api/instances/stop", s.handleInstanceStop)
 	mux.HandleFunc("/api/instances/restart", s.handleInstanceRestart)
-	mux.HandleFunc("/api/instances/archive", s.handleInstanceArchive)
 	mux.HandleFunc("/api/instances/delete", s.handleInstanceDelete)
-	mux.HandleFunc("/api/instances/purge", s.handleInstancePurge)
 	mux.HandleFunc("/api/instances/input", s.handleInstanceInput)
 	mux.HandleFunc("/api/instances/tty/ws", s.handleInstanceTTYWS)
 	mux.HandleFunc("/api/instances/log", s.handleInstanceLog)
@@ -613,25 +611,61 @@ func (s *Server) handleWorktreeStatus(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	cmd := gitx.GitCommand(2*time.Second, gitRoot, "diff", "--numstat", "HEAD")
-	out, err := cmd.Output()
-	if err != nil {
-		// Empty output with a nil error is a clean tree. If err is non-nil, git
-		// failed or timed out and we should surface that instead of pretending the
-		// worktree has no changes.
-		msg := strings.TrimSpace(string(out))
-		if msg == "" {
-			msg = err.Error()
+	type diffResult struct {
+		changes []map[string]any
+		total   map[string]int
+		errMsg  string
+	}
+
+	runDiff := func(args ...string) diffResult {
+		cmd := gitx.GitCommand(2*time.Second, gitRoot, args...)
+		out, err := cmd.Output()
+		if err != nil {
+			msg := strings.TrimSpace(string(out))
+			if msg == "" {
+				msg = err.Error()
+			}
+			return diffResult{
+				changes: []map[string]any{},
+				total:   map[string]int{"additions": 0, "deletions": 0},
+				errMsg:  fmt.Sprintf("git diff failed: %s", msg),
+			}
 		}
-		writeErr(w, http.StatusInternalServerError, fmt.Errorf("git diff failed: %s", msg))
+		changes, total := parseGitDiffNumStat(string(out))
+		return diffResult{changes: changes, total: total}
+	}
+
+	stagedCh := make(chan diffResult, 1)
+	unstagedCh := make(chan diffResult, 1)
+
+	go func() { stagedCh <- runDiff("diff", "--cached", "--numstat") }()
+	go func() { unstagedCh <- runDiff("diff", "--numstat") }()
+
+	staged := <-stagedCh
+	unstaged := <-unstagedCh
+
+	if staged.errMsg != "" && unstaged.errMsg != "" {
+		writeErr(w, http.StatusInternalServerError, fmt.Errorf("staged: %s; unstaged: %s", staged.errMsg, unstaged.errMsg))
 		return
 	}
 
-	changes, total := parseGitDiffNumStat(string(out))
-	writeJSON(w, http.StatusOK, map[string]any{
-		"changes": changes,
-		"total":   total,
-	})
+	resp := map[string]any{
+		"staged": map[string]any{
+			"changes": staged.changes,
+			"total":   staged.total,
+		},
+		"unstaged": map[string]any{
+			"changes": unstaged.changes,
+			"total":   unstaged.total,
+		},
+	}
+	if staged.errMsg != "" {
+		resp["staged"].(map[string]any)["error"] = staged.errMsg
+	}
+	if unstaged.errMsg != "" {
+		resp["unstaged"].(map[string]any)["error"] = unstaged.errMsg
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (s *Server) handleInstances(w http.ResponseWriter, r *http.Request) {
@@ -650,11 +684,10 @@ func (s *Server) handleInstances(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"instances": items, "version": version})
 	case http.MethodPost:
 		var req struct {
-			WorktreeID string            `json:"worktree_id"`
-			TagID      string            `json:"tag_id"`
-			Command    string            `json:"command"`
-			Name       string            `json:"name"`
-			Labels     map[string]string `json:"labels"`
+			WorktreeID string `json:"worktree_id"`
+			TagID      string `json:"tag_id"`
+			Command    string `json:"command"`
+			Name       string `json:"name"`
 		}
 		if err := readJSON(r.Body, &req); err != nil {
 			writeErr(w, http.StatusBadRequest, err)
@@ -671,7 +704,6 @@ func (s *Server) handleInstances(w http.ResponseWriter, r *http.Request) {
 			TagID:   req.TagID,
 			Command: req.Command,
 			Name:    req.Name,
-			Labels:  normalizeLabels(req.Labels),
 		})
 		if err != nil {
 			writeErr(w, http.StatusBadRequest, err)
@@ -741,25 +773,6 @@ func (s *Server) handleInstanceRestart(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, item)
 }
 
-func (s *Server) handleInstanceArchive(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	var req struct {
-		ID string `json:"id"`
-	}
-	if err := readJSON(r.Body, &req); err != nil {
-		writeErr(w, http.StatusBadRequest, err)
-		return
-	}
-	if err := s.instanceMgr.Archive(req.ID); err != nil {
-		writeErr(w, http.StatusBadRequest, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
-}
-
 func (s *Server) handleInstanceDelete(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -773,35 +786,6 @@ func (s *Server) handleInstanceDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.instanceMgr.Delete(req.ID); err != nil {
-		writeErr(w, http.StatusBadRequest, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
-}
-
-func (s *Server) handleInstancePurge(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	var req struct {
-		WorktreeID string `json:"worktree_id"`
-		Version    int64  `json:"version"`
-	}
-	if err := readJSON(r.Body, &req); err != nil {
-		writeErr(w, http.StatusBadRequest, err)
-		return
-	}
-	err := s.instanceMgr.PurgeArchivedInstances(req.WorktreeID, req.Version)
-	if errors.Is(err, store.ErrVersionConflict) {
-		st, _ := s.store.Load()
-		writeJSON(w, http.StatusConflict, map[string]any{
-			"error":   "state changed, please refresh",
-			"version": st.Version,
-		})
-		return
-	}
-	if err != nil {
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
@@ -1246,11 +1230,10 @@ func (s *Server) handleMCPCall(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"result": map[string]any{"instances": items}})
 	case "instance_start":
 		var args struct {
-			WorktreeID string            `json:"worktree_id"`
-			TagID      string            `json:"tag_id"`
-			Command    string            `json:"command"`
-			Name       string            `json:"name"`
-			Labels     map[string]string `json:"labels"`
+			WorktreeID string `json:"worktree_id"`
+			TagID      string `json:"tag_id"`
+			Command    string `json:"command"`
+			Name       string `json:"name"`
 		}
 		if err := decodeArgs(req.Args, &args); err != nil {
 			writeErr(w, http.StatusBadRequest, err)
@@ -1261,7 +1244,6 @@ func (s *Server) handleMCPCall(w http.ResponseWriter, r *http.Request) {
 			TagID:      args.TagID,
 			Command:    args.Command,
 			Name:       args.Name,
-			Labels:     normalizeLabels(args.Labels),
 		})
 		if err != nil {
 			writeErr(w, http.StatusBadRequest, err)
@@ -1295,19 +1277,6 @@ func (s *Server) handleMCPCall(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"result": map[string]string{"status": "ok"}})
-	case "instance_archive":
-		var args struct {
-			ID string `json:"id"`
-		}
-		if err := decodeArgs(req.Args, &args); err != nil {
-			writeErr(w, http.StatusBadRequest, err)
-			return
-		}
-		if err := s.instanceMgr.Archive(args.ID); err != nil {
-			writeErr(w, http.StatusBadRequest, err)
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"result": map[string]string{"status": "ok"}})
 	case "instance_delete":
 		var args struct {
 			ID string `json:"id"`
@@ -1317,28 +1286,6 @@ func (s *Server) handleMCPCall(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err := s.instanceMgr.Delete(args.ID); err != nil {
-			writeErr(w, http.StatusBadRequest, err)
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"result": map[string]string{"status": "ok"}})
-	case "instance_purge":
-		var args struct {
-			WorktreeID string `json:"worktree_id"`
-			Version    int64  `json:"version"`
-		}
-		if err := decodeArgs(req.Args, &args); err != nil {
-			writeErr(w, http.StatusBadRequest, err)
-			return
-		}
-		if err := s.instanceMgr.PurgeArchivedInstances(args.WorktreeID, args.Version); err != nil {
-			if errors.Is(err, store.ErrVersionConflict) {
-				st, _ := s.store.Load()
-				writeJSON(w, http.StatusConflict, map[string]any{
-					"error":   "state changed, please refresh",
-					"version": st.Version,
-				})
-				return
-			}
 			writeErr(w, http.StatusBadRequest, err)
 			return
 		}
@@ -1453,25 +1400,6 @@ func writeSSELogEvent(w io.Writer, chunk string, next int64) error {
 	}
 	_, err = io.WriteString(w, "\n\n")
 	return err
-}
-
-func normalizeLabels(in map[string]string) map[string]string {
-	if len(in) == 0 {
-		return nil
-	}
-	out := map[string]string{}
-	for k, v := range in {
-		key := strings.TrimSpace(k)
-		val := strings.TrimSpace(v)
-		if key == "" || val == "" {
-			continue
-		}
-		out[key] = val
-	}
-	if len(out) == 0 {
-		return nil
-	}
-	return out
 }
 
 func sameOriginHost(r *http.Request) bool {
@@ -1687,19 +1615,21 @@ func (s *Server) handleLLMConfig(w http.ResponseWriter, r *http.Request) {
 			apiKeyMasked = llm.MaskKey(cfg.APIKey)
 		}
 		writeJSON(w, http.StatusOK, map[string]any{
-			"protocol":       cfg.Protocol,
-			"api_key_masked": apiKeyMasked,
-			"api_address":    cfg.APIAddress,
-			"model":          cfg.Model,
-			"is_secure":      s.isSecure,
-			"available":      llm.IsAvailable(),
+			"protocol":        cfg.Protocol,
+			"api_key_masked":  apiKeyMasked,
+			"api_address":     cfg.APIAddress,
+			"model":           cfg.Model,
+			"reasoning_split": cfg.ReasoningSplit,
+			"is_secure":       s.isSecure,
+			"available":       llm.IsAvailable(),
 		})
 	case http.MethodPatch:
 		var req struct {
-			Protocol   string `json:"protocol"`
-			APIKey     string `json:"api_key"`
-			APIAddress string `json:"api_address"`
-			Model      string `json:"model"`
+			Protocol       string `json:"protocol"`
+			APIKey         string `json:"api_key"`
+			APIAddress     string `json:"api_address"`
+			Model          string `json:"model"`
+			ReasoningSplit bool   `json:"reasoning_split"`
 		}
 		if err := readJSON(r.Body, &req); err != nil {
 			writeErr(w, http.StatusBadRequest, err)
@@ -1707,8 +1637,8 @@ func (s *Server) handleLLMConfig(w http.ResponseWriter, r *http.Request) {
 		}
 		cfg := llm.Load()
 		if req.Protocol != "" {
-			if req.Protocol != "openai" && req.Protocol != "anthropic" && req.Protocol != "openai_compatible" {
-				writeErr(w, http.StatusBadRequest, fmt.Errorf("invalid protocol: must be 'openai', 'anthropic', or 'openai_compatible'"))
+			if req.Protocol != "openai" && req.Protocol != "anthropic" {
+				writeErr(w, http.StatusBadRequest, fmt.Errorf("invalid protocol: must be 'openai' or 'anthropic'"))
 				return
 			}
 			// Check if switching to a protocol without an API key
@@ -1717,10 +1647,6 @@ func (s *Server) handleLLMConfig(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			cfg.Protocol = req.Protocol
-			// Auto-fill default address if not provided
-			if req.APIAddress == "" && cfg.APIAddress == "" {
-				cfg.APIAddress = llm.DefaultAddress(req.Protocol)
-			}
 		}
 		if req.APIKey != "" {
 			cfg.APIKey = req.APIKey
@@ -1731,6 +1657,7 @@ func (s *Server) handleLLMConfig(w http.ResponseWriter, r *http.Request) {
 		if req.Model != "" {
 			cfg.Model = req.Model
 		}
+		cfg.ReasoningSplit = req.ReasoningSplit
 		if err := llm.Save(cfg); err != nil {
 			writeErr(w, http.StatusInternalServerError, err)
 			return

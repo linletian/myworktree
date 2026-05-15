@@ -137,20 +137,48 @@ Response:
 ### Get worktree git status
 `GET /api/worktree/status?id=<worktreeId>`
 
-Returns the list of changed files (staged + unstaged relative to HEAD) for the specified worktree.
+Returns the list of changed files, split into staged and unstaged changes, for the specified worktree.
 
 - `id`: worktree ID (`"__main__"` for the main repo) or a managed worktree ID from `GET /api/worktrees`.
-- Uses `git diff --numstat HEAD` with a 2-second timeout.
-- Returns an empty list if there are no changes.
-- Returns HTTP 500 if git reports an error while collecting the diff.
+- Uses two concurrent git commands, each with a 2-second timeout:
+  - `git diff --cached --numstat` — staged changes (index vs HEAD)
+  - `git diff --numstat` — unstaged changes (working tree vs index)
+- Returns empty lists if there are no changes.
+- Returns HTTP 500 if both git commands fail.
+- On partial failure (one command fails), the failing section includes an `error` field describing the failure, while the successful section returns its results normally. HTTP 200 is returned in this case.
 
 Response:
 ```json
 {
-  "changes": [
-    { "path": "foo.go", "additions": 10, "deletions": 3 }
-  ],
-  "total": { "additions": 10, "deletions": 10 }
+  "staged": {
+    "changes": [
+      { "path": "foo.go", "additions": 10, "deletions": 3 }
+    ],
+    "total": { "additions": 10, "deletions": 3 }
+  },
+  "unstaged": {
+    "changes": [
+      { "path": "bar.go", "additions": 5, "deletions": 2 }
+    ],
+    "total": { "additions": 5, "deletions": 2 }
+  }
+}
+```
+
+Partial failure example (staged succeeded, unstaged failed):
+```json
+{
+  "staged": {
+    "changes": [
+      { "path": "foo.go", "additions": 10, "deletions": 3 }
+    ],
+    "total": { "additions": 10, "deletions": 3 }
+  },
+  "unstaged": {
+    "changes": [],
+    "total": { "additions": 0, "deletions": 0 },
+    "error": "git diff failed: context deadline exceeded"
+  }
 }
 ```
 - Returns HTTP 400 if `id` is missing or unknown.
@@ -181,7 +209,7 @@ Response:
 
 Response:
 ```json
-{ "instances": [ {"id":"...","worktree_id":"...","worktree_name":"...","tag_id":"...","name":"build-server","labels":{"purpose":"refactor"},"pid":123,"status":"running"} ], "version": 7 }
+{ "instances": [ {"id":"...","worktree_id":"...","worktree_name":"...","tag_id":"...","name":"build-server","pid":123,"status":"running"} ], "version": 7 }
 ```
 
 - `version`: monotonically increasing state version. Incrementing `SaveWithVersion` calls cause this to grow. Clients should track it and send it back on operations that modify state (e.g., reorder) to detect concurrent modifications.
@@ -191,7 +219,7 @@ Response:
 
 Body:
 ```json
-{ "worktree_id": "<worktreeId>", "tag_id": "optional", "command": "optional", "name": "optional", "labels": {"purpose":"refactor","priority":"P1"} }
+{ "worktree_id": "<worktreeId>", "tag_id": "optional", "command": "optional", "name": "optional" }
 ```
 
 - `worktree_id` can be a regular worktree ID, or `"__main__"` to run an instance in the main (host) git repository. For `"__main__"`, the instance starts in the main repo root directory.
@@ -225,7 +253,7 @@ Body:
 
 Response (200):
 ```json
-{ "id":"...","worktree_id":"...","worktree_name":"...","tag_id":"...","name":"build-server","labels":{},"pid":123,"status":"running","created_at":"..." }
+{ "id":"...","worktree_id":"...","worktree_name":"...","tag_id":"...","name":"build-server","pid":123,"status":"running","created_at":"..." }
 ```
 
 ### Reorder tabs
@@ -239,7 +267,7 @@ Body:
 ```
 
 - `worktree_id`: the worktree whose tab order is being set (can be `"__main__"` for the main repo)
-- `order`: ordered list of ALL instance IDs belonging to that worktree (both active and archived). All instances must be included.
+- `order`: ordered list of ALL instance IDs belonging to that worktree. All instances must be included.
 - `version`: the state version observed by the client (from `GET /api/instances`). Used for optimistic locking — if the state has changed since the client fetched it, the server returns HTTP 409 Conflict.
 
 Response (200):
@@ -272,8 +300,8 @@ Body:
 { "id": "<instanceId>" }
 ```
 
-- Creates a new instance with the same worktree + tag/command + labels.
-- If the old instance is not archived yet (and is not running), it will be archived automatically.
+- Creates a new instance with the same worktree + tag/command.
+- If the old instance is not running, it will be deleted automatically.
 - The old instance record is linked to the new one via `restarted_to` / `restarted_from`.
 
 ### Send input
@@ -336,16 +364,6 @@ Client                    Server
    |<-- binary output -------|  Process output
 ```
 
-### Archive
-`POST /api/instances/archive`
-
-Body:
-```json
-{ "id": "<instanceId>" }
-```
-
-Archives a non-running instance (hides it from the main list).
-
 ### Delete
 `POST /api/instances/delete`
 
@@ -354,30 +372,7 @@ Body:
 { "id": "<instanceId>" }
 ```
 
-Deletes a non-running instance record (best-effort deletes the log file).
-
-### Purge archived
-`POST /api/instances/purge`
-
-Deletes archived instances for a given worktree in a single atomic write, protected by optimistic locking. Use an empty `worktree_id` to target all worktrees.
-
-Body:
-```json
-{ "worktree_id": "wt1", "version": 7 }
-```
-
-- `worktree_id`: the worktree whose archived instances to delete (omit or use empty string to target all worktrees).
-- `version`: the state version observed by the client (from `GET /api/instances`). Used for optimistic locking — if the state has changed since the client fetched it, the server returns HTTP 409 Conflict.
-
-Response (200):
-```json
-{ "status": "ok" }
-```
-
-- Returns HTTP 409 Conflict if the state version has changed. The response body includes the current version so the client can refresh and retry:
-```json
-{ "error": "state changed, please refresh", "version": 8 }
-```
+Deletes a stopped (non-running) instance record (best-effort deletes the log file).
 
 ### Log replay (tail / incremental)
 `GET /api/instances/log?id=<instanceId>[&since=<byteOffset>]`
@@ -476,7 +471,7 @@ Response:
 Supported tool names:
 - `worktree_list`, `worktree_create`, `worktree_delete`
 - `branch_list`, `tag_list`
-- `instance_list`, `instance_start`, `instance_stop`, `instance_input`, `instance_archive`, `instance_delete`, `instance_purge`, `instance_log_tail`
+- `instance_list`, `instance_start`, `instance_stop`, `instance_input`, `instance_delete`, `instance_log_tail`
 
 ## 7) LLM 配置
 ### 获取当前配置
@@ -485,34 +480,36 @@ Supported tool names:
 返回当前 LLM 配置（不包含明文 API Key）：
 ```json
 {
-  "protocol": "openai_compatible",
+  "protocol": "openai",
   "api_address": "<provider_api_address>",
   "api_key_masked": "<masked_api_key>",
   "model": "<model_name>",
+  "reasoning_split": false,
   "is_secure": true,
   "available": true
 }
 ```
-- `protocol`: `"openai"` | `"anthropic"` | `"openai_compatible"`
-- `api_address`: API 地址（OpenAI Compatible 模式下需要包含完整路径如 `/v1/chat/completions`）
+- `protocol`: `"openai"` | `"anthropic"`
+- `api_address`: API 地址（需要包含完整路径如 `/v1/chat/completions`）
 - `api_key_masked`: API Key 脱敏显示（仅显示前 3 字符 + `***` + 后 3 字符）
 - `model`: 当前使用的模型名称
+- `reasoning_split`: 是否启用思考分离（部分 provider 支持）
 - `is_secure`: 当前是否为 localhost 或 HTTPS 环境（影响 LLM Settings 按钮可见性）
-- `available`: LLM 是否可用（API Key 已配置）
+- `available`: LLM 是否可用（protocol、API Key、API Address、Model 四项全部已配置）
 
 ### 更新配置
 `PATCH /api/llm/config`
 
 Body:
 ```json
-{ "protocol": "openai_compatible", "api_address": "<provider_api_address>", "api_key": "<api_key>", "model": "<model_name>" }
+{ "protocol": "openai", "api_address": "<provider_api_address>", "api_key": "<api_key>", "model": "<model_name>", "reasoning_split": false }
 ```
 
-环境变量 `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` / `OPENAI_COMPATIBLE_API_KEY` 优先级更高。
+环境变量 `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` 优先级更高。
 
 Response (200):
 ```json
-{ "status": "ok", "protocol": "openai_compatible" }
+{ "status": "ok", "protocol": "openai" }
 ```
 
 ### 测试 LLM 连接

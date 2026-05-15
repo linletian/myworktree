@@ -10,10 +10,11 @@ import (
 
 // Config holds the LLM configuration.
 type Config struct {
-	Protocol   string `json:"protocol"` // "openai", "anthropic", "openai_compatible"
-	APIKey     string `json:"api_key"`
-	APIAddress string `json:"api_address"` // custom endpoint URL
-	Model      string `json:"model"`       // model name (e.g., "gpt-4o-mini", "abab6.5s-chat")
+	Protocol       string `json:"protocol"` // "openai", "anthropic"
+	APIKey         string `json:"api_key"`
+	APIAddress     string `json:"api_address"`     // custom endpoint URL
+	Model          string `json:"model"`           // model name (e.g., "deepseek-chat")
+	ReasoningSplit bool   `json:"reasoning_split"` // enable reasoning_split (some providers support it)
 
 	// Deprecated: Mode is kept for migration from old config files.
 	// Use Protocol instead. This field is not serialized.
@@ -43,7 +44,7 @@ func (c *Config) Copy() *Config {
 	if c == nil {
 		return &Config{}
 	}
-	return &Config{Protocol: c.Protocol, APIKey: c.APIKey, APIAddress: c.APIAddress, Model: c.Model}
+	return &Config{Protocol: c.Protocol, APIKey: c.APIKey, APIAddress: c.APIAddress, Model: c.Model, ReasoningSplit: c.ReasoningSplit}
 }
 
 // Save persists the global LLM configuration to the config file.
@@ -135,13 +136,11 @@ func overrideFromEnv(cfg *Config) {
 	if openAIKey != "" {
 		cfg.APIKey = openAIKey
 		cfg.Protocol = "openai"
-		cfg.APIAddress = DefaultAddress("openai")
 		return
 	}
 	if anthropicKey != "" {
 		cfg.APIKey = anthropicKey
 		cfg.Protocol = "anthropic"
-		cfg.APIAddress = DefaultAddress("anthropic")
 	}
 }
 
@@ -160,36 +159,9 @@ func CurrentMode() string {
 	return cfg.Protocol
 }
 
-// IsAvailable returns true if a protocol is set and API key is configured.
+// IsAvailable returns true if all required fields are configured.
+// Model, API address, and API key must all be set (non-empty) in addition to protocol.
 func IsAvailable() bool {
 	cfg := Load()
-	return cfg.Protocol != "" && cfg.APIKey != ""
-}
-
-// DefaultModel returns the default model name for the given protocol.
-func DefaultModel(protocol string) string {
-	switch protocol {
-	case "openai":
-		return "gpt-4o-mini"
-	case "anthropic":
-		return "claude-3-5-haiku-20241022"
-	case "openai_compatible":
-		return ""
-	default:
-		return ""
-	}
-}
-
-// DefaultAddress returns the default API endpoint URL for the given protocol.
-func DefaultAddress(protocol string) string {
-	switch protocol {
-	case "openai":
-		return "https://api.openai.com/v1/chat/completions"
-	case "anthropic":
-		return "https://api.anthropic.com/v1/messages"
-	case "openai_compatible":
-		return ""
-	default:
-		return ""
-	}
+	return cfg.Protocol != "" && cfg.APIKey != "" && cfg.APIAddress != "" && cfg.Model != ""
 }

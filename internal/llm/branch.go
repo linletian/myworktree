@@ -37,29 +37,18 @@ func BuildPrompt(taskDesc string) string {
 func GenerateBranchName(ctx context.Context, taskDesc string) (string, error) {
 	cfg := Load()
 	model := cfg.Model
-	if model == "" {
-		model = DefaultModel(cfg.Protocol)
-	}
 	prompt := BuildPrompt(taskDesc)
 	switch cfg.Protocol {
 	case "":
 		return "", errors.New("no LLM protocol configured")
-	case "openai", "openai_compatible":
-		url := cfg.APIAddress
-		if url == "" {
-			url = DefaultAddress(cfg.Protocol)
-		}
-		raw, err := callOpenAI(ctx, cfg.APIKey, url, model, prompt)
+	case "openai":
+		raw, err := callOpenAI(ctx, cfg.APIKey, cfg.APIAddress, model, prompt, cfg.ReasoningSplit)
 		if err != nil {
 			return "", err
 		}
 		return parseBranchName(raw)
 	case "anthropic":
-		url := cfg.APIAddress
-		if url == "" {
-			url = DefaultAddress(cfg.Protocol)
-		}
-		raw, err := callAnthropic(ctx, cfg.APIKey, url, model, prompt)
+		raw, err := callAnthropic(ctx, cfg.APIKey, cfg.APIAddress, model, prompt, cfg.ReasoningSplit)
 		if err != nil {
 			return "", err
 		}

@@ -27,8 +27,7 @@ myworktree 只做管理，不碰项目具体内容：
 ## 功能（MVP）
 - 受管 worktree：创建/列表/纳入管理(import)/删除（严格删除：dirty 则拒绝）
 - 受管 instance：基于 Tag 启动模板启动/停止/重启/列表
-- instance 重启会保留 worktree、tag/命令、labels，并串联旧/新实例记录
-- 支持可选 instance labels（`k=v`），可用于 UI 过滤与搜索
+- instance 重启会保留 worktree、tag/命令，并串联旧/新实例记录
 - 默认 WebSocket Web TTY 交互（并保留 SSE/HTTP 兜底）
 - 前端页面关闭/刷新后：后端 instance 继续运行；重新打开可回放输出并继续交互
 - UI 提供传输状态标记（websocket/sse/polling）和 WS 重连按钮

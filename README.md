@@ -28,8 +28,7 @@ myworktree is a thin management layer that:
 ## Features (MVP)
 - Create/list/import/delete managed worktrees (strict delete: refuses if dirty)
 - Start/list/stop managed instances per worktree via **Tag** templates
-- Instance restart support (keeps worktree/tag-or-command/labels and links old/new instance records)
-- Optional instance labels (`k=v`) with UI filtering/search
+- Instance restart support (keeps worktree/tag-or-command and links old/new instance records)
 - Web UI can be closed/reopened; instances keep running; WebSocket Web TTY is default (with SSE/HTTP fallback)
 - UI shows transport status (`websocket/sse/polling`) and provides WS reconnect action
 - Startup reconcile: stale persisted `running` instances are auto-marked `stopped` after mw restart

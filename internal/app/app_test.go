@@ -27,45 +27,6 @@ func TestParseInt64Default(t *testing.T) {
 	}
 }
 
-func TestNormalizeLabels(t *testing.T) {
-	if got := normalizeLabels(nil); got != nil {
-		t.Fatalf("nil input should return nil, got %#v", got)
-	}
-	if got := normalizeLabels(map[string]string{}); got != nil {
-		t.Fatalf("empty map should return nil, got %#v", got)
-	}
-
-	got := normalizeLabels(map[string]string{
-		" team ":  " backend ",
-		"":        "x",
-		"x":       "",
-		"owner":   "   ",
-		"   ":     "value",
-		"service": " api ",
-	})
-	if len(got) != 2 || got["team"] != "backend" || got["service"] != "api" {
-		t.Fatalf("unexpected labels normalization result: %#v", got)
-	}
-	if _, ok := got["owner"]; ok {
-		t.Fatalf("owner with whitespace value should be dropped: %#v", got)
-	}
-	if _, ok := got["x"]; ok {
-		t.Fatalf("label with empty value should be dropped: %#v", got)
-	}
-	if _, ok := got[""]; ok {
-		t.Fatalf("empty key should be dropped: %#v", got)
-	}
-
-	got = normalizeLabels(map[string]string{
-		" ":   " ",
-		"":    "",
-		"foo": "   ",
-	})
-	if got != nil {
-		t.Fatalf("all invalid labels should return nil, got %#v", got)
-	}
-}
-
 func TestClientIP(t *testing.T) {
 	if got := clientIP("127.0.0.1:12345"); got != "127.0.0.1" {
 		t.Fatalf("expected host only, got %q", got)
@@ -574,7 +535,7 @@ func TestParseGitDiffNumStat(t *testing.T) {
 	}
 }
 
-func TestHandleWorktreeStatusGitFailureReturnsError(t *testing.T) {
+func TestHandleWorktreeStatusGitFailureBothFail(t *testing.T) {
 	dir := t.TempDir()
 	script := filepath.Join(dir, "git")
 	if err := os.WriteFile(script, []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
@@ -588,10 +549,51 @@ func TestHandleWorktreeStatusGitFailureReturnsError(t *testing.T) {
 	srv.handleWorktreeStatus(w, req)
 
 	if w.Code != http.StatusInternalServerError {
-		t.Fatalf("expected 500 for git failure, got %d", w.Code)
+		t.Fatalf("expected 500 when both git commands fail, got %d", w.Code)
 	}
 	if !strings.Contains(w.Body.String(), "git diff failed") {
-		t.Fatalf("expected git diff failure message, got %q", w.Body.String())
+		t.Fatalf("expected 'git diff failed' in error message, got %q", w.Body.String())
+	}
+}
+
+func TestHandleWorktreeStatusPartialFailure(t *testing.T) {
+	dir := t.TempDir()
+	script := filepath.Join(dir, "git")
+	// staged succeeds, unstaged fails
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nif echo \"$@\" | grep -q -- '--cached'; then echo '1\t0\ttest.go'; exit 0; else exit 1; fi\n"), 0o755); err != nil {
+		t.Fatalf("write fake git: %v", err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	srv := &Server{root: t.TempDir()}
+	req := httptest.NewRequest(http.MethodGet, "/api/worktree/status?id=__main__", nil)
+	w := httptest.NewRecorder()
+	srv.handleWorktreeStatus(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 for partial failure, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var resp map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+
+	staged, _ := resp["staged"].(map[string]any)
+	if staged["changes"] == nil {
+		t.Fatal("staged: missing changes")
+	}
+	if _, hasErr := staged["error"]; hasErr {
+		t.Fatal("staged: should not have error field")
+	}
+
+	unstaged, _ := resp["unstaged"].(map[string]any)
+	errMsg, _ := unstaged["error"].(string)
+	if errMsg == "" {
+		t.Fatal("unstaged: expected error field")
+	}
+	if !strings.Contains(errMsg, "git diff failed") {
+		t.Fatalf("unstaged: expected 'git diff failed' in error, got %q", errMsg)
 	}
 }
 

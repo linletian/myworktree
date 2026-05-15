@@ -6,7 +6,7 @@
 - Run server (inside the target repo): `go run ./cmd/myworktree -listen 127.0.0.1:0`
 - Run full test suite: `go test ./...`
 - Run one package: `go test ./internal/worktree -v`
-- Run one test: `go test ./internal/app -run TestNormalizeLabels -v`
+- Run one test: `go test ./internal/app -run TestClientIP -v`
 - Lint/format check used by CI: `test -z "$(gofmt -l .)"`
 
 ## High-level architecture
