@@ -784,6 +784,14 @@
                     border-color: #cb2431;
                 }
 
+            #btnAIGenerate.muted {
+                opacity: 0.5;
+                background: #e8e8e8;
+                border-color: #d0d0d0;
+                color: #999;
+                cursor: pointer;
+            }
+
             #terminal-controls {
                 position: absolute;
                 top: 20px;
@@ -937,23 +945,25 @@
             <select id="llmProtocol" onchange="onLLMProtocolChange()">
                 <option value="openai">OpenAI</option>
                 <option value="anthropic">Anthropic</option>
-                <option value="openai_compatible">OpenAI Compatible</option>
             </select>
         </div>
         <div class="form-group">
             <label>Model</label>
-            <input id="llmModel" placeholder="e.g. gpt-4o-mini" />
-            <div class="muted" id="llm-model-hint">Default auto-filled based on protocol</div>
+            <input id="llmModel" placeholder="e.g. deepseek-chat" />
+            <div class="muted" id="llm-model-hint">Enter model name manually</div>
         </div>
         <div class="form-group">
             <label>API Address</label>
-            <input id="llmAPIAddress" type="url" placeholder="https://..." />
-            <div class="muted">e.g. https://api.openai.com/v1/chat/completions</div>
+            <input id="llmAPIAddress" type="url" placeholder="https://api.deepseek.com/v1/chat/completions" />
+            <div class="muted">Full URL including path</div>
         </div>
         <div class="form-group">
             <label>API Key</label>
             <input id="llmAPIKey" type="password" placeholder="sk-..." />
             <div id="llm-api-key-masked" class="muted"></div>
+        </div>
+        <div class="form-group">
+            <label><input type="checkbox" id="llmReasoningSplit" /> Enable reasoning_split (for providers that support it)</label>
         </div>
         <div class="form-actions">
             <button type="button" onclick="testLLMConnection()">Test Connection</button>
@@ -1967,6 +1977,7 @@
                 document.getElementById("wtBranchName").value = "";
                 document.getElementById("wtBranchPreview").textContent = "Branch name preview";
                 document.getElementById("wtAdopt").checked = false;
+                updateAIGenerateButtonState();
             }
             if (id === 'modal-import-wt') {
                 // Pre-load candidates
@@ -2983,6 +2994,12 @@
                 alert("Please enter a task description first.");
                 return;
             }
+            // Check if LLM is configured; if not, open settings directly
+            const cfg = await api("/api/llm/config");
+            if (!cfg.available) {
+                openLLMSettingsDialog();
+                return;
+            }
             const btn = document.getElementById("btnAIGenerate");
             btn.disabled = true;
             btn.textContent = "Generating...";
@@ -3012,6 +3029,7 @@
                 document.getElementById("llmAPIAddress").value = cfg.api_address || "";
                 document.getElementById("llmModel").value = cfg.model || "";
                 document.getElementById("llmAPIKey").value = "";
+                document.getElementById("llmReasoningSplit").checked = cfg.reasoning_split || false;
                 const maskedEl = document.getElementById("llm-api-key-masked");
                 if (cfg.api_key_masked) {
                     maskedEl.textContent = "Current: " + cfg.api_key_masked;
@@ -3031,24 +3049,14 @@
             document.getElementById("dialog-llm-settings").close();
         }
 
-        // Auto-fill model default when protocol changes.
+        // Auto-fill model hint when protocol changes.
         function onLLMProtocolChange() {
-            const protocol = document.getElementById("llmProtocol").value;
-            const modelInput = document.getElementById("llmModel");
             const modelHint = document.getElementById("llm-model-hint");
-            if (modelInput.value === "") {
-                modelInput.value = defaultModelForProtocol(protocol);
-                modelHint.textContent = "Default: " + defaultModelForProtocol(protocol);
-            }
+            modelHint.textContent = "Enter model name manually";
         }
 
         function defaultModelForProtocol(protocol) {
-            switch (protocol) {
-                case "openai": return "gpt-4o-mini";
-                case "anthropic": return "claude-3-5-haiku-20241022";
-                case "openai_compatible": return "";
-                default: return "";
-            }
+            return "";
         }
 
         // Save LLM settings.
@@ -3057,12 +3065,13 @@
             const apiKey = document.getElementById("llmAPIKey").value.trim();
             const apiAddress = document.getElementById("llmAPIAddress").value.trim();
             const model = document.getElementById("llmModel").value.trim();
+            const reasoningSplit = document.getElementById("llmReasoningSplit").checked;
             const errorDiv = document.getElementById("llm-settings-error");
             errorDiv.style.display = "none";
             try {
                 await api("/api/llm/config", {
                     method: "PATCH",
-                    body: JSON.stringify({ protocol, api_key: apiKey, api_address: apiAddress, model })
+                    body: JSON.stringify({ protocol, api_key: apiKey, api_address: apiAddress, model, reasoning_split: reasoningSplit })
                 });
                 // Update the LLM settings button visibility
                 await loadLLMSettingsVisibility();
@@ -3084,9 +3093,10 @@
                 const apiKey = document.getElementById("llmAPIKey").value.trim();
                 const apiAddress = document.getElementById("llmAPIAddress").value.trim();
                 const model = document.getElementById("llmModel").value.trim();
+                const reasoningSplit = document.getElementById("llmReasoningSplit").checked;
                 await api("/api/llm/config", {
                     method: "PATCH",
-                    body: JSON.stringify({ protocol, api_key: apiKey, api_address: apiAddress, model })
+                    body: JSON.stringify({ protocol, api_key: apiKey, api_address: apiAddress, model, reasoning_split: reasoningSplit })
                 });
                 const res = await api("/api/llm/test", { method: "POST" });
                 resultEl.textContent = "OK! Generated: " + res.branch_name;
@@ -3097,13 +3107,15 @@
             }
         }
 
-        // Load and update the LLM Settings button visibility.
+        // Load and update the LLM Settings button visibility and AI Generate button state.
         async function loadLLMSettingsVisibility() {
             try {
                 const cfg = await api("/api/llm/config");
                 updateLLMSettingsButtonVisibility(cfg.is_secure);
+                updateAIGenerateButtonVisual(cfg.available);
             } catch (e) {
                 updateLLMSettingsButtonVisibility(false);
+                updateAIGenerateButtonVisual(false);
             }
         }
 
@@ -3113,6 +3125,30 @@
             const hostname = window.location.hostname;
             const isLocalhost = hostname === "localhost" || hostname === "127.0.0.1";
             btn.style.display = (isLocalhost || isSecure) ? "inline-block" : "none";
+        }
+
+        // Update the AI Generate button visual state and LLM availability.
+        // When LLM is not fully configured, the button appears muted but remains clickable
+        // to open the LLM Settings dialog.
+        async function updateAIGenerateButtonState() {
+            try {
+                const cfg = await api("/api/llm/config");
+                updateAIGenerateButtonVisual(cfg.available);
+            } catch (e) {
+                updateAIGenerateButtonVisual(false);
+            }
+        }
+
+        function updateAIGenerateButtonVisual(available) {
+            const btn = document.getElementById("btnAIGenerate");
+            if (!btn) return;
+            if (available) {
+                btn.classList.remove("muted");
+                btn.title = "";
+            } else {
+                btn.classList.add("muted");
+                btn.title = "Configure LLM settings to enable AI generation";
+            }
         }
 
         // Boot

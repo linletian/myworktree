@@ -480,34 +480,36 @@ Supported tool names:
 返回当前 LLM 配置（不包含明文 API Key）：
 ```json
 {
-  "protocol": "openai_compatible",
+  "protocol": "openai",
   "api_address": "<provider_api_address>",
   "api_key_masked": "<masked_api_key>",
   "model": "<model_name>",
+  "reasoning_split": false,
   "is_secure": true,
   "available": true
 }
 ```
-- `protocol`: `"openai"` | `"anthropic"` | `"openai_compatible"`
-- `api_address`: API 地址（OpenAI Compatible 模式下需要包含完整路径如 `/v1/chat/completions`）
+- `protocol`: `"openai"` | `"anthropic"`
+- `api_address`: API 地址（需要包含完整路径如 `/v1/chat/completions`）
 - `api_key_masked`: API Key 脱敏显示（仅显示前 3 字符 + `***` + 后 3 字符）
 - `model`: 当前使用的模型名称
+- `reasoning_split`: 是否启用思考分离（部分 provider 支持）
 - `is_secure`: 当前是否为 localhost 或 HTTPS 环境（影响 LLM Settings 按钮可见性）
-- `available`: LLM 是否可用（API Key 已配置）
+- `available`: LLM 是否可用（protocol、API Key、API Address、Model 四项全部已配置）
 
 ### 更新配置
 `PATCH /api/llm/config`
 
 Body:
 ```json
-{ "protocol": "openai_compatible", "api_address": "<provider_api_address>", "api_key": "<api_key>", "model": "<model_name>" }
+{ "protocol": "openai", "api_address": "<provider_api_address>", "api_key": "<api_key>", "model": "<model_name>", "reasoning_split": false }
 ```
 
-环境变量 `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` / `OPENAI_COMPATIBLE_API_KEY` 优先级更高。
+环境变量 `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` 优先级更高。
 
 Response (200):
 ```json
-{ "status": "ok", "protocol": "openai_compatible" }
+{ "status": "ok", "protocol": "openai" }
 ```
 
 ### 测试 LLM 连接

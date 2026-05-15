@@ -1638,19 +1638,21 @@ func (s *Server) handleLLMConfig(w http.ResponseWriter, r *http.Request) {
 			apiKeyMasked = llm.MaskKey(cfg.APIKey)
 		}
 		writeJSON(w, http.StatusOK, map[string]any{
-			"protocol":       cfg.Protocol,
-			"api_key_masked": apiKeyMasked,
-			"api_address":    cfg.APIAddress,
-			"model":          cfg.Model,
-			"is_secure":      s.isSecure,
-			"available":      llm.IsAvailable(),
+			"protocol":        cfg.Protocol,
+			"api_key_masked":  apiKeyMasked,
+			"api_address":     cfg.APIAddress,
+			"model":           cfg.Model,
+			"reasoning_split": cfg.ReasoningSplit,
+			"is_secure":       s.isSecure,
+			"available":       llm.IsAvailable(),
 		})
 	case http.MethodPatch:
 		var req struct {
-			Protocol   string `json:"protocol"`
-			APIKey     string `json:"api_key"`
-			APIAddress string `json:"api_address"`
-			Model      string `json:"model"`
+			Protocol       string `json:"protocol"`
+			APIKey         string `json:"api_key"`
+			APIAddress     string `json:"api_address"`
+			Model          string `json:"model"`
+			ReasoningSplit bool   `json:"reasoning_split"`
 		}
 		if err := readJSON(r.Body, &req); err != nil {
 			writeErr(w, http.StatusBadRequest, err)
@@ -1658,8 +1660,8 @@ func (s *Server) handleLLMConfig(w http.ResponseWriter, r *http.Request) {
 		}
 		cfg := llm.Load()
 		if req.Protocol != "" {
-			if req.Protocol != "openai" && req.Protocol != "anthropic" && req.Protocol != "openai_compatible" {
-				writeErr(w, http.StatusBadRequest, fmt.Errorf("invalid protocol: must be 'openai', 'anthropic', or 'openai_compatible'"))
+			if req.Protocol != "openai" && req.Protocol != "anthropic" {
+				writeErr(w, http.StatusBadRequest, fmt.Errorf("invalid protocol: must be 'openai' or 'anthropic'"))
 				return
 			}
 			// Check if switching to a protocol without an API key
@@ -1668,10 +1670,6 @@ func (s *Server) handleLLMConfig(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			cfg.Protocol = req.Protocol
-			// Auto-fill default address if not provided
-			if req.APIAddress == "" && cfg.APIAddress == "" {
-				cfg.APIAddress = llm.DefaultAddress(req.Protocol)
-			}
 		}
 		if req.APIKey != "" {
 			cfg.APIKey = req.APIKey
@@ -1682,6 +1680,7 @@ func (s *Server) handleLLMConfig(w http.ResponseWriter, r *http.Request) {
 		if req.Model != "" {
 			cfg.Model = req.Model
 		}
+		cfg.ReasoningSplit = req.ReasoningSplit
 		if err := llm.Save(cfg); err != nil {
 			writeErr(w, http.StatusInternalServerError, err)
 			return

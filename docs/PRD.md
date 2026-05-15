@@ -75,13 +75,13 @@
 
 ### 9.1 模式选择
 - **正则模式**（默认）：使用 `slugify()` 正则转换，不调用任何 LLM API
-- **LLM 模式**：调用 LLM API（支持 OpenAI / Anthropic / OpenAI Compatible 三种协议，由配置决定）
+- **LLM 模式**：调用 LLM API（支持 OpenAI / Anthropic 两种协议，由配置决定）
 
 ### 9.2 配置方式
 配置文件：`~/.config/myworktree/config.json`（0o600 权限），示例：
 ```json
 {
-  "protocol": "openai_compatible",
+  "protocol": "openai",
   "api_address": "<provider_api_address>",
   "api_key": "<api_key>",
   "model": "<model_name>"
@@ -89,11 +89,10 @@
 ```
 
 支持的 protocol：
-- `openai`：OpenAI 官方 API
-- `anthropic`：Anthropic API
-- `openai_compatible`：兼容 OpenAI 接口格式的第三方服务（如 SiliconFlow、MiniMax 等）
+- `openai`：OpenAI API 格式（适用于 OpenAI 及 DeepSeek 等兼容 OpenAI 格式的服务）
+- `anthropic`：Anthropic API 格式（适用于 Anthropic 及 DeepSeek 的 Anthropic 格式端点）
 
-同时支持环境变量（优先级更高）：`OPENAI_API_KEY` / `ANTHROPIC_API_KEY` / `OPENAI_COMPATIBLE_API_KEY`。
+同时支持环境变量（优先级更高）：`OPENAI_API_KEY` / `ANTHROPIC_API_KEY`。
 
 ### 9.3 分支名规范（由 LLM 遵守）
 1. 长度不超过 100 个字符
