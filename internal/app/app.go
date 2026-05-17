@@ -702,12 +702,51 @@ func (s *Server) handleWorktreeStatus(w http.ResponseWriter, r *http.Request) {
 
 	stagedCh := make(chan diffResult, 1)
 	unstagedCh := make(chan diffResult, 1)
+	untrackedCh := make(chan diffResult, 1)
 
 	go func() { stagedCh <- runDiff("diff", "--cached", "--numstat") }()
 	go func() { unstagedCh <- runDiff("diff", "--numstat") }()
+	go func() {
+		out, err := s.gitRunner(2*time.Second, gitRoot, "ls-files", "--others", "--exclude-standard")
+		if err != nil {
+			msg := strings.TrimSpace(string(out))
+			if msg == "" {
+				msg = err.Error()
+			}
+			untrackedCh <- diffResult{
+				changes: []map[string]any{},
+				total:   map[string]int{"additions": 0, "deletions": 0},
+				errMsg:  fmt.Sprintf("git ls-files failed: %s", msg),
+			}
+			return
+		}
+		lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+		var changes []map[string]any
+		totalAdds := 0
+		for _, p := range lines {
+			p = strings.TrimSpace(p)
+			if p == "" {
+				continue
+			}
+			fullPath := filepath.Join(gitRoot, p)
+			adds := countFileLines(fullPath)
+			totalAdds += adds
+			changes = append(changes, map[string]any{
+				"path":      p,
+				"additions": adds,
+				"deletions": 0,
+				"status":    "untracked",
+			})
+		}
+		untrackedCh <- diffResult{changes: changes, total: map[string]int{"additions": totalAdds, "deletions": 0}}
+	}()
 
 	staged := <-stagedCh
 	unstaged := <-unstagedCh
+	untracked := <-untrackedCh
+
+	unstaged.changes = append(unstaged.changes, untracked.changes...)
+	unstaged.total["additions"] += untracked.total["additions"]
 
 	if staged.errMsg != "" && unstaged.errMsg != "" {
 		writeErr(w, http.StatusInternalServerError, fmt.Errorf("staged: %s; unstaged: %s", staged.errMsg, unstaged.errMsg))
@@ -729,6 +768,9 @@ func (s *Server) handleWorktreeStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	if unstaged.errMsg != "" {
 		resp["unstaged"].(map[string]any)["error"] = unstaged.errMsg
+	}
+	if untracked.errMsg != "" {
+		resp["unstaged"].(map[string]any)["warning"] = untracked.errMsg
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -1614,6 +1656,41 @@ func writeRepoListenPort(dataDir string, port int) error {
 		return err
 	}
 	return os.WriteFile(filepath.Join(dataDir, "server.json"), b, 0o600)
+}
+
+// countFileLines reads the file at path and returns its line count.
+// Returns 0 if the file cannot be read, exceeds 1 MB, or appears binary.
+func countFileLines(path string) int {
+	info, err := os.Stat(path)
+	if err != nil {
+		return 0
+	}
+	if info.Size() > 1<<20 {
+		return 0
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return 0
+	}
+	if isBinaryData(data) {
+		return 0
+	}
+	return strings.Count(string(data), "\n")
+}
+
+// isBinaryData returns true if data contains null bytes in the first 8 KB,
+// indicating binary content.
+func isBinaryData(data []byte) bool {
+	n := len(data)
+	if n > 8192 {
+		n = 8192
+	}
+	for _, b := range data[:n] {
+		if b == 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // parseGitDiffNumStat parses the output of "git diff --numstat HEAD" and

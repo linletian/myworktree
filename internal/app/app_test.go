@@ -596,6 +596,145 @@ func TestHandleWorktreeStatusPartialFailure(t *testing.T) {
 	if !strings.Contains(errMsg, "git diff failed") {
 		t.Fatalf("unstaged: expected 'git diff failed' in error, got %q", errMsg)
 	}
+	warnMsg, _ := unstaged["warning"].(string)
+	if warnMsg == "" {
+		t.Fatal("unstaged: expected warning field for ls-files failure")
+	}
+	if !strings.Contains(warnMsg, "git ls-files failed") {
+		t.Fatalf("unstaged: expected 'git ls-files failed' in warning, got %q", warnMsg)
+	}
+}
+
+func TestHandleWorktreeStatusWithUntracked(t *testing.T) {
+	tmpDir := t.TempDir()
+	os.WriteFile(filepath.Join(tmpDir, "newfile.go"), []byte("line1\nline2\nline3\n"), 0644)
+	os.MkdirAll(filepath.Join(tmpDir, "subdir"), 0755)
+	os.WriteFile(filepath.Join(tmpDir, "subdir", "nested.go"), []byte("package p\n"), 0644)
+
+	srv := &Server{
+		root: tmpDir,
+		gitRunner: func(timeout time.Duration, gitRoot string, args ...string) ([]byte, error) {
+			isLsFiles := false
+			isCached := false
+			for _, a := range args {
+				if a == "ls-files" {
+					isLsFiles = true
+				}
+				if a == "--cached" {
+					isCached = true
+				}
+			}
+			if isLsFiles {
+				return []byte("newfile.go\nsubdir/nested.go\n"), nil
+			}
+			if isCached {
+				return []byte("3\t0\tstaged.go\n"), nil
+			}
+			return []byte("1\t2\tmodified.go\n"), nil
+		},
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/worktree/status?id=__main__", nil)
+	w := httptest.NewRecorder()
+	srv.handleWorktreeStatus(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var resp map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("invalid JSON: %v (body=%s)", err, w.Body.String())
+	}
+
+	staged, _ := resp["staged"].(map[string]any)
+	stagedChanges := staged["changes"].([]interface{})
+	if len(stagedChanges) != 1 {
+		t.Fatalf("staged: expected 1 change, got %d", len(stagedChanges))
+	}
+
+	unstaged, _ := resp["unstaged"].(map[string]any)
+	unstagedChanges := unstaged["changes"].([]interface{})
+	if len(unstagedChanges) != 3 {
+		t.Fatalf("unstaged: expected 3 changes (modified + 2 untracked), got %d", len(unstagedChanges))
+	}
+
+	var untrackedAdds float64
+	foundUntracked := 0
+	for _, c := range unstagedChanges {
+		change := c.(map[string]interface{})
+		status, _ := change["status"].(string)
+		if status == "untracked" {
+			foundUntracked++
+			untrackedAdds += change["additions"].(float64)
+		}
+	}
+	if foundUntracked != 2 {
+		t.Fatalf("expected 2 untracked files, got %d", foundUntracked)
+	}
+
+	unstagedTotal := unstaged["total"].(map[string]interface{})
+	expAdds := 1.0 + untrackedAdds
+	if unstagedTotal["additions"].(float64) != expAdds {
+		t.Fatalf("unstaged total additions: expected %v, got %v", expAdds, unstagedTotal["additions"])
+	}
+	if unstagedTotal["deletions"].(float64) != 2.0 {
+		t.Fatalf("unstaged total deletions: expected 2, got %v", unstagedTotal["deletions"])
+	}
+}
+
+func TestHandleWorktreeStatusLsFilesFailsDiffSucceeds(t *testing.T) {
+	srv := &Server{
+		root: t.TempDir(),
+		gitRunner: func(timeout time.Duration, gitRoot string, args ...string) ([]byte, error) {
+			for _, a := range args {
+				if a == "ls-files" {
+					return nil, os.ErrNotExist
+				}
+				if a == "--cached" {
+					return []byte("1\t0\tstaged.go\n"), nil
+				}
+			}
+			return []byte("2\t3\tmodified.go\n"), nil
+		},
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/worktree/status?id=__main__", nil)
+	w := httptest.NewRecorder()
+	srv.handleWorktreeStatus(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var resp map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+
+	unstaged, _ := resp["unstaged"].(map[string]any)
+
+	if _, hasErr := unstaged["error"]; hasErr {
+		t.Fatal("unstaged: should not have error field when diff succeeds")
+	}
+
+	warnMsg, _ := unstaged["warning"].(string)
+	if warnMsg == "" {
+		t.Fatal("unstaged: expected warning field for ls-files failure")
+	}
+	if !strings.Contains(warnMsg, "git ls-files failed") {
+		t.Fatalf("unstaged: expected 'git ls-files failed' in warning, got %q", warnMsg)
+	}
+
+	unstagedChanges := unstaged["changes"].([]interface{})
+	if len(unstagedChanges) != 1 {
+		t.Fatalf("unstaged: expected 1 diff change, got %d", len(unstagedChanges))
+	}
+
+	staged, _ := resp["staged"].(map[string]any)
+	if _, hasWarn := staged["warning"]; hasWarn {
+		t.Fatal("staged: should not have warning field")
+	}
 }
 
 func TestHandleMain(t *testing.T) {
