@@ -222,11 +222,30 @@
         .git-change-stats .additions { color: #28a745; }
         .git-change-stats .deletions { color: #cb2431; }
 
+        .git-change-untracked-badge {
+            flex-shrink: 0;
+            font-size: 10px;
+            font-weight: 600;
+            padding: 1px 4px;
+            border-radius: 3px;
+            background: #d4c5f9;
+            color: #6f42c1;
+            line-height: 1;
+        }
+
         .git-change-empty {
             padding: 16px 12px;
             text-align: center;
             color: #6a737d;
             font-size: 12px;
+        }
+
+        .git-change-warning {
+            padding: 6px 12px;
+            font-size: 12px;
+            color: #9a6700;
+            background: #fff8c5;
+            border-bottom: 1px solid #d4a72c;
         }
 
         .wt-item {
@@ -1349,6 +1368,7 @@
                 const changes = data ? data.changes : [];
                 const total = data ? data.total : { additions: 0, deletions: 0 };
                 const sectionErr = data ? data.error : null;
+                const sectionWarning = data ? data.warning : null;
 
                 if (gitChangesError) {
                     if (section === expanded) {
@@ -1368,6 +1388,13 @@
                     empty.textContent = `\u26a0 ${sectionErr}`;
                     list.appendChild(empty);
                     return;
+                }
+
+                if (sectionWarning) {
+                    const warn = document.createElement("div");
+                    warn.className = "git-change-warning";
+                    warn.textContent = `\u26a0 ${sectionWarning}`;
+                    list.appendChild(warn);
                 }
 
                 if (!changes || changes.length === 0) {
@@ -1400,6 +1427,13 @@
                     const displayPath = truncatePath(c.path, avail);
                     const item = document.createElement("div");
                     item.className = "git-change-item";
+
+                    if (c.status === "untracked") {
+                        const badge = document.createElement("span");
+                        badge.className = "git-change-untracked-badge";
+                        badge.textContent = "U";
+                        item.appendChild(badge);
+                    }
 
                     const path = document.createElement("span");
                     path.className = "git-change-path";
