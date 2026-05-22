@@ -7,6 +7,7 @@
 
 | 任务 | 依赖 | 预估工时 | 文件 |
 |------|------|------|------|
+| [Task 0](#task-0-项目主文档更新) | — | 0.5d | `README.md`、`README.zh-CN.md` |
 | [Task 1](#task-1-全局-auth-配置) | — | 0.5d | `internal/config/global.go` + `_test.go` |
 | [Task 2](#task-2-cli-变更) | Task 1 | 1d | `internal/cli/cli.go` |
 | [Task 3](#task-3-app-配置扩展--serverjson-重构) | — | 0.5d | `internal/app/app.go` |
@@ -22,6 +23,8 @@
 ### 依赖图
 
 ```
+Task 0 (文档优先，最先执行)
+
 Task 1 ──→ Task 2 ──→ (无后续依赖)
        │
        ├──→ Task 5 ──→ Task 6 ──→ Task 9
@@ -34,6 +37,30 @@ Task 3 ──→ Task 4 ─────────────┤
                                │
                                └──→ Task 10 ──→ Task 11
 ```
+
+---
+
+## Task 0: 项目主文档更新 ⚡ 文档优先，最先执行
+
+**文件**: `README.md`（修改）、`README.zh-CN.md`（修改）
+
+**需求**: §设计目标 (行 19–27)、§用户使用流程 (行 514–552)、§架构 §目录结构 (行 35–45)
+
+> **执行原则**：本文档应在任何代码实施前完成。文档先行确保团队对功能边界、用户接口和架构设计达成共识，后续实施可严格按文档验收。
+
+| 子任务 | 描述 | 需求来源 |
+|--------|------|----------|
+| 0.1 | **README.md §Remote access 重写**：扩展当前「Remote access」章节（行 213–217），增加以下内容：<br>- **全局 Token 配置**：`mw config` 交互式引导，token 存储在 `~/.config/myworktree/auth.json`<br>- **Portal 仪表板**：`--portal-port 12345` 共享入口，列出所有运行中实例并可点击跳转<br>- **Tailscale HTTPS**：自动配置 `tailscale serve`，提供 `https://<machine>.ts.net` 域名访问<br>- **网络安全说明表**：复制计划文档 §网络安全说明 (行 477–490) 中的访问路径/协议/加密层级表 | §设计目标 行 21–27、§用户流程 行 514–552 |
+| 0.2 | **README.md §Features 更新**：在「Features (MVP)」章节末尾增加 Portal Dashboard 相关条目：<br>- `Portal Dashboard with shared entry port, auto-discovery of running instances across repos`<br>- `Global auth token (HttpOnly Cookie, CSRF protection, tailscale serve integration)` | §设计目标 行 24–27 |
+| 0.3 | **README.md §CLI examples 更新**：增加 `mw config` 子命令示例：<br>```bash<br>mw config              # 交互式引导（设置/查看/清除 Token）<br>mw config set-auth     # 直接设置 Token<br>mw config get-auth     # 查看 Token（掩码）<br>mw config clear-auth   # 清除 Token<br>mw start --listen 0.0.0.0:0            # LAN 访问，自动继承全局 Token<br>mw start --listen 0.0.0.0:0 --portal-port 12346  # 自定义 Portal 端口<br>mw start --listen 0.0.0.0:0 --portal-port 0       # 禁用 Portal<br>``` | §5 CLI 变更 行 393–411、§用户流程 行 514–552 |
+| 0.4 | **README.md §Run 示例更新**：在 `mw` 启动示例下方增加 Portal 输出示例：<br>```<br>Portal dashboard at:<br>  http://0.0.0.0:12345/<br>Tailscale: https://my-machine.tail-scale.ts.net/<br>``` | §可观测性 行 600、§用户流程 行 526–530 |
+| 0.5 | **README.zh-CN.md 同步更新**：对应中文 README 的「远程访问」章节（行 211–213）、「功能」章节、CLI 示例进行与 0.1–0.4 等效的中文更新 | 同上述子任务 |
+
+**验收标准**:
+- `README.md` 和 `README.zh-CN.md` 的「Remote access / 远程访问」章节包含 Portal Dashboard、全局 Token、Tailscale HTTPS 三类功能说明
+- CLI 示例包含 `mw config` 和 `--portal-port` 的用法
+- 网络安全说明表（访问路径/协议/加密层级）出现在远程访问章节
+- 中英文 README 内容一致
 
 ---
 
@@ -383,6 +410,9 @@ Task 3 ──→ Task 4 ─────────────┤
 ## 附录 B: 文件变更总览
 
 ```
+README.md               (修改, Task 0)
+README.zh-CN.md          (修改, Task 0)
+
 internal/
 ├── config/
 │   ├── global.go           (新增, Task 1)
