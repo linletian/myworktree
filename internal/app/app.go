@@ -1429,14 +1429,15 @@ func (s *Server) withAuth(next http.Handler) http.Handler {
 		return next
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if isLoopbackRequest(r) {
+			next.ServeHTTP(w, r)
+			return
+		}
 		if !sameOriginHost(r) {
 			http.Error(w, "forbidden origin", http.StatusForbidden)
 			return
 		}
-		token := strings.TrimSpace(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
-		if token == "" {
-			token = strings.TrimSpace(r.URL.Query().Get("token"))
-		}
+		token := extractAuthToken(r)
 		if token != s.cfg.AuthToken {
 			if !s.allowAuthAttempt(clientIP(r.RemoteAddr)) {
 				http.Error(w, "too many unauthorized attempts", http.StatusTooManyRequests)
@@ -1448,6 +1449,19 @@ func (s *Server) withAuth(next http.Handler) http.Handler {
 		s.resetAuthAttempts(clientIP(r.RemoteAddr))
 		next.ServeHTTP(w, r)
 	})
+}
+
+func extractAuthToken(r *http.Request) string {
+	if token := strings.TrimSpace(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")); token != "" {
+		return token
+	}
+	if token := strings.TrimSpace(r.URL.Query().Get("token")); token != "" {
+		return token
+	}
+	if cookie, err := r.Cookie("mw_token"); err == nil {
+		return strings.TrimSpace(cookie.Value)
+	}
+	return ""
 }
 
 func (s *Server) withServerRevision(next http.Handler) http.Handler {
