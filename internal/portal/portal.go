@@ -1016,3 +1016,33 @@ func (s *csrfState) allowAuthAttempt(ip string) bool {
 	s.authLimits[ip] = newTimes
 	return true
 }
+
+var tsDNSNameCmd = func(ctx context.Context) (string, error) {
+	cmd := exec.CommandContext(ctx, "tailscale", "status", "--json")
+	out, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+	var status struct {
+		Self struct {
+			DNSName string `json:"DNSName"`
+		} `json:"Self"`
+	}
+	if err := json.Unmarshal(out, &status); err != nil {
+		return "", err
+	}
+	if status.Self.DNSName == "" {
+		return "", fmt.Errorf("no DNS name")
+	}
+	return strings.TrimSuffix(status.Self.DNSName, "."), nil
+}
+
+func TailscaleDNSName() string {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	name, err := tsDNSNameCmd(ctx)
+	if err != nil {
+		return ""
+	}
+	return name
+}

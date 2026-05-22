@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"golang.org/x/term"
 
@@ -134,7 +136,12 @@ func startCmd(logger *log.Logger, prog string, args []string) error {
 		}
 	}()
 
-	select {}
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	<-sigCh
+	fmt.Println("\nShutting down...")
+	srv.Shutdown()
+	return nil
 }
 
 func worktreeCmd(logger *log.Logger, args []string) error {

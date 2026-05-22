@@ -29,6 +29,7 @@ import (
 	"myworktree/internal/llm"
 	"myworktree/internal/mcp"
 	"myworktree/internal/monitor"
+	"myworktree/internal/portal"
 	"myworktree/internal/store"
 	"myworktree/internal/tag"
 	"myworktree/internal/ui"
@@ -61,6 +62,8 @@ type Server struct {
 	serverRev string
 	isSecure  bool
 
+	portal     *portal.Portal
+	httpSrv    *http.Server
 	store       store.FileStore
 	worktreeMgr worktree.Manager
 	instanceMgr *instance.Manager
@@ -347,14 +350,47 @@ func (s *Server) Start() (string, error) {
 	}
 	s.ln = ln
 
+	if s.cfg.PortalPort > 0 {
+		base, err := os.UserConfigDir()
+		if err != nil {
+			s.logger.Printf("[portal] warning: UserConfigDir failed: %v", err)
+			base = ""
+		}
+		host, _, err := net.SplitHostPort(s.cfg.ListenAddr)
+		if err != nil {
+			s.logger.Printf("[portal] warning: SplitHostPort failed: %v", err)
+			host = s.cfg.ListenAddr
+		}
+		cfg := portal.Config{
+			PortalPort:   s.cfg.PortalPort,
+			Host:         host,
+			AuthToken:    s.cfg.AuthToken,
+			RegistryDir:  filepath.Join(base, "myworktree", "portal"),
+			DataDir:      s.dataDir,
+			RepoName:     filepath.Base(filepath.Clean(s.root)),
+			RepoHash:     gitx.HashPath(s.root),
+		}
+		s.portal = portal.New(cfg)
+		if err := s.portal.Start(); err != nil {
+			s.logger.Printf("[portal] warning: portal.Start failed: %v", err)
+			s.portal = nil
+		} else {
+			s.logger.Printf("[portal] Portal dashboard at: http://%s:%d/", host, s.cfg.PortalPort)
+			if tsName := portal.TailscaleDNSName(); tsName != "" {
+				s.logger.Printf("[portal] Tailscale URL: https://%s/", tsName)
+			}
+		}
+	}
+
 	h := s.withServerRevision(s.withAuth(s.mux))
+	s.httpSrv = &http.Server{Handler: h}
 
 	go func() {
 		if s.cfg.TLSCert != "" || s.cfg.TLSKey != "" {
-			_ = http.ServeTLS(ln, h, s.cfg.TLSCert, s.cfg.TLSKey)
+			_ = s.httpSrv.ServeTLS(ln, s.cfg.TLSCert, s.cfg.TLSKey)
 			return
 		}
-		_ = http.Serve(ln, h)
+		_ = s.httpSrv.Serve(ln)
 	}()
 
 	scheme := "http"
@@ -369,6 +405,20 @@ func (s *Server) Start() (string, error) {
 		}
 	}
 	return url, nil
+}
+
+func (s *Server) Shutdown() {
+	if s.portal != nil {
+		s.portal.Stop()
+	}
+	if s.httpSrv != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = s.httpSrv.Shutdown(ctx)
+	}
+	if s.ln != nil {
+		s.ln.Close()
+	}
 }
 
 func (s *Server) listTopBranches() (string, []gitx.Branch, error) {
