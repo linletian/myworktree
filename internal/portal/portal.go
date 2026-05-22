@@ -599,8 +599,30 @@ func (p *Portal) handleProxy(w http.ResponseWriter, r *http.Request) {
 	}
 
 	proxy := httputil.NewSingleHostReverseProxy(&url.URL{Scheme: "http", Host: fmt.Sprintf("127.0.0.1:%d", port)})
-	r.URL.Host = fmt.Sprintf("127.0.0.1:%d", port)
+	originalPath := r.URL.Path
+	proxy.Director = func(req *http.Request) {
+		req.URL.Scheme = "http"
+		req.URL.Host = fmt.Sprintf("127.0.0.1:%d", port)
+		strippedPath := strings.TrimPrefix(originalPath, "/s/"+repoHash)
+		if !strings.HasPrefix(strippedPath, "/") {
+			strippedPath = "/" + strippedPath
+		}
+		req.URL.Path = strippedPath
+		req.URL.RawPath = ""
+	}
+	proxy.ErrorLog = log.New(&logWriter{repoHash: repoHash, port: port}, "", 0)
+
 	proxy.ServeHTTP(w, r)
+}
+
+type logWriter struct {
+	repoHash string
+	port     int
+}
+
+func (l *logWriter) Write(p []byte) (int, error) {
+	log.Printf("[portal] reverse proxy: dial 127.0.0.1:%d (repo_hash=%q) failed: %s", l.port, l.repoHash, strings.TrimSpace(string(p)))
+	return len(p), nil
 }
 
 func (p *Portal) checkAuth(r *http.Request) bool {

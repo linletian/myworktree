@@ -1,10 +1,15 @@
 package portal
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
+	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -403,4 +408,327 @@ func TestPortalMuConcurrentAccess(t *testing.T) {
 	}
 
 	wg.Wait()
+}
+
+func TestHandleProxy_AuthRequired(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfg := Config{
+		PortalPort:  12345,
+		AuthToken:   "test-token",
+		RegistryDir: tmpDir,
+		RepoHash:    "abc123",
+	}
+	p := New(cfg)
+
+	req := httptest.NewRequest("GET", "/s/abc123/", nil)
+	rec := httptest.NewRecorder()
+	p.handleProxy(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", rec.Code)
+	}
+}
+
+func TestHandleProxy_InvalidRepoHash(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfg := Config{
+		PortalPort:  12345,
+		AuthToken:   "test-token",
+		RegistryDir: tmpDir,
+		RepoHash:    "abc123",
+	}
+	p := New(cfg)
+
+	tests := []struct {
+		path         string
+		expectStatus int
+	}{
+		{"/s/../etc/passwd", http.StatusBadRequest},
+		{"/s/g..g/", http.StatusBadRequest},
+		{"/s/ABCDEF/", http.StatusBadRequest},
+	}
+
+	for _, tt := range tests {
+		req := httptest.NewRequest("GET", tt.path, nil)
+		req.AddCookie(&http.Cookie{Name: "mw_token", Value: "test-token"})
+		rec := httptest.NewRecorder()
+		p.handleProxy(rec, req)
+
+		if rec.Code != tt.expectStatus {
+			t.Errorf("path %q: expected %d, got %d", tt.path, tt.expectStatus, rec.Code)
+		}
+	}
+}
+
+func TestHandleProxy_InstanceNotFound(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfg := Config{
+		PortalPort:  12345,
+		AuthToken:   "test-token",
+		RegistryDir: tmpDir,
+		RepoHash:    "abc123",
+	}
+	p := New(cfg)
+
+	req := httptest.NewRequest("GET", "/s/abc123/", nil)
+	req.AddCookie(&http.Cookie{Name: "mw_token", Value: "test-token"})
+	rec := httptest.NewRecorder()
+	p.handleProxy(rec, req)
+
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("expected 502, got %d", rec.Code)
+	}
+}
+
+func TestHandleProxy_SlidingCookie(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfg := Config{
+		PortalPort:  12345,
+		AuthToken:   "test-token",
+		RegistryDir: tmpDir,
+		RepoHash:    "slide123",
+	}
+	p := New(cfg)
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Skip("skipping test: port not available")
+	}
+	defer ln.Close()
+	instancePort := ln.Addr().(*net.TCPAddr).Port
+
+	reg := registration{
+		InstanceID: p.instanceID,
+		PID:       os.Getpid(),
+		Port:      instancePort,
+		RepoHash:  "slide123",
+	}
+	data, _ := json.Marshal(reg)
+	os.WriteFile(filepath.Join(tmpDir, p.instanceID+".json"), data, 0o600)
+
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			buf := make([]byte, 1024)
+			n, _ := conn.Read(buf)
+			conn.Write(buf[:n])
+			conn.Close()
+		}
+	}()
+
+	req := httptest.NewRequest("GET", "/s/slide123/api/list", nil)
+	req.AddCookie(&http.Cookie{Name: "mw_token", Value: "test-token"})
+	rec := httptest.NewRecorder()
+	p.handleProxy(rec, req)
+
+	cookies := rec.Result().Cookies()
+	var found bool
+	for _, c := range cookies {
+		if c.Name == "mw_token" && c.MaxAge > 0 {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("expected sliding auth cookie to be set")
+	}
+}
+
+func waitForPort(host string, port int, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		conn, err := net.DialTimeout("tcp", fmt.Sprintf("%s:%d", host, port), 50*time.Millisecond)
+		if err == nil {
+			conn.Close()
+			return true
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return false
+}
+
+func wsHandshake(conn net.Conn, path string, key string) error {
+	req := fmt.Sprintf("GET %s HTTP/1.1\r\nHost: localhost\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Key: %s\r\nSec-WebSocket-Version: 13\r\nCookie: mw_token=test-token\r\n\r\n", path, key)
+	_, err := conn.Write([]byte(req))
+	if err != nil {
+		return err
+	}
+	buf := make([]byte, 1024)
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	n, err := conn.Read(buf)
+	if err != nil {
+		return err
+	}
+	resp := string(buf[:n])
+	if !strings.Contains(resp, "101") {
+		return fmt.Errorf("handshake failed: %s", resp[:min(200, len(resp))])
+	}
+	return nil
+}
+
+func wsReadFrame(conn net.Conn) (opcode int, payload []byte, err error) {
+	header := make([]byte, 2)
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_, err = conn.Read(header)
+	if err != nil {
+		return 0, nil, err
+	}
+	opcode = int(header[0]) & 0x0f
+	masked := (header[1] & 0x80) != 0
+	payloadLen := int(header[1]) & 0x7f
+	if payloadLen == 126 {
+		ext := make([]byte, 2)
+		conn.Read(ext)
+		payloadLen = int(ext[0])<<8 | int(ext[1])
+	} else if payloadLen == 127 {
+		ext := make([]byte, 8)
+		conn.Read(ext)
+		payloadLen = 0
+		for _, b := range ext {
+			payloadLen = payloadLen<<8 + int(b)
+		}
+	}
+	maskKey := make([]byte, 4)
+	if masked {
+		conn.Read(maskKey)
+	}
+	payload = make([]byte, payloadLen)
+	conn.Read(payload)
+	if masked {
+		for i := range payload {
+			payload[i] ^= maskKey[i%4]
+		}
+	}
+	return opcode, payload, nil
+}
+
+func wsWriteFrame(conn net.Conn, opcode int, payload []byte) error {
+	maskKey := []byte{0x12, 0x34, 0x56, 0x78}
+	var frame []byte
+	if len(payload) < 126 {
+		frame = make([]byte, 6+len(payload))
+		frame[0] = byte(0x80 | opcode)
+		frame[1] = byte(0x80 | len(payload))
+		copy(frame[2:], maskKey)
+		for i, b := range payload {
+			frame[6+i] = b ^ maskKey[i%4]
+		}
+	} else if len(payload) < 65536 {
+		frame = make([]byte, 8+len(payload))
+		frame[0] = byte(0x80 | opcode)
+		frame[1] = 0xfe
+		frame[2] = byte(len(payload) >> 8)
+		frame[3] = byte(len(payload) & 0xff)
+		copy(frame[4:], maskKey)
+		for i, b := range payload {
+			frame[8+i] = b ^ maskKey[i%4]
+		}
+	} else {
+		frame = make([]byte, 14+len(payload))
+		frame[0] = byte(0x80 | opcode)
+		frame[1] = 0xff
+		copy(frame[10:], maskKey)
+		for i, b := range payload {
+			frame[14+i] = b ^ maskKey[i%4]
+		}
+	}
+	_, err := conn.Write(frame)
+	return err
+}
+
+func TestHandleProxy_WebSocket(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	backendLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Skip("skipping test: port not available")
+	}
+	backendPort := backendLn.Addr().(*net.TCPAddr).Port
+
+	go func() {
+		for {
+			conn, err := backendLn.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer conn.Close()
+				buf := make([]byte, 4096)
+				n, _ := conn.Read(buf)
+				reqStr := string(buf[:n])
+				if !strings.Contains(reqStr, "Upgrade: websocket") {
+					conn.Write([]byte("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK"))
+					return
+				}
+				conn.Write([]byte("HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n"))
+				opcode, payload, _ := wsReadFrame(conn)
+				if opcode == 0x01 && len(payload) > 0 {
+					wsWriteFrame(conn, opcode, payload)
+				}
+			}()
+		}
+	}()
+	defer backendLn.Close()
+
+	reg := registration{
+		InstanceID: "test-instance",
+		PID:       os.Getpid(),
+		Port:      backendPort,
+		RepoHash:  "abc123",
+	}
+	data, _ := json.Marshal(reg)
+	os.WriteFile(filepath.Join(tmpDir, "test-instance.json"), data, 0o600)
+
+	cfg := Config{
+		PortalPort:  0,
+		AuthToken:   "test-token",
+		RegistryDir: tmpDir,
+		RepoHash:    "abc123",
+	}
+	p := New(cfg)
+
+	proxyLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Skip("skipping test: port not available")
+	}
+	proxyPort := proxyLn.Addr().(*net.TCPAddr).Port
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/s/", p.handleProxy)
+	srv := &http.Server{Handler: mux}
+	go srv.Serve(proxyLn)
+	defer srv.Shutdown(context.Background())
+
+	if !waitForPort("127.0.0.1", proxyPort, 500*time.Millisecond) {
+		t.Skip("proxy server not ready")
+	}
+
+	conn, err := net.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", proxyPort))
+	if err != nil {
+		t.Skip("skipping test: proxy port not available")
+	}
+	defer conn.Close()
+
+	if err := wsHandshake(conn, "/s/abc123/echo", "dGhlIHNhbXBsZSBub25jZQ=="); err != nil {
+		t.Fatal("handshake failed:", err)
+	}
+
+	testMsg := []byte("Hello WebSocket")
+	if err := wsWriteFrame(conn, 0x01, testMsg); err != nil {
+		t.Fatal("write frame failed:", err)
+	}
+
+	opcode, echoPayload, err := wsReadFrame(conn)
+	if err != nil {
+		t.Fatal("read frame failed:", err)
+	}
+	if opcode != 0x01 {
+		t.Fatalf("expected text frame (opcode=1), got opcode=%d", opcode)
+	}
+	if string(echoPayload) != string(testMsg) {
+		t.Fatalf("expected echo %q, got %q", string(testMsg), string(echoPayload))
+	}
 }
