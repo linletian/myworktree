@@ -1,6 +1,6 @@
 # myworktree — PRD (v0.1)
 
-> 定位：单人使用的 **git worktree + coding CLI instance** 管理框架；提供 Web UI 做管理与输出回放；默认本机安全运行，可选远程访问（内置 HTTPS + Token）。
+> 定位：单人使用的 **git worktree + coding CLI instance** 管理框架；提供 Web UI 做管理与输出回放；Portal 仪表板全局入口，支持跨仓库运行实例自动发现；默认本机安全运行，可选远程访问（全局 Token、Portal 反向代理、Tailscale HTTPS）。
 
 ## 1. 背景
 在同一项目中并行多个 AI coding 任务时，常见痛点：
@@ -41,6 +41,9 @@
 - 默认只监听 `127.0.0.1`。
 - 监听非 loopback（例如 `0.0.0.0` 或局域网 IP）时：必须提供 `--auth`。
 - 可选内置 HTTPS：`--tls-cert/--tls-key`。
+- **Portal 端口绑定**：Portal 仪表板可绑定到 `0.0.0.0`，用户通过 LAN IP 或 Tailscale 域名访问。非 loopback 访问 Portal 时须通过 `mw_token` Cookie 认证。
+- **全局 Token（HttpOnly Cookie + CSRF）**：全局 Token 存储在 `~/.config/myworktree/auth.json`（0600 权限），通过 `mw config` 交互式配置。Portal 仪表板使用 HttpOnly Cookie（`mw_token`）传输 Token——JS 不可读取，防止 XSS 窃取。登录/登出端点采用 double-submit cookie 模式做 CSRF 防护。
+- **Tailscale HTTPS**：当 Tailscale 可用时，Portal 持有者自动配置 `tailscale serve` 提供 `https://<machine>.ts.net` 域名访问（Let's Encrypt 证书）。Tailscale 的 WireGuard 隧道提供网络层加密，应用层仅域名访问时叠加 TLS。
 - 涉及宿主机图形界面的快捷动作（例如从侧栏直接打开 Terminal / Finder）只在浏览器通过 `127.0.0.1` / `localhost` 访问时展示；远程访问时隐藏，避免误导用户在远端会话里触发本机 GUI 行为。
 - 对应后端接口也强制仅接受 loopback 客户端请求，不能只依赖前端隐藏来形成安全边界。
 - 日志/回放脱敏：
@@ -59,7 +62,12 @@
   - 超时降级：5 秒握手超时后自动降级到 SSE 方案。
   - 运行中的实例在前端按实例维护各自的终端会话；切换标签时隐藏非活动终端，而不是强制断开其 PTY 连接。
   - 终端配置：Web TTY 的缓冲区（scrollback）、主题、字体等参数由前端灵活配置，以适应不同的调试和使用场景。
-- 规划增强：无（PTY + Web TTY 已完成）。
+- 规划增强：**Portal Dashboard MVP**（规划中）：
+  - 全局 Token 配置（`mw config` 交互式引导，`~/.config/myworktree/auth.json`，`0o600` 权限）
+  - Portal 仪表板（共享入口端口，自动发现所有仓库的运行实例，HttpOnly Cookie 认证，CSRF 防护）
+  - 反向代理（通过 Portal 统一入口访问各实例，解决跨域 Cookie 问题，支持 WebSocket）
+  - Tailscale Serve 自动管理（自动配置 `tailscale serve` 提供 `https://<machine>.ts.net` 域名访问）
+  - 双层认证架构（Portal 层 Cookie + CSRF，实例层 loopback 绕过）
 - 浏览器关闭保护：前端在 `beforeunload` 事件时，无论是否存在运行中实例，均触发浏览器原生确认对话框，防止误操作关闭页面。
 - **Main workspace 分支查询**：`GET /api/main` 返回 `{name, branch}`。branch 字段实时查询（`git rev-parse --abbrev-ref HEAD`），在 detached HEAD 场景（如 CI 浅克隆）下返回空字符串而非错误。
 
@@ -68,6 +76,15 @@
 - 可启动/列出/停止 instance，且前端关闭后 instance 仍继续运行。
 - UI 重连可看到所有已管理对象，并能回放 instance 近期输出。
 - 本机访问 Web UI 时，可从侧栏一键打开所选主工作区/worktree 的 Terminal 与 Finder；远程访问时不展示这两个快捷入口。
+- **Portal Dashboard MVP**：
+  - `mw config` 交互式引导可完成全局 Token 的配置、查看（掩码）、清除
+  - `mw start --listen 0.0.0.0:0` 自动启动 Portal 仪表板，多实例中仅一个持有 Portal 端口
+  - Portal 仪表板可通过 LAN IP 和 Tailscale 域名访问，显示所有运行实例并可点击跳转
+  - Cookie 认证流程：获取 CSRF token → 提交 auth → 获得 HttpOnly Cookie → 访问实例列表/代理
+  - 实例通过 Portal 反向代理访问时，loopback 请求自动绕过实例端 auth 中间件
+  - 反向代理支持 WebSocket 升级转发
+  - Tailscale 可用时自动配置 `tailscale serve`，提供 HTTPS 域名访问
+  - Portal 持有者崩溃后，其他实例在 10~15 秒内完成故障转移接管
 ## 9. LLM 智能分支命名
 
 在 Create Worktree 时，可选使用 LLM 将任务描述转换为简洁、规范的分支名。
