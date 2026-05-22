@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -43,6 +44,11 @@ type Config struct {
 	Open         bool
 	WorktreesDir string
 	PortalPort   int
+}
+
+type serverConfig struct {
+	ListenPort  int    `json:"listen_port"`
+	InstanceID  string `json:"instance_id,omitempty"`
 }
 
 type Server struct {
@@ -1625,9 +1631,6 @@ func canListenTCP(addr string) bool {
 }
 
 func readRepoListenPort(dataDir string) (int, error) {
-	type config struct {
-		ListenPort int `json:"listen_port"`
-	}
 	b, err := os.ReadFile(filepath.Join(dataDir, "server.json"))
 	if errors.Is(err, os.ErrNotExist) {
 		return 0, nil
@@ -1635,7 +1638,7 @@ func readRepoListenPort(dataDir string) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	var cfg config
+	var cfg serverConfig
 	if err := json.Unmarshal(b, &cfg); err != nil {
 		return 0, err
 	}
@@ -1645,18 +1648,58 @@ func readRepoListenPort(dataDir string) (int, error) {
 	return cfg.ListenPort, nil
 }
 
-func writeRepoListenPort(dataDir string, port int) error {
-	type config struct {
-		ListenPort int `json:"listen_port"`
+func generateInstanceID() string {
+	bid := make([]byte, 8)
+	if _, err := rand.Read(bid); err != nil {
+		// Fallback for crypto/rand failure (extremely rare)
+		// Use timestamp + PID + stack hash for basic uniqueness
+		h := sha256.New()
+		h.Write([]byte(fmt.Sprintf("%d-%d-%p", time.Now().UnixNano(), os.Getpid(), generateInstanceID)))
+		copy(bid, h.Sum(nil)[:8])
 	}
+	return fmt.Sprintf("%d-%d-%x", os.Getpid(), time.Now().UnixNano(), bid)
+}
+
+func writeRepoListenPort(dataDir string, port int) error {
+	filePath := filepath.Join(dataDir, "server.json")
+	var cfg serverConfig
+	if data, err := os.ReadFile(filePath); err == nil {
+		_ = json.Unmarshal(data, &cfg)
+	}
+	cfg.ListenPort = port
+	if cfg.InstanceID == "" {
+		cfg.InstanceID = generateInstanceID()
+	}
+
 	if err := os.MkdirAll(dataDir, 0o755); err != nil {
 		return err
 	}
-	b, err := json.MarshalIndent(config{ListenPort: port}, "", "  ")
+	tmp, err := os.CreateTemp(dataDir, "server.json.*")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(dataDir, "server.json"), b, 0o600)
+	tmpPath := tmp.Name()
+	var renamed bool
+	defer func() {
+		tmp.Close()
+		if !renamed {
+			os.Remove(tmpPath)
+		}
+	}()
+	if err := tmp.Chmod(0o600); err != nil {
+		return err
+	}
+	if err := json.NewEncoder(tmp).Encode(cfg); err != nil {
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpPath, filePath); err != nil {
+		return err
+	}
+	renamed = true
+	return nil
 }
 
 // countFileLines reads the file at path and returns its line count.
