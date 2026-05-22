@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<title>Portal Dashboard</title>
+	<style>
+		* {
+			margin: 0;
+			padding: 0;
+			box-sizing: border-box;
+		}
+		body {
+			font-family: ui-monospace, "SF Mono", Menlo, Monaco, Consolas, monospace;
+			background-color: #1a1a1a;
+			color: #e0e0e0;
+			padding: 20px;
+		}
+		h1 {
+			font-size: 18px;
+			margin-bottom: 20px;
+			color: #ffffff;
+		}
+		#token-form {
+			margin-bottom: 20px;
+			padding: 16px;
+			background: #252525;
+			border: 1px solid #333;
+			border-radius: 4px;
+			display: none;
+		}
+		#token-form.visible {
+			display: block;
+		}
+		#token-form label {
+			display: block;
+			margin-bottom: 8px;
+			font-size: 14px;
+		}
+		#token-form input[type="password"] {
+			width: 300px;
+			padding: 8px;
+			font-family: inherit;
+			font-size: 14px;
+			background: #333;
+			border: 1px solid #444;
+			color: #e0e0e0;
+			border-radius: 4px;
+			margin-right: 8px;
+		}
+		#token-form button {
+			padding: 8px 16px;
+			font-family: inherit;
+			font-size: 14px;
+			background: #0066cc;
+			color: #ffffff;
+			border: none;
+			border-radius: 4px;
+			cursor: pointer;
+		}
+		#token-form button:hover {
+			background: #0055aa;
+		}
+		#error-msg {
+			color: #ff6666;
+			font-size: 13px;
+			margin-top: 8px;
+			display: none;
+		}
+		table {
+			width: 100%;
+			border-collapse: collapse;
+		}
+		th, td {
+			text-align: left;
+			padding: 12px;
+			border-bottom: 1px solid #333;
+		}
+		th {
+			background: #252525;
+			color: #aaa;
+			font-size: 13px;
+			font-weight: normal;
+		}
+		td {
+			font-size: 14px;
+		}
+		tr:hover {
+			background: #252525;
+		}
+		.status-dot {
+			display: inline-block;
+			width: 8px;
+			height: 8px;
+			border-radius: 50%;
+			margin-right: 8px;
+		}
+		.status-dot.alive {
+			background: #22c55e;
+		}
+		.status-dot.dead {
+			background: #ef4444;
+		}
+		.repo-link {
+			color: #66ccff;
+			text-decoration: none;
+		}
+		.repo-link:hover {
+			text-decoration: underline;
+		}
+		#loading {
+			font-size: 13px;
+			color: #888;
+		}
+	</style>
+</head>
+<body>
+	<h1>Portal Dashboard</h1>
+
+	<div id="token-form">
+		<label for="token-input">Enter auth token to access the dashboard:</label>
+		<input type="password" id="token-input" placeholder="Global auth token">
+		<button id="login-btn">Login</button>
+		<div id="error-msg"></div>
+	</div>
+
+	<div id="loading">Loading instances...</div>
+
+	<table id="instances-table" style="display: none;">
+		<thead>
+			<tr>
+				<th>Repository</th>
+				<th>Port</th>
+				<th>Instance ID</th>
+				<th>Status</th>
+				<th>Link</th>
+			</tr>
+		</thead>
+		<tbody id="instances-body">
+		</tbody>
+	</table>
+
+	<script>
+		var pendingCsrfToken = null;
+
+		function getCSRF() {
+			return fetch('/api/csrf-token')
+				.then(function(r) { return r.json(); })
+				.then(function(data) {
+					pendingCsrfToken = data.csrf_token;
+				});
+		}
+
+		function login() {
+			var token = document.getElementById('token-input').value;
+			if (!token) return;
+
+			getCSRF().then(function() {
+				var body = JSON.stringify({token: token, csrf_token: pendingCsrfToken});
+				return fetch('/api/auth', {
+					method: 'POST',
+					headers: {'Content-Type': 'application/json'},
+					body: body
+				});
+			}).then(function(r) {
+				if (r.ok) {
+					document.getElementById('token-form').classList.remove('visible');
+					document.getElementById('error-msg').style.display = 'none';
+					fetchList();
+				} else {
+					document.getElementById('error-msg').textContent = 'Invalid token';
+					document.getElementById('error-msg').style.display = 'block';
+				}
+			});
+		}
+
+		function fetchList() {
+			fetch('/api/list')
+				.then(function(r) {
+					if (r.status === 401) {
+						document.getElementById('token-form').classList.add('visible');
+						document.getElementById('instances-table').style.display = 'none';
+						document.getElementById('loading').textContent = 'Please login to view instances';
+						return null;
+					}
+					return r.json();
+				})
+				.then(function(data) {
+					if (!data) return;
+					renderList(data);
+				});
+		}
+
+		function renderList(data) {
+			document.getElementById('loading').style.display = 'none';
+			document.getElementById('instances-table').style.display = 'table';
+
+			var tbody = document.getElementById('instances-body');
+			tbody.textContent = '';
+
+			var procs = data.processes || [];
+			procs.forEach(function(p) {
+				var tr = document.createElement('tr');
+
+				var nameTd = document.createElement('td');
+				nameTd.textContent = p.repo_name;
+				tr.appendChild(nameTd);
+
+				var portTd = document.createElement('td');
+				portTd.textContent = p.port;
+				tr.appendChild(portTd);
+
+				var idTd = document.createElement('td');
+				idTd.textContent = p.instance_id;
+				idTd.style.fontSize = '12px';
+				idTd.style.color = '#888';
+				tr.appendChild(idTd);
+
+				var statusTd = document.createElement('td');
+				var dot = document.createElement('span');
+				dot.className = 'status-dot ' + (p.alive ? 'alive' : 'dead');
+				statusTd.appendChild(dot);
+				statusTd.appendChild(document.createTextNode(p.alive ? 'Alive' : 'Dead'));
+				tr.appendChild(statusTd);
+
+				var linkTd = document.createElement('td');
+				if (p.alive && p.repo_hash) {
+					var a = document.createElement('a');
+					a.href = '/s/' + p.repo_hash + '/';
+					a.className = 'repo-link';
+					a.textContent = 'Open';
+					a.target = '_blank';
+					linkTd.appendChild(a);
+				}
+				tr.appendChild(linkTd);
+
+				tbody.appendChild(tr);
+			});
+		}
+
+		document.getElementById('login-btn').addEventListener('click', login);
+		document.getElementById('token-input').addEventListener('keypress', function(e) {
+			if (e.key === 'Enter') login();
+		});
+
+		fetchList();
+		setInterval(fetchList, 5000);
+	</script>
+</body>
+</html>

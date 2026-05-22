@@ -2,6 +2,7 @@ package portal
 
 import (
 	"context"
+	_ "embed"
 	cryptorand "crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -14,11 +15,20 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
 )
+
+//go:embed dashboard.html
+var DashboardHTML []byte
+
+var cspHashes = [][2]string{
+	{"script", "sha256-placeholder"},
+	{"style", "sha256-placeholder"},
+}
 
 type Config struct {
 	PortalPort   int
@@ -343,7 +353,35 @@ func (p *Portal) writePortalStatus() {
 }
 
 func (p *Portal) handleDashboard(w http.ResponseWriter, r *http.Request) {
-	w.Write([]byte("Dashboard"))
+	if r.URL.Path != "/" {
+		http.NotFound(w, r)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+
+	var scriptHashes []string
+	var styleHashes []string
+	for _, h := range cspHashes {
+		if h[0] == "script" {
+			scriptHashes = append(scriptHashes, h[1])
+		} else if h[0] == "style" {
+			styleHashes = append(styleHashes, h[1])
+		}
+	}
+
+	csp := "default-src 'self'; script-src"
+	for _, h := range scriptHashes {
+		csp += " " + h
+	}
+	csp += "; style-src"
+	for _, h := range styleHashes {
+		csp += " " + h
+	}
+	w.Header().Set("Content-Security-Policy", csp)
+
+	w.Write(DashboardHTML)
 }
 
 func (p *Portal) handleCSRFToken(w http.ResponseWriter, r *http.Request) {
@@ -391,6 +429,12 @@ func (p *Portal) handleAuth(w http.ResponseWriter, r *http.Request) {
 	if p.cfg.AuthToken == "" {
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(map[string]string{"error": "auth token not configured on server"})
+		return
+	}
+
+	ip := getIP(r)
+	if !p.csrfState.allowAuthAttempt(ip) {
+		http.Error(w, "Rate limit exceeded", http.StatusTooManyRequests)
 		return
 	}
 
@@ -476,6 +520,10 @@ func (p *Portal) handleList(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	sort.Slice(processes, func(i, j int) bool {
+		return processes[i]["repo_name"].(string) < processes[j]["repo_name"].(string)
+	})
+
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"is_portal":  p.isPortalHolder(),
 		"portal_port": p.cfg.PortalPort,
@@ -521,6 +569,9 @@ func (p *Portal) handleLogout(w http.ResponseWriter, r *http.Request) {
 		MaxAge:   0,
 		SameSite: http.SameSiteLaxMode,
 		HttpOnly: true,
+	}
+	if r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https" {
+		cookie.Secure = true
 	}
 	http.SetCookie(w, cookie)
 
@@ -669,17 +720,19 @@ func isProcessAlive(pid int, port int) bool {
 }
 
 type csrfState struct {
-	mu       sync.Mutex
-	pending  map[string]time.Time
-	used     map[string]time.Time
+	mu         sync.Mutex
+	pending    map[string]time.Time
+	used       map[string]time.Time
 	rateLimits map[string]time.Time
+	authLimits map[string][]time.Time
 }
 
 func newCSRFState() *csrfState {
 	return &csrfState{
 		pending:    make(map[string]time.Time),
-		used:      make(map[string]time.Time),
+		used:       make(map[string]time.Time),
 		rateLimits: make(map[string]time.Time),
+		authLimits: make(map[string][]time.Time),
 	}
 }
 
@@ -778,4 +831,40 @@ func (s *csrfState) cleanup() {
 			delete(s.rateLimits, k)
 		}
 	}
+	for k, times := range s.authLimits {
+		var remaining []time.Time
+		for _, t := range times {
+			if t.After(cutoff) {
+				remaining = append(remaining, t)
+			}
+		}
+		if len(remaining) == 0 {
+			delete(s.authLimits, k)
+		} else {
+			s.authLimits[k] = remaining
+		}
+	}
+}
+
+func (s *csrfState) allowAuthAttempt(ip string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if len(s.authLimits) >= 10000 {
+		return false
+	}
+
+	cutoff := time.Now().Add(-1 * time.Minute)
+	var newTimes []time.Time
+	for _, t := range s.authLimits[ip] {
+		if t.After(cutoff) {
+			newTimes = append(newTimes, t)
+		}
+	}
+	if len(newTimes) >= 20 {
+		return false
+	}
+	newTimes = append(newTimes, time.Now())
+	s.authLimits[ip] = newTimes
+	return true
 }
