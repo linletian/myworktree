@@ -2,6 +2,8 @@ package portal
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -1057,4 +1060,111 @@ func TestTailscaleServeLoop_IgnoresNonHolder(t *testing.T) {
 	time.Sleep(10 * time.Millisecond)
 	close(p.done)
 	p.wg.Wait()
+}
+
+func TestCSPHashes_MatchesDashboardHTML(t *testing.T) {
+	content := string(DashboardHTML)
+
+	scriptRe := regexp.MustCompile(`(?s)<script>(.+?)</script>`)
+	styleRe := regexp.MustCompile(`(?s)<style>(.+?)</style>`)
+
+	scriptMatches := scriptRe.FindAllStringSubmatch(content, -1)
+	styleMatches := styleRe.FindAllStringSubmatch(content, -1)
+
+	if len(scriptMatches)+len(styleMatches) == 0 {
+		t.Fatal("no <script> or <style> blocks found in dashboard.html")
+	}
+
+	if len(CSPHashes) == 0 {
+		t.Fatal("CSPHashes is empty, run go generate")
+	}
+
+	if len(CSPHashes) != len(scriptMatches)+len(styleMatches) {
+		t.Fatalf("CSPHashes has %d entries, but dashboard.html has %d script/style blocks — run go generate",
+			len(CSPHashes), len(scriptMatches)+len(styleMatches))
+	}
+
+	seen := make(map[string]int)
+	for i, entry := range CSPHashes {
+		seen[entry[1]]++
+		if seen[entry[1]] > 1 {
+			t.Errorf("duplicate hash value %q in CSPHashes (index %d)", entry[1], i)
+		}
+	}
+
+	scriptCount, styleCount := 0, 0
+	for _, entry := range CSPHashes {
+		switch entry[0] {
+		case "script":
+			scriptCount++
+		case "style":
+			styleCount++
+		default:
+			t.Errorf("unknown CSPHashes type %q", entry[0])
+		}
+	}
+	if scriptCount != len(scriptMatches) {
+		t.Errorf("CSPHashes has %d script entries, expected %d", scriptCount, len(scriptMatches))
+	}
+	if styleCount != len(styleMatches) {
+		t.Errorf("CSPHashes has %d style entries, expected %d", styleCount, len(styleMatches))
+	}
+
+	var cspScripts, cspStyles []string
+	for _, entry := range CSPHashes {
+		switch entry[0] {
+		case "script":
+			cspScripts = append(cspScripts, entry[1])
+		case "style":
+			cspStyles = append(cspStyles, entry[1])
+		}
+	}
+
+	for i, m := range scriptMatches {
+		h := sha256.Sum256([]byte(m[1]))
+		exp := "sha256-" + base64.StdEncoding.EncodeToString(h[:])
+		found := false
+		for _, csp := range cspScripts {
+			if strings.Trim(csp, "'") == exp {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("script block #%d hash %q not found in CSPHashes scripts", i+1, exp)
+		}
+	}
+
+	for i, m := range styleMatches {
+		h := sha256.Sum256([]byte(m[1]))
+		exp := "sha256-" + base64.StdEncoding.EncodeToString(h[:])
+		found := false
+		for _, csp := range cspStyles {
+			if strings.Trim(csp, "'") == exp {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("style block #%d hash %q not found in CSPHashes styles", i+1, exp)
+		}
+	}
+}
+
+func TestCSPHashes_NotEmpty(t *testing.T) {
+	if len(CSPHashes) == 0 {
+		t.Fatal("CSPHashes is empty — run go generate ./internal/portal/")
+	}
+}
+
+func TestCSPHashes_NoDuplicateTypes(t *testing.T) {
+	seen := make(map[string]string)
+	for _, entry := range CSPHashes {
+		tag := entry[0]
+		hashVal := entry[1]
+		if prev, ok := seen[tag]; ok && prev == hashVal {
+			t.Errorf("duplicate CSP hash entry: %s %s", tag, hashVal)
+		}
+		seen[tag] = hashVal
+	}
 }

@@ -25,13 +25,10 @@ import (
 	"time"
 )
 
+//go:generate go run gen.go
+
 //go:embed dashboard.html
 var DashboardHTML []byte
-
-var cspHashes = [][2]string{
-	{"script", "sha256-placeholder"},
-	{"style", "sha256-placeholder"},
-}
 
 var tsStatus = func(ctx context.Context) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, "tailscale", "serve", "status", "--json")
@@ -492,7 +489,7 @@ func (p *Portal) handleDashboard(w http.ResponseWriter, r *http.Request) {
 
 	var scriptHashes []string
 	var styleHashes []string
-	for _, h := range cspHashes {
+	for _, h := range CSPHashes {
 		if h[0] == "script" {
 			scriptHashes = append(scriptHashes, h[1])
 		} else if h[0] == "style" {
@@ -504,7 +501,7 @@ func (p *Portal) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	for _, h := range scriptHashes {
 		csp += " " + h
 	}
-	csp += "; style-src"
+	csp += "; style-src 'self'"
 	for _, h := range styleHashes {
 		csp += " " + h
 	}
