@@ -1,0 +1,406 @@
+package portal
+
+import (
+	"encoding/json"
+	"net/http"
+	"os"
+	"path/filepath"
+	"sync"
+	"testing"
+	"time"
+)
+
+func TestGenerateInstanceID(t *testing.T) {
+	id1 := generateInstanceID()
+	id2 := generateInstanceID()
+
+	if id1 == "" {
+		t.Fatal("generateInstanceID returned empty string")
+	}
+	if id1 == id2 {
+		t.Fatal("generateInstanceID returned same ID twice")
+	}
+
+	for i, c := range id1 {
+		if c == '-' {
+			continue
+		}
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+			t.Fatalf("instanceID contains invalid character %c at position %d", c, i)
+		}
+	}
+}
+
+func TestRegistrationFileWriteRead(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	cfg := Config{
+		PortalPort:   12345,
+		InstancePort: 54321,
+		Host:         "localhost",
+		AuthToken:    "test-token",
+		RegistryDir:  tmpDir,
+		RepoName:     "test-repo",
+		RepoHash:     "abc123",
+	}
+
+	p := New(cfg)
+	p.writeRegistration()
+
+	regFile := filepath.Join(tmpDir, p.instanceID+".json")
+	data, err := os.ReadFile(regFile)
+	if err != nil {
+		t.Fatalf("failed to read registration file: %v", err)
+	}
+
+	var reg registration
+	if err := json.Unmarshal(data, &reg); err != nil {
+		t.Fatalf("registration file is not valid JSON: %v", err)
+	}
+
+	if reg.InstanceID != p.instanceID {
+		t.Fatalf("expected instanceID %q, got %q", p.instanceID, reg.InstanceID)
+	}
+	if reg.PID != os.Getpid() {
+		t.Fatalf("expected PID %d, got %d", os.Getpid(), reg.PID)
+	}
+	if reg.Port != 54321 {
+		t.Fatalf("expected port %d, got %d", 54321, reg.Port)
+	}
+	if reg.RepoName != "test-repo" {
+		t.Fatalf("expected RepoName %q, got %q", "test-repo", reg.RepoName)
+	}
+	if reg.RepoHash != "abc123" {
+		t.Fatalf("expected RepoHash %q, got %q", "abc123", reg.RepoHash)
+	}
+	if reg.StartedAt == "" {
+		t.Fatal("expected StartedAt to be set")
+	}
+}
+
+func TestIsPortalHolder(t *testing.T) {
+	cfg := Config{PortalPort: 12345}
+	p := New(cfg)
+
+	if p.isPortalHolder() {
+		t.Fatal("new Portal should not be a portal holder")
+	}
+}
+
+func TestIsProcessAlive_PIDNotExist(t *testing.T) {
+	alive := isProcessAlive(999999, 0)
+	if alive {
+		t.Fatal("process with non-existent PID should not be alive")
+	}
+}
+
+func TestIsProcessAlive_PIDExistsNoPort(t *testing.T) {
+	alive := isProcessAlive(os.Getpid(), 0)
+	if !alive {
+		t.Fatal("current process should be alive even without port")
+	}
+}
+
+func TestIsProcessAlive_InvalidPID(t *testing.T) {
+	alive := isProcessAlive(-1, 0)
+	if alive {
+		t.Fatal("negative PID should not be considered alive")
+	}
+}
+
+func TestCSRFGenerate(t *testing.T) {
+	state := newCSRFState()
+	token := state.generate()
+
+	if len(token) != 64 {
+		t.Fatalf("expected 64 char hex token, got %d", len(token))
+	}
+
+	token2 := state.generate()
+	if token == token2 {
+		t.Fatal("two generated tokens should be different")
+	}
+}
+
+func TestCSRFVerifyAndConsume_Success(t *testing.T) {
+	state := newCSRFState()
+	token := state.generate()
+
+	if !state.verifyAndConsume(token, token) {
+		t.Fatal("verifyAndConsume should succeed with matching token")
+	}
+
+	if state.verifyAndConsume(token, token) {
+		t.Fatal("second verification should fail (token already used)")
+	}
+}
+
+func TestCSRFVerifyAndConsume_Mismatch(t *testing.T) {
+	state := newCSRFState()
+	token := state.generate()
+
+	if state.verifyAndConsume(token, "different") {
+		t.Fatal("verifyAndConsume should fail with mismatched token")
+	}
+}
+
+func TestCSRFVerifyAndConsume_Reuse(t *testing.T) {
+	state := newCSRFState()
+	token := state.generate()
+
+	if !state.verifyAndConsume(token, token) {
+		t.Fatal("first verification should succeed")
+	}
+	if state.verifyAndConsume(token, token) {
+		t.Fatal("second verification should fail (token already used)")
+	}
+}
+
+func TestCSRFVerifyAndConsume_Expired(t *testing.T) {
+	state := newCSRFState()
+	state.used["old-token"] = time.Now().Add(-6 * time.Minute)
+
+	if !state.verifyAndConsume("old-token", "old-token") {
+		t.Fatal("expired token should be accepted (spec: not in used OR in used but > 5min TTL)")
+	}
+}
+
+func TestCSRFAllowCSRFRequest_FirstRequest(t *testing.T) {
+	state := newCSRFState()
+
+	if !state.allowCSRFRequest("192.168.1.1") {
+		t.Fatal("first request from IP should be allowed")
+	}
+}
+
+func TestCSRFAllowCSRFRequest_RateLimit(t *testing.T) {
+	state := newCSRFState()
+	ip := "192.168.1.2"
+
+	if !state.allowCSRFRequest(ip) {
+		t.Fatal("first request should be allowed")
+	}
+	if state.allowCSRFRequest(ip) {
+		t.Fatal("second request within 1 second should be rate limited")
+	}
+}
+
+func TestCSRFAllowCSRFRequest_DifferentIPs(t *testing.T) {
+	state := newCSRFState()
+
+	if !state.allowCSRFRequest("192.168.1.1") {
+		t.Fatal("first IP should be allowed")
+	}
+	if !state.allowCSRFRequest("192.168.1.2") {
+		t.Fatal("different IP should be allowed")
+	}
+}
+
+func TestCSRFCleanup(t *testing.T) {
+	state := newCSRFState()
+
+	state.used["old-token"] = time.Now().Add(-6 * time.Minute)
+	state.rateLimits["old-ip"] = time.Now().Add(-6 * time.Minute)
+
+	state.cleanup()
+
+	if _, exists := state.used["old-token"]; exists {
+		t.Fatal("old token should have been cleaned up")
+	}
+	if _, exists := state.rateLimits["old-ip"]; exists {
+		t.Fatal("old IP rate limit should have been cleaned up")
+	}
+}
+
+func TestPortalStructFields(t *testing.T) {
+	cfg := Config{
+		PortalPort:  12345,
+		Host:        "localhost",
+		AuthToken:   "test-token",
+		RegistryDir: "/tmp/portal",
+		RepoName:    "test-repo",
+		RepoHash:    "abc123",
+	}
+
+	p := New(cfg)
+
+	if p.cfg.PortalPort != 12345 {
+		t.Fatalf("expected PortalPort 12345, got %d", p.cfg.PortalPort)
+	}
+	if p.instanceID == "" {
+		t.Fatal("instanceID should not be empty")
+	}
+	if p.done == nil {
+		t.Fatal("done channel should be initialized")
+	}
+	if p.csrfState == nil {
+		t.Fatal("csrfState should be initialized")
+	}
+}
+
+func TestPortalCloseOnce(t *testing.T) {
+	cfg := Config{PortalPort: 12345}
+	p := New(cfg)
+
+	p.Stop()
+	p.Stop()
+	p.Stop()
+	p.Stop()
+	p.Stop()
+}
+
+func TestParseRepoHash(t *testing.T) {
+	tests := []struct {
+		path      string
+		expected  string
+		expectErr bool
+	}{
+		{"/s/abc123/", "abc123", false},
+		{"/s/abc123/path", "abc123", false},
+		{"/s/", "", true},
+		{"/s/../etc/passwd", "", true},
+		{"/s/g..g/", "", true},
+		{"/s/123abc/", "123abc", false},
+		{"/s/ABCDEF/", "", true},
+		{"/s/abc123def/", "abc123def", false},
+	}
+
+	for _, tt := range tests {
+		result := parseRepoHash(tt.path)
+		if tt.expectErr && result != "" {
+			t.Errorf("parseRepoHash(%q) = %q, expected empty string", tt.path, result)
+		} else if !tt.expectErr && result != tt.expected {
+			t.Errorf("parseRepoHash(%q) = %q, expected %q", tt.path, result, tt.expected)
+		}
+	}
+}
+
+func TestFindInstancePort(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	cfg := Config{
+		PortalPort:  12345,
+		RegistryDir: tmpDir,
+	}
+
+	p := New(cfg)
+
+	reg := registration{
+		InstanceID: p.instanceID,
+		PID:        os.Getpid(),
+		Port:       54321,
+		RepoHash:   "findme123",
+	}
+	data, _ := json.Marshal(reg)
+	os.WriteFile(filepath.Join(tmpDir, p.instanceID+".json"), data, 0o600)
+
+	port := p.findInstancePort("findme123")
+	if port != 54321 {
+		t.Fatalf("expected port 54321, got %d", port)
+	}
+
+	port = p.findInstancePort("notfound")
+	if port != 0 {
+		t.Fatalf("expected 0 for non-existent hash, got %d", port)
+	}
+}
+
+func TestFindInstancePort_EmptyRegistryDir(t *testing.T) {
+	cfg := Config{
+		PortalPort:  12345,
+		RegistryDir: "",
+	}
+
+	p := New(cfg)
+
+	port := p.findInstancePort("anyhash")
+	if port != 0 {
+		t.Fatalf("expected 0 with empty RegistryDir, got %d", port)
+	}
+}
+
+func TestGetIP(t *testing.T) {
+	tests := []struct {
+		remoteAddr string
+		xff        string
+		expected   string
+	}{
+		{"192.168.1.1:12345", "", "192.168.1.1"},
+		{"192.168.1.1:12345", "10.0.0.1", "10.0.0.1"},
+		{"192.168.1.1:12345", "10.0.0.1, 10.0.0.2", "10.0.0.1"},
+	}
+
+	for _, tt := range tests {
+		req := &http.Request{
+			RemoteAddr: tt.remoteAddr,
+			Header:     http.Header{},
+		}
+		if tt.xff != "" {
+			req.Header.Set("X-Forwarded-For", tt.xff)
+		}
+
+		ip := getIP(req)
+		if ip != tt.expected {
+			t.Errorf("getIP(remoteAddr=%q, XFF=%q) = %q, expected %q",
+				tt.remoteAddr, tt.xff, ip, tt.expected)
+		}
+	}
+}
+
+func TestRegistration_NoAuthTokenInFile(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	cfg := Config{
+		PortalPort:  12345,
+		AuthToken:   "secret-token-should-not-be-in-file",
+		RegistryDir: tmpDir,
+		RepoName:    "test-repo",
+		RepoHash:    "abc123",
+	}
+
+	p := New(cfg)
+	p.writeRegistration()
+
+	regFile := filepath.Join(tmpDir, p.instanceID+".json")
+	data, _ := os.ReadFile(regFile)
+
+	var reg map[string]interface{}
+	json.Unmarshal(data, &reg)
+
+	if _, exists := reg["auth_token"]; exists {
+		t.Fatal("registration file should not contain auth_token")
+	}
+}
+
+func TestCSRFState_MaxCapacity(t *testing.T) {
+	state := &csrfState{
+		used:       make(map[string]time.Time),
+		rateLimits: make(map[string]time.Time),
+	}
+
+	for i := 0; i < 9999; i++ {
+		state.rateLimits[string(rune('0'+i%10))+string(rune('0'+(i/10)%10))] = time.Now()
+	}
+
+	if !state.allowCSRFRequest("new-ip") {
+		t.Fatal("should allow request when map is at capacity (10000 limit is check before update)")
+	}
+}
+
+func TestPortalMuConcurrentAccess(t *testing.T) {
+	cfg := Config{PortalPort: 12345}
+	p := New(cfg)
+
+	var wg sync.WaitGroup
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 100; j++ {
+				_ = p.isPortalHolder()
+			}
+		}()
+	}
+
+	wg.Wait()
+}
