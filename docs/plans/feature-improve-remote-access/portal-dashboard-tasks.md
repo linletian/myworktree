@@ -42,9 +42,9 @@ Task 3 ──→ Task 4 ─────────────┤
 
 ## Task 0: 项目主文档更新 ⚡ 文档优先，最先执行
 
-**文件**: `README.md`（修改）、`README.zh-CN.md`（修改）
+**文件**: `README.md`（修改）、`README.zh-CN.md`（修改）、`docs/PRD.md`（修改）、`docs/ARCHITECTURE.md`（修改）、`docs/API.md`（修改）
 
-**需求**: §设计目标 (行 19–27)、§用户使用流程 (行 514–552)、§架构 §目录结构 (行 35–45)
+**需求**: §设计目标 (行 19–27)、§用户使用流程 (行 514–552)、§架构 §目录结构 (行 35–45)、§仪表板端点 (行 212–222)、§网络安全说明 (行 473–490)
 
 > **执行原则**：本文档应在任何代码实施前完成。文档先行确保团队对功能边界、用户接口和架构设计达成共识，后续实施可严格按文档验收。
 
@@ -55,12 +55,18 @@ Task 3 ──→ Task 4 ─────────────┤
 | 0.3 | **README.md §CLI examples 更新**：增加 `mw config` 子命令示例：<br>```bash<br>mw config              # 交互式引导（设置/查看/清除 Token）<br>mw config set-auth     # 直接设置 Token<br>mw config get-auth     # 查看 Token（掩码）<br>mw config clear-auth   # 清除 Token<br>mw start --listen 0.0.0.0:0            # LAN 访问，自动继承全局 Token<br>mw start --listen 0.0.0.0:0 --portal-port 12346  # 自定义 Portal 端口<br>mw start --listen 0.0.0.0:0 --portal-port 0       # 禁用 Portal<br>``` | §5 CLI 变更 行 393–411、§用户流程 行 514–552 |
 | 0.4 | **README.md §Run 示例更新**：在 `mw` 启动示例下方增加 Portal 输出示例：<br>```<br>Portal dashboard at:<br>  http://0.0.0.0:12345/<br>Tailscale: https://my-machine.tail-scale.ts.net/<br>``` | §可观测性 行 600、§用户流程 行 526–530 |
 | 0.5 | **README.zh-CN.md 同步更新**：对应中文 README 的「远程访问」章节（行 211–213）、「功能」章节、CLI 示例进行与 0.1–0.4 等效的中文更新 | 同上述子任务 |
+| 0.6 | **PRD.md 更新**：<br>(a) 标题/描述行（行 1–4）：增加「Portal 仪表板」作为关键特性<br>(b) §6 安全（行 40–48）：扩展安全章节，增加 Portal 端口绑定、全局 Token（HttpOnly Cookie + CSRF）、Tailscale HTTPS 相关安全约束<br>(c) §7 当前实现状态（行 50–64）：将「规划增强：无」改为列出 Portal Dashboard 各项增强（全局 Token、Portal 仪表板、反向代理、Tailscale serve 自动管理）<br>(d) §8 验收标准（行 66–70）：新增 Portal Dashboard MVP 验收标准项 | §设计目标 行 19–27、§安全总结 行 607–619 |
+| 0.7 | **ARCHITECTURE.md 更新**：<br>(a) §1 Overview（行 3–9）：加入 Portal/仪表板作为新能力层<br>(b) §2 High-level components（行 11–22）：新增 `internal/config/`（全局 auth 配置）和 `internal/portal/`（抢占/注册/反向代理/Tailscale）两个包<br>(c) §3 Data & persistence（行 24–46）：增加 `auth.json`（全局 token）、`portal/` 注册目录、`server.json` 扩展（新增 `instance_id` 字段）的描述<br>(d) §6 Security model（行 332–341）：扩展安全模型为双层认证架构（Portal 层 Cookie + CSRF，实例层 loopback 绕过）<br>(e) **新增** CLI Flags / 配置章节：列出 `--portal-port`、`--auth` 自动填充、`mw config` 子命令 | §架构 §目录结构 行 35–45、§架构 §文件变更清单 行 49–57、§7 双层认证架构 行 469–470 |
+| 0.8 | **API.md 更新**：<br>(a) Header/Auth 块（行 1–21）：增加 `mw_token` Cookie 作为第三个 token 来源说明<br>(b) **新增** Portal 端点章节：列出所有 Portal 端点的 URL、方法、认证要求、请求/响应格式（`GET /`、`GET /api/csrf-token`、`POST /api/auth`、`GET /api/list`、`GET /api/portal-status`、`POST /api/logout`、`ANY /s/<repo-hash>/*`），标注 CSRF 防护（`/api/auth` 和 `/api/logout` 需 `csrf_token`）<br>(c) 反向代理说明：`/s/<repo-hash>/*` 的代理行为、repo-hash 格式校验、WebSocket 支持<br>(d) 响应格式文档化：`/api/list` 的 JSON schema（`is_portal`、`portal_port`、`processes[]`），`/api/portal-status` 的响应 | §3 仪表板端点 行 212–222、§3 反向代理 行 231–244、§3 `/api/list` 响应 行 224–229 |
 
 **验收标准**:
 - `README.md` 和 `README.zh-CN.md` 的「Remote access / 远程访问」章节包含 Portal Dashboard、全局 Token、Tailscale HTTPS 三类功能说明
 - CLI 示例包含 `mw config` 和 `--portal-port` 的用法
 - 网络安全说明表（访问路径/协议/加密层级）出现在远程访问章节
 - 中英文 README 内容一致
+- `PRD.md` §7 列出 Portal Dashboard 增强项，§8 含 Portal Dashboard MVP 验收标准
+- `ARCHITECTURE.md` 包含 `internal/config/` 和 `internal/portal/` 两个新包、`auth.json` / `portal/` 目录、双层认证架构描述、新增 CLI Flags 章节
+- `API.md` 包含完整的 Portal 端点文档（7 个端点，含请求/响应 schema、CSRF 标注、反向代理说明）
 
 ---
 
@@ -412,6 +418,10 @@ Task 3 ──→ Task 4 ─────────────┤
 ```
 README.md               (修改, Task 0)
 README.zh-CN.md          (修改, Task 0)
+docs/
+├── PRD.md               (修改, Task 0)
+├── ARCHITECTURE.md      (修改, Task 0)
+└── API.md               (修改, Task 0)
 
 internal/
 ├── config/
