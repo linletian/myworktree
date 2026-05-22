@@ -368,7 +368,7 @@
 - 若指向其他端口 → 认为配置已过期（上轮 Portal 崩溃残留或端口变更），调用 `tailscale serve stop` 清理后重新启动
 - 若无 `:443` 配置或 `tailscale serve status` 以非零退出码退出 → 视为未运行，启动新的 tailscale serve
 
-**检测失败时的安全默认**：若 `--json` 不支持（旧版 tailscale）或解析失败，不自动启动 tailscale serve（避免与现有手动配置冲突），仅记录 Warn 日志。
+**检测失败时的安全默认**：若 JSON 解析失败，不自动启动 tailscale serve（避免与现有手动配置冲突），仅记录 Warn 日志。
 
 **启动命令**:
 

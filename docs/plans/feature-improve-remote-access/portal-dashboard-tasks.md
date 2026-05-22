@@ -299,7 +299,7 @@ Task 3 ──→ Task 4 ─────────────┤
 | 8.5 | 启动命令：`tailscale serve --bg http://127.0.0.1:<portal-port>`，10 秒超时 | §4 行 375 |
 | 8.6 | 启动时孤儿清理：`claimerLoop` 抢占端口成功后立即调用 `tailscale serve status --json`，检测到 `:443` 指向错误端口 → Warn 日志 + `stop` + 重新启动 | §4 行 358–361 |
 | 8.7 | 实现 `stopTailscaleServe()`：执行 `tailscale serve stop` | §4 行 379 |
-| 8.8 | 边界处理：(a) Tailscale 未安装 → Warn 跳过 (b) `--json` 不支持 → Warn 跳过 (c) 用户手动配置 → 检测到已配置同端口则跳过 (d) `status` 退出码非零 → 视为未配置 | §4 行 371、行 383–389 |
+| 8.8 | 边界处理：(a) Tailscale 未安装 → Warn 跳过 (c) 用户手动配置 → 检测到已配置同端口则跳过 (d) `status` 退出码非零 → 视为未配置 | §4 行 371、行 383–389 |
 | 8.9 | **集成测试**：mock 外部命令输出，验证四种分支：已正确配置/指向错误端口/无配置/json 解析失败；验证启动时孤儿清理场景 | §测试策略 行 586 |
 
 **验收标准**:
@@ -307,7 +307,7 @@ Task 3 ──→ Task 4 ─────────────┤
 - 非持有者不执行 `tailscale serve` 命令
 - `tailscale serve` 残留指向其他端口 → 接管时清理 + 重新配置
 - Tailscale 未安装时 `mw start` 正常启动（仪表板可用，仅无 HTTPS 域名）
-- 旧版 tailscale（无 `--json`）不自动启动 serve，仅 Warn 日志
+- 【已移除】仅支持 tailscale ≥ 1.56.0（`--json` 标志引入版本），不再兼容旧版
 
 ---
 

@@ -3,11 +3,13 @@ package portal
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -731,4 +733,328 @@ func TestHandleProxy_WebSocket(t *testing.T) {
 	if string(echoPayload) != string(testMsg) {
 		t.Fatalf("expected echo %q, got %q", string(testMsg), string(echoPayload))
 	}
+}
+
+func fakeExitError() error {
+	cmd := exec.Command("false")
+	return cmd.Run()
+}
+
+func TestGetTailscaleServeStatus_AlreadyConfigured(t *testing.T) {
+	origStatus := tsStatus
+	defer func() { tsStatus = origStatus }()
+
+	tsStatus = func(ctx context.Context) ([]byte, error) {
+		return []byte(`{"TCP":{":443":"http://127.0.0.1:12345"}}`), nil
+	}
+
+	cfg := Config{PortalPort: 12345}
+	p := New(cfg)
+
+	status, err := p.getTailscaleServeStatus()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if status.currentPort != 12345 {
+		t.Fatalf("expected currentPort 12345, got %d", status.currentPort)
+	}
+}
+
+func TestGetTailscaleServeStatus_WrongPort(t *testing.T) {
+	origStatus := tsStatus
+	defer func() { tsStatus = origStatus }()
+
+	tsStatus = func(ctx context.Context) ([]byte, error) {
+		return []byte(`{"TCP":{":443":"http://127.0.0.1:9999"}}`), nil
+	}
+
+	cfg := Config{PortalPort: 12345}
+	p := New(cfg)
+
+	status, err := p.getTailscaleServeStatus()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if status.currentPort != 9999 {
+		t.Fatalf("expected currentPort 9999, got %d", status.currentPort)
+	}
+}
+
+func TestGetTailscaleServeStatus_NotConfigured(t *testing.T) {
+	origStatus := tsStatus
+	defer func() { tsStatus = origStatus }()
+
+	tsStatus = func(ctx context.Context) ([]byte, error) {
+		return []byte(`{"TCP":{}}`), nil
+	}
+
+	cfg := Config{PortalPort: 12345}
+	p := New(cfg)
+
+	status, err := p.getTailscaleServeStatus()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if status.currentPort != 0 {
+		t.Fatalf("expected currentPort 0 (not configured), got %d", status.currentPort)
+	}
+}
+
+func TestGetTailscaleServeStatus_NoTCPKey(t *testing.T) {
+	origStatus := tsStatus
+	defer func() { tsStatus = origStatus }()
+
+	tsStatus = func(ctx context.Context) ([]byte, error) {
+		return []byte(`{"Other":"value"}`), nil
+	}
+
+	cfg := Config{PortalPort: 12345}
+	p := New(cfg)
+
+	status, err := p.getTailscaleServeStatus()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if status.currentPort != 0 {
+		t.Fatalf("expected currentPort 0, got %d", status.currentPort)
+	}
+}
+
+func TestGetTailscaleServeStatus_JSONParseFailure(t *testing.T) {
+	origStatus := tsStatus
+	defer func() { tsStatus = origStatus }()
+
+	tsStatus = func(ctx context.Context) ([]byte, error) {
+		return []byte(`not json`), nil
+	}
+
+	cfg := Config{PortalPort: 12345}
+	p := New(cfg)
+
+	_, err := p.getTailscaleServeStatus()
+	if err == nil {
+		t.Fatal("expected error for unparseable JSON")
+	}
+	if !p.stoppedTailscaleServe {
+		t.Fatal("expected stoppedTailscaleServe to be true after JSON parse failure")
+	}
+
+	_, err = p.getTailscaleServeStatus()
+	if err == nil {
+		t.Fatal("expected error when stoppedTailscaleServe is true")
+	}
+}
+
+func TestGetTailscaleServeStatus_TailscaleNotFound(t *testing.T) {
+	origStatus := tsStatus
+	defer func() { tsStatus = origStatus }()
+
+	tsStatus = func(ctx context.Context) ([]byte, error) {
+		return nil, &exec.Error{Name: "tailscale", Err: exec.ErrNotFound}
+	}
+
+	cfg := Config{PortalPort: 12345}
+	p := New(cfg)
+
+	_, err := p.getTailscaleServeStatus()
+	if err == nil {
+		t.Fatal("expected error for tailscale not found")
+	}
+	if !p.stoppedTailscaleServe {
+		t.Fatal("expected stoppedTailscaleServe to be true after tailscale not found")
+	}
+
+	_, err = p.getTailscaleServeStatus()
+	if err == nil {
+		t.Fatal("expected error when stoppedTailscaleServe is true")
+	}
+}
+
+func TestGetTailscaleServeStatus_ExitError(t *testing.T) {
+	origStatus := tsStatus
+	defer func() { tsStatus = origStatus }()
+
+	tsStatus = func(ctx context.Context) ([]byte, error) {
+		return nil, fakeExitError()
+	}
+
+	cfg := Config{PortalPort: 12345}
+	p := New(cfg)
+
+	status, err := p.getTailscaleServeStatus()
+	if err != nil {
+		t.Fatalf("exit error should return status with currentPort 0, got error: %v", err)
+	}
+	if status.currentPort != 0 {
+		t.Fatalf("expected currentPort 0 for non-zero exit, got %d", status.currentPort)
+	}
+	if p.stoppedTailscaleServe {
+		t.Fatal("stoppedTailscaleServe should NOT be set for non-zero exit code")
+	}
+}
+
+func TestRepairTailscaleServe_AlreadyCorrect(t *testing.T) {
+	origAction := tsServeAction
+	defer func() { tsServeAction = origAction }()
+
+	var actionCalled bool
+	tsServeAction = func(ctx context.Context, args ...string) error {
+		actionCalled = true
+		return nil
+	}
+
+	cfg := Config{PortalPort: 12345}
+	p := New(cfg)
+	p.repairTailscaleServe(12345)
+
+	if actionCalled {
+		t.Fatal("expected no action when currentPort matches portal port")
+	}
+}
+
+func TestRepairTailscaleServe_PointsToWrongPort(t *testing.T) {
+	origAction := tsServeAction
+	defer func() { tsServeAction = origAction }()
+
+	var actions []string
+	tsServeAction = func(ctx context.Context, args ...string) error {
+		actions = append(actions, strings.Join(args, " "))
+		return nil
+	}
+
+	cfg := Config{PortalPort: 12345}
+	p := New(cfg)
+	p.repairTailscaleServe(9999)
+
+	if len(actions) != 2 {
+		t.Fatalf("expected 2 actions (stop + start), got %d: %v", len(actions), actions)
+	}
+	if actions[0] != "serve stop" {
+		t.Fatalf("expected first action 'serve stop', got %q", actions[0])
+	}
+	if actions[1] != "serve --bg http://127.0.0.1:12345" {
+		t.Fatalf("expected second action 'serve --bg http://127.0.0.1:12345', got %q", actions[1])
+	}
+}
+
+func TestRepairTailscaleServe_NotConfigured(t *testing.T) {
+	origAction := tsServeAction
+	defer func() { tsServeAction = origAction }()
+
+	var actions []string
+	tsServeAction = func(ctx context.Context, args ...string) error {
+		actions = append(actions, strings.Join(args, " "))
+		return nil
+	}
+
+	cfg := Config{PortalPort: 12345}
+	p := New(cfg)
+	p.repairTailscaleServe(0)
+
+	if len(actions) != 1 {
+		t.Fatalf("expected 1 action (start only), got %d: %v", len(actions), actions)
+	}
+	if actions[0] != "serve --bg http://127.0.0.1:12345" {
+		t.Fatalf("expected 'serve --bg http://127.0.0.1:12345', got %q", actions[0])
+	}
+}
+
+func TestRepairTailscaleServe_StopFailsDoesNotStart(t *testing.T) {
+	origAction := tsServeAction
+	defer func() { tsServeAction = origAction }()
+
+	var actions []string
+	tsServeAction = func(ctx context.Context, args ...string) error {
+		actions = append(actions, strings.Join(args, " "))
+		if strings.Join(args, " ") == "serve stop" {
+			return errors.New("stop failed")
+		}
+		return nil
+	}
+
+	cfg := Config{PortalPort: 12345}
+	p := New(cfg)
+	p.repairTailscaleServe(9999)
+
+	if len(actions) != 1 {
+		t.Fatalf("expected only 1 action (stop, which fails), got %d: %v", len(actions), actions)
+	}
+	if actions[0] != "serve stop" {
+		t.Fatalf("expected 'serve stop', got %q", actions[0])
+	}
+}
+
+func TestEnsureTailscaleServe_AllowsRepairWhenCalled(t *testing.T) {
+	origStatus := tsStatus
+	origAction := tsServeAction
+	defer func() {
+		tsStatus = origStatus
+		tsServeAction = origAction
+	}()
+
+	tsStatus = func(ctx context.Context) ([]byte, error) {
+		return []byte(`{"TCP":{":443":"http://127.0.0.1:9999"}}`), nil
+	}
+
+	var actions []string
+	tsServeAction = func(ctx context.Context, args ...string) error {
+		actions = append(actions, strings.Join(args, " "))
+		return nil
+	}
+
+	cfg := Config{PortalPort: 12345}
+	p := New(cfg)
+
+	p.mu.Lock()
+	p.ln = &net.TCPListener{}
+	p.mu.Unlock()
+
+	p.ensureTailscaleServe()
+
+	if len(actions) != 2 {
+		t.Fatalf("expected 2 actions (stop + start), got %d", len(actions))
+	}
+	if actions[0] != "serve stop" {
+		t.Fatalf("expected first action 'serve stop', got %q", actions[0])
+	}
+}
+
+func TestCleanupStaleTailscaleServe_AlreadyCorrect(t *testing.T) {
+	origStatus := tsStatus
+	origAction := tsServeAction
+	defer func() {
+		tsStatus = origStatus
+		tsServeAction = origAction
+	}()
+
+	tsStatus = func(ctx context.Context) ([]byte, error) {
+		return []byte(`{"TCP":{":443":"http://127.0.0.1:12345"}}`), nil
+	}
+
+	var actionCalled bool
+	tsServeAction = func(ctx context.Context, args ...string) error {
+		actionCalled = true
+		return nil
+	}
+
+	cfg := Config{PortalPort: 12345}
+	p := New(cfg)
+	p.cleanupStaleTailscaleServe()
+
+	if actionCalled {
+		t.Fatal("expected no action when already correctly configured")
+	}
+}
+
+func TestTailscaleServeLoop_IgnoresNonHolder(t *testing.T) {
+	cfg := Config{PortalPort: 12345}
+	p := New(cfg)
+
+	p.wg.Add(1)
+	go func() {
+		p.tailscaleServeLoop()
+	}()
+	time.Sleep(10 * time.Millisecond)
+	close(p.done)
+	p.wg.Wait()
 }
