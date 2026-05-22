@@ -557,6 +557,7 @@ mw start --listen 0.0.0.0:0 --portal-port 0
 
 | 步骤 | 内容 | 复杂度 |
 |------|------|--------|
+| 0 | `README.md` / `README.zh-CN.md` — 远程访问章节重写（Portal Dashboard、全局 Token、Tailscale HTTPS）+ CLI 示例更新 + 网络安全说明表 | 低 |
 | 1 | `internal/config/global.go` — 全局 auth 配置读写（`auth.json`，原子写入，仅明文存储，`Load()` 容错处理：文件不存在返回零值 + nil error，JSON 解析失败返回零值 + 非 nil error） | 低 |
 | 2 | `cli.go` — 交互式 `config` 子命令（`Run()` 中新增 `case "config":` 分支，二级子命令路由） + 全局 Token 自动填充 + `--portal-port` flag | 中 |
 | 3 | `app.go` — Config 结构体扩展 + `server.json` 读写改为读取-合并-写入 + 原子写入 | 中 |
