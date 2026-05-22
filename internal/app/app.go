@@ -42,6 +42,7 @@ type Config struct {
 	TLSKey       string
 	Open         bool
 	WorktreesDir string
+	PortalPort   int
 }
 
 type Server struct {

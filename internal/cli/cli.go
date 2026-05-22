@@ -9,7 +9,10 @@ import (
 	"path/filepath"
 	"strings"
 
+	"golang.org/x/term"
+
 	"myworktree/internal/app"
+	"myworktree/internal/config"
 	"myworktree/internal/gitx"
 	"myworktree/internal/instance"
 	"myworktree/internal/store"
@@ -44,6 +47,12 @@ func Run(args []string, logger *log.Logger) int {
 				return 1
 			}
 			return 0
+		case "config":
+			if err := configCmd(logger, args[2:]); err != nil {
+				logger.Print(err)
+				return 1
+			}
+			return 0
 		}
 	}
 
@@ -63,6 +72,7 @@ func startCmd(logger *log.Logger, prog string, args []string) error {
 	var tlsKey string
 	var open bool
 	var worktreesDir string
+	var portalPort int
 
 	defaultOpen := filepath.Base(strings.TrimSpace(prog)) == "mw"
 
@@ -72,7 +82,17 @@ func startCmd(logger *log.Logger, prog string, args []string) error {
 	fs.StringVar(&tlsKey, "tls-key", "", "path to TLS private key PEM")
 	fs.BoolVar(&open, "open", defaultOpen, "open browser")
 	fs.StringVar(&worktreesDir, "worktrees-dir", "", "worktrees root dir (default: sibling <repo>-myworktree; set to 'data' for legacy DataDir/worktrees)")
+	fs.IntVar(&portalPort, "portal-port", 12345, "portal port (0=disabled)")
 	_ = fs.Parse(args)
+
+	if auth == "" {
+		gc, err := config.Load()
+		if err != nil {
+			logger.Printf("[config] auth.json is corrupted: %v", err)
+		} else if gc.AuthToken != "" {
+			auth = gc.AuthToken
+		}
+	}
 
 	cfg := app.Config{
 		ListenAddr:   listen,
@@ -81,6 +101,7 @@ func startCmd(logger *log.Logger, prog string, args []string) error {
 		TLSKey:       tlsKey,
 		Open:         open,
 		WorktreesDir: worktreesDir,
+		PortalPort:   portalPort,
 	}
 
 	srv, err := app.New(cfg, logger)
@@ -294,4 +315,107 @@ func projectDataDir(gitRoot string) (string, error) {
 	}
 	repoHash := gitx.HashPath(gitRoot)
 	return filepath.Join(base, "myworktree", repoHash), nil
+}
+
+func configCmd(logger *log.Logger, args []string) error {
+	if len(args) == 0 {
+		return configInteractive(logger)
+	}
+	switch args[0] {
+	case "set-auth":
+		return configSetAuth(logger)
+	case "get-auth":
+		return configGetAuth()
+	case "clear-auth":
+		return configClearAuth()
+	default:
+		return fmt.Errorf("unknown config subcommand: %s", args[0])
+	}
+}
+
+func configInteractive(logger *log.Logger) error {
+	fmt.Println("Global auth configuration")
+	fmt.Println("  [1] Set auth token")
+	fmt.Println("  [2] View auth token")
+	fmt.Println("  [3] Clear auth token")
+	fmt.Println("  [q] Quit")
+	fmt.Print("Choose an option: ")
+
+	br := bufio.NewReader(os.Stdin)
+	line, _, err := br.ReadLine()
+	if err != nil {
+		return err
+	}
+	switch strings.TrimSpace(string(line)) {
+	case "1":
+		return configSetAuth(logger)
+	case "2":
+		return configGetAuth()
+	case "3":
+		return configClearAuth()
+	case "q", "Q":
+		return nil
+	default:
+		fmt.Println("Invalid option.")
+		return nil
+	}
+}
+
+func configSetAuth(logger *log.Logger) error {
+	fmt.Print("Enter auth token: ")
+	token, err := readPassword()
+	if err != nil {
+		return fmt.Errorf("failed to read token: %w", err)
+	}
+	fmt.Print("Confirm auth token: ")
+	token2, err := readPassword()
+	if err != nil {
+		return fmt.Errorf("failed to read token: %w", err)
+	}
+	if token != token2 {
+		fmt.Println("Tokens do not match. Please try again.")
+		return nil
+	}
+	gc := &config.GlobalConfig{AuthToken: token}
+	if err := config.Save(gc); err != nil {
+		return fmt.Errorf("failed to save config: %w", err)
+	}
+	fmt.Println("Auth token saved successfully.")
+	return nil
+}
+
+func configGetAuth() error {
+	gc, err := config.Load()
+	if err != nil {
+		return fmt.Errorf("failed to load config: %w", err)
+	}
+	if gc.AuthToken == "" {
+		fmt.Println("No auth token configured.")
+		return nil
+	}
+	token := gc.AuthToken
+	if len(token) >= 8 {
+		fmt.Printf("Auth token: %s****%s\n", token[:4], token[len(token)-4:])
+	} else {
+		fmt.Println("Auth token: ****")
+	}
+	return nil
+}
+
+func configClearAuth() error {
+	gc := &config.GlobalConfig{AuthToken: ""}
+	if err := config.Save(gc); err != nil {
+		return fmt.Errorf("failed to save config: %w", err)
+	}
+	fmt.Println("Auth token cleared.")
+	return nil
+}
+
+func readPassword() (string, error) {
+	data, err := term.ReadPassword(int(os.Stdin.Fd()))
+	if err != nil {
+		return "", err
+	}
+	fmt.Println()
+	return string(data), nil
 }
