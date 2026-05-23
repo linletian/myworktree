@@ -185,13 +185,14 @@ func (p *Portal) claimerLoop() {
 
 		p.mu.Lock()
 		p.ln = ln
-		p.srv = p.newServer()
+		srv := p.newServer()
+		p.srv = srv
 		p.mu.Unlock()
 
 		p.writePortalStatus()
 		p.cleanupStaleTailscaleServe()
 
-		err = p.srv.Serve(ln)
+		err = srv.Serve(ln)
 		if err != nil && err != http.ErrServerClosed {
 			log.Printf("[portal] HTTP serve exited unexpectedly: %v", err)
 		}

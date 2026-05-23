@@ -1,12 +1,14 @@
 package portal
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -16,6 +18,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -1166,5 +1169,503 @@ func TestCSPHashes_NoDuplicateTypes(t *testing.T) {
 			t.Errorf("duplicate CSP hash entry: %s %s", tag, hashVal)
 		}
 		seen[tag] = hashVal
+	}
+}
+
+func TestPortalPortContention(t *testing.T) {
+	tmpDir := t.TempDir()
+	portalPort := 0
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Skip("no available port for contention test")
+	}
+	portalPort = ln.Addr().(*net.TCPAddr).Port
+	ln.Close()
+
+	const goroutines = 5
+	var holders int32
+	var wg sync.WaitGroup
+	ready := make(chan struct{}, goroutines)
+
+	for i := 0; i < goroutines; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			cfg := Config{
+				PortalPort:  portalPort,
+				Host:        "127.0.0.1",
+				AuthToken:   "test-token",
+				RegistryDir: filepath.Join(tmpDir, fmt.Sprintf("client%d", idx)),
+				RepoName:    "test-repo",
+				RepoHash:    fmt.Sprintf("hash%d", idx),
+			}
+			p := New(cfg)
+			p.Start()
+			ready <- struct{}{}
+
+			deadline := time.Now().Add(8 * time.Second)
+			for time.Now().Before(deadline) {
+				if p.isPortalHolder() {
+					atomic.AddInt32(&holders, 1)
+					break
+				}
+				time.Sleep(50 * time.Millisecond)
+			}
+			p.Stop()
+		}(i)
+	}
+
+	for i := 0; i < goroutines; i++ {
+		<-ready
+	}
+	wg.Wait()
+
+	if holders == 0 {
+		t.Errorf("expected at least 1 holder, got %d", holders)
+	}
+}
+
+func TestConcurrentRegistryReadWrite(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfg := Config{
+		PortalPort:  12345,
+		Host:        "localhost",
+		AuthToken:   "test-token",
+		RegistryDir: tmpDir,
+		RepoName:    "test-repo",
+		RepoHash:    "abc123",
+	}
+	p := New(cfg)
+	p.writeRegistration()
+
+	var wg sync.WaitGroup
+	const readers = 10
+	for i := 0; i < readers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 50; j++ {
+				p.findInstancePort("abc123")
+			}
+		}()
+	}
+
+	for i := 0; i < 5; i++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			cfg := Config{
+				PortalPort:  12345,
+				Host:        "localhost",
+				AuthToken:   "test-token",
+				RegistryDir: tmpDir,
+				RepoName:    "test-repo",
+				RepoHash:    fmt.Sprintf("concurrent%d", id),
+			}
+			p := New(cfg)
+			p.writeRegistration()
+		}(i)
+	}
+
+	wg.Wait()
+}
+
+func TestCleanupDuringGoroutines(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfg := Config{
+		PortalPort:  12345,
+		Host:        "localhost",
+		AuthToken:   "test-token",
+		RegistryDir: tmpDir,
+		RepoName:    "test-repo",
+		RepoHash:    "xyz789",
+	}
+	p := New(cfg)
+	p.writeRegistration()
+
+	deadInstanceIDs := make([]string, 10)
+	for i := 0; i < 10; i++ {
+		cfg := Config{
+			PortalPort:  12345,
+			Host:       "localhost",
+			AuthToken:   "test-token",
+			RegistryDir: tmpDir,
+			RepoName:    "test-repo",
+			RepoHash:    fmt.Sprintf("dead%d", i),
+		}
+		pp := New(cfg)
+		deadInstanceIDs[i] = pp.instanceID
+		reg := registration{
+			InstanceID: pp.instanceID,
+			PID:        999999,
+			Port:       54321,
+			RepoHash:   fmt.Sprintf("dead%d", i),
+		}
+		data, _ := json.Marshal(reg)
+		os.WriteFile(filepath.Join(tmpDir, pp.instanceID+".json"), data, 0o600)
+	}
+
+	var wg sync.WaitGroup
+	for i := 0; i < 5; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 20; j++ {
+				p.findInstancePort("xyz789")
+			}
+		}()
+	}
+
+	p.cleanupStaleRegistrations()
+	wg.Wait()
+
+	for _, instanceID := range deadInstanceIDs {
+		if _, err := os.Stat(filepath.Join(tmpDir, instanceID+".json")); !os.IsNotExist(err) {
+			t.Errorf("stale registration file %s.json should have been cleaned up", instanceID)
+		}
+	}
+}
+
+func TestStopAndClaimerLoopConcurrent(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfg := Config{
+		PortalPort:  12346,
+		Host:        "127.0.0.1",
+		AuthToken:   "test-token",
+		RegistryDir: tmpDir,
+		RepoName:    "test-repo",
+		RepoHash:    "stop123",
+	}
+	p := New(cfg)
+	p.Start()
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		p.Stop()
+	}()
+
+	time.Sleep(100 * time.Millisecond)
+	wg.Wait()
+}
+
+func TestRegistryDirDeletionRecovery(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfg := Config{
+		PortalPort:  12347,
+		Host:        "localhost",
+		AuthToken:   "test-token",
+		RegistryDir: tmpDir,
+		RepoName:    "test-repo",
+		RepoHash:    "recovery123",
+	}
+	p := New(cfg)
+	p.writeRegistration()
+
+	os.RemoveAll(tmpDir)
+	if _, err := os.Stat(tmpDir); !os.IsNotExist(err) {
+		t.Fatal("expected registry dir to be removed before test")
+	}
+
+	p.cleanupStaleRegistrations()
+
+	p.writeRegistration()
+	if _, err := os.Stat(tmpDir); os.IsNotExist(err) {
+		t.Fatal("registry dir was not recreated by writeRegistration()")
+	}
+
+	regFile := filepath.Join(tmpDir, p.instanceID+".json")
+	if _, err := os.Stat(regFile); os.IsNotExist(err) {
+		t.Fatal("registration file was not recreated after writeRegistration()")
+	}
+}
+
+func TestHandleAuth_EmptyTokenReturns400(t *testing.T) {
+	cfg := Config{
+		PortalPort:  12348,
+		AuthToken:   "",
+		RegistryDir: t.TempDir(),
+	}
+	p := New(cfg)
+
+	req := httptest.NewRequest("POST", "/api/auth", strings.NewReader(`{"token":"","csrf_token":"test"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	p.handleAuth(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+
+	var resp map[string]string
+	json.NewDecoder(w.Body).Decode(&resp)
+	if resp["error"] != "auth token not configured on server" {
+		t.Fatalf("unexpected error message: %q", resp["error"])
+	}
+}
+
+func TestHandleLogout_CSRFValidation(t *testing.T) {
+	cfg := Config{
+		PortalPort:  12349,
+		AuthToken:   "test-token",
+		RegistryDir: t.TempDir(),
+	}
+	p := New(cfg)
+
+	csrfRec := httptest.NewRecorder()
+	p.handleCSRFToken(csrfRec, httptest.NewRequest("GET", "/api/csrf-token", nil))
+	if csrfRec.Code != http.StatusOK {
+		t.Fatalf("CSRF token request failed: %d", csrfRec.Code)
+	}
+	csrfCookies := csrfRec.Result().Cookies()
+	var csrfCookie *http.Cookie
+	for _, c := range csrfCookies {
+		if c.Name == "mw_csrf" {
+			csrfCookie = c
+			break
+		}
+	}
+	if csrfCookie == nil {
+		t.Fatal("no mw_csrf cookie")
+	}
+	validToken := csrfCookie.Value
+
+	tests := []struct {
+		name       string
+		csrfCookie *http.Cookie
+		csrfBody   string
+		wantStatus int
+	}{
+		{
+			name:       "valid CSRF token",
+			csrfCookie: csrfCookie,
+			csrfBody:   validToken,
+			wantStatus: http.StatusOK,
+		},
+		{
+			name:       "missing CSRF token",
+			csrfCookie: nil,
+			csrfBody:   "",
+			wantStatus: http.StatusForbidden,
+		},
+		{
+			name:       "CSRF token mismatch",
+			csrfCookie: &http.Cookie{Name: "mw_csrf", Value: "cookie-token"},
+			csrfBody:   "body-token",
+			wantStatus: http.StatusForbidden,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			body := `{"csrf_token":"` + tt.csrfBody + `"}`
+			if tt.csrfBody == "" {
+				body = `{}`
+			}
+			req := httptest.NewRequest("POST", "/api/logout", strings.NewReader(body))
+			req.Header.Set("Content-Type", "application/json")
+			if tt.csrfCookie != nil {
+				req.AddCookie(tt.csrfCookie)
+			}
+			w := httptest.NewRecorder()
+			p.handleLogout(w, req)
+
+			if w.Code != tt.wantStatus {
+				t.Errorf("expected %d, got %d", tt.wantStatus, w.Code)
+			}
+		})
+	}
+}
+
+func TestEndToEndAuthFlow(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfg := Config{
+		PortalPort:  12350,
+		Host:        "localhost",
+		AuthToken:   "e2e-test-token",
+		RegistryDir:  tmpDir,
+		RepoName:    "test-repo",
+		RepoHash:    "e2e123",
+	}
+	p := New(cfg)
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Skip("port not available")
+	}
+	defer ln.Close()
+	instancePort := ln.Addr().(*net.TCPAddr).Port
+
+	reg := registration{
+		InstanceID: p.instanceID,
+		PID:       os.Getpid(),
+		Port:      instancePort,
+		RepoHash:  "e2e123",
+	}
+	data, _ := json.Marshal(reg)
+	os.WriteFile(filepath.Join(tmpDir, p.instanceID+".json"), data, 0o600)
+
+	go http.Serve(ln, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	csrfReq := httptest.NewRequest("GET", "/api/csrf-token", nil)
+	csrfRec := httptest.NewRecorder()
+	p.handleCSRFToken(csrfRec, csrfReq)
+	if csrfRec.Code != http.StatusOK {
+		t.Fatalf("CSRF token request failed: %d", csrfRec.Code)
+	}
+
+	var csrfResp map[string]string
+	json.NewDecoder(csrfRec.Body).Decode(&csrfResp)
+	authCSRFToken := csrfResp["csrf_token"]
+	if authCSRFToken == "" {
+		t.Fatal("no CSRF token in response")
+	}
+
+	cookies := csrfRec.Result().Cookies()
+	var csrfCookieValue string
+	for _, c := range cookies {
+		if c.Name == "mw_csrf" {
+			csrfCookieValue = c.Value
+			break
+		}
+	}
+	if csrfCookieValue == "" {
+		t.Fatal("no mw_csrf cookie set")
+	}
+
+	authReq := httptest.NewRequest("POST", "/api/auth", strings.NewReader(
+		`{"token":"e2e-test-token","csrf_token":"`+authCSRFToken+`"}`))
+	authReq.Header.Set("Content-Type", "application/json")
+	authReq.AddCookie(&http.Cookie{Name: "mw_csrf", Value: csrfCookieValue})
+	authRec := httptest.NewRecorder()
+	p.handleAuth(authRec, authReq)
+	if authRec.Code != http.StatusOK {
+		t.Fatalf("auth request failed: %d - %s", authRec.Code, authRec.Body.String())
+	}
+
+	authCookies := authRec.Result().Cookies()
+	var tokenCookieValue string
+	for _, c := range authCookies {
+		if c.Name == "mw_token" {
+			tokenCookieValue = c.Value
+			break
+		}
+	}
+	if tokenCookieValue == "" {
+		t.Fatal("no mw_token cookie set after auth")
+	}
+
+	listReq := httptest.NewRequest("GET", "/api/list", nil)
+	listReq.AddCookie(&http.Cookie{Name: "mw_token", Value: tokenCookieValue})
+	listRec := httptest.NewRecorder()
+	p.handleList(listRec, listReq)
+	if listRec.Code != http.StatusOK {
+		t.Fatalf("list request failed: %d", listRec.Code)
+	}
+
+	listCookies := listRec.Result().Cookies()
+	var slidingCookieFound bool
+	for _, c := range listCookies {
+		if c.Name == "mw_token" && c.MaxAge == 86400 {
+			slidingCookieFound = true
+			tokenCookieValue = c.Value
+			break
+		}
+	}
+	if !slidingCookieFound {
+		t.Fatal("sliding auth cookie not refreshed on /api/list response")
+	}
+
+	var listResp map[string]interface{}
+	json.NewDecoder(listRec.Body).Decode(&listResp)
+	if listResp["is_portal"] == nil {
+		t.Fatal("is_portal missing from list response")
+	}
+
+	proxyReq := httptest.NewRequest("GET", "/s/e2e123/", nil)
+	proxyReq.AddCookie(&http.Cookie{Name: "mw_token", Value: tokenCookieValue})
+	proxyRec := httptest.NewRecorder()
+	p.handleProxy(proxyRec, proxyReq)
+	if proxyRec.Code != http.StatusOK {
+		t.Fatalf("proxy request failed: %d", proxyRec.Code)
+	}
+
+	proxyCookies := proxyRec.Result().Cookies()
+	var proxySlidingCookieFound bool
+	for _, c := range proxyCookies {
+		if c.Name == "mw_token" && c.MaxAge == 86400 {
+			proxySlidingCookieFound = true
+			tokenCookieValue = c.Value
+			break
+		}
+	}
+	if !proxySlidingCookieFound {
+		t.Fatal("sliding auth cookie not refreshed on /s/<repo-hash>/ proxy response")
+	}
+
+	time.Sleep(time.Second)
+	logoutCSRFReq := httptest.NewRequest("GET", "/api/csrf-token", nil)
+	logoutCSRFRec := httptest.NewRecorder()
+	p.handleCSRFToken(logoutCSRFRec, logoutCSRFReq)
+	if logoutCSRFRec.Code != http.StatusOK {
+		t.Fatalf("logout CSRF token request failed: %d", logoutCSRFRec.Code)
+	}
+	var logoutCSRFCookie *http.Cookie
+	for _, c := range logoutCSRFRec.Result().Cookies() {
+		if c.Name == "mw_csrf" {
+			logoutCSRFCookie = c
+			break
+		}
+	}
+	if logoutCSRFCookie == nil {
+		t.Fatal("no mw_csrf cookie for logout")
+	}
+
+	logoutReq := httptest.NewRequest("POST", "/api/logout", strings.NewReader(
+		`{"csrf_token":"`+logoutCSRFCookie.Value+`"}`))
+	logoutReq.Header.Set("Content-Type", "application/json")
+	logoutReq.AddCookie(logoutCSRFCookie)
+	logoutReq.AddCookie(&http.Cookie{Name: "mw_token", Value: tokenCookieValue})
+	logoutRec := httptest.NewRecorder()
+	p.handleLogout(logoutRec, logoutReq)
+	if logoutRec.Code != http.StatusOK {
+		t.Fatalf("logout failed: %d", logoutRec.Code)
+	}
+
+	afterLogoutReq := httptest.NewRequest("GET", "/api/list", nil)
+	afterLogoutRec := httptest.NewRecorder()
+	p.handleList(afterLogoutRec, afterLogoutReq)
+	if afterLogoutRec.Code != http.StatusUnauthorized {
+		t.Fatalf("after logout without cookie: expected 401, got %d", afterLogoutRec.Code)
+	}
+}
+
+func TestLogPrefixVerification(t *testing.T) {
+	var logBuf bytes.Buffer
+	origOutput := log.Writer()
+	log.SetOutput(&logBuf)
+	defer log.SetOutput(origOutput)
+
+	tmpDir := t.TempDir()
+	cfg := Config{
+		PortalPort:  12351,
+		Host:        "localhost",
+		AuthToken:   "test-token",
+		RegistryDir:  tmpDir,
+		RepoName:    "test-repo",
+		RepoHash:    "log123",
+	}
+	p := New(cfg)
+	p.writeRegistration()
+	p.writePortalStatus()
+	p.cleanupStaleTailscaleServe()
+	p.cleanupStaleRegistrations()
+
+	output := logBuf.String()
+	if !strings.Contains(output, "[portal]") {
+		t.Errorf("expected log output to contain [portal] prefix, got: %s", output)
 	}
 }

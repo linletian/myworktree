@@ -21,6 +21,12 @@ func (c *GlobalConfig) Copy() *GlobalConfig {
 
 var configPath = defaultConfigPath
 
+func SetPathForTest(pathFunc func() (string, error)) func() {
+	old := configPath
+	configPath = pathFunc
+	return func() { configPath = old }
+}
+
 func defaultConfigPath() (string, error) {
 	base, err := os.UserConfigDir()
 	if err != nil {

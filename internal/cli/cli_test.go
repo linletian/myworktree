@@ -2,11 +2,14 @@ package cli
 
 import (
 	"bytes"
+	"encoding/json"
 	"io"
 	"log"
 	"os"
+	"path/filepath"
 	"testing"
 
+	"myworktree/internal/config"
 	"myworktree/internal/version"
 )
 
@@ -70,5 +73,90 @@ func captureStdout(t *testing.T) func() string {
 		}
 		_ = r.Close()
 		return buf.String()
+	}
+}
+
+func testConfigPath(tmpDir string) func() (string, error) {
+	return func() (string, error) {
+		return filepath.Join(tmpDir, "myworktree", "auth.json"), nil
+	}
+}
+
+func TestResolveGlobalAuthToken_NormalFileInheritsToken(t *testing.T) {
+	tmpDir := t.TempDir()
+	reset := config.SetPathForTest(testConfigPath(tmpDir))
+	defer reset()
+
+	token := "test-token-inherit"
+	path := filepath.Join(tmpDir, "myworktree", "auth.json")
+	os.MkdirAll(filepath.Dir(path), 0o755)
+	cfg := config.GlobalConfig{AuthToken: token}
+	data, _ := json.Marshal(cfg)
+	os.WriteFile(path, data, 0o600)
+
+	var buf bytes.Buffer
+	logger := log.New(&buf, "", 0)
+
+	result := resolveGlobalAuthToken("", logger)
+	if result != token {
+		t.Fatalf("expected token %q, got %q", token, result)
+	}
+	if buf.Len() > 0 {
+		t.Fatalf("expected no warning, got: %s", buf.String())
+	}
+}
+
+func TestResolveGlobalAuthToken_FileNotExistsKeepsEmpty(t *testing.T) {
+	tmpDir := t.TempDir()
+	reset := config.SetPathForTest(testConfigPath(tmpDir))
+	defer reset()
+
+	var buf bytes.Buffer
+	logger := log.New(&buf, "", 0)
+
+	result := resolveGlobalAuthToken("", logger)
+	if result != "" {
+		t.Fatalf("expected empty auth, got %q", result)
+	}
+	if buf.Len() > 0 {
+		t.Fatalf("expected no warning, got: %s", buf.String())
+	}
+}
+
+func TestResolveGlobalAuthToken_CorruptedFileWarnsAndKeepsEmpty(t *testing.T) {
+	tmpDir := t.TempDir()
+	reset := config.SetPathForTest(testConfigPath(tmpDir))
+	defer reset()
+
+	path := filepath.Join(tmpDir, "myworktree", "auth.json")
+	os.MkdirAll(filepath.Dir(path), 0o755)
+	os.WriteFile(path, []byte("{invalid-json"), 0o600)
+
+	var buf bytes.Buffer
+	logger := log.New(&buf, "", 0)
+
+	result := resolveGlobalAuthToken("", logger)
+	if result != "" {
+		t.Fatalf("expected empty auth for corrupted file, got %q", result)
+	}
+	if !bytes.Contains(buf.Bytes(), []byte("[config] auth.json is corrupted:")) {
+		t.Fatalf("expected Warn log containing '[config] auth.json is corrupted:', got: %s", buf.String())
+	}
+}
+
+func TestResolveGlobalAuthToken_AuthAlreadySet(t *testing.T) {
+	tmpDir := t.TempDir()
+	reset := config.SetPathForTest(testConfigPath(tmpDir))
+	defer reset()
+
+	var buf bytes.Buffer
+	logger := log.New(&buf, "", 0)
+
+	result := resolveGlobalAuthToken("explicit-token", logger)
+	if result != "explicit-token" {
+		t.Fatalf("expected auth to remain %q, got %q", "explicit-token", result)
+	}
+	if buf.Len() > 0 {
+		t.Fatalf("expected no warning/log when --auth is explicitly set, got: %s", buf.String())
 	}
 }

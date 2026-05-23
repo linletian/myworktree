@@ -87,14 +87,7 @@ func startCmd(logger *log.Logger, prog string, args []string) error {
 	fs.IntVar(&portalPort, "portal-port", 12345, "portal port (0=disabled)")
 	_ = fs.Parse(args)
 
-	if auth == "" {
-		gc, err := config.Load()
-		if err != nil {
-			logger.Printf("[config] auth.json is corrupted: %v", err)
-		} else if gc.AuthToken != "" {
-			auth = gc.AuthToken
-		}
-	}
+	auth = resolveGlobalAuthToken(auth, logger)
 
 	cfg := app.Config{
 		ListenAddr:   listen,
@@ -425,4 +418,18 @@ func readPassword() (string, error) {
 	}
 	fmt.Println()
 	return string(data), nil
+}
+
+func resolveGlobalAuthToken(auth string, logger *log.Logger) string {
+	if auth == "" {
+		gc, err := config.Load()
+		if err != nil {
+			if logger != nil {
+				logger.Printf("[config] auth.json is corrupted: %v", err)
+			}
+		} else if gc.AuthToken != "" {
+			return gc.AuthToken
+		}
+	}
+	return auth
 }
