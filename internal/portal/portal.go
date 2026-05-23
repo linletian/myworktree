@@ -30,6 +30,19 @@ import (
 //go:embed dashboard.html
 var DashboardHTML []byte
 
+// === Tailscale serve integration (currently disabled) ===
+//
+// tailscale serve on macOS + tailscale 1.98 CLI returns success but does not
+// actually configure the proxy. tailscale serve status always reports "No serve
+// config". The tailscaleServeLoop goroutine and the cleanupStaleTailscaleServe()
+// call in claimerLoop are NOT wired into Start/Stop/claimerLoop prod code paths.
+//
+// All tailscale serve functions below are kept for reference and tests, but are
+// not invoked in production. To re-enable when tailscale fixes the issue:
+//   1. Restore go p.tailscaleServeLoop() in Start() and bump wg counter +1
+//   2. Restore p.cleanupStaleTailscaleServe() after writePortalStatus() in claimerLoop
+//   3. Restore p.stopTailscaleServe() in Stop()
+
 var tsStatus = func(ctx context.Context) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, "tailscale", "serve", "status", "--json")
 	return cmd.Output()
@@ -64,6 +77,10 @@ type Portal struct {
 	// is permanently unavailable (binary not installed, JSON parse failures).
 	// Once true, tailscale serve management is disabled for the lifetime of this instance.
 	stoppedTailscaleServe bool
+	// tailscaleServeOK tracks whether tailscale serve is believed to be
+	// correctly configured. Once true, the 30s periodic check skips
+	// re-evaluation to avoid log spam when status returns empty.
+	tailscaleServeOK bool
 
 	csrfState *csrfState
 }
@@ -103,11 +120,11 @@ func generateInstanceID() string {
 
 func (p *Portal) Start() error {
 	p.writeRegistration()
-	p.wg.Add(4)
+	// tailscaleServeLoop not started here — see comment block at top of file
+	p.wg.Add(3)
 	go p.claimerLoop()
 	go p.csrfState.cleanupLoop(p.done, &p.wg)
 	go p.cleanupRegistrationLoop()
-	go p.tailscaleServeLoop()
 	return nil
 }
 
@@ -126,14 +143,7 @@ func (p *Portal) Stop() {
 			p.ln = nil
 		}
 		p.mu.Unlock()
-		p.mu.Lock()
-		skip := p.stoppedTailscaleServe
-		p.mu.Unlock()
-		if !skip {
-			if err := p.stopTailscaleServe(); err != nil {
-				log.Printf("[portal] warning: stopTailscaleServe failed: %v", err)
-			}
-		}
+		// stopTailscaleServe() not called here — disabled, see top of file
 		p.deleteRegistration(wasHolder)
 		p.wg.Wait()
 	})
@@ -190,7 +200,7 @@ func (p *Portal) claimerLoop() {
 		p.mu.Unlock()
 
 		p.writePortalStatus()
-		p.cleanupStaleTailscaleServe()
+		// cleanupStaleTailscaleServe() not called here — disabled, see top of file
 
 		err = srv.Serve(ln)
 		if err != nil && err != http.ErrServerClosed {
@@ -249,8 +259,9 @@ func (p *Portal) tailscaleServeLoop() {
 		case <-ticker.C:
 			p.mu.Lock()
 			isHolder := p.ln != nil
+			serveOK := p.tailscaleServeOK
 			p.mu.Unlock()
-			if !isHolder {
+			if !isHolder || serveOK {
 				continue
 			}
 			p.ensureTailscaleServe()
@@ -271,11 +282,17 @@ func (p *Portal) ensureTailscaleServe() {
 
 func (p *Portal) repairTailscaleServe(currentPort int) {
 	if currentPort == p.cfg.PortalPort {
+		p.mu.Lock()
+		p.tailscaleServeOK = true
+		p.mu.Unlock()
 		return
 	}
 
 	if currentPort > 0 {
 		log.Printf("[portal] detaching stale tailscale serve at :443 → 127.0.0.1:%d", currentPort)
+		p.mu.Lock()
+		p.tailscaleServeOK = false
+		p.mu.Unlock()
 		if err := p.stopTailscaleServe(); err != nil {
 			log.Printf("[portal] failed to stop stale tailscale serve: %v", err)
 			return
@@ -285,6 +302,9 @@ func (p *Portal) repairTailscaleServe(currentPort int) {
 	if err := p.startTailscaleServe(); err != nil {
 		log.Printf("[portal] failed to start tailscale serve: %v", err)
 	} else {
+		p.mu.Lock()
+		p.tailscaleServeOK = true
+		p.mu.Unlock()
 		log.Printf("[portal] tailscale serve started successfully on :443 → 127.0.0.1:%d", p.cfg.PortalPort)
 	}
 }
@@ -353,10 +373,14 @@ func (p *Portal) startTailscaleServe() error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	return tsServeAction(ctx, "serve", "--bg", fmt.Sprintf("http://127.0.0.1:%d", p.cfg.PortalPort))
+	return tsServeAction(ctx, "serve", "--bg", strconv.Itoa(p.cfg.PortalPort))
 }
 
 func (p *Portal) stopTailscaleServe() error {
+	p.mu.Lock()
+	p.tailscaleServeOK = false
+	p.mu.Unlock()
+
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 

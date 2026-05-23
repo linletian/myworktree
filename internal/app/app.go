@@ -356,14 +356,9 @@ func (s *Server) Start() (string, error) {
 			s.logger.Printf("[portal] warning: UserConfigDir failed: %v", err)
 			base = ""
 		}
-		host, _, err := net.SplitHostPort(s.cfg.ListenAddr)
-		if err != nil {
-			s.logger.Printf("[portal] warning: SplitHostPort failed: %v", err)
-			host = s.cfg.ListenAddr
-		}
 		cfg := portal.Config{
 			PortalPort:   s.cfg.PortalPort,
-			Host:         host,
+			Host:         "0.0.0.0",
 			AuthToken:    s.cfg.AuthToken,
 			RegistryDir:  filepath.Join(base, "myworktree", "portal"),
 			DataDir:      s.dataDir,
@@ -375,7 +370,7 @@ func (s *Server) Start() (string, error) {
 			s.logger.Printf("[portal] warning: portal.Start failed: %v", err)
 			s.portal = nil
 		} else {
-			s.logger.Printf("[portal] Portal dashboard at: http://%s:%d/", host, s.cfg.PortalPort)
+			s.logger.Printf("[portal] Portal dashboard at: http://0.0.0.0:%d/", s.cfg.PortalPort)
 			if tsName := portal.TailscaleDNSName(); tsName != "" {
 				s.logger.Printf("[portal] Tailscale URL: https://%s/", tsName)
 			}

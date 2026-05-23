@@ -938,8 +938,8 @@ func TestRepairTailscaleServe_PointsToWrongPort(t *testing.T) {
 	if actions[0] != "serve stop" {
 		t.Fatalf("expected first action 'serve stop', got %q", actions[0])
 	}
-	if actions[1] != "serve --bg http://127.0.0.1:12345" {
-		t.Fatalf("expected second action 'serve --bg http://127.0.0.1:12345', got %q", actions[1])
+	if actions[1] != "serve --bg 12345" {
+		t.Fatalf("expected second action 'serve --bg 12345', got %q", actions[1])
 	}
 }
 
@@ -960,8 +960,8 @@ func TestRepairTailscaleServe_NotConfigured(t *testing.T) {
 	if len(actions) != 1 {
 		t.Fatalf("expected 1 action (start only), got %d: %v", len(actions), actions)
 	}
-	if actions[0] != "serve --bg http://127.0.0.1:12345" {
-		t.Fatalf("expected 'serve --bg http://127.0.0.1:12345', got %q", actions[0])
+	if actions[0] != "serve --bg 12345" {
+		t.Fatalf("expected 'serve --bg 12345', got %q", actions[0])
 	}
 }
 
