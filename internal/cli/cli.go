@@ -2,6 +2,8 @@ package cli
 
 import (
 	"bufio"
+	"crypto/rand"
+	"encoding/hex"
 	"flag"
 	"fmt"
 	"log"
@@ -79,7 +81,7 @@ func startCmd(logger *log.Logger, prog string, args []string) error {
 	defaultOpen := filepath.Base(strings.TrimSpace(prog)) == "mw"
 
 	fs.StringVar(&listen, "listen", "127.0.0.1:0", "listen address")
-	fs.StringVar(&auth, "auth", "", "auth token (required for non-loopback listen)")
+	fs.StringVar(&auth, "auth", "", "auth token (auto-generated if not provided)")
 	fs.StringVar(&tlsCert, "tls-cert", "", "path to TLS certificate PEM")
 	fs.StringVar(&tlsKey, "tls-key", "", "path to TLS private key PEM")
 	fs.BoolVar(&open, "open", defaultOpen, "open browser")
@@ -111,6 +113,9 @@ func startCmd(logger *log.Logger, prog string, args []string) error {
 	// Print a friendly message with the server URL
 	fmt.Println("Server running at:")
 	fmt.Printf("  %s\n", url)
+	if auth != "" {
+		fmt.Printf("\nRemote access token: %s\n", auth)
+	}
 	fmt.Println("\nPress 'o' + Enter to open browser")
 
 	go func() {
@@ -420,16 +425,44 @@ func readPassword() (string, error) {
 	return string(data), nil
 }
 
+// resolveGlobalAuthToken returns the effective auth token.
+// If auth is provided via flag, it is used as-is.
+// Otherwise, it reads from global config; if empty, a new 32-char hex token
+// is generated via crypto/rand and persisted to global config.
 func resolveGlobalAuthToken(auth string, logger *log.Logger) string {
 	if auth == "" {
 		gc, err := config.Load()
 		if err != nil {
 			if logger != nil {
-				logger.Printf("[config] auth.json is corrupted: %v", err)
+				logger.Printf("[config] failed to load auth config: %v", err)
 			}
 		} else if gc.AuthToken != "" {
 			return gc.AuthToken
 		}
+
+		token, err := generateAuthToken()
+		if err != nil {
+			if logger != nil {
+				logger.Printf("[config] failed to generate auth token: %v", err)
+			}
+			return ""
+		}
+		gc.AuthToken = token
+		if err := config.Save(gc); err != nil {
+			if logger != nil {
+				logger.Printf("[config] failed to persist auth token (session only, will not survive restart): %v", err)
+			}
+			return token
+		}
+		return token
 	}
 	return auth
+}
+
+func generateAuthToken() (string, error) {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
 }

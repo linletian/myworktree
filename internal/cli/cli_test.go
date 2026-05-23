@@ -106,7 +106,7 @@ func TestResolveGlobalAuthToken_NormalFileInheritsToken(t *testing.T) {
 	}
 }
 
-func TestResolveGlobalAuthToken_FileNotExistsKeepsEmpty(t *testing.T) {
+func TestResolveGlobalAuthToken_FileNotExistsAutoGeneratesToken(t *testing.T) {
 	tmpDir := t.TempDir()
 	reset := config.SetPathForTest(testConfigPath(tmpDir))
 	defer reset()
@@ -115,15 +115,26 @@ func TestResolveGlobalAuthToken_FileNotExistsKeepsEmpty(t *testing.T) {
 	logger := log.New(&buf, "", 0)
 
 	result := resolveGlobalAuthToken("", logger)
-	if result != "" {
-		t.Fatalf("expected empty auth, got %q", result)
+	if result == "" {
+		t.Fatal("expected auto-generated auth token, got empty string")
+	}
+	if len(result) != 32 {
+		t.Fatalf("expected 32-char hex token, got %d chars: %q", len(result), result)
 	}
 	if buf.Len() > 0 {
 		t.Fatalf("expected no warning, got: %s", buf.String())
 	}
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("failed to load config after auto-generation: %v", err)
+	}
+	if cfg.AuthToken != result {
+		t.Fatalf("saved token %q does not match returned token %q", cfg.AuthToken, result)
+	}
 }
 
-func TestResolveGlobalAuthToken_CorruptedFileWarnsAndKeepsEmpty(t *testing.T) {
+func TestResolveGlobalAuthToken_CorruptedFileWarnsAndAutoGenerates(t *testing.T) {
 	tmpDir := t.TempDir()
 	reset := config.SetPathForTest(testConfigPath(tmpDir))
 	defer reset()
@@ -136,11 +147,19 @@ func TestResolveGlobalAuthToken_CorruptedFileWarnsAndKeepsEmpty(t *testing.T) {
 	logger := log.New(&buf, "", 0)
 
 	result := resolveGlobalAuthToken("", logger)
-	if result != "" {
-		t.Fatalf("expected empty auth for corrupted file, got %q", result)
+	if result == "" {
+		t.Fatal("expected auto-generated token for corrupted config, got empty")
 	}
-	if !bytes.Contains(buf.Bytes(), []byte("[config] auth.json is corrupted:")) {
-		t.Fatalf("expected Warn log containing '[config] auth.json is corrupted:', got: %s", buf.String())
+	if !bytes.Contains(buf.Bytes(), []byte("[config] failed to load auth config:")) {
+		t.Fatalf("expected Warn log containing '[config] failed to load auth config:', got: %s", buf.String())
+	}
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("failed to load fixed config: %v", err)
+	}
+	if cfg.AuthToken != result {
+		t.Fatalf("saved token %q does not match returned token %q", cfg.AuthToken, result)
 	}
 }
 
