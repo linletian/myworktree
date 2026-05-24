@@ -595,20 +595,56 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Login - myworktree</title>
     <style>
-        body { font-family: ui-monospace, "SF Mono", Menlo, Monaco, Consolas, monospace; background: #f6f8fa; color: #24292e; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
-        .login-box { background: #fff; border: 1px solid #d0d7da; border-radius: 6px; padding: 32px; width: 360px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
-        h1 { font-size: 18px; margin: 0 0 24px 0; }
-        label { display: block; margin-bottom: 8px; font-size: 14px; color: #586069; }
-        input[type="password"] { width: 100%; padding: 10px; font-size: 14px; border: 1px solid #ddd; border-radius: 4px; box-sizing: border-box; margin-bottom: 16px; }
-        button { width: 100%; padding: 10px; font-size: 14px; background: #2ea44f; color: #fff; border: none; border-radius: 4px; cursor: pointer; }
-        button:hover { background: #2c974b; }
-        .error { color: #cb2431; font-size: 13px; margin-bottom: 16px; display: none; }
+        :root {
+            --bg-color: #f6f8fa;
+            --text-primary: #24292e;
+            --text-secondary: #586069;
+            --card-bg: #ffffff;
+            --card-border: #e1e4e8;
+            --card-shadow: 0 4px 24px rgba(0,0,0,0.08);
+            --input-bg: #ffffff;
+            --input-border: #d0d7da;
+            --input-focus-border: #2ea44f;
+            --input-focus-shadow: rgba(46, 164, 79, 0.2);
+            --button-bg: #2ea44f;
+            --button-hover-bg: #2c974b;
+            --error-text: #cb2431;
+            --card-radius: 16px;
+            --input-radius: 8px;
+            --btn-radius: 8px;
+        }
+        @media (prefers-color-scheme: dark) {
+            :root {
+                --bg-color: #1a1a1a;
+                --text-primary: #e0e0e0;
+                --text-secondary: #888;
+                --card-bg: #222222;
+                --card-border: #333;
+                --card-shadow: 0 4px 24px rgba(0,0,0,0.3);
+                --input-bg: #2a2a2a;
+                --input-border: #444;
+                --input-focus-border: #3fb950;
+                --input-focus-shadow: rgba(63, 185, 80, 0.2);
+                --button-bg: #238636;
+                --button-hover-bg: #2ea043;
+                --error-text: #ff6666;
+            }
+        }
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji"; background: var(--bg-color); color: var(--text-primary); display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
+        .login-box { background: var(--card-bg); border: 1px solid var(--card-border); border-radius: var(--card-radius); padding: 40px; width: 100%; max-width: 400px; box-shadow: var(--card-shadow); box-sizing: border-box; margin: 20px; }
+        h2 { font-size: 20px; font-weight: 600; margin: 0 0 8px 0; text-align: center; }
+        .subtitle { font-size: 13px; color: var(--text-secondary); margin: 0 0 24px 0; text-align: center; }
+        label { display: block; margin-bottom: 6px; font-size: 13px; font-weight: 500; color: var(--text-primary); }
+        input[type="password"] { width: 100%; padding: 10px 12px; font-size: 14px; background: var(--input-bg); border: 1px solid var(--input-border); color: var(--text-primary); border-radius: var(--input-radius); box-sizing: border-box; margin-bottom: 16px; outline: none; transition: border-color 0.2s, box-shadow 0.2s; }
+        input[type="password"]:focus { border-color: var(--input-focus-border); box-shadow: 0 0 0 3px var(--input-focus-shadow); }
+        button { width: 100%; padding: 10px 16px; font-size: 14px; font-weight: 500; background: var(--button-bg); color: #ffffff; border: none; border-radius: var(--btn-radius); cursor: pointer; transition: background 0.15s ease; }
+        button:hover { background: var(--button-hover-bg); }
     </style>
 </head>
 <body>
     <div class="login-box">
-        <h1>myworktree Login</h1>
-        <div class="error" id="error"></div>
+        <h2>myworktree</h2>
+        <p class="subtitle">Enter your auth token to continue</p>
         <form id="login-form" method="post" action="/login">
             <input type="hidden" name="next" value="{{NEXT}}">
             <label for="token">Auth Token</label>

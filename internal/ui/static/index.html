@@ -891,6 +891,26 @@
             }
         }
 
+        /* Remote badge */
+        .remote-badge {
+            font-size: 10px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            padding: 2px 8px;
+            border-radius: 10px;
+            background: #b84a4a;
+            color: #ffffff;
+            margin-left: 6px;
+            vertical-align: middle;
+            position: relative;
+            top: -1px;
+            line-height: 1;
+        }
+        .remote-badge.hidden {
+            display: none;
+        }
+
         /* Utilities */
         .hidden {
             display: none !important;
@@ -986,7 +1006,7 @@
         <!-- Sidebar: Worktrees -->
         <div id="sidebar">
             <div class="sidebar-title">
-                <span>Worktrees</span>
+                <span>Worktrees<span id="remote-badge" class="remote-badge hidden">Remote</span></span>
                 <div class="sidebar-actions">
                     <button class="icon-btn" onclick="openModal('modal-create-wt')" title="New Worktree">+</button>
                     <button class="icon-btn" onclick="openModal('modal-import-wt')" title="Import Worktree">↓</button>
@@ -1387,6 +1407,12 @@
             if (sessionStorage.getItem(SERVER_UPGRADED_FLAG) === "1") {
                 sessionStorage.removeItem(SERVER_UPGRADED_FLAG);
                 alert("Backend upgraded. Frontend has been refreshed automatically.");
+            }
+            // Show remote badge when not on loopback
+            const hostname = window.location.hostname;
+            if (hostname !== "localhost" && hostname !== "127.0.0.1") {
+                const badge = document.getElementById("remote-badge");
+                if (badge) badge.classList.remove("hidden");
             }
             refresh();
             // Polling for status updates (2s)
