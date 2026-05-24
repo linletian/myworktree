@@ -2,8 +2,8 @@ package portal
 
 import (
 	"context"
-	_ "embed"
 	cryptorand "crypto/rand"
+	_ "embed"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -64,14 +64,14 @@ type Config struct {
 }
 
 type Portal struct {
-	cfg       Config
+	cfg        Config
 	instanceID string
-	mu        sync.Mutex
-	srv       *http.Server
-	ln        net.Listener
-	done      chan struct{}
-	wg        sync.WaitGroup
-	closeOnce sync.Once
+	mu         sync.Mutex
+	srv        *http.Server
+	ln         net.Listener
+	done       chan struct{}
+	wg         sync.WaitGroup
+	closeOnce  sync.Once
 	// stoppedTailscaleServe is a one-way latch set when tailscale management
 	// is permanently unavailable (binary not installed, JSON parse failures).
 	// Once true, tailscale serve management is disabled for the lifetime of this instance.
@@ -103,7 +103,7 @@ type portalStatus struct {
 
 func New(cfg Config) *Portal {
 	return &Portal{
-		cfg:       cfg,
+		cfg:        cfg,
 		instanceID: generateInstanceID(),
 		done:       make(chan struct{}),
 		csrfState:  newCSRFState(),
@@ -677,9 +677,9 @@ func (p *Portal) handleList(w http.ResponseWriter, r *http.Request) {
 	})
 
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"is_portal":  p.isPortalHolder(),
+		"is_portal":   p.isPortalHolder(),
 		"portal_port": p.cfg.PortalPort,
-		"processes":  processes,
+		"processes":   processes,
 	})
 }
 

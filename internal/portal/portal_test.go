@@ -898,7 +898,7 @@ func TestCleanupDuringGoroutines(t *testing.T) {
 	for i := 0; i < 10; i++ {
 		cfg := Config{
 			PortalPort:  12345,
-			Host:       "localhost",
+			Host:        "localhost",
 			AuthToken:   "test-token",
 			RegistryDir: tmpDir,
 			RepoName:    "test-repo",
@@ -920,7 +920,7 @@ func TestCleanupDuringGoroutines(t *testing.T) {
 	var wg sync.WaitGroup
 	for i := 0; i < 5; i++ {
 		wg.Add(1)
-			go func() {
+		go func() {
 			defer wg.Done()
 			for j := 0; j < 20; j++ {
 				os.ReadDir(tmpDir)
@@ -1096,7 +1096,7 @@ func TestEndToEndAuthFlow(t *testing.T) {
 		PortalPort:  12350,
 		Host:        "localhost",
 		AuthToken:   "e2e-test-token",
-		RegistryDir:  tmpDir,
+		RegistryDir: tmpDir,
 		RepoName:    "test-repo",
 		RepoHash:    "e2e123",
 	}
@@ -1111,10 +1111,10 @@ func TestEndToEndAuthFlow(t *testing.T) {
 
 	reg := registration{
 		InstanceID: p.instanceID,
-		PID:       os.Getpid(),
-		Port:      instancePort,
-		RepoHash:  "e2e123",
-		Path:      "/path/to/e2e123",
+		PID:        os.Getpid(),
+		Port:       instancePort,
+		RepoHash:   "e2e123",
+		Path:       "/path/to/e2e123",
 	}
 	data, _ := json.Marshal(reg)
 	os.WriteFile(filepath.Join(tmpDir, p.instanceID+".json"), data, 0o600)
@@ -1246,7 +1246,7 @@ func TestLogPrefixVerification(t *testing.T) {
 		PortalPort:  12351,
 		Host:        "localhost",
 		AuthToken:   "test-token",
-		RegistryDir:  tmpDir,
+		RegistryDir: tmpDir,
 		RepoName:    "test-repo",
 		RepoHash:    "log123",
 	}

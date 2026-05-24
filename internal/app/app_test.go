@@ -808,10 +808,10 @@ func TestWithAuth_LoopbackBypass(t *testing.T) {
 	}))
 
 	tests := []struct {
-		name      string
+		name       string
 		remoteAddr string
-		origin    string
-		token     string
+		origin     string
+		token      string
 		wantStatus int
 	}{
 		{
@@ -897,9 +897,9 @@ func TestWithAuth_CookieToken(t *testing.T) {
 	}))
 
 	tests := []struct {
-		name         string
-		cookie       string
-		wantStatus   int
+		name       string
+		cookie     string
+		wantStatus int
 	}{
 		{
 			name:       "valid cookie token",
@@ -969,9 +969,9 @@ func TestWithAuth_RateLimiting(t *testing.T) {
 
 func TestExtractAuthToken(t *testing.T) {
 	tests := []struct {
-		name    string
-		setup   func(*http.Request)
-		want    string
+		name  string
+		setup func(*http.Request)
+		want  string
 	}{
 		{
 			name: "Authorization Bearer",

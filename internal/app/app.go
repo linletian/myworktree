@@ -49,8 +49,8 @@ type Config struct {
 }
 
 type serverConfig struct {
-	ListenPort  int    `json:"listen_port"`
-	InstanceID  string `json:"instance_id,omitempty"`
+	ListenPort int    `json:"listen_port"`
+	InstanceID string `json:"instance_id,omitempty"`
 }
 
 type Server struct {
@@ -63,8 +63,8 @@ type Server struct {
 	serverRev string
 	isSecure  bool
 
-	portal     *portal.Portal
-	httpSrv    *http.Server
+	portal      *portal.Portal
+	httpSrv     *http.Server
 	store       store.FileStore
 	worktreeMgr worktree.Manager
 	instanceMgr *instance.Manager
@@ -1777,9 +1777,9 @@ func clientIP(remoteAddr string) string {
 }
 
 // isLoopbackHost checks if host is a loopback address.
-	// IPv6 is explicitly disabled and NOT supported.
-	// Only IPv4 loopback (127.x.x.x) and "localhost" are considered loopback.
-	// IPv6 addresses (including ::1, ::ffff:127.0.0.1) are rejected as non-loopback.
+// IPv6 is explicitly disabled and NOT supported.
+// Only IPv4 loopback (127.x.x.x) and "localhost" are considered loopback.
+// IPv6 addresses (including ::1, ::ffff:127.0.0.1) are rejected as non-loopback.
 func isLoopbackHost(host string) bool {
 	host = strings.TrimSpace(host)
 	if host == "" {
