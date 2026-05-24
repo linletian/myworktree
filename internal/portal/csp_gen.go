@@ -4,5 +4,5 @@ package portal
 
 var CSPHashes = [][2]string{
 	{"script", "'sha256-hLONftYIVHh7fBj54sE30p8qve0O00r4B9m49dG/R78='"},
-	{"style", "'sha256-znjmTepgvpYiRmkyQzL7nWSUF5gedE/aPakoPyXJSBs='"},
+	{"style", "'sha256-NGh8KkP6xLorPzXB/lrGeJraiEskRbDHyMlkkJ41GHg='"},
 }

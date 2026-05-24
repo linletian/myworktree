@@ -153,7 +153,9 @@ func New(cfg Config, logger *log.Logger) (*Server, error) {
 		isSecure:  isSecure,
 	}
 	s.registerAPIs(mux)
-	if err := ui.Register(mux, filepath.Base(filepath.Clean(s.root))); err != nil {
+	if err := ui.Register(mux, filepath.Base(filepath.Clean(s.root)), func(r *http.Request) bool {
+		return !isLoopbackRequest(r)
+	}); err != nil {
 		return nil, fmt.Errorf("ui.Register: %w", err)
 	}
 

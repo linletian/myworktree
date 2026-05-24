@@ -5,6 +5,46 @@
 	<meta name="viewport" content="width=device-width, initial-scale=1.0">
 	<title>Portal Dashboard</title>
 	<style>
+		:root {
+			--bg-color: #ffffff;
+			--text-primary: #24292e;
+			--text-secondary: #586069;
+			--panel-bg: #f6f8fa;
+			--border-color: #e1e4e8;
+			--input-bg: #ffffff;
+			--input-border: #ddd;
+			--button-bg: #0066cc;
+			--button-hover-bg: #0055aa;
+			--error-text: #cb2431;
+			--table-header-bg: #f6f8fa;
+			--table-header-text: #586069;
+			--hover-bg: #f6f8fa;
+			--link-color: #0366d6;
+			--alive-color: #28a745;
+			--dead-color: #ef4444;
+		}
+
+		@media (prefers-color-scheme: dark) {
+			:root {
+				--bg-color: #1a1a1a;
+				--text-primary: #e0e0e0;
+				--text-secondary: #888;
+				--panel-bg: #252525;
+				--border-color: #333;
+				--input-bg: #333;
+				--input-border: #444;
+				--button-bg: #0066cc;
+				--button-hover-bg: #0055aa;
+				--error-text: #ff6666;
+				--table-header-bg: #252525;
+				--table-header-text: #aaa;
+				--hover-bg: #252525;
+				--link-color: #66ccff;
+				--alive-color: #22c55e;
+				--dead-color: #ef4444;
+			}
+		}
+
 		* {
 			margin: 0;
 			padding: 0;
@@ -12,20 +52,20 @@
 		}
 		body {
 			font-family: ui-monospace, "SF Mono", Menlo, Monaco, Consolas, monospace;
-			background-color: #1a1a1a;
-			color: #e0e0e0;
+			background-color: var(--bg-color);
+			color: var(--text-primary);
 			padding: 20px;
 		}
 		h1 {
 			font-size: 18px;
 			margin-bottom: 20px;
-			color: #ffffff;
+			color: var(--text-primary);
 		}
 		#token-form {
 			margin-bottom: 20px;
 			padding: 16px;
-			background: #252525;
-			border: 1px solid #333;
+			background: var(--panel-bg);
+			border: 1px solid var(--border-color);
 			border-radius: 4px;
 			display: none;
 		}
@@ -42,9 +82,9 @@
 			padding: 8px;
 			font-family: inherit;
 			font-size: 14px;
-			background: #333;
-			border: 1px solid #444;
-			color: #e0e0e0;
+			background: var(--input-bg);
+			border: 1px solid var(--input-border);
+			color: var(--text-primary);
 			border-radius: 4px;
 			margin-right: 8px;
 		}
@@ -52,17 +92,17 @@
 			padding: 8px 16px;
 			font-family: inherit;
 			font-size: 14px;
-			background: #0066cc;
-			color: #ffffff;
+			background: var(--button-bg);
+			color: var(--text-primary);
 			border: none;
 			border-radius: 4px;
 			cursor: pointer;
 		}
 		#token-form button:hover {
-			background: #0055aa;
+			background: var(--button-hover-bg);
 		}
 		#error-msg {
-			color: #ff6666;
+			color: var(--error-text);
 			font-size: 13px;
 			margin-top: 8px;
 			display: none;
@@ -74,11 +114,11 @@
 		th, td {
 			text-align: left;
 			padding: 12px;
-			border-bottom: 1px solid #333;
+			border-bottom: 1px solid var(--border-color);
 		}
 		th {
-			background: #252525;
-			color: #aaa;
+			background: var(--panel-bg);
+			color: var(--table-header-text);
 			font-size: 13px;
 			font-weight: normal;
 		}
@@ -86,7 +126,7 @@
 			font-size: 14px;
 		}
 		tr:hover {
-			background: #252525;
+			background: var(--panel-bg);
 		}
 		.status-dot {
 			display: inline-block;
@@ -96,13 +136,13 @@
 			margin-right: 8px;
 		}
 		.status-dot.alive {
-			background: #22c55e;
+			background: var(--alive-color);
 		}
 		.status-dot.dead {
-			background: #ef4444;
+			background: var(--dead-color);
 		}
 		.repo-link {
-			color: #66ccff;
+			color: var(--link-color);
 			text-decoration: none;
 		}
 		.repo-link:hover {
@@ -110,7 +150,7 @@
 		}
 		#loading {
 			font-size: 13px;
-			color: #888;
+			color: var(--text-secondary);
 		}
 	</style>
 </head>

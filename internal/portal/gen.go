@@ -1,5 +1,20 @@
 //go:build ignore
 
+// CSP hash generator for portal/dashboard.html
+//
+// This script extracts all inline <script> and <style> blocks from
+// dashboard.html, computes their SHA-256 hashes, and writes them to
+// csp_gen.go. The hashes are used by handleDashboard to build the
+// Content-Security-Policy header.
+//
+// Triggered by the go:generate directive in portal.go:
+//     cd internal/portal && go generate
+// or from repo root:
+//     go generate ./internal/portal
+//
+// IMPORTANT: Always run this after changing dashboard.html, otherwise
+// TestCSPHashes_MatchesDashboardHTML will fail.
+
 package main
 
 import (
