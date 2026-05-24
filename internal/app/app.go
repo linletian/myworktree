@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
 	"io"
 	"log"
 	"net"
@@ -400,14 +401,38 @@ func (s *Server) Start() (string, error) {
 	if s.cfg.TLSCert != "" && s.cfg.TLSKey != "" {
 		scheme = "https"
 	}
-	addr := ln.Addr().String()
+	// IPv6 is explicitly disabled. Always use IPv4 127.0.0.1 regardless of what
+	// the OS reports for the listening socket (macOS may report [::]:port).
+	addr := "127.0.0.1"
+	if tcpAddr, ok := ln.Addr().(*net.TCPAddr); ok {
+		addr = net.JoinHostPort("127.0.0.1", strconv.Itoa(tcpAddr.Port))
+	}
 	url := fmt.Sprintf("%s://%s/", scheme, addr)
 	if s.cfg.Open {
-		if err := OpenURL(url); err != nil {
-			s.logger.Printf("open browser failed: %v", err)
+		if err := waitForServer(12345, 5*time.Second); err != nil {
+			s.logger.Printf("server not ready: %v", err)
+			s.logger.Printf("please manually open http://127.0.0.1:12345/")
+		} else {
+			if openErr := OpenURL("http://127.0.0.1:12345/"); openErr != nil {
+				s.logger.Printf("open browser failed: %v", openErr)
+			}
 		}
 	}
 	return url, nil
+}
+
+func waitForServer(port int, timeout time.Duration) error {
+	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		conn, err := net.DialTimeout("tcp", addr, 100*time.Millisecond)
+		if err == nil {
+			conn.Close()
+			return nil
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	return fmt.Errorf("server not ready after %v (port %d)", timeout, port)
 }
 
 func (s *Server) Shutdown() {
@@ -523,6 +548,7 @@ func (s *Server) registerAPIs(mux *http.ServeMux) {
 	mux.HandleFunc("/api/llm/config", s.handleLLMConfig)
 	mux.HandleFunc("/api/llm/test", s.handleLLMTest)
 	mux.HandleFunc("/api/llm/generate", s.handleLLMGenerate)
+	mux.HandleFunc("/login", s.handleLogin)
 }
 
 func (s *Server) handleBranches(w http.ResponseWriter, r *http.Request) {
@@ -552,6 +578,84 @@ func (s *Server) handleMain(w http.ResponseWriter, r *http.Request) {
 		"name":   name,
 		"branch": branch,
 	})
+}
+
+func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		token := extractAuthToken(r)
+		if token == s.cfg.AuthToken {
+			http.Redirect(w, r, "/", http.StatusFound)
+			return
+		}
+		loginHTML := `<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Login - myworktree</title>
+    <style>
+        body { font-family: ui-monospace, "SF Mono", Menlo, Monaco, Consolas, monospace; background: #f6f8fa; color: #24292e; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
+        .login-box { background: #fff; border: 1px solid #d0d7da; border-radius: 6px; padding: 32px; width: 360px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+        h1 { font-size: 18px; margin: 0 0 24px 0; }
+        label { display: block; margin-bottom: 8px; font-size: 14px; color: #586069; }
+        input[type="password"] { width: 100%; padding: 10px; font-size: 14px; border: 1px solid #ddd; border-radius: 4px; box-sizing: border-box; margin-bottom: 16px; }
+        button { width: 100%; padding: 10px; font-size: 14px; background: #2ea44f; color: #fff; border: none; border-radius: 4px; cursor: pointer; }
+        button:hover { background: #2c974b; }
+        .error { color: #cb2431; font-size: 13px; margin-bottom: 16px; display: none; }
+    </style>
+</head>
+<body>
+    <div class="login-box">
+        <h1>myworktree Login</h1>
+        <div class="error" id="error"></div>
+        <form id="login-form" method="post" action="/login">
+            <input type="hidden" name="next" value="{{NEXT}}">
+            <label for="token">Auth Token</label>
+            <input type="password" id="token" name="token" placeholder="Enter auth token" required>
+            <button type="submit">Login</button>
+        </form>
+    </div>
+</body>
+</html>`
+		nextURL := r.URL.Query().Get("next")
+		if nextURL == "" || !isValidRedirectPath(nextURL) {
+			nextURL = "/"
+		}
+		loginHTML = strings.ReplaceAll(loginHTML, "{{NEXT}}", html.EscapeString(nextURL))
+		w.Write([]byte(loginHTML))
+		return
+	}
+	if r.Method == http.MethodPost {
+		if err := r.ParseForm(); err != nil {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		token := strings.TrimSpace(r.FormValue("token"))
+		if token != s.cfg.AuthToken {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		nextURL := r.FormValue("next")
+		if nextURL == "" || !isValidRedirectPath(nextURL) {
+			nextURL = "/"
+		}
+		cookie := &http.Cookie{
+			Name:     "mw_token",
+			Value:    token,
+			Path:     "/",
+			MaxAge:   86400,
+			SameSite: http.SameSiteLaxMode,
+			HttpOnly: true,
+		}
+		if r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https" {
+			cookie.Secure = true
+		}
+		http.SetCookie(w, cookie)
+		http.Redirect(w, r, nextURL, http.StatusFound)
+		return
+	}
+	http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 }
 
 func (s *Server) handleTags(w http.ResponseWriter, r *http.Request) {
@@ -1490,18 +1594,51 @@ func (s *Server) withAuth(next http.Handler) http.Handler {
 			http.Error(w, "forbidden origin", http.StatusForbidden)
 			return
 		}
+		if r.URL.Path == "/login" || r.URL.Path == "/api/csrf-token" {
+			next.ServeHTTP(w, r)
+			return
+		}
 		token := extractAuthToken(r)
 		if token != s.cfg.AuthToken {
 			if !s.allowAuthAttempt(clientIP(r.RemoteAddr)) {
 				http.Error(w, "too many unauthorized attempts", http.StatusTooManyRequests)
 				return
 			}
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			if isAPIClient(r) {
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+			redirectURL := "/login"
+			if r.URL.Path != "/" {
+				redirectURL = "/login?next=" + url.QueryEscape(r.URL.Path)
+			}
+			http.Redirect(w, r, redirectURL, http.StatusFound)
 			return
 		}
 		s.resetAuthAttempts(clientIP(r.RemoteAddr))
 		next.ServeHTTP(w, r)
 	})
+}
+
+func isAPIClient(r *http.Request) bool {
+	accept := r.Header.Get("Accept")
+	return strings.Contains(accept, "application/json") || strings.Contains(accept, "text/event-stream")
+}
+
+func isValidRedirectPath(path string) bool {
+	if path == "" {
+		return false
+	}
+	if path[0] != '/' {
+		return false
+	}
+	if len(path) > 1 && path[1] == '/' {
+		return false
+	}
+	if strings.Contains(path, "://") {
+		return false
+	}
+	return true
 }
 
 func extractAuthToken(r *http.Request) string {
@@ -1603,6 +1740,10 @@ func clientIP(remoteAddr string) string {
 	return host
 }
 
+// isLoopbackHost checks if host is a loopback address.
+	// IPv6 is explicitly disabled and NOT supported.
+	// Only IPv4 loopback (127.x.x.x) and "localhost" are considered loopback.
+	// IPv6 addresses (including ::1, ::ffff:127.0.0.1) are rejected as non-loopback.
 func isLoopbackHost(host string) bool {
 	host = strings.TrimSpace(host)
 	if host == "" {
@@ -1611,8 +1752,15 @@ func isLoopbackHost(host string) bool {
 	if strings.EqualFold(host, "localhost") {
 		return true
 	}
+	// Reject all IPv6 addresses (not supported). IPv6 addresses contain ":".
+	if strings.Contains(host, ":") {
+		return false
+	}
 	ip := net.ParseIP(host)
-	return ip != nil && ip.IsLoopback()
+	if ip == nil {
+		return false
+	}
+	return ip.IsLoopback()
 }
 
 func isLoopbackRequest(r *http.Request) bool {

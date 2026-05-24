@@ -124,7 +124,7 @@
 `withAuth` 中间件改造后的执行流程（按顺序）：
 
 1. **AuthToken 为空**：若配置中未设置 token，直接放行所有请求（保留现有行为）。
-2. **Loopback 检查**：调用 `isLoopbackRequest(r)` 判断请求来源是否为回环地址（`127.0.0.1`、`localhost`、`::1`）。若为 loopback，直接放行——跳过 Origin 同源校验和 token 校验。这是实现反向代理认证绕过的基础。
+2. **Loopback 检查**：调用 `isLoopbackRequest(r)` 判断请求来源是否为回环地址（`127.0.0.1`、`localhost`）。IPv6 地址（包括 `::1`）不支持，视为非 loopback。若为 loopback，直接放行——跳过 Origin 同源校验和 token 校验。这是实现反向代理认证绕过的基础。
 3. **Origin 同源校验**（仅非 loopback）：调用 `sameOriginHost(r)` 比较请求头 `Origin` 与 `Host`。若 Origin 为空（浏览器未发送）则放行；若 Origin 的 Host 部分与请求 Host 不匹配则返回 403。注意：此校验依赖浏览器诚实地发送 Origin 头，非浏览器客户端（curl 等）可伪造，因此仅作为纵深防御层而非独立安全边界。
 4. **Token 提取**：按以下优先级从请求中提取 token：(a) `Authorization: Bearer <token>` 请求头；(b) URL 查询参数 `?token=<token>`；(c) `mw_token` Cookie（新增的 Cookie 来源）。取第一个非空值。
 5. **Token 比对 + 速率限制**：将提取的 token 与配置中的 `AuthToken` 做字符串明文比较。若不匹配，记录该 IP 的失败次数（每 IP 每分钟最多 20 次），超出则返回 429，未超出则返回 401。若匹配成功，清除该 IP 的失败计数并放行请求。
@@ -620,7 +620,7 @@ mw start --listen 0.0.0.0:0 --portal-port 0
 | auth.json 文件泄露导致 token 暴露 | `auth_token` 仅明文存储（不引入 bcrypt 哈希）。风险接受理由：`auth_token` 明文已同时用于 `withAuth` 中间件字符串比较、反向代理转发和 Cookie 设置，引入哈希无法消除明文存储需求，安全收益微乎其微。缓解措施：(1) 严格 `0o600` 文件权限；(2) 推荐使用 `openssl rand -hex 32` 生成高熵 token（256-bit 随机） |
 | 实例被外部直接访问 | 实例绑定 `0.0.0.0`，但 token 校验对所有非 loopback 请求强制生效 |
 | 代理绕过认证 | 反向代理仅监听 Portal 端口内的路径（`/s/<repo-hash>/`），转发前先校验 Cookie |
-| Loopback 始终放行 | 对 `127.0.0.1`/`localhost`/`::1` 不校验 Token（仅代理内部转发使用） |
+| Loopback 始终放行 | 对 `127.0.0.1`/`localhost` 不校验 Token（仅代理内部转发使用）。IPv6 不支持，`::1` 视为普通请求 |
 | portal.json / server.json 进程崩溃时文件损坏 | 所有持久化文件均采用原子写入（写临时文件 → rename） |
 | 日志输出泄露敏感信息 | Token 仅以掩码形式（前 4 位 + 后 4 位）出现在日志和终端输出中 |
 

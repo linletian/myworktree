@@ -1288,7 +1288,7 @@
         async function fetchAPI(path, opts = {}) {
             const res = await fetch(path, {
                 ...opts,
-                headers: { "content-type": "application/json", ...headers, ...(opts.headers || {}) },
+                headers: { "content-type": "application/json", "accept": "application/json", ...headers, ...(opts.headers || {}) },
             });
             rememberServerRevision(res);
             return res;

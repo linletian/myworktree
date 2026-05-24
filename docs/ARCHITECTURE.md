@@ -352,7 +352,7 @@ myworktree implements a **dual-layer authentication architecture**:
 - `GET /` dashboard page served with strict CSP headers (hash-based inline script/style whitelist)
 
 **Layer 2 — Instance (loopback-bypassed via proxy)**:
-- Default listen: loopback only
+- Default listen: loopback only, **IPv6 explicitly disabled**
 - Non-loopback requires `--auth`
 - Loopback requests skip all token/origin validation (enables Portal reverse proxy)
 - Origin/Host check + basic rate limit on unauthorized non-loopback attempts

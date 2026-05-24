@@ -128,7 +128,7 @@ func startCmd(logger *log.Logger, prog string, args []string) error {
 			}
 			trimmed := strings.TrimSpace(line)
 			if trimmed == "o" || trimmed == "O" {
-				_ = app.OpenURL(url)
+				_ = app.OpenURL("http://127.0.0.1:12345/")
 				fmt.Println("Opening browser...")
 			}
 		}

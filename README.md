@@ -179,7 +179,7 @@ mw config set-auth     # set token directly
 mw config get-auth     # view token (masked)
 mw config clear-auth   # clear token
 
-# start with remote access & Portal
+# start with remote access & Portal (IPv6 is explicitly disabled)
 mw start --listen 0.0.0.0:0                     # LAN access, auto-inherits global token
 mw start --listen 0.0.0.0:0 --portal-port 12346 # custom Portal port
 mw start --listen 0.0.0.0:0 --portal-port 0     # disable Portal

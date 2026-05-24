@@ -44,7 +44,8 @@ func TestIsLoopbackHost(t *testing.T) {
 	}{
 		{name: "localhost", host: "localhost", want: true},
 		{name: "ipv4 loopback", host: "127.0.0.1", want: true},
-		{name: "ipv6 loopback", host: "::1", want: true},
+		{name: "ipv6 loopback", host: "::1", want: false},
+		{name: "ipv4 mapped ipv6", host: "::ffff:127.0.0.1", want: false},
 		{name: "remote ipv4", host: "203.0.113.10", want: false},
 		{name: "blank", host: "", want: false},
 	}
@@ -827,11 +828,11 @@ func TestWithAuth_LoopbackBypass(t *testing.T) {
 			wantStatus: http.StatusOK,
 		},
 		{
-			name:       "loopback ipv6 passes",
+			name:       "loopback ipv6 is not supported",
 			remoteAddr: "[::1]:12345",
 			origin:     "",
 			token:      "wrong-token",
-			wantStatus: http.StatusOK,
+			wantStatus: http.StatusFound,
 		},
 		{
 			name:       "localhost passes",
@@ -913,12 +914,12 @@ func TestWithAuth_CookieToken(t *testing.T) {
 		{
 			name:       "wrong cookie token",
 			cookie:     "mw_token=wrong-token",
-			wantStatus: http.StatusUnauthorized,
+			wantStatus: http.StatusFound,
 		},
 		{
 			name:       "empty cookie token",
 			cookie:     "mw_token=",
-			wantStatus: http.StatusUnauthorized,
+			wantStatus: http.StatusFound,
 		},
 	}
 
@@ -954,8 +955,8 @@ func TestWithAuth_RateLimiting(t *testing.T) {
 	for i := 0; i < 20; i++ {
 		w := httptest.NewRecorder()
 		handler.ServeHTTP(w, req)
-		if w.Code != http.StatusUnauthorized {
-			t.Fatalf("request %d: expected 401, got %d", i+1, w.Code)
+		if w.Code != http.StatusFound {
+			t.Fatalf("request %d: expected 302, got %d", i+1, w.Code)
 		}
 	}
 
@@ -1017,6 +1018,31 @@ func TestExtractAuthToken(t *testing.T) {
 			tt.setup(req)
 			if got := extractAuthToken(req); got != tt.want {
 				t.Fatalf("extractAuthToken() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestIsValidRedirectPath(t *testing.T) {
+	tests := []struct {
+		path  string
+		valid bool
+	}{
+		{"/", true},
+		{"/dashboard", true},
+		{"/api/list", true},
+		{"", false},
+		{"/login", true},
+		{"login", false},
+		{"http://evil.com", false},
+		{"https://evil.com", false},
+		{"//evil.com", false},
+		{"///evil.com", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.path, func(t *testing.T) {
+			if got := isValidRedirectPath(tt.path); got != tt.valid {
+				t.Fatalf("isValidRedirectPath(%q) = %v, want %v", tt.path, got, tt.valid)
 			}
 		})
 	}

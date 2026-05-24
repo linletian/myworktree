@@ -184,7 +184,7 @@
 		var pendingCsrfToken = null;
 
 		function getCSRF() {
-			return fetch('/api/csrf-token')
+			return fetch('/api/csrf-token', { headers: { 'Accept': 'application/json' } })
 				.then(function(r) { return r.json(); })
 				.then(function(data) {
 					pendingCsrfToken = data.csrf_token;
@@ -199,7 +199,7 @@
 				var body = JSON.stringify({token: token, csrf_token: pendingCsrfToken});
 				return fetch('/api/auth', {
 					method: 'POST',
-					headers: {'Content-Type': 'application/json'},
+					headers: {'Content-Type': 'application/json', 'Accept': 'application/json'},
 					body: body
 				});
 			}).then(function(r) {
