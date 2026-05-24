@@ -408,12 +408,12 @@ func (s *Server) Start() (string, error) {
 		addr = net.JoinHostPort("127.0.0.1", strconv.Itoa(tcpAddr.Port))
 	}
 	url := fmt.Sprintf("%s://%s/", scheme, addr)
-	if s.cfg.Open {
-		if err := waitForServer(12345, 5*time.Second); err != nil {
+	if s.cfg.Open && s.cfg.PortalPort > 0 {
+		if err := waitForServer(s.cfg.PortalPort, 5*time.Second); err != nil {
 			s.logger.Printf("server not ready: %v", err)
-			s.logger.Printf("please manually open http://127.0.0.1:12345/")
+			s.logger.Printf("please manually open http://127.0.0.1:%d/", s.cfg.PortalPort)
 		} else {
-			if openErr := OpenURL("http://127.0.0.1:12345/"); openErr != nil {
+			if openErr := OpenURL(fmt.Sprintf("http://127.0.0.1:%d/", s.cfg.PortalPort)); openErr != nil {
 				s.logger.Printf("open browser failed: %v", openErr)
 			}
 		}

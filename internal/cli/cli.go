@@ -80,8 +80,10 @@ func startCmd(logger *log.Logger, prog string, args []string) error {
 
 	defaultOpen := filepath.Base(strings.TrimSpace(prog)) == "mw"
 
+	// NOTE: Default listen changed from 127.0.0.1:0 to 0.0.0.0:0 (breaking change).
+	// This binds to all network interfaces to support remote access.
 	fs.StringVar(&listen, "listen", "0.0.0.0:0", "listen address")
-	fs.StringVar(&auth, "auth", "", "auth token (auto-generated if not provided)")
+	fs.StringVar(&auth, "auth", "", "auth token for remote access (auto-generated once and persisted if not provided)")
 	fs.StringVar(&tlsCert, "tls-cert", "", "path to TLS certificate PEM")
 	fs.StringVar(&tlsKey, "tls-key", "", "path to TLS private key PEM")
 	fs.BoolVar(&open, "open", defaultOpen, "open browser")
@@ -128,8 +130,12 @@ func startCmd(logger *log.Logger, prog string, args []string) error {
 			}
 			trimmed := strings.TrimSpace(line)
 			if trimmed == "o" || trimmed == "O" {
-				_ = app.OpenURL("http://127.0.0.1:12345/")
-				fmt.Println("Opening browser...")
+				if portalPort > 0 {
+					_ = app.OpenURL(fmt.Sprintf("http://127.0.0.1:%d/", portalPort))
+					fmt.Println("Opening browser...")
+				} else {
+					fmt.Println("Portal is disabled, browser not available")
+				}
 			}
 		}
 	}()
