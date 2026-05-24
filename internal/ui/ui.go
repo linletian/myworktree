@@ -16,7 +16,7 @@ var indexHTMLReader = func() ([]byte, error) {
 	return staticFS.ReadFile("static/index.html")
 }
 
-func Register(mux *http.ServeMux, repoName string) error {
+func Register(mux *http.ServeMux, repoName string, isRemote func(r *http.Request) bool) error {
 	content, err := indexHTMLReader()
 	if err != nil {
 		return fmt.Errorf("failed to read embedded index.html: %w", err)
@@ -31,7 +31,11 @@ func Register(mux *http.ServeMux, repoName string) error {
 			return
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		_, _ = w.Write(content)
+		body := content
+		if isRemote != nil && isRemote(r) {
+			body = bytes.ReplaceAll(body, []byte("<body>"), []byte(`<body class="remote-access">`))
+		}
+		_, _ = w.Write(body)
 	})
 
 	// Static assets.

@@ -8,6 +8,8 @@ Base URL: printed when starting `myworktree` or `mw`, e.g. `http://127.0.0.1:500
 Auth:
 - If `--auth <token>` is set, send `Authorization: Bearer <token>`.
 - Alternatively, pass `?token=<token>` for simple clients.
+- For Portal dashboard access, the `mw_token` HttpOnly Cookie is used as the third token source (automatically sent by browser after `/api/auth` login).
+- Token priority: `Authorization` header → `?token=` query → `mw_token` Cookie.
 - Prefer the `Authorization` header when possible so tokens do not end up in browser history or shell history.
 
 Common response header:
@@ -473,7 +475,140 @@ Supported tool names:
 - `branch_list`, `tag_list`
 - `instance_list`, `instance_start`, `instance_stop`, `instance_input`, `instance_delete`, `instance_log_tail`
 
-## 7) LLM 配置
+## 7) Portal Dashboard
+
+The Portal dashboard provides a shared entry point for discovering and accessing all running instances across repos.
+
+Base URL: `http://<host>:<portal-port>/` (default portal port: 12345).
+
+**Auth model**: Portal uses `mw_token` HttpOnly Cookie for authentication. The token is obtained via the CSRF-protected `/api/auth` endpoint. Once authenticated, the Cookie is automatically sent by the browser on all subsequent requests. Cookie has 24-hour sliding expiration (refreshed on each successful auth request).
+
+**CSRF protection**: `/api/auth` and `/api/logout` endpoints use double-submit cookie pattern. Client must fetch a CSRF token from `/api/csrf-token`, then include it in the request body. CSRF tokens are single-use with a 5-minute TTL.
+
+### Dashboard page
+`GET /`
+
+Returns the embedded Portal dashboard HTML page (no authentication required).
+
+Response headers:
+- `Content-Security-Policy: default-src 'self'; script-src 'sha256-<hash>' ...; style-src 'self' 'sha256-<hash>' ...`
+- `X-Content-Type-Options: nosniff`
+
+### Get CSRF token
+`GET /api/csrf-token`
+
+Returns a new single-use CSRF token and sets `mw_csrf` Cookie.
+
+Rate limit: 1 request per second per IP.
+
+Response:
+```json
+{ "csrf_token": "<64-char-hex>" }
+```
+
+Sets Cookie: `mw_csrf=<token>; Path=/; SameSite=Strict` (non-HttpOnly — JS must read it for CSRF double-submit).
+
+### Authenticate (login)
+`POST /api/auth`
+
+Authenticates with the global auth token. Requires valid CSRF token.
+
+Body:
+```json
+{ "token": "<auth-token>", "csrf_token": "<csrf-token>" }
+```
+
+Rate limit: 20 attempts per minute per IP.
+
+Success (200): Sets `mw_token` HttpOnly Cookie (`Max-Age=86400, SameSite=Lax`) and returns:
+```json
+{ "status": "ok" }
+```
+
+Errors:
+- `400`: Auth token not configured on server (`{"error":"auth token not configured on server"}`)
+- `401`: Invalid token
+- `403`: CSRF token invalid/expired/used
+- `429`: Rate limit exceeded
+
+### List instances
+`GET /api/list`
+
+**Authentication required** (Cookie `mw_token` or Bearer token).
+
+Returns JSON with all running instances and Portal status. Each successful request refreshes the `mw_token` Cookie's expiration (sliding).
+
+Response:
+```json
+{
+  "is_portal": true,
+  "portal_port": 12345,
+  "processes": [
+    {
+      "instance_id": "12345-1710000000-a1b2c3",
+      "pid": 12345,
+      "port": 50053,
+      "host": "0.0.0.0",
+      "repo_name": "myproject",
+      "repo_hash": "a1b2c3d4e5f6",
+      "started_at": "2024-03-10T12:00:00Z",
+      "alive": true
+    }
+  ]
+}
+```
+
+- `is_portal`: whether the current process holds the Portal port
+- `portal_port`: Portal port number
+- `alive`: determined by PID liveness and TCP port reachability
+
+### Portal status
+`GET /api/portal-status`
+
+No authentication required. Returns whether the current instance holds the Portal port.
+
+Response:
+```json
+{ "is_portal": true }
+```
+
+### Logout
+`POST /api/logout`
+
+**CSRF required**. Clears the `mw_token` Cookie.
+
+Body:
+```json
+{ "csrf_token": "<csrf-token>" }
+```
+
+Response (200):
+```json
+{ "status": "ok" }
+```
+
+Always returns 200 (idempotent — successful even if not logged in).
+
+Errors:
+- `403`: CSRF token invalid/expired/used or missing
+
+### Reverse proxy (access instance)
+`ANY /s/<repo-hash>/*`
+
+**Authentication required** (Cookie `mw_token` or Bearer token). Each successful request refreshes the `mw_token` Cookie's expiration (sliding).
+
+Proxies the request to the corresponding instance at `http://127.0.0.1:<port>`. Since the proxy connects via loopback, the instance's auth middleware automatically bypasses token validation.
+
+Security:
+- `repo-hash` format validation: only `[a-f0-9]+` (lowercase hex) accepted; path traversal characters (`..`, `/`, `\`) rejected with 400
+- WebSocket upgrade is automatically handled by the reverse proxy (Go's `httputil.ReverseProxy` natively supports WebSocket hijacking)
+
+Errors:
+- `400`: Invalid `repo-hash` format
+- `401`: Not authenticated
+- `502`: Target instance offline
+
+## 8) LLM 配置
 ### 获取当前配置
 `GET /api/llm/config`
 

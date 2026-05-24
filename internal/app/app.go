@@ -2,11 +2,13 @@ package app
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
 	"io"
 	"log"
 	"net"
@@ -28,6 +30,7 @@ import (
 	"myworktree/internal/llm"
 	"myworktree/internal/mcp"
 	"myworktree/internal/monitor"
+	"myworktree/internal/portal"
 	"myworktree/internal/store"
 	"myworktree/internal/tag"
 	"myworktree/internal/ui"
@@ -42,6 +45,12 @@ type Config struct {
 	TLSKey       string
 	Open         bool
 	WorktreesDir string
+	PortalPort   int
+}
+
+type serverConfig struct {
+	ListenPort int    `json:"listen_port"`
+	InstanceID string `json:"instance_id,omitempty"`
 }
 
 type Server struct {
@@ -54,6 +63,8 @@ type Server struct {
 	serverRev string
 	isSecure  bool
 
+	portal      *portal.Portal
+	httpSrv     *http.Server
 	store       store.FileStore
 	worktreeMgr worktree.Manager
 	instanceMgr *instance.Manager
@@ -143,7 +154,9 @@ func New(cfg Config, logger *log.Logger) (*Server, error) {
 		isSecure:  isSecure,
 	}
 	s.registerAPIs(mux)
-	if err := ui.Register(mux, filepath.Base(filepath.Clean(s.root))); err != nil {
+	if err := ui.Register(mux, filepath.Base(filepath.Clean(s.root)), func(r *http.Request) bool {
+		return !isLoopbackRequest(r)
+	}); err != nil {
 		return nil, fmt.Errorf("ui.Register: %w", err)
 	}
 
@@ -340,28 +353,100 @@ func (s *Server) Start() (string, error) {
 	}
 	s.ln = ln
 
+	if s.cfg.PortalPort > 0 {
+		base, err := os.UserConfigDir()
+		if err != nil {
+			s.logger.Printf("[portal] warning: UserConfigDir failed: %v", err)
+			base = ""
+		}
+		instancePort := 0
+		if tcpAddr, ok := s.ln.Addr().(*net.TCPAddr); ok {
+			instancePort = tcpAddr.Port
+		}
+		cfg := portal.Config{
+			PortalPort:   s.cfg.PortalPort,
+			InstancePort: instancePort,
+			Host:         "0.0.0.0",
+			AuthToken:    s.cfg.AuthToken,
+			RegistryDir:  filepath.Join(base, "myworktree", "portal"),
+			DataDir:      s.dataDir,
+			RepoName:     filepath.Base(filepath.Clean(s.root)),
+			RepoHash:     gitx.HashPath(s.root),
+			WorktreePath: s.root,
+		}
+		s.portal = portal.New(cfg)
+		if err := s.portal.Start(); err != nil {
+			s.logger.Printf("[portal] warning: portal.Start failed: %v", err)
+			s.portal = nil
+		} else {
+			s.logger.Printf("[portal] Portal dashboard at: http://0.0.0.0:%d/", s.cfg.PortalPort)
+			if tsName := portal.TailscaleDNSName(); tsName != "" {
+				s.logger.Printf("[portal] Tailscale URL: https://%s/", tsName)
+			}
+		}
+	}
+
 	h := s.withServerRevision(s.withAuth(s.mux))
+	s.httpSrv = &http.Server{Handler: h}
 
 	go func() {
 		if s.cfg.TLSCert != "" || s.cfg.TLSKey != "" {
-			_ = http.ServeTLS(ln, h, s.cfg.TLSCert, s.cfg.TLSKey)
+			_ = s.httpSrv.ServeTLS(ln, s.cfg.TLSCert, s.cfg.TLSKey)
 			return
 		}
-		_ = http.Serve(ln, h)
+		_ = s.httpSrv.Serve(ln)
 	}()
 
 	scheme := "http"
 	if s.cfg.TLSCert != "" && s.cfg.TLSKey != "" {
 		scheme = "https"
 	}
-	addr := ln.Addr().String()
+	// IPv6 is explicitly disabled. Always use IPv4 127.0.0.1 regardless of what
+	// the OS reports for the listening socket (macOS may report [::]:port).
+	addr := "127.0.0.1"
+	if tcpAddr, ok := ln.Addr().(*net.TCPAddr); ok {
+		addr = net.JoinHostPort("127.0.0.1", strconv.Itoa(tcpAddr.Port))
+	}
 	url := fmt.Sprintf("%s://%s/", scheme, addr)
-	if s.cfg.Open {
-		if err := OpenURL(url); err != nil {
-			s.logger.Printf("open browser failed: %v", err)
+	if s.cfg.Open && s.cfg.PortalPort > 0 {
+		if err := waitForServer(s.cfg.PortalPort, 5*time.Second); err != nil {
+			s.logger.Printf("server not ready: %v", err)
+			s.logger.Printf("please manually open http://127.0.0.1:%d/", s.cfg.PortalPort)
+		} else {
+			if openErr := OpenURL(fmt.Sprintf("http://127.0.0.1:%d/", s.cfg.PortalPort)); openErr != nil {
+				s.logger.Printf("open browser failed: %v", openErr)
+			}
 		}
 	}
 	return url, nil
+}
+
+func waitForServer(port int, timeout time.Duration) error {
+	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		conn, err := net.DialTimeout("tcp", addr, 100*time.Millisecond)
+		if err == nil {
+			conn.Close()
+			return nil
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	return fmt.Errorf("server not ready after %v (port %d)", timeout, port)
+}
+
+func (s *Server) Shutdown() {
+	if s.portal != nil {
+		s.portal.Stop()
+	}
+	if s.httpSrv != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = s.httpSrv.Shutdown(ctx)
+	}
+	if s.ln != nil {
+		s.ln.Close()
+	}
 }
 
 func (s *Server) listTopBranches() (string, []gitx.Branch, error) {
@@ -463,6 +548,7 @@ func (s *Server) registerAPIs(mux *http.ServeMux) {
 	mux.HandleFunc("/api/llm/config", s.handleLLMConfig)
 	mux.HandleFunc("/api/llm/test", s.handleLLMTest)
 	mux.HandleFunc("/api/llm/generate", s.handleLLMGenerate)
+	mux.HandleFunc("/login", s.handleLogin)
 }
 
 func (s *Server) handleBranches(w http.ResponseWriter, r *http.Request) {
@@ -492,6 +578,120 @@ func (s *Server) handleMain(w http.ResponseWriter, r *http.Request) {
 		"name":   name,
 		"branch": branch,
 	})
+}
+
+func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		token := extractAuthToken(r)
+		if token == s.cfg.AuthToken {
+			http.Redirect(w, r, "/", http.StatusFound)
+			return
+		}
+		loginHTML := `<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Login - myworktree</title>
+    <style>
+        :root {
+            --bg-color: #f6f8fa;
+            --text-primary: #24292e;
+            --text-secondary: #586069;
+            --card-bg: #ffffff;
+            --card-border: #e1e4e8;
+            --card-shadow: 0 4px 24px rgba(0,0,0,0.08);
+            --input-bg: #ffffff;
+            --input-border: #d0d7da;
+            --input-focus-border: #2ea44f;
+            --input-focus-shadow: rgba(46, 164, 79, 0.2);
+            --button-bg: #2ea44f;
+            --button-hover-bg: #2c974b;
+            --error-text: #cb2431;
+            --card-radius: 16px;
+            --input-radius: 8px;
+            --btn-radius: 8px;
+        }
+        @media (prefers-color-scheme: dark) {
+            :root {
+                --bg-color: #1a1a1a;
+                --text-primary: #e0e0e0;
+                --text-secondary: #888;
+                --card-bg: #222222;
+                --card-border: #333;
+                --card-shadow: 0 4px 24px rgba(0,0,0,0.3);
+                --input-bg: #2a2a2a;
+                --input-border: #444;
+                --input-focus-border: #3fb950;
+                --input-focus-shadow: rgba(63, 185, 80, 0.2);
+                --button-bg: #238636;
+                --button-hover-bg: #2ea043;
+                --error-text: #ff6666;
+            }
+        }
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji"; background: var(--bg-color); color: var(--text-primary); display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
+        .login-box { background: var(--card-bg); border: 1px solid var(--card-border); border-radius: var(--card-radius); padding: 40px; width: 100%; max-width: 400px; box-shadow: var(--card-shadow); box-sizing: border-box; margin: 20px; }
+        h2 { font-size: 20px; font-weight: 600; margin: 0 0 8px 0; text-align: center; }
+        .subtitle { font-size: 13px; color: var(--text-secondary); margin: 0 0 24px 0; text-align: center; }
+        label { display: block; margin-bottom: 6px; font-size: 13px; font-weight: 500; color: var(--text-primary); }
+        input[type="password"] { width: 100%; padding: 10px 12px; font-size: 14px; background: var(--input-bg); border: 1px solid var(--input-border); color: var(--text-primary); border-radius: var(--input-radius); box-sizing: border-box; margin-bottom: 16px; outline: none; transition: border-color 0.2s, box-shadow 0.2s; }
+        input[type="password"]:focus { border-color: var(--input-focus-border); box-shadow: 0 0 0 3px var(--input-focus-shadow); }
+        button { width: 100%; padding: 10px 16px; font-size: 14px; font-weight: 500; background: var(--button-bg); color: #ffffff; border: none; border-radius: var(--btn-radius); cursor: pointer; transition: background 0.15s ease; }
+        button:hover { background: var(--button-hover-bg); }
+    </style>
+</head>
+<body>
+    <div class="login-box">
+        <h2>myworktree</h2>
+        <p class="subtitle">Enter your auth token to continue</p>
+        <form id="login-form" method="post" action="/login">
+            <input type="hidden" name="next" value="{{NEXT}}">
+            <label for="token">Auth Token</label>
+            <input type="password" id="token" name="token" placeholder="Enter auth token" required>
+            <button type="submit">Login</button>
+        </form>
+    </div>
+</body>
+</html>`
+		nextURL := r.URL.Query().Get("next")
+		if nextURL == "" || !isValidRedirectPath(nextURL) {
+			nextURL = "/"
+		}
+		loginHTML = strings.ReplaceAll(loginHTML, "{{NEXT}}", html.EscapeString(nextURL))
+		w.Write([]byte(loginHTML))
+		return
+	}
+	if r.Method == http.MethodPost {
+		if err := r.ParseForm(); err != nil {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		token := strings.TrimSpace(r.FormValue("token"))
+		if token != s.cfg.AuthToken {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		nextURL := r.FormValue("next")
+		if nextURL == "" || !isValidRedirectPath(nextURL) {
+			nextURL = "/"
+		}
+		cookie := &http.Cookie{
+			Name:     "mw_token",
+			Value:    token,
+			Path:     "/",
+			MaxAge:   86400,
+			SameSite: http.SameSiteLaxMode,
+			HttpOnly: true,
+		}
+		if r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https" {
+			cookie.Secure = true
+		}
+		http.SetCookie(w, cookie)
+		http.Redirect(w, r, nextURL, http.StatusFound)
+		return
+	}
+	http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 }
 
 func (s *Server) handleTags(w http.ResponseWriter, r *http.Request) {
@@ -1422,25 +1622,72 @@ func (s *Server) withAuth(next http.Handler) http.Handler {
 		return next
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if isLoopbackRequest(r) {
+			next.ServeHTTP(w, r)
+			return
+		}
 		if !sameOriginHost(r) {
 			http.Error(w, "forbidden origin", http.StatusForbidden)
 			return
 		}
-		token := strings.TrimSpace(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
-		if token == "" {
-			token = strings.TrimSpace(r.URL.Query().Get("token"))
+		if r.URL.Path == "/login" || r.URL.Path == "/api/csrf-token" {
+			next.ServeHTTP(w, r)
+			return
 		}
+		token := extractAuthToken(r)
 		if token != s.cfg.AuthToken {
 			if !s.allowAuthAttempt(clientIP(r.RemoteAddr)) {
 				http.Error(w, "too many unauthorized attempts", http.StatusTooManyRequests)
 				return
 			}
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			if isAPIClient(r) {
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+			redirectURL := "/login"
+			if r.URL.Path != "/" {
+				redirectURL = "/login?next=" + url.QueryEscape(r.URL.Path)
+			}
+			http.Redirect(w, r, redirectURL, http.StatusFound)
 			return
 		}
 		s.resetAuthAttempts(clientIP(r.RemoteAddr))
 		next.ServeHTTP(w, r)
 	})
+}
+
+func isAPIClient(r *http.Request) bool {
+	accept := r.Header.Get("Accept")
+	return strings.Contains(accept, "application/json") || strings.Contains(accept, "text/event-stream")
+}
+
+func isValidRedirectPath(path string) bool {
+	if path == "" {
+		return false
+	}
+	if path[0] != '/' {
+		return false
+	}
+	if len(path) > 1 && path[1] == '/' {
+		return false
+	}
+	if strings.Contains(path, "://") {
+		return false
+	}
+	return true
+}
+
+func extractAuthToken(r *http.Request) string {
+	if token := strings.TrimSpace(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")); token != "" {
+		return token
+	}
+	if token := strings.TrimSpace(r.URL.Query().Get("token")); token != "" {
+		return token
+	}
+	if cookie, err := r.Cookie("mw_token"); err == nil {
+		return strings.TrimSpace(cookie.Value)
+	}
+	return ""
 }
 
 func (s *Server) withServerRevision(next http.Handler) http.Handler {
@@ -1529,6 +1776,10 @@ func clientIP(remoteAddr string) string {
 	return host
 }
 
+// isLoopbackHost checks if host is a loopback address.
+// IPv6 is explicitly disabled and NOT supported.
+// Only IPv4 loopback (127.x.x.x) and "localhost" are considered loopback.
+// IPv6 addresses (including ::1, ::ffff:127.0.0.1) are rejected as non-loopback.
 func isLoopbackHost(host string) bool {
 	host = strings.TrimSpace(host)
 	if host == "" {
@@ -1537,8 +1788,15 @@ func isLoopbackHost(host string) bool {
 	if strings.EqualFold(host, "localhost") {
 		return true
 	}
+	// Reject all IPv6 addresses (not supported). IPv6 addresses contain ":".
+	if strings.Contains(host, ":") {
+		return false
+	}
 	ip := net.ParseIP(host)
-	return ip != nil && ip.IsLoopback()
+	if ip == nil {
+		return false
+	}
+	return ip.IsLoopback()
 }
 
 func isLoopbackRequest(r *http.Request) bool {
@@ -1624,9 +1882,6 @@ func canListenTCP(addr string) bool {
 }
 
 func readRepoListenPort(dataDir string) (int, error) {
-	type config struct {
-		ListenPort int `json:"listen_port"`
-	}
 	b, err := os.ReadFile(filepath.Join(dataDir, "server.json"))
 	if errors.Is(err, os.ErrNotExist) {
 		return 0, nil
@@ -1634,7 +1889,7 @@ func readRepoListenPort(dataDir string) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	var cfg config
+	var cfg serverConfig
 	if err := json.Unmarshal(b, &cfg); err != nil {
 		return 0, err
 	}
@@ -1644,18 +1899,58 @@ func readRepoListenPort(dataDir string) (int, error) {
 	return cfg.ListenPort, nil
 }
 
-func writeRepoListenPort(dataDir string, port int) error {
-	type config struct {
-		ListenPort int `json:"listen_port"`
+func generateInstanceID() string {
+	bid := make([]byte, 8)
+	if _, err := rand.Read(bid); err != nil {
+		// Fallback for crypto/rand failure (extremely rare)
+		// Use timestamp + PID + stack hash for basic uniqueness
+		h := sha256.New()
+		h.Write([]byte(fmt.Sprintf("%d-%d-%p", time.Now().UnixNano(), os.Getpid(), generateInstanceID)))
+		copy(bid, h.Sum(nil)[:8])
 	}
+	return fmt.Sprintf("%d-%d-%x", os.Getpid(), time.Now().UnixNano(), bid)
+}
+
+func writeRepoListenPort(dataDir string, port int) error {
+	filePath := filepath.Join(dataDir, "server.json")
+	var cfg serverConfig
+	if data, err := os.ReadFile(filePath); err == nil {
+		_ = json.Unmarshal(data, &cfg)
+	}
+	cfg.ListenPort = port
+	if cfg.InstanceID == "" {
+		cfg.InstanceID = generateInstanceID()
+	}
+
 	if err := os.MkdirAll(dataDir, 0o755); err != nil {
 		return err
 	}
-	b, err := json.MarshalIndent(config{ListenPort: port}, "", "  ")
+	tmp, err := os.CreateTemp(dataDir, "server.json.*")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(dataDir, "server.json"), b, 0o600)
+	tmpPath := tmp.Name()
+	var renamed bool
+	defer func() {
+		tmp.Close()
+		if !renamed {
+			os.Remove(tmpPath)
+		}
+	}()
+	if err := tmp.Chmod(0o600); err != nil {
+		return err
+	}
+	if err := json.NewEncoder(tmp).Encode(cfg); err != nil {
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpPath, filePath); err != nil {
+		return err
+	}
+	renamed = true
+	return nil
 }
 
 // countFileLines reads the file at path and returns its line count.

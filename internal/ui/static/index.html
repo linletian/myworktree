@@ -21,6 +21,100 @@
             --sidebar-bottom-min-height: 100px;
             --term-ctrl-btn-size: 32px;
             --term-ctrl-btn-gap: 10px;
+
+            --text-primary: #24292e;
+            --text-secondary: #586069;
+            --text-muted: #6a737d;
+            --tab-bg: #fbfbfb;
+            --tab-active-bg: #fff;
+            --main-bg: #fff;
+            --button-bg: #fafbfc;
+            --button-hover-bg: #f3f4f6;
+            --button-border: #ddd;
+            --primary-button-bg: #2ea44f;
+            --primary-button-hover-bg: #2c974b;
+            --danger-text: #cb2431;
+            --danger-hover-bg: #ffeef0;
+            --status-running: #28a745;
+            --status-stopped: #999;
+            --status-exited: #6a737d;
+            --status-failed: #cb2431;
+            --additions: #28a745;
+            --deletions: #cb2431;
+            --warning-bg: #fff8c5;
+            --warning-text: #9a6700;
+            --warning-border: #d4a72c;
+            --untracked-badge-bg: #d4c5f9;
+            --untracked-badge-text: #6f42c1;
+            --git-change-border: #f0f0f0;
+            --modal-titlebar-bg: #f6f8fa;
+            --modal-border: #d0d7da;
+            --modal-backdrop: rgba(0,0,0,0.4);
+            --table-header-bg: #f6f8fa;
+            --table-border: #e1e4e8;
+            --table-cell-border: #f0f0f0;
+            --group-header-bg: #faf8ff;
+            --badge-bg: #21262d;
+            --badge-text: #adbac7;
+            --conn-sse: #e36209;
+            --conn-none: #999;
+
+            --remote-title-bg: linear-gradient(90deg, #e8c4c4, #d4a5a5, #e8d4d4, #e8c4c4);
+            --remote-title-text: #4a1a1a;
+            --remote-title-icon: #7a3a3a;
+        }
+
+        @media (prefers-color-scheme: dark) {
+            :root {
+                --bg-color: #0d1117;
+                --border-color: #30363d;
+                --active-color: #58a6ff;
+                --active-bg: #0f2647;
+                --hover-bg: #161b22;
+                --main-accent: #a371f7;
+                --main-accent-bg: #1a1525;
+                --main-accent-hover: #252035;
+                --text-primary: #c9d1d9;
+                --text-secondary: #8b949e;
+                --text-muted: #6e7681;
+                --tab-bg: #161b22;
+                --tab-active-bg: #0d1117;
+                --main-bg: #0d1117;
+                --button-bg: #21262d;
+                --button-hover-bg: #30363d;
+                --button-border: #30363d;
+                --primary-button-bg: #238636;
+                --primary-button-hover-bg: #2ea043;
+                --danger-text: #f85149;
+                --danger-hover-bg: #f851491a;
+                --status-running: #3fb950;
+                --status-stopped: #8b949e;
+                --status-exited: #6e7681;
+                --status-failed: #f85149;
+                --additions: #3fb950;
+                --deletions: #f85149;
+                --warning-bg: #341a00;
+                --warning-text: #d29922;
+                --warning-border: #9e6a03;
+                --untracked-badge-bg: #4a3060;
+                --untracked-badge-text: #d2a8ff;
+                --git-change-border: #21262d;
+                --modal-titlebar-bg: #161b22;
+                --modal-border: #30363d;
+                --modal-backdrop: rgba(0,0,0,0.6);
+                --table-header-bg: #161b22;
+                --table-border: #30363d;
+                --table-cell-border: #21262d;
+                --group-header-bg: #1a1525;
+                --badge-bg: #30363d;
+                --badge-text: #c9d1d9;
+                --conn-sse: #e36209;
+                --conn-none: #8b949e;
+
+                --remote-title-bg: linear-gradient(90deg, #4a3030, #3d2828, #5a3a3a, #4a3030);
+                --remote-title-text: #e8c4c4;
+                --remote-title-icon: #c4a0a0;
+            }
         }
 
         body, html {
@@ -30,7 +124,7 @@
             overflow: hidden;
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji";
             font-size: 13px;
-            color: #24292e;
+            color: var(--text-primary);
         }
 
         * {
@@ -70,14 +164,14 @@
             cursor: pointer;
             border: none;
             background: none;
-            color: #586069;
+            color: var(--text-secondary);
             padding: 2px;
             border-radius: 4px;
         }
 
             .icon-btn:hover {
-                background: #e1e4e8;
-                color: #0366d6;
+                background: var(--border-color);
+                color: var(--active-color);
             }
 
         #wt-list {
@@ -154,7 +248,7 @@
         .git-section-chevron {
             flex-shrink: 0;
             transition: transform 0.2s;
-            color: #6a737d;
+            color: var(--text-muted);
         }
 
         .git-section.expanded .git-section-chevron {
@@ -164,17 +258,17 @@
         .git-section-title {
             font-size: 11px;
             font-weight: 600;
-            color: #6a737d;
+            color: var(--text-muted);
         }
 
         .git-section-summary {
             margin-left: auto;
             font-size: 11px;
-            color: #6a737d;
+            color: var(--text-muted);
         }
 
-        .git-section-summary .additions { color: #28a745; }
-        .git-section-summary .deletions { color: #cb2431; }
+        .git-section-summary .additions { color: var(--additions); }
+        .git-section-summary .deletions { color: var(--danger-text); }
 
         .git-section-list {
             overflow-y: auto;
@@ -194,7 +288,7 @@
             padding: 4px 12px;
             font-size: 12px;
             font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-            border-bottom: 1px solid #f0f0f0;
+            border-bottom: 1px solid var(--git-change-border);
             display: flex;
             align-items: center;
             gap: 6px;
@@ -219,8 +313,8 @@
             gap: 4px;
         }
 
-        .git-change-stats .additions { color: #28a745; }
-        .git-change-stats .deletions { color: #cb2431; }
+        .git-change-stats .additions { color: var(--additions); }
+        .git-change-stats .deletions { color: var(--danger-text); }
 
         .git-change-untracked-badge {
             flex-shrink: 0;
@@ -228,31 +322,31 @@
             font-weight: 600;
             padding: 1px 4px;
             border-radius: 3px;
-            background: #d4c5f9;
-            color: #6f42c1;
+            background: var(--untracked-badge-bg);
+            color: var(--main-accent);
             line-height: 1;
         }
 
         .git-change-empty {
             padding: 16px 12px;
             text-align: center;
-            color: #6a737d;
+            color: var(--text-muted);
             font-size: 12px;
         }
 
         .git-change-warning {
             padding: 6px 12px;
             font-size: 12px;
-            color: #9a6700;
-            background: #fff8c5;
-            border-bottom: 1px solid #d4a72c;
+            color: var(--warning-text);
+            background: var(--warning-bg);
+            border-bottom: 1px solid var(--warning-border);
         }
 
         .wt-item {
             padding: 8px 12px;
             cursor: pointer;
             border-left: 3px solid transparent;
-            border-bottom: 1px solid #f0f0f0;
+            border-bottom: 1px solid var(--git-change-border);
             display: flex;
             flex-direction: column;
             gap: 2px;
@@ -291,10 +385,10 @@
             padding: 6px 12px 2px;
             font-size: 11px;
             font-weight: 600;
-            color: #6a737d;
+            color: var(--text-muted);
             text-transform: uppercase;
             letter-spacing: 0.5px;
-            border-bottom: 1px solid #f0f0f0;
+            border-bottom: 1px solid var(--git-change-border);
             cursor: default;
         }
 
@@ -305,7 +399,7 @@
 
         .wt-branch {
             font-size: 11px;
-            color: #6a737d;
+            color: var(--text-muted);
             display: flex;
             align-items: center;
             gap: 4px;
@@ -327,7 +421,7 @@
             cursor: pointer;
             padding: 2px;
             border-radius: 3px;
-            color: #6a737d;
+            color: var(--text-muted);
             display: flex;
             align-items: center;
             justify-content: center;
@@ -335,7 +429,7 @@
 
         .wt-action-btn:hover {
             background-color: rgba(0,0,0,0.1);
-            color: #24292e;
+            color: var(--text-primary);
         }
 
         .wt-action-btn.loading {
@@ -358,7 +452,7 @@
             display: flex;
             flex-direction: column;
             min-width: 0;
-            background: #fff;
+            background: var(--main-bg);
         }
 
         /* Tabs Header */
@@ -369,7 +463,7 @@
             align-items: center;
             padding: 0 8px;
             gap: 4px;
-            background: #fbfbfb;
+            background: var(--tab-bg);
         }
 
         #tabs-container {
@@ -401,7 +495,7 @@
             box-shadow: inset 3px 0 0 var(--active-color);
             background: var(--active-bg);
         }
-            color: #586069;
+            color: var(--text-secondary);
             margin-bottom: -1px;
             height: 32px;
             display: flex;
@@ -410,13 +504,13 @@
         }
 
             .tab:hover {
-                background: #f6f8fa;
+                background: var(--hover-bg);
             }
 
             .tab.active {
-                background: #fff;
+                background: var(--main-bg);
                 border-color: var(--border-color);
-                color: #24292e;
+                color: var(--text-primary);
                 border-top: 2px solid var(--active-color);
             }
 
@@ -444,25 +538,25 @@
         }
 
         .status-running {
-            background: #28a745;
+            background: var(--status-running);
         }
 
         .status-stopped {
-            background: #999;
+            background: var(--status-stopped);
         }
 
         .status-exited {
-            background: #6a737d;
+            background: var(--status-exited);
         }
 
         .status-failed {
-            background: #cb2431;
+            background: var(--status-failed);
         }
 
         .new-tab-btn {
             padding: 4px 8px;
             cursor: pointer;
-            color: #586069;
+            color: var(--text-secondary);
             font-weight: bold;
             font-size: 16px;
             border-radius: 4px;
@@ -471,8 +565,8 @@
         }
 
             .new-tab-btn:hover {
-                background: #e1e4e8;
-                color: #0366d6;
+                background: var(--border-color);
+                color: var(--active-color);
             }
 
         /* Actions Toolbar (Hidden by default, shown when instance active) */
@@ -510,7 +604,7 @@
             top: 50%;
             left: 50%;
             transform: translate(-50%, -50%);
-            color: #586069;
+            color: var(--text-secondary);
             text-align: center;
         }
 
@@ -538,19 +632,19 @@
             width: 680px;
             max-width: 90vw;
             padding: 0;
-            border: 1px solid #d0d7da;
+            border: 1px solid var(--modal-border);
             border-radius: 10px;
             box-shadow: 0 14px 28px rgba(0,0,0,0.25), 0 10px 10px rgba(0,0,0,0.22);
         }
         #modal-monitor::backdrop {
-            background: rgba(0,0,0,0.4);
+            background: var(--modal-backdrop);
         }
         #modal-monitor .monitor-titlebar {
             display: flex;
             align-items: center;
             padding: 10px 12px;
-            border-bottom: 1px solid #e1e4e8;
-            background: #f6f8fa;
+            border-bottom: 1px solid var(--border-color);
+            background: var(--hover-bg);
             border-radius: 10px 10px 0 0;
         }
         #modal-monitor .monitor-close-btn {
@@ -563,7 +657,7 @@
             align-items: center;
             justify-content: center;
             cursor: pointer;
-            color: rgba(0,0,0,0.5);
+            color: var(--text-secondary);
             padding: 0;
             flex-shrink: 0;
             transition: opacity 0.15s;
@@ -578,7 +672,7 @@
             margin-left: 10px;
             font-size: 13px;
             font-weight: 500;
-            color: #24292e;
+            color: var(--text-primary);
         }
         #modal-monitor .monitor-summary {
             display: flex;
@@ -587,8 +681,8 @@
             flex-wrap: wrap;
         }
         #modal-monitor .monitor-summary-item {
-            background: #f6f8fa;
-            border: 1px solid #e1e4e8;
+            background: var(--hover-bg);
+            border: 1px solid var(--border-color);
             border-radius: 6px;
             padding: 8px 12px;
             flex: 1;
@@ -596,14 +690,14 @@
         }
         #modal-monitor .monitor-summary-item .label {
             font-size: 11px;
-            color: #586069;
+            color: var(--text-secondary);
             text-transform: uppercase;
             letter-spacing: 0.5px;
         }
         #modal-monitor .monitor-summary-item .value {
             font-size: 16px;
             font-weight: 600;
-            color: #24292e;
+            color: var(--text-primary);
             margin-top: 2px;
         }
         #modal-monitor table {
@@ -614,30 +708,30 @@
         #modal-monitor th {
             text-align: left;
             padding: 6px 8px;
-            background: #f6f8fa;
-            border-bottom: 1px solid #e1e4e8;
-            color: #586069;
+            background: var(--hover-bg);
+            border-bottom: 1px solid var(--border-color);
+            color: var(--text-secondary);
             font-size: 11px;
             text-transform: uppercase;
             letter-spacing: 0.5px;
         }
         #modal-monitor td {
             padding: 6px 8px;
-            border-bottom: 1px solid #f0f0f0;
+            border-bottom: 1px solid var(--git-change-border);
         }
         #modal-monitor tr:last-child td {
             border-bottom: none;
         }
         #modal-monitor .wt-group-header td {
-            background: #faf8ff;
+            background: var(--main-accent-bg);
             font-weight: 600;
-            color: #6f42c1;
+            color: var(--main-accent);
             font-size: 11px;
             text-transform: uppercase;
             letter-spacing: 0.5px;
         }
         #modal-monitor .wt-group-header td {
-            border-top: 1px solid #e1e4e8;
+            border-top: 1px solid var(--border-color);
         }
         #modal-monitor .wt-group-header td:first-child {
             border-top-left-radius: 4px;
@@ -645,22 +739,22 @@
         #modal-monitor .wt-group-header td:last-child {
             border-top-right-radius: 4px;
         }
-        #modal-monitor .conn-ws { color: #28a745; }
-        #modal-monitor .conn-sse { color: #e36209; }
-        #modal-monitor .conn-none { color: #999; }
+        #modal-monitor .conn-ws { color: var(--additions); }
+        #modal-monitor .conn-sse { color: var(--conn-sse); }
+        #modal-monitor .conn-none { color: var(--status-stopped); }
         #modal-monitor .empty-state {
             text-align: center;
-            color: #586069;
+            color: var(--text-secondary);
             padding: 20px;
         }
         #modal-monitor .monitor-licenses {
-            border-top: 1px solid #e1e4e8;
+            border-top: 1px solid var(--border-color);
             padding: 8px 14px;
         }
         #modal-monitor .monitor-licenses-toggle {
             background: none;
             border: none;
-            color: #586069;
+            color: var(--text-secondary);
             font-size: 11px;
             cursor: pointer;
             padding: 2px 0;
@@ -669,7 +763,7 @@
             gap: 4px;
         }
         #modal-monitor .monitor-licenses-toggle:hover {
-            color: #24292e;
+            color: var(--text-primary);
         }
         #modal-monitor .monitor-licenses-toggle svg {
             transition: transform 0.2s;
@@ -681,7 +775,7 @@
             display: none;
             margin-top: 8px;
             font-size: 11px;
-            color: #586069;
+            color: var(--text-secondary);
             line-height: 1.6;
             max-height: 200px;
             overflow-y: auto;
@@ -691,27 +785,27 @@
         }
         #modal-monitor .license-item {
             padding: 4px 0;
-            border-bottom: 1px solid #f0f0f0;
+            border-bottom: 1px solid var(--git-change-border);
         }
         #modal-monitor .license-item:last-child {
             border-bottom: none;
         }
         #modal-monitor .license-name {
             font-weight: 600;
-            color: #24292e;
+            color: var(--text-primary);
         }
         #modal-monitor .license-sppver {
-            color: #999;
+            color: var(--status-stopped);
             margin-left: 4px;
         }
         #modal-monitor .license-type {
-            color: #6f42c1;
+            color: var(--main-accent);
             margin-left: 6px;
         }
 
         /* Dialogs */
         dialog {
-            border: 1px solid #ddd;
+            border: 1px solid var(--button-border);
             border-radius: 6px;
             padding: 20px;
             box-shadow: 0 4px 12px rgba(0,0,0,0.15);
@@ -719,7 +813,7 @@
         }
 
             dialog::backdrop {
-                background: rgba(0,0,0,0.3);
+                background: var(--modal-backdrop);
             }
 
         .form-group {
@@ -735,8 +829,10 @@
             .form-group input, .form-group select {
                 width: 100%;
                 padding: 6px;
-                border: 1px solid #ddd;
+                border: 1px solid var(--button-border);
                 border-radius: 4px;
+                background: var(--main-bg);
+                color: var(--text-primary);
             }
 
         .form-actions {
@@ -747,7 +843,7 @@
         }
 
         .muted {
-            color: #6a737d;
+            color: var(--text-muted);
             font-size: 12px;
             margin-top: 4px;
         }
@@ -763,7 +859,56 @@
         }
 
         #dialog-llm-settings::backdrop {
-            background: rgba(0,0,0,0.4);
+            background: var(--modal-backdrop);
+        }
+
+        /* Remote Access Warning */
+        @keyframes gradientScroll {
+            0% { background-position: 0% 50%; }
+            100% { background-position: 300% 50%; }
+        }
+
+        .remote-access .sidebar-title {
+            background: var(--remote-title-bg);
+            background-size: 300% 100%;
+            animation: gradientScroll 6s linear infinite;
+            color: var(--remote-title-text);
+            border-bottom-color: transparent;
+        }
+
+        .remote-access .sidebar-title .icon-btn {
+            color: var(--remote-title-icon);
+        }
+
+        .remote-access .sidebar-title .icon-btn:hover {
+            background: rgba(0,0,0,0.1);
+            color: var(--remote-title-text);
+        }
+
+        @media (prefers-color-scheme: dark) {
+            .remote-access .sidebar-title .icon-btn:hover {
+                background: rgba(255,255,255,0.1);
+            }
+        }
+
+        /* Remote badge */
+        .remote-badge {
+            font-size: 10px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            padding: 2px 8px;
+            border-radius: 10px;
+            background: #b84a4a;
+            color: #ffffff;
+            margin-left: 6px;
+            vertical-align: middle;
+            position: relative;
+            top: -1px;
+            line-height: 1;
+        }
+        .remote-badge.hidden {
+            display: none;
         }
 
         /* Utilities */
@@ -774,40 +919,41 @@
         button {
             cursor: pointer;
             padding: 6px 12px;
-            border: 1px solid #ddd;
-            background: #fafbfc;
+            border: 1px solid var(--button-border);
+            background: var(--button-bg);
+            color: var(--text-primary);
             border-radius: 4px;
         }
 
             button:hover {
-                background: #f3f4f6;
-                border-color: #ccc;
+                background: var(--button-hover-bg);
+                border-color: var(--button-border);
             }
 
             button.primary {
-                background: #2ea44f;
+                background: var(--primary-button-bg);
                 color: white;
                 border: 1px solid rgba(27,31,35,0.15);
             }
 
                 button.primary:hover {
-                    background: #2c974b;
+                    background: var(--primary-button-hover-bg);
                 }
 
             button.danger {
-                color: #cb2431;
+                color: var(--danger-text);
             }
 
                 button.danger:hover {
-                    background: #ffeef0;
-                    border-color: #cb2431;
+                    background: var(--danger-hover-bg);
+                    border-color: var(--danger-text);
                 }
 
             #btnAIGenerate.muted {
                 opacity: 0.5;
-                background: #e8e8e8;
-                border-color: #d0d0d0;
-                color: #999;
+                background: var(--button-bg);
+                border-color: var(--button-border);
+                color: var(--status-stopped);
                 cursor: pointer;
             }
 
@@ -861,7 +1007,7 @@
         <!-- Sidebar: Worktrees -->
         <div id="sidebar">
             <div class="sidebar-title">
-                <span>Worktrees</span>
+                <span>Worktrees<span id="remote-badge" class="remote-badge hidden">Remote</span></span>
                 <div class="sidebar-actions">
                     <button class="icon-btn" onclick="openModal('modal-create-wt')" title="New Worktree">+</button>
                     <button class="icon-btn" onclick="openModal('modal-import-wt')" title="Import Worktree">↓</button>
@@ -957,7 +1103,7 @@
     <!-- LLM Settings Dialog -->
     <dialog id="dialog-llm-settings">
         <h3>LLM Settings</h3>
-        <div id="llm-settings-error" style="color:#c0392b;display:none;"></div>
+        <div id="llm-settings-error" style="color:var(--danger-text);display:none;"></div>
         <div class="form-group">
             <label>Protocol</label>
             <select id="llmProtocol" onchange="onLLMProtocolChange()">
@@ -994,7 +1140,7 @@
     <!-- Modal: Import Worktree -->
     <dialog id="modal-import-wt" style="width: 80vw; max-width: 900px;">
         <h3>Import Worktree</h3>
-        <div id="import-candidates" style="margin-bottom: 15px; max-height: 200px; overflow-y: auto; border: 1px solid #30363d; border-radius: 6px; display: none;">
+        <div id="import-candidates" style="margin-bottom: 15px; max-height: 200px; overflow-y: auto; border: 1px solid var(--border-color); border-radius: 6px; display: none;">
             <!-- filled by JS -->
         </div>
         <div class="form-group">
@@ -1163,7 +1309,7 @@
         async function fetchAPI(path, opts = {}) {
             const res = await fetch(path, {
                 ...opts,
-                headers: { "content-type": "application/json", ...headers, ...(opts.headers || {}) },
+                headers: { "content-type": "application/json", "accept": "application/json", ...headers, ...(opts.headers || {}) },
             });
             rememberServerRevision(res);
             return res;
@@ -1262,6 +1408,12 @@
             if (sessionStorage.getItem(SERVER_UPGRADED_FLAG) === "1") {
                 sessionStorage.removeItem(SERVER_UPGRADED_FLAG);
                 alert("Backend upgraded. Frontend has been refreshed automatically.");
+            }
+            // Show remote badge when not on loopback
+            const hostname = window.location.hostname;
+            if (hostname !== "localhost" && hostname !== "127.0.0.1") {
+                const badge = document.getElementById("remote-badge");
+                if (badge) badge.classList.remove("hidden");
             }
             refresh();
             // Polling for status updates (2s)
@@ -1374,7 +1526,7 @@
                     if (section === expanded) {
                         const empty = document.createElement("div");
                         empty.className = "git-change-empty";
-                        empty.style.color = "#cb2431";
+                        empty.style.color = "var(--danger-text)";
                         empty.textContent = `\u26a0 ${gitChangesError}`;
                         list.appendChild(empty);
                     }
@@ -1384,7 +1536,7 @@
                 if (sectionErr) {
                     const empty = document.createElement("div");
                     empty.className = "git-change-empty";
-                    empty.style.color = "#cb2431";
+                    empty.style.color = "var(--danger-text)";
                     empty.textContent = `\u26a0 ${sectionErr}`;
                     list.appendChild(empty);
                     return;
@@ -2015,27 +2167,27 @@
                 // Pre-load candidates
                 const list = document.getElementById("import-candidates");
                 list.style.display = 'none';
-                list.innerHTML = '<div style="padding:8px;color:#8b949e">Scanning...</div>';
+                list.innerHTML = '<div style="padding:8px;color:var(--text-secondary)">Scanning...</div>';
                 try {
                     const res = await api("/api/worktrees/unmanaged");
                     const items = res.candidates || [];
                     if (items.length === 0) {
-                        list.innerHTML = '<div style="padding:8px;color:#8b949e;text-align:center">No unmanaged worktrees found</div>';
+                        list.innerHTML = '<div style="padding:8px;color:var(--text-secondary);text-align:center">No unmanaged worktrees found</div>';
                     } else {
                         list.innerHTML = "";
                         for (const c of items) {
                             const row = document.createElement("div");
-                            row.style.cssText = "padding: 8px; border-bottom: 1px solid #21262d; display: flex; align-items: center; gap: 8px; cursor: pointer;";
+                            row.style.cssText = "padding: 8px; border-bottom: 1px solid var(--border-color); display: flex; align-items: center; gap: 8px; cursor: pointer;";
                             row.addEventListener("click", () => {
                                 document.getElementById("wtImportName").value = c.path;
                             });
 
                             const badge = document.createElement("span");
-                            badge.style.cssText = "font-family:monospace; background: #21262d; color: #adbac7; padding: 2px 4px; border-radius: 4px;";
+                            badge.style.cssText = "font-family:monospace; background: var(--badge-bg); color: var(--badge-text); padding: 2px 4px; border-radius: 4px;";
                             badge.textContent = c.branch;
 
                             const path = document.createElement("span");
-                            path.style.cssText = "font-size: 12px; color: #768390; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left;";
+                            path.style.cssText = "font-size: 12px; color: var(--text-secondary); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left;";
                             path.title = c.path;
                             path.textContent = c.path;
 
@@ -3134,7 +3286,7 @@
         async function testLLMConnection() {
             const resultEl = document.getElementById("llm-test-result");
             resultEl.textContent = "Testing...";
-            resultEl.style.color = "#6a737d";
+            resultEl.style.color = "var(--text-muted)";
             try {
                 // First save current config
                 const protocol = document.getElementById("llmProtocol").value;
@@ -3148,10 +3300,10 @@
                 });
                 const res = await api("/api/llm/test", { method: "POST" });
                 resultEl.textContent = "OK! Generated: " + res.branch_name;
-                resultEl.style.color = "#22863a";
+                resultEl.style.color = "var(--additions)";
             } catch (e) {
                 resultEl.textContent = "Failed: " + e.message;
-                resultEl.style.color = "#c0392b";
+                resultEl.style.color = "var(--danger-text)";
             }
         }
 

@@ -44,7 +44,8 @@ func TestIsLoopbackHost(t *testing.T) {
 	}{
 		{name: "localhost", host: "localhost", want: true},
 		{name: "ipv4 loopback", host: "127.0.0.1", want: true},
-		{name: "ipv6 loopback", host: "::1", want: true},
+		{name: "ipv6 loopback", host: "::1", want: false},
+		{name: "ipv4 mapped ipv6", host: "::ffff:127.0.0.1", want: false},
 		{name: "remote ipv4", host: "203.0.113.10", want: false},
 		{name: "blank", host: "", want: false},
 	}
@@ -792,5 +793,257 @@ func TestHandleMain(t *testing.T) {
 	srv.handleMain(wPut, reqPut)
 	if wPut.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("PUT /api/main: expected status 405, got %d", wPut.Code)
+	}
+}
+
+func TestWithAuth_LoopbackBypass(t *testing.T) {
+	nullLogger := log.New(os.Stderr, "", 0)
+	srv, err := New(Config{AuthToken: "test-token"}, nullLogger)
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+
+	handler := srv.withAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	tests := []struct {
+		name       string
+		remoteAddr string
+		origin     string
+		token      string
+		wantStatus int
+	}{
+		{
+			name:       "loopback no token passes",
+			remoteAddr: "127.0.0.1:12345",
+			origin:     "",
+			wantStatus: http.StatusOK,
+		},
+		{
+			name:       "loopback with Authorization header passes",
+			remoteAddr: "127.0.0.1:12345",
+			origin:     "",
+			token:      "wrong-token",
+			wantStatus: http.StatusOK,
+		},
+		{
+			name:       "loopback ipv6 is not supported",
+			remoteAddr: "[::1]:12345",
+			origin:     "",
+			token:      "wrong-token",
+			wantStatus: http.StatusFound,
+		},
+		{
+			name:       "localhost passes",
+			remoteAddr: "localhost:12345",
+			origin:     "",
+			token:      "wrong-token",
+			wantStatus: http.StatusOK,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/test", nil)
+			req.RemoteAddr = tt.remoteAddr
+			if tt.origin != "" {
+				req.Header.Set("Origin", tt.origin)
+			}
+			if tt.token != "" {
+				req.Header.Set("Authorization", "Bearer "+tt.token)
+			}
+			w := httptest.NewRecorder()
+			handler.ServeHTTP(w, req)
+			if w.Code != tt.wantStatus {
+				t.Fatalf("expected %d, got %d", tt.wantStatus, w.Code)
+			}
+		})
+	}
+}
+
+func TestWithAuth_NonLoopbackRequiresToken(t *testing.T) {
+	nullLogger := log.New(os.Stderr, "", 0)
+	srv, err := New(Config{AuthToken: "test-token"}, nullLogger)
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+
+	handler := srv.withAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/test", nil)
+	req.RemoteAddr = "192.168.1.5:12345"
+	req.Host = "192.168.1.5:8080"
+	req.Header.Set("Origin", "http://evil.com")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 for origin mismatch, got %d", w.Code)
+	}
+}
+
+func TestWithAuth_CookieToken(t *testing.T) {
+	nullLogger := log.New(os.Stderr, "", 0)
+	srv, err := New(Config{AuthToken: "test-token"}, nullLogger)
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+
+	handler := srv.withAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	tests := []struct {
+		name       string
+		cookie     string
+		wantStatus int
+	}{
+		{
+			name:       "valid cookie token",
+			cookie:     "mw_token=test-token",
+			wantStatus: http.StatusOK,
+		},
+		{
+			name:       "cookie with other values",
+			cookie:     "foo=bar; mw_token=test-token; baz=qux",
+			wantStatus: http.StatusOK,
+		},
+		{
+			name:       "wrong cookie token",
+			cookie:     "mw_token=wrong-token",
+			wantStatus: http.StatusFound,
+		},
+		{
+			name:       "empty cookie token",
+			cookie:     "mw_token=",
+			wantStatus: http.StatusFound,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/test", nil)
+			req.RemoteAddr = "192.168.1.5:12345"
+			req.Header.Set("Cookie", tt.cookie)
+			w := httptest.NewRecorder()
+			handler.ServeHTTP(w, req)
+			if w.Code != tt.wantStatus {
+				t.Fatalf("expected %d, got %d", tt.wantStatus, w.Code)
+			}
+		})
+	}
+}
+
+func TestWithAuth_RateLimiting(t *testing.T) {
+	nullLogger := log.New(os.Stderr, "", 0)
+	srv, err := New(Config{AuthToken: "test-token"}, nullLogger)
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+
+	handler := srv.withAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/test", nil)
+	req.RemoteAddr = "192.168.1.5:12345"
+	req.Header.Set("Authorization", "Bearer wrong-token")
+
+	for i := 0; i < 20; i++ {
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+		if w.Code != http.StatusFound {
+			t.Fatalf("request %d: expected 302, got %d", i+1, w.Code)
+		}
+	}
+
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusTooManyRequests {
+		t.Fatalf("after 20 failures: expected 429, got %d", w.Code)
+	}
+}
+
+func TestExtractAuthToken(t *testing.T) {
+	tests := []struct {
+		name  string
+		setup func(*http.Request)
+		want  string
+	}{
+		{
+			name: "Authorization Bearer",
+			setup: func(r *http.Request) {
+				r.Header.Set("Authorization", "Bearer my-secret-token")
+			},
+			want: "my-secret-token",
+		},
+		{
+			name: "query token",
+			setup: func(r *http.Request) {
+				r.URL.RawQuery = "token=url-token"
+			},
+			want: "url-token",
+		},
+		{
+			name: "cookie mw_token",
+			setup: func(r *http.Request) {
+				r.Header.Set("Cookie", "mw_token=cookie-token")
+			},
+			want: "cookie-token",
+		},
+		{
+			name: "priority Authorization over cookie",
+			setup: func(r *http.Request) {
+				r.Header.Set("Authorization", "Bearer bearer-token")
+				r.Header.Set("Cookie", "mw_token=cookie-token")
+			},
+			want: "bearer-token",
+		},
+		{
+			name: "priority query over cookie",
+			setup: func(r *http.Request) {
+				r.URL.RawQuery = "token=url-token"
+				r.Header.Set("Cookie", "mw_token=cookie-token")
+			},
+			want: "url-token",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/test", nil)
+			tt.setup(req)
+			if got := extractAuthToken(req); got != tt.want {
+				t.Fatalf("extractAuthToken() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestIsValidRedirectPath(t *testing.T) {
+	tests := []struct {
+		path  string
+		valid bool
+	}{
+		{"/", true},
+		{"/dashboard", true},
+		{"/api/list", true},
+		{"", false},
+		{"/login", true},
+		{"login", false},
+		{"http://evil.com", false},
+		{"https://evil.com", false},
+		{"//evil.com", false},
+		{"///evil.com", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.path, func(t *testing.T) {
+			if got := isValidRedirectPath(tt.path); got != tt.valid {
+				t.Fatalf("isValidRedirectPath(%q) = %v, want %v", tt.path, got, tt.valid)
+			}
+		})
 	}
 }
