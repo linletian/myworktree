@@ -12,8 +12,6 @@ import (
 	"math/rand"
 	"net"
 	"net/http"
-	"net/http/httputil"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -62,6 +60,7 @@ type Config struct {
 	DataDir      string
 	RepoName     string
 	RepoHash     string
+	WorktreePath string
 }
 
 type Portal struct {
@@ -93,6 +92,7 @@ type registration struct {
 	RepoName   string `json:"repo_name"`
 	RepoHash   string `json:"repo_hash"`
 	StartedAt  string `json:"started_at"`
+	Path       string `json:"path"`
 }
 
 type portalStatus struct {
@@ -229,7 +229,6 @@ func (p *Portal) newServer() *http.Server {
 	mux.HandleFunc("/api/list", p.handleList)
 	mux.HandleFunc("/api/portal-status", p.handlePortalStatus)
 	mux.HandleFunc("/api/logout", p.handleLogout)
-	mux.HandleFunc("/s/", p.handleProxy)
 
 	return &http.Server{
 		Handler: mux,
@@ -465,6 +464,7 @@ func (p *Portal) writeRegistration() {
 		RepoName:   p.cfg.RepoName,
 		RepoHash:   p.cfg.RepoHash,
 		StartedAt:  time.Now().Format(time.RFC3339),
+		Path:       p.cfg.WorktreePath,
 	}
 
 	data, _ := json.Marshal(reg)
@@ -666,6 +666,7 @@ func (p *Portal) handleList(w http.ResponseWriter, r *http.Request) {
 				"repo_name":   reg.RepoName,
 				"repo_hash":   reg.RepoHash,
 				"started_at":  reg.StartedAt,
+				"path":        reg.Path,
 				"alive":       alive,
 			})
 		}
@@ -729,53 +730,6 @@ func (p *Portal) handleLogout(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
 
-func (p *Portal) handleProxy(w http.ResponseWriter, r *http.Request) {
-	if !p.checkAuth(r) {
-		http.Error(w, "Unauthorized", http.StatusUnauthorized)
-		return
-	}
-
-	p.refreshAuthCookie(w, r)
-
-	repoHash := parseRepoHash(r.URL.Path)
-	if repoHash == "" {
-		http.Error(w, "Invalid repo hash", http.StatusBadRequest)
-		return
-	}
-
-	port := p.findInstancePort(repoHash)
-	if port == 0 {
-		http.Error(w, "Instance not found", http.StatusBadGateway)
-		return
-	}
-
-	proxy := httputil.NewSingleHostReverseProxy(&url.URL{Scheme: "http", Host: fmt.Sprintf("127.0.0.1:%d", port)})
-	originalPath := r.URL.Path
-	proxy.Director = func(req *http.Request) {
-		req.URL.Scheme = "http"
-		req.URL.Host = fmt.Sprintf("127.0.0.1:%d", port)
-		strippedPath := strings.TrimPrefix(originalPath, "/s/"+repoHash)
-		if !strings.HasPrefix(strippedPath, "/") {
-			strippedPath = "/" + strippedPath
-		}
-		req.URL.Path = strippedPath
-		req.URL.RawPath = ""
-	}
-	proxy.ErrorLog = log.New(&logWriter{repoHash: repoHash, port: port}, "", 0)
-
-	proxy.ServeHTTP(w, r)
-}
-
-type logWriter struct {
-	repoHash string
-	port     int
-}
-
-func (l *logWriter) Write(p []byte) (int, error) {
-	log.Printf("[portal] reverse proxy: dial 127.0.0.1:%d (repo_hash=%q) failed: %s", l.port, l.repoHash, strings.TrimSpace(string(p)))
-	return len(p), nil
-}
-
 func (p *Portal) checkAuth(r *http.Request) bool {
 	token := extractToken(r)
 	if token == "" {
@@ -812,47 +766,6 @@ func extractToken(r *http.Request) string {
 	return ""
 }
 
-func parseRepoHash(path string) string {
-	parts := strings.Split(strings.TrimPrefix(path, "/s/"), "/")
-	if len(parts) == 0 {
-		return ""
-	}
-	hash := parts[0]
-	for _, c := range hash {
-		if !((c >= 'a' && c <= 'f') || (c >= '0' && c <= '9')) {
-			return ""
-		}
-	}
-	return hash
-}
-
-func (p *Portal) findInstancePort(repoHash string) int {
-	if p.cfg.RegistryDir == "" {
-		return 0
-	}
-	entries, _ := os.ReadDir(p.cfg.RegistryDir)
-	for _, entry := range entries {
-		if entry.IsDir() || entry.Name() == "portal.json" {
-			continue
-		}
-		if filepath.Ext(entry.Name()) != ".json" {
-			continue
-		}
-		data, err := os.ReadFile(filepath.Join(p.cfg.RegistryDir, entry.Name()))
-		if err != nil {
-			continue
-		}
-		var reg registration
-		if json.Unmarshal(data, &reg) != nil {
-			continue
-		}
-		if reg.RepoHash == repoHash {
-			return reg.Port
-		}
-	}
-	return 0
-}
-
 func getIP(r *http.Request) string {
 	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
 		if idx := strings.Index(xff, ","); idx != -1 {
@@ -881,14 +794,15 @@ func isProcessAlive(pid int, port int) bool {
 	if proc.Signal(syscall.Signal(0)) != nil {
 		return false
 	}
-	if port <= 0 {
-		return true
+	if port > 0 {
+		conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 1*time.Second)
+		if err == nil {
+			conn.Close()
+			return true
+		}
+		// TCP failed — port may be wrong (upgrade scenario) or not yet bound.
+		// Fall back to PID-only check: if process is alive, we're good.
 	}
-	conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 1*time.Second)
-	if err != nil {
-		return false
-	}
-	conn.Close()
 	return true
 }
 

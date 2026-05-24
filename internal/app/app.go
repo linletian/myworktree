@@ -358,14 +358,20 @@ func (s *Server) Start() (string, error) {
 			s.logger.Printf("[portal] warning: UserConfigDir failed: %v", err)
 			base = ""
 		}
+		instancePort := 0
+		if tcpAddr, ok := s.ln.Addr().(*net.TCPAddr); ok {
+			instancePort = tcpAddr.Port
+		}
 		cfg := portal.Config{
 			PortalPort:   s.cfg.PortalPort,
+			InstancePort: instancePort,
 			Host:         "0.0.0.0",
 			AuthToken:    s.cfg.AuthToken,
 			RegistryDir:  filepath.Join(base, "myworktree", "portal"),
 			DataDir:      s.dataDir,
 			RepoName:     filepath.Base(filepath.Clean(s.root)),
 			RepoHash:     gitx.HashPath(s.root),
+			WorktreePath: s.root,
 		}
 		s.portal = portal.New(cfg)
 		if err := s.portal.Start(); err != nil {

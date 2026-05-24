@@ -80,7 +80,7 @@ func startCmd(logger *log.Logger, prog string, args []string) error {
 
 	defaultOpen := filepath.Base(strings.TrimSpace(prog)) == "mw"
 
-	fs.StringVar(&listen, "listen", "127.0.0.1:0", "listen address")
+	fs.StringVar(&listen, "listen", "0.0.0.0:0", "listen address")
 	fs.StringVar(&auth, "auth", "", "auth token (auto-generated if not provided)")
 	fs.StringVar(&tlsCert, "tls-cert", "", "path to TLS certificate PEM")
 	fs.StringVar(&tlsKey, "tls-key", "", "path to TLS private key PEM")

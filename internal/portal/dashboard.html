@@ -171,7 +171,7 @@
 			<tr>
 				<th>Repository</th>
 				<th>Port</th>
-				<th>Instance ID</th>
+				<th>Path</th>
 				<th>Status</th>
 				<th>Link</th>
 			</tr>
@@ -251,7 +251,7 @@
 				tr.appendChild(portTd);
 
 				var idTd = document.createElement('td');
-				idTd.textContent = p.instance_id;
+				idTd.textContent = p.path;
 				idTd.style.fontSize = '12px';
 				idTd.style.color = '#888';
 				tr.appendChild(idTd);
@@ -264,9 +264,9 @@
 				tr.appendChild(statusTd);
 
 				var linkTd = document.createElement('td');
-				if (p.alive && p.repo_hash) {
+				if (p.alive && p.port > 0) {
 					var a = document.createElement('a');
-					a.href = '/s/' + p.repo_hash + '/';
+					a.href = window.location.protocol + '//' + window.location.hostname + ':' + p.port + '/';
 					a.className = 'repo-link';
 					a.textContent = 'Open';
 					a.target = '_blank';
