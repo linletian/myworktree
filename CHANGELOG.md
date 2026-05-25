@@ -1,5 +1,27 @@
 # Changelog
 
+## v0.3.0
+
+Release focused on remote collaboration, build robustness, and Apple Silicon reliability.
+
+Highlights:
+- Added **Portal Dashboard** — a shared entry port with auto-discovery of running instances across repos, global auth token (HttpOnly Cookie, CSRF protection), and Tailscale serve readiness.
+- Improved **remote access** — instances and portal now bind to `0.0.0.0` by default, auth token auto-generates on first run, and the login flow supports CSRF-protected forms for non-loopback clients.
+- Integrated **LLM-powered branch naming** — configurable protocol (OpenAI / Anthropic), with reasoning split support and a manual override option.
+- Upgraded terminal shell with **xterm.js v6.0.0** and fixed Chinese IME shift-symbol fullwidth issues.
+- Enhanced the **Changes panel** with separate Staged / Unstaged accordion sections, untracked file tracking, and per-file diff stats.
+- Streamlined instance lifecycle — instances can be deleted directly on stop (no archive step), with per-worktree tab reordering via optimistic locking.
+
+Build hardening for Apple Silicon:
+- Release builds now set `CGO_ENABLED=0` to guarantee pure-Go cross-compilation from Linux to Darwin.
+- Removed `-w` linker flag to preserve macOS code-signing compatibility.
+- Added optional macOS codesign + notarization job (enabled via repository variables/secrets) to resolve Gatekeeper blocking on Apple Silicon Macs.
+- Users who still encounter "no response" on Apple Silicon can run `xattr -d com.apple.quarantine ./mw` to clear the download quarantine attribute.
+
+Documentation and validation:
+- Expanded API, architecture, and PRD docs to cover the Portal Dashboard, remote access flow, CSRF protection, and auto-auth generation.
+- Release packaging continues to publish Darwin `amd64` / `arm64` archives plus SHA256 checksums via the tag-triggered GitHub Actions workflow, with an optional codesign job.
+
 ## v0.2.0
 
 Feature release focused on workspace visibility, terminal continuity, and day-to-day usability improvements.

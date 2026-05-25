@@ -77,6 +77,12 @@ Start from `v0.2.0` or newer for public release binaries. The earlier `v0.1.0` G
 Each release archive contains `mw`, `myworktree`, `README.md`, `LICENSE`, and `CHANGELOG.md`.
 If there is no prerelease/release asset yet, or you need a platform we do not publish, follow the source build steps below.
 
+**Apple Silicon troubleshooting:** macOS may quarantine downloaded binaries and silently prevent execution (Gatekeeper). If the binary does not respond or shows "cannot be opened":
+```bash
+xattr -d com.apple.quarantine ./mw ./myworktree
+```
+Or open **System Settings → Privacy & Security** and click "Allow Anyway" for the blocked binaries.
+
 ### Build & install
 
 ```bash

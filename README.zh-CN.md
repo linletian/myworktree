@@ -77,6 +77,12 @@ mw --version
 每个发布压缩包内都包含 `mw`、`myworktree`、`README.md`、`LICENSE` 和 `CHANGELOG.md`。
 如果当前还没有预发布/正式发布压缩包，或者你的平台暂无对应产物，就直接使用下面的源码编译步骤。
 
+**Apple Silicon 排障提示：** macOS 会对从网络下载的二进制文件施加隔离属性（Gatekeeper），可能导致二进制无响应或提示"无法验证开发者"。可运行：
+```bash
+xattr -d com.apple.quarantine ./mw ./myworktree
+```
+或在 **系统设置 → 隐私与安全性** 中为被阻止的二进制文件点击"仍要打开"。
+
 ### Build & install
 
 ```bash
