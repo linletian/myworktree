@@ -141,9 +141,8 @@ mw
 
 当 Portal 启用时，启动输出包含：
 ```
-Portal dashboard at:
-  http://0.0.0.0:12345/
-Tailscale: https://my-machine.tail-scale.ts.net/
+[portal] Portal dashboard at: http://0.0.0.0:12345/
+[portal] Tailscale URL: https://my-machine.tail-scale.ts.net/
 ```
 
 myworktree 会用**当前工作目录**定位目标项目（git root），并基于该 git root 计算独立的数据目录，因此要管理其他项目时，只需要在另一个项目仓库目录下运行同一个 myworktree 二进制即可。
@@ -174,10 +173,11 @@ myworktree instance list
 myworktree instance stop <instanceId>
 
 # config（全局认证 Token）
-mw config              # 交互式引导（设置/查看/清除 Token）
+mw config              # 交互式引导（设置/查看/清除/重新生成 Token）
 mw config set-auth     # 直接设置 Token
 mw config get-auth     # 查看 Token（掩码显示）
 mw config clear-auth   # 清除 Token
+mw config regen        # 重新生成 Token（需确认）
 
 # 启动并启用远程访问 + Portal
 mw start --listen 0.0.0.0:0                     # LAN 访问，自动继承全局 Token
@@ -236,18 +236,18 @@ GitHub Actions（`.github/workflows/go-ci.yml`）会在以下场景运行：
 
 ```bash
 mw config
-# → 交互式引导：[1] 设置 Token  [2] 查看 Token  [3] 清除 Token  [q] 退出
+# → 交互式引导：[1] 设置 Token  [2] 查看 Token  [3] 清除 Token  [4] 重新生成 Token  [q] 退出
 # Token 存储在 ~/.config/myworktree/auth.json（0600 权限）
 ```
 
-Token 以明文存储在 `auth.json` 中（0600 权限）。实例级别 `--auth` 参数优先级高于全局 Token。
+当未提供 `--auth` 且 `auth.json` 中无已有 Token 时，CLI 会**自动生成一个随机的 32 字符 hex Token** 并持久化。这确保实例默认启用认证。实例级别 `--auth` 参数优先级高于全局 Token。
 
 ### Portal 仪表板
 
 `mw start --listen 0.0.0.0:0` 会在端口 `12345` 启动 **Portal 仪表板**（可通过 `--portal-port` 自定义）。仪表板功能：
 
 - 自动发现并列出所有跨仓库运行中的实例
-- 点击实例通过 Portal 反向代理跳转到其 Web UI
+- 点击实例直接跳转到其 Web UI（通过实例端口直连——Portal 反向代理 `/s/<repo-hash>/` 计划中但尚未实现）
 - 使用 **HttpOnly Cookie**（`mw_token`）进行认证——Token 不出现在 URL 或 JS 中
 - 登录/登出端点采用 **CSRF 防护**（double-submit cookie 模式）
 - Cookie 具备 24 小时**滑动过期**机制（每次认证成功的请求自动刷新有效期）
@@ -256,7 +256,7 @@ Token 以明文存储在 `auth.json` 中（0600 权限）。实例级别 `--auth
 
 ### Tailscale HTTPS
 
-当 Tailscale 已安装时，Portal 持有者自动配置 `tailscale serve`，提供 HTTPS 访问（`https://<machine>.ts.net`）。全程自动化，无需手动配置。
+> **说明**：自动 `tailscale serve` 配置功能**当前已禁用**，原因是 macOS 上 Tailscale 1.98 CLI 存在 bug：`tailscale serve --bg` 返回成功但实际未配置代理。相关代码存在于 `internal/portal/portal.go` 中但未接入正式代码路径。用户仍可通过 Tailscale IP（`http://100.x.x.x:12345`）经 WireGuard 隧道安全访问 Portal。待 Tailscale 修复上游 bug 后将重新启用自动 `tailscale serve` 管理功能。
 
 ### 网络安全
 

@@ -141,9 +141,8 @@ When startup succeeds, `mw` opens the web page automatically at the serving URL 
 
 When Portal is enabled, the startup output includes:
 ```
-Portal dashboard at:
-  http://0.0.0.0:12345/
-Tailscale: https://my-machine.tail-scale.ts.net/
+[portal] Portal dashboard at: http://0.0.0.0:12345/
+[portal] Tailscale URL: https://my-machine.tail-scale.ts.net/
 ```
 
 myworktree uses the **current working directory** to detect the target repo (git root) and derives an isolated per-project data dir from it, so you can manage other projects by running the same binary in a different repo directory.
@@ -174,10 +173,11 @@ myworktree instance list
 myworktree instance stop <instanceId>
 
 # config (global auth token)
-mw config              # interactive guided setup (set/view/clear token)
+mw config              # interactive guided setup (set/view/clear/regen token)
 mw config set-auth     # set token directly
 mw config get-auth     # view token (masked)
 mw config clear-auth   # clear token
+mw config regen        # regenerate token (with confirmation)
 
 # start with remote access & Portal (IPv6 is explicitly disabled)
 mw start --listen 0.0.0.0:0                     # LAN access, auto-inherits global token
@@ -238,18 +238,18 @@ Configure a global auth token once, and all instances automatically inherit it:
 
 ```bash
 mw config
-# → Interactive guided setup: [1] set token [2] view token [3] clear token [q] quit
+# → Interactive guided setup: [1] set token [2] view token [3] clear token [4] regen token [q] quit
 # Token stored in ~/.config/myworktree/auth.json (0600 permissions)
 ```
 
-The token is stored as plaintext in `auth.json` (0600 permissions). Instance-level `--auth` override takes precedence over the global token.
+When `--auth` is not provided and no token exists in `auth.json`, the CLI **automatically generates a random 32-character hex token** and persists it. This ensures instances always have authentication enabled by default. Instance-level `--auth` override takes precedence over the global token.
 
 ### Portal Dashboard
 
 `mw start --listen 0.0.0.0:0` starts a **Portal Dashboard** on port `12345` (configurable via `--portal-port`). The dashboard:
 
 - Lists all running instances across repos with auto-discovery
-- Click an instance to jump to its Web UI through the Portal reverse proxy
+- Click an instance to jump to its Web UI (directly via instance port — Portal reverse proxy `/s/<repo-hash>/` is planned but not yet implemented)
 - Uses **HttpOnly Cookie** (`mw_token`) for authentication — token never appears in URL or JS
 - **CSRF protection** via double-submit cookie pattern on login/logout endpoints
 - Cookie has 24-hour **sliding expiration** (refreshed on each auth-successful request)
@@ -258,7 +258,7 @@ Set `--portal-port 0` to disable the Portal.
 
 ### Tailscale HTTPS
 
-When Tailscale is installed, the Portal holder automatically configures `tailscale serve` to provide HTTPS access via `https://<machine>.ts.net`. This is fully automated — zero manual configuration.
+> **Note**: Automatic `tailscale serve` configuration is **currently disabled** due to a Tailscale 1.98 CLI bug on macOS where `tailscale serve --bg` reports success but does not actually configure the proxy. The relevant code exists in `internal/portal/portal.go` but is not wired into the production code paths. Users can still securely access Portal via Tailscale IP (`http://100.x.x.x:12345`) over the WireGuard tunnel. Automatic `tailscale serve` management will be re-enabled once Tailscale fixes the upstream bug.
 
 ### Network Security
 
