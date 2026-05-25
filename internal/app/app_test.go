@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"myworktree/internal/config"
 	"myworktree/internal/store"
 )
 
@@ -886,6 +887,18 @@ func TestWithAuth_NonLoopbackRequiresToken(t *testing.T) {
 }
 
 func TestWithAuth_CookieToken(t *testing.T) {
+	tmpDir := t.TempDir()
+	testConfigPath := filepath.Join(tmpDir, "myworktree", "auth.json")
+	reset := config.SetPathForTest(func() (string, error) { return testConfigPath, nil })
+	defer reset()
+
+	if err := os.MkdirAll(filepath.Dir(testConfigPath), 0o755); err != nil {
+		t.Fatalf("mkdir failed: %v", err)
+	}
+	if err := os.WriteFile(testConfigPath, []byte(`{"auth_token":"test-token"}`), 0o600); err != nil {
+		t.Fatalf("write failed: %v", err)
+	}
+
 	nullLogger := log.New(os.Stderr, "", 0)
 	srv, err := New(Config{AuthToken: "test-token"}, nullLogger)
 	if err != nil {
@@ -938,6 +951,18 @@ func TestWithAuth_CookieToken(t *testing.T) {
 }
 
 func TestWithAuth_RateLimiting(t *testing.T) {
+	tmpDir := t.TempDir()
+	testConfigPath := filepath.Join(tmpDir, "myworktree", "auth.json")
+	reset := config.SetPathForTest(func() (string, error) { return testConfigPath, nil })
+	defer reset()
+
+	if err := os.MkdirAll(filepath.Dir(testConfigPath), 0o755); err != nil {
+		t.Fatalf("mkdir failed: %v", err)
+	}
+	if err := os.WriteFile(testConfigPath, []byte(`{"auth_token":"test-token"}`), 0o600); err != nil {
+		t.Fatalf("write failed: %v", err)
+	}
+
 	nullLogger := log.New(os.Stderr, "", 0)
 	srv, err := New(Config{AuthToken: "test-token"}, nullLogger)
 	if err != nil {

@@ -339,6 +339,8 @@ func configCmd(logger *log.Logger, args []string) error {
 		return configGetAuth()
 	case "clear-auth":
 		return configClearAuth()
+	case "regen":
+		return configRegenAuth(logger)
 	default:
 		return fmt.Errorf("unknown config subcommand: %s", args[0])
 	}
@@ -349,6 +351,7 @@ func configInteractive(logger *log.Logger) error {
 	fmt.Println("  [1] Set auth token")
 	fmt.Println("  [2] View auth token")
 	fmt.Println("  [3] Clear auth token")
+	fmt.Println("  [4] Regenerate auth token")
 	fmt.Println("  [q] Quit")
 	fmt.Print("Choose an option: ")
 
@@ -364,6 +367,8 @@ func configInteractive(logger *log.Logger) error {
 		return configGetAuth()
 	case "3":
 		return configClearAuth()
+	case "4":
+		return configRegenAuth(logger)
 	case "q", "Q":
 		return nil
 	default:
@@ -419,6 +424,37 @@ func configClearAuth() error {
 		return fmt.Errorf("failed to save config: %w", err)
 	}
 	fmt.Println("Auth token cleared.")
+	return nil
+}
+
+func configRegenAuth(logger *log.Logger) error {
+	gc, err := config.Load()
+	if err != nil {
+		return fmt.Errorf("failed to load config: %w", err)
+	}
+	if gc.AuthToken != "" {
+		fmt.Print("This will replace the existing auth token. Continue? [y/N] ")
+		br := bufio.NewReader(os.Stdin)
+		line, _, err := br.ReadLine()
+		if err != nil {
+			return fmt.Errorf("failed to read input: %w", err)
+		}
+		if !strings.EqualFold(strings.TrimSpace(string(line)), "y") {
+			fmt.Println("Aborted.")
+			return nil
+		}
+	}
+
+	token, err := generateAuthToken()
+	if err != nil {
+		return fmt.Errorf("failed to generate token: %w", err)
+	}
+	gc.AuthToken = token
+	if err := config.Save(gc); err != nil {
+		return fmt.Errorf("failed to save config: %w", err)
+	}
+	fmt.Printf("New auth token: %s\n", token)
+	fmt.Println("Auth token regenerated successfully.")
 	return nil
 }
 

@@ -179,3 +179,125 @@ func TestResolveGlobalAuthToken_AuthAlreadySet(t *testing.T) {
 		t.Fatalf("expected no warning/log when --auth is explicitly set, got: %s", buf.String())
 	}
 }
+
+func TestConfigRegenAuth_EmptyConfigGeneratesNewToken(t *testing.T) {
+	tmpDir := t.TempDir()
+	reset := config.SetPathForTest(testConfigPath(tmpDir))
+	defer reset()
+
+	path := filepath.Join(tmpDir, "myworktree", "auth.json")
+	os.MkdirAll(filepath.Dir(path), 0o755)
+	os.WriteFile(path, []byte(`{}`), 0o600)
+
+	err := configRegenAuth(nil)
+	if err != nil {
+		t.Fatalf("configRegenAuth failed: %v", err)
+	}
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("Load after regen failed: %v", err)
+	}
+	if cfg.AuthToken == "" {
+		t.Fatal("expected non-empty token after regen")
+	}
+	if len(cfg.AuthToken) != 32 {
+		t.Fatalf("expected 32-char hex token, got %d chars: %q", len(cfg.AuthToken), cfg.AuthToken)
+	}
+}
+
+func TestConfigRegenAuth_NoExistingTokenSkipsConfirmation(t *testing.T) {
+	tmpDir := t.TempDir()
+	reset := config.SetPathForTest(testConfigPath(tmpDir))
+	defer reset()
+
+	path := filepath.Join(tmpDir, "myworktree", "auth.json")
+	os.MkdirAll(filepath.Dir(path), 0o755)
+	os.WriteFile(path, []byte(`{}`), 0o600)
+
+	restore := captureStdin(t, "y\n")
+	err := configRegenAuth(nil)
+	restore()
+	if err != nil {
+		t.Fatalf("configRegenAuth failed: %v", err)
+	}
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("Load after regen failed: %v", err)
+	}
+	if cfg.AuthToken == "" {
+		t.Fatal("expected non-empty token after regen")
+	}
+}
+
+func TestConfigRegenAuth_ExistingTokenRequiresConfirmation(t *testing.T) {
+	tmpDir := t.TempDir()
+	reset := config.SetPathForTest(testConfigPath(tmpDir))
+	defer reset()
+
+	path := filepath.Join(tmpDir, "myworktree", "auth.json")
+	os.MkdirAll(filepath.Dir(path), 0o755)
+	os.WriteFile(path, []byte(`{"auth_token":"old-token-value"}`), 0o600)
+
+	restore := captureStdin(t, "n\n")
+	err := configRegenAuth(nil)
+	restore()
+	if err != nil {
+		t.Fatalf("configRegenAuth failed: %v", err)
+	}
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("Load after aborted regen failed: %v", err)
+	}
+	if cfg.AuthToken != "old-token-value" {
+		t.Fatalf("expected old token to remain unchanged after abort, got %q", cfg.AuthToken)
+	}
+}
+
+func TestConfigRegenAuth_YesConfirmationProceeds(t *testing.T) {
+	tmpDir := t.TempDir()
+	reset := config.SetPathForTest(testConfigPath(tmpDir))
+	defer reset()
+
+	path := filepath.Join(tmpDir, "myworktree", "auth.json")
+	os.MkdirAll(filepath.Dir(path), 0o755)
+	os.WriteFile(path, []byte(`{"auth_token":"old-token-value"}`), 0o600)
+
+	restore := captureStdin(t, "y\n")
+	err := configRegenAuth(nil)
+	restore()
+	if err != nil {
+		t.Fatalf("configRegenAuth failed: %v", err)
+	}
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("Load after regen failed: %v", err)
+	}
+	if cfg.AuthToken == "old-token-value" {
+		t.Fatal("expected token to be regenerated, but old token remains")
+	}
+	if len(cfg.AuthToken) != 32 {
+		t.Fatalf("expected 32-char hex token, got %d chars: %q", len(cfg.AuthToken), cfg.AuthToken)
+	}
+}
+
+func captureStdin(t *testing.T, input string) (restore func()) {
+	t.Helper()
+	oldStdin := os.Stdin
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe failed: %v", err)
+	}
+	go func() {
+		w.WriteString(input)
+		w.Close()
+	}()
+	os.Stdin = r
+	return func() {
+		os.Stdin = oldStdin
+		r.Close()
+	}
+}
