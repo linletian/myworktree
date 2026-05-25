@@ -27,8 +27,7 @@ myworktree 只做管理，不碰项目具体内容：
 ## 功能（MVP）
 - 受管 worktree：创建/列表/纳入管理(import)/删除（严格删除：dirty 则拒绝）
 - 受管 instance：基于 Tag 启动模板启动/停止/重启/列表
-- instance 重启会保留 worktree、tag/命令、labels，并串联旧/新实例记录
-- 支持可选 instance labels（`k=v`），可用于 UI 过滤与搜索
+- instance 重启会保留 worktree、tag/命令，并串联旧/新实例记录
 - 默认 WebSocket Web TTY 交互（并保留 SSE/HTTP 兜底）
 - 前端页面关闭/刷新后：后端 instance 继续运行；重新打开可回放输出并继续交互
 - UI 提供传输状态标记（websocket/sse/polling）和 WS 重连按钮
@@ -36,6 +35,8 @@ myworktree 只做管理，不碰项目具体内容：
 - 可选内置 HTTPS（`--tls-cert/--tls-key`），非 loopback 监听必须 `--auth`
 - 回放落盘日志脱敏（覆盖常见 secret 与 `sk-...`）
 - MCP 接口（`/api/mcp/tools`、`/api/mcp/call`）
+- Portal 仪表板：共享入口端口，跨仓库自动发现运行实例
+- 全局认证 Token（HttpOnly Cookie、CSRF 防护、Tailscale Serve 自动集成）
 
 ## 运行环境
 - macOS 12+ 其他平台未验证
@@ -75,6 +76,12 @@ mw --version
 
 每个发布压缩包内都包含 `mw`、`myworktree`、`README.md`、`LICENSE` 和 `CHANGELOG.md`。
 如果当前还没有预发布/正式发布压缩包，或者你的平台暂无对应产物，就直接使用下面的源码编译步骤。
+
+**Apple Silicon 排障提示：** macOS 会对从网络下载的二进制文件施加隔离属性（Gatekeeper），可能导致二进制无响应或提示"无法验证开发者"。可运行：
+```bash
+xattr -d com.apple.quarantine ./mw ./myworktree
+```
+或在 **系统设置 → 隐私与安全性** 中为被阻止的二进制文件点击"仍要打开"。
 
 ### Build & install
 
@@ -138,6 +145,12 @@ mw
 运行成功后，`mw` 默认会自动打开浏览器访问对应 URL。
 `myworktree` 默认只打印 URL；如果也想自动打开浏览器，可传 `-open=true`。
 
+当 Portal 启用时，启动输出包含：
+```
+[portal] Portal dashboard at: http://0.0.0.0:12345/
+[portal] Tailscale URL: https://my-machine.tail-scale.ts.net/
+```
+
 myworktree 会用**当前工作目录**定位目标项目（git root），并基于该 git root 计算独立的数据目录，因此要管理其他项目时，只需要在另一个项目仓库目录下运行同一个 myworktree 二进制即可。
 
 默认情况下，新建 worktree 会放在主仓库的同级目录下：
@@ -164,6 +177,18 @@ myworktree instance start --worktree <worktreeId> --cmd "echo hello && ls"
 myworktree instance start --worktree <worktreeId>  # 启动一个可交互 shell instance
 myworktree instance list
 myworktree instance stop <instanceId>
+
+# config（全局认证 Token）
+mw config              # 交互式引导（设置/查看/清除/重新生成 Token）
+mw config set-auth     # 直接设置 Token
+mw config get-auth     # 查看 Token（掩码显示）
+mw config clear-auth   # 清除 Token
+mw config regen        # 重新生成 Token（需确认）
+
+# 启动并启用远程访问 + Portal
+mw start --listen 0.0.0.0:0                     # LAN 访问，自动继承全局 Token
+mw start --listen 0.0.0.0:0 --portal-port 12346 # 自定义 Portal 端口
+mw start --listen 0.0.0.0:0 --portal-port 0     # 禁用 Portal
 ```
 
 ## Tag 配置
@@ -210,10 +235,46 @@ GitHub Actions（`.github/workflows/go-ci.yml`）会在以下场景运行：
 带 `v*` 标签的发布会触发 `.github/workflows/release.yml`，产出 darwin `amd64` / `arm64` 压缩包和 SHA256 校验文件。
 
 ## 远程访问
-- 默认只监听本机回环地址。
-- 监听到非 loopback（如 `0.0.0.0` 或局域网 IP）时必须提供 `--auth`。
-- 需要 HTTPS 时提供 `--tls-cert` 与 `--tls-key`。
-- 简单客户端可用 `?token=<token>`，但更推荐 `Authorization: Bearer <token>`，避免 token 落入浏览器历史或 shell 历史。
+
+### 全局 Token
+
+一次性配置全局认证 Token，所有实例自动继承：
+
+```bash
+mw config
+# → 交互式引导：[1] 设置 Token  [2] 查看 Token  [3] 清除 Token  [4] 重新生成 Token  [q] 退出
+# Token 存储在 ~/.config/myworktree/auth.json（0600 权限）
+```
+
+当未提供 `--auth` 且 `auth.json` 中无已有 Token 时，CLI 会**自动生成一个随机的 32 字符 hex Token** 并持久化。这确保实例默认启用认证。实例级别 `--auth` 参数优先级高于全局 Token。
+
+### Portal 仪表板
+
+`mw start --listen 0.0.0.0:0` 会在端口 `12345` 启动 **Portal 仪表板**（可通过 `--portal-port` 自定义）。仪表板功能：
+
+- 自动发现并列出所有跨仓库运行中的实例
+- 点击实例直接跳转到其 Web UI（通过实例端口直连——Portal 反向代理 `/s/<repo-hash>/` 计划中但尚未实现）
+- 使用 **HttpOnly Cookie**（`mw_token`）进行认证——Token 不出现在 URL 或 JS 中
+- 登录/登出端点采用 **CSRF 防护**（double-submit cookie 模式）
+- Cookie 具备 24 小时**滑动过期**机制（每次认证成功的请求自动刷新有效期）
+
+设置 `--portal-port 0` 可禁用 Portal。
+
+### Tailscale HTTPS
+
+> **说明**：自动 `tailscale serve` 配置功能**当前已禁用**，原因是 macOS 上 Tailscale 1.98 CLI 存在 bug：`tailscale serve --bg` 返回成功但实际未配置代理。相关代码存在于 `internal/portal/portal.go` 中但未接入正式代码路径。用户仍可通过 Tailscale IP（`http://100.x.x.x:12345`）经 WireGuard 隧道安全访问 Portal。待 Tailscale 修复上游 bug 后将重新启用自动 `tailscale serve` 管理功能。
+
+### 网络安全
+
+| 访问路径 | 协议 | 加密层级 |
+|----------|------|----------|
+| 实例直连（本地/LAN IP） | `http://192.168.1.18:PORT` → 实例 | 无（仅 LAN 可及） |
+| 实例直连（Tailscale IP） | `http://100.x.x.x:PORT` → 实例 | WireGuard 隧道加密 |
+| 仪表板 + 代理（本地/LAN） | `http://host:12345` → 代理 `http://127.0.0.1:PORT` | 无（仅 LAN 可及） |
+| 仪表板 + 代理（Tailscale IP） | `http://100.x.x.x:12345` → 代理 `http://127.0.0.1:PORT` | WireGuard 隧道加密 |
+| `tailscale serve` 域名 | `https://machine.ts.net` → 代理 `http://127.0.0.1:PORT` | Let's Encrypt TLS + WireGuard |
+
+> **说明**：Tailscale 的 WireGuard 隧道已对网络层加密。仅通过 `tailscale serve` 域名访问时使用应用层 HTTPS（Let's Encrypt 证书）。
 
 ## License
 MIT 协议，详见 [LICENSE](./LICENSE)。

@@ -1,0 +1,435 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<title>Portal Dashboard</title>
+	<style>
+		:root {
+			--bg-color: #ffffff;
+			--text-primary: #24292e;
+			--text-secondary: #586069;
+			--panel-bg: #f6f8fa;
+			--border-color: #e1e4e8;
+			--input-bg: #ffffff;
+			--input-border: #d0d7da;
+			--input-focus-border: #2ea44f;
+			--input-focus-shadow: rgba(46, 164, 79, 0.2);
+			--button-bg: #2ea44f;
+			--button-hover-bg: #2c974b;
+			--error-text: #cb2431;
+			--table-header-bg: #f6f8fa;
+			--table-header-text: #586069;
+			--hover-bg: #f6f8fa;
+			--link-color: #0366d6;
+			--alive-color: #28a745;
+			--dead-color: #ef4444;
+			--card-bg: #ffffff;
+			--card-shadow: 0 4px 24px rgba(0,0,0,0.08);
+			--card-border: #e1e4e8;
+			--card-radius: 16px;
+			--input-radius: 8px;
+			--btn-radius: 8px;
+			--overlay-bg: rgba(246, 248, 250, 0.95);
+		}
+
+		@media (prefers-color-scheme: dark) {
+			:root {
+				--bg-color: #1a1a1a;
+				--text-primary: #e0e0e0;
+				--text-secondary: #888;
+				--panel-bg: #252525;
+				--border-color: #333;
+				--input-bg: #2a2a2a;
+				--input-border: #444;
+				--input-focus-border: #3fb950;
+				--input-focus-shadow: rgba(63, 185, 80, 0.2);
+				--button-bg: #238636;
+				--button-hover-bg: #2ea043;
+				--error-text: #ff6666;
+				--table-header-bg: #252525;
+				--table-header-text: #aaa;
+				--hover-bg: #252525;
+				--link-color: #66ccff;
+				--alive-color: #22c55e;
+				--dead-color: #ef4444;
+				--card-bg: #222222;
+				--card-shadow: 0 4px 24px rgba(0,0,0,0.3);
+				--card-border: #333;
+				--overlay-bg: rgba(30, 30, 30, 0.95);
+			}
+		}
+
+		* {
+			margin: 0;
+			padding: 0;
+			box-sizing: border-box;
+		}
+		body {
+			font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji";
+			background-color: var(--bg-color);
+			color: var(--text-primary);
+			padding: 40px 20px;
+			min-height: 100vh;
+		}
+		.content-card {
+			background: var(--card-bg);
+			border: 1px solid var(--card-border);
+			border-radius: 12px;
+			box-shadow: var(--card-shadow);
+			padding: 32px;
+			max-width: 960px;
+			margin: 0 auto;
+		}
+		.page-header {
+			margin-bottom: 24px;
+		}
+		.page-header h1 {
+			font-size: 24px;
+			font-weight: 700;
+			margin: 0 0 6px 0;
+			color: var(--text-primary);
+		}
+		.page-desc {
+			font-size: 13px;
+			color: var(--text-secondary);
+			margin: 0;
+		}
+		#token-form {
+			display: none;
+			position: fixed;
+			top: 0;
+			left: 0;
+			width: 100%;
+			height: 100%;
+			background: var(--overlay-bg);
+			backdrop-filter: blur(8px);
+			z-index: 1000;
+			align-items: center;
+			justify-content: center;
+		}
+		#token-form.visible {
+			display: flex;
+		}
+		.login-card {
+			background: var(--card-bg);
+			border: 1px solid var(--card-border);
+			border-radius: var(--card-radius);
+			box-shadow: var(--card-shadow);
+			padding: 40px;
+			width: 100%;
+			max-width: 400px;
+			margin: 20px;
+			box-sizing: border-box;
+		}
+		.login-card h2 {
+			margin: 0 0 8px 0;
+			font-size: 20px;
+			font-weight: 600;
+			color: var(--text-primary);
+			text-align: center;
+		}
+		.login-card .subtitle {
+			margin: 0 0 24px 0;
+			font-size: 13px;
+			color: var(--text-secondary);
+			text-align: center;
+		}
+		.login-card label {
+			display: block;
+			margin-bottom: 6px;
+			font-size: 13px;
+			font-weight: 500;
+			color: var(--text-primary);
+		}
+		.login-card input[type="password"] {
+			width: 100%;
+			padding: 10px 12px;
+			font-family: inherit;
+			font-size: 14px;
+			background: var(--input-bg);
+			border: 1px solid var(--input-border);
+			color: var(--text-primary);
+			border-radius: var(--input-radius);
+			box-sizing: border-box;
+			margin-bottom: 16px;
+			outline: none;
+			transition: border-color 0.2s, box-shadow 0.2s;
+		}
+		.login-card input[type="password"]:focus {
+			border-color: var(--input-focus-border);
+			box-shadow: 0 0 0 3px var(--input-focus-shadow);
+		}
+		.login-card button {
+			width: 100%;
+			padding: 10px 16px;
+			font-family: inherit;
+			font-size: 14px;
+			font-weight: 500;
+			background: var(--button-bg);
+			color: #ffffff;
+			border: none;
+			border-radius: var(--btn-radius);
+			cursor: pointer;
+			box-sizing: border-box;
+			transition: background 0.15s ease;
+		}
+		.login-card button:hover {
+			background: var(--button-hover-bg);
+		}
+		.login-card .error-msg {
+			color: var(--error-text);
+			font-size: 13px;
+			margin-bottom: 16px;
+			padding: 8px 12px;
+			background: rgba(203, 36, 49, 0.08);
+			border-radius: 6px;
+			display: none;
+			align-items: center;
+			gap: 6px;
+		}
+		.login-card .error-msg.visible {
+			display: flex;
+		}
+		table {
+			width: 100%;
+			border-collapse: separate;
+			border-spacing: 0;
+		}
+		th {
+			background: var(--panel-bg);
+			color: var(--table-header-text);
+			font-size: 11px;
+			font-weight: 600;
+			text-transform: uppercase;
+			letter-spacing: 0.5px;
+			padding: 10px 16px;
+			text-align: left;
+			border-bottom: 1px solid var(--border-color);
+		}
+		th:first-child {
+			border-top-left-radius: 8px;
+		}
+		th:last-child {
+			border-top-right-radius: 8px;
+		}
+		td {
+			font-size: 14px;
+			padding: 14px 16px;
+			border-bottom: 1px solid var(--border-color);
+			vertical-align: middle;
+		}
+		tr:last-child td {
+			border-bottom: none;
+		}
+		tr:hover td {
+			background: var(--hover-bg);
+			transition: background 0.1s ease;
+		}
+		.col-repo {
+			font-weight: 500;
+		}
+		.col-path {
+			font-size: 12px;
+			color: var(--text-secondary);
+			font-family: ui-monospace, "SF Mono", Menlo, Monaco, Consolas, monospace;
+		}
+		.status-badge {
+			display: inline-flex;
+			align-items: center;
+			gap: 6px;
+			font-size: 12px;
+			font-weight: 500;
+			padding: 3px 10px;
+			border-radius: 12px;
+		}
+		.status-badge.alive {
+			background: rgba(40, 167, 69, 0.12);
+			color: var(--alive-color);
+		}
+		.status-badge.dead {
+			background: rgba(239, 68, 68, 0.12);
+			color: var(--dead-color);
+		}
+		.status-dot {
+			display: inline-block;
+			width: 6px;
+			height: 6px;
+			border-radius: 50%;
+		}
+		.status-badge.alive .status-dot {
+			background: var(--alive-color);
+		}
+		.status-badge.dead .status-dot {
+			background: var(--dead-color);
+		}
+		.action-link {
+			display: inline-flex;
+			align-items: center;
+			padding: 4px 12px;
+			font-size: 12px;
+			font-weight: 500;
+			color: var(--link-color);
+			background: var(--panel-bg);
+			border: 1px solid var(--border-color);
+			border-radius: 6px;
+			text-decoration: none;
+			transition: background 0.15s ease, border-color 0.15s ease;
+		}
+		.action-link:hover {
+			background: var(--hover-bg);
+			border-color: var(--link-color);
+			text-decoration: none;
+		}
+		#loading {
+			font-size: 13px;
+			color: var(--text-secondary);
+			padding: 20px 0;
+			text-align: center;
+		}
+	</style>
+</head>
+<body>
+	<div id="token-form">
+		<div class="login-card">
+			<h2>Portal Dashboard</h2>
+			<p class="subtitle">Enter your auth token to continue</p>
+			<div id="error-msg" class="error-msg"></div>
+			<label for="token-input">Auth Token</label>
+			<input type="password" id="token-input" placeholder="Enter auth token">
+			<button id="login-btn">Login</button>
+		</div>
+	</div>
+
+	<div class="content-card">
+		<div class="page-header">
+			<h1>Portal Dashboard</h1>
+			<p class="page-desc">Running instances across all repositories</p>
+		</div>
+		<div id="loading">Loading instances...</div>
+		<table id="instances-table" style="display: none;">
+			<thead>
+				<tr>
+					<th>Repository</th>
+					<th>Port</th>
+					<th>Path</th>
+					<th>Status</th>
+					<th>Link</th>
+				</tr>
+			</thead>
+			<tbody id="instances-body">
+			</tbody>
+		</table>
+	</div>
+
+	<script>
+		var pendingCsrfToken = null;
+
+		function getCSRF() {
+			return fetch('/api/csrf-token', { headers: { 'Accept': 'application/json' } })
+				.then(function(r) { return r.json(); })
+				.then(function(data) {
+					pendingCsrfToken = data.csrf_token;
+				});
+		}
+
+		function login() {
+			var token = document.getElementById('token-input').value;
+			if (!token) return;
+
+			getCSRF().then(function() {
+				var body = JSON.stringify({token: token, csrf_token: pendingCsrfToken});
+				return fetch('/api/auth', {
+					method: 'POST',
+					headers: {'Content-Type': 'application/json', 'Accept': 'application/json'},
+					body: body
+				});
+			}).then(function(r) {
+				if (r.ok) {
+					document.getElementById('token-form').classList.remove('visible');
+					document.getElementById('error-msg').classList.remove('visible');
+					fetchList();
+				} else {
+					document.getElementById('error-msg').innerHTML = '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1zm0 10a1 1 0 1 1 0 2 1 1 0 0 1 0-2zm0-8a1 1 0 0 1 1 1v5a1 1 0 0 1-2 0V4a1 1 0 0 1 1-1z" fill="currentColor"/></svg> Invalid token';
+					document.getElementById('error-msg').classList.add('visible');
+				}
+			});
+		}
+
+		function fetchList() {
+			fetch('/api/list')
+				.then(function(r) {
+					if (r.status === 401) {
+						document.getElementById('token-form').classList.add('visible');
+						document.getElementById('instances-table').style.display = 'none';
+						document.getElementById('loading').textContent = 'Please login to view instances';
+						return null;
+					}
+					return r.json();
+				})
+				.then(function(data) {
+					if (!data) return;
+					renderList(data);
+				});
+		}
+
+		function renderList(data) {
+			document.getElementById('loading').style.display = 'none';
+			document.getElementById('instances-table').style.display = 'table';
+
+			var tbody = document.getElementById('instances-body');
+			tbody.textContent = '';
+
+			var procs = data.processes || [];
+			procs.forEach(function(p) {
+				var tr = document.createElement('tr');
+
+				var nameTd = document.createElement('td');
+				nameTd.textContent = p.repo_name;
+				nameTd.className = 'col-repo';
+				tr.appendChild(nameTd);
+
+				var portTd = document.createElement('td');
+				portTd.textContent = p.port;
+				tr.appendChild(portTd);
+
+				var idTd = document.createElement('td');
+				idTd.textContent = p.path;
+				idTd.className = 'col-path';
+				tr.appendChild(idTd);
+
+				var statusTd = document.createElement('td');
+				var badge = document.createElement('span');
+				badge.className = 'status-badge ' + (p.alive ? 'alive' : 'dead');
+				var dot = document.createElement('span');
+				dot.className = 'status-dot';
+				badge.appendChild(dot);
+				badge.appendChild(document.createTextNode(p.alive ? 'Alive' : 'Dead'));
+				statusTd.appendChild(badge);
+				tr.appendChild(statusTd);
+
+				var linkTd = document.createElement('td');
+				if (p.alive && p.port > 0) {
+					var a = document.createElement('a');
+					a.href = window.location.protocol + '//' + window.location.hostname + ':' + p.port + '/';
+					a.className = 'action-link';
+					a.textContent = 'Open';
+					a.target = '_blank';
+					linkTd.appendChild(a);
+				}
+				tr.appendChild(linkTd);
+
+				tbody.appendChild(tr);
+			});
+		}
+
+		document.getElementById('login-btn').addEventListener('click', login);
+		document.getElementById('token-input').addEventListener('keypress', function(e) {
+			if (e.key === 'Enter') login();
+		});
+
+		fetchList();
+		setInterval(fetchList, 5000);
+	</script>
+</body>
+</html>

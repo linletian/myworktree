@@ -25,7 +25,34 @@ type Manager struct {
 	ProjectPath string
 }
 
+var defaultTags = []Tag{
+	{ID: "docs", Command: "pwd"},
+	{ID: "dev", Command: "pwd"},
+	{ID: "review", Command: "pwd"},
+}
+
+func (m Manager) ensureDefaults() error {
+	if m.GlobalPath == "" {
+		return nil
+	}
+	if _, err := os.Stat(m.GlobalPath); err == nil {
+		return nil
+	}
+	dir := filepath.Dir(m.GlobalPath)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return err
+	}
+	b, err := json.MarshalIndent(File{Tags: defaultTags}, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(m.GlobalPath, b, 0644)
+}
+
 func (m Manager) LoadMerged() (map[string]Tag, error) {
+	if err := m.ensureDefaults(); err != nil {
+		return nil, err
+	}
 	merged := map[string]Tag{}
 	if err := loadInto(merged, m.GlobalPath); err != nil {
 		return nil, err

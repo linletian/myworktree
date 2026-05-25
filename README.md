@@ -28,14 +28,15 @@ myworktree is a thin management layer that:
 ## Features (MVP)
 - Create/list/import/delete managed worktrees (strict delete: refuses if dirty)
 - Start/list/stop managed instances per worktree via **Tag** templates
-- Instance restart support (keeps worktree/tag-or-command/labels and links old/new instance records)
-- Optional instance labels (`k=v`) with UI filtering/search
+- Instance restart support (keeps worktree/tag-or-command and links old/new instance records)
 - Web UI can be closed/reopened; instances keep running; WebSocket Web TTY is default (with SSE/HTTP fallback)
 - UI shows transport status (`websocket/sse/polling`) and provides WS reconnect action
 - Startup reconcile: stale persisted `running` instances are auto-marked `stopped` after mw restart
 - Optional built-in HTTPS (`--tls-cert/--tls-key`) and token auth for non-loopback
 - Stored backlog redaction for common secrets (e.g. `sk-...`)
 - MCP tool endpoints (`/api/mcp/tools`, `/api/mcp/call`)
+- Portal Dashboard with shared entry port, auto-discovery of running instances across repos
+- Global auth token (HttpOnly Cookie, CSRF protection, tailscale serve integration)
 
 ## Requirements
 - macOS 12+ (other platforms are not validated yet)
@@ -75,6 +76,12 @@ Start from `v0.2.0` or newer for public release binaries. The earlier `v0.1.0` G
 
 Each release archive contains `mw`, `myworktree`, `README.md`, `LICENSE`, and `CHANGELOG.md`.
 If there is no prerelease/release asset yet, or you need a platform we do not publish, follow the source build steps below.
+
+**Apple Silicon troubleshooting:** macOS may quarantine downloaded binaries and silently prevent execution (Gatekeeper). If the binary does not respond or shows "cannot be opened":
+```bash
+xattr -d com.apple.quarantine ./mw ./myworktree
+```
+Or open **System Settings → Privacy & Security** and click "Allow Anyway" for the blocked binaries.
 
 ### Build & install
 
@@ -138,6 +145,12 @@ mw
 When startup succeeds, `mw` opens the web page automatically at the serving URL by default.
 `myworktree` prints the URL without opening a browser unless you pass `-open=true`.
 
+When Portal is enabled, the startup output includes:
+```
+[portal] Portal dashboard at: http://0.0.0.0:12345/
+[portal] Tailscale URL: https://my-machine.tail-scale.ts.net/
+```
+
 myworktree uses the **current working directory** to detect the target repo (git root) and derives an isolated per-project data dir from it, so you can manage other projects by running the same binary in a different repo directory.
 
 By default, newly created worktrees are placed next to your repo:
@@ -164,6 +177,18 @@ myworktree instance start --worktree <worktreeId> --cmd "echo hello && ls"
 myworktree instance start --worktree <worktreeId>  # starts an interactive shell instance
 myworktree instance list
 myworktree instance stop <instanceId>
+
+# config (global auth token)
+mw config              # interactive guided setup (set/view/clear/regen token)
+mw config set-auth     # set token directly
+mw config get-auth     # view token (masked)
+mw config clear-auth   # clear token
+mw config regen        # regenerate token (with confirmation)
+
+# start with remote access & Portal (IPv6 is explicitly disabled)
+mw start --listen 0.0.0.0:0                     # LAN access, auto-inherits global token
+mw start --listen 0.0.0.0:0 --portal-port 12346 # custom Portal port
+mw start --listen 0.0.0.0:0 --portal-port 0     # disable Portal
 ```
 
 Note: command starts are executed inside the instance shell, and you can continue sending input to the same running instance from the UI.
@@ -212,10 +237,46 @@ The workflow verifies `gofmt`, runs `go test ./...`, and builds both binaries on
 Tagged releases (`v*`) run `.github/workflows/release.yml`, which produces darwin `amd64` / `arm64` archives plus SHA256 checksums.
 
 ## Remote access
-- Default: binds to loopback only.
-- If you listen on a non-loopback address, you must set `--auth`.
-- For HTTPS, provide `--tls-cert` and `--tls-key`.
-- `?token=<token>` works for simple clients, but prefer `Authorization: Bearer <token>` to avoid leaving tokens in browser history or shell history.
+
+### Global Token
+
+Configure a global auth token once, and all instances automatically inherit it:
+
+```bash
+mw config
+# → Interactive guided setup: [1] set token [2] view token [3] clear token [4] regen token [q] quit
+# Token stored in ~/.config/myworktree/auth.json (0600 permissions)
+```
+
+When `--auth` is not provided and no token exists in `auth.json`, the CLI **automatically generates a random 32-character hex token** and persists it. This ensures instances always have authentication enabled by default. Instance-level `--auth` override takes precedence over the global token.
+
+### Portal Dashboard
+
+`mw start --listen 0.0.0.0:0` starts a **Portal Dashboard** on port `12345` (configurable via `--portal-port`). The dashboard:
+
+- Lists all running instances across repos with auto-discovery
+- Click an instance to jump to its Web UI (directly via instance port — Portal reverse proxy `/s/<repo-hash>/` is planned but not yet implemented)
+- Uses **HttpOnly Cookie** (`mw_token`) for authentication — token never appears in URL or JS
+- **CSRF protection** via double-submit cookie pattern on login/logout endpoints
+- Cookie has 24-hour **sliding expiration** (refreshed on each auth-successful request)
+
+Set `--portal-port 0` to disable the Portal.
+
+### Tailscale HTTPS
+
+> **Note**: Automatic `tailscale serve` configuration is **currently disabled** due to a Tailscale 1.98 CLI bug on macOS where `tailscale serve --bg` reports success but does not actually configure the proxy. The relevant code exists in `internal/portal/portal.go` but is not wired into the production code paths. Users can still securely access Portal via Tailscale IP (`http://100.x.x.x:12345`) over the WireGuard tunnel. Automatic `tailscale serve` management will be re-enabled once Tailscale fixes the upstream bug.
+
+### Network Security
+
+| Access Path | Protocol | Encryption Layer |
+|-------------|----------|-----------------|
+| Instance direct (local/LAN IP) | `http://192.168.1.18:PORT` → instance | None (LAN only) |
+| Instance direct (Tailscale IP) | `http://100.x.x.x:PORT` → instance | WireGuard tunnel |
+| Dashboard + proxy (local/LAN) | `http://host:12345` → proxy `http://127.0.0.1:PORT` | None (LAN only) |
+| Dashboard + proxy (Tailscale IP) | `http://100.x.x.x:12345` → proxy `http://127.0.0.1:PORT` | WireGuard tunnel |
+| `tailscale serve` domain | `https://machine.ts.net` → proxy `http://127.0.0.1:PORT` | Let's Encrypt TLS + WireGuard |
+
+> **Note**: Tailscale's WireGuard tunnel provides network-layer encryption. Application-layer HTTPS is only used when accessing via `tailscale serve` domain (Let's Encrypt certificate).
 
 ## License
 MIT. See [LICENSE](./LICENSE).

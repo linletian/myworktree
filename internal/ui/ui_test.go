@@ -12,7 +12,7 @@ import (
 func fetchIndexHTML(t *testing.T) string {
 	t.Helper()
 	mux := http.NewServeMux()
-	if err := Register(mux, "myworktree"); err != nil {
+	if err := Register(mux, "myworktree", nil); err != nil {
 		t.Fatal(err)
 	}
 	srv := httptest.NewServer(mux)
@@ -58,7 +58,7 @@ func TestRegisterServesRootAndStatic(t *testing.T) {
 	}
 
 	mux := http.NewServeMux()
-	if err := Register(mux, "myworktree"); err != nil {
+	if err := Register(mux, "myworktree", nil); err != nil {
 		t.Fatal(err)
 	}
 	srv := httptest.NewServer(mux)
@@ -76,7 +76,7 @@ func TestRegisterServesRootAndStatic(t *testing.T) {
 
 func TestRegisterReturnsNotFoundForUnknownPath(t *testing.T) {
 	mux := http.NewServeMux()
-	if err := Register(mux, "myworktree"); err != nil {
+	if err := Register(mux, "myworktree", nil); err != nil {
 		t.Fatal(err)
 	}
 	srv := httptest.NewServer(mux)
@@ -94,7 +94,7 @@ func TestRegisterReturnsNotFoundForUnknownPath(t *testing.T) {
 
 func TestRegisterSubstitutesPageTitle(t *testing.T) {
 	mux := http.NewServeMux()
-	if err := Register(mux, "myproject"); err != nil {
+	if err := Register(mux, "myproject", nil); err != nil {
 		t.Fatal(err)
 	}
 	srv := httptest.NewServer(mux)
@@ -178,12 +178,69 @@ func TestIndexHTMLCoversPerSessionConnectionManagement(t *testing.T) {
 		"if (session.ttySocket) { session.ttySocket.close(); session.ttySocket = null; }",
 		"session.ttySocket = ws;",
 		"if (session.ttySocket === ws) {",
-		"session.ttyReconnectTimer = setTimeout(() => connectTTY(session), 1000);",
+		"session.ttyReconnectTimer = setTimeout(() => connectTTY(session), 5000);",
 	}
 	for _, check := range checks {
 		if !strings.Contains(bodyText, check) {
 			t.Fatalf("GET / should include per-session connection management hook %q", check)
 		}
+	}
+}
+
+func TestRegisterRemoteAccess(t *testing.T) {
+	mux := http.NewServeMux()
+	if err := Register(mux, "myworktree", func(r *http.Request) bool { return true }); err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/")
+	if err != nil {
+		t.Fatalf("GET / failed: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if !strings.Contains(string(body), `<body class="remote-access">`) {
+		t.Fatalf("expected body to contain remote-access class when isRemote returns true")
+	}
+}
+
+func TestRegisterLocalAccess(t *testing.T) {
+	mux := http.NewServeMux()
+	if err := Register(mux, "myworktree", func(r *http.Request) bool { return false }); err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/")
+	if err != nil {
+		t.Fatalf("GET / failed: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if strings.Contains(string(body), `<body class="remote-access">`) {
+		t.Fatalf("expected body NOT to contain remote-access class when isRemote returns false")
+	}
+}
+
+func TestRegisterNilRemote(t *testing.T) {
+	mux := http.NewServeMux()
+	if err := Register(mux, "myworktree", nil); err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/")
+	if err != nil {
+		t.Fatalf("GET / failed: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if strings.Contains(string(body), `<body class="remote-access">`) {
+		t.Fatalf("expected body NOT to contain remote-access class when isRemote is nil")
 	}
 }
 
@@ -196,7 +253,7 @@ func TestRegisterReturnsErrorWhenIndexHTMLMissing(t *testing.T) {
 	}
 	defer func() { indexHTMLReader = orig }()
 
-	err := Register(mux, "test")
+	err := Register(mux, "test", nil)
 	if err == nil {
 		t.Fatal("expected error when index.html is missing, got nil")
 	}
@@ -246,7 +303,7 @@ func TestRegisterTitleWithSpecialRepoNames(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			mux := http.NewServeMux()
-			if err := Register(mux, tc.repoName); err != nil {
+			if err := Register(mux, tc.repoName, nil); err != nil {
 				t.Fatal(err)
 			}
 			srv := httptest.NewServer(mux)

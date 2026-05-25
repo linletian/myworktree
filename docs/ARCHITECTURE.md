@@ -5,6 +5,7 @@ myworktree is a lightweight single-user manager for:
 - **git worktrees** (isolated working directories)
 - **instances** (long-running shell/CLI processes started by myworktree)
 - **web UI + HTTP API** to manage them and replay recent output
+- **Portal dashboard** (shared entry port with auto-discovery of running instances across repos, reverse proxy, and tailscale serve integration)
 
 It does **not** analyze project code or prevent concurrent write conflicts inside a worktree.
 
@@ -18,6 +19,9 @@ It does **not** analyze project code or prevent concurrent write conflicts insid
 - `internal/redact/` — secret redaction for stored logs/backlog.
 - `internal/mcp/` — MCP adapter surface (tool names + app-level tool dispatch), keeping core decoupled.
 - `internal/monitor/` — resource stats collector (CPU delta via gopsutil/process.Times, memory via RSS)
+- `internal/llm/` — LLM API client（OpenAI / Anthropic / OpenAI Compatible），可选，LLM Settings 通过 Web UI 对话框配置
+- `internal/config/` — global auth configuration (read/write `auth.json`)
+- `internal/portal/` — Portal dashboard (port claiming, instance registry, CSRF state management, HTTP endpoints; **reverse proxy `/s/<repo-hash>/` planned but not yet implemented** — current dashboard links point to instance ports directly; tailscale serve automation code is defined but **currently unused** due to tailscale CLI bug)
 - `internal/ui/` — embedded static UI.
 
 ## 3. Data & persistence
@@ -31,6 +35,18 @@ It does **not** analyze project code or prevent concurrent write conflicts insid
   - `state.json` — managed worktrees + managed instances + tab order + version
   - `tags.json` — project-level tags
   - `logs/<instanceId>.log` — rolling instance backlog
+
+### 3.1.2 全局配置
+- 存储于用户级配置目录：`~/.config/myworktree/config.json`（按 OpenCode 方式，0o600 权限）
+- 包含 LLM 配置（protocol、api_key、api_address、model 等）
+- 不存于项目目录下，避免污染 git 仓库
+
+### 3.1.3 Global auth & Portal registry
+- `~/.config/myworktree/auth.json` — global auth token (0600 permissions, plaintext storage, `internal/config/` package)
+- `~/.config/myworktree/<repo-hash>/server.json` — per-instance config (`listen_port`, `instance_id`; `instance_id` is a `pid-timestamp-rand` format unique identifier used for cross-referencing with Portal registry)
+- `~/.config/myworktree/portal/` — shared Portal registry directory:
+  - `<instance-id>.json` — per-instance registration (instance_id, pid, port, host, repo_name, repo_hash, started_at; **no auth_token**)
+  - `portal.json` — current Portal holder (instance_id, port, updated_at)
 
 ### 3.2 State model
 - Worktree: id, name, path, branch, baseRef, createdAt
@@ -51,7 +67,7 @@ The sidebar shows a pinned **Main Workspace** item at the top (purple accent), f
 - **Instance routing**: Use `worktree_id: "__main__"` (constant: `instance.MainWorktreeID`) in `POST /api/instances` to start an instance in the main repo root. The instance's `worktree_id` will be `"__main__"` and `worktree_name` will be the directory basename.
 - **Auto-select**: On first load, the UI auto-selects the first worktree; if no worktrees exist, it selects the main repo.
 - **Refresh**: All branch info (main repo + worktrees) updates via the existing 2-second polling.
-- **Git Changes panel**: Below the worktree list, a read-only panel shows all changed files (staged + unstaged) relative to HEAD for the currently selected worktree. The panel auto-refreshes every 10 seconds and on worktree selection change. The main repo's changes also refresh when its branch changes. Per-file addition/deletion counts are obtained via `git diff --numstat HEAD` with the same authenticated API wrapper as the rest of the UI, and the git command is enforced with a real 2-second timeout.
+- **Git Changes panel**: Below the worktree list, a read-only panel shows changed files for the currently selected worktree, split into two mutually exclusive accordion sections: **Staged** (changes in the index via `git diff --cached --numstat`) and **Unstaged** (working tree changes via `git diff --numstat`). The panel auto-refreshes every 10 seconds and on worktree selection change. The main repo's changes also refresh when its branch changes. Both git commands run concurrently on the server with a 2-second timeout each. The accordion defaults to showing Unstaged; clicking either header expands that section and collapses the other. Empty sections still show their header with a "No staged changes" / "No unstaged changes" message.
 
 ## 4. Instance lifecycle & reconnect semantics
 - An instance is a server-managed process; UI windows are merely views.
@@ -323,12 +339,42 @@ If issues arise with the current filtering approach:
 - `docs/TERMINAL_IO_ANALYSIS.md` - Terminal I/O architecture and filtering
 - `docs/TERMINAL_TEST_CASES.md` - Test cases for terminal behavior
 
-## 6. Security model (single-user)
-- Default listen: loopback only.
-- Non-loopback requires `--auth`.
-- Optional built-in HTTPS via `--tls-cert/--tls-key`.
-- Origin/Host check + basic rate limit on unauthorized attempts.
-- Redaction on stored backlog (e.g. `sk-...`).
+## 6. Security model (single-user, dual-layer)
+
+myworktree implements a **dual-layer authentication architecture**:
+
+**Layer 1 — Portal (public-facing)**:
+- `mw_token` HttpOnly Cookie-based authentication (JS cannot read token, prevents XSS theft)
+- Double-submit cookie CSRF protection on `/api/auth` and `/api/logout` endpoints
+- CSRF token: single-use, 5-minute TTL, IP rate-limited (1 req/s)
+- Cookie: 24-hour sliding expiration, `SameSite=Lax`, `Secure` flag on HTTPS
+- `POST /api/auth` rate-limited per IP (20 attempts/min)
+- `GET /` dashboard page served with strict CSP headers (hash-based inline script/style whitelist)
+
+**Layer 2 — Instance (loopback-bypassed via proxy)**:
+- Default listen: loopback only, **IPv6 explicitly disabled**
+- Non-loopback requires `--auth`
+- Loopback requests skip all token/origin validation (enables Portal reverse proxy)
+- Origin/Host check + basic rate limit on unauthorized non-loopback attempts
+- Optional built-in HTTPS via `--tls-cert/--tls-key`
+- Redaction on stored backlog (e.g. `sk-...`)
+
+**Proxy authentication bypass (planned)**: The planned Portal reverse proxy (`/s/<repo-hash>/`) will forward requests to instances via `127.0.0.1` (loopback), so instances automatically skip auth. **Currently not yet implemented** — dashboard links connect to instance ports directly.
+
+**Tailscale**: WireGuard tunnel provides network-layer encryption. ~~Portal holder automatically manages `tailscale serve` for HTTPS domain access (`https://<machine>.ts.net`) with Let's Encrypt certificates.~~ **Currently disabled** — tailscale CLI `serve` command on macOS returns success but does not actually configure the proxy. The `tailscaleServeLoop` goroutine and related `cleanupStaleTailscaleServe()` call are removed from the production code path. Users can still securely access Portal via Tailscale IP (`http://100.x.x.x:12345`) over the WireGuard tunnel.
+
+### CLI Flags & Configuration
+
+| Flag / Command | Description |
+|---------------|-------------|
+| `--portal-port <int>` | Portal claim target port (default: 12345; 0 = disable Portal) |
+| `--auth <token>` | Per-instance auth token (overrides global token) |
+| `mw config` | Interactive guided setup for global auth token |
+| `mw config set-auth` | Set global token (hidden echo + confirmation) |
+| `mw config get-auth` | View token (masked: first 4 + `****` + last 4 chars) |
+| `mw config clear-auth` | Clear global token (no confirmation) |
+
+**Auth token auto-fill**: When `--auth` is empty, `startCmd` automatically loads from `~/.config/myworktree/auth.json`. If the file is corrupted, a warning is logged but startup continues (non-loopback listen will then be rejected by `validateSecurity()`).
 
 ## 7. MCP extensibility
 - Core managers (worktree/instance) are transport-agnostic.

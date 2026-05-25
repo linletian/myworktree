@@ -2,11 +2,13 @@ package app
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
 	"io"
 	"log"
 	"net"
@@ -23,10 +25,13 @@ import (
 	"syscall"
 	"time"
 
+	"myworktree/internal/config"
 	"myworktree/internal/gitx"
 	"myworktree/internal/instance"
+	"myworktree/internal/llm"
 	"myworktree/internal/mcp"
 	"myworktree/internal/monitor"
+	"myworktree/internal/portal"
 	"myworktree/internal/store"
 	"myworktree/internal/tag"
 	"myworktree/internal/ui"
@@ -41,6 +46,12 @@ type Config struct {
 	TLSKey       string
 	Open         bool
 	WorktreesDir string
+	PortalPort   int
+}
+
+type serverConfig struct {
+	ListenPort int    `json:"listen_port"`
+	InstanceID string `json:"instance_id,omitempty"`
 }
 
 type Server struct {
@@ -51,7 +62,10 @@ type Server struct {
 	root      string
 	dataDir   string
 	serverRev string
+	isSecure  bool
 
+	portal      *portal.Portal
+	httpSrv     *http.Server
 	store       store.FileStore
 	worktreeMgr worktree.Manager
 	instanceMgr *instance.Manager
@@ -63,6 +77,8 @@ type Server struct {
 	ttyClients  map[string]map[string]*ttyClientState
 	ttyApplied  map[string]ttySize
 	ttyNextID   uint64
+
+	gitRunner func(timeout time.Duration, gitRoot string, args ...string) ([]byte, error)
 }
 
 type authFail struct {
@@ -114,11 +130,13 @@ func New(cfg Config, logger *log.Logger) (*Server, error) {
 	}
 	instanceMgr := &instance.Manager{
 		DataDir: dataDir,
+		Root:    root,
 		Store:   st,
 		Logger:  logger,
 	}
 
 	mux := http.NewServeMux()
+	isSecure := cfg.TLSCert != "" && cfg.TLSKey != ""
 	s := &Server{
 		cfg:         cfg,
 		logger:      logger,
@@ -134,10 +152,18 @@ func New(cfg Config, logger *log.Logger) (*Server, error) {
 			Instances: instanceMgr,
 		},
 		authFails: map[string]authFail{},
+		isSecure:  isSecure,
 	}
 	s.registerAPIs(mux)
-	if err := ui.Register(mux, filepath.Base(filepath.Clean(s.root))); err != nil {
+	if err := ui.Register(mux, filepath.Base(filepath.Clean(s.root)), func(r *http.Request) bool {
+		return !isLoopbackRequest(r)
+	}); err != nil {
 		return nil, fmt.Errorf("ui.Register: %w", err)
+	}
+
+	s.gitRunner = func(timeout time.Duration, gitRoot string, args ...string) ([]byte, error) {
+		cmd := gitx.GitCommand(timeout, gitRoot, args...)
+		return cmd.Output()
 	}
 
 	return s, nil
@@ -328,28 +354,100 @@ func (s *Server) Start() (string, error) {
 	}
 	s.ln = ln
 
+	if s.cfg.PortalPort > 0 {
+		base, err := os.UserConfigDir()
+		if err != nil {
+			s.logger.Printf("[portal] warning: UserConfigDir failed: %v", err)
+			base = ""
+		}
+		instancePort := 0
+		if tcpAddr, ok := s.ln.Addr().(*net.TCPAddr); ok {
+			instancePort = tcpAddr.Port
+		}
+		cfg := portal.Config{
+			PortalPort:   s.cfg.PortalPort,
+			InstancePort: instancePort,
+			Host:         "0.0.0.0",
+			AuthToken:    s.cfg.AuthToken,
+			RegistryDir:  filepath.Join(base, "myworktree", "portal"),
+			DataDir:      s.dataDir,
+			RepoName:     filepath.Base(filepath.Clean(s.root)),
+			RepoHash:     gitx.HashPath(s.root),
+			WorktreePath: s.root,
+		}
+		s.portal = portal.New(cfg)
+		if err := s.portal.Start(); err != nil {
+			s.logger.Printf("[portal] warning: portal.Start failed: %v", err)
+			s.portal = nil
+		} else {
+			s.logger.Printf("[portal] Portal dashboard at: http://0.0.0.0:%d/", s.cfg.PortalPort)
+			if tsName := portal.TailscaleDNSName(); tsName != "" {
+				s.logger.Printf("[portal] Tailscale URL: https://%s/", tsName)
+			}
+		}
+	}
+
 	h := s.withServerRevision(s.withAuth(s.mux))
+	s.httpSrv = &http.Server{Handler: h}
 
 	go func() {
 		if s.cfg.TLSCert != "" || s.cfg.TLSKey != "" {
-			_ = http.ServeTLS(ln, h, s.cfg.TLSCert, s.cfg.TLSKey)
+			_ = s.httpSrv.ServeTLS(ln, s.cfg.TLSCert, s.cfg.TLSKey)
 			return
 		}
-		_ = http.Serve(ln, h)
+		_ = s.httpSrv.Serve(ln)
 	}()
 
 	scheme := "http"
 	if s.cfg.TLSCert != "" && s.cfg.TLSKey != "" {
 		scheme = "https"
 	}
-	addr := ln.Addr().String()
+	// IPv6 is explicitly disabled. Always use IPv4 127.0.0.1 regardless of what
+	// the OS reports for the listening socket (macOS may report [::]:port).
+	addr := "127.0.0.1"
+	if tcpAddr, ok := ln.Addr().(*net.TCPAddr); ok {
+		addr = net.JoinHostPort("127.0.0.1", strconv.Itoa(tcpAddr.Port))
+	}
 	url := fmt.Sprintf("%s://%s/", scheme, addr)
-	if s.cfg.Open {
-		if err := OpenURL(url); err != nil {
-			s.logger.Printf("open browser failed: %v", err)
+	if s.cfg.Open && s.cfg.PortalPort > 0 {
+		if err := waitForServer(s.cfg.PortalPort, 5*time.Second); err != nil {
+			s.logger.Printf("server not ready: %v", err)
+			s.logger.Printf("please manually open http://127.0.0.1:%d/", s.cfg.PortalPort)
+		} else {
+			if openErr := OpenURL(fmt.Sprintf("http://127.0.0.1:%d/", s.cfg.PortalPort)); openErr != nil {
+				s.logger.Printf("open browser failed: %v", openErr)
+			}
 		}
 	}
 	return url, nil
+}
+
+func waitForServer(port int, timeout time.Duration) error {
+	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		conn, err := net.DialTimeout("tcp", addr, 100*time.Millisecond)
+		if err == nil {
+			conn.Close()
+			return nil
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	return fmt.Errorf("server not ready after %v (port %d)", timeout, port)
+}
+
+func (s *Server) Shutdown() {
+	if s.portal != nil {
+		s.portal.Stop()
+	}
+	if s.httpSrv != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = s.httpSrv.Shutdown(ctx)
+	}
+	if s.ln != nil {
+		s.ln.Close()
+	}
 }
 
 func (s *Server) listTopBranches() (string, []gitx.Branch, error) {
@@ -359,12 +457,33 @@ func (s *Server) listTopBranches() (string, []gitx.Branch, error) {
 		return "", nil, err
 	}
 
-	// Default branch always first; then newest -> oldest, total 10.
+	// Build a quick existence lookup for branch names
+	exists := make(map[string]bool, len(items))
+	for _, b := range items {
+		exists[b.Name] = true
+	}
+
+	// Priority order: default > main > develop; skip if same as default
+	priorities := make([]string, 0, 3)
+	priorities = append(priorities, def)
+	if def != "main" && exists["main"] {
+		priorities = append(priorities, "main")
+	}
+	if def != "develop" && exists["develop"] {
+		priorities = append(priorities, "develop")
+	}
+
+	// Build result: priority branches first, then the rest by commit time, total 10.
+	seen := make(map[string]bool, 10)
 	out := make([]gitx.Branch, 0, 10)
-	if def != "" {
+	for _, name := range priorities {
+		if seen[name] {
+			continue
+		}
 		for _, b := range items {
-			if b.Name == def {
+			if b.Name == name {
 				out = append(out, b)
+				seen[name] = true
 				break
 			}
 		}
@@ -373,10 +492,11 @@ func (s *Server) listTopBranches() (string, []gitx.Branch, error) {
 		if len(out) >= 10 {
 			break
 		}
-		if def != "" && b.Name == def {
+		if seen[b.Name] {
 			continue
 		}
 		out = append(out, b)
+		seen[b.Name] = true
 	}
 	return def, out, nil
 }
@@ -412,21 +532,24 @@ func (s *Server) registerAPIs(mux *http.ServeMux) {
 	mux.HandleFunc("/api/instances/reorder", s.handleInstanceReorder)
 	mux.HandleFunc("/api/instances/stop", s.handleInstanceStop)
 	mux.HandleFunc("/api/instances/restart", s.handleInstanceRestart)
-	mux.HandleFunc("/api/instances/archive", s.handleInstanceArchive)
 	mux.HandleFunc("/api/instances/delete", s.handleInstanceDelete)
-	mux.HandleFunc("/api/instances/purge", s.handleInstancePurge)
 	mux.HandleFunc("/api/instances/input", s.handleInstanceInput)
 	mux.HandleFunc("/api/instances/tty/ws", s.handleInstanceTTYWS)
 	mux.HandleFunc("/api/instances/log", s.handleInstanceLog)
 	mux.HandleFunc("/api/instances/log/stream", s.handleInstanceLogStream)
 	mux.HandleFunc("/api/instances/stats", s.handleInstanceStats)
 	mux.HandleFunc("/api/tags", s.handleTags)
+	mux.HandleFunc("/api/tags/open-dir", s.handleTagsOpenDir)
 	mux.HandleFunc("/api/branches", s.handleBranches)
 	mux.HandleFunc("/api/worktrees/open-terminal", s.handleWorktreeOpenTerminal)
 	mux.HandleFunc("/api/worktrees/open-finder", s.handleWorktreeOpenFinder)
 	mux.HandleFunc("/api/mcp/tools", s.handleMCPTools)
 	mux.HandleFunc("/api/mcp/call", s.handleMCPCall)
 	mux.HandleFunc("/api/main", s.handleMain)
+	mux.HandleFunc("/api/llm/config", s.handleLLMConfig)
+	mux.HandleFunc("/api/llm/test", s.handleLLMTest)
+	mux.HandleFunc("/api/llm/generate", s.handleLLMGenerate)
+	mux.HandleFunc("/login", s.handleLogin)
 }
 
 func (s *Server) handleBranches(w http.ResponseWriter, r *http.Request) {
@@ -458,6 +581,124 @@ func (s *Server) handleMain(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		token := extractAuthToken(r)
+		if token != "" {
+			cfg, _ := config.Load()
+			if cfg != nil && token == cfg.AuthToken {
+				http.Redirect(w, r, "/", http.StatusFound)
+				return
+			}
+		}
+		loginHTML := `<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Login - myworktree</title>
+    <style>
+        :root {
+            --bg-color: #f6f8fa;
+            --text-primary: #24292e;
+            --text-secondary: #586069;
+            --card-bg: #ffffff;
+            --card-border: #e1e4e8;
+            --card-shadow: 0 4px 24px rgba(0,0,0,0.08);
+            --input-bg: #ffffff;
+            --input-border: #d0d7da;
+            --input-focus-border: #2ea44f;
+            --input-focus-shadow: rgba(46, 164, 79, 0.2);
+            --button-bg: #2ea44f;
+            --button-hover-bg: #2c974b;
+            --error-text: #cb2431;
+            --card-radius: 16px;
+            --input-radius: 8px;
+            --btn-radius: 8px;
+        }
+        @media (prefers-color-scheme: dark) {
+            :root {
+                --bg-color: #1a1a1a;
+                --text-primary: #e0e0e0;
+                --text-secondary: #888;
+                --card-bg: #222222;
+                --card-border: #333;
+                --card-shadow: 0 4px 24px rgba(0,0,0,0.3);
+                --input-bg: #2a2a2a;
+                --input-border: #444;
+                --input-focus-border: #3fb950;
+                --input-focus-shadow: rgba(63, 185, 80, 0.2);
+                --button-bg: #238636;
+                --button-hover-bg: #2ea043;
+                --error-text: #ff6666;
+            }
+        }
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji"; background: var(--bg-color); color: var(--text-primary); display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
+        .login-box { background: var(--card-bg); border: 1px solid var(--card-border); border-radius: var(--card-radius); padding: 40px; width: 100%; max-width: 400px; box-shadow: var(--card-shadow); box-sizing: border-box; margin: 20px; }
+        h2 { font-size: 20px; font-weight: 600; margin: 0 0 8px 0; text-align: center; }
+        .subtitle { font-size: 13px; color: var(--text-secondary); margin: 0 0 24px 0; text-align: center; }
+        label { display: block; margin-bottom: 6px; font-size: 13px; font-weight: 500; color: var(--text-primary); }
+        input[type="password"] { width: 100%; padding: 10px 12px; font-size: 14px; background: var(--input-bg); border: 1px solid var(--input-border); color: var(--text-primary); border-radius: var(--input-radius); box-sizing: border-box; margin-bottom: 16px; outline: none; transition: border-color 0.2s, box-shadow 0.2s; }
+        input[type="password"]:focus { border-color: var(--input-focus-border); box-shadow: 0 0 0 3px var(--input-focus-shadow); }
+        button { width: 100%; padding: 10px 16px; font-size: 14px; font-weight: 500; background: var(--button-bg); color: #ffffff; border: none; border-radius: var(--btn-radius); cursor: pointer; transition: background 0.15s ease; }
+        button:hover { background: var(--button-hover-bg); }
+    </style>
+</head>
+<body>
+    <div class="login-box">
+        <h2>myworktree</h2>
+        <p class="subtitle">Enter your auth token to continue</p>
+        <form id="login-form" method="post" action="/login">
+            <input type="hidden" name="next" value="{{NEXT}}">
+            <label for="token">Auth Token</label>
+            <input type="password" id="token" name="token" placeholder="Enter auth token" required>
+            <button type="submit">Login</button>
+        </form>
+    </div>
+</body>
+</html>`
+		nextURL := r.URL.Query().Get("next")
+		if nextURL == "" || !isValidRedirectPath(nextURL) {
+			nextURL = "/"
+		}
+		loginHTML = strings.ReplaceAll(loginHTML, "{{NEXT}}", html.EscapeString(nextURL))
+		w.Write([]byte(loginHTML))
+		return
+	}
+	if r.Method == http.MethodPost {
+		if err := r.ParseForm(); err != nil {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		token := strings.TrimSpace(r.FormValue("token"))
+		cfg, err := config.Load()
+		if err != nil || token != cfg.AuthToken {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		nextURL := r.FormValue("next")
+		if nextURL == "" || !isValidRedirectPath(nextURL) {
+			nextURL = "/"
+		}
+		cookie := &http.Cookie{
+			Name:     "mw_token",
+			Value:    token,
+			Path:     "/",
+			MaxAge:   86400,
+			SameSite: http.SameSiteLaxMode,
+			HttpOnly: true,
+		}
+		if r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https" {
+			cookie.Secure = true
+		}
+		http.SetCookie(w, cookie)
+		http.Redirect(w, r, nextURL, http.StatusFound)
+		return
+	}
+	http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+}
+
 func (s *Server) handleTags(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -485,6 +726,41 @@ func (s *Server) handleTags(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"tags": items})
 }
 
+func (s *Server) handleTagsOpenDir(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !isLoopbackRequest(r) {
+		writeErr(w, http.StatusForbidden, errors.New("host GUI actions are only allowed from loopback clients"))
+		return
+	}
+	base, err := os.UserConfigDir()
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	dir := filepath.Join(base, "myworktree")
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "open", dir)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			err = fmt.Errorf("command timed out: open %s", dir)
+		} else {
+			detail := strings.TrimSpace(string(out))
+			if detail != "" {
+				err = fmt.Errorf("%w: %s", err, detail)
+			}
+		}
+		s.logger.Printf("open tags dir command failed: args=%q err=%v", dir, err)
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
 func (s *Server) handleWorktrees(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
@@ -499,12 +775,17 @@ func (s *Server) handleWorktrees(w http.ResponseWriter, r *http.Request) {
 			TaskDescription string `json:"task_description"`
 			BaseRef         string `json:"base_ref"`
 			AdoptIfExists   bool   `json:"adopt_if_exists"`
+			BranchName      string `json:"branch_name"`
 		}
 		if err := readJSON(r.Body, &req); err != nil {
 			writeErr(w, http.StatusBadRequest, err)
 			return
 		}
-		item, err := s.worktreeMgr.CreateWithOptions(req.TaskDescription, worktree.CreateOptions{BaseRef: req.BaseRef, AdoptIfExists: req.AdoptIfExists})
+		opts := worktree.CreateOptions{BaseRef: req.BaseRef, AdoptIfExists: req.AdoptIfExists}
+		if req.BranchName != "" {
+			opts.BranchName = req.BranchName
+		}
+		item, err := s.worktreeMgr.CreateWithOptionsCtx(r.Context(), req.TaskDescription, opts)
 		if err != nil {
 			writeErr(w, http.StatusBadRequest, err)
 			return
@@ -601,25 +882,102 @@ func (s *Server) handleWorktreeStatus(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	cmd := gitx.GitCommand(2*time.Second, gitRoot, "diff", "--numstat", "HEAD")
-	out, err := cmd.Output()
-	if err != nil {
-		// Empty output with a nil error is a clean tree. If err is non-nil, git
-		// failed or timed out and we should surface that instead of pretending the
-		// worktree has no changes.
-		msg := strings.TrimSpace(string(out))
-		if msg == "" {
-			msg = err.Error()
+	type diffResult struct {
+		changes []map[string]any
+		total   map[string]int
+		errMsg  string
+	}
+
+	runDiff := func(args ...string) diffResult {
+		out, err := s.gitRunner(2*time.Second, gitRoot, args...)
+		if err != nil {
+			msg := strings.TrimSpace(string(out))
+			if msg == "" {
+				msg = err.Error()
+			}
+			return diffResult{
+				changes: []map[string]any{},
+				total:   map[string]int{"additions": 0, "deletions": 0},
+				errMsg:  fmt.Sprintf("git diff failed: %s", msg),
+			}
 		}
-		writeErr(w, http.StatusInternalServerError, fmt.Errorf("git diff failed: %s", msg))
+		changes, total := parseGitDiffNumStat(string(out))
+		return diffResult{changes: changes, total: total}
+	}
+
+	stagedCh := make(chan diffResult, 1)
+	unstagedCh := make(chan diffResult, 1)
+	untrackedCh := make(chan diffResult, 1)
+
+	go func() { stagedCh <- runDiff("diff", "--cached", "--numstat") }()
+	go func() { unstagedCh <- runDiff("diff", "--numstat") }()
+	go func() {
+		out, err := s.gitRunner(2*time.Second, gitRoot, "ls-files", "--others", "--exclude-standard")
+		if err != nil {
+			msg := strings.TrimSpace(string(out))
+			if msg == "" {
+				msg = err.Error()
+			}
+			untrackedCh <- diffResult{
+				changes: []map[string]any{},
+				total:   map[string]int{"additions": 0, "deletions": 0},
+				errMsg:  fmt.Sprintf("git ls-files failed: %s", msg),
+			}
+			return
+		}
+		lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+		var changes []map[string]any
+		totalAdds := 0
+		for _, p := range lines {
+			p = strings.TrimSpace(p)
+			if p == "" {
+				continue
+			}
+			fullPath := filepath.Join(gitRoot, p)
+			adds := countFileLines(fullPath)
+			totalAdds += adds
+			changes = append(changes, map[string]any{
+				"path":      p,
+				"additions": adds,
+				"deletions": 0,
+				"status":    "untracked",
+			})
+		}
+		untrackedCh <- diffResult{changes: changes, total: map[string]int{"additions": totalAdds, "deletions": 0}}
+	}()
+
+	staged := <-stagedCh
+	unstaged := <-unstagedCh
+	untracked := <-untrackedCh
+
+	unstaged.changes = append(unstaged.changes, untracked.changes...)
+	unstaged.total["additions"] += untracked.total["additions"]
+
+	if staged.errMsg != "" && unstaged.errMsg != "" {
+		writeErr(w, http.StatusInternalServerError, fmt.Errorf("staged: %s; unstaged: %s", staged.errMsg, unstaged.errMsg))
 		return
 	}
 
-	changes, total := parseGitDiffNumStat(string(out))
-	writeJSON(w, http.StatusOK, map[string]any{
-		"changes": changes,
-		"total":   total,
-	})
+	resp := map[string]any{
+		"staged": map[string]any{
+			"changes": staged.changes,
+			"total":   staged.total,
+		},
+		"unstaged": map[string]any{
+			"changes": unstaged.changes,
+			"total":   unstaged.total,
+		},
+	}
+	if staged.errMsg != "" {
+		resp["staged"].(map[string]any)["error"] = staged.errMsg
+	}
+	if unstaged.errMsg != "" {
+		resp["unstaged"].(map[string]any)["error"] = unstaged.errMsg
+	}
+	if untracked.errMsg != "" {
+		resp["unstaged"].(map[string]any)["warning"] = untracked.errMsg
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (s *Server) handleInstances(w http.ResponseWriter, r *http.Request) {
@@ -638,11 +996,10 @@ func (s *Server) handleInstances(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"instances": items, "version": version})
 	case http.MethodPost:
 		var req struct {
-			WorktreeID string            `json:"worktree_id"`
-			TagID      string            `json:"tag_id"`
-			Command    string            `json:"command"`
-			Name       string            `json:"name"`
-			Labels     map[string]string `json:"labels"`
+			WorktreeID string `json:"worktree_id"`
+			TagID      string `json:"tag_id"`
+			Command    string `json:"command"`
+			Name       string `json:"name"`
 		}
 		if err := readJSON(r.Body, &req); err != nil {
 			writeErr(w, http.StatusBadRequest, err)
@@ -659,7 +1016,6 @@ func (s *Server) handleInstances(w http.ResponseWriter, r *http.Request) {
 			TagID:   req.TagID,
 			Command: req.Command,
 			Name:    req.Name,
-			Labels:  normalizeLabels(req.Labels),
 		})
 		if err != nil {
 			writeErr(w, http.StatusBadRequest, err)
@@ -729,25 +1085,6 @@ func (s *Server) handleInstanceRestart(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, item)
 }
 
-func (s *Server) handleInstanceArchive(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	var req struct {
-		ID string `json:"id"`
-	}
-	if err := readJSON(r.Body, &req); err != nil {
-		writeErr(w, http.StatusBadRequest, err)
-		return
-	}
-	if err := s.instanceMgr.Archive(req.ID); err != nil {
-		writeErr(w, http.StatusBadRequest, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
-}
-
 func (s *Server) handleInstanceDelete(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -761,35 +1098,6 @@ func (s *Server) handleInstanceDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.instanceMgr.Delete(req.ID); err != nil {
-		writeErr(w, http.StatusBadRequest, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
-}
-
-func (s *Server) handleInstancePurge(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	var req struct {
-		WorktreeID string `json:"worktree_id"`
-		Version    int64  `json:"version"`
-	}
-	if err := readJSON(r.Body, &req); err != nil {
-		writeErr(w, http.StatusBadRequest, err)
-		return
-	}
-	err := s.instanceMgr.PurgeArchivedInstances(req.WorktreeID, req.Version)
-	if errors.Is(err, store.ErrVersionConflict) {
-		st, _ := s.store.Load()
-		writeJSON(w, http.StatusConflict, map[string]any{
-			"error":   "state changed, please refresh",
-			"version": st.Version,
-		})
-		return
-	}
-	if err != nil {
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
@@ -1174,7 +1482,7 @@ func (s *Server) handleMCPCall(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusBadRequest, err)
 			return
 		}
-		item, err := s.worktreeMgr.Create(args.TaskDescription, args.BaseRef)
+		item, err := s.worktreeMgr.CreateWithOptionsCtx(r.Context(), args.TaskDescription, worktree.CreateOptions{BaseRef: args.BaseRef})
 		if err != nil {
 			writeErr(w, http.StatusBadRequest, err)
 			return
@@ -1234,11 +1542,10 @@ func (s *Server) handleMCPCall(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"result": map[string]any{"instances": items}})
 	case "instance_start":
 		var args struct {
-			WorktreeID string            `json:"worktree_id"`
-			TagID      string            `json:"tag_id"`
-			Command    string            `json:"command"`
-			Name       string            `json:"name"`
-			Labels     map[string]string `json:"labels"`
+			WorktreeID string `json:"worktree_id"`
+			TagID      string `json:"tag_id"`
+			Command    string `json:"command"`
+			Name       string `json:"name"`
 		}
 		if err := decodeArgs(req.Args, &args); err != nil {
 			writeErr(w, http.StatusBadRequest, err)
@@ -1249,7 +1556,6 @@ func (s *Server) handleMCPCall(w http.ResponseWriter, r *http.Request) {
 			TagID:      args.TagID,
 			Command:    args.Command,
 			Name:       args.Name,
-			Labels:     normalizeLabels(args.Labels),
 		})
 		if err != nil {
 			writeErr(w, http.StatusBadRequest, err)
@@ -1283,19 +1589,6 @@ func (s *Server) handleMCPCall(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"result": map[string]string{"status": "ok"}})
-	case "instance_archive":
-		var args struct {
-			ID string `json:"id"`
-		}
-		if err := decodeArgs(req.Args, &args); err != nil {
-			writeErr(w, http.StatusBadRequest, err)
-			return
-		}
-		if err := s.instanceMgr.Archive(args.ID); err != nil {
-			writeErr(w, http.StatusBadRequest, err)
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"result": map[string]string{"status": "ok"}})
 	case "instance_delete":
 		var args struct {
 			ID string `json:"id"`
@@ -1305,28 +1598,6 @@ func (s *Server) handleMCPCall(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err := s.instanceMgr.Delete(args.ID); err != nil {
-			writeErr(w, http.StatusBadRequest, err)
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"result": map[string]string{"status": "ok"}})
-	case "instance_purge":
-		var args struct {
-			WorktreeID string `json:"worktree_id"`
-			Version    int64  `json:"version"`
-		}
-		if err := decodeArgs(req.Args, &args); err != nil {
-			writeErr(w, http.StatusBadRequest, err)
-			return
-		}
-		if err := s.instanceMgr.PurgeArchivedInstances(args.WorktreeID, args.Version); err != nil {
-			if errors.Is(err, store.ErrVersionConflict) {
-				st, _ := s.store.Load()
-				writeJSON(w, http.StatusConflict, map[string]any{
-					"error":   "state changed, please refresh",
-					"version": st.Version,
-				})
-				return
-			}
 			writeErr(w, http.StatusBadRequest, err)
 			return
 		}
@@ -1352,29 +1623,82 @@ func (s *Server) handleMCPCall(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) withAuth(next http.Handler) http.Handler {
-	if strings.TrimSpace(s.cfg.AuthToken) == "" {
-		return next
-	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if isLoopbackRequest(r) {
+			next.ServeHTTP(w, r)
+			return
+		}
 		if !sameOriginHost(r) {
 			http.Error(w, "forbidden origin", http.StatusForbidden)
 			return
 		}
-		token := strings.TrimSpace(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
-		if token == "" {
-			token = strings.TrimSpace(r.URL.Query().Get("token"))
+		if r.URL.Path == "/login" || r.URL.Path == "/api/csrf-token" {
+			next.ServeHTTP(w, r)
+			return
 		}
-		if token != s.cfg.AuthToken {
+		cfg, err := config.Load()
+		if err != nil {
+			http.Error(w, "auth config unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		if strings.TrimSpace(cfg.AuthToken) == "" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		token := extractAuthToken(r)
+		if token != cfg.AuthToken {
 			if !s.allowAuthAttempt(clientIP(r.RemoteAddr)) {
 				http.Error(w, "too many unauthorized attempts", http.StatusTooManyRequests)
 				return
 			}
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			if isAPIClient(r) {
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+			redirectURL := "/login"
+			if r.URL.Path != "/" {
+				redirectURL = "/login?next=" + url.QueryEscape(r.URL.Path)
+			}
+			http.Redirect(w, r, redirectURL, http.StatusFound)
 			return
 		}
 		s.resetAuthAttempts(clientIP(r.RemoteAddr))
 		next.ServeHTTP(w, r)
 	})
+}
+
+func isAPIClient(r *http.Request) bool {
+	accept := r.Header.Get("Accept")
+	return strings.Contains(accept, "application/json") || strings.Contains(accept, "text/event-stream")
+}
+
+func isValidRedirectPath(path string) bool {
+	if path == "" {
+		return false
+	}
+	if path[0] != '/' {
+		return false
+	}
+	if len(path) > 1 && path[1] == '/' {
+		return false
+	}
+	if strings.Contains(path, "://") {
+		return false
+	}
+	return true
+}
+
+func extractAuthToken(r *http.Request) string {
+	if token := strings.TrimSpace(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")); token != "" {
+		return token
+	}
+	if token := strings.TrimSpace(r.URL.Query().Get("token")); token != "" {
+		return token
+	}
+	if cookie, err := r.Cookie("mw_token"); err == nil {
+		return strings.TrimSpace(cookie.Value)
+	}
+	return ""
 }
 
 func (s *Server) withServerRevision(next http.Handler) http.Handler {
@@ -1443,25 +1767,6 @@ func writeSSELogEvent(w io.Writer, chunk string, next int64) error {
 	return err
 }
 
-func normalizeLabels(in map[string]string) map[string]string {
-	if len(in) == 0 {
-		return nil
-	}
-	out := map[string]string{}
-	for k, v := range in {
-		key := strings.TrimSpace(k)
-		val := strings.TrimSpace(v)
-		if key == "" || val == "" {
-			continue
-		}
-		out[key] = val
-	}
-	if len(out) == 0 {
-		return nil
-	}
-	return out
-}
-
 func sameOriginHost(r *http.Request) bool {
 	origin := strings.TrimSpace(r.Header.Get("Origin"))
 	if origin == "" {
@@ -1482,6 +1787,10 @@ func clientIP(remoteAddr string) string {
 	return host
 }
 
+// isLoopbackHost checks if host is a loopback address.
+// IPv6 is explicitly disabled and NOT supported.
+// Only IPv4 loopback (127.x.x.x) and "localhost" are considered loopback.
+// IPv6 addresses (including ::1, ::ffff:127.0.0.1) are rejected as non-loopback.
 func isLoopbackHost(host string) bool {
 	host = strings.TrimSpace(host)
 	if host == "" {
@@ -1490,8 +1799,15 @@ func isLoopbackHost(host string) bool {
 	if strings.EqualFold(host, "localhost") {
 		return true
 	}
+	// Reject all IPv6 addresses (not supported). IPv6 addresses contain ":".
+	if strings.Contains(host, ":") {
+		return false
+	}
 	ip := net.ParseIP(host)
-	return ip != nil && ip.IsLoopback()
+	if ip == nil {
+		return false
+	}
+	return ip.IsLoopback()
 }
 
 func isLoopbackRequest(r *http.Request) bool {
@@ -1577,9 +1893,6 @@ func canListenTCP(addr string) bool {
 }
 
 func readRepoListenPort(dataDir string) (int, error) {
-	type config struct {
-		ListenPort int `json:"listen_port"`
-	}
 	b, err := os.ReadFile(filepath.Join(dataDir, "server.json"))
 	if errors.Is(err, os.ErrNotExist) {
 		return 0, nil
@@ -1587,7 +1900,7 @@ func readRepoListenPort(dataDir string) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	var cfg config
+	var cfg serverConfig
 	if err := json.Unmarshal(b, &cfg); err != nil {
 		return 0, err
 	}
@@ -1597,18 +1910,93 @@ func readRepoListenPort(dataDir string) (int, error) {
 	return cfg.ListenPort, nil
 }
 
-func writeRepoListenPort(dataDir string, port int) error {
-	type config struct {
-		ListenPort int `json:"listen_port"`
+func generateInstanceID() string {
+	bid := make([]byte, 8)
+	if _, err := rand.Read(bid); err != nil {
+		// Fallback for crypto/rand failure (extremely rare)
+		// Use timestamp + PID + stack hash for basic uniqueness
+		h := sha256.New()
+		h.Write([]byte(fmt.Sprintf("%d-%d-%p", time.Now().UnixNano(), os.Getpid(), generateInstanceID)))
+		copy(bid, h.Sum(nil)[:8])
 	}
+	return fmt.Sprintf("%d-%d-%x", os.Getpid(), time.Now().UnixNano(), bid)
+}
+
+func writeRepoListenPort(dataDir string, port int) error {
+	filePath := filepath.Join(dataDir, "server.json")
+	var cfg serverConfig
+	if data, err := os.ReadFile(filePath); err == nil {
+		_ = json.Unmarshal(data, &cfg)
+	}
+	cfg.ListenPort = port
+	if cfg.InstanceID == "" {
+		cfg.InstanceID = generateInstanceID()
+	}
+
 	if err := os.MkdirAll(dataDir, 0o755); err != nil {
 		return err
 	}
-	b, err := json.MarshalIndent(config{ListenPort: port}, "", "  ")
+	tmp, err := os.CreateTemp(dataDir, "server.json.*")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(dataDir, "server.json"), b, 0o600)
+	tmpPath := tmp.Name()
+	var renamed bool
+	defer func() {
+		tmp.Close()
+		if !renamed {
+			os.Remove(tmpPath)
+		}
+	}()
+	if err := tmp.Chmod(0o600); err != nil {
+		return err
+	}
+	if err := json.NewEncoder(tmp).Encode(cfg); err != nil {
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpPath, filePath); err != nil {
+		return err
+	}
+	renamed = true
+	return nil
+}
+
+// countFileLines reads the file at path and returns its line count.
+// Returns 0 if the file cannot be read, exceeds 1 MB, or appears binary.
+func countFileLines(path string) int {
+	info, err := os.Stat(path)
+	if err != nil {
+		return 0
+	}
+	if info.Size() > 1<<20 {
+		return 0
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return 0
+	}
+	if isBinaryData(data) {
+		return 0
+	}
+	return strings.Count(string(data), "\n")
+}
+
+// isBinaryData returns true if data contains null bytes in the first 8 KB,
+// indicating binary content.
+func isBinaryData(data []byte) bool {
+	n := len(data)
+	if n > 8192 {
+		n = 8192
+	}
+	for _, b := range data[:n] {
+		if b == 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // parseGitDiffNumStat parses the output of "git diff --numstat HEAD" and
@@ -1664,6 +2052,114 @@ func parseGitDiffNumStat(output string) ([]map[string]any, map[string]int) {
 	}
 
 	return changes, map[string]int{"additions": totalAdds, "deletions": totalDels}
+}
+
+func (s *Server) handleLLMConfig(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		cfg := llm.Load()
+		apiKeyMasked := ""
+		if cfg.APIKey != "" {
+			apiKeyMasked = llm.MaskKey(cfg.APIKey)
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"protocol":        cfg.Protocol,
+			"api_key_masked":  apiKeyMasked,
+			"api_address":     cfg.APIAddress,
+			"model":           cfg.Model,
+			"reasoning_split": cfg.ReasoningSplit,
+			"is_secure":       s.isSecure,
+			"available":       llm.IsAvailable(),
+		})
+	case http.MethodPatch:
+		var req struct {
+			Protocol       string `json:"protocol"`
+			APIKey         string `json:"api_key"`
+			APIAddress     string `json:"api_address"`
+			Model          string `json:"model"`
+			ReasoningSplit bool   `json:"reasoning_split"`
+		}
+		if err := readJSON(r.Body, &req); err != nil {
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
+		cfg := llm.Load()
+		if req.Protocol != "" {
+			if req.Protocol != "openai" && req.Protocol != "anthropic" {
+				writeErr(w, http.StatusBadRequest, fmt.Errorf("invalid protocol: must be 'openai' or 'anthropic'"))
+				return
+			}
+			// Check if switching to a protocol without an API key
+			if req.APIKey == "" && cfg.APIKey == "" {
+				writeErr(w, http.StatusBadRequest, fmt.Errorf("API key is required for %s protocol", req.Protocol))
+				return
+			}
+			cfg.Protocol = req.Protocol
+		}
+		if req.APIKey != "" {
+			cfg.APIKey = req.APIKey
+		}
+		if req.APIAddress != "" {
+			cfg.APIAddress = req.APIAddress
+		}
+		if req.Model != "" {
+			cfg.Model = req.Model
+		}
+		cfg.ReasoningSplit = req.ReasoningSplit
+		if err := llm.Save(cfg); err != nil {
+			writeErr(w, http.StatusInternalServerError, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "protocol": cfg.Protocol})
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *Server) handleLLMTest(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !llm.IsAvailable() {
+		writeErr(w, http.StatusBadRequest, fmt.Errorf("no LLM configured"))
+		return
+	}
+	branchName, err := llm.TestConnection(r.Context())
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, fmt.Errorf("invalid API key or network error"))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "branch_name": branchName})
+}
+
+func (s *Server) handleLLMGenerate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !llm.IsAvailable() {
+		writeErr(w, http.StatusBadRequest, fmt.Errorf("no LLM configured"))
+		return
+	}
+	var req struct {
+		TaskDescription string `json:"task_description"`
+	}
+	if err := readJSON(r.Body, &req); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	taskDesc := strings.TrimSpace(req.TaskDescription)
+	if taskDesc == "" {
+		writeErr(w, http.StatusBadRequest, fmt.Errorf("task description is required"))
+		return
+	}
+	branchName, err := llm.GenerateBranchName(r.Context(), taskDesc)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, fmt.Errorf("generation failed: %w", err))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"branch_name": branchName})
 }
 
 func computeServerRevision() string {
@@ -1728,11 +2224,6 @@ func (s *Server) handleWorktreeOpen(w http.ResponseWriter, r *http.Request, args
 			return
 		}
 		writeErr(w, http.StatusInternalServerError, err)
-		return
-	}
-
-	if _, err := os.Stat(path); err != nil {
-		writeErr(w, http.StatusNotFound, fmt.Errorf("worktree path not found: %w", err))
 		return
 	}
 

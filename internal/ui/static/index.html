@@ -21,6 +21,112 @@
             --sidebar-bottom-min-height: 100px;
             --term-ctrl-btn-size: 32px;
             --term-ctrl-btn-gap: 10px;
+
+            --text-primary: #24292e;
+            --text-secondary: #586069;
+            --text-muted: #6a737d;
+            --tab-bg: #fbfbfb;
+            --tab-active-bg: #fff;
+            --main-bg: #fff;
+            --button-bg: #fafbfc;
+            --button-hover-bg: #f3f4f6;
+            --button-border: #ddd;
+            --primary-button-bg: #2ea44f;
+            --primary-button-hover-bg: #2c974b;
+            --danger-text: #cb2431;
+            --danger-hover-bg: #ffeef0;
+            --status-running: #28a745;
+            --status-stopped: #999;
+            --status-exited: #6a737d;
+            --status-failed: #cb2431;
+            --additions: #28a745;
+            --deletions: #cb2431;
+            --warning-bg: #fff8c5;
+            --warning-text: #9a6700;
+            --warning-border: #d4a72c;
+            --untracked-badge-bg: #d4c5f9;
+            --untracked-badge-text: #6f42c1;
+            --git-change-border: #f0f0f0;
+            --modal-titlebar-bg: #f6f8fa;
+            --modal-border: #d0d7da;
+            --modal-backdrop: rgba(0,0,0,0.4);
+            --table-header-bg: #f6f8fa;
+            --table-border: #e1e4e8;
+            --table-cell-border: #f0f0f0;
+            --group-header-bg: #faf8ff;
+            --badge-bg: #21262d;
+            --badge-text: #adbac7;
+            --conn-sse: #e36209;
+            --conn-none: #999;
+
+            --remote-title-bg: linear-gradient(90deg, #e8c4c4, #d4a5a5, #e8d4d4, #e8c4c4);
+            --remote-title-text: #4a1a1a;
+            --remote-title-icon: #7a3a3a;
+            --shadow: 0 1px 2px rgba(0,0,0,0.05);
+            --dialog-shadow: 0 4px 12px rgba(0,0,0,0.15);
+            --status-bar-bg: rgba(0,0,0,0.5);
+            --status-bar-text: #ccc;
+            --overlay-bg: rgba(0,0,0,0.7);
+            --overlay-text: #ffffff;
+        }
+
+        @media (prefers-color-scheme: dark) {
+            :root {
+                --bg-color: #0d1117;
+                --border-color: #30363d;
+                --active-color: #58a6ff;
+                --active-bg: #0f2647;
+                --hover-bg: #161b22;
+                --main-accent: #a371f7;
+                --main-accent-bg: #1a1525;
+                --main-accent-hover: #252035;
+                --text-primary: #c9d1d9;
+                --text-secondary: #8b949e;
+                --text-muted: #6e7681;
+                --tab-bg: #161b22;
+                --tab-active-bg: #0d1117;
+                --main-bg: #0d1117;
+                --button-bg: #21262d;
+                --button-hover-bg: #30363d;
+                --button-border: #30363d;
+                --primary-button-bg: #238636;
+                --primary-button-hover-bg: #2ea043;
+                --danger-text: #f85149;
+                --danger-hover-bg: #f851491a;
+                --status-running: #3fb950;
+                --status-stopped: #8b949e;
+                --status-exited: #6e7681;
+                --status-failed: #f85149;
+                --additions: #3fb950;
+                --deletions: #f85149;
+                --warning-bg: #341a00;
+                --warning-text: #d29922;
+                --warning-border: #9e6a03;
+                --untracked-badge-bg: #4a3060;
+                --untracked-badge-text: #d2a8ff;
+                --git-change-border: #21262d;
+                --modal-titlebar-bg: #161b22;
+                --modal-border: #30363d;
+                --modal-backdrop: rgba(0,0,0,0.6);
+                --table-header-bg: #161b22;
+                --table-border: #30363d;
+                --table-cell-border: #21262d;
+                --group-header-bg: #1a1525;
+                --badge-bg: #30363d;
+                --badge-text: #c9d1d9;
+                --conn-sse: #e36209;
+                --conn-none: #8b949e;
+
+                --remote-title-bg: linear-gradient(90deg, #4a3030, #3d2828, #5a3a3a, #4a3030);
+                --remote-title-text: #e8c4c4;
+                --remote-title-icon: #c4a0a0;
+                --shadow: 0 1px 2px rgba(0,0,0,0.3);
+                --dialog-shadow: 0 4px 24px rgba(0,0,0,0.4);
+                --status-bar-bg: rgba(255,255,255,0.15);
+                --status-bar-text: #c9d1d9;
+                --overlay-bg: rgba(0,0,0,0.85);
+                --overlay-text: #c9d1d9;
+            }
         }
 
         body, html {
@@ -30,7 +136,7 @@
             overflow: hidden;
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji";
             font-size: 13px;
-            color: #24292e;
+            color: var(--text-primary);
         }
 
         * {
@@ -70,14 +176,14 @@
             cursor: pointer;
             border: none;
             background: none;
-            color: #586069;
+            color: var(--text-secondary);
             padding: 2px;
             border-radius: 4px;
         }
 
             .icon-btn:hover {
-                background: #e1e4e8;
-                color: #0366d6;
+                background: var(--border-color);
+                color: var(--active-color);
             }
 
         #wt-list {
@@ -124,46 +230,77 @@
             border-top: 1px solid var(--border-color);
         }
 
-        #git-changes-header {
+        .git-section {
+            display: flex;
+            flex-direction: column;
+            flex-shrink: 0;
+        }
+
+        .git-section.expanded {
+            flex: 1;
+            min-height: 0;
+        }
+
+        .git-section-header {
             display: flex;
             align-items: center;
             padding: 6px 12px;
             border-bottom: 1px solid var(--border-color);
-            gap: 8px;
+            gap: 6px;
             flex-shrink: 0;
             background: var(--bg-color);
+            cursor: pointer;
+            user-select: none;
         }
 
-        .git-changes-title {
+        .git-section-header:hover {
+            background: var(--hover-bg);
+        }
+
+        .git-section-chevron {
+            flex-shrink: 0;
+            transition: transform 0.2s;
+            color: var(--text-muted);
+        }
+
+        .git-section.expanded .git-section-chevron {
+            transform: rotate(90deg);
+        }
+
+        .git-section-title {
             font-size: 11px;
             font-weight: 600;
-            text-transform: uppercase;
-            letter-spacing: 0.5px;
-            color: #6a737d;
+            color: var(--text-muted);
         }
 
-        #git-changes-summary {
+        .git-section-summary {
             margin-left: auto;
             font-size: 11px;
-            color: #6a737d;
+            color: var(--text-muted);
         }
 
-        #git-changes-summary .additions { color: #28a745; }
-        #git-changes-summary .deletions { color: #cb2431; }
+        .git-section-summary .additions { color: var(--additions); }
+        .git-section-summary .deletions { color: var(--danger-text); }
 
-        #git-changes-list {
-            flex: 1;
+        .git-section-list {
             overflow-y: auto;
-            list-style: none;
             padding: 0;
             margin: 0;
+        }
+
+        .git-section.expanded .git-section-list {
+            flex: 1;
+        }
+
+        .git-section:not(.expanded) .git-section-list {
+            display: none;
         }
 
         .git-change-item {
             padding: 4px 12px;
             font-size: 12px;
             font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-            border-bottom: 1px solid #f0f0f0;
+            border-bottom: 1px solid var(--git-change-border);
             display: flex;
             align-items: center;
             gap: 6px;
@@ -188,21 +325,40 @@
             gap: 4px;
         }
 
-        .git-change-stats .additions { color: #28a745; }
-        .git-change-stats .deletions { color: #cb2431; }
+        .git-change-stats .additions { color: var(--additions); }
+        .git-change-stats .deletions { color: var(--danger-text); }
 
-        .git-changes-empty {
+        .git-change-untracked-badge {
+            flex-shrink: 0;
+            font-size: 10px;
+            font-weight: 600;
+            padding: 1px 4px;
+            border-radius: 3px;
+            background: var(--untracked-badge-bg);
+            color: var(--main-accent);
+            line-height: 1;
+        }
+
+        .git-change-empty {
             padding: 16px 12px;
             text-align: center;
-            color: #6a737d;
+            color: var(--text-muted);
             font-size: 12px;
+        }
+
+        .git-change-warning {
+            padding: 6px 12px;
+            font-size: 12px;
+            color: var(--warning-text);
+            background: var(--warning-bg);
+            border-bottom: 1px solid var(--warning-border);
         }
 
         .wt-item {
             padding: 8px 12px;
             cursor: pointer;
             border-left: 3px solid transparent;
-            border-bottom: 1px solid #f0f0f0;
+            border-bottom: 1px solid var(--git-change-border);
             display: flex;
             flex-direction: column;
             gap: 2px;
@@ -216,7 +372,7 @@
                 background: var(--active-bg);
                 border-left-color: var(--active-color);
                 font-weight: 500;
-                box-shadow: 0 1px 2px rgba(0,0,0,0.05);
+                box-shadow: var(--shadow);
             }
 
         .wt-item-main {
@@ -241,10 +397,10 @@
             padding: 6px 12px 2px;
             font-size: 11px;
             font-weight: 600;
-            color: #6a737d;
+            color: var(--text-muted);
             text-transform: uppercase;
             letter-spacing: 0.5px;
-            border-bottom: 1px solid #f0f0f0;
+            border-bottom: 1px solid var(--git-change-border);
             cursor: default;
         }
 
@@ -255,7 +411,7 @@
 
         .wt-branch {
             font-size: 11px;
-            color: #6a737d;
+            color: var(--text-muted);
             display: flex;
             align-items: center;
             gap: 4px;
@@ -277,15 +433,15 @@
             cursor: pointer;
             padding: 2px;
             border-radius: 3px;
-            color: #6a737d;
+            color: var(--text-muted);
             display: flex;
             align-items: center;
             justify-content: center;
         }
 
         .wt-action-btn:hover {
-            background-color: rgba(0,0,0,0.1);
-            color: #24292e;
+            background: var(--hover-bg);
+            color: var(--text-primary);
         }
 
         .wt-action-btn.loading {
@@ -308,7 +464,7 @@
             display: flex;
             flex-direction: column;
             min-width: 0;
-            background: #fff;
+            background: var(--main-bg);
         }
 
         /* Tabs Header */
@@ -319,16 +475,51 @@
             align-items: center;
             padding: 0 8px;
             gap: 4px;
-            background: #fbfbfb;
+            background: var(--tab-bg);
         }
 
         #tabs-container {
             flex: 1;
             display: flex;
             overflow-x: auto;
+            overflow-y: hidden;
             height: 100%;
             align-items: flex-end;
             gap: 4px;
+        }
+
+        #tabs-container::-webkit-scrollbar,
+        #tabs-container::-webkit-scrollbar:horizontal {
+            -webkit-appearance: none;
+            height: 2px;
+            width: 0;
+            background: transparent;
+        }
+
+        #tabs-container::-webkit-scrollbar-track,
+        #tabs-container::-webkit-scrollbar-track-piece {
+            background: transparent;
+            border: none;
+        }
+
+        #tabs-container::-webkit-scrollbar-thumb,
+        #tabs-container::-webkit-scrollbar-thumb:horizontal {
+            background: var(--text-muted);
+            border-radius: 1px;
+            border: none;
+        }
+
+        #tabs-container::-webkit-scrollbar-thumb:hover,
+        #tabs-container::-webkit-scrollbar-thumb:active {
+            background: var(--text-secondary);
+        }
+
+        #tabs-container::-webkit-scrollbar-button,
+        #tabs-container::-webkit-scrollbar-corner {
+            display: none;
+            width: 0;
+            height: 0;
+            background: transparent;
         }
 
         .tab {
@@ -338,6 +529,12 @@
             border-bottom: none;
             border-radius: 4px 4px 0 0;
             user-select: none;
+            color: var(--text-secondary);
+            margin-bottom: -1px;
+            height: 32px;
+            display: flex;
+            align-items: center;
+            gap: 6px;
         }
 
         /* Drag and drop visual feedback */
@@ -351,28 +548,21 @@
             box-shadow: inset 3px 0 0 var(--active-color);
             background: var(--active-bg);
         }
-            color: #586069;
-            margin-bottom: -1px;
-            height: 32px;
-            display: flex;
-            align-items: center;
-            gap: 6px;
+
+        .tab:hover {
+            background: var(--hover-bg);
         }
 
-            .tab:hover {
-                background: #f6f8fa;
-            }
-
-            .tab.active {
-                background: #fff;
-                border-color: var(--border-color);
-                color: #24292e;
-                border-top: 2px solid var(--active-color);
-            }
+        .tab.active {
+            background: var(--main-bg);
+            border-color: var(--border-color);
+            color: var(--text-primary);
+            border-top: 2px solid var(--active-color);
+        }
 
         /* Inline rename input */
         .tab-rename-input {
-            background: var(--bg-primary);
+            background: var(--main-bg);
             border: 1px solid var(--border-color);
             border-radius: 3px;
             padding: 1px 4px;
@@ -394,25 +584,25 @@
         }
 
         .status-running {
-            background: #28a745;
+            background: var(--status-running);
         }
 
         .status-stopped {
-            background: #999;
+            background: var(--status-stopped);
         }
 
         .status-exited {
-            background: #6a737d;
+            background: var(--status-exited);
         }
 
         .status-failed {
-            background: #cb2431;
+            background: var(--status-failed);
         }
 
         .new-tab-btn {
             padding: 4px 8px;
             cursor: pointer;
-            color: #586069;
+            color: var(--text-secondary);
             font-weight: bold;
             font-size: 16px;
             border-radius: 4px;
@@ -421,28 +611,9 @@
         }
 
             .new-tab-btn:hover {
-                background: #e1e4e8;
-                color: #0366d6;
+                background: var(--border-color);
+                color: var(--active-color);
             }
-
-        /* Show archived label — always visible, never scrolls away */
-        #show-archived-label {
-            display: flex;
-            align-items: center;
-            gap: 6px;
-            white-space: nowrap;
-            font-size: 12px;
-            color: #586069;
-            margin-left: 8px;
-            flex-shrink: 0;
-            cursor: pointer;
-        }
-
-        /* Purge button in header area */
-        #header button.danger {
-            flex-shrink: 0;
-            margin-left: 8px;
-        }
 
         /* Actions Toolbar (Hidden by default, shown when instance active) */
         #instance-actions {
@@ -479,7 +650,7 @@
             top: 50%;
             left: 50%;
             transform: translate(-50%, -50%);
-            color: #586069;
+            color: var(--text-secondary);
             text-align: center;
         }
 
@@ -488,8 +659,8 @@
             position: absolute;
             bottom: 0;
             right: 0;
-            background: rgba(0,0,0,0.5);
-            color: #ccc;
+            background: var(--status-bar-bg);
+            color: var(--status-bar-text);
             padding: 2px 8px;
             font-size: 11px;
             z-index: 10;
@@ -498,8 +669,8 @@
             border-top-left-radius: 4px;
         }
         #status-bar:hover {
-            background: rgba(0,0,0,0.7);
-            color: #fff;
+            background: var(--hover-bg);
+            color: var(--text-primary);
         }
 
         /* Resource Monitor Modal */
@@ -507,47 +678,15 @@
             width: 680px;
             max-width: 90vw;
             padding: 0;
-            border: 1px solid #d0d7da;
+            border: 1px solid var(--modal-border);
             border-radius: 10px;
-            box-shadow: 0 14px 28px rgba(0,0,0,0.25), 0 10px 10px rgba(0,0,0,0.22);
+            box-shadow: var(--dialog-shadow);
         }
         #modal-monitor::backdrop {
-            background: rgba(0,0,0,0.4);
+            background: var(--modal-backdrop);
         }
-        #modal-monitor .monitor-titlebar {
-            display: flex;
-            align-items: center;
-            padding: 10px 12px;
-            border-bottom: 1px solid #e1e4e8;
-            background: #f6f8fa;
+        #modal-monitor .modal-titlebar {
             border-radius: 10px 10px 0 0;
-        }
-        #modal-monitor .monitor-close-btn {
-            width: 14px;
-            height: 14px;
-            border-radius: 50%;
-            background: #ff5f57;
-            border: none;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            cursor: pointer;
-            color: rgba(0,0,0,0.5);
-            padding: 0;
-            flex-shrink: 0;
-            transition: opacity 0.15s;
-        }
-        #modal-monitor .monitor-close-btn:hover {
-            opacity: 0.85;
-        }
-        #modal-monitor .monitor-close-btn:active {
-            opacity: 0.7;
-        }
-        #modal-monitor .monitor-title {
-            margin-left: 10px;
-            font-size: 13px;
-            font-weight: 500;
-            color: #24292e;
         }
         #modal-monitor .monitor-summary {
             display: flex;
@@ -556,8 +695,8 @@
             flex-wrap: wrap;
         }
         #modal-monitor .monitor-summary-item {
-            background: #f6f8fa;
-            border: 1px solid #e1e4e8;
+            background: var(--hover-bg);
+            border: 1px solid var(--border-color);
             border-radius: 6px;
             padding: 8px 12px;
             flex: 1;
@@ -565,14 +704,14 @@
         }
         #modal-monitor .monitor-summary-item .label {
             font-size: 11px;
-            color: #586069;
+            color: var(--text-secondary);
             text-transform: uppercase;
             letter-spacing: 0.5px;
         }
         #modal-monitor .monitor-summary-item .value {
             font-size: 16px;
             font-weight: 600;
-            color: #24292e;
+            color: var(--text-primary);
             margin-top: 2px;
         }
         #modal-monitor table {
@@ -583,30 +722,30 @@
         #modal-monitor th {
             text-align: left;
             padding: 6px 8px;
-            background: #f6f8fa;
-            border-bottom: 1px solid #e1e4e8;
-            color: #586069;
+            background: var(--hover-bg);
+            border-bottom: 1px solid var(--border-color);
+            color: var(--text-secondary);
             font-size: 11px;
             text-transform: uppercase;
             letter-spacing: 0.5px;
         }
         #modal-monitor td {
             padding: 6px 8px;
-            border-bottom: 1px solid #f0f0f0;
+            border-bottom: 1px solid var(--git-change-border);
         }
         #modal-monitor tr:last-child td {
             border-bottom: none;
         }
         #modal-monitor .wt-group-header td {
-            background: #faf8ff;
+            background: var(--main-accent-bg);
             font-weight: 600;
-            color: #6f42c1;
+            color: var(--main-accent);
             font-size: 11px;
             text-transform: uppercase;
             letter-spacing: 0.5px;
         }
         #modal-monitor .wt-group-header td {
-            border-top: 1px solid #e1e4e8;
+            border-top: 1px solid var(--border-color);
         }
         #modal-monitor .wt-group-header td:first-child {
             border-top-left-radius: 4px;
@@ -614,22 +753,22 @@
         #modal-monitor .wt-group-header td:last-child {
             border-top-right-radius: 4px;
         }
-        #modal-monitor .conn-ws { color: #28a745; }
-        #modal-monitor .conn-sse { color: #e36209; }
-        #modal-monitor .conn-none { color: #999; }
+        #modal-monitor .conn-ws { color: var(--additions); }
+        #modal-monitor .conn-sse { color: var(--conn-sse); }
+        #modal-monitor .conn-none { color: var(--status-stopped); }
         #modal-monitor .empty-state {
             text-align: center;
-            color: #586069;
+            color: var(--text-secondary);
             padding: 20px;
         }
         #modal-monitor .monitor-licenses {
-            border-top: 1px solid #e1e4e8;
+            border-top: 1px solid var(--border-color);
             padding: 8px 14px;
         }
         #modal-monitor .monitor-licenses-toggle {
             background: none;
             border: none;
-            color: #586069;
+            color: var(--text-secondary);
             font-size: 11px;
             cursor: pointer;
             padding: 2px 0;
@@ -638,7 +777,7 @@
             gap: 4px;
         }
         #modal-monitor .monitor-licenses-toggle:hover {
-            color: #24292e;
+            color: var(--text-primary);
         }
         #modal-monitor .monitor-licenses-toggle svg {
             transition: transform 0.2s;
@@ -650,7 +789,7 @@
             display: none;
             margin-top: 8px;
             font-size: 11px;
-            color: #586069;
+            color: var(--text-secondary);
             line-height: 1.6;
             max-height: 200px;
             overflow-y: auto;
@@ -660,35 +799,39 @@
         }
         #modal-monitor .license-item {
             padding: 4px 0;
-            border-bottom: 1px solid #f0f0f0;
+            border-bottom: 1px solid var(--git-change-border);
         }
         #modal-monitor .license-item:last-child {
             border-bottom: none;
         }
         #modal-monitor .license-name {
             font-weight: 600;
-            color: #24292e;
+            color: var(--text-primary);
         }
         #modal-monitor .license-sppver {
-            color: #999;
+            color: var(--status-stopped);
             margin-left: 4px;
         }
         #modal-monitor .license-type {
-            color: #6f42c1;
+            color: var(--main-accent);
             margin-left: 6px;
         }
 
         /* Dialogs */
         dialog {
-            border: 1px solid #ddd;
+            border: 1px solid var(--button-border);
             border-radius: 6px;
-            padding: 20px;
-            box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+            padding: 0;
+            box-shadow: var(--dialog-shadow);
+            background: var(--main-bg);
+            color: var(--text-primary);
+            max-height: 90vh;
+            overflow-y: auto;
             width: 400px;
         }
 
             dialog::backdrop {
-                background: rgba(0,0,0,0.3);
+                background: var(--modal-backdrop);
             }
 
         .form-group {
@@ -704,22 +847,144 @@
             .form-group input, .form-group select {
                 width: 100%;
                 padding: 6px;
-                border: 1px solid #ddd;
+                border: 1px solid var(--button-border);
                 border-radius: 4px;
+                background: var(--main-bg);
+                color: var(--text-primary);
             }
 
         .form-actions {
-            text-align: right;
             margin-top: 16px;
             display: flex;
-            justify-content: flex-end;
+            align-items: center;
             gap: 8px;
         }
 
         .muted {
-            color: #6a737d;
+            color: var(--text-muted);
             font-size: 12px;
             margin-top: 4px;
+        }
+
+        /* Unified Modal Header & Body */
+        .modal-titlebar {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 10px 12px;
+            border-bottom: 1px solid var(--border-color);
+            background: var(--hover-bg);
+            border-radius: 6px 6px 0 0;
+        }
+        .modal-title {
+            font-size: 13px;
+            font-weight: 600;
+            color: var(--text-primary);
+        }
+        .modal-close-btn {
+            width: 20px;
+            height: 20px;
+            border-radius: 4px;
+            background: none;
+            border: none;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            color: var(--text-muted);
+            padding: 0;
+            flex-shrink: 0;
+            transition: background 0.15s, color 0.15s;
+        }
+        .modal-close-btn:hover {
+            background: var(--border-color);
+            color: var(--danger-text);
+        }
+        .modal-close-btn:active {
+            opacity: 0.7;
+        }
+        .modal-body {
+            padding: 20px;
+        }
+
+        /* Connection Overlay */
+        #connection-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: var(--overlay-bg);
+            color: var(--overlay-text);
+            z-index: 9999;
+            align-items: center;
+            justify-content: center;
+            flex-direction: column;
+            font-family: sans-serif;
+        }
+        #connection-overlay .conn-title {
+            font-size: 24px;
+            font-weight: bold;
+            margin-bottom: 10px;
+        }
+        #connection-overlay .conn-sub {
+            color: var(--overlay-text);
+        }
+
+        /* LLM Settings Dialog overrides */
+        #dialog-llm-settings {
+            width: 420px;
+            max-width: 90vw;
+            border-radius: 8px;
+        }
+
+        /* Remote Access Warning */
+        @keyframes gradientScroll {
+            0% { background-position: 0% 50%; }
+            100% { background-position: 300% 50%; }
+        }
+
+        .remote-access .sidebar-title {
+            background: var(--remote-title-bg);
+            background-size: 300% 100%;
+            animation: gradientScroll 6s linear infinite;
+            color: var(--remote-title-text);
+            border-bottom-color: transparent;
+        }
+
+        .remote-access .sidebar-title .icon-btn {
+            color: var(--remote-title-icon);
+        }
+
+        .remote-access .sidebar-title .icon-btn:hover {
+            background: rgba(0,0,0,0.1);
+            color: var(--remote-title-text);
+        }
+
+        @media (prefers-color-scheme: dark) {
+            .remote-access .sidebar-title .icon-btn:hover {
+                background: rgba(255,255,255,0.1);
+            }
+        }
+
+        /* Remote badge */
+        .remote-badge {
+            font-size: 10px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            padding: 2px 8px;
+            border-radius: 10px;
+            background: #b84a4a;
+            color: #ffffff;
+            margin-left: 6px;
+            vertical-align: middle;
+            position: relative;
+            top: -1px;
+            line-height: 1;
+        }
+        .remote-badge.hidden {
+            display: none;
         }
 
         /* Utilities */
@@ -730,34 +995,43 @@
         button {
             cursor: pointer;
             padding: 6px 12px;
-            border: 1px solid #ddd;
-            background: #fafbfc;
+            border: 1px solid var(--button-border);
+            background: var(--button-bg);
+            color: var(--text-primary);
             border-radius: 4px;
         }
 
             button:hover {
-                background: #f3f4f6;
-                border-color: #ccc;
+                background: var(--button-hover-bg);
+                border-color: var(--button-border);
             }
 
             button.primary {
-                background: #2ea44f;
+                background: var(--primary-button-bg);
                 color: white;
-                border: 1px solid rgba(27,31,35,0.15);
+                border: 1px solid var(--button-border);
             }
 
                 button.primary:hover {
-                    background: #2c974b;
+                    background: var(--primary-button-hover-bg);
                 }
 
             button.danger {
-                color: #cb2431;
+                color: var(--danger-text);
             }
 
                 button.danger:hover {
-                    background: #ffeef0;
-                    border-color: #cb2431;
+                    background: var(--danger-hover-bg);
+                    border-color: var(--danger-text);
                 }
+
+            #btnAIGenerate.muted {
+                opacity: 0.5;
+                background: var(--button-bg);
+                border-color: var(--button-border);
+                color: var(--status-stopped);
+                cursor: pointer;
+            }
 
             #terminal-controls {
                 position: absolute;
@@ -801,15 +1075,15 @@
 </head>
 <body>
     <div id="app">
-        <div id="connection-overlay" style="display:none; position:fixed; top:0; left:0; right:0; bottom:0; background:rgba(0,0,0,0.7); color:white; z-index:9999; align-items:center; justify-content:center; flex-direction:column; font-family:sans-serif;">
-            <div style="font-size: 24px; font-weight: bold; margin-bottom: 10px;">Connection Lost</div>
-            <div style="color: #ccc;">Backend server unreachable. Retrying...</div>
+        <div id="connection-overlay" style="display:none;">
+            <div class="conn-title">Connection Lost</div>
+            <div class="conn-sub">Backend server unreachable. Retrying...</div>
         </div>
 
         <!-- Sidebar: Worktrees -->
         <div id="sidebar">
             <div class="sidebar-title">
-                <span>Worktrees</span>
+                <span>Worktrees<span id="remote-badge" class="remote-badge hidden">Remote</span></span>
                 <div class="sidebar-actions">
                     <button class="icon-btn" onclick="openModal('modal-create-wt')" title="New Worktree">+</button>
                     <button class="icon-btn" onclick="openModal('modal-import-wt')" title="Import Worktree">↓</button>
@@ -820,11 +1094,26 @@
             </div>
             <div id="sidebar-resize-handle" onmousedown="startSidebarResize(event)"></div>
             <div id="sidebar-bottom-panel">
-                <div id="git-changes-header">
-                    <span class="git-changes-title">Changes</span>
-                    <span id="git-changes-summary"></span>
+                <div id="git-staged-section" class="git-section">
+                    <div class="git-section-header" onclick="toggleGitSection('staged')">
+                        <svg class="git-section-chevron" width="8" height="8" viewBox="0 0 8 8" fill="none" xmlns="http://www.w3.org/2000/svg">
+                            <path d="M3 1L7 4L3 7" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+                        </svg>
+                        <span class="git-section-title">Staged</span>
+                        <span class="git-section-summary" id="git-staged-summary"></span>
+                    </div>
+                    <div class="git-section-list" id="git-staged-list"></div>
                 </div>
-                <div id="git-changes-list"></div>
+                <div id="git-unstaged-section" class="git-section expanded">
+                    <div class="git-section-header" onclick="toggleGitSection('unstaged')">
+                        <svg class="git-section-chevron" width="8" height="8" viewBox="0 0 8 8" fill="none" xmlns="http://www.w3.org/2000/svg">
+                            <path d="M3 1L7 4L3 7" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+                        </svg>
+                        <span class="git-section-title">Unstaged</span>
+                        <span class="git-section-summary" id="git-unstaged-summary"></span>
+                    </div>
+                    <div class="git-section-list" id="git-unstaged-list"></div>
+                </div>
             </div>
         </div>
 
@@ -836,15 +1125,8 @@
                 <div id="instance-actions">
                     <button onclick="restartInstance()" title="Restart">Restart</button>
                     <button onclick="stopInstance()" title="Stop">Stop</button>
-                    <button onclick="archiveInstance()" title="Archive">Archive</button>
-                    <button onclick="reconnectWS()" title="Reconnect WebSocket">Reconnect</button>
                     <button class="danger" onclick="deleteInstance()" title="Delete">Delete</button>
-                    <button class="danger" onclick="purgeArchivedInstances()" title="Delete all archived instances">Purge</button>
                 </div>
-
-                <label id="show-archived-label">
-                    <input type="checkbox" id="show-archived-cb" onchange="toggleArchived(this)"> Show archived
-                </label>
             </div>
 
             <div id="workspace">
@@ -865,77 +1147,159 @@
 
     <!-- Modal: Create Worktree -->
     <dialog id="modal-create-wt">
-        <h3>Create Worktree</h3>
-        <div class="form-group">
-            <label>Task Description</label>
-            <input id="wtTask" placeholder="e.g. fix login bug" />
-            <div class="muted">Creates branch mwt/fix-login-bug</div>
-        </div>
-        <div class="form-group">
-            <label>Base Ref</label>
-            <select id="wtBaseSelect" onchange="onBaseRefChange()"></select>
-            <input id="wtBaseCustom" placeholder="custom ref" style="display:none; margin-top:4px" />
-        </div>
-        <div class="form-group">
-            <label><input type="checkbox" id="wtAdopt" /> Adopt existing branch/worktree if exists</label>
-        </div>
-        <div class="form-actions">
-            <button onclick="closeModal('modal-create-wt')">Cancel</button>
-            <button class="primary" onclick="doCreateWorktree()">Create</button>
-        </div>
-    </dialog>
-
-    <!-- Modal: Import Worktree -->
-    <dialog id="modal-import-wt" style="width: 80vw; max-width: 900px;">
-        <h3>Import Worktree</h3>
-        <div id="import-candidates" style="margin-bottom: 15px; max-height: 200px; overflow-y: auto; border: 1px solid #30363d; border-radius: 6px; display: none;">
-            <!-- filled by JS -->
-        </div>
-        <div class="form-group">
-            <label>Or manually by Branch/Name/Path</label>
-            <input id="wtImportName" placeholder="e.g. feature/foo or /abs/path" />
-        </div>
-        <div class="form-actions">
-            <button onclick="closeModal('modal-import-wt')">Cancel</button>
-            <button class="primary" onclick="doImportWorktree()">Import</button>
-        </div>
-    </dialog>
-
-    <!-- Modal: Start Instance -->
-    <dialog id="modal-start-instance">
-        <h3>Start Instance</h3>
-        <div class="form-group">
-            <label>Tag (Template)</label>
-            <select id="tagSelect"></select>
-        </div>
-        <div class="form-group">
-            <label>Or Custom Command</label>
-            <input id="cmd" placeholder="e.g. echo hello && zsh" />
-        </div>
-        <div class="form-group">
-            <label>Name (Optional)</label>
-            <input id="instName" placeholder="e.g. build-server" />
-        </div>
-        <div class="form-group">
-            <label>Labels (Optional)</label>
-            <input id="instLabels" placeholder="k=v,role=backend" />
-        </div>
-        <div class="form-actions">
-            <button onclick="closeModal('modal-start-instance')">Cancel</button>
-            <button class="primary" onclick="doStartInstance()">Start</button>
-        </div>
-    </dialog>
-
-    <!-- Modal: Resource Monitor -->
-    <dialog id="modal-monitor">
-        <div class="monitor-titlebar">
-            <button class="monitor-close-btn" onclick="closeMonitorModal()" title="Close">
+        <div class="modal-titlebar">
+            <span class="modal-title">Create Worktree</span>
+            <button class="modal-close-btn" onclick="closeModal('modal-create-wt')" title="Close">
                 <svg width="10" height="10" viewBox="0 0 10 10" fill="none" xmlns="http://www.w3.org/2000/svg">
                     <line x1="1" y1="1" x2="9" y2="9" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
                     <line x1="9" y1="1" x2="1" y2="9" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
                 </svg>
             </button>
-            <span class="monitor-title">Resource Monitor</span>
+        </div>
+        <div class="modal-body">
+            <div class="form-group">
+                <label>Task Description</label>
+                <div style="display:flex; gap:8px; align-items:center;">
+                    <input id="wtTask" style="flex:1;" placeholder="e.g. fix login bug" oninput="onTaskDescChange()" />
+                    <button type="button" id="btnAIGenerate" onclick="generateBranchName()">AI Generate</button>
+                </div>
+            </div>
+            <div class="form-group">
+                <label>Branch Name</label>
+                <input id="wtBranchName" placeholder="auto-generated or enter manually" />
+                <div class="muted" id="wtBranchPreview">Branch name preview</div>
+            </div>
+            <div class="form-group">
+                <label>Base Ref</label>
+                <select id="wtBaseSelect" onchange="onBaseRefChange()"></select>
+                <input id="wtBaseCustom" placeholder="custom ref" style="display:none; margin-top:4px" />
+            </div>
+            <div class="form-group">
+                <label><input type="checkbox" id="wtAdopt" /> Adopt existing branch/worktree if exists</label>
+            </div>
+            <div class="form-actions">
+                <button type="button" id="btnLLMSettings" onclick="openLLMSettingsDialog()" style="display:none;">LLM Settings</button>
+                <div style="flex:1;"></div>
+                <button onclick="closeModal('modal-create-wt')">Cancel</button>
+                <button class="primary" onclick="doCreateWorktree()">Create</button>
+            </div>
+        </div>
+    </dialog>
+
+    <!-- LLM Settings Dialog -->
+    <dialog id="dialog-llm-settings">
+        <div class="modal-titlebar">
+            <span class="modal-title">LLM Settings</span>
+            <button class="modal-close-btn" onclick="closeLLMSettingsDialog()" title="Close">
+                <svg width="10" height="10" viewBox="0 0 10 10" fill="none" xmlns="http://www.w3.org/2000/svg">
+                    <line x1="1" y1="1" x2="9" y2="9" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                    <line x1="9" y1="1" x2="1" y2="9" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                </svg>
+            </button>
+        </div>
+        <div class="modal-body">
+            <div id="llm-settings-error" style="color:var(--danger-text);display:none;"></div>
+            <div class="form-group">
+                <label>Protocol</label>
+                <select id="llmProtocol" onchange="onLLMProtocolChange()">
+                    <option value="openai">OpenAI</option>
+                    <option value="anthropic">Anthropic</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label>Model</label>
+                <input id="llmModel" placeholder="e.g. deepseek-chat" />
+                <div class="muted" id="llm-model-hint">Enter model name manually</div>
+            </div>
+            <div class="form-group">
+                <label>API Address</label>
+                <input id="llmAPIAddress" type="url" placeholder="https://api.deepseek.com/v1/chat/completions" />
+                <div class="muted">Full URL including path</div>
+            </div>
+            <div class="form-group">
+                <label>API Key</label>
+                <input id="llmAPIKey" type="password" placeholder="sk-..." />
+                <div id="llm-api-key-masked" class="muted"></div>
+            </div>
+            <div class="form-group">
+                <label><input type="checkbox" id="llmReasoningSplit" /> Enable reasoning_split (for providers that support it)</label>
+            </div>
+            <div class="form-actions">
+                <button type="button" onclick="testLLMConnection()">Test Connection</button>
+                <span id="llm-test-result" style="font-size:12px;flex:1;"></span>
+                <button onclick="closeLLMSettingsDialog()">Cancel</button>
+                <button class="primary" onclick="saveLLMSettings()">Save</button>
+            </div>
+        </div>
+    </dialog>
+
+    <!-- Modal: Import Worktree -->
+    <dialog id="modal-import-wt" style="width: 80vw; max-width: 900px;">
+        <div class="modal-titlebar">
+            <span class="modal-title">Import Worktree</span>
+            <button class="modal-close-btn" onclick="closeModal('modal-import-wt')" title="Close">
+                <svg width="10" height="10" viewBox="0 0 10 10" fill="none" xmlns="http://www.w3.org/2000/svg">
+                    <line x1="1" y1="1" x2="9" y2="9" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                    <line x1="9" y1="1" x2="1" y2="9" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                </svg>
+            </button>
+        </div>
+        <div class="modal-body">
+            <div id="import-candidates" style="margin-bottom: 15px; max-height: 200px; overflow-y: auto; border: 1px solid var(--border-color); border-radius: 6px; display: none;">
+                <!-- filled by JS -->
+            </div>
+            <div class="form-group">
+                <label>Or manually by Branch/Name/Path</label>
+                <input id="wtImportName" placeholder="e.g. feature/foo or /abs/path" />
+            </div>
+            <div class="form-actions">
+                <button onclick="closeModal('modal-import-wt')">Cancel</button>
+                <button class="primary" onclick="doImportWorktree()">Import</button>
+            </div>
+        </div>
+    </dialog>
+
+    <!-- Modal: Start Instance -->
+    <dialog id="modal-start-instance">
+        <div class="modal-titlebar">
+            <span class="modal-title">Start Instance</span>
+            <button class="modal-close-btn" onclick="closeModal('modal-start-instance')" title="Close">
+                <svg width="10" height="10" viewBox="0 0 10 10" fill="none" xmlns="http://www.w3.org/2000/svg">
+                    <line x1="1" y1="1" x2="9" y2="9" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                    <line x1="9" y1="1" x2="1" y2="9" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                </svg>
+            </button>
+        </div>
+        <div class="modal-body">
+            <div class="form-group">
+                <label>Template <span id="template-edit-btn" class="wt-action-btn" style="display:inline-flex;vertical-align:middle;opacity:0.6" title="Edit templates" onclick="openTagsDir(event)"><svg viewBox="0 0 24 24" width="12" height="12" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path></svg></span></label>
+                <select id="tagSelect" onchange="onTagChange()"></select>
+            </div>
+            <div class="form-group">
+                <label>Or Custom Command</label>
+                <input id="cmd" placeholder="e.g. echo hello && zsh" />
+            </div>
+            <div class="form-group">
+                <label>Name (Optional)</label>
+                <input id="instName" placeholder="e.g. build-server" />
+            </div>
+            <div class="form-actions">
+                <button onclick="closeModal('modal-start-instance')">Cancel</button>
+                <button class="primary" onclick="doStartInstance()">Start</button>
+            </div>
+        </div>
+    </dialog>
+
+    <!-- Modal: Resource Monitor -->
+    <dialog id="modal-monitor">
+        <div class="modal-titlebar">
+            <span class="modal-title">Resource Monitor</span>
+            <button class="modal-close-btn" onclick="closeMonitorModal()" title="Close">
+                <svg width="10" height="10" viewBox="0 0 10 10" fill="none" xmlns="http://www.w3.org/2000/svg">
+                    <line x1="1" y1="1" x2="9" y2="9" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                    <line x1="9" y1="1" x2="1" y2="9" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                </svg>
+            </button>
         </div>
         <div class="monitor-summary" id="monitor-summary">
             <!-- filled by JS -->
@@ -974,7 +1338,7 @@
                 <div class="license-item"><span class="license-name">tklauser/numcpus</span><span class="license-sppver">v0.11.0</span><span class="license-type">Apache-2.0</span></div>
                 <div class="license-item"><span class="license-name">go-ole/go-ole</span><span class="license-sppver">v1.2.6</span><span class="license-type">MIT</span></div>
                 <div class="license-item"><span class="license-name">yusufpapurcu/wmi</span><span class="license-sppver">v1.2.4</span><span class="license-type">MIT</span></div>
-                <div class="license-item"><span class="license-name">xterm.js</span><span class="license-sppver">(bundled)</span><span class="license-type">MIT</span></div>
+                <div class="license-item"><span class="license-name">xterm.js</span><span class="license-sppver">v6.0.0</span><span class="license-type">MIT</span></div>
             </div>
         </div>
     </dialog>
@@ -999,7 +1363,6 @@
             branches: [],
             activeWT: null,
             activeInst: null,
-            showArchived: false,
             mainRepo: null,
             renamingInst: null,    // instance id currently being renamed
             renamingInstValue: ""  // preserved value across re-renders
@@ -1020,10 +1383,11 @@
         let stateVersion = 0;
 
         // Git Changes
-        let gitChanges = { changes: [], total: { additions: 0, deletions: 0 } };
+        let gitChanges = { staged: { changes: [], total: { additions: 0, deletions: 0 } }, unstaged: { changes: [], total: { additions: 0, deletions: 0 } } };
         let gitChangesTimer = null;
         let gitChangesSeq = 0;
         let gitChangesError = null;
+        let gitExpandedSection = 'unstaged';
         let isResizingSidebar = false;
         let sidebarResizeStartY = 0;
         let sidebarTopPanelStartHeight = 0;
@@ -1061,7 +1425,7 @@
         async function fetchAPI(path, opts = {}) {
             const res = await fetch(path, {
                 ...opts,
-                headers: { "content-type": "application/json", ...headers, ...(opts.headers || {}) },
+                headers: { "content-type": "application/json", "accept": "application/json", ...headers, ...(opts.headers || {}) },
             });
             rememberServerRevision(res);
             return res;
@@ -1140,8 +1504,6 @@
                         return;
                     }
                     render();
-                    const cb = document.getElementById("show-archived-cb");
-                    if (cb) cb.checked = state.showArchived;
                 } catch (e) {
                     console.error(e);
                     const inst = getActiveInstance();
@@ -1163,6 +1525,12 @@
                 sessionStorage.removeItem(SERVER_UPGRADED_FLAG);
                 alert("Backend upgraded. Frontend has been refreshed automatically.");
             }
+            // Show remote badge when not on loopback
+            const hostname = window.location.hostname;
+            if (hostname !== "localhost" && hostname !== "127.0.0.1") {
+                const badge = document.getElementById("remote-badge");
+                if (badge) badge.classList.remove("hidden");
+            }
             refresh();
             // Polling for status updates (2s)
             if (pollTimer) clearInterval(pollTimer);
@@ -1173,44 +1541,6 @@
 
             // Initial focus attempt after a short delay
             setTimeout(() => focusTerminalIfPossible(), 100);
-        }
-
-        function toggleArchived(el) {
-            state.showArchived = el.checked;
-            renderTabs();
-        }
-
-        async function purgeArchivedInstances() {
-            const archived = state.instances.filter(i => i.archived && i.worktree_id === state.activeWT);
-            if (archived.length === 0) return;
-            if (!confirm(`Delete ${archived.length} archived instance(s) in current worktree?`)) return;
-
-            // Optimistic update: remove archived instances for this worktree from local state immediately.
-            const archivedIds = new Set(archived.map(i => i.id));
-            state.instances = state.instances.filter(i => !(i.archived && i.worktree_id === state.activeWT));
-            // Select a new active instance if the previously selected one was purged.
-            if (state.activeInst && archivedIds.has(state.activeInst)) {
-                selectInstance(null);
-            } else {
-                renderTabs();
-            }
-
-            try {
-                // Keep 409 handling here so optimistic UI state can resync cleanly.
-                await api("/api/instances/purge", {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ worktree_id: state.activeWT, version: stateVersion })
-                });
-                // Success: refresh in background to sync version and any server-side bookkeeping.
-                refresh();
-            } catch (e) {
-                refresh();
-                if (e && e.status === 409) {
-                    return;
-                }
-                alert(e.message || e);
-            }
         }
 
         // --- Git Changes ---
@@ -1227,7 +1557,7 @@
                     gitChangesError = typeof data === "string"
                         ? (data || resp.statusText || "Unknown error")
                         : ((data && data.error) || resp.statusText || "Unknown error");
-                    gitChanges = { changes: [], total: { additions: 0, deletions: 0 } };
+                    gitChanges = { staged: { changes: [], total: { additions: 0, deletions: 0 } }, unstaged: { changes: [], total: { additions: 0, deletions: 0 } } };
                 } else {
                     gitChangesError = null;
                     gitChanges = data;
@@ -1237,7 +1567,7 @@
                 console.error("failed to fetch git changes:", e);
                 if (seq !== gitChangesSeq) return;
                 gitChangesError = e.message || "Network error";
-                gitChanges = { changes: [], total: { additions: 0, deletions: 0 } };
+                gitChanges = { staged: { changes: [], total: { additions: 0, deletions: 0 } }, unstaged: { changes: [], total: { additions: 0, deletions: 0 } } };
                 renderGitChanges();
             }
         }
@@ -1276,86 +1606,129 @@
             return prefix + (lo > 0 ? filename.slice(prefix.length, prefix.length + lo) + '…' : '…');
         }
 
+        function toggleGitSection(name) {
+            if (gitExpandedSection === name) return;
+            const prev = document.getElementById(`git-${gitExpandedSection}-section`);
+            const next = document.getElementById(`git-${name}-section`);
+            if (prev) prev.classList.remove('expanded');
+            if (next) next.classList.add('expanded');
+            gitExpandedSection = name;
+            renderGitChanges();
+        }
+
         function renderGitChanges() {
-            const list = document.getElementById("git-changes-list");
-            const summary = document.getElementById("git-changes-summary");
-            if (!list) return;
-            const firstItem = list.querySelector('.git-change-item');
-            const firstStats = list.querySelector('.git-change-stats');
+            const expanded = gitExpandedSection;
+            const expList = document.getElementById(`git-${expanded}-list`);
+            const firstItem = expList ? expList.querySelector('.git-change-item') : null;
+            const firstStats = expList ? expList.querySelector('.git-change-stats') : null;
             const itemWidth = firstItem ? firstItem.getBoundingClientRect().width : 200;
             const statsWidth = firstStats ? firstStats.getBoundingClientRect().width : 0;
             const avail = Math.max(itemWidth - statsWidth - 8, 40);
-            list.replaceChildren();
-            if (summary) summary.replaceChildren();
 
-            if (gitChangesError) {
-                const empty = document.createElement("div");
-                empty.className = "git-changes-empty";
-                empty.style.color = "#cb2431";
-                empty.textContent = `⚠ ${gitChangesError}`;
-                list.appendChild(empty);
-                return;
-            }
+            ['staged', 'unstaged'].forEach(section => {
+                const list = document.getElementById(`git-${section}-list`);
+                const summary = document.getElementById(`git-${section}-summary`);
+                if (!list) return;
+                list.replaceChildren();
+                if (summary) summary.replaceChildren();
 
-            if (!gitChanges.changes || gitChanges.changes.length === 0) {
-                const empty = document.createElement("div");
-                empty.className = "git-changes-empty";
-                empty.textContent = "No changes";
-                list.appendChild(empty);
-                return;
-            }
+                const data = gitChanges[section];
+                const changes = data ? data.changes : [];
+                const total = data ? data.total : { additions: 0, deletions: 0 };
+                const sectionErr = data ? data.error : null;
+                const sectionWarning = data ? data.warning : null;
 
-            if (summary) {
-                const t = gitChanges.total;
-                if (t.additions > 0) {
-                    const adds = document.createElement("span");
-                    adds.className = "additions";
-                    adds.textContent = `+${t.additions}`;
-                    summary.appendChild(adds);
+                if (gitChangesError) {
+                    if (section === expanded) {
+                        const empty = document.createElement("div");
+                        empty.className = "git-change-empty";
+                        empty.style.color = "var(--danger-text)";
+                        empty.textContent = `\u26a0 ${gitChangesError}`;
+                        list.appendChild(empty);
+                    }
+                    return;
                 }
-                if (t.deletions > 0) {
-                    if (summary.childNodes.length > 0) summary.appendChild(document.createTextNode(" "));
-                    const dels = document.createElement("span");
-                    dels.className = "deletions";
-                    dels.textContent = `-${t.deletions}`;
-                    summary.appendChild(dels);
+
+                if (sectionErr) {
+                    const empty = document.createElement("div");
+                    empty.className = "git-change-empty";
+                    empty.style.color = "var(--danger-text)";
+                    empty.textContent = `\u26a0 ${sectionErr}`;
+                    list.appendChild(empty);
+                    return;
                 }
-                if (summary.childNodes.length > 0) summary.appendChild(document.createTextNode(" "));
-                summary.appendChild(document.createTextNode(`${gitChanges.changes.length} file(s)`));
-            }
 
-            // Paths and error text come from git output, so build the DOM with
-            // textContent/attributes instead of innerHTML to avoid XSS.
-            gitChanges.changes.forEach(c => {
-                const displayPath = truncatePath(c.path, avail);
-                const item = document.createElement("div");
-                item.className = "git-change-item";
+                if (sectionWarning) {
+                    const warn = document.createElement("div");
+                    warn.className = "git-change-warning";
+                    warn.textContent = `\u26a0 ${sectionWarning}`;
+                    list.appendChild(warn);
+                }
 
-                const path = document.createElement("span");
-                path.className = "git-change-path";
-                path.title = c.path;
-                path.textContent = displayPath;
-                item.appendChild(path);
+                if (!changes || changes.length === 0) {
+                    const empty = document.createElement("div");
+                    empty.className = "git-change-empty";
+                    empty.textContent = section === 'staged' ? "No staged changes" : "No unstaged changes";
+                    list.appendChild(empty);
+                    return;
+                }
 
-                if (c.additions > 0 || c.deletions > 0) {
-                    const stats = document.createElement("div");
-                    stats.className = "git-change-stats";
-                    if (c.additions > 0) {
+                if (summary) {
+                    if (total.additions > 0) {
                         const adds = document.createElement("span");
                         adds.className = "additions";
-                        adds.textContent = `+${c.additions}`;
-                        stats.appendChild(adds);
+                        adds.textContent = `+${total.additions}`;
+                        summary.appendChild(adds);
                     }
-                    if (c.deletions > 0) {
+                    if (total.deletions > 0) {
+                        if (summary.childNodes.length > 0) summary.appendChild(document.createTextNode(" "));
                         const dels = document.createElement("span");
                         dels.className = "deletions";
-                        dels.textContent = `-${c.deletions}`;
-                        stats.appendChild(dels);
+                        dels.textContent = `-${total.deletions}`;
+                        summary.appendChild(dels);
                     }
-                    item.appendChild(stats);
+                    if (summary.childNodes.length > 0) summary.appendChild(document.createTextNode(" "));
+                    summary.appendChild(document.createTextNode(`${changes.length} file(s)`));
                 }
 
-                list.appendChild(item);
+                changes.forEach(c => {
+                    const displayPath = truncatePath(c.path, avail);
+                    const item = document.createElement("div");
+                    item.className = "git-change-item";
+
+                    if (c.status === "untracked") {
+                        const badge = document.createElement("span");
+                        badge.className = "git-change-untracked-badge";
+                        badge.textContent = "U";
+                        item.appendChild(badge);
+                    }
+
+                    const path = document.createElement("span");
+                    path.className = "git-change-path";
+                    path.title = c.path;
+                    path.textContent = displayPath;
+                    item.appendChild(path);
+
+                    if (c.additions > 0 || c.deletions > 0) {
+                        const stats = document.createElement("div");
+                        stats.className = "git-change-stats";
+                        if (c.additions > 0) {
+                            const adds = document.createElement("span");
+                            adds.className = "additions";
+                            adds.textContent = `+${c.additions}`;
+                            stats.appendChild(adds);
+                        }
+                        if (c.deletions > 0) {
+                            const dels = document.createElement("span");
+                            dels.className = "deletions";
+                            dels.textContent = `-${c.deletions}`;
+                            stats.appendChild(dels);
+                        }
+                        item.appendChild(stats);
+                    }
+
+                    list.appendChild(item);
+                });
             });
         }
 
@@ -1555,15 +1928,12 @@
 
             // Filter instances for current WT
             let instances = state.instances.filter(i => i.worktree_id === state.activeWT);
-            if (!state.showArchived) {
-                instances = instances.filter(i => !i.archived);
-            }
 
-            // Fix invalid selection (e.g. archived/deleted)
+            // Fix invalid selection (e.g. deleted)
             if (state.activeInst && !instances.find(i => i.id === state.activeInst)) {
                 let newId = null;
                 const oldInst = state.instances.find(i => i.id === state.activeInst);
-                // If old instance still exists (e.g. archived), try to select neighbors
+                // If old instance still exists, try to select neighbors
                 if (oldInst) {
                     const currentIdx = instances.findIndex(i => i.id === oldInst.id);
                     if (currentIdx > 0) newId = instances[currentIdx - 1].id;
@@ -1588,7 +1958,6 @@
                 const isActive = state.activeInst === i.id;
                 const statusClass = `status-${i.status}`;
                 const displayName = i.name || i.tag_id || i.id.substring(0, 6);
-                const archivedMark = i.archived ? '<span style="opacity:0.6; font-size:11px; margin-left:6px">[archived]</span>' : '';
                 const isRenaming = state.renamingInst === i.id;
 
                 const renameValue = isRenaming && state.renamingInstValue ? state.renamingInstValue : displayName;
@@ -1618,7 +1987,7 @@
                  ondrop="handleDrop('${i.id}', event)"
                  title="Drag to reorder; double-click to rename">
               <span class="tab-status ${statusClass}"></span>
-              ${displayName} ${archivedMark}
+               ${displayName}
             </div>
           `;
             }).join("");
@@ -1835,6 +2204,9 @@
                     }).join("");
                 if (ts.innerHTML !== opts) ts.innerHTML = opts;
             }
+            const isLocal = window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1";
+            const editBtn = document.getElementById("template-edit-btn");
+            if (editBtn) editBtn.style.display = isLocal ? "inline-flex" : "none";
         }
 
         // Interaction
@@ -1900,31 +2272,38 @@
         // Actions
         async function openModal(id) {
             const el = document.getElementById(id);
+            if (id === 'modal-create-wt') {
+                document.getElementById("wtTask").value = "";
+                document.getElementById("wtBranchName").value = "";
+                document.getElementById("wtBranchPreview").textContent = "Branch name preview";
+                document.getElementById("wtAdopt").checked = false;
+                updateAIGenerateButtonState();
+            }
             if (id === 'modal-import-wt') {
                 // Pre-load candidates
                 const list = document.getElementById("import-candidates");
                 list.style.display = 'none';
-                list.innerHTML = '<div style="padding:8px;color:#8b949e">Scanning...</div>';
+                list.innerHTML = '<div style="padding:8px;color:var(--text-secondary)">Scanning...</div>';
                 try {
                     const res = await api("/api/worktrees/unmanaged");
                     const items = res.candidates || [];
                     if (items.length === 0) {
-                        list.innerHTML = '<div style="padding:8px;color:#8b949e;text-align:center">No unmanaged worktrees found</div>';
+                        list.innerHTML = '<div style="padding:8px;color:var(--text-secondary);text-align:center">No unmanaged worktrees found</div>';
                     } else {
                         list.innerHTML = "";
                         for (const c of items) {
                             const row = document.createElement("div");
-                            row.style.cssText = "padding: 8px; border-bottom: 1px solid #21262d; display: flex; align-items: center; gap: 8px; cursor: pointer;";
+                            row.style.cssText = "padding: 8px; border-bottom: 1px solid var(--border-color); display: flex; align-items: center; gap: 8px; cursor: pointer;";
                             row.addEventListener("click", () => {
                                 document.getElementById("wtImportName").value = c.path;
                             });
 
                             const badge = document.createElement("span");
-                            badge.style.cssText = "font-family:monospace; background: #21262d; color: #adbac7; padding: 2px 4px; border-radius: 4px;";
+                            badge.style.cssText = "font-family:monospace; background: var(--badge-bg); color: var(--badge-text); padding: 2px 4px; border-radius: 4px;";
                             badge.textContent = c.branch;
 
                             const path = document.createElement("span");
-                            path.style.cssText = "font-size: 12px; color: #768390; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left;";
+                            path.style.cssText = "font-size: 12px; color: var(--text-secondary); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left;";
                             path.title = c.path;
                             path.textContent = c.path;
 
@@ -1944,7 +2323,7 @@
                     }
                     list.style.display = 'block';
                 } catch (e) {
-                    list.innerHTML = `<div style="padding:8px;color:#cb2431">Error: ${e.message}</div>`;
+                    list.innerHTML = `<div style="padding:8px;color:var(--danger-text)">Error: ${e.message}</div>`;
                     list.style.display = 'block';
                 }
             }
@@ -1960,10 +2339,19 @@
 
         function promptStartInstance() {
             if (!state.activeWT) { alert("Select a worktree first"); return; }
-            document.getElementById("instLabels").value = "";
             document.getElementById("cmd").value = "";
             document.getElementById("instName").value = "";
+            document.getElementById("tagSelect").value = "";
             openModal("modal-start-instance");
+        }
+
+        function onTagChange() {
+            const ts = document.getElementById("tagSelect");
+            const tag = state.tags.find(t => t.id === ts.value);
+            if (tag) {
+                document.getElementById("cmd").value = tag.command || "";
+                document.getElementById("instName").value = tag.id || "";
+            }
         }
 
         // API Calls
@@ -1974,14 +2362,16 @@
                     base_ref: document.getElementById("wtBaseSelect").value === "__custom__"
                         ? document.getElementById("wtBaseCustom").value
                         : document.getElementById("wtBaseSelect").value,
-                    adopt_if_exists: document.getElementById("wtAdopt").checked
+                    adopt_if_exists: document.getElementById("wtAdopt").checked,
+                    branch_name: document.getElementById("wtBranchName").value.trim()
                 };
                 const res = await api("/api/worktrees", { method: "POST", body: JSON.stringify(body) });
                 closeModal("modal-create-wt");
-                document.getElementById("wtTask").value = "";
                 await refresh();
                 selectWorktreeByID(res.id);
-            } catch (e) { alert(e); }
+            } catch (e) {
+                alert(e);
+            }
         }
 
         async function doImportWorktreePath(path) {
@@ -2017,7 +2407,6 @@
                     tag_id: document.getElementById("tagSelect").value,
                     command: document.getElementById("cmd").value,
                     name: document.getElementById("instName").value,
-                    labels: parseLabelsInput(document.getElementById("instLabels").value)
                 };
                 const res = await api("/api/instances", { method: "POST", body: JSON.stringify(body) });
                 closeModal("modal-start-instance");
@@ -2046,28 +2435,10 @@
                 selectInstance(res.id); // Switch to new instance
             } catch (e) { alert(e); }
         }
-        async function archiveInstance() {
-            if (!state.activeInst) return;
-            try { await api("/api/instances/archive", { method: "POST", body: JSON.stringify({ id: state.activeInst }) }); refresh(); } catch (e) { alert(e); }
-        }
         async function deleteInstance() {
             if (!state.activeInst || !confirm("Delete instance log?")) return;
             try { await api("/api/instances/delete", { method: "POST", body: JSON.stringify({ id: state.activeInst }) }); refresh(); } catch (e) { alert(e); }
         }
-        function reconnectWS() {
-            const session = getActiveTerminalSession();
-            if (session) connectTTY(session);
-        }
-
-        function parseLabelsInput(raw) {
-            const out = {};
-            for (const token of (raw || "").split(",")) {
-                const [k, v] = token.split("=").map(s => s.trim());
-                if (k && v) out[k] = v;
-            }
-            return out;
-        }
-
         // Terminal Logic (Per Instance)
         let windowHasFocus = true;
         let openDialogs = new Set();
@@ -2564,8 +2935,16 @@
 
                 let isFirstData = true;
                 let handshakeTimeout = null;
+                let connectTimeout = setTimeout(() => {
+                    if (session.ttySocket === ws && ws.readyState !== WebSocket.OPEN) {
+                        console.error('WebSocket connection timeout: could not open within 10s');
+                        if (state.activeInst === id) updateStatus("ws connect timeout");
+                        ws.close();
+                    }
+                }, 10000);
 
                 ws.onopen = () => {
+                    if (connectTimeout) { clearTimeout(connectTimeout); connectTimeout = null; }
                     session.ttyState = 'HANDSHAKING';
                     handshakeTimeout = setTimeout(() => {
                         if (session.ttyState !== 'READY' && ws === session.ttySocket) {
@@ -2631,16 +3010,14 @@
 
                 ws.onclose = () => {
                     resetTTYOutputDecoder(session);
-                    if (handshakeTimeout) {
-                        clearTimeout(handshakeTimeout);
-                        handshakeTimeout = null;
-                    }
+                    if (connectTimeout) { clearTimeout(connectTimeout); connectTimeout = null; }
+                    if (handshakeTimeout) { clearTimeout(handshakeTimeout); handshakeTimeout = null; }
                     session.ttyState = 'IDLE';
                     if (session.ttySocket === ws) {
                         const latest = state.instances.find(i => i.id === session.id);
                         if (latest && latest.status === 'running') {
                             if (state.activeInst === session.id) updateStatus("ws closed, retrying...");
-                            session.ttyReconnectTimer = setTimeout(() => connectTTY(session), 1000);
+                            session.ttyReconnectTimer = setTimeout(() => connectTTY(session), 5000);
                         } else if (state.activeInst === session.id) {
                             updateStatus("stopped");
                         }
@@ -2697,6 +3074,22 @@
             } finally {
                 loadingActions.delete(key);
                 renderSidebar();
+            }
+        }
+
+        async function openTagsDir(event) {
+            event.stopPropagation();
+            try {
+                const controller = new AbortController();
+                const timeoutId = setTimeout(() => controller.abort(), 10000);
+                try {
+                    await api("/api/tags/open-dir", { method: "POST", signal: controller.signal });
+                } finally {
+                    clearTimeout(timeoutId);
+                }
+            } catch (e) {
+                console.error("Failed to open tags dir:", e);
+                alert("Failed to open tags directory: " + e.message);
             }
         }
 
@@ -2897,8 +3290,186 @@
             if (session && session.term) session.term.scrollToBottom();
         }
 
+        // --- LLM Branch Naming ---
+
+        // Update the branch name preview text based on the current input.
+        function onTaskDescChange() {
+            const task = document.getElementById("wtTask").value.trim();
+            const preview = document.getElementById("wtBranchPreview");
+            if (task) {
+                preview.textContent = "Preview: " + task.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+            } else {
+                preview.textContent = "Branch name preview";
+            }
+        }
+
+        // Generate a branch name from the task description using the LLM.
+        async function generateBranchName() {
+            const task = document.getElementById("wtTask").value.trim();
+            if (!task) {
+                alert("Please enter a task description first.");
+                return;
+            }
+            // Check if LLM is configured; if not, open settings directly
+            const cfg = await api("/api/llm/config");
+            if (!cfg.available) {
+                openLLMSettingsDialog();
+                return;
+            }
+            const btn = document.getElementById("btnAIGenerate");
+            btn.disabled = true;
+            btn.textContent = "Generating...";
+            try {
+                const res = await api("/api/llm/generate", {
+                    method: "POST",
+                    body: JSON.stringify({ task_description: task })
+                });
+                document.getElementById("wtBranchName").value = res.branch_name;
+                document.getElementById("wtBranchPreview").textContent = "Preview: " + res.branch_name;
+            } catch (e) {
+                alert("AI generation failed: " + e.message);
+            } finally {
+                btn.disabled = false;
+                btn.textContent = "AI Generate";
+            }
+        }
+
+        // Open the LLM Settings dialog.
+        async function openLLMSettingsDialog() {
+            const dialog = document.getElementById("dialog-llm-settings");
+            const errorDiv = document.getElementById("llm-settings-error");
+            errorDiv.style.display = "none";
+            try {
+                const cfg = await api("/api/llm/config");
+                document.getElementById("llmProtocol").value = cfg.protocol || "openai";
+                document.getElementById("llmAPIAddress").value = cfg.api_address || "";
+                document.getElementById("llmModel").value = cfg.model || "";
+                document.getElementById("llmAPIKey").value = "";
+                document.getElementById("llmReasoningSplit").checked = cfg.reasoning_split || false;
+                const maskedEl = document.getElementById("llm-api-key-masked");
+                if (cfg.api_key_masked) {
+                    maskedEl.textContent = "Current: " + cfg.api_key_masked;
+                } else {
+                    maskedEl.textContent = "";
+                }
+                onLLMProtocolChange();
+            } catch (e) {
+                errorDiv.textContent = "Failed to load config: " + e.message;
+                errorDiv.style.display = "block";
+            }
+            dialog.showModal();
+        }
+
+        // Close the LLM Settings dialog.
+        function closeLLMSettingsDialog() {
+            document.getElementById("dialog-llm-settings").close();
+        }
+
+        // Auto-fill model hint when protocol changes.
+        function onLLMProtocolChange() {
+            const modelHint = document.getElementById("llm-model-hint");
+            modelHint.textContent = "Enter model name manually";
+        }
+
+        function defaultModelForProtocol(protocol) {
+            return "";
+        }
+
+        // Save LLM settings.
+        async function saveLLMSettings() {
+            const protocol = document.getElementById("llmProtocol").value;
+            const apiKey = document.getElementById("llmAPIKey").value.trim();
+            const apiAddress = document.getElementById("llmAPIAddress").value.trim();
+            const model = document.getElementById("llmModel").value.trim();
+            const reasoningSplit = document.getElementById("llmReasoningSplit").checked;
+            const errorDiv = document.getElementById("llm-settings-error");
+            errorDiv.style.display = "none";
+            try {
+                await api("/api/llm/config", {
+                    method: "PATCH",
+                    body: JSON.stringify({ protocol, api_key: apiKey, api_address: apiAddress, model, reasoning_split: reasoningSplit })
+                });
+                // Update the LLM settings button visibility
+                await loadLLMSettingsVisibility();
+                closeLLMSettingsDialog();
+            } catch (e) {
+                errorDiv.textContent = "Save failed: " + e.message;
+                errorDiv.style.display = "block";
+            }
+        }
+
+        // Test the LLM connection.
+        async function testLLMConnection() {
+            const resultEl = document.getElementById("llm-test-result");
+            resultEl.textContent = "Testing...";
+            resultEl.style.color = "var(--text-muted)";
+            try {
+                // First save current config
+                const protocol = document.getElementById("llmProtocol").value;
+                const apiKey = document.getElementById("llmAPIKey").value.trim();
+                const apiAddress = document.getElementById("llmAPIAddress").value.trim();
+                const model = document.getElementById("llmModel").value.trim();
+                const reasoningSplit = document.getElementById("llmReasoningSplit").checked;
+                await api("/api/llm/config", {
+                    method: "PATCH",
+                    body: JSON.stringify({ protocol, api_key: apiKey, api_address: apiAddress, model, reasoning_split: reasoningSplit })
+                });
+                const res = await api("/api/llm/test", { method: "POST" });
+                resultEl.textContent = "OK! Generated: " + res.branch_name;
+                resultEl.style.color = "var(--additions)";
+            } catch (e) {
+                resultEl.textContent = "Failed: " + e.message;
+                resultEl.style.color = "var(--danger-text)";
+            }
+        }
+
+        // Load and update the LLM Settings button visibility and AI Generate button state.
+        async function loadLLMSettingsVisibility() {
+            try {
+                const cfg = await api("/api/llm/config");
+                updateLLMSettingsButtonVisibility(cfg.is_secure);
+                updateAIGenerateButtonVisual(cfg.available);
+            } catch (e) {
+                updateLLMSettingsButtonVisibility(false);
+                updateAIGenerateButtonVisual(false);
+            }
+        }
+
+        function updateLLMSettingsButtonVisibility(isSecure) {
+            const btn = document.getElementById("btnLLMSettings");
+            if (!btn) return;
+            const hostname = window.location.hostname;
+            const isLocalhost = hostname === "localhost" || hostname === "127.0.0.1";
+            btn.style.display = (isLocalhost || isSecure) ? "inline-block" : "none";
+        }
+
+        // Update the AI Generate button visual state and LLM availability.
+        // When LLM is not fully configured, the button appears muted but remains clickable
+        // to open the LLM Settings dialog.
+        async function updateAIGenerateButtonState() {
+            try {
+                const cfg = await api("/api/llm/config");
+                updateAIGenerateButtonVisual(cfg.available);
+            } catch (e) {
+                updateAIGenerateButtonVisual(false);
+            }
+        }
+
+        function updateAIGenerateButtonVisual(available) {
+            const btn = document.getElementById("btnAIGenerate");
+            if (!btn) return;
+            if (available) {
+                btn.classList.remove("muted");
+                btn.title = "";
+            } else {
+                btn.classList.add("muted");
+                btn.title = "Configure LLM settings to enable AI generation";
+            }
+        }
+
         // Boot
         init();
+        loadLLMSettingsVisibility();
     </script>
 </body>
 </html>

@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"myworktree/internal/config"
 	"myworktree/internal/store"
 )
 
@@ -24,45 +25,6 @@ func TestParseInt64Default(t *testing.T) {
 	}
 	if got := parseInt64Default("abc", -1); got != -1 {
 		t.Fatalf("invalid input should return default, got %d", got)
-	}
-}
-
-func TestNormalizeLabels(t *testing.T) {
-	if got := normalizeLabels(nil); got != nil {
-		t.Fatalf("nil input should return nil, got %#v", got)
-	}
-	if got := normalizeLabels(map[string]string{}); got != nil {
-		t.Fatalf("empty map should return nil, got %#v", got)
-	}
-
-	got := normalizeLabels(map[string]string{
-		" team ":  " backend ",
-		"":        "x",
-		"x":       "",
-		"owner":   "   ",
-		"   ":     "value",
-		"service": " api ",
-	})
-	if len(got) != 2 || got["team"] != "backend" || got["service"] != "api" {
-		t.Fatalf("unexpected labels normalization result: %#v", got)
-	}
-	if _, ok := got["owner"]; ok {
-		t.Fatalf("owner with whitespace value should be dropped: %#v", got)
-	}
-	if _, ok := got["x"]; ok {
-		t.Fatalf("label with empty value should be dropped: %#v", got)
-	}
-	if _, ok := got[""]; ok {
-		t.Fatalf("empty key should be dropped: %#v", got)
-	}
-
-	got = normalizeLabels(map[string]string{
-		" ":   " ",
-		"":    "",
-		"foo": "   ",
-	})
-	if got != nil {
-		t.Fatalf("all invalid labels should return nil, got %#v", got)
 	}
 }
 
@@ -83,7 +45,8 @@ func TestIsLoopbackHost(t *testing.T) {
 	}{
 		{name: "localhost", host: "localhost", want: true},
 		{name: "ipv4 loopback", host: "127.0.0.1", want: true},
-		{name: "ipv6 loopback", host: "::1", want: true},
+		{name: "ipv6 loopback", host: "::1", want: false},
+		{name: "ipv4 mapped ipv6", host: "::ffff:127.0.0.1", want: false},
 		{name: "remote ipv4", host: "203.0.113.10", want: false},
 		{name: "blank", host: "", want: false},
 	}
@@ -574,24 +537,205 @@ func TestParseGitDiffNumStat(t *testing.T) {
 	}
 }
 
-func TestHandleWorktreeStatusGitFailureReturnsError(t *testing.T) {
-	dir := t.TempDir()
-	script := filepath.Join(dir, "git")
-	if err := os.WriteFile(script, []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
-		t.Fatalf("write fake git: %v", err)
+func TestHandleWorktreeStatusGitFailureBothFail(t *testing.T) {
+	srv := &Server{
+		root: t.TempDir(),
+		gitRunner: func(timeout time.Duration, gitRoot string, args ...string) ([]byte, error) {
+			return nil, os.ErrNotExist
+		},
 	}
-	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	srv := &Server{root: t.TempDir()}
 	req := httptest.NewRequest(http.MethodGet, "/api/worktree/status?id=__main__", nil)
 	w := httptest.NewRecorder()
 	srv.handleWorktreeStatus(w, req)
 
 	if w.Code != http.StatusInternalServerError {
-		t.Fatalf("expected 500 for git failure, got %d", w.Code)
+		t.Fatalf("expected 500 when both git commands fail, got %d", w.Code)
 	}
 	if !strings.Contains(w.Body.String(), "git diff failed") {
-		t.Fatalf("expected git diff failure message, got %q", w.Body.String())
+		t.Fatalf("expected 'git diff failed' in error message, got %q", w.Body.String())
+	}
+}
+
+func TestHandleWorktreeStatusPartialFailure(t *testing.T) {
+	srv := &Server{
+		root: t.TempDir(),
+		gitRunner: func(timeout time.Duration, gitRoot string, args ...string) ([]byte, error) {
+			for _, a := range args {
+				if a == "--cached" {
+					return []byte("1\t0\ttest.go"), nil
+				}
+			}
+			return nil, os.ErrNotExist
+		},
+	}
+	req := httptest.NewRequest(http.MethodGet, "/api/worktree/status?id=__main__", nil)
+	w := httptest.NewRecorder()
+	srv.handleWorktreeStatus(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 for partial failure, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var resp map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+
+	staged, _ := resp["staged"].(map[string]any)
+	if staged["changes"] == nil {
+		t.Fatal("staged: missing changes")
+	}
+	if _, hasErr := staged["error"]; hasErr {
+		t.Fatal("staged: should not have error field")
+	}
+
+	unstaged, _ := resp["unstaged"].(map[string]any)
+	errMsg, _ := unstaged["error"].(string)
+	if errMsg == "" {
+		t.Fatal("unstaged: expected error field")
+	}
+	if !strings.Contains(errMsg, "git diff failed") {
+		t.Fatalf("unstaged: expected 'git diff failed' in error, got %q", errMsg)
+	}
+	warnMsg, _ := unstaged["warning"].(string)
+	if warnMsg == "" {
+		t.Fatal("unstaged: expected warning field for ls-files failure")
+	}
+	if !strings.Contains(warnMsg, "git ls-files failed") {
+		t.Fatalf("unstaged: expected 'git ls-files failed' in warning, got %q", warnMsg)
+	}
+}
+
+func TestHandleWorktreeStatusWithUntracked(t *testing.T) {
+	tmpDir := t.TempDir()
+	os.WriteFile(filepath.Join(tmpDir, "newfile.go"), []byte("line1\nline2\nline3\n"), 0644)
+	os.MkdirAll(filepath.Join(tmpDir, "subdir"), 0755)
+	os.WriteFile(filepath.Join(tmpDir, "subdir", "nested.go"), []byte("package p\n"), 0644)
+
+	srv := &Server{
+		root: tmpDir,
+		gitRunner: func(timeout time.Duration, gitRoot string, args ...string) ([]byte, error) {
+			isLsFiles := false
+			isCached := false
+			for _, a := range args {
+				if a == "ls-files" {
+					isLsFiles = true
+				}
+				if a == "--cached" {
+					isCached = true
+				}
+			}
+			if isLsFiles {
+				return []byte("newfile.go\nsubdir/nested.go\n"), nil
+			}
+			if isCached {
+				return []byte("3\t0\tstaged.go\n"), nil
+			}
+			return []byte("1\t2\tmodified.go\n"), nil
+		},
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/worktree/status?id=__main__", nil)
+	w := httptest.NewRecorder()
+	srv.handleWorktreeStatus(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var resp map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("invalid JSON: %v (body=%s)", err, w.Body.String())
+	}
+
+	staged, _ := resp["staged"].(map[string]any)
+	stagedChanges := staged["changes"].([]interface{})
+	if len(stagedChanges) != 1 {
+		t.Fatalf("staged: expected 1 change, got %d", len(stagedChanges))
+	}
+
+	unstaged, _ := resp["unstaged"].(map[string]any)
+	unstagedChanges := unstaged["changes"].([]interface{})
+	if len(unstagedChanges) != 3 {
+		t.Fatalf("unstaged: expected 3 changes (modified + 2 untracked), got %d", len(unstagedChanges))
+	}
+
+	var untrackedAdds float64
+	foundUntracked := 0
+	for _, c := range unstagedChanges {
+		change := c.(map[string]interface{})
+		status, _ := change["status"].(string)
+		if status == "untracked" {
+			foundUntracked++
+			untrackedAdds += change["additions"].(float64)
+		}
+	}
+	if foundUntracked != 2 {
+		t.Fatalf("expected 2 untracked files, got %d", foundUntracked)
+	}
+
+	unstagedTotal := unstaged["total"].(map[string]interface{})
+	expAdds := 1.0 + untrackedAdds
+	if unstagedTotal["additions"].(float64) != expAdds {
+		t.Fatalf("unstaged total additions: expected %v, got %v", expAdds, unstagedTotal["additions"])
+	}
+	if unstagedTotal["deletions"].(float64) != 2.0 {
+		t.Fatalf("unstaged total deletions: expected 2, got %v", unstagedTotal["deletions"])
+	}
+}
+
+func TestHandleWorktreeStatusLsFilesFailsDiffSucceeds(t *testing.T) {
+	srv := &Server{
+		root: t.TempDir(),
+		gitRunner: func(timeout time.Duration, gitRoot string, args ...string) ([]byte, error) {
+			for _, a := range args {
+				if a == "ls-files" {
+					return nil, os.ErrNotExist
+				}
+				if a == "--cached" {
+					return []byte("1\t0\tstaged.go\n"), nil
+				}
+			}
+			return []byte("2\t3\tmodified.go\n"), nil
+		},
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/worktree/status?id=__main__", nil)
+	w := httptest.NewRecorder()
+	srv.handleWorktreeStatus(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var resp map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+
+	unstaged, _ := resp["unstaged"].(map[string]any)
+
+	if _, hasErr := unstaged["error"]; hasErr {
+		t.Fatal("unstaged: should not have error field when diff succeeds")
+	}
+
+	warnMsg, _ := unstaged["warning"].(string)
+	if warnMsg == "" {
+		t.Fatal("unstaged: expected warning field for ls-files failure")
+	}
+	if !strings.Contains(warnMsg, "git ls-files failed") {
+		t.Fatalf("unstaged: expected 'git ls-files failed' in warning, got %q", warnMsg)
+	}
+
+	unstagedChanges := unstaged["changes"].([]interface{})
+	if len(unstagedChanges) != 1 {
+		t.Fatalf("unstaged: expected 1 diff change, got %d", len(unstagedChanges))
+	}
+
+	staged, _ := resp["staged"].(map[string]any)
+	if _, hasWarn := staged["warning"]; hasWarn {
+		t.Fatal("staged: should not have warning field")
 	}
 }
 
@@ -650,5 +794,293 @@ func TestHandleMain(t *testing.T) {
 	srv.handleMain(wPut, reqPut)
 	if wPut.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("PUT /api/main: expected status 405, got %d", wPut.Code)
+	}
+}
+
+func TestWithAuth_LoopbackBypass(t *testing.T) {
+	tmpDir := t.TempDir()
+	testConfigPath := filepath.Join(tmpDir, "myworktree", "auth.json")
+	reset := config.SetPathForTest(func() (string, error) { return testConfigPath, nil })
+	defer reset()
+
+	if err := os.MkdirAll(filepath.Dir(testConfigPath), 0o755); err != nil {
+		t.Fatalf("mkdir failed: %v", err)
+	}
+	if err := os.WriteFile(testConfigPath, []byte(`{"auth_token":"test-token"}`), 0o600); err != nil {
+		t.Fatalf("write failed: %v", err)
+	}
+
+	nullLogger := log.New(os.Stderr, "", 0)
+	srv, err := New(Config{AuthToken: "test-token"}, nullLogger)
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+
+	handler := srv.withAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	tests := []struct {
+		name       string
+		remoteAddr string
+		origin     string
+		token      string
+		wantStatus int
+	}{
+		{
+			name:       "loopback no token passes",
+			remoteAddr: "127.0.0.1:12345",
+			origin:     "",
+			wantStatus: http.StatusOK,
+		},
+		{
+			name:       "loopback with Authorization header passes",
+			remoteAddr: "127.0.0.1:12345",
+			origin:     "",
+			token:      "wrong-token",
+			wantStatus: http.StatusOK,
+		},
+		{
+			name:       "loopback ipv6 is not supported",
+			remoteAddr: "[::1]:12345",
+			origin:     "",
+			token:      "wrong-token",
+			wantStatus: http.StatusFound,
+		},
+		{
+			name:       "localhost passes",
+			remoteAddr: "localhost:12345",
+			origin:     "",
+			token:      "wrong-token",
+			wantStatus: http.StatusOK,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/test", nil)
+			req.RemoteAddr = tt.remoteAddr
+			if tt.origin != "" {
+				req.Header.Set("Origin", tt.origin)
+			}
+			if tt.token != "" {
+				req.Header.Set("Authorization", "Bearer "+tt.token)
+			}
+			w := httptest.NewRecorder()
+			handler.ServeHTTP(w, req)
+			if w.Code != tt.wantStatus {
+				t.Fatalf("expected %d, got %d", tt.wantStatus, w.Code)
+			}
+		})
+	}
+}
+
+func TestWithAuth_NonLoopbackRequiresToken(t *testing.T) {
+	nullLogger := log.New(os.Stderr, "", 0)
+	srv, err := New(Config{AuthToken: "test-token"}, nullLogger)
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+
+	handler := srv.withAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/test", nil)
+	req.RemoteAddr = "192.168.1.5:12345"
+	req.Host = "192.168.1.5:8080"
+	req.Header.Set("Origin", "http://evil.com")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 for origin mismatch, got %d", w.Code)
+	}
+}
+
+func TestWithAuth_CookieToken(t *testing.T) {
+	tmpDir := t.TempDir()
+	testConfigPath := filepath.Join(tmpDir, "myworktree", "auth.json")
+	reset := config.SetPathForTest(func() (string, error) { return testConfigPath, nil })
+	defer reset()
+
+	if err := os.MkdirAll(filepath.Dir(testConfigPath), 0o755); err != nil {
+		t.Fatalf("mkdir failed: %v", err)
+	}
+	if err := os.WriteFile(testConfigPath, []byte(`{"auth_token":"test-token"}`), 0o600); err != nil {
+		t.Fatalf("write failed: %v", err)
+	}
+
+	nullLogger := log.New(os.Stderr, "", 0)
+	srv, err := New(Config{AuthToken: "test-token"}, nullLogger)
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+
+	handler := srv.withAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	tests := []struct {
+		name       string
+		cookie     string
+		wantStatus int
+	}{
+		{
+			name:       "valid cookie token",
+			cookie:     "mw_token=test-token",
+			wantStatus: http.StatusOK,
+		},
+		{
+			name:       "cookie with other values",
+			cookie:     "foo=bar; mw_token=test-token; baz=qux",
+			wantStatus: http.StatusOK,
+		},
+		{
+			name:       "wrong cookie token",
+			cookie:     "mw_token=wrong-token",
+			wantStatus: http.StatusFound,
+		},
+		{
+			name:       "empty cookie token",
+			cookie:     "mw_token=",
+			wantStatus: http.StatusFound,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/test", nil)
+			req.RemoteAddr = "192.168.1.5:12345"
+			req.Header.Set("Cookie", tt.cookie)
+			w := httptest.NewRecorder()
+			handler.ServeHTTP(w, req)
+			if w.Code != tt.wantStatus {
+				t.Fatalf("expected %d, got %d", tt.wantStatus, w.Code)
+			}
+		})
+	}
+}
+
+func TestWithAuth_RateLimiting(t *testing.T) {
+	tmpDir := t.TempDir()
+	testConfigPath := filepath.Join(tmpDir, "myworktree", "auth.json")
+	reset := config.SetPathForTest(func() (string, error) { return testConfigPath, nil })
+	defer reset()
+
+	if err := os.MkdirAll(filepath.Dir(testConfigPath), 0o755); err != nil {
+		t.Fatalf("mkdir failed: %v", err)
+	}
+	if err := os.WriteFile(testConfigPath, []byte(`{"auth_token":"test-token"}`), 0o600); err != nil {
+		t.Fatalf("write failed: %v", err)
+	}
+
+	nullLogger := log.New(os.Stderr, "", 0)
+	srv, err := New(Config{AuthToken: "test-token"}, nullLogger)
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+
+	handler := srv.withAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/test", nil)
+	req.RemoteAddr = "192.168.1.5:12345"
+	req.Header.Set("Authorization", "Bearer wrong-token")
+
+	for i := 0; i < 20; i++ {
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+		if w.Code != http.StatusFound {
+			t.Fatalf("request %d: expected 302, got %d", i+1, w.Code)
+		}
+	}
+
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusTooManyRequests {
+		t.Fatalf("after 20 failures: expected 429, got %d", w.Code)
+	}
+}
+
+func TestExtractAuthToken(t *testing.T) {
+	tests := []struct {
+		name  string
+		setup func(*http.Request)
+		want  string
+	}{
+		{
+			name: "Authorization Bearer",
+			setup: func(r *http.Request) {
+				r.Header.Set("Authorization", "Bearer my-secret-token")
+			},
+			want: "my-secret-token",
+		},
+		{
+			name: "query token",
+			setup: func(r *http.Request) {
+				r.URL.RawQuery = "token=url-token"
+			},
+			want: "url-token",
+		},
+		{
+			name: "cookie mw_token",
+			setup: func(r *http.Request) {
+				r.Header.Set("Cookie", "mw_token=cookie-token")
+			},
+			want: "cookie-token",
+		},
+		{
+			name: "priority Authorization over cookie",
+			setup: func(r *http.Request) {
+				r.Header.Set("Authorization", "Bearer bearer-token")
+				r.Header.Set("Cookie", "mw_token=cookie-token")
+			},
+			want: "bearer-token",
+		},
+		{
+			name: "priority query over cookie",
+			setup: func(r *http.Request) {
+				r.URL.RawQuery = "token=url-token"
+				r.Header.Set("Cookie", "mw_token=cookie-token")
+			},
+			want: "url-token",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/test", nil)
+			tt.setup(req)
+			if got := extractAuthToken(req); got != tt.want {
+				t.Fatalf("extractAuthToken() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestIsValidRedirectPath(t *testing.T) {
+	tests := []struct {
+		path  string
+		valid bool
+	}{
+		{"/", true},
+		{"/dashboard", true},
+		{"/api/list", true},
+		{"", false},
+		{"/login", true},
+		{"login", false},
+		{"http://evil.com", false},
+		{"https://evil.com", false},
+		{"//evil.com", false},
+		{"///evil.com", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.path, func(t *testing.T) {
+			if got := isValidRedirectPath(tt.path); got != tt.valid {
+				t.Fatalf("isValidRedirectPath(%q) = %v, want %v", tt.path, got, tt.valid)
+			}
+		})
 	}
 }

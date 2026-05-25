@@ -1,6 +1,6 @@
 # myworktree — PRD (v0.1)
 
-> 定位：单人使用的 **git worktree + coding CLI instance** 管理框架；提供 Web UI 做管理与输出回放；默认本机安全运行，可选远程访问（内置 HTTPS + Token）。
+> 定位：单人使用的 **git worktree + coding CLI instance** 管理框架；提供 Web UI 做管理与输出回放；Portal 仪表板全局入口，支持跨仓库运行实例自动发现；默认本机安全运行，可选远程访问（全局 Token、Portal 反向代理、Tailscale HTTPS）。
 
 ## 1. 背景
 在同一项目中并行多个 AI coding 任务时，常见痛点：
@@ -27,22 +27,27 @@
 - **Instance**：myworktree 托管启动的一个进程（通常运行 zsh + 某个命令）。
 - **Window**：前端对 instance 的渲染视图；Window 关闭不影响 instance。
 - **Tag**：启动模板（command/env/preStart/cwd）。
-- **Labels**：管理标签（键值对元数据），用于搜索/过滤/分组，不影响启动行为。
 
 ## 5. 关键规则
 - 后端必须保持：worktree 与 instance 的生命周期独立于前端。
 - 删除 worktree：若 `git status --porcelain` 非空（含 untracked），**拒绝删除**。
 - 分支命名：
-  - 默认：创建 worktree 使用分支 `mwt/<slug>`（不再是 `wt/*`）。
-  - 自定义分组：当用户在 task description 里直接输入 `<group>/<name>`（例如 `feature/auth`）时，分支名就是 `<group>/<name>`，不会再额外加前缀。
+  - 分支名直接使用用户在表单中输入的值（手动输入或 LLM 生成）。
+  - LLM 模式：调用 LLM 将任务描述转换为分支名（如 `fix/auth-bug`），保留 `/` 分组前缀（如 `feature/auth` → `feature/auth`）。
+  - 自定义输入：用户在 Branch Name 输入框直接输入时，直接使用该值作为分支名。
   - 命名冲突：如目标分支已存在，自动给 `<name>` 加 `-2/-3` 后缀避免冲突；并支持将既有 worktree **纳入管理（import）**。
 
 ## 6. 安全
-- 默认只监听 `127.0.0.1`。
-- 监听非 loopback（例如 `0.0.0.0` 或局域网 IP）时：必须提供 `--auth`。
+- 默认监听 `0.0.0.0:0`，自动选择端口并持久化。
+- 启动时若未通过 `--auth` 显式提供 Token，则自动生成 32 位随机 Token 并持久化到 `auth.json`（0o600 权限），确保认证始终启用。
 - 可选内置 HTTPS：`--tls-cert/--tls-key`。
+- **Portal 端口绑定**：Portal 仪表板可绑定到 `0.0.0.0`，用户通过 LAN IP 或 Tailscale 域名访问。非 loopback 访问 Portal 时须通过 `mw_token` Cookie 认证。
+- **全局 Token（HttpOnly Cookie + CSRF）**：全局 Token 存储在 `~/.config/myworktree/auth.json`（0600 权限），通过 `mw config` 交互式配置。Portal 仪表板使用 HttpOnly Cookie（`mw_token`）传输 Token——JS 不可读取，防止 XSS 窃取。登录/登出端点采用 double-submit cookie 模式做 CSRF 防护。
+- **速率限制**：实例端认证失败限流 20 次/分钟/IP；Portal 端 CSRF token 生成限流 1 req/s/IP，认证尝试限流 20 次/分钟/IP。
+- **Tailscale HTTPS**：~~当 Tailscale 可用时，Portal 持有者自动配置 `tailscale serve` 提供 `https://<machine>.ts.net` 域名访问（Let's Encrypt 证书）。~~ **（暂未启用）** 在 macOS 下测试发现 tailscale 1.98 CLI 的 `serve` 命令存在 bug：`tailscale serve --bg <port>` 返回成功但实际未配置代理、`tailscale serve status` 始终报告 No serve config。相关代码（`tailscaleServeLoop`、`ensureTailscaleServe` 等）已封存不调用，待 tailscale 修复后恢复。Tailscale WireGuard 隧道本身提供网络层加密，仍可通过 `http://100.x.x.x:PORT` 安全访问。
 - 涉及宿主机图形界面的快捷动作（例如从侧栏直接打开 Terminal / Finder）只在浏览器通过 `127.0.0.1` / `localhost` 访问时展示；远程访问时隐藏，避免误导用户在远端会话里触发本机 GUI 行为。
 - 对应后端接口也强制仅接受 loopback 客户端请求，不能只依赖前端隐藏来形成安全边界。
+- Loopback 判断仅支持 IPv4（`127.x.x.x` / `localhost`）；IPv6 地址（含 `::1`）不被识别为 loopback，需走完整的 Token 认证流程。
 - 日志/回放脱敏：
   - env 键名包含 `TOKEN/SECRET/KEY/PASSWORD` 的值写入状态时替换为 `***`。
   - 输出回放中按模式脱敏主流 AI key（如 `sk-***`）。
@@ -50,14 +55,21 @@
 ## 7. 当前实现状态（与愿景差异）
 - 已实现：worktree/instance 管理、Web UI、API、输出回放、脱敏、认证与可选 HTTPS、MCP tools 列表接口。
 - 已实现：侧栏主工作区/各 worktree 项提供两个快捷入口，可一键在宿主机打开对应目录的 Terminal（zsh）与 Finder 窗口，便于在 Web UI 与本机 GUI/CLI 间快速切换。
+- **已实现 Git Changes 面板暂存/未暂存分离**：侧栏底部 CHANGES 区域拆分为 Staged 和 Unstaged 两个互锁折叠 section。默认展开 Unstaged，点击任一标题栏展开当前 section 并自动折叠另一个。每个 section 独立显示暂存/未暂存的文件列表和行数汇总。
+  - 后端 `/api/worktree/status` 并发执行 `git diff --cached --numstat`（暂存）和 `git diff --numstat`（未暂存），复用同一解析器，响应中分别返回 `staged` 和 `unstaged` 两个字段。
 - **已实现 PTY + Web TTY**：instance 通过 PTY 启动，支持真正的交互式终端（vim/htop/less 等 TUI 程序）。
   - WebSocket 握手协议：服务端发送 `{"type":"ready"}`，客户端等待后发送 resize 开始数据流。
   - 窗口尺寸传递：前端监听窗口 resize 并通知后端 PTY，确保 TUI 程序正确重绘。
   - 智能重绘：前端在收到第一条数据后延迟 50ms 再次发送 resize，确保 TUI 完整刷新。
-  - 超时降级：5 秒握手超时后自动降级到 SSE 方案。
+   - 超时降级：客户端若在 5 秒内未收到 WebSocket `ready` 握手消息，则自动关闭 WebSocket 并回退到 SSE 方案。
   - 运行中的实例在前端按实例维护各自的终端会话；切换标签时隐藏非活动终端，而不是强制断开其 PTY 连接。
   - 终端配置：Web TTY 的缓冲区（scrollback）、主题、字体等参数由前端灵活配置，以适应不同的调试和使用场景。
-- 规划增强：无（PTY + Web TTY 已完成）。
+- 规划增强：**Portal Dashboard MVP**（已实现）：
+  - 全局 Token 配置（`mw config` 交互式引导，`~/.config/myworktree/auth.json`，`0o600` 权限）
+  - Portal 仪表板（共享入口端口，自动发现所有仓库的运行实例，HttpOnly Cookie 认证，CSRF 防护）
+  - ~~反向代理（通过 Portal 统一入口访问各实例，解决跨域 Cookie 问题，支持 WebSocket）~~ **（暂未实现）**：计划通过 `/s/<repo-hash>/` 路径代理到对应实例端口，当前仪表板链接直接指向实例端口
+  - ~~Tailscale Serve 自动管理（自动配置 `tailscale serve` 提供 `https://<machine>.ts.net` 域名访问）~~ **（暂未启用，见 §6 安全说明）**
+  - 双层认证架构（Portal 层 Cookie + CSRF，实例层 loopback 绕过）
 - 浏览器关闭保护：前端在 `beforeunload` 事件时，无论是否存在运行中实例，均触发浏览器原生确认对话框，防止误操作关闭页面。
 - **Main workspace 分支查询**：`GET /api/main` 返回 `{name, branch}`。branch 字段实时查询（`git rev-parse --abbrev-ref HEAD`），在 detached HEAD 场景（如 CI 浅克隆）下返回空字符串而非错误。
 
@@ -66,4 +78,54 @@
 - 可启动/列出/停止 instance，且前端关闭后 instance 仍继续运行。
 - UI 重连可看到所有已管理对象，并能回放 instance 近期输出。
 - 本机访问 Web UI 时，可从侧栏一键打开所选主工作区/worktree 的 Terminal 与 Finder；远程访问时不展示这两个快捷入口。
-- 非 loopback 无 `--auth` 时拒绝启动；输出回放对 `sk-...` 做脱敏。
+- **Portal Dashboard MVP**：
+  - `mw config` 交互式引导可完成全局 Token 的配置、查看（掩码）、清除、重新生成
+  - `mw start --listen 0.0.0.0:0` 自动启动 Portal 仪表板，多实例中仅一个持有 Portal 端口
+  - Portal 仪表板可通过 LAN IP 和 Tailscale 域名访问，显示所有运行实例并可点击跳转
+  - Cookie 认证流程：获取 CSRF token → 提交 auth → 获得 HttpOnly Cookie → 访问实例列表
+  - ~~实例通过 Portal 反向代理访问时，loopback 请求自动绕过实例端 auth 中间件~~ **（暂未实现）**
+  - ~~反向代理支持 WebSocket 升级转发~~ **（暂未实现）**
+  - ~~Tailscale 可用时自动配置 `tailscale serve`，提供 HTTPS 域名访问~~ **（暂未启用）**
+  - Portal 持有者崩溃后，其他实例在 10~15 秒内完成故障转移接管
+## 9. LLM 智能分支命名
+
+在 Create Worktree 时，可选使用 LLM 将任务描述转换为简洁、规范的分支名。
+
+### 9.1 模式选择
+- **正则模式**（默认）：使用 `slugify()` 正则转换，不调用任何 LLM API
+- **LLM 模式**：调用 LLM API（支持 OpenAI / Anthropic 两种协议，由配置决定）
+
+### 9.2 配置方式
+配置文件：`~/.config/myworktree/config.json`（0o600 权限），示例：
+```json
+{
+  "protocol": "openai",
+  "api_address": "<provider_api_address>",
+  "api_key": "<api_key>",
+  "model": "<model_name>"
+}
+```
+
+支持的 protocol：
+- `openai`：OpenAI API 格式（适用于 OpenAI 及 DeepSeek 等兼容 OpenAI 格式的服务）
+- `anthropic`：Anthropic API 格式（适用于 Anthropic 及 DeepSeek 的 Anthropic 格式端点）
+
+同时支持环境变量（优先级更高）：`OPENAI_API_KEY` / `ANTHROPIC_API_KEY`。
+
+### 9.3 分支名规范（由 LLM 遵守）
+1. 长度不超过 100 个字符
+2. 只包含小写字母、数字、连字符和斜杠（用于 git 分支分组，如 `feature/auth`）
+3. 符合 git 规范（以字母开头）
+4. 使用英文，可包含数字
+
+### 9.4 前端交互
+- **AI Generate 按钮**：在创建 worktree 弹窗中，输入任务描述后，点击 "AI Generate" 按钮调用 LLM 生成分支名，填入 Branch Name 输入框。
+- **Branch Name 输入框**：始终可见，用户可直接编辑 LLM 生成的结果，或手动输入自定义分支名。
+- **LLM Settings 按钮**：位于创建表单左下角，点击打开 LLM 配置对话框（仅在 localhost 或 HTTPS 环境下可见）。
+  - 支持配置：协议类型、API 地址、API Key、模型名称。
+  - 提供"测试连接"功能验证配置是否正确。
+- LLM 调用失败时显示错误提示，用户仍可手动输入或修改 Branch Name 输入框。
+
+### 9.5 资源占用
+- 仅在调用 LLM 时产生网络请求，无本地资源占用
+- 不开启 LLM 时行为与现有版本完全一致
