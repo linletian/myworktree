@@ -25,6 +25,7 @@ import (
 	"syscall"
 	"time"
 
+	"myworktree/internal/config"
 	"myworktree/internal/gitx"
 	"myworktree/internal/instance"
 	"myworktree/internal/llm"
@@ -584,9 +585,12 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		token := extractAuthToken(r)
-		if token == s.cfg.AuthToken {
-			http.Redirect(w, r, "/", http.StatusFound)
-			return
+		if token != "" {
+			cfg, _ := config.Load()
+			if cfg != nil && token == cfg.AuthToken {
+				http.Redirect(w, r, "/", http.StatusFound)
+				return
+			}
 		}
 		loginHTML := `<!DOCTYPE html>
 <html lang="en">
@@ -668,7 +672,8 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		token := strings.TrimSpace(r.FormValue("token"))
-		if token != s.cfg.AuthToken {
+		cfg, err := config.Load()
+		if err != nil || token != cfg.AuthToken {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
@@ -1618,9 +1623,6 @@ func (s *Server) handleMCPCall(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) withAuth(next http.Handler) http.Handler {
-	if strings.TrimSpace(s.cfg.AuthToken) == "" {
-		return next
-	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if isLoopbackRequest(r) {
 			next.ServeHTTP(w, r)
@@ -1634,8 +1636,17 @@ func (s *Server) withAuth(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
+		cfg, err := config.Load()
+		if err != nil {
+			http.Error(w, "auth config unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		if strings.TrimSpace(cfg.AuthToken) == "" {
+			next.ServeHTTP(w, r)
+			return
+		}
 		token := extractAuthToken(r)
-		if token != s.cfg.AuthToken {
+		if token != cfg.AuthToken {
 			if !s.allowAuthAttempt(clientIP(r.RemoteAddr)) {
 				http.Error(w, "too many unauthorized attempts", http.StatusTooManyRequests)
 				return

@@ -21,7 +21,7 @@ It does **not** analyze project code or prevent concurrent write conflicts insid
 - `internal/monitor/` — resource stats collector (CPU delta via gopsutil/process.Times, memory via RSS)
 - `internal/llm/` — LLM API client（OpenAI / Anthropic / OpenAI Compatible），可选，LLM Settings 通过 Web UI 对话框配置
 - `internal/config/` — global auth configuration (read/write `auth.json`)
-- `internal/portal/` — Portal dashboard (port claiming, instance registry, CSRF state management, HTTP endpoints, reverse proxy; tailscale serve automation code is defined but **currently unused** due to tailscale CLI bug)
+- `internal/portal/` — Portal dashboard (port claiming, instance registry, CSRF state management, HTTP endpoints; **reverse proxy `/s/<repo-hash>/` planned but not yet implemented** — current dashboard links point to instance ports directly; tailscale serve automation code is defined but **currently unused** due to tailscale CLI bug)
 - `internal/ui/` — embedded static UI.
 
 ## 3. Data & persistence
@@ -359,7 +359,7 @@ myworktree implements a **dual-layer authentication architecture**:
 - Optional built-in HTTPS via `--tls-cert/--tls-key`
 - Redaction on stored backlog (e.g. `sk-...`)
 
-**Proxy authentication bypass**: Portal reverse proxy forwards requests to instances via `127.0.0.1` (loopback), so instances automatically skip auth — users never need to manually pass tokens to individual instances.
+**Proxy authentication bypass (planned)**: The planned Portal reverse proxy (`/s/<repo-hash>/`) will forward requests to instances via `127.0.0.1` (loopback), so instances automatically skip auth. **Currently not yet implemented** — dashboard links connect to instance ports directly.
 
 **Tailscale**: WireGuard tunnel provides network-layer encryption. ~~Portal holder automatically manages `tailscale serve` for HTTPS domain access (`https://<machine>.ts.net`) with Let's Encrypt certificates.~~ **Currently disabled** — tailscale CLI `serve` command on macOS returns success but does not actually configure the proxy. The `tailscaleServeLoop` goroutine and related `cleanupStaleTailscaleServe()` call are removed from the production code path. Users can still securely access Portal via Tailscale IP (`http://100.x.x.x:12345`) over the WireGuard tunnel.
 

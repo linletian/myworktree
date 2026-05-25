@@ -11,6 +11,7 @@ Auth:
 - For Portal dashboard access, the `mw_token` HttpOnly Cookie is used as the third token source (automatically sent by browser after `/api/auth` login).
 - Token priority: `Authorization` header → `?token=` query → `mw_token` Cookie.
 - Prefer the `Authorization` header when possible so tokens do not end up in browser history or shell history.
+- **Auto-generate token**: When `--auth` is not provided and no token exists in `auth.json`, the CLI automatically generates a random 32-char hex token, persists it to `~/.config/myworktree/auth.json`, and uses it as the instance auth token. This ensures instances always have auth enabled by default.
 
 Common response header:
 - `X-Myworktree-Server-Rev: <rev>` is returned by API and UI responses.
@@ -592,8 +593,10 @@ Always returns 200 (idempotent — successful even if not logged in).
 Errors:
 - `403`: CSRF token invalid/expired/used or missing
 
-### Reverse proxy (access instance)
+### Reverse proxy (access instance) — planned, not yet implemented
 `ANY /s/<repo-hash>/*`
+
+> **Status: Planned but not yet implemented.** Currently the Portal dashboard links directly to instance ports (`http://<host>:<port>/`) instead of using the reverse proxy path. The `/s/<repo-hash>/*` route handler is not registered in the Portal HTTP server.
 
 **Authentication required** (Cookie `mw_token` or Bearer token). Each successful request refreshes the `mw_token` Cookie's expiration (sliding).
 
@@ -607,6 +610,19 @@ Errors:
 - `400`: Invalid `repo-hash` format
 - `401`: Not authenticated
 - `502`: Target instance offline
+
+### Instance login page (instance-level, HTML)
+`GET /login`, `POST /login`
+
+**No authentication required** — this is the login page itself.
+
+The instance server serves an HTML login form at `/login` for browser-based authentication (separate from the Portal JSON API). Non-loopback browser requests that lack valid auth are redirected to this page.
+
+- `GET /login` — Returns an HTML login page with password input and form. If the user already has a valid `mw_token` Cookie that matches the global auth config, they are redirected to `/` immediately.
+- `POST /login` — Accepts `token` and optional `next` form fields. On successful auth, sets `mw_token` HttpOnly Cookie (Max-Age=86400, SameSite=Lax, Secure on HTTPS) and redirects to the `next` path (or `/` if not provided). **Note**: `/login` is explicitly exempt from `withAuth` middleware rate limiting; no per-IP rate limits apply to this endpoint.
+
+Errors:
+- `401`: Invalid token
 
 ## 8) LLM 配置
 ### 获取当前配置

@@ -38,14 +38,16 @@
   - 命名冲突：如目标分支已存在，自动给 `<name>` 加 `-2/-3` 后缀避免冲突；并支持将既有 worktree **纳入管理（import）**。
 
 ## 6. 安全
-- 默认只监听 `127.0.0.1`。
-- 监听非 loopback（例如 `0.0.0.0` 或局域网 IP）时：必须提供 `--auth`。
+- 默认监听 `0.0.0.0:0`，自动选择端口并持久化。
+- 启动时若未通过 `--auth` 显式提供 Token，则自动生成 32 位随机 Token 并持久化到 `auth.json`（0o600 权限），确保认证始终启用。
 - 可选内置 HTTPS：`--tls-cert/--tls-key`。
 - **Portal 端口绑定**：Portal 仪表板可绑定到 `0.0.0.0`，用户通过 LAN IP 或 Tailscale 域名访问。非 loopback 访问 Portal 时须通过 `mw_token` Cookie 认证。
 - **全局 Token（HttpOnly Cookie + CSRF）**：全局 Token 存储在 `~/.config/myworktree/auth.json`（0600 权限），通过 `mw config` 交互式配置。Portal 仪表板使用 HttpOnly Cookie（`mw_token`）传输 Token——JS 不可读取，防止 XSS 窃取。登录/登出端点采用 double-submit cookie 模式做 CSRF 防护。
+- **速率限制**：实例端认证失败限流 20 次/分钟/IP；Portal 端 CSRF token 生成限流 1 req/s/IP，认证尝试限流 20 次/分钟/IP。
 - **Tailscale HTTPS**：~~当 Tailscale 可用时，Portal 持有者自动配置 `tailscale serve` 提供 `https://<machine>.ts.net` 域名访问（Let's Encrypt 证书）。~~ **（暂未启用）** 在 macOS 下测试发现 tailscale 1.98 CLI 的 `serve` 命令存在 bug：`tailscale serve --bg <port>` 返回成功但实际未配置代理、`tailscale serve status` 始终报告 No serve config。相关代码（`tailscaleServeLoop`、`ensureTailscaleServe` 等）已封存不调用，待 tailscale 修复后恢复。Tailscale WireGuard 隧道本身提供网络层加密，仍可通过 `http://100.x.x.x:PORT` 安全访问。
 - 涉及宿主机图形界面的快捷动作（例如从侧栏直接打开 Terminal / Finder）只在浏览器通过 `127.0.0.1` / `localhost` 访问时展示；远程访问时隐藏，避免误导用户在远端会话里触发本机 GUI 行为。
 - 对应后端接口也强制仅接受 loopback 客户端请求，不能只依赖前端隐藏来形成安全边界。
+- Loopback 判断仅支持 IPv4（`127.x.x.x` / `localhost`）；IPv6 地址（含 `::1`）不被识别为 loopback，需走完整的 Token 认证流程。
 - 日志/回放脱敏：
   - env 键名包含 `TOKEN/SECRET/KEY/PASSWORD` 的值写入状态时替换为 `***`。
   - 输出回放中按模式脱敏主流 AI key（如 `sk-***`）。
@@ -59,13 +61,13 @@
   - WebSocket 握手协议：服务端发送 `{"type":"ready"}`，客户端等待后发送 resize 开始数据流。
   - 窗口尺寸传递：前端监听窗口 resize 并通知后端 PTY，确保 TUI 程序正确重绘。
   - 智能重绘：前端在收到第一条数据后延迟 50ms 再次发送 resize，确保 TUI 完整刷新。
-  - 超时降级：5 秒握手超时后自动降级到 SSE 方案。
+   - 超时降级：客户端若在 5 秒内未收到 WebSocket `ready` 握手消息，则自动关闭 WebSocket 并回退到 SSE 方案。
   - 运行中的实例在前端按实例维护各自的终端会话；切换标签时隐藏非活动终端，而不是强制断开其 PTY 连接。
   - 终端配置：Web TTY 的缓冲区（scrollback）、主题、字体等参数由前端灵活配置，以适应不同的调试和使用场景。
 - 规划增强：**Portal Dashboard MVP**（已实现）：
   - 全局 Token 配置（`mw config` 交互式引导，`~/.config/myworktree/auth.json`，`0o600` 权限）
   - Portal 仪表板（共享入口端口，自动发现所有仓库的运行实例，HttpOnly Cookie 认证，CSRF 防护）
-  - 反向代理（通过 Portal 统一入口访问各实例，解决跨域 Cookie 问题，支持 WebSocket）
+  - ~~反向代理（通过 Portal 统一入口访问各实例，解决跨域 Cookie 问题，支持 WebSocket）~~ **（暂未实现）**：计划通过 `/s/<repo-hash>/` 路径代理到对应实例端口，当前仪表板链接直接指向实例端口
   - ~~Tailscale Serve 自动管理（自动配置 `tailscale serve` 提供 `https://<machine>.ts.net` 域名访问）~~ **（暂未启用，见 §6 安全说明）**
   - 双层认证架构（Portal 层 Cookie + CSRF，实例层 loopback 绕过）
 - 浏览器关闭保护：前端在 `beforeunload` 事件时，无论是否存在运行中实例，均触发浏览器原生确认对话框，防止误操作关闭页面。
@@ -77,12 +79,12 @@
 - UI 重连可看到所有已管理对象，并能回放 instance 近期输出。
 - 本机访问 Web UI 时，可从侧栏一键打开所选主工作区/worktree 的 Terminal 与 Finder；远程访问时不展示这两个快捷入口。
 - **Portal Dashboard MVP**：
-  - `mw config` 交互式引导可完成全局 Token 的配置、查看（掩码）、清除
+  - `mw config` 交互式引导可完成全局 Token 的配置、查看（掩码）、清除、重新生成
   - `mw start --listen 0.0.0.0:0` 自动启动 Portal 仪表板，多实例中仅一个持有 Portal 端口
   - Portal 仪表板可通过 LAN IP 和 Tailscale 域名访问，显示所有运行实例并可点击跳转
-  - Cookie 认证流程：获取 CSRF token → 提交 auth → 获得 HttpOnly Cookie → 访问实例列表/代理
-  - 实例通过 Portal 反向代理访问时，loopback 请求自动绕过实例端 auth 中间件
-  - 反向代理支持 WebSocket 升级转发
+  - Cookie 认证流程：获取 CSRF token → 提交 auth → 获得 HttpOnly Cookie → 访问实例列表
+  - ~~实例通过 Portal 反向代理访问时，loopback 请求自动绕过实例端 auth 中间件~~ **（暂未实现）**
+  - ~~反向代理支持 WebSocket 升级转发~~ **（暂未实现）**
   - ~~Tailscale 可用时自动配置 `tailscale serve`，提供 HTTPS 域名访问~~ **（暂未启用）**
   - Portal 持有者崩溃后，其他实例在 10~15 秒内完成故障转移接管
 ## 9. LLM 智能分支命名
