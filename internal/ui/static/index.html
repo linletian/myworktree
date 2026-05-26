@@ -417,6 +417,21 @@
             gap: 4px;
         }
 
+        .wt-diverge-badges {
+            display: inline-flex;
+            gap: 3px;
+            align-items: center;
+            margin-left: 2px;
+        }
+
+        .wt-diverge-badge {
+            font-size: 10px;
+            color: var(--danger-text);
+            font-weight: 600;
+            line-height: 1;
+            white-space: nowrap;
+        }
+
         .wt-actions {
             margin-left: auto;
             display: flex;
@@ -1365,7 +1380,8 @@
             activeInst: null,
             mainRepo: null,
             renamingInst: null,    // instance id currently being renamed
-            renamingInstValue: ""  // preserved value across re-renders
+            renamingInstValue: "", // preserved value across re-renders
+            diverged: {}           // worktree_id -> {branch: {diverged, ahead}}
         };
 
         let loadingActions = new Set(); // Stores keys like "term:<id>" or "finder:<id>"
@@ -1379,6 +1395,7 @@
         // Terminal & Transport
         let terminalSessions = {};
         let pollTimer = null;
+        let divergeTimer = null;
         let refreshInFlight = null;
         let stateVersion = 0;
 
@@ -1478,6 +1495,8 @@
                     state.branches = branches;
                     reconcileTerminalSessions();
 
+                    fetchDiverge();
+
                     // Fetch main repo info independently — failure is non-blocking.
                     api("/api/main").then(main => {
                         const prevBranch = state.mainRepo ? state.mainRepo.branch : null;
@@ -1520,6 +1539,29 @@
             await refreshInFlight;
         }
 
+        async function fetchDiverge() {
+            try {
+                const data = await api("/api/worktrees/diverged");
+                state.diverged = data.items || {};
+                renderSidebar();
+            } catch (e) {
+                console.error("fetch diverge failed:", e);
+            }
+        }
+
+        async function fetchDivergeSingle(id) {
+            try {
+                const data = await api(`/api/worktree/diverged?id=${encodeURIComponent(id)}`);
+                if (!state.diverged) state.diverged = {};
+                if (data.items) {
+                    Object.assign(state.diverged, data.items);
+                }
+                renderSidebar();
+            } catch (e) {
+                console.error("fetch diverge single failed:", e);
+            }
+        }
+
         function init() {
             if (sessionStorage.getItem(SERVER_UPGRADED_FLAG) === "1") {
                 sessionStorage.removeItem(SERVER_UPGRADED_FLAG);
@@ -1535,6 +1577,9 @@
             // Polling for status updates (2s)
             if (pollTimer) clearInterval(pollTimer);
             pollTimer = setInterval(refresh, 2000);
+            // Polling for diverge status (60s)
+            if (divergeTimer) clearInterval(divergeTimer);
+            divergeTimer = setInterval(fetchDiverge, 60000);
 
             // Status bar click -> resource monitor
             document.getElementById("status-bar").addEventListener("click", openModalMonitor);
@@ -1781,6 +1826,21 @@
             renderModals(); // Update options inside modals
         }
 
+        function divergeBadges(id) {
+            const data = state.diverged && state.diverged[id];
+            if (!data) return '';
+            let badges = '';
+            const branchKeys = Object.keys(data).sort();
+            for (const branch of branchKeys) {
+                const info = data[branch];
+                if (info.diverged && info.ahead > 0) {
+                    const label = branch === 'main' || branch === 'master' ? 'm' : (branch === 'develop' ? 'd' : branch.substring(0, 1));
+                    badges += `<span class="wt-diverge-badge" title="Behind ${branch} by ${info.ahead} commit${info.ahead > 1 ? 's' : ''}">${label}\u2191${info.ahead}</span>`;
+                }
+            }
+            return badges ? `<span class="wt-diverge-badges">${badges}</span>` : '';
+        }
+
         function renderSidebar() {
             const list = document.getElementById("wt-list");
             let html = "";
@@ -1820,7 +1880,7 @@
             <li class="wt-item wt-item-main ${isMainActive ? 'active' : ''}" onclick="selectWorktree(MAIN_WT_ID)">
               <div class="wt-name">${state.mainRepo.name}</div>
               <div class="wt-branch">
-                <span>🏠</span> ${branchLabel}
+                <span>🏠</span> ${branchLabel}${divergeBadges(MAIN_WT_ID)}
                 <div style="margin-left: auto; display: flex; gap: 4px; align-items: center;">
                     ${shortcuts(MAIN_WT_ID)}
                 </div>
@@ -1839,7 +1899,7 @@
             <li class="wt-item ${isActive ? 'active' : ''}" onclick="selectWorktree('${w.id}')">
               <div class="wt-name">${w.name}</div>
               <div class="wt-branch">
-                <span>🌱</span> ${w.branch}
+                <span>🌱</span> ${w.branch}${divergeBadges(w.id)}
                 <div style="margin-left: auto; display: flex; gap: 4px; align-items: center;">
                     ${shortcuts(w.id)}
                     ${isActive ? `<span style="font-size:10px;cursor:pointer;padding:2px 4px;" onclick="deleteWorktree('${w.id}', event)">✕</span>` : ''}
@@ -2222,6 +2282,8 @@
             } else {
                 refresh(); // Will trigger auto-select instance in renderTabs
             }
+            // Refresh diverge status for the selected worktree immediately.
+            fetchDivergeSingle(id);
             // Reset and start git changes polling for the new worktree.
             if (gitChangesTimer) clearInterval(gitChangesTimer);
             refreshGitChanges();
