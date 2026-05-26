@@ -543,6 +543,8 @@ func (s *Server) registerAPIs(mux *http.ServeMux) {
 	mux.HandleFunc("/api/branches", s.handleBranches)
 	mux.HandleFunc("/api/worktrees/open-terminal", s.handleWorktreeOpenTerminal)
 	mux.HandleFunc("/api/worktrees/open-finder", s.handleWorktreeOpenFinder)
+	mux.HandleFunc("/api/worktrees/diverged", s.handleWorktreesDiverged)
+	mux.HandleFunc("/api/worktree/diverged", s.handleWorktreeDiverged)
 	mux.HandleFunc("/api/mcp/tools", s.handleMCPTools)
 	mux.HandleFunc("/api/mcp/call", s.handleMCPCall)
 	mux.HandleFunc("/api/main", s.handleMain)
@@ -978,6 +980,86 @@ func (s *Server) handleWorktreeStatus(w http.ResponseWriter, r *http.Request) {
 		resp["unstaged"].(map[string]any)["warning"] = untracked.errMsg
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+func (s *Server) handleWorktreesDiverged(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	result := make(map[string]gitx.DivergedResult)
+
+	worktrees, err := s.worktreeMgr.List()
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+
+	mainBranch := gitx.DefaultBranch(s.root)
+
+	for _, wt := range worktrees {
+		items := gitx.CheckDiverged(wt.Path, wt.Branch, mainBranch)
+		if len(items) > 0 {
+			result[wt.ID] = items
+		}
+	}
+
+	result[instance.MainWorktreeID] = gitx.DivergedResult{}
+
+	writeJSON(w, http.StatusOK, map[string]any{"items": result})
+}
+
+func (s *Server) handleWorktreeDiverged(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	id := strings.TrimSpace(r.URL.Query().Get("id"))
+	if id == "" {
+		writeErr(w, http.StatusBadRequest, errors.New("id is required"))
+		return
+	}
+
+	var worktreePath string
+	if id == instance.MainWorktreeID {
+		worktreePath = s.root
+	} else {
+		worktrees, err := s.worktreeMgr.List()
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, err)
+			return
+		}
+		found := false
+		for _, wt := range worktrees {
+			if wt.ID == id {
+				worktreePath = wt.Path
+				found = true
+				break
+			}
+		}
+		if !found {
+			writeErr(w, http.StatusBadRequest, fmt.Errorf("unknown worktree id: %s", id))
+			return
+		}
+	}
+
+	branch, err := gitx.CurrentBranch(worktreePath)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, fmt.Errorf("failed to get current branch: %w", err))
+		return
+	}
+
+	mainBranch := gitx.DefaultBranch(s.root)
+	items := gitx.CheckDiverged(worktreePath, branch, mainBranch)
+
+	result := make(map[string]gitx.DivergedResult)
+	if len(items) > 0 {
+		result[id] = items
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"items": result})
 }
 
 func (s *Server) handleInstances(w http.ResponseWriter, r *http.Request) {
