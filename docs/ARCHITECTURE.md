@@ -22,6 +22,7 @@ It does **not** analyze project code or prevent concurrent write conflicts insid
 - `internal/llm/` — LLM API client（OpenAI / Anthropic / OpenAI Compatible），可选，LLM Settings 通过 Web UI 对话框配置
 - `internal/config/` — global auth configuration (read/write `auth.json`)
 - `internal/portal/` — Portal dashboard (port claiming, instance registry, CSRF state management, HTTP endpoints; **reverse proxy `/s/<repo-hash>/` planned but not yet implemented** — current dashboard links point to instance ports directly; tailscale serve automation code is defined but **currently unused** due to tailscale CLI bug)
+- `internal/gitx/` — git CLI wrappers (branch listing, default branch detection, branch divergence detection)
 - `internal/ui/` — embedded static UI.
 
 ## 3. Data & persistence
@@ -67,6 +68,7 @@ The sidebar shows a pinned **Main Workspace** item at the top (purple accent), f
 - **Instance routing**: Use `worktree_id: "__main__"` (constant: `instance.MainWorktreeID`) in `POST /api/instances` to start an instance in the main repo root. The instance's `worktree_id` will be `"__main__"` and `worktree_name` will be the directory basename.
 - **Auto-select**: On first load, the UI auto-selects the first worktree; if no worktrees exist, it selects the main repo.
 - **Refresh**: All branch info (main repo + worktrees) updates via the existing 2-second polling.
+- **Divergence labels**: Each non-main worktree item in the sidebar displays compact red labels (e.g. `m↑3`, `d↑1`) next to its branch name, indicating how many commits the upstream branch (main or develop) is ahead. Labels are refreshed every 60 seconds and immediately when the user selects a different worktree. This helps users verify whether their worktree base is up-to-date before starting new work. See `docs/plans/git-commit-history-graph/DESIGN.md` for details.
 - **Git Changes panel**: Below the worktree list, a read-only panel shows changed files for the currently selected worktree, split into two mutually exclusive accordion sections: **Staged** (changes in the index via `git diff --cached --numstat`) and **Unstaged** (working tree changes via `git diff --numstat`). The panel auto-refreshes every 10 seconds and on worktree selection change. The main repo's changes also refresh when its branch changes. Both git commands run concurrently on the server with a 2-second timeout each. The accordion defaults to showing Unstaged; clicking either header expands that section and collapses the other. Empty sections still show their header with a "No staged changes" / "No unstaged changes" message.
 
 ## 4. Instance lifecycle & reconnect semantics

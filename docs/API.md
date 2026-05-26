@@ -186,6 +186,57 @@ Partial failure example (staged succeeded, unstaged failed):
 ```
 - Returns HTTP 400 if `id` is missing or unknown.
 
+### Get all worktrees divergence
+`GET /api/worktrees/diverged`
+
+Returns divergence information for all worktrees: whether each worktree branch is behind the main branch or develop branch.
+
+- Called on page load and every 60 seconds.
+- For each worktree whose branch is the main branch itself, returns an empty object `{}` (no divergence check needed).
+- For each worktree whose branch is develop, checks only main.
+- For all other worktrees, checks both main and develop (if develop exists locally).
+- Uses the local vs remote effective head that is more ahead (`git rev-list --left-right --count`).
+
+Response:
+```json
+{
+  "items": {
+    "wt_abc123": {
+      "main":    {"diverged": true,  "ahead": 3},
+      "develop": {"diverged": false}
+    },
+    "wt_def456": {
+      "main":    {"diverged": true,  "ahead": 1},
+      "develop": {"diverged": true,  "ahead": 2}
+    },
+    "__main__": {}
+  }
+}
+```
+
+- `diverged`: `true` means the upstream branch has commits not yet contained in the worktree branch HEAD.
+- `ahead`: number of commits the upstream effective head is ahead of the worktree HEAD. Only present when `diverged` is `true`.
+- `main` / `develop`: each key may be absent if the check is not applicable (e.g., develop does not exist locally).
+
+### Get single worktree divergence
+`GET /api/worktree/diverged?id=<worktreeId>`
+
+Returns divergence information for a single worktree. Same response structure as above, but only contains the requested worktree entry.
+
+- Called immediately when the user selects a worktree in the sidebar to refresh divergence labels.
+- `id` can be a managed worktree ID, or `"__main__"` for the main repo.
+
+Response:
+```json
+{
+  "items": {
+    "wt_abc123": {
+      "main":    {"diverged": true,  "ahead": 3}
+    }
+  }
+}
+```
+
 ## 3) Branches
 ### List (default + top 10)
 `GET /api/branches`
