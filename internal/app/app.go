@@ -379,11 +379,6 @@ func (s *Server) Start() (string, error) {
 		if err := s.portal.Start(); err != nil {
 			s.logger.Printf("[portal] warning: portal.Start failed: %v", err)
 			s.portal = nil
-		} else {
-			s.logger.Printf("[portal] Portal dashboard at: http://0.0.0.0:%d/", s.cfg.PortalPort)
-			if tsName := portal.TailscaleDNSName(); tsName != "" {
-				s.logger.Printf("[portal] Tailscale URL: https://%s/", tsName)
-			}
 		}
 	}
 
