@@ -72,6 +72,13 @@
   - 双层认证架构（Portal 层 Cookie + CSRF，实例层 loopback 绕过）
 - 浏览器关闭保护：前端在 `beforeunload` 事件时，无论是否存在运行中实例，均触发浏览器原生确认对话框，防止误操作关闭页面。
 - **Main workspace 分支查询**：`GET /api/main` 返回 `{name, branch}`。branch 字段实时查询（`git rev-parse --abbrev-ref HEAD`），在 detached HEAD 场景（如 CI 浅克隆）下返回空字符串而非错误。
+- **规划新增：分支落后检测**：
+  - 侧栏每个 worktree 分支名旁显示红色标签（如 `m↑3` / `d↑1`），标识当前分支是否落后于主分支或集成分支 develop。
+  - 如果当前 worktree 就是主分支自身，则不显示标记。
+  - 判断逻辑：计算当前 HEAD 到上游 effective head（本地和远端中更领先的一方）的 ahead 数量，结果 `> 0` 即落后。
+  - 远端发现优先 `origin`，其次取其他 remote 中领先最多的；无远端则仅用本地判断。
+  - 标签常驻显示，60 秒定时刷新；切换 worktree 时立即刷新。
+  - 详情见 `docs/plans/git-commit-history-graph/DESIGN.md`。
 
 ## 8. 验收标准（MVP）
 - 可创建/列出/删除 worktree（dirty 删除被拒绝）。
