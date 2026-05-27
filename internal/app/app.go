@@ -948,9 +948,22 @@ func (s *Server) handleWorktreeStatus(w http.ResponseWriter, r *http.Request) {
 		untrackedCh <- diffResult{changes: changes, total: map[string]int{"additions": totalAdds, "deletions": 0}}
 	}()
 
-	staged := <-stagedCh
-	unstaged := <-unstagedCh
-	untracked := <-untrackedCh
+	var staged, unstaged, untracked diffResult
+	select {
+	case staged = <-stagedCh:
+	case <-r.Context().Done():
+		return
+	}
+	select {
+	case unstaged = <-unstagedCh:
+	case <-r.Context().Done():
+		return
+	}
+	select {
+	case untracked = <-untrackedCh:
+	case <-r.Context().Done():
+		return
+	}
 
 	unstaged.changes = append(unstaged.changes, untracked.changes...)
 	unstaged.total["additions"] += untracked.total["additions"]
@@ -998,14 +1011,50 @@ func (s *Server) handleWorktreesDiverged(w http.ResponseWriter, r *http.Request)
 
 	mainBranch := gitx.DefaultBranch(s.root)
 
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+
 	for _, wt := range worktrees {
-		items := gitx.CheckDiverged(wt.Path, wt.Branch, mainBranch)
-		if len(items) > 0 {
-			result[wt.ID] = items
-		}
+		wg.Add(1)
+		go func(wt store.ManagedWorktree) {
+			defer wg.Done()
+			branch, err := gitx.CurrentBranch(wt.Path)
+			var items gitx.DivergedResult
+			if err != nil {
+				items = gitx.DivergedResult{
+					gitx.MainBranchKey: gitx.DivergedStatus{Error: fmt.Sprintf("cannot determine branch: %v", err)},
+				}
+			} else {
+				items = gitx.CheckDiverged(wt.Path, branch, mainBranch)
+			}
+			mu.Lock()
+			if len(items) > 0 {
+				result[wt.ID] = items
+			}
+			mu.Unlock()
+		}(wt)
 	}
 
-	result[instance.MainWorktreeID] = gitx.DivergedResult{}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		rootBranch, err := gitx.CurrentBranch(s.root)
+		var items gitx.DivergedResult
+		if err != nil {
+			items = gitx.DivergedResult{
+				gitx.MainBranchKey: gitx.DivergedStatus{Error: fmt.Sprintf("cannot determine branch: %v", err)},
+			}
+		} else {
+			items = gitx.CheckDiverged(s.root, rootBranch, mainBranch)
+		}
+		mu.Lock()
+		if len(items) > 0 {
+			result[instance.MainWorktreeID] = items
+		}
+		mu.Unlock()
+	}()
+
+	wg.Wait()
 
 	writeJSON(w, http.StatusOK, map[string]any{"items": result})
 }
@@ -1045,13 +1094,19 @@ func (s *Server) handleWorktreeDiverged(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 
+	mainBranch := gitx.DefaultBranch(s.root)
+
 	branch, err := gitx.CurrentBranch(worktreePath)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, fmt.Errorf("failed to get current branch: %w", err))
+		result := map[string]gitx.DivergedResult{
+			id: {
+				gitx.MainBranchKey: gitx.DivergedStatus{Error: fmt.Sprintf("cannot determine branch: %v", err)},
+			},
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"items": result})
 		return
 	}
 
-	mainBranch := gitx.DefaultBranch(s.root)
 	items := gitx.CheckDiverged(worktreePath, branch, mainBranch)
 
 	result := make(map[string]gitx.DivergedResult)

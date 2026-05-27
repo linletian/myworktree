@@ -196,18 +196,22 @@ Returns divergence information for all worktrees: whether each worktree branch i
 - For each worktree whose branch is develop, checks only main.
 - For all other worktrees, checks both main and develop (if develop exists locally).
 - Uses the local vs remote effective head that is more ahead (`git rev-list --left-right --count`).
+- If the worktree's current branch cannot be determined (e.g., detached HEAD), the worktree entry contains only an `error` field.
 
 Response:
 ```json
 {
   "items": {
     "wt_abc123": {
-      "main":    {"diverged": true,  "ahead": 3},
-      "develop": {"diverged": false}
-    },
-    "wt_def456": {
-      "main":    {"diverged": true,  "ahead": 1},
+       "mainBranch":    {"diverged": true,  "ahead": 3},
+       "develop": {"diverged": false}
+     },
+     "wt_def456": {
+       "mainBranch":    {"diverged": true,  "ahead": 1},
       "develop": {"diverged": true,  "ahead": 2}
+    },
+    "wt_detached": {
+       "mainBranch": {"error": "cannot determine branch: git HEAD is detached or malformed"}
     },
     "__main__": {}
   }
@@ -216,7 +220,8 @@ Response:
 
 - `diverged`: `true` means the upstream branch has commits not yet contained in the worktree branch HEAD.
 - `ahead`: number of commits the upstream effective head is ahead of the worktree HEAD. Only present when `diverged` is `true`.
-- `main` / `develop`: each key may be absent if the check is not applicable (e.g., develop does not exist locally).
+- `error`: optional string describing why the check failed (e.g., git command timeout). When present, `diverged` is `false` and `ahead` is absent.
+- `mainBranch` / `develop`: each key may be absent if the check is not applicable (e.g., develop does not exist locally).
 
 ### Get single worktree divergence
 `GET /api/worktree/diverged?id=<worktreeId>`
@@ -231,7 +236,7 @@ Response:
 {
   "items": {
     "wt_abc123": {
-      "main":    {"diverged": true,  "ahead": 3}
+       "mainBranch":    {"diverged": true,  "ahead": 3}
     }
   }
 }

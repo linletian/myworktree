@@ -432,6 +432,14 @@
             white-space: nowrap;
         }
 
+        .wt-diverge-badge-err {
+            font-size: 10px;
+            color: #d4a017;
+            font-weight: 600;
+            line-height: 1;
+            white-space: nowrap;
+        }
+
         .wt-actions {
             margin-left: auto;
             display: flex;
@@ -1542,6 +1550,7 @@
         async function fetchDiverge() {
             try {
                 const data = await api("/api/worktrees/diverged");
+                if (!state.diverged) state.diverged = {};
                 state.diverged = data.items || {};
                 renderSidebar();
             } catch (e) {
@@ -1833,8 +1842,10 @@
             const branchKeys = Object.keys(data).sort();
             for (const branch of branchKeys) {
                 const info = data[branch];
-                if (info.diverged && info.ahead > 0) {
-                    const label = branch === 'main' || branch === 'master' ? 'm' : (branch === 'develop' ? 'd' : branch.substring(0, 1));
+                if (info.error) {
+                    badges += `<span class="wt-diverge-badge-err" title="Error checking ${branch}: ${info.error}">err\u2191</span>`;
+                } else if (info.diverged && info.ahead > 0) {
+                    const label = branch === 'mainBranch' ? 'm' : (branch === 'develop' ? 'd' : branch.substring(0, 1));
                     badges += `<span class="wt-diverge-badge" title="Behind ${branch} by ${info.ahead} commit${info.ahead > 1 ? 's' : ''}">${label}\u2191${info.ahead}</span>`;
                 }
             }
