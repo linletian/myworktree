@@ -62,6 +62,9 @@ func TestGitHubURL(t *testing.T) {
 	}{
 		{"scp style", "git@github.com:owner/repo.git", "https://github.com/owner/repo"},
 		{"scp style no .git", "git@github.com:owner/repo", "https://github.com/owner/repo"},
+		{"scp style with ssh config alias user", "mywork@github.com:owner/repo.git", "https://github.com/owner/repo"},
+		{"scp style with ci bot user", "ci-bot@github.com:owner/repo.git", "https://github.com/owner/repo"},
+		{"scp style with dotted user", "first.last@github.com:owner/repo.git", "https://github.com/owner/repo"},
 		{"https", "https://github.com/owner/repo.git", "https://github.com/owner/repo"},
 		{"https no .git", "https://github.com/owner/repo", "https://github.com/owner/repo"},
 		{"https trailing slash", "https://github.com/owner/repo.git/", "https://github.com/owner/repo"},

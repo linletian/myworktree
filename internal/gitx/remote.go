@@ -16,7 +16,9 @@ import (
 //     remote in declared order.
 //
 // Supported URL formats (after leading/trailing whitespace is trimmed):
-//   - git@github.com:owner/repo.git       (SCP-style, default SSH port only)
+//   - <user>@github.com:owner/repo.git     (SCP-style; user is arbitrary —
+//     `git` is the conventional default, but `~/.ssh/config` aliases and CI
+//     bots commonly use other usernames such as `mywork` or `ci-bot`)
 //   - https://github.com/owner/repo.git
 //   - http://github.com/owner/repo.git
 //   - ssh://[user@]github.com/owner/repo.git (no explicit port)
@@ -83,9 +85,13 @@ func listRemotes(gitRoot string) []string {
 // Group 1 = owner, group 2 = repo (without `.git`).
 var githubHTTPRE = regexp.MustCompile(`(?i)^https?://github\.com/([A-Za-z0-9._-]+)/([A-Za-z0-9._-]+?)(?:\.git)?/?$`)
 
-// githubSCPRE matches git@github.com:owner/repo[.git] (SCP-style).
+// githubSCPRE matches <user>@github.com:owner/repo[.git] (SCP-style).
+// The user segment is intentionally arbitrary: the SSH `git@` prefix is
+// just a convention; `~/.ssh/config` aliases and CI bots commonly use
+// other usernames (e.g. `mywork@`, `ci-bot@`). The `[^@/]+` shape mirrors
+// `githubSSHRE` below so the two ssh-shaped forms are treated symmetrically.
 // Group 1 = owner, group 2 = repo (without `.git`).
-var githubSCPRE = regexp.MustCompile(`(?i)^git@github\.com:([A-Za-z0-9._-]+)/([A-Za-z0-9._-]+?)(?:\.git)?$`)
+var githubSCPRE = regexp.MustCompile(`(?i)^[^@/]+@github\.com:([A-Za-z0-9._-]+)/([A-Za-z0-9._-]+?)(?:\.git)?$`)
 
 // githubSSHRE matches ssh://[user@]github.com/owner/repo[.git].
 // Group 1 = owner, group 2 = repo (without `.git`).
