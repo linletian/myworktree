@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Sidebar main workspace now shows a GitHub icon to the right of the project name. The icon is rendered only when `git remote` points at `github.com`; clicking opens the canonical `https://github.com/<owner>/<repo>` URL in a new tab. Source of truth is a new `github_url` field on `GET /api/main`, computed via the new `gitx.GitHubURL` helper (prefers `origin`, then falls back to iterating `git remote`; normalizes SCP / HTTPS / `ssh://` forms; strips `.git`). GitHub Enterprise and non-GitHub remotes are intentionally not surfaced.
+
 ## v0.3.0
 
 Release focused on remote collaboration, build robustness, and Apple Silicon reliability.

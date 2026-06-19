@@ -409,6 +409,48 @@
             word-break: break-all;
         }
 
+        /* Main row hosts a flex layout (name + optional GitHub link icon). */
+        .wt-item-main .wt-name {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .wt-item-main .wt-name-text {
+            flex: 1;
+            min-width: 0;
+        }
+
+        .wt-github-link {
+            flex-shrink: 0;
+            margin-left: auto;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            color: var(--text-muted);
+            border-radius: 3px;
+            padding: 1px 2px;
+            text-decoration: none;
+            transition: color 0.15s, background 0.15s;
+        }
+
+        .wt-github-link:hover {
+            color: var(--text-primary);
+            background: var(--hover-bg);
+        }
+
+        .wt-github-link:focus-visible {
+            outline: 2px solid var(--active-color);
+            outline-offset: 1px;
+        }
+
+        .wt-github-link svg {
+            width: 14px;
+            height: 14px;
+            fill: currentColor;
+            display: block;
+        }
+
         .wt-branch {
             font-size: 11px;
             color: var(--text-muted);
@@ -1355,6 +1397,16 @@
         let knownServerRev = "";
         let serverRevReloading = false;
 
+        // escapeHtml neutralises the five HTML metacharacters so that
+        // user-controlled strings (worktree names, branch labels) can be
+        // safely interpolated into innerHTML templates.
+        const escapeHtml = (s) => String(s ?? "")
+            .replace(/&/g, "&amp;")
+            .replace(/</g, "&lt;")
+            .replace(/>/g, "&gt;")
+            .replace(/"/g, "&quot;")
+            .replace(/'/g, "&#39;");
+
         // Global State
         let state = {
             worktrees: [],
@@ -1803,10 +1855,10 @@
 
                 return `
                 <div class="wt-actions">
-                    <span class="wt-action-btn ${isTermLoading ? 'loading' : ''}" title="Open Terminal" onclick="openTerminal('${id}', event)">
+                    <span class="wt-action-btn ${isTermLoading ? 'loading' : ''}" title="Open Terminal" onclick="openTerminal('${escapeHtml(id)}', event)">
                         ${termIcon}
                     </span>
-                    <span class="wt-action-btn ${isFinderLoading ? 'loading' : ''}" title="Open Finder" onclick="openFinder('${id}', event)">
+                    <span class="wt-action-btn ${isFinderLoading ? 'loading' : ''}" title="Open Finder" onclick="openFinder('${escapeHtml(id)}', event)">
                         ${finderIcon}
                     </span>
                 </div>`;
@@ -1816,11 +1868,26 @@
             if (state.mainRepo) {
                 const branchLabel = state.mainRepo.branch;
                 const isMainActive = state.activeWT === MAIN_WT_ID;
+                // GitHub link is rendered only when the backend resolved a
+                // github.com remote. Older backends that don't expose this
+                // field also leave the icon hidden (falsy short-circuit).
+                const githubUrl = state.mainRepo.github_url;
+                const githubLinkHtml = githubUrl ? `
+                    <a class="wt-github-link" href="${encodeURI(githubUrl)}" target="_blank" rel="noopener noreferrer"
+                       title="Open GitHub repository" aria-label="Open GitHub repository in a new tab"
+                       onclick="event.stopPropagation();">
+                        <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                            <path d="M12 .5C5.65.5.5 5.65.5 12c0 5.08 3.29 9.39 7.86 10.91.58.11.79-.25.79-.56 0-.28-.01-1.02-.02-2-3.2.7-3.87-1.54-3.87-1.54-.52-1.33-1.27-1.69-1.27-1.69-1.04-.71.08-.7.08-.7 1.15.08 1.76 1.18 1.76 1.18 1.02 1.76 2.69 1.25 3.34.96.1-.74.4-1.25.72-1.54-2.55-.29-5.24-1.28-5.24-5.7 0-1.26.45-2.29 1.18-3.1-.12-.29-.51-1.46.11-3.04 0 0 .97-.31 3.18 1.18a11.1 11.1 0 0 1 5.79 0c2.21-1.5 3.18-1.18 3.18-1.18.63 1.58.24 2.75.12 3.04.74.81 1.18 1.84 1.18 3.1 0 4.43-2.7 5.41-5.26 5.69.41.36.78 1.06.78 2.14 0 1.55-.01 2.79-.01 3.17 0 .31.21.68.8.56C20.21 21.39 23.5 17.08 23.5 12 23.5 5.65 18.35.5 12 .5Z"/>
+                        </svg>
+                    </a>` : '';
                 html += `
             <li class="wt-item wt-item-main ${isMainActive ? 'active' : ''}" onclick="selectWorktree(MAIN_WT_ID)">
-              <div class="wt-name">${state.mainRepo.name}</div>
+              <div class="wt-name">
+                <span class="wt-name-text">${escapeHtml(state.mainRepo.name)}</span>
+                ${githubLinkHtml}
+              </div>
               <div class="wt-branch">
-                <span>🏠</span> ${branchLabel}
+                <span>🏠</span> ${escapeHtml(branchLabel)}
                 <div style="margin-left: auto; display: flex; gap: 4px; align-items: center;">
                     ${shortcuts(MAIN_WT_ID)}
                 </div>
@@ -1835,14 +1902,15 @@
             // Regular worktrees
             html += state.worktrees.map(w => {
                 const isActive = state.activeWT === w.id;
+                const wIdEsc = escapeHtml(w.id);
                 return `
-            <li class="wt-item ${isActive ? 'active' : ''}" onclick="selectWorktree('${w.id}')">
-              <div class="wt-name">${w.name}</div>
+            <li class="wt-item ${isActive ? 'active' : ''}" onclick="selectWorktree('${wIdEsc}')">
+              <div class="wt-name">${escapeHtml(w.name)}</div>
               <div class="wt-branch">
-                <span>🌱</span> ${w.branch}
+                <span>🌱</span> ${escapeHtml(w.branch)}
                 <div style="margin-left: auto; display: flex; gap: 4px; align-items: center;">
                     ${shortcuts(w.id)}
-                    ${isActive ? `<span style="font-size:10px;cursor:pointer;padding:2px 4px;" onclick="deleteWorktree('${w.id}', event)">✕</span>` : ''}
+                    ${isActive ? `<span style="font-size:10px;cursor:pointer;padding:2px 4px;" onclick="deleteWorktree('${wIdEsc}', event)">✕</span>` : ''}
                 </div>
               </div>
             </li>

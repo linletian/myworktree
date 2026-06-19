@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"myworktree/internal/config"
+	"myworktree/internal/gitx"
 	"myworktree/internal/store"
 )
 
@@ -778,6 +779,21 @@ func TestHandleMain(t *testing.T) {
 	// Branch field is present (may be empty string on detached HEAD).
 	if _, ok := resp["branch"]; !ok {
 		t.Fatalf("GET /api/main: missing branch field")
+	}
+
+	// github_url field is present as a string. The expected value is derived
+	// from whatever the resolver (covered by its own tests) produces for the
+	// same git root, so the assertion stays valid across owner / repo
+	// renames, forks, and org transfers. We only require the API to surface
+	// the same string the resolver returns (or "" when the resolver yields
+	// nothing).
+	gh, ok := resp["github_url"].(string)
+	if !ok {
+		t.Fatalf("GET /api/main: expected github_url to be a string, got %T (%v)", resp["github_url"], resp["github_url"])
+	}
+	wantGitHub := gitx.GitHubURL(srv.root)
+	if gh != wantGitHub {
+		t.Fatalf("GET /api/main: github_url = %q, want %q (resolver output)", gh, wantGitHub)
 	}
 
 	// POST → 405

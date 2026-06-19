@@ -37,6 +37,7 @@ myworktree is a thin management layer that:
 - MCP tool endpoints (`/api/mcp/tools`, `/api/mcp/call`)
 - Portal Dashboard with shared entry port, auto-discovery of running instances across repos
 - Global auth token (HttpOnly Cookie, CSRF protection, tailscale serve integration)
+- Sidebar main workspace shows a GitHub icon next to the project name when the repo's git remote points at `github.com`; clicking opens the canonical `https://github.com/<owner>/<repo>` URL in a new tab. GitHub Enterprise and non-GitHub remotes are intentionally not surfaced.
 
 ## Requirements
 - macOS 12+ (other platforms are not validated yet)
