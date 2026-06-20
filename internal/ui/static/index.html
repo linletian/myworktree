@@ -3350,7 +3350,7 @@
             }
             tbody.innerHTML = html;
             const discRow = document.createElement('tr');
-            discRow.innerHTML = '<td colspan="6" style="font-size:12px;color:var(--text-secondary);padding-top:8px;border-top:1px solid var(--border);text-align:center;">实例里运行的孙进程程序不做统计</td>';
+            discRow.innerHTML = '<td colspan="6" style="font-size:12px;color:var(--text-secondary);padding-top:8px;border-top:1px solid var(--border);text-align:center;">Child processes spawned by instances are not counted</td>';
             tbody.appendChild(discRow);
         }
 
