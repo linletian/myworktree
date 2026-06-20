@@ -12,6 +12,8 @@
             --text-secondary: #586069;
             --text-muted: #6a737d;
             --header-bg: #f6f8fa;
+            --main-bg: #fff;
+            --active-color: #005cc5;
             --tab-active-bg: #ffffff;
             --tab-bg: #f6f8fa;
             --tab-border: #e1e4e8;
@@ -36,6 +38,8 @@
                 --text-secondary: #8b949e;
                 --text-muted: #6e7681;
                 --header-bg: #161b22;
+                --main-bg: #0d1117;
+                --active-color: #58a6ff;
                 --tab-active-bg: #0d1117;
                 --tab-bg: #161b22;
                 --tab-border: #30363d;
@@ -81,23 +85,29 @@
             word-break: break-all;
         }
 
-        /* Tabs */
+        /* Tabs (matches main page Instance tab style) */
         #tabs {
-            display: flex; flex-shrink: 0;
-            border-bottom: 1px solid var(--tab-border);
-            background: var(--header-bg);
+            display: flex; flex-shrink: 0; gap: 4px;
+            background: var(--tab-bg);
             padding: 0 16px;
+            border-bottom: 1px solid var(--border-color);
         }
         #tabs button {
-            padding: 8px 16px; border: none; background: none;
-            font-size: 13px; cursor: pointer; color: var(--text-secondary);
-            border-bottom: 2px solid transparent;
-            transition: color 0.15s, border-color 0.15s;
+            padding: 6px 12px; border: 1px solid transparent;
+            border-bottom: none; border-radius: 4px 4px 0 0;
+            background: none; font-size: 13px; cursor: pointer;
+            color: var(--text-secondary); user-select: none;
+            margin-bottom: -1px;
         }
-        #tabs button:hover { color: var(--text-primary); }
+        #tabs button:hover {
+            background: var(--hover-bg);
+            color: var(--text-primary);
+        }
         #tabs button.active {
+            background: var(--main-bg);
+            border-color: var(--border-color);
             color: var(--text-primary); font-weight: 500;
-            border-bottom-color: #0969da;
+            border-top: 2px solid var(--active-color);
         }
 
         /* Content */
@@ -105,7 +115,7 @@
             flex: 1; overflow: auto; padding: 0;
         }
         #content pre {
-            margin: 0; padding: 16px;
+            margin: 0 auto; padding: 16px; max-width: 1100px;
             font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
             font-size: 12px; line-height: 1.5;
             white-space: pre; overflow-x: auto;
@@ -116,7 +126,7 @@
         }
         #content .error-state {
             background: var(--error-bg); color: var(--error-text);
-            padding: 16px; margin: 16px; border-radius: 6px;
+            padding: 16px; margin: 16px auto; max-width: 700px; border-radius: 6px;
             font-size: 12px;
         }
         #content .loading-state {
@@ -126,7 +136,7 @@
 
         /* Markdown rendered content */
         #content .markdown-body {
-            padding: 16px; max-width: 900px;
+            margin: 0 auto; padding: 16px; max-width: 900px;
             font-size: 14px; line-height: 1.6; color: var(--text-primary);
         }
         #content .markdown-body h1, #content .markdown-body h2, #content .markdown-body h3 {
@@ -157,6 +167,28 @@
             border-left: 3px solid var(--border-color); padding-left: 12px;
             color: var(--text-muted); margin: 8px 0;
         }
+
+        /* Code + line numbers */
+        .code-lines {
+            max-width: 1100px; margin: 0 auto;
+            border: 1px solid var(--border-color); border-radius: 6px;
+            overflow-x: auto;
+            font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+            font-size: 12px; line-height: 1.5;
+        }
+        .code-line { display: flex; white-space: pre; min-width: max-content; }
+        .code-line .ln {
+            padding: 0 10px; text-align: right; color: var(--text-muted);
+            user-select: none; min-width: 3.5em; flex-shrink: 0;
+            border-right: 1px solid var(--border-color);
+            background: var(--header-bg);
+        }
+        .code-line .cd { padding: 0 16px; }
+
+        /* Diff row background (text color handled by highlight.js) */
+        .code-line.diff-add { background: var(--diff-add-bg); }
+        .code-line.diff-del { background: var(--diff-del-bg); }
+        .code-line.diff-hunk { background: none; }
     </style>
 </head>
 <body>
@@ -293,20 +325,160 @@
         }
     }
 
+    function splitHighlightedLines(text, lang) {
+        var result = hljs.highlight(text, {language: lang});
+        var htmlLines = result.value.split('\n');
+        var out = [];
+        // Stack of unclosed <span ...> tags — survives across lines so
+        // multi-line tokens (block comments, docstrings, raw strings) keep
+        // their colour on continuation lines.
+        var stack = [];
+
+        for (var i = 0; i < htmlLines.length; i++) {
+            var line = htmlLines[i];
+
+            // Reopen spans from previous line (reverse = correct nesting).
+            for (var k = stack.length - 1; k >= 0; k--) {
+                line = stack[k] + line;
+            }
+
+            // Walk all <span…> and </span> in this line.
+            var re = /<span[^>]*>|<\/span>/g;
+            var m;
+            while ((m = re.exec(line)) !== null) {
+                if (m[0].indexOf('</span>') === 0) {
+                    if (stack.length > 0) stack.pop();
+                } else {
+                    stack.push(m[0]);
+                }
+            }
+
+            // Close any spans that remain open at end of line (stack survives
+            // for the next line so they can be reopened above).
+            for (var j = 0; j < stack.length; j++) {
+                line += '</span>';
+            }
+
+            out.push(line);
+        }
+        // If hljs output ends with unclosed <span>s (malformed input edge
+        // case), close them on the last line so browsers don't auto-close
+        // beyond our container and affect subsequent page style scope.
+        if (out.length > 0 && stack.length > 0) {
+            for (var j = 0; j < stack.length; j++) {
+                out[out.length - 1] += '</span>';
+            }
+        }
+        return out;
+    }
+
+    function renderWithLineNumbers(text, lang) {
+        var lines = text.split('\n');
+        if (lines.length > 0 && lines[lines.length - 1] === '') lines = lines.slice(0, -1);
+
+        var hlLines = null;
+        if (hljsOk && lang) {
+            hlLines = splitHighlightedLines(text, lang);
+            // Guard against split count mismatch
+            while (hlLines.length < lines.length) hlLines.push('');
+            if (hlLines.length > lines.length) hlLines = hlLines.slice(0, lines.length);
+        }
+
+        var container = document.createElement('div');
+        container.className = 'code-lines';
+
+        for (var i = 0; i < lines.length; i++) {
+            var row = document.createElement('div');
+            row.className = 'code-line';
+
+            var ln = document.createElement('span');
+            ln.className = 'ln';
+            ln.textContent = (i + 1);
+
+            var cd = document.createElement('span');
+            cd.className = 'cd';
+            if (hlLines) {
+                cd.innerHTML = hlLines[i] || esc(lines[i]);
+            } else {
+                cd.textContent = lines[i];
+            }
+
+            row.appendChild(ln);
+            row.appendChild(cd);
+            container.appendChild(row);
+        }
+        return container;
+    }
+
+    function renderDiffWithLineNumbers(text) {
+        var lines = text.split('\n');
+        if (lines.length > 0 && lines[lines.length - 1] === '') lines = lines.slice(0, -1);
+
+        // Pre-compute highlighted lines via the same splitHighlightedLines path
+        // used by renderWithLineNumbers.  Diff tokens are always intra-line
+        // (every line starts with +, -, or @), so the stack mechanism is a
+        // no-op — the consistency is worth the single call site.
+        var hlLines = null;
+        if (hljsOk) {
+            hlLines = splitHighlightedLines(text, 'diff');
+            while (hlLines.length < lines.length) hlLines.push('');
+            if (hlLines.length > lines.length) hlLines = hlLines.slice(0, lines.length);
+        }
+
+        var currentNew = 0;
+        var hunkRe = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/;
+
+        var container = document.createElement('div');
+        container.className = 'code-lines';
+
+        for (var i = 0; i < lines.length; i++) {
+            var line = lines[i];
+            var row = document.createElement('div');
+            row.className = 'code-line';
+
+            var ln = document.createElement('span');
+            ln.className = 'ln';
+
+            if (line.indexOf('@@') === 0) {
+                var m = line.match(hunkRe);
+                if (m) currentNew = parseInt(m[1], 10) - 1;
+                ln.textContent = '\u00B7\u00B7\u00B7';
+                row.classList.add('diff-hunk');
+            } else if (line.charAt(0) === '+') {
+                currentNew++;
+                ln.textContent = currentNew;
+                row.classList.add('diff-add');
+            } else if (line.charAt(0) === '-') {
+                ln.textContent = '';
+                row.classList.add('diff-del');
+            } else {
+                currentNew++;
+                ln.textContent = currentNew;
+            }
+
+            var cd = document.createElement('span');
+            cd.className = 'cd';
+            if (hlLines) {
+                cd.innerHTML = hlLines[i] || esc(line);
+            } else {
+                cd.textContent = line;
+            }
+
+            row.appendChild(ln);
+            row.appendChild(cd);
+            container.appendChild(row);
+        }
+        return container;
+    }
+
     function showDiff(text) {
         var content = document.getElementById('content');
         if (!text || text.trim() === '') {
             content.innerHTML = '<div class="empty-state">No changes</div>';
             return;
         }
-        var pre = document.createElement('pre');
-        var code = document.createElement('code');
-        code.className = 'language-diff';
-        code.textContent = text;
-        pre.appendChild(code);
         content.innerHTML = '';
-        content.appendChild(pre);
-        if (hljsOk) hljs.highlightElement(code);
+        content.appendChild(renderDiffWithLineNumbers(text));
     }
 
     function showFormatted(text, fileType) {
@@ -321,27 +493,17 @@
                 // Highlight code blocks inside markdown
                 if (hljsOk) content.querySelectorAll('pre code').forEach(function(block) { hljs.highlightElement(block); });
             } else {
-                var pre = document.createElement('pre');
-                pre.textContent = text;
                 content.innerHTML = '';
-                content.appendChild(pre);
+                content.appendChild(renderWithLineNumbers(text, ''));
             }
         } else if (fileType === 'text/x-code') {
             var ext = filePath.substring(filePath.lastIndexOf('.')).toLowerCase();
             var lang = extToLang(ext);
-            var pre = document.createElement('pre');
-            var code = document.createElement('code');
-            if (lang) code.className = 'language-' + lang;
-            code.textContent = text;
-            pre.appendChild(code);
             content.innerHTML = '';
-            content.appendChild(pre);
-            if (lang && hljsOk) hljs.highlightElement(code);
+            content.appendChild(renderWithLineNumbers(text, lang));
         } else {
-            var pre2 = document.createElement('pre');
-            pre2.textContent = text;
             content.innerHTML = '';
-            content.appendChild(pre2);
+            content.appendChild(renderWithLineNumbers(text, ''));
         }
     }
 

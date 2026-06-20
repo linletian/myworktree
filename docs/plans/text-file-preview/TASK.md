@@ -234,3 +234,38 @@ Phase 1 (后端 API)
 | `internal/ui/static/index.html` | 2, 3 | +34 行 |
 | `internal/app/app_test.go` | 5 | +150 行 |
 | **总计** | | **~680 行** |
+
+---
+
+## Phase 6：审阅回顾与补充改动（2026-06-20）
+
+基于代码评审，实现过程中补充了以下改动：
+
+### 渲染方案迭代
+- **双列 `<pre>` → 单行 flex 容器**：行号列（`<div>`+`<span>`）与高亮 `<pre>` 渲染基线不一致，累积错位达 8 行。最终采用 `.code-line` 单行 flex 布局，行号与代码在同一 DOM 中天然对齐
+- **代码高亮**：整段 `hljs.highlight` → `splitHighlightedLines` 按行安全分割，追踪跨行 token 的 `<span>` 标签并在后续行恢复（解决多行字符串/注释断色）
+- **Diff 高亮**：保留 hljs `diff` token 级着色，CSS 只设 `diff-add`/`diff-del` 背景色
+- **Tab 样式**：对齐主页面 Instance tab 样式（`border-top: 2px solid var(--active-color)`、`border-radius: 4px 4px 0 0`）
+
+### 后端补充
+- **合成 diff**：新 untracked 文件时 `git diff` 返回空，后端自动合成标准 unified diff（含 `\ No newline at end of file`）
+- **合成 diff 大小限制**：`os.Stat` 预检文件大小 + 合成后 `len(out)` 复检，防止大文件 OOM/DoS
+- **中文路径双重防御**：所有 git 命令加 `-c core.quotePath=false` + `unquoteGitPath` 反转义兜底
+- **`resolveWorktreePath` 提取**重构
+- **API 文档更新**：`docs/API.md` 新增两个端点文档
+
+### 新增测试
+| 测试函数 | 覆盖内容 |
+|----------|---------|
+| `TestUnquoteGitPath` | 12 用例：普通路径、C 转义、八进制 UTF-8、混合转义 |
+| `TestHandleWorktreeFileDiffSynthetic` | 合成 diff（文件以 `\n` 结尾） |
+| `TestHandleWorktreeFileDiffSyntheticNoNewline` | 合成 diff + `\ No newline` 标记 |
+
+### 实际改动量
+| 文件 | 最终改动 |
+|------|---------|
+| `internal/app/app.go` | +~200 行（含合成 diff、`unquoteGitPath`、安全加固） |
+| `internal/app/app_test.go` | +~280 行（新增 3 个测试函数） |
+| `internal/ui/static/preview.html` | ~520 行（单行容器、行号、hljs 安全分割、Tab 对齐） |
+| `docs/API.md` | +36 行（新端点文档） |
+| `docs/plans/text-file-preview/FEASIBILITY.md` | 补充实际实现偏差表 |

@@ -1138,6 +1138,46 @@ func TestFormatBytes(t *testing.T) {
 
 // --- Tests for file preview feature ---
 
+func TestUnquoteGitPath(t *testing.T) {
+	tests := []struct {
+		in   string
+		want string
+	}{
+		// Plain paths (no quoting) are returned unchanged.
+		{in: "main.go", want: "main.go"},
+		{in: "docs/plans/plan.md", want: "docs/plans/plan.md"},
+		{in: "", want: ""},
+		{in: `"`, want: `"`}, // single char, too short for quoting
+
+		// Quoted ASCII path with no internal escapes.
+		{in: `"plain name.txt"`, want: "plain name.txt"},
+
+		// C-style escapes.
+		{in: `"path\\with\\backslashes"`, want: `path\with\backslashes`},
+		{in: `"path\"with\"quotes"`, want: `path"with"quotes`},
+		{in: `"path\twith\ttabs"`, want: "path\twith\ttabs"},
+		{in: `"path\nwith\nnewlines"`, want: "path\nwith\nnewlines"},
+
+		// Octal-escaped UTF-8 bytes (Chinese "分析报告" = e5 88 86 e6 9e 90 e6 8a a5 e5 91 8a).
+		{in: `"Safari\345\210\206\346\236\220\346\212\245\345\221\212.md"`,
+			want: "Safari分析报告.md"},
+
+		// Mixed escapes.
+		{in: `"src\\test\tool\"go\\.py"`, want: "src\\test\tool\"go\\.py"},
+
+		// Known real-world examples.
+		{in: `"Safari\345\215\241\346\255\273\345\210\206\346\236\220\346\212\245\345\221\212.md"`,
+			want: "Safari卡死分析报告.md"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.in, func(t *testing.T) {
+			if got := unquoteGitPath(tt.in); got != tt.want {
+				t.Errorf("unquoteGitPath(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestIsPathWithin(t *testing.T) {
 	root := t.TempDir()
 	os.WriteFile(filepath.Join(root, "test.txt"), []byte("hello"), 0o644)
@@ -1333,6 +1373,7 @@ func TestHandleWorktreeFileDiffStaged(t *testing.T) {
 }
 
 func TestHandleWorktreeFileDiffEmpty(t *testing.T) {
+	// File doesn't exist → synthetic diff skipped, body empty.
 	root := t.TempDir()
 	srv := &Server{
 		root: root,
@@ -1350,6 +1391,98 @@ func TestHandleWorktreeFileDiffEmpty(t *testing.T) {
 	}
 	if w.Body.String() != "" {
 		t.Fatalf("expected empty body, got %q", w.Body.String())
+	}
+}
+
+func TestHandleWorktreeFileDiffSynthetic(t *testing.T) {
+	// File exists and git diff returns empty → synthetic diff generated.
+	root := t.TempDir()
+	content := "line1\nline2\n"
+	os.WriteFile(filepath.Join(root, "test.go"), []byte(content), 0o644)
+	srv := &Server{
+		root: root,
+		gitRunner: func(timeout time.Duration, gitRoot string, args ...string) ([]byte, error) {
+			return []byte(""), nil
+		},
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/worktree/file/diff?id=__main__&path=test.go", nil)
+	w := httptest.NewRecorder()
+	srv.handleWorktreeFileDiff(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, "diff --git a/test.go b/test.go") {
+		t.Fatalf("missing diff header in synthetic diff: %q", body)
+	}
+	if !strings.Contains(body, "new file mode 100644") {
+		t.Fatalf("missing new file mode in synthetic diff: %q", body)
+	}
+	if !strings.Contains(body, "@@ -0,0 +1,2 @@") {
+		t.Fatalf("missing hunk header in synthetic diff: %q", body)
+	}
+	if !strings.Contains(body, "+line1") {
+		t.Fatalf("missing +line1 in synthetic diff: %q", body)
+	}
+	if strings.Contains(body, "\\ No newline at end of file") {
+		t.Fatalf("unexpected no-newline marker for file ending with \\n: %q", body)
+	}
+}
+
+func TestHandleWorktreeFileDiffSyntheticNoNewline(t *testing.T) {
+	// File exists without trailing newline → synthetic diff includes marker.
+	root := t.TempDir()
+	content := "only-line"
+	os.WriteFile(filepath.Join(root, "test.go"), []byte(content), 0o644)
+	srv := &Server{
+		root: root,
+		gitRunner: func(timeout time.Duration, gitRoot string, args ...string) ([]byte, error) {
+			return []byte(""), nil
+		},
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/worktree/file/diff?id=__main__&path=test.go", nil)
+	w := httptest.NewRecorder()
+	srv.handleWorktreeFileDiff(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, "@@ -0,0 +1,1 @@") {
+		t.Fatalf("expected single-line hunk, got %q", body)
+	}
+	if !strings.Contains(body, "\\ No newline at end of file") {
+		t.Fatalf("missing no-newline marker: %q", body)
+	}
+}
+
+func TestHandleWorktreeFileDiffSyntheticTooLarge(t *testing.T) {
+	// File > 500KB → Stat pre-check skips synthesis, body empty (silent skip).
+	root := t.TempDir()
+	big := make([]byte, 500<<10+1)
+	for i := range big {
+		big[i] = 'x'
+	}
+	os.WriteFile(filepath.Join(root, "big.txt"), big, 0o644)
+	srv := &Server{
+		root: root,
+		gitRunner: func(timeout time.Duration, gitRoot string, args ...string) ([]byte, error) {
+			return []byte(""), nil
+		},
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/worktree/file/diff?id=__main__&path=big.txt", nil)
+	w := httptest.NewRecorder()
+	srv.handleWorktreeFileDiff(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if w.Body.String() != "" {
+		t.Fatalf("expected empty body for file >500KB, got %d bytes", len(w.Body.String()))
 	}
 }
 

@@ -206,6 +206,19 @@ Content API 的响应可携带额外元数据：
 - Diff 输出**本质是代码高亮的子集**——`diff` 是代码高亮库的一等公民语言
 - 高亮库体积可控（~10-30KB gzipped），对首屏加载影响可以忽略
 
+**实际实现偏差（2026-06-20）**：
+
+| 维度 | 计划 | 实现 |
+|------|------|------|
+| **布局** | 高亮库 + 双列 `<pre>` 布局 | 单行 flex 容器（`.code-line`）— 行号和代码在同一 DOM 行中，避免双列基线偏差累积错位 |
+| **行号** | 无 | 真实文件行号：Diff 解析 `@@` hunk header 提取新文件行号；Formatted 使用自然序号 |
+| **Diff 着色** | highlight.js `diff` 语言 | 同 plan — 保留 hljs `diff` token 级着色，CSS 仅设背景色（`diff-add`/`diff-del`） |
+| **代码高亮** | highlight.js | 整段 `hljs.highlight` → `splitHighlightedLines` 按行安全分割，追踪跨行 token 的 `<span>` 标签并恢复 |
+| **Tab 样式** | 无特别规划 | 对齐主页面 Instance tab 样式（顶部强调条、圆角上沿） |
+| **合成 diff** | 未规划 | 新文件（untracked）场景后端合成完整 unified diff，含 `\ No newline at end of file` 标记 |
+| **中文路径** | 未规划 | 双重防御：所有 git 命令加 `-c core.quotePath=false` + `unquoteGitPath` 反转义兜底 |
+| **合成 diff 大小** | 未规划 | `os.Stat` 预检 + 合成后复检，防止大文件 OOM/DoS |
+
 ### 4.2 格式化预览 Tab
 
 **数据源**：文件在工作区的当前内容（磁盘上的实际文件）

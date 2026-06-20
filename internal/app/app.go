@@ -1,6 +1,7 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -915,10 +916,10 @@ func (s *Server) handleWorktreeStatus(w http.ResponseWriter, r *http.Request) {
 	unstagedCh := make(chan diffResult, 1)
 	untrackedCh := make(chan diffResult, 1)
 
-	go func() { stagedCh <- runDiff("diff", "--cached", "--numstat") }()
-	go func() { unstagedCh <- runDiff("diff", "--numstat") }()
+	go func() { stagedCh <- runDiff("-c", "core.quotePath=false", "diff", "--cached", "--numstat") }()
+	go func() { unstagedCh <- runDiff("-c", "core.quotePath=false", "diff", "--numstat") }()
 	go func() {
-		out, err := s.gitRunner(2*time.Second, gitRoot, "ls-files", "--others", "--exclude-standard")
+		out, err := s.gitRunner(2*time.Second, gitRoot, "-c", "core.quotePath=false", "ls-files", "--others", "--exclude-standard")
 		if err != nil {
 			msg := strings.TrimSpace(string(out))
 			if msg == "" {
@@ -935,7 +936,7 @@ func (s *Server) handleWorktreeStatus(w http.ResponseWriter, r *http.Request) {
 		var changes []map[string]any
 		totalAdds := 0
 		for _, p := range lines {
-			p = strings.TrimSpace(p)
+			p = unquoteGitPath(strings.TrimSpace(p))
 			if p == "" {
 				continue
 			}
@@ -1027,7 +1028,7 @@ func (s *Server) handleWorktreeFileDiff(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	args := []string{"diff"}
+	args := []string{"-c", "core.quotePath=false", "diff"}
 	if staged {
 		args = append(args, "--cached")
 	}
@@ -1045,6 +1046,47 @@ func (s *Server) handleWorktreeFileDiff(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "diff output too large", http.StatusRequestEntityTooLarge)
 		return
 	}
+
+	// If diff is empty (e.g. new untracked file), read the file and present
+	// it as a full-addition diff so the user sees the content.
+	if len(out) == 0 {
+		fullPath := filepath.Join(gitRoot, filePath)
+		// Stat first to avoid reading huge files into memory (same 500KB cap).
+		info, err := os.Stat(fullPath)
+		if err == nil && info.Size() <= 500<<10 {
+			data, err := os.ReadFile(fullPath)
+			if err == nil && !isBinaryData(data) {
+				lines := strings.Split(string(data), "\n")
+				nl := len(lines)
+				if nl > 0 && lines[nl-1] == "" {
+					lines = lines[:nl-1]
+				}
+				var buf bytes.Buffer
+				fmt.Fprintf(&buf, "diff --git a/%s b/%s\n", filePath, filePath)
+				buf.WriteString("new file mode 100644\n")
+				buf.WriteString("--- /dev/null\n")
+				fmt.Fprintf(&buf, "+++ b/%s\n", filePath)
+				fmt.Fprintf(&buf, "@@ -0,0 +1,%d @@\n", len(lines))
+				for _, line := range lines {
+					buf.WriteByte('+')
+					buf.WriteString(line)
+					buf.WriteByte('\n')
+				}
+				// git diff appends this marker when the file lacks a trailing newline
+				if len(data) > 0 && data[len(data)-1] != '\n' {
+					buf.WriteString("\\ No newline at end of file\n")
+				}
+				out = buf.Bytes()
+				// Re-check after synthesis: header and '+' prefixes can push a
+				// borderline file over the 500KB limit.
+				if len(out) > 500<<10 {
+					http.Error(w, "diff output too large", http.StatusRequestEntityTooLarge)
+					return
+				}
+			}
+		}
+	}
+
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.Write(out)
 }
@@ -2351,6 +2393,66 @@ func detectFileType(path string) string {
 	}
 }
 
+// unquoteGitPath reverses git's core.quotePath quoting.
+//
+// When core.quotePath=true (git's default), git wraps file paths containing
+// non-ASCII or special characters in double quotes and escapes \t, \n, \\,
+// \" and non-ASCII bytes as \ooo octal sequences.
+//
+// The primary fix is passing -c core.quotePath=false to every git command
+// that produces file paths (see handleWorktreeStatus, handleWorktreeFileDiff).
+// This function is a defense-in-depth safety net: if a future contributor
+// forgets -c on a new call site, or if an older git binary ignores the flag,
+// the path will still be corrected before it reaches API consumers.
+//
+// Callers that parse git output should always apply unquoteGitPath.
+// Do NOT rely on -c core.quotePath=false alone — use both layers.
+func unquoteGitPath(p string) string {
+	if len(p) < 2 || p[0] != '"' || p[len(p)-1] != '"' {
+		return p
+	}
+	s := p[1 : len(p)-1]
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\\' && i+1 < len(s) {
+			switch s[i+1] {
+			case '\\':
+				b.WriteByte('\\')
+				i++
+			case '"':
+				b.WriteByte('"')
+				i++
+			case 't':
+				b.WriteByte('\t')
+				i++
+			case 'n':
+				b.WriteByte('\n')
+				i++
+			default:
+				if s[i+1] >= '0' && s[i+1] <= '7' {
+					val := int(s[i+1] - '0')
+					i++
+					if i+1 < len(s) && s[i+1] >= '0' && s[i+1] <= '7' {
+						val = val*8 + int(s[i+1]-'0')
+						i++
+						if i+1 < len(s) && s[i+1] >= '0' && s[i+1] <= '7' {
+							val = val*8 + int(s[i+1]-'0')
+							i++
+						}
+					}
+					b.WriteByte(byte(val))
+				} else {
+					b.WriteByte('\\')
+				}
+			}
+		} else {
+			b.WriteByte(s[i])
+		}
+	}
+	return b.String()
+}
+
 // parseGitDiffNumStat parses the output of "git diff --numstat HEAD" and
 // returns per-file change info and totals.
 //
@@ -2389,7 +2491,7 @@ func parseGitDiffNumStat(output string) ([]map[string]any, map[string]int) {
 			}
 		}
 
-		path := strings.TrimSpace(parts[2])
+		path := unquoteGitPath(strings.TrimSpace(parts[2]))
 		if path == "" {
 			continue
 		}
