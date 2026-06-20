@@ -71,7 +71,8 @@
   - ~~Tailscale Serve 自动管理（自动配置 `tailscale serve` 提供 `https://<machine>.ts.net` 域名访问）~~ **（暂未启用，见 §6 安全说明）**
   - 双层认证架构（Portal 层 Cookie + CSRF，实例层 loopback 绕过）
 - 浏览器关闭保护：前端在 `beforeunload` 事件时，无论是否存在运行中实例，均触发浏览器原生确认对话框，防止误操作关闭页面。
-- **Main workspace 分支查询**：`GET /api/main` 返回 `{name, branch}`。branch 字段实时查询（`git rev-parse --abbrev-ref HEAD`），在 detached HEAD 场景（如 CI 浅克隆）下返回空字符串而非错误。
+- **Main workspace 分支查询**：`GET /api/main` 返回 `{name, branch, github_url}`。branch 字段实时查询（`git rev-parse --abbrev-ref HEAD`），在 detached HEAD 场景（如 CI 浅克隆）下返回空字符串而非错误。github_url 字段基于 `git remote` 推算（优先 origin，回退到 `git remote` 列表），规范化 SCP / HTTPS / ssh:// 三种形式，仅识别 `github.com`，返回 `https://github.com/<owner>/<repo>`，其它情况返回空串。
+- **已实现侧栏主工作区 GitHub 链接**：侧栏主工作区项目名右侧条件渲染 GitHub 图标，链接到 `state.mainRepo.github_url`（来源：`/api/main` 的 github_url 字段，由 `gitx.GitHubURL` 计算）。点击在新窗口打开，使用 `<a target="_blank" rel="noopener noreferrer">` 并通过 `event.stopPropagation()` 避免触发 `selectWorktree`。非 GitHub remote、无 remote 或解析失败时不渲染图标。仅识别 `github.com`，不含 GitHub Enterprise。
 - **已实现：instance PTY 日志内存化（彻底取消磁盘日志）**：
   - 旧实现：每条 PTY chunk（1024 字节）写入 `logs/<instanceId>.log`，并在文件达到 10MB 后做"读 10MB + 截断 + 写 10MB"，造成约 10 万倍磁盘写放大；OpenCode 等 TUI 高频重绘场景下数据目录写入量可达 280MB+。
   - 新实现：每个 running instance 拥有一个进程内的 **有界 ring buffer**（`internal/instance/logbuf.go`）。HTTP/SSE/WS 日志回放端点与 MCP `instance_log_tail` 全部从该 buffer 读取，磁盘 I/O 完全消除。

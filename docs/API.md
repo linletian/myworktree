@@ -31,11 +31,21 @@ Returns the main (host) git repository name and its currently checked-out branch
 
 Response:
 ```json
-{ "name": "myproject", "branch": "feature/ui-update" }
+{
+  "name": "myproject",
+  "branch": "feature/ui-update",
+  "github_url": "https://github.com/owner/myproject"
+}
 ```
 
-- `name`: basename of the git root directory
+- `name`: basename of the git root directory.
 - `branch`: currently checked-out branch (via `git rev-parse --abbrev-ref HEAD`). Returns empty string on detached HEAD (e.g., CI shallow clones).
+- `github_url`: when the main repo has a git remote pointing at `github.com`, returns the canonical `https://github.com/<owner>/<repo>` URL; otherwise returns an empty string. Resolution order:
+  1. `git remote get-url origin` (preferred).
+  2. If `origin` is missing or not parseable, fall back to iterating `git remote` and trying each remote in declared order.
+  3. Supported URL formats: `<user>@github.com:owner/repo.git` (SCP-style; the user segment is arbitrary — `git` is the conventional default, but `~/.ssh/config` aliases and CI bots commonly use other usernames), `https://github.com/owner/repo.git`, `ssh://[user@]github.com/owner/repo.git` (no explicit port — `ssh://git@github.com:22/...` is **not** recognized). The `.git` suffix and a trailing `/` are stripped.
+  4. Only host `github.com` (case-insensitive) is recognized. GitHub Enterprise (`*.ghe.com`, self-hosted) and any non-GitHub host (GitLab, Bitbucket, local paths, `file://`) yield an empty string.
+  5. The field is always present in the JSON response (an empty string means "no GitHub link to show").
 
 ## 2) Worktrees
 ### List

@@ -37,6 +37,7 @@ myworktree 只做管理，不碰项目具体内容：
 - MCP 接口（`/api/mcp/tools`、`/api/mcp/call`）
 - Portal 仪表板：共享入口端口，跨仓库自动发现运行实例
 - 全局认证 Token（HttpOnly Cookie、CSRF 防护、Tailscale Serve 自动集成）
+- 侧栏主工作区项目名旁在仓库 remote 指向 `github.com` 时渲染 GitHub 图标；点击在新窗口打开 `https://github.com/<owner>/<repo>` 规范 URL。GitHub Enterprise 与非 GitHub remote 不展示。
 
 ## 运行环境
 - macOS 12+ 其他平台未验证

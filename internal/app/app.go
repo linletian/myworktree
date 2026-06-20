@@ -584,8 +584,9 @@ func (s *Server) handleMain(w http.ResponseWriter, r *http.Request) {
 	name := filepath.Base(filepath.Clean(s.root))
 	branch, _ := gitx.CurrentBranch(s.root) // returns empty string on detached HEAD
 	writeJSON(w, http.StatusOK, map[string]any{
-		"name":   name,
-		"branch": branch,
+		"name":       name,
+		"branch":     branch,
+		"github_url": gitx.GitHubURL(s.root),
 	})
 }
 

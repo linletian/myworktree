@@ -106,7 +106,7 @@ func effectiveHead(gitRoot, branch string) (string, error) {
 
 		var maxRemoteAhead int
 		var maxRemoteHead string
-		for _, remote := range listRemotes(gitRoot) {
+		for _, remote := range ListRemotes(gitRoot) {
 			if remote == "origin" {
 				continue
 			}
@@ -132,7 +132,7 @@ func effectiveHead(gitRoot, branch string) (string, error) {
 	if remoteHeadVal := remoteHead(gitRoot, "origin", branch); remoteHeadVal != "" {
 		return remoteHeadVal, nil
 	}
-	for _, remote := range listRemotes(gitRoot) {
+	for _, remote := range ListRemotes(gitRoot) {
 		if remote == "origin" {
 			continue
 		}
@@ -187,19 +187,4 @@ func leftRightCount(gitRoot, left, right string) (leftAhead, rightAhead int, err
 		return 0, 0, fmt.Errorf("parse right count %q: %w", parts[1], err)
 	}
 	return l, r, nil
-}
-
-func listRemotes(gitRoot string) []string {
-	cmd := GitCommand(2*time.Second, gitRoot, "remote")
-	out, err := cmd.Output()
-	if err != nil {
-		return nil
-	}
-	var remotes []string
-	for _, r := range strings.Fields(string(out)) {
-		if r != "" {
-			remotes = append(remotes, r)
-		}
-	}
-	return remotes
 }
