@@ -106,7 +106,7 @@ func effectiveHead(gitRoot, branch string) (string, error) {
 
 		var maxRemoteAhead int
 		var maxRemoteHead string
-		for _, remote := range listRemotes(gitRoot) {
+		for _, remote := range ListRemotes(gitRoot) {
 			if remote == "origin" {
 				continue
 			}
@@ -132,7 +132,7 @@ func effectiveHead(gitRoot, branch string) (string, error) {
 	if remoteHeadVal := remoteHead(gitRoot, "origin", branch); remoteHeadVal != "" {
 		return remoteHeadVal, nil
 	}
-	for _, remote := range listRemotes(gitRoot) {
+	for _, remote := range ListRemotes(gitRoot) {
 		if remote == "origin" {
 			continue
 		}

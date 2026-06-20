@@ -39,7 +39,7 @@ func GitHubURL(gitRoot string) string {
 			return url
 		}
 	}
-	for _, name := range listRemotes(gitRoot) {
+	for _, name := range ListRemotes(gitRoot) {
 		if name == "origin" {
 			continue
 		}
@@ -62,23 +62,6 @@ func getRemoteURL(gitRoot, name string) string {
 		return ""
 	}
 	return strings.TrimSpace(string(out))
-}
-
-func listRemotes(gitRoot string) []string {
-	cmd := GitCommand(2*time.Second, gitRoot, "remote")
-	out, err := cmd.Output()
-	if err != nil {
-		return nil
-	}
-	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
-	names := make([]string, 0, len(lines))
-	for _, line := range lines {
-		n := strings.TrimSpace(line)
-		if n != "" {
-			names = append(names, n)
-		}
-	}
-	return names
 }
 
 // githubHTTPRE matches the path portion of an HTTPS / http GitHub URL.
