@@ -1313,6 +1313,26 @@
         </div>
     </dialog>
 
+    <!-- Modal: log buffer budget exceeded (server returns 503 + structured body). -->
+    <dialog id="modal-budget-error">
+        <div class="modal-titlebar">
+            <span class="modal-title">Cannot Start Instance</span>
+            <button class="modal-close-btn" onclick="closeModal('modal-budget-error')" title="Close">
+                <svg width="10" height="10" viewBox="0 0 10 10" fill="none" xmlns="http://www.w3.org/2000/svg">
+                    <line x1="1" y1="1" x2="9" y2="9" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                    <line x1="9" y1="1" x2="1" y2="9" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                </svg>
+            </button>
+        </div>
+        <div class="modal-body">
+            <p id="budget-error-message" style="margin-bottom: 12px; line-height: 1.5;"></p>
+            <p id="budget-error-hint" style="color: var(--text-secondary); font-size: 13px; line-height: 1.5; margin-bottom: 16px;"></p>
+            <div class="form-actions">
+                <button onclick="closeModal('modal-budget-error')">Close</button>
+            </div>
+        </div>
+    </dialog>
+
     <!-- Modal: Resource Monitor -->
     <dialog id="modal-monitor">
         <div class="modal-titlebar">
@@ -2485,7 +2505,32 @@
                 closeModal("modal-start-instance");
                 await refresh();
                 selectInstance(res.id);
-            } catch (e) { alert(e); }
+            } catch (e) {
+                if (e && e.status === 503 && e.body && e.body.error === "log_buffer_budget_exceeded") {
+                    showBudgetError(e.body);
+                    return;
+                }
+                alert(e.message || e);
+            }
+        }
+
+        function showBudgetError(body) {
+            const msgEl = document.getElementById("budget-error-message");
+            const hintEl = document.getElementById("budget-error-hint");
+            msgEl.textContent = body.message || "Insufficient memory to start new instance.";
+            const used = formatBytes(body.used_bytes);
+            const limit = formatBytes(body.limit_bytes);
+            hintEl.textContent = `Used ${used} / limit ${limit}. ${body.hint || ""}`;
+            openModal("modal-budget-error");
+        }
+
+        function formatBytes(n) {
+            if (n == null) return "?";
+            const kb = 1024, mb = 1024 * 1024, gb = 1024 * 1024 * 1024;
+            if (n >= gb) return (n / gb).toFixed(2) + " GB";
+            if (n >= mb) return (n / mb).toFixed(2) + " MB";
+            if (n >= kb) return (n / kb).toFixed(2) + " KB";
+            return n + " B";
         }
 
         async function stopInstance() {

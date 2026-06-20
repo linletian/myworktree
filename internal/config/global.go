@@ -10,6 +10,11 @@ import (
 
 type GlobalConfig struct {
 	AuthToken string `json:"auth_token"`
+
+	// LogBufferBytes is the per-instance ring buffer cap for captured PTY
+	// output. 0 means "use adaptive sizing" (clamp(available/16, 16MB, 256MB)).
+	// When set, the value is clamped to [16MB, 256MB].
+	LogBufferBytes int64 `json:"log_buffer_bytes,omitempty"`
 }
 
 func (c *GlobalConfig) Copy() *GlobalConfig {

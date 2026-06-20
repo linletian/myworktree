@@ -266,11 +266,13 @@ func instanceCmd(logger *log.Logger, args []string) error {
 	if err != nil {
 		return err
 	}
+	cfg, _ := config.Load()
 	mgr := &instance.Manager{
-		DataDir: dataDir,
-		Root:    root,
-		Store:   store.FileStore{Path: filepath.Join(dataDir, "state.json")},
-		Logger:  logger,
+		DataDir:        dataDir,
+		Root:           root,
+		Store:          store.FileStore{Path: filepath.Join(dataDir, "state.json")},
+		Logger:         logger,
+		LogBufferBytes: cfg.LogBufferBytes,
 	}
 
 	switch args[0] {

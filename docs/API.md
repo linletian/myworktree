@@ -293,8 +293,30 @@ Example (ad-hoc command without tags):
 
 Response (201):
 ```json
-{ "id":"...","pid":123,"status":"running","log_path":"..." }
+{ "id":"...","pid":123,"status":"running","created_at":"..." }
 ```
+
+**Error: log buffer budget exceeded (`503 Service Unavailable`)**
+
+Returned when starting the new instance would push the per-process log-buffer total past the global budget (default: 25% of system RAM — see `docs/ARCHITECTURE.md` §4.1 *Instance log buffer*). The error code `log_buffer_budget_exceeded` is part of the stable API contract; the UI matches on it to surface a dedicated modal.
+
+Headers:
+- `Content-Type: application/json`
+- `Retry-After: 0` (will not auto-resolve; user must close other instances or raise `log_buffer_bytes` in `auth.json`)
+
+Body:
+```json
+{
+  "error": "log_buffer_budget_exceeded",
+  "message": "Insufficient memory to start new instance: used 100.00 MB, limit 64.00 MB.",
+  "used_bytes": 104857600,
+  "limit_bytes": 67108864,
+  "system_bytes": 268435456,
+  "hint": "Close other instances, raise LogBufferBytes in auth.json, or reduce concurrent tabs."
+}
+```
+
+The same shape is returned by the MCP `instance_start` tool when the budget is exceeded.
 
 ### Rename
 `PATCH /api/instances`
@@ -431,13 +453,15 @@ Body:
 { "id": "<instanceId>" }
 ```
 
-Deletes a stopped (non-running) instance record (best-effort deletes the log file).
+Deletes a stopped (non-running) instance record. The instance's in-memory log buffer is also released, decrementing the global log-buffer accounting.
 
 ### Log replay (tail / incremental)
 `GET /api/instances/log?id=<instanceId>[&since=<byteOffset>]`
 
 - Without `since`: returns recent tail as `text/plain`.
 - With `since`: returns incremental content from byte offset and includes response header `X-Log-Offset: <nextByteOffset>`.
+- Logs live in an in-memory ring buffer attached to the **running** instance (see `docs/ARCHITECTURE.md` §4.1 *Instance log buffer*). After the instance stops, exits, or fails — or after the daemon restarts — the buffer is released and this endpoint returns an empty body. Unknown / never-started instance IDs also return empty.
+- The `byteOffset` cursor is the running total of bytes the instance has produced (monotonic; never decreases). When `since` points to data that has already been evicted from the ring (oldest-byte > since), the response silently clamps to the oldest live byte and `X-Log-Offset` advances accordingly.
 
 Response: `text/plain`
 
@@ -449,6 +473,8 @@ Response: `text/plain`
 ```json
 {"chunk":"...","next":12345}
 ```
+- Same in-memory backing as the tail endpoint above. The cursor `next` is the same monotonic byte counter; clients should echo it as `since` on the next request to receive only new chunks.
+- Polling cadence: 1 s. When no new data is available, the server emits an SSE comment line (`: ping`) as a keep-alive — no `log` event, no cursor update. Clients should treat the absence of a `log` event as "no progress" and keep using the last `next` they saw.
 
 ### Instance resource stats
 `GET /api/instances/stats`

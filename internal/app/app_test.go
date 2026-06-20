@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"myworktree/internal/config"
+	"myworktree/internal/instance"
 	"myworktree/internal/store"
 )
 
@@ -1084,3 +1085,60 @@ func TestIsValidRedirectPath(t *testing.T) {
 		})
 	}
 }
+
+func TestWriteLogBufferBudgetErr(t *testing.T) {
+	w := httptest.NewRecorder()
+	budgetErr := &instance.LogBufferBudgetError{
+		UsedBytes:   100 * 1024 * 1024,
+		LimitBytes:  50 * 1024 * 1024,
+		SystemBytes: 16 * 1024 * 1024 * 1024,
+	}
+	writeLogBufferBudgetErr(w, budgetErr)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", w.Code)
+	}
+	if got := w.Header().Get("Retry-After"); got != "0" {
+		t.Fatalf("Retry-After = %q, want \"0\"", got)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("body not JSON: %v: %s", err, w.Body.String())
+	}
+	if body["error"] != "log_buffer_budget_exceeded" {
+		t.Fatalf("error field = %v, want log_buffer_budget_exceeded", body["error"])
+	}
+	for _, k := range []string{"message", "used_bytes", "limit_bytes", "system_bytes", "hint"} {
+		if _, ok := body[k]; !ok {
+			t.Fatalf("body missing field %q", k)
+		}
+	}
+	if int64(body["used_bytes"].(float64)) != budgetErr.UsedBytes {
+		t.Fatalf("used_bytes mismatch")
+	}
+}
+
+func TestFormatBytes(t *testing.T) {
+	cases := []struct {
+		in   int64
+		want string
+	}{
+		{512, "512 B"},
+		{2048, "2.00 KB"},
+		{5 * 1024 * 1024, "5.00 MB"},
+		{2 * 1024 * 1024 * 1024, "2.00 GB"},
+	}
+	for _, c := range cases {
+		if got := formatBytes(c.in); got != c.want {
+			t.Errorf("formatBytes(%d) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+// fakeMemSaturated and the TestHandle{Instances,MCPCall}_BudgetExceededReturns503
+// tests previously lived here. They were removed when SetMemSampler /
+// SetTotalBufferBytesForTest were relocated to the instance package's
+// _test.go helpers (see manager_export_test.go), so production code can no
+// longer reach them. Equivalent coverage of Manager.Start's budget error
+// path now lives in instance/manager_budget_test.go; the HTTP response shape
+// is covered by TestWriteLogBufferBudgetErr above.

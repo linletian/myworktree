@@ -13,10 +13,10 @@ It does **not** analyze project code or prevent concurrent write conflicts insid
 - `cmd/myworktree/` — CLI entry.
 - `internal/app/` — HTTP server, auth middleware, API routing.
 - `internal/worktree/` — worktree lifecycle via `git` CLI.
-- `internal/instance/` — instance lifecycle (spawn/stop/list) + output log file.
+- `internal/instance/` — instance lifecycle (spawn/stop/list) + in-memory PTY log ring buffer (see §4).
 - `internal/tag/` — Tag config loader (MVP: JSON).
 - `internal/store/` — persistent state store (`state.json`) with file locking + atomic writes.
-- `internal/redact/` — secret redaction for stored logs/backlog.
+- `internal/redact/` — secret redaction applied to PTY chunks before they enter the ring buffer / live broadcast (e.g. `sk-...`).
 - `internal/mcp/` — MCP adapter surface (tool names + app-level tool dispatch), keeping core decoupled.
 - `internal/monitor/` — resource stats collector (CPU delta via gopsutil/process.Times, memory via RSS)
 - `internal/llm/` — LLM API client（OpenAI / Anthropic / OpenAI Compatible），可选，LLM Settings 通过 Web UI 对话框配置
@@ -35,7 +35,7 @@ It does **not** analyze project code or prevent concurrent write conflicts insid
 - Override: `-worktrees-dir=data` uses the legacy location under the per-project data dir; you can also set a custom path.
   - `state.json` — managed worktrees + managed instances + tab order + version
   - `tags.json` — project-level tags
-  - `logs/<instanceId>.log` — rolling instance backlog
+  - `logs/` — **no longer used** for live instance output. The directory may still exist on upgraded installs containing dead `.log` artifacts from older versions; the daemon purges them once on startup (see §4). Live PTY output is captured into a per-instance in-memory ring buffer instead.
 
 ### 3.1.2 全局配置
 - 存储于用户级配置目录：`~/.config/myworktree/config.json`（按 OpenCode 方式，0o600 权限）
@@ -51,7 +51,8 @@ It does **not** analyze project code or prevent concurrent write conflicts insid
 
 ### 3.2 State model
 - Worktree: id, name, path, branch, baseRef, createdAt
-- Instance: id, worktreeId, tagId, command, cwd, env (sanitized), pid, status, logPath, timestamps
+- Instance: id, worktreeId, tagId, command, cwd, env (sanitized), pid, status, timestamps
+  - **Schema note (v0.4.0)**: the legacy `log_path` field was removed when PTY logs moved to memory. `state.json` files written by older versions still load cleanly — the field is silently ignored by JSON decoding. External tools reading `state.json` should drop their dependency on `log_path`.
 - TabOrder (at State level): map of worktree_id to ordered list of instance IDs
 - **Version** (at State level): monotonically increasing int64, incremented on every write via `SaveWithVersion`. Used for optimistic locking on concurrent modification detection.
 - Main Repo: not persisted; served via `GET /api/main` with live git branch
@@ -83,12 +84,42 @@ The sidebar shows a pinned **Main Workspace** item at the top (purple accent), f
 - Switching between running instances hides inactive terminal containers instead of tearing down their PTY attachment. This avoids detaching long-lived TUI programs such as Copilot CLI while they remain running.
 - Fallback path remains available: HTTP input `POST /api/instances/input` + replay/SSE logs (`GET /api/instances/log`, `GET /api/instances/log/stream`).
 - UI shows transport state (`websocket/sse/polling`) and supports manual WS reconnect.
-- Backlog is stored on disk with a size cap (rolling truncate).
-- On server startup, stale persisted `running` records are reconciled to `stopped` because in-memory stdin/stdout bindings cannot be resumed after process restart.
+- PTY output is captured into a per-instance **in-memory ring buffer**; no disk I/O is involved on the steady state. The buffer feeds the HTTP/SSE/WS replay endpoints and the MCP `instance_log_tail` tool. See §4.1 for sizing, eviction, and budget rules.
+- On server startup, stale persisted `running` records are reconciled to `stopped` because in-memory stdin/stdout bindings cannot be resumed after process restart. The same startup pass also calls `Manager.PurgeOrphanLogFiles()` to remove dead `.log` files left behind by pre-buffer versions; missing or empty `logs/` directories are not an error.
 - **Rename**: `PATCH /api/instances` updates an instance's display name (`name` field). The rename takes effect immediately in the UI and persists to `state.json`.
 - **Tab ordering**: `PATCH /api/instances/reorder` persists per-worktree tab order to `state.json` (`tab_order` map + array order in `State.Instances`). Uses **optimistic locking** — the client sends the `version` observed from `GET /api/instances`. If the state has been modified since (e.g., another user started an instance), the server returns HTTP 409 Conflict and the client refreshes and retries.
 - **Resource monitoring**: A clickable transport status bar in the bottom-right of the workspace opens a resource monitor modal. The modal shows per-instance CPU%, memory RSS, and connection type (WebSocket/SSE) grouped by worktree, with subtotals and a global summary. Data is fetched via `GET /api/instances/stats` (1-second polling when open, stops when closed). CPU% uses delta calculation from `process.Times()` with a per-PID baseline stored in the `Collector` struct.
 - **Browser close protection**: The frontend registers a `beforeunload` event handler that unconditionally triggers a browser-native confirmation dialog on any page close/refresh/navigation attempt. This is purely a client-side UX safeguard — backend instances are unaffected and continue running.
+
+### 4.1 Instance log buffer (in-memory)
+
+Each running instance owns a bounded, **in-memory** ring buffer (`internal/instance/logbuf.go`, `RingBuffer`) that captures the PTY output stream emitted by `pumpLogs`. This buffer is the **only** backing store for the log replay endpoints, the SSE live-stream endpoint, and the MCP `instance_log_tail` tool. There is no persistent on-disk log file.
+
+**Why in-memory.** The previous design wrote every 1024-byte PTY chunk to a per-instance `<id>.log` file and called `enforceMaxLogSize` after each write; once a file reached the 10 MB cap, every subsequent chunk triggered a full `read 10 MB + truncate + write 10 MB` pass — write amplification on the order of 100,000× under TUI redraw workloads. Removing disk persistence eliminates the bug at the source and is consistent with the existing reconcile-on-startup semantics, which already declare that logs cannot be replayed across daemon restarts (running instances are marked `stopped`, their PTY channels are not resumed).
+
+**Sizing (per-instance cap).**
+- Floor: 16 MB (`MinBufferCap`)
+- Default: 32 MB (`DefaultBufferCap`)
+- Ceiling: 256 MB (`MaxBufferCap`) — never exceeded
+- Adaptive: when no user override is set, the cap is `clamp(available_memory / 16, 16 MB, 256 MB)`, sampled via `gopsutil/v4/mem.VirtualMemory()` at instance start.
+- User override: `log_buffer_bytes` in `~/.config/myworktree/auth.json` (`GlobalConfig.LogBufferBytes`). When set, the value is clamped to `[16 MB, 256 MB]`.
+- The backing slice is allocated eagerly inside `NewRingBuffer` so the first `Write` does not stall the producer on a 32 MB malloc.
+
+**Global budget.** The sum of all live buffer caps is bounded by `MaxTotalFraction × system_RAM` (default 25%). When `Manager.Start` would push the sum over this limit, it returns `*instance.LogBufferBudgetError` (which wraps the sentinel `ErrLogBufferBudgetExceeded`). The HTTP layer translates this into `503 Service Unavailable` with the structured `log_buffer_budget_exceeded` body documented in `docs/API.md` (Start endpoint). The MCP path returns the same shape. The budget check runs **before** `exec.Command` / `pty.Start`, so a rejected request leaves no orphan processes or PTYs to clean up.
+
+**Cursor semantics (`since` / `next`).** `head` is a monotonic total-bytes-written counter for the instance. Clients pass it as `since` to read incrementally; the server returns the bytes plus an advanced cursor. When no new data is available, the cursor is returned unchanged (preserves the SSE 1 s poll-loop contract). When `since` points to data already evicted from the ring (oldest live byte > since), the read silently clamps to the oldest live byte.
+
+**Lifecycle.**
+- `Start` resolves the cap with budget enforcement, creates the buffer, adds it to `Manager.buffers[id]` (an `*atomic.Pointer[RingBuffer]`), and atomically increments `Manager.totalBufBytes`.
+- `pumpLogs` reads PTY chunks, redacts them, and writes to the buffer via the pre-fetched pointer using a single `atomic.Pointer.Load` per chunk — no `stateMu` acquisition on the hot path. The redacted chunk is also broadcast to live subscribers (WS/SSE).
+- `Stop` / `wait` / `Restart` / `Delete` all funnel into `dropBufferLocked`, which `Swap(nil)` on the pointer, closes the buffer, decrements `totalBufBytes`, and removes the map entry. In-flight `pumpLogs` chunks dropped after the swap are intentional: the same lifecycle event closes the PTY, so `Read` returns EOF and the goroutine exits naturally.
+
+**Startup purge.** `Manager.PurgeOrphanLogFiles()` is invoked once during `Server.Start` (after `ReconcileRunningOnStartup`). It removes every `*.log` file under `DataDir/logs/` — these are now dead artifacts left by the pre-buffer code path. A missing `logs/` directory is not an error; the count of removed files is logged.
+
+**Failure modes & user-facing knobs.**
+- Budget exceeded → 503 with `log_buffer_budget_exceeded`. The dashboard surfaces a modal showing `used_bytes` / `limit_bytes` and a hint to raise `LogBufferBytes` or close other tabs.
+- Memory sampler fails (e.g. unusual cgroup) → cap falls back to `DefaultBufferCap`; the budget check is skipped for that call.
+- Daemon restart → all buffers are gone. The next `GET /api/instances/log` for a stopped/never-started instance returns empty (documented behaviour).
 
 ## 5. Terminal Protocol Timing Specification
 
@@ -359,7 +390,7 @@ myworktree implements a **dual-layer authentication architecture**:
 - Loopback requests skip all token/origin validation (enables Portal reverse proxy)
 - Origin/Host check + basic rate limit on unauthorized non-loopback attempts
 - Optional built-in HTTPS via `--tls-cert/--tls-key`
-- Redaction on stored backlog (e.g. `sk-...`)
+- Redaction is applied on each PTY chunk *before* it lands in the in-memory ring buffer or is broadcast to live subscribers (e.g. `sk-...` masked). The replayed/streamed bytes never contain the raw secret.
 
 **Proxy authentication bypass (planned)**: The planned Portal reverse proxy (`/s/<repo-hash>/`) will forward requests to instances via `127.0.0.1` (loopback), so instances automatically skip auth. **Currently not yet implemented** — dashboard links connect to instance ports directly.
 

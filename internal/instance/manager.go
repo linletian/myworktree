@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -22,8 +23,7 @@ import (
 )
 
 const (
-	maxLogBytes    int64 = 10 * 1024 * 1024
-	MainWorktreeID       = "__main__"
+	MainWorktreeID = "__main__"
 )
 
 // ErrInstanceNotFound is returned when an instance ID does not match any known instance.
@@ -35,6 +35,13 @@ type Manager struct {
 	Store   store.FileStore
 	Logger  *log.Logger
 
+	// LogBufferBytes is the per-instance ring buffer cap from config.
+	// 0 means "use adaptive sizing".
+	LogBufferBytes int64
+
+	// memSampler queries system memory. Defaults to gopsutilMem if nil.
+	memSampler MemSampler
+
 	stateMu     sync.Mutex
 	mu          sync.Mutex
 	running     map[string]*exec.Cmd
@@ -42,7 +49,26 @@ type Manager struct {
 	ptys        map[string]*os.File
 	subscribers map[string]map[chan string]struct{}
 	conns       map[string]string // instance ID -> connection type ("websocket"/"sse"/"")
-	connsMu     sync.Mutex
+
+	// buffers holds the per-instance ring buffer pointers for captured PTY
+	// output. Each value is an atomic.Pointer so the hot path in pumpLogs
+	// can read the current buffer with a single atomic load (no stateMu
+	// acquisition per 1024-byte PTY chunk). Map mutations (insert/delete)
+	// still require stateMu.
+	buffers map[string]*atomic.Pointer[RingBuffer]
+
+	// totalBufBytes is the sum of all live buffer caps. Atomic so it doesn't
+	// contend with stateMu.
+	totalBufBytes atomic.Int64
+
+	// memSampleMu guards the 60s memory-sample cache below. The cache is used
+	// only by the adaptive-cap path in Start(); the budget check always reads
+	// a fresh sample to avoid rejecting requests based on stale data.
+	memSampleMu      sync.Mutex
+	lastMemSampleAt  time.Time
+	lastMemAvailable int64
+
+	connsMu sync.Mutex
 }
 
 type StartInput struct {
@@ -83,6 +109,87 @@ func (m *Manager) ReconcileRunningOnStartup() (int, error) {
 	return changed, nil
 }
 
+// PurgeOrphanLogFiles removes every *.log file in DataDir/logs/. After the
+// in-memory ring buffer refactor, no live state references these files — they
+// are dead artifacts left over from the old per-instance log file. Runs once
+// at daemon startup to reclaim disk space.
+//
+// Returns the number of files removed. A missing logs/ directory is not an
+// error (returns 0).
+func (m *Manager) PurgeOrphanLogFiles() (int, error) {
+	if strings.TrimSpace(m.DataDir) == "" {
+		return 0, nil
+	}
+	logDir := filepath.Join(m.DataDir, "logs")
+	entries, err := os.ReadDir(logDir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	removed := 0
+	var failed []string
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		if !strings.HasSuffix(e.Name(), ".log") {
+			continue
+		}
+		full := filepath.Join(logDir, e.Name())
+		if err := os.Remove(full); err != nil {
+			failed = append(failed, fmt.Sprintf("%s: %v", full, err))
+			continue
+		}
+		removed++
+	}
+	if m.Logger != nil {
+		if removed > 0 {
+			m.Logger.Printf("purge: removed %d orphan log files from %s", removed, logDir)
+		}
+		for _, f := range failed {
+			m.Logger.Printf("purge: %s", f)
+		}
+	}
+	return removed, nil
+}
+
+// memSampleCacheTTL is how long the adaptive-cap path reuses a single
+// mem.VirtualMemory() result. The cap is a starting point that's re-evaluated
+// on every instance start, so staleness here is harmless.
+const memSampleCacheTTL = 60 * time.Second
+
+// sampledAvailable returns a mem.Available result, refreshing at most once
+// per memSampleCacheTTL. Used by the adaptive-cap path in Start(). On a cache
+// miss it queries the configured sampler (or gopsutilMem as the default) and
+// stores the result.
+func (m *Manager) sampledAvailable(now time.Time) (int64, error) {
+	m.memSampleMu.Lock()
+	defer m.memSampleMu.Unlock()
+	if !m.lastMemSampleAt.IsZero() && now.Sub(m.lastMemSampleAt) < memSampleCacheTTL {
+		return m.lastMemAvailable, nil
+	}
+	sampler := m.memSampler
+	if sampler == nil {
+		sampler = gopsutilMem{}
+	}
+	vm, err := sampler.VirtualMemory()
+	if err != nil {
+		return 0, err
+	}
+	avail := vm.Available
+	if avail <= 0 {
+		avail = vm.Total - vm.Used
+	}
+	if avail < 0 {
+		avail = 0
+	}
+	m.lastMemAvailable = avail
+	m.lastMemSampleAt = now
+	return avail, nil
+}
+
 func (m *Manager) Start(in StartInput) (store.ManagedInstance, error) {
 	m.mu.Lock()
 	if m.running == nil {
@@ -115,11 +222,9 @@ func (m *Manager) Start(in StartInput) (store.ManagedInstance, error) {
 	var wtName string
 
 	if in.Root != "" {
-		// Main repo: use Root directly.
 		wtPath = in.Root
 		wtName = filepath.Base(filepath.Clean(in.Root))
 	} else {
-		// Normal worktree lookup.
 		var wt *store.ManagedWorktree
 		for i := range st.Worktrees {
 			if st.Worktrees[i].ID == in.WorktreeID {
@@ -177,19 +282,35 @@ func (m *Manager) Start(in StartInput) (store.ManagedInstance, error) {
 	if instName == "" {
 		instName = effectiveTagID
 	}
-	logDir := filepath.Join(m.DataDir, "logs")
-	if err := os.MkdirAll(logDir, 0o755); err != nil {
-		return store.ManagedInstance{}, err
-	}
-	logPath := filepath.Join(logDir, id+".log")
-	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
-	if err != nil {
-		return store.ManagedInstance{}, err
-	}
 
 	cwd := wtPath
 	if strings.TrimSpace(cwdRel) != "" && cwdRel != "." {
 		cwd = filepath.Join(wtPath, cwdRel)
+	}
+
+	// Resolve buffer cap with budget enforcement. Done BEFORE exec.Command /
+	// pty.Start so a budget-exceeded error short-circuits the heavy work
+	// (process spawn, PTY allocation) and leaves no resources to clean up.
+	//
+	// The cap path uses a 60s-cached mem.Available sample (cheap to query
+	// repeatedly under batch starts); the budget check inside resolveCap
+	// always queries the sampler live so budget decisions never use stale
+	// data.
+	sampler := m.memSampler
+	if sampler == nil {
+		sampler = gopsutilMem{}
+	}
+	var capAvail int64 = -1
+	if m.LogBufferBytes <= 0 {
+		// Adaptive path: use the cached Available sample. Errors here fall
+		// back to live sampling inside resolveCap → adaptiveCapFromAvailable.
+		if avail, sErr := m.sampledAvailable(time.Now()); sErr == nil {
+			capAvail = avail
+		}
+	}
+	capBytes, err := resolveCapFromAvailable(m.LogBufferBytes, sampler, m.totalBufBytes.Load(), capAvail)
+	if err != nil {
+		return store.ManagedInstance{}, err
 	}
 
 	cmd := exec.Command("zsh", "-f", "-i")
@@ -204,22 +325,21 @@ func (m *Manager) Start(in StartInput) (store.ManagedInstance, error) {
 		pre.Dir = cwd
 		pre.Env = cmd.Env
 		if out, err := pre.CombinedOutput(); err != nil {
-			_ = logFile.Close()
-			_ = os.WriteFile(logPath, []byte(redact.Text(string(out))), 0o600)
 			return store.ManagedInstance{}, fmt.Errorf("preStart failed: %w: %s", err, strings.TrimSpace(string(out)))
 		}
 	}
 
 	ptmx, err := pty.Start(cmd)
 	if err != nil {
-		_ = logFile.Close()
 		return store.ManagedInstance{}, err
 	}
+	buf := NewRingBuffer(capBytes)
+	m.totalBufBytes.Add(capBytes)
 
 	now := time.Now().UTC().Format(time.RFC3339)
 	inst := store.ManagedInstance{
 		ID:           id,
-		WorktreeID:   in.WorktreeID, // MainWorktreeID for main repo, or a real worktree ID
+		WorktreeID:   in.WorktreeID,
 		WorktreeName: wtName,
 		TagID:        effectiveTagID,
 		Name:         instName,
@@ -228,26 +348,38 @@ func (m *Manager) Start(in StartInput) (store.ManagedInstance, error) {
 		Env:          sanitizedEnv(env),
 		PID:          cmd.Process.Pid,
 		Status:       "running",
-		LogPath:      logPath,
 		CreatedAt:    now,
 	}
 	m.stateMu.Lock()
-	st2, err := m.Store.Load()
-	if err == nil {
-		st2.Instances = append(st2.Instances, inst)
-		if st2.TabOrder == nil {
-			st2.TabOrder = make(map[string][]string)
-		}
-		st2.TabOrder[in.WorktreeID] = append(st2.TabOrder[in.WorktreeID], inst.ID)
-		err = m.Store.SaveWithVersion(st2, st2.Version)
-	}
-	m.stateMu.Unlock()
-	if err != nil {
+	st2, loadErr := m.Store.Load()
+	if loadErr != nil {
+		m.stateMu.Unlock()
 		_ = cmd.Process.Kill()
 		_ = ptmx.Close()
-		_ = logFile.Close()
+		buf.Close()
+		m.totalBufBytes.Add(-capBytes)
+		return store.ManagedInstance{}, loadErr
+	}
+	st2.Instances = append(st2.Instances, inst)
+	if st2.TabOrder == nil {
+		st2.TabOrder = make(map[string][]string)
+	}
+	st2.TabOrder[in.WorktreeID] = append(st2.TabOrder[in.WorktreeID], inst.ID)
+	if err := m.Store.SaveWithVersion(st2, st2.Version); err != nil {
+		m.stateMu.Unlock()
+		_ = cmd.Process.Kill()
+		_ = ptmx.Close()
+		buf.Close()
+		m.totalBufBytes.Add(-capBytes)
 		return store.ManagedInstance{}, err
 	}
+	if m.buffers == nil {
+		m.buffers = map[string]*atomic.Pointer[RingBuffer]{}
+	}
+	p := &atomic.Pointer[RingBuffer]{}
+	p.Store(buf)
+	m.buffers[id] = p
+	m.stateMu.Unlock()
 
 	m.mu.Lock()
 	m.running[id] = cmd
@@ -262,7 +394,7 @@ func (m *Manager) Start(in StartInput) (store.ManagedInstance, error) {
 		}()
 	}
 
-	go m.pumpLogs(id, ptmx, ptmx, logFile, logPath)
+	go m.pumpLogs(id, ptmx)
 	go m.wait(id, cmd)
 	return inst, nil
 }
@@ -276,7 +408,6 @@ func (m *Manager) List() ([]store.ManagedInstance, error) {
 }
 
 // UpdateName updates the display name of an existing instance.
-// Returns the updated instance on success.
 func (m *Manager) UpdateName(id string, name string) (store.ManagedInstance, error) {
 	id = strings.TrimSpace(id)
 	if id == "" {
@@ -306,8 +437,6 @@ func (m *Manager) UpdateName(id string, name string) (store.ManagedInstance, err
 }
 
 // ReorderInstances sets the tab order for a specific worktree.
-// orderIDs must contain all instance IDs for the given worktree.
-// expectedVersion is the version the caller observed; save is rejected if the state has changed.
 func (m *Manager) ReorderInstances(worktreeID string, orderIDs []string, expectedVersion int64) error {
 	worktreeID = strings.TrimSpace(worktreeID)
 	if worktreeID == "" {
@@ -321,13 +450,11 @@ func (m *Manager) ReorderInstances(worktreeID string, orderIDs []string, expecte
 		return err
 	}
 
-	// Build maps for lookup.
 	idSet := make(map[string]bool, len(orderIDs))
 	for _, id := range orderIDs {
 		idSet[id] = true
 	}
 
-	// Validate: every instance for this worktree must be in orderIDs.
 	for _, inst := range st.Instances {
 		if inst.WorktreeID == worktreeID {
 			if !idSet[inst.ID] {
@@ -336,7 +463,6 @@ func (m *Manager) ReorderInstances(worktreeID string, orderIDs []string, expecte
 		}
 	}
 
-	// Validate: every ID in orderIDs must belong to this worktree.
 	for _, id := range orderIDs {
 		found := false
 		for _, inst := range st.Instances {
@@ -350,24 +476,20 @@ func (m *Manager) ReorderInstances(worktreeID string, orderIDs []string, expecte
 		}
 	}
 
-	// Update TabOrder index.
 	if st.TabOrder == nil {
 		st.TabOrder = make(map[string][]string)
 	}
 	st.TabOrder[worktreeID] = orderIDs
 
-	// Rebuild Instances slice to match desired order.
 	idToInst := make(map[string]store.ManagedInstance, len(st.Instances))
 	for _, inst := range st.Instances {
 		idToInst[inst.ID] = inst
 	}
 
 	newOrder := make([]store.ManagedInstance, 0, len(st.Instances))
-	// Instances from this worktree, in the new order.
 	for _, id := range orderIDs {
 		newOrder = append(newOrder, idToInst[id])
 	}
-	// Append instances from other worktrees (unchanged).
 	for _, inst := range st.Instances {
 		if inst.WorktreeID != worktreeID {
 			newOrder = append(newOrder, inst)
@@ -399,7 +521,6 @@ func (m *Manager) Stop(id string) error {
 		return fmt.Errorf("unknown instance id: %s", id)
 	}
 	if inst.Status != "running" {
-		// Idempotent: stopping an already-exited instance is a no-op.
 		return nil
 	}
 
@@ -408,7 +529,6 @@ func (m *Manager) Stop(id string) error {
 	in := m.inputs[id]
 	m.mu.Unlock()
 
-	// If server restarted, cmd may be missing; best-effort signal by PID/process-group.
 	if (cmd == nil || cmd.Process == nil) && inst.PID > 0 {
 		terminatePID(inst.PID, syscall.SIGTERM)
 		go func(pid int) {
@@ -454,16 +574,12 @@ func (m *Manager) SendInput(id string, input string) error {
 		return fmt.Errorf("instance input unavailable: %s", id)
 	}
 
-	// Process control characters (Ctrl+C/Z/\)
-	// These send signals to the process group for immediate termination.
-	// We also write the character to stdin as a fallback, matching real terminal behavior.
 	for _, ch := range input {
 		switch ch {
 		case 0x03:
 			if cmd != nil && cmd.Process != nil {
 				_ = terminatePID(cmd.Process.Pid, syscall.SIGINT)
 			}
-			// Also write to stdin as fallback (original behavior in v0.1.0)
 			if _, err := io.WriteString(in, string(ch)); err != nil {
 				return err
 			}
@@ -563,11 +679,9 @@ func (m *Manager) Restart(id string) (store.ManagedInstance, error) {
 		return newInst, nil
 	}
 	oldIdx := -1
-	var oldLogPath string
 	for i := range st2.Instances {
 		if st2.Instances[i].ID == id {
 			oldIdx = i
-			oldLogPath = st2.Instances[i].LogPath
 			break
 		}
 	}
@@ -583,9 +697,6 @@ func (m *Manager) Restart(id string) (store.ManagedInstance, error) {
 	_ = m.Store.SaveWithVersion(st2, st2.Version)
 	m.stateMu.Unlock()
 
-	if strings.TrimSpace(oldLogPath) != "" {
-		_ = os.Remove(oldLogPath)
-	}
 	m.mu.Lock()
 	delete(m.running, id)
 	delete(m.inputs, id)
@@ -595,6 +706,10 @@ func (m *Manager) Restart(id string) (store.ManagedInstance, error) {
 	}
 	m.closeSubscribersLocked(id)
 	m.mu.Unlock()
+
+	m.stateMu.Lock()
+	m.dropBufferLocked(id)
+	m.stateMu.Unlock()
 
 	return newInst, nil
 }
@@ -608,7 +723,14 @@ func (m *Manager) SubscribeOutput(id string) (<-chan string, func(), error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	if logPathByID(st, id) == "" {
+	found := false
+	for _, it := range st.Instances {
+		if it.ID == id {
+			found = true
+			break
+		}
+	}
+	if !found {
 		return nil, nil, fmt.Errorf("unknown instance id: %s", id)
 	}
 
@@ -651,14 +773,12 @@ func (m *Manager) Delete(id string) error {
 		return err
 	}
 	idx := -1
-	var logPath string
 	for i := range st.Instances {
 		if st.Instances[i].ID == id {
 			if st.Instances[i].Status == "running" {
 				return fmt.Errorf("instance is running: %s", id)
 			}
 			idx = i
-			logPath = st.Instances[i].LogPath
 			break
 		}
 	}
@@ -669,9 +789,7 @@ func (m *Manager) Delete(id string) error {
 	if err := m.Store.SaveWithVersion(st, st.Version); err != nil {
 		return err
 	}
-	if strings.TrimSpace(logPath) != "" {
-		_ = os.Remove(logPath)
-	}
+	m.dropBufferLocked(id)
 	m.mu.Lock()
 	delete(m.running, id)
 	delete(m.inputs, id)
@@ -688,37 +806,18 @@ func (m *Manager) Tail(id string, n int64) (string, error) {
 	if n <= 0 {
 		n = 4096
 	}
-	st, err := m.Store.Load()
-	if err != nil {
-		return "", err
+	m.stateMu.Lock()
+	p, ok := m.buffers[id]
+	m.stateMu.Unlock()
+	if !ok || p == nil {
+		return "", nil
 	}
-	path := logPathByID(st, id)
-	if path == "" {
-		return "", fmt.Errorf("unknown instance id: %s", id)
+	rb := p.Load()
+	if rb == nil {
+		return "", nil
 	}
-	f, err := os.Open(path)
-	if err != nil {
-		return "", err
-	}
-	defer f.Close()
-
-	fi, err := f.Stat()
-	if err != nil {
-		return "", err
-	}
-	size := fi.Size()
-	start := size - n
-	if start < 0 {
-		start = 0
-	}
-	if _, err := f.Seek(start, io.SeekStart); err != nil {
-		return "", err
-	}
-	b, err := io.ReadAll(f)
-	if err != nil {
-		return "", err
-	}
-	return string(b), nil
+	body, _ := rb.Tail(n)
+	return body, nil
 }
 
 // ReadSince returns log content starting at byte offset "since" (inclusive),
@@ -730,40 +829,17 @@ func (m *Manager) ReadSince(id string, since int64, maxBytes int64) (string, int
 	if maxBytes <= 0 {
 		maxBytes = 64 * 1024
 	}
-	st, err := m.Store.Load()
-	if err != nil {
-		return "", since, err
+	m.stateMu.Lock()
+	p, ok := m.buffers[id]
+	m.stateMu.Unlock()
+	if !ok || p == nil {
+		return "", since, nil
 	}
-	path := logPathByID(st, id)
-	if path == "" {
-		return "", since, fmt.Errorf("unknown instance id: %s", id)
+	rb := p.Load()
+	if rb == nil {
+		return "", since, nil
 	}
-	f, err := os.Open(path)
-	if err != nil {
-		return "", since, err
-	}
-	defer f.Close()
-
-	fi, err := f.Stat()
-	if err != nil {
-		return "", since, err
-	}
-	size := fi.Size()
-	start := since
-	if start > size {
-		start = size
-	}
-	if size-start > maxBytes {
-		start = size - maxBytes
-	}
-	if _, err := f.Seek(start, io.SeekStart); err != nil {
-		return "", since, err
-	}
-	b, err := io.ReadAll(f)
-	if err != nil {
-		return "", since, err
-	}
-	return string(b), start + int64(len(b)), nil
+	return rb.ReadSince(since, maxBytes)
 }
 
 func (m *Manager) wait(id string, cmd *exec.Cmd) {
@@ -781,6 +857,7 @@ func (m *Manager) wait(id string, cmd *exec.Cmd) {
 
 	m.stateMu.Lock()
 	defer m.stateMu.Unlock()
+	m.dropBufferLocked(id)
 	st, loadErr := m.Store.Load()
 	if loadErr != nil {
 		return
@@ -799,35 +876,46 @@ func (m *Manager) wait(id string, cmd *exec.Cmd) {
 	_ = m.Store.SaveWithVersion(st, st.Version)
 }
 
-func (m *Manager) pumpLogs(id string, stdout io.Reader, stderr io.Reader, out *os.File, logPath string) {
-	defer func() { _ = out.Close() }()
-	var wg sync.WaitGroup
-	wg.Add(2)
-	write := func(r io.Reader) {
-		defer wg.Done()
-		buf := make([]byte, 1024)
-		for {
-			n, err := r.Read(buf)
-			if n > 0 {
-				chunk := redact.Text(string(buf[:n]))
-				_, _ = out.WriteString(chunk)
-				_ = enforceMaxLogSize(logPath, maxLogBytes)
-				m.broadcastOutput(id, chunk)
+// pumpLogs reads PTY output, redacts it, and writes to the instance's ring
+// buffer (replacing the old on-disk log file). The hot path is designed for
+// heavy TUI workloads (e.g. OpenCode CLI redraws producing MB/s): the ring
+// buffer pointer is fetched once under stateMu, then each chunk uses an
+// atomic load so neither the per-chunk stateMu acquisition nor the
+// `[]byte(chunk)` allocation occurs on the data path.
+//
+// Lifecycle: PTY mode yields stdout == stderr, so a single Read is enough
+// (no wg/stderr branch like the old file-based implementation needed).
+// If Stop/Restart swaps the buffer to nil, subsequent atomic loads return
+// nil and the chunk is dropped — acceptable because the same lifecycle
+// event closes ptmx, causing Read to return EOF and ending this goroutine.
+func (m *Manager) pumpLogs(id string, ptmx *os.File) {
+	defer func() { _ = ptmx.Close() }()
+
+	m.stateMu.Lock()
+	p, ok := m.buffers[id]
+	m.stateMu.Unlock()
+	if !ok || p == nil {
+		// No buffer (instance stopped before goroutine started) — drain
+		// ptmx so the underlying process is not blocked on a full pty buffer,
+		// then exit.
+		_, _ = io.Copy(io.Discard, ptmx)
+		return
+	}
+
+	readBuf := make([]byte, 1024)
+	for {
+		n, err := ptmx.Read(readBuf)
+		if n > 0 {
+			chunk := redact.Text(string(readBuf[:n]))
+			if rb := p.Load(); rb != nil {
+				rb.WriteString(chunk)
 			}
-			if err != nil {
-				return
-			}
+			m.broadcastOutput(id, chunk)
+		}
+		if err != nil {
+			return
 		}
 	}
-	// For PTY mode, stdout and stderr are the same, so we only read once
-	if stdout == stderr {
-		wg.Done()
-		write(stdout)
-	} else {
-		go write(stdout)
-		go write(stderr)
-	}
-	wg.Wait()
 }
 
 func (m *Manager) broadcastOutput(id string, chunk string) {
@@ -845,12 +933,42 @@ func (m *Manager) broadcastOutput(id string, chunk string) {
 	}
 }
 
+// closeSubscribersLocked closes subscriber channels for the given instance.
+// Buffer cleanup is done separately via dropBufferLocked under stateMu to
+// avoid lock-ordering issues.
+//
+// Caller must hold m.mu.
 func (m *Manager) closeSubscribersLocked(id string) {
 	subs := m.subscribers[id]
 	for ch := range subs {
 		close(ch)
 	}
 	delete(m.subscribers, id)
+}
+
+// dropBufferLocked removes the ring buffer for an instance and decrements the
+// global cap counter. Caller must hold m.stateMu.
+//
+// Lifecycle note: in Restart the buffer is dropped AFTER the store is
+// updated with the new instance id and AFTER subscribers are closed. There
+// is a microsecond-scale window where the old id's buffer is still in the
+// map; this is intentional so the old pumpLogs goroutine can finish its
+// last few chunks (it will exit on its own when Restart closes the old
+// ptmx). Any Tail/ReadSince for the old id in that window returns the
+// remaining buffered bytes, which is the documented contract.
+func (m *Manager) dropBufferLocked(id string) {
+	p, ok := m.buffers[id]
+	if !ok {
+		return
+	}
+	if rb := p.Swap(nil); rb != nil {
+		capBytes := rb.CapBytes()
+		rb.Close()
+		if capBytes > 0 {
+			m.totalBufBytes.Add(-capBytes)
+		}
+	}
+	delete(m.buffers, id)
 }
 
 func sanitizedEnv(in map[string]string) map[string]string {
@@ -864,33 +982,6 @@ func sanitizedEnv(in map[string]string) map[string]string {
 	return out
 }
 
-func enforceMaxLogSize(path string, max int64) error {
-	f, err := os.Open(path)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	fi, err := f.Stat()
-	if err != nil {
-		return err
-	}
-	if fi.Size() <= max {
-		return nil
-	}
-	start := fi.Size() - max
-	if start < 0 {
-		start = 0
-	}
-	if _, err := f.Seek(start, io.SeekStart); err != nil {
-		return err
-	}
-	b, err := io.ReadAll(f)
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(path, b, 0o600)
-}
-
 func shortID() string {
 	b := make([]byte, 6)
 	_, _ = rand.Read(b)
@@ -901,7 +992,6 @@ func terminatePID(pid int, sig syscall.Signal) error {
 	if pid <= 0 {
 		return errors.New("invalid pid")
 	}
-	// Prefer signaling the process group (-pid) so `script` and its child shell exit together.
 	if err := syscall.Kill(-pid, sig); err == nil || errors.Is(err, syscall.ESRCH) {
 		return nil
 	}
@@ -936,15 +1026,6 @@ func (m *Manager) markStopped(id string, status string) error {
 	return fmt.Errorf("unknown instance id: %s", id)
 }
 
-func logPathByID(st store.State, id string) string {
-	for _, it := range st.Instances {
-		if it.ID == id {
-			return it.LogPath
-		}
-	}
-	return ""
-}
-
 func (m *Manager) loadTags() (map[string]tag.Tag, error) {
 	base, err := os.UserConfigDir()
 	if err != nil {
@@ -958,7 +1039,6 @@ func (m *Manager) loadTags() (map[string]tag.Tag, error) {
 }
 
 // SetConnectionType records the current transport type for an instance.
-// connType should be "websocket", "sse", or "" (disconnected).
 func (m *Manager) SetConnectionType(id, connType string) {
 	m.connsMu.Lock()
 	defer m.connsMu.Unlock()

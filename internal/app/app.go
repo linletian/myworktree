@@ -128,11 +128,13 @@ func New(cfg Config, logger *log.Logger) (*Server, error) {
 		WorktreesDir: cfg.WorktreesDir,
 		Store:        st,
 	}
+	globalCfg, _ := config.Load()
 	instanceMgr := &instance.Manager{
-		DataDir: dataDir,
-		Root:    root,
-		Store:   st,
-		Logger:  logger,
+		DataDir:        dataDir,
+		Root:           root,
+		Store:          st,
+		Logger:         logger,
+		LogBufferBytes: globalCfg.LogBufferBytes,
 	}
 
 	mux := http.NewServeMux()
@@ -331,6 +333,11 @@ func (s *Server) Start() (string, error) {
 		s.logger.Printf("reconcile running instances failed: %v", err)
 	} else if n > 0 {
 		s.logger.Printf("reconciled %d stale running instances to stopped", n)
+	}
+	if n, err := s.instanceMgr.PurgeOrphanLogFiles(); err != nil {
+		s.logger.Printf("purge orphan log files failed: %v", err)
+	} else if n > 0 {
+		s.logger.Printf("purged %d orphan log files", n)
 	}
 
 	listenAddr, err := resolveRepoListenAddr(s.cfg.ListenAddr, s.dataDir, s.logger)
@@ -1150,6 +1157,11 @@ func (s *Server) handleInstances(w http.ResponseWriter, r *http.Request) {
 			Name:    req.Name,
 		})
 		if err != nil {
+			var budgetErr *instance.LogBufferBudgetError
+			if errors.As(err, &budgetErr) {
+				writeLogBufferBudgetErr(w, budgetErr)
+				return
+			}
 			writeErr(w, http.StatusBadRequest, err)
 			return
 		}
@@ -1690,6 +1702,11 @@ func (s *Server) handleMCPCall(w http.ResponseWriter, r *http.Request) {
 			Name:       args.Name,
 		})
 		if err != nil {
+			var budgetErr *instance.LogBufferBudgetError
+			if errors.As(err, &budgetErr) {
+				writeLogBufferBudgetErr(w, budgetErr)
+				return
+			}
 			writeErr(w, http.StatusBadRequest, err)
 			return
 		}
@@ -1856,6 +1873,41 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 
 func writeErr(w http.ResponseWriter, status int, err error) {
 	writeJSON(w, status, map[string]string{"error": err.Error()})
+}
+
+// writeLogBufferBudgetErr writes a structured 503 response when a new instance
+// was rejected for exceeding the global log buffer budget. The "error" code
+// "log_buffer_budget_exceeded" is part of the API contract — the dashboard
+// matches on it to display a popup instead of a generic error.
+func writeLogBufferBudgetErr(w http.ResponseWriter, err *instance.LogBufferBudgetError) {
+	body := map[string]any{
+		"error":        "log_buffer_budget_exceeded",
+		"message":      fmt.Sprintf("Insufficient memory to start new instance: used %s, limit %s.", formatBytes(err.UsedBytes), formatBytes(err.LimitBytes)),
+		"used_bytes":   err.UsedBytes,
+		"limit_bytes":  err.LimitBytes,
+		"system_bytes": err.SystemBytes,
+		"hint":         "Close other instances, raise LogBufferBytes in auth.json, or reduce concurrent tabs.",
+	}
+	w.Header().Set("Retry-After", "0")
+	writeJSON(w, http.StatusServiceUnavailable, body)
+}
+
+func formatBytes(b int64) string {
+	const (
+		kb = 1 << 10
+		mb = 1 << 20
+		gb = 1 << 30
+	)
+	switch {
+	case b >= gb:
+		return fmt.Sprintf("%.2f GB", float64(b)/float64(gb))
+	case b >= mb:
+		return fmt.Sprintf("%.2f MB", float64(b)/float64(mb))
+	case b >= kb:
+		return fmt.Sprintf("%.2f KB", float64(b)/float64(kb))
+	default:
+		return fmt.Sprintf("%d B", b)
+	}
 }
 
 func parseInt64Default(s string, def int64) int64 {
