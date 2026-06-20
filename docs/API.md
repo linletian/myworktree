@@ -186,6 +186,42 @@ Partial failure example (staged succeeded, unstaged failed):
 ```
 - Returns HTTP 400 if `id` is missing or unknown.
 
+### Get single file diff
+`GET /api/worktree/file/diff?id=<worktreeId>&path=<filePath>&staged=true|false`
+
+Returns the unified diff (`git diff [--cached] -- <path>`) for a single file in a worktree.
+
+- `id`: worktree ID (`"__main__"` for the main repo) or a managed worktree ID.
+- `path`: file path relative to the worktree root.
+- `staged`: optional, defaults to `false`. Set to `true` for staged (index) diff.
+- Uses a 2-second timeout.
+- Returns plain text (`Content-Type: text/plain; charset=utf-8`).
+- Returns HTTP 400 if `id` or `path` is missing.
+- Returns HTTP 403 if the path escapes the worktree root or targets a sensitive file.
+- Returns HTTP 413 if the diff output exceeds 500 KB.
+- Returns HTTP 500 on git failure.
+
+**Synthetic diff for untracked files**: when a file is untracked (not in git's index), `git diff` produces no output. In this case the endpoint synthesizes a standard unified diff header with the full file content as an all-addition hunk, mimicking `git diff /dev/null <path>`. The synthetic diff includes `\ No newline at end of file` when the source file lacks a trailing newline, matching native git behaviour.
+Clients that parse this output should be prepared for both real and synthetic diffs.
+
+### Get single file content
+`GET /api/worktree/file/content?id=<worktreeId>&path=<filePath>`
+
+Returns the raw content of a single file in a worktree.
+
+- `id`: worktree ID (`"__main__"` for the main repo) or a managed worktree ID.
+- `path`: file path relative to the worktree root.
+- Returns plain text (`Content-Type: text/plain; charset=utf-8`).
+- Response headers:
+  - `X-File-Type`: hint — `text/markdown`, `text/x-code`, or `text/plain`.
+  - `X-File-FullPath`: absolute filesystem path of the requested file.
+- 1 MB file size limit.
+- Returns HTTP 400 if `id` or `path` is missing.
+- Returns HTTP 403 if the path escapes the worktree root or targets a sensitive file.
+- Returns HTTP 404 if the file does not exist.
+- Returns HTTP 413 if the file exceeds 1 MB.
+- Returns HTTP 415 if the file is binary (detected via null bytes).
+
 ### Get all worktrees divergence
 `GET /api/worktrees/diverged`
 

@@ -1382,6 +1382,8 @@
                 <div class="license-item"><span class="license-name">go-ole/go-ole</span><span class="license-sppver">v1.2.6</span><span class="license-type">MIT</span></div>
                 <div class="license-item"><span class="license-name">yusufpapurcu/wmi</span><span class="license-sppver">v1.2.4</span><span class="license-type">MIT</span></div>
                 <div class="license-item"><span class="license-name">xterm.js</span><span class="license-sppver">v6.0.0</span><span class="license-type">MIT</span></div>
+                <div class="license-item"><span class="license-name">highlight.js</span><span class="license-sppver">v11.9.0</span><span class="license-type">BSD-3-Clause</span></div>
+                <div class="license-item"><span class="license-name">marked.js</span><span class="license-sppver">v12.0.2</span><span class="license-type">MIT</span></div>
             </div>
         </div>
     </dialog>
@@ -1690,6 +1692,29 @@
             renderGitChanges();
         }
 
+        function openFilePreview(worktreeId, filePath, section) {
+            var wt = null;
+            for (var i = 0; i < state.worktrees.length; i++) {
+                if (state.worktrees[i].id === worktreeId) { wt = state.worktrees[i]; break; }
+            }
+            var branch = '';
+            if (worktreeId === MAIN_WT_ID) {
+                branch = state.mainRepo ? state.mainRepo.branch : '';
+            } else if (wt) {
+                branch = wt.branch || '';
+            }
+            var params = new URLSearchParams();
+            params.set('id', worktreeId);
+            params.set('path', filePath);
+            params.set('repo', state.mainRepo ? state.mainRepo.name : '');
+            params.set('wt_name', wt ? (wt.name || '') : (worktreeId === MAIN_WT_ID ? 'main' : ''));
+            params.set('branch', branch);
+            params.set('file', filePath.split('/').pop());
+            params.set('staged', section === 'staged' ? 'true' : 'false');
+            var pw = window.open('/preview?' + params.toString(), '_blank');
+            if (!pw) { alert('Pop-up blocked. Please allow pop-ups for this site to preview files.'); }
+        }
+
         function renderGitChanges() {
             const expanded = gitExpandedSection;
             const expList = document.getElementById(`git-${expanded}-list`);
@@ -1800,6 +1825,11 @@
                         }
                         item.appendChild(stats);
                     }
+
+                    item.style.cursor = 'pointer';
+                    item.addEventListener('click', (function(p, s) {
+                        return function() { openFilePreview(state.activeWT, p, s); };
+                    })(c.path, section));
 
                     list.appendChild(item);
                 });

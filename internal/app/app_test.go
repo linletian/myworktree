@@ -3,6 +3,7 @@ package app
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"log"
 	"net/http"
 	"net/http/httptest"
@@ -1132,6 +1133,473 @@ func TestFormatBytes(t *testing.T) {
 		if got := formatBytes(c.in); got != c.want {
 			t.Errorf("formatBytes(%d) = %q, want %q", c.in, got, c.want)
 		}
+	}
+}
+
+// --- Tests for file preview feature ---
+
+func TestUnquoteGitPath(t *testing.T) {
+	tests := []struct {
+		in   string
+		want string
+	}{
+		// Plain paths (no quoting) are returned unchanged.
+		{in: "main.go", want: "main.go"},
+		{in: "docs/plans/plan.md", want: "docs/plans/plan.md"},
+		{in: "", want: ""},
+		{in: `"`, want: `"`}, // single char, too short for quoting
+
+		// Quoted ASCII path with no internal escapes.
+		{in: `"plain name.txt"`, want: "plain name.txt"},
+
+		// C-style escapes.
+		{in: `"path\\with\\backslashes"`, want: `path\with\backslashes`},
+		{in: `"path\"with\"quotes"`, want: `path"with"quotes`},
+		{in: `"path\twith\ttabs"`, want: "path\twith\ttabs"},
+		{in: `"path\nwith\nnewlines"`, want: "path\nwith\nnewlines"},
+
+		// Octal-escaped UTF-8 bytes (Chinese "分析报告" = e5 88 86 e6 9e 90 e6 8a a5 e5 91 8a).
+		{in: `"Safari\345\210\206\346\236\220\346\212\245\345\221\212.md"`,
+			want: "Safari分析报告.md"},
+
+		// Mixed escapes.
+		{in: `"src\\test\tool\"go\\.py"`, want: "src\\test\tool\"go\\.py"},
+
+		// Known real-world examples.
+		{in: `"Safari\345\215\241\346\255\273\345\210\206\346\236\220\346\212\245\345\221\212.md"`,
+			want: "Safari卡死分析报告.md"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.in, func(t *testing.T) {
+			if got := unquoteGitPath(tt.in); got != tt.want {
+				t.Errorf("unquoteGitPath(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestIsPathWithin(t *testing.T) {
+	root := t.TempDir()
+	os.WriteFile(filepath.Join(root, "test.txt"), []byte("hello"), 0o644)
+
+	tests := []struct {
+		name     string
+		root     string
+		filePath string
+		want     bool
+	}{
+		{name: "normal", root: root, filePath: "test.txt", want: true},
+		{name: "subdir", root: root, filePath: filepath.Join("sub", "test.txt"), want: true}, // resolves within root
+		{name: "traversal", root: root, filePath: "../../etc/passwd", want: false},
+		{name: "root itself", root: root, filePath: ".", want: true},
+		{name: "empty", root: root, filePath: "", want: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isPathWithin(tt.root, tt.filePath); got != tt.want {
+				t.Errorf("isPathWithin(%q, %q) = %v, want %v", tt.root, tt.filePath, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestIsSensitiveFile(t *testing.T) {
+	tests := []struct {
+		path string
+		want bool
+	}{
+		{path: "main.go", want: false},
+		{path: "README.md", want: false},
+		{path: ".env", want: true},
+		{path: ".env.local", want: true},
+		{path: "server.key", want: true},
+		{path: "cert.pem", want: true},
+		{path: "id_rsa", want: true}, // SSH private key
+		{path: "config/secrets.yaml", want: true},
+		{path: "token.json", want: true},
+		{path: "credentials.ini", want: true},
+		{path: "src/privatekey.go", want: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.path, func(t *testing.T) {
+			if got := isSensitiveFile(tt.path); got != tt.want {
+				t.Errorf("isSensitiveFile(%q) = %v, want %v", tt.path, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestDetectFileType(t *testing.T) {
+	tests := []struct {
+		path string
+		want string
+	}{
+		{path: "README.md", want: "text/markdown"},
+		{path: "main.go", want: "text/x-code"},
+		{path: "app.js", want: "text/x-code"},
+		{path: "types.ts", want: "text/x-code"},
+		{path: "script.py", want: "text/x-code"},
+		{path: "main.rs", want: "text/x-code"},
+		{path: "index.html", want: "text/x-code"},
+		{path: "style.css", want: "text/x-code"},
+		{path: "config.json", want: "text/x-code"},
+		{path: "data.yaml", want: "text/x-code"},
+		{path: "Makefile", want: "text/plain"},
+		{path: "unknown.xyz", want: "text/plain"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.path, func(t *testing.T) {
+			if got := detectFileType(tt.path); got != tt.want {
+				t.Errorf("detectFileType(%q) = %q, want %q", tt.path, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestHandleWorktreeFileDiff(t *testing.T) {
+	root := t.TempDir()
+	srv := &Server{
+		root: root,
+		gitRunner: func(timeout time.Duration, gitRoot string, args ...string) ([]byte, error) {
+			return []byte("+added line\n-deleted line\n"), nil
+		},
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/worktree/file/diff?id=__main__&path=test.go", nil)
+	w := httptest.NewRecorder()
+	srv.handleWorktreeFileDiff(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if w.Body.String() != "+added line\n-deleted line\n" {
+		t.Fatalf("unexpected body: %q", w.Body.String())
+	}
+}
+
+func TestHandleWorktreeFileDiffPathTraversal(t *testing.T) {
+	root := t.TempDir()
+	srv := &Server{
+		root: root,
+		gitRunner: func(timeout time.Duration, gitRoot string, args ...string) ([]byte, error) {
+			return []byte("diff"), nil
+		},
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/worktree/file/diff?id=__main__&path=../../etc/passwd", nil)
+	w := httptest.NewRecorder()
+	srv.handleWorktreeFileDiff(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("path traversal should return 403, got %d", w.Code)
+	}
+}
+
+func TestHandleWorktreeFileContent(t *testing.T) {
+	root := t.TempDir()
+	os.WriteFile(filepath.Join(root, "README.md"), []byte("# Hello\nWorld"), 0o644)
+	srv := &Server{root: root}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/worktree/file/content?id=__main__&path=README.md", nil)
+	w := httptest.NewRecorder()
+	srv.handleWorktreeFileContent(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if w.Body.String() != "# Hello\nWorld" {
+		t.Fatalf("unexpected body: %q", w.Body.String())
+	}
+	if ct := w.Header().Get("X-File-Type"); ct != "text/markdown" {
+		t.Fatalf("expected X-File-Type=text/markdown, got %q", ct)
+	}
+}
+
+func TestHandleWorktreeFileContentSensitive(t *testing.T) {
+	root := t.TempDir()
+	os.WriteFile(filepath.Join(root, ".env"), []byte("SECRET=abc"), 0o644)
+	srv := &Server{root: root}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/worktree/file/content?id=__main__&path=.env", nil)
+	w := httptest.NewRecorder()
+	srv.handleWorktreeFileContent(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("sensitive file should return 403, got %d", w.Code)
+	}
+}
+
+func TestHandleWorktreeFileContentBinary(t *testing.T) {
+	root := t.TempDir()
+	data := make([]byte, 100)
+	data[50] = 0 // null byte
+	os.WriteFile(filepath.Join(root, "binary.bin"), data, 0o644)
+	srv := &Server{root: root}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/worktree/file/content?id=__main__&path=binary.bin", nil)
+	w := httptest.NewRecorder()
+	srv.handleWorktreeFileContent(w, req)
+
+	if w.Code != http.StatusUnsupportedMediaType {
+		t.Fatalf("binary file should return 415, got %d", w.Code)
+	}
+}
+
+func TestHandleWorktreeFileDiffStaged(t *testing.T) {
+	root := t.TempDir()
+	srv := &Server{
+		root: root,
+		gitRunner: func(timeout time.Duration, gitRoot string, args ...string) ([]byte, error) {
+			// Verify --cached flag is present for staged diff
+			for _, a := range args {
+				if a == "--cached" {
+					return []byte("+staged change\n"), nil
+				}
+			}
+			return []byte("+unstaged change\n"), nil
+		},
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/worktree/file/diff?id=__main__&path=test.go&staged=true", nil)
+	w := httptest.NewRecorder()
+	srv.handleWorktreeFileDiff(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if w.Body.String() != "+staged change\n" {
+		t.Fatalf("unexpected body: %q", w.Body.String())
+	}
+}
+
+func TestHandleWorktreeFileDiffEmpty(t *testing.T) {
+	// File doesn't exist → synthetic diff skipped, body empty.
+	root := t.TempDir()
+	srv := &Server{
+		root: root,
+		gitRunner: func(timeout time.Duration, gitRoot string, args ...string) ([]byte, error) {
+			return []byte(""), nil
+		},
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/worktree/file/diff?id=__main__&path=test.go", nil)
+	w := httptest.NewRecorder()
+	srv.handleWorktreeFileDiff(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if w.Body.String() != "" {
+		t.Fatalf("expected empty body, got %q", w.Body.String())
+	}
+}
+
+func TestHandleWorktreeFileDiffSynthetic(t *testing.T) {
+	// File exists and git diff returns empty → synthetic diff generated.
+	root := t.TempDir()
+	content := "line1\nline2\n"
+	os.WriteFile(filepath.Join(root, "test.go"), []byte(content), 0o644)
+	srv := &Server{
+		root: root,
+		gitRunner: func(timeout time.Duration, gitRoot string, args ...string) ([]byte, error) {
+			return []byte(""), nil
+		},
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/worktree/file/diff?id=__main__&path=test.go", nil)
+	w := httptest.NewRecorder()
+	srv.handleWorktreeFileDiff(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, "diff --git a/test.go b/test.go") {
+		t.Fatalf("missing diff header in synthetic diff: %q", body)
+	}
+	if !strings.Contains(body, "new file mode 100644") {
+		t.Fatalf("missing new file mode in synthetic diff: %q", body)
+	}
+	if !strings.Contains(body, "@@ -0,0 +1,2 @@") {
+		t.Fatalf("missing hunk header in synthetic diff: %q", body)
+	}
+	if !strings.Contains(body, "+line1") {
+		t.Fatalf("missing +line1 in synthetic diff: %q", body)
+	}
+	if strings.Contains(body, "\\ No newline at end of file") {
+		t.Fatalf("unexpected no-newline marker for file ending with \\n: %q", body)
+	}
+}
+
+func TestHandleWorktreeFileDiffSyntheticNoNewline(t *testing.T) {
+	// File exists without trailing newline → synthetic diff includes marker.
+	root := t.TempDir()
+	content := "only-line"
+	os.WriteFile(filepath.Join(root, "test.go"), []byte(content), 0o644)
+	srv := &Server{
+		root: root,
+		gitRunner: func(timeout time.Duration, gitRoot string, args ...string) ([]byte, error) {
+			return []byte(""), nil
+		},
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/worktree/file/diff?id=__main__&path=test.go", nil)
+	w := httptest.NewRecorder()
+	srv.handleWorktreeFileDiff(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, "@@ -0,0 +1,1 @@") {
+		t.Fatalf("expected single-line hunk, got %q", body)
+	}
+	if !strings.Contains(body, "\\ No newline at end of file") {
+		t.Fatalf("missing no-newline marker: %q", body)
+	}
+}
+
+func TestHandleWorktreeFileDiffSyntheticTooLarge(t *testing.T) {
+	// File > 500KB → Stat pre-check skips synthesis, body empty (silent skip).
+	root := t.TempDir()
+	big := make([]byte, 500<<10+1)
+	for i := range big {
+		big[i] = 'x'
+	}
+	os.WriteFile(filepath.Join(root, "big.txt"), big, 0o644)
+	srv := &Server{
+		root: root,
+		gitRunner: func(timeout time.Duration, gitRoot string, args ...string) ([]byte, error) {
+			return []byte(""), nil
+		},
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/worktree/file/diff?id=__main__&path=big.txt", nil)
+	w := httptest.NewRecorder()
+	srv.handleWorktreeFileDiff(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if w.Body.String() != "" {
+		t.Fatalf("expected empty body for file >500KB, got %d bytes", len(w.Body.String()))
+	}
+}
+
+func TestHandleWorktreeFileDiffFileNotFound(t *testing.T) {
+	root := t.TempDir()
+	srv := &Server{
+		root: root,
+		gitRunner: func(timeout time.Duration, gitRoot string, args ...string) ([]byte, error) {
+			return []byte("fatal: ambiguous argument"), errors.New("exit 128")
+		},
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/worktree/file/diff?id=__main__&path=nonexistent.go", nil)
+	w := httptest.NewRecorder()
+	srv.handleWorktreeFileDiff(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d", w.Code)
+	}
+}
+
+func TestHandleWorktreeFileDiffSensitiveFile(t *testing.T) {
+	root := t.TempDir()
+	srv := &Server{
+		root: root,
+		gitRunner: func(timeout time.Duration, gitRoot string, args ...string) ([]byte, error) {
+			return []byte("diff"), nil
+		},
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/worktree/file/diff?id=__main__&path=.env", nil)
+	w := httptest.NewRecorder()
+	srv.handleWorktreeFileDiff(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("sensitive file should return 403, got %d", w.Code)
+	}
+}
+
+func TestHandleWorktreeFileDiffOutputToolarge(t *testing.T) {
+	root := t.TempDir()
+	// Generate output > 500KB
+	big := make([]byte, 500<<10+1)
+	for i := range big {
+		big[i] = 'x'
+	}
+	srv := &Server{
+		root: root,
+		gitRunner: func(timeout time.Duration, gitRoot string, args ...string) ([]byte, error) {
+			return big, nil
+		},
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/worktree/file/diff?id=__main__&path=big.txt", nil)
+	w := httptest.NewRecorder()
+	srv.handleWorktreeFileDiff(w, req)
+
+	if w.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("diff >500KB should return 413, got %d", w.Code)
+	}
+}
+
+func TestHandleWorktreeFileContentPathTraversal(t *testing.T) {
+	root := t.TempDir()
+	srv := &Server{root: root}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/worktree/file/content?id=__main__&path=../../etc/passwd", nil)
+	w := httptest.NewRecorder()
+	srv.handleWorktreeFileContent(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("path traversal should return 403, got %d", w.Code)
+	}
+}
+
+func TestHandleWorktreeFileContentToolarge(t *testing.T) {
+	root := t.TempDir()
+	// Create file > 1MB
+	big := make([]byte, 1<<20+1)
+	for i := range big {
+		big[i] = 'x'
+	}
+	os.WriteFile(filepath.Join(root, "big.txt"), big, 0o644)
+	srv := &Server{root: root}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/worktree/file/content?id=__main__&path=big.txt", nil)
+	w := httptest.NewRecorder()
+	srv.handleWorktreeFileContent(w, req)
+
+	if w.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("file >1MB should return 413, got %d", w.Code)
+	}
+}
+
+func TestIsSensitiveFileSSHKeys(t *testing.T) {
+	tests := []struct {
+		path string
+		want bool
+	}{
+		{path: "id_rsa", want: true},
+		{path: "id_ed25519", want: true},
+		{path: "id_ecdsa", want: true},
+		{path: "id_dsa", want: true},
+		{path: "id_rsa.pub", want: false},
+		{path: "id_ed25519.pub", want: false},
+		{path: "id_ecdsa.pub", want: false},
+		{path: "id_dsa.pub", want: false},
+		{path: "config/private_key.yaml", want: true},
+		{path: "secret/tokens.json", want: true},
+		{path: ".env.production", want: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.path, func(t *testing.T) {
+			if got := isSensitiveFile(tt.path); got != tt.want {
+				t.Errorf("isSensitiveFile(%q) = %v, want %v", tt.path, got, tt.want)
+			}
+		})
 	}
 }
 
