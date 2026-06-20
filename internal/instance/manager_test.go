@@ -1,12 +1,15 @@
 package instance
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/creack/pty"
 	"myworktree/internal/store"
@@ -28,36 +31,271 @@ func TestSanitizedEnv(t *testing.T) {
 	}
 }
 
-func TestLogPathByID(t *testing.T) {
-	st := store.State{
-		Instances: []store.ManagedInstance{
-			{ID: "a1", LogPath: "/tmp/a1.log"},
-		},
+func TestPurgeOrphanLogFiles_RemovesOnlyLogFiles(t *testing.T) {
+	t.Parallel()
+	dataDir := t.TempDir()
+	logDir := filepath.Join(dataDir, "logs")
+	if err := os.MkdirAll(logDir, 0o755); err != nil {
+		t.Fatalf("mkdir logs: %v", err)
 	}
-	if got := logPathByID(st, "a1"); got != "/tmp/a1.log" {
-		t.Fatalf("unexpected log path: %q", got)
+	// Create some orphan .log files plus a non-.log file that must survive.
+	for _, name := range []string{"abc.log", "def.log", "keepme.txt"} {
+		if err := os.WriteFile(filepath.Join(logDir, name), []byte("data"), 0o600); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
 	}
-	if got := logPathByID(st, "missing"); got != "" {
-		t.Fatalf("missing id should return empty path, got %q", got)
+
+	m := &Manager{DataDir: dataDir}
+	n, err := m.PurgeOrphanLogFiles()
+	if err != nil {
+		t.Fatalf("PurgeOrphanLogFiles err: %v", err)
+	}
+	if n != 2 {
+		t.Fatalf("removed %d, want 2", n)
+	}
+	for _, name := range []string{"abc.log", "def.log"} {
+		if _, err := os.Stat(filepath.Join(logDir, name)); !os.IsNotExist(err) {
+			t.Fatalf("expected %s removed, stat err = %v", name, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(logDir, "keepme.txt")); err != nil {
+		t.Fatalf("non-.log file should be preserved: %v", err)
 	}
 }
 
-func TestEnforceMaxLogSize(t *testing.T) {
+func TestPurgeOrphanLogFiles_IdempotentOnMissingDir(t *testing.T) {
 	t.Parallel()
-	p := filepath.Join(t.TempDir(), "instance.log")
-	content := "0123456789abcdefghijklmnopqrstuvwxyz"
-	if err := os.WriteFile(p, []byte(content), 0o600); err != nil {
-		t.Fatalf("write log failed: %v", err)
-	}
-	if err := enforceMaxLogSize(p, 10); err != nil {
-		t.Fatalf("enforceMaxLogSize failed: %v", err)
-	}
-	b, err := os.ReadFile(p)
+	dataDir := t.TempDir()
+	m := &Manager{DataDir: dataDir}
+	n, err := m.PurgeOrphanLogFiles()
 	if err != nil {
-		t.Fatalf("read log failed: %v", err)
+		t.Fatalf("err: %v", err)
 	}
-	if string(b) != content[len(content)-10:] {
-		t.Fatalf("unexpected trimmed log content: %q", string(b))
+	if n != 0 {
+		t.Fatalf("removed %d, want 0", n)
+	}
+}
+
+func TestPurgeOrphanLogFiles_IdempotentSecondCall(t *testing.T) {
+	t.Parallel()
+	dataDir := t.TempDir()
+	logDir := filepath.Join(dataDir, "logs")
+	if err := os.MkdirAll(logDir, 0o755); err != nil {
+		t.Fatalf("mkdir logs: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(logDir, "x.log"), []byte("y"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	m := &Manager{DataDir: dataDir}
+	if n, _ := m.PurgeOrphanLogFiles(); n != 1 {
+		t.Fatalf("first call removed %d, want 1", n)
+	}
+	if n, _ := m.PurgeOrphanLogFiles(); n != 0 {
+		t.Fatalf("second call removed %d, want 0", n)
+	}
+}
+
+func TestTailFromBuffer(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "state.json")
+	fs := store.FileStore{Path: path}
+	if err := fs.Save(store.State{}); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	m := &Manager{Store: fs, buffers: map[string]*atomic.Pointer[RingBuffer]{}}
+	p := &atomic.Pointer[RingBuffer]{}
+	p.Store(NewRingBuffer(1024))
+	m.buffers["id1"] = p
+	p.Load().WriteString("hello world")
+
+	got, err := m.Tail("id1", 5)
+	if err != nil {
+		t.Fatalf("Tail err: %v", err)
+	}
+	if got != "world" {
+		t.Fatalf("Tail = %q, want %q", got, "world")
+	}
+}
+
+func TestTailFromBuffer_MissingReturnsEmpty(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "state.json")
+	fs := store.FileStore{Path: path}
+	if err := fs.Save(store.State{}); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	m := &Manager{Store: fs, buffers: map[string]*atomic.Pointer[RingBuffer]{}}
+	got, err := m.Tail("missing", 100)
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if got != "" {
+		t.Fatalf("got = %q, want empty", got)
+	}
+}
+
+func TestReadSinceFromBuffer(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "state.json")
+	fs := store.FileStore{Path: path}
+	if err := fs.Save(store.State{}); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	m := &Manager{Store: fs, buffers: map[string]*atomic.Pointer[RingBuffer]{}}
+	p := &atomic.Pointer[RingBuffer]{}
+	p.Store(NewRingBuffer(1024))
+	m.buffers["id1"] = p
+	p.Load().WriteString("part1")
+	cursor := p.Load().Offset()
+	p.Load().WriteString("part2")
+
+	body, next, err := m.ReadSince("id1", cursor, 64*1024)
+	if err != nil {
+		t.Fatalf("ReadSince err: %v", err)
+	}
+	if body != "part2" {
+		t.Fatalf("body = %q, want %q", body, "part2")
+	}
+	if next != p.Load().Offset() {
+		t.Fatalf("next = %d, want %d", next, p.Load().Offset())
+	}
+}
+
+func TestDropBufferLocked_DecrementsTotal(t *testing.T) {
+	t.Parallel()
+	m := &Manager{buffers: map[string]*atomic.Pointer[RingBuffer]{}}
+	p := &atomic.Pointer[RingBuffer]{}
+	p.Store(NewRingBuffer(64 << 10)) // 64 KB
+	m.buffers["id1"] = p
+	m.totalBufBytes.Store(int64(64 << 10))
+
+	m.stateMu.Lock()
+	m.dropBufferLocked("id1")
+	m.stateMu.Unlock()
+
+	if _, ok := m.buffers["id1"]; ok {
+		t.Fatalf("buffer should be dropped from map")
+	}
+	if got := m.totalBufBytes.Load(); got != 0 {
+		t.Fatalf("totalBufBytes = %d, want 0", got)
+	}
+	// After drop, atomic load on the (now-removed) pointer must yield nil
+	// for any in-flight pumpLogs goroutine to skip its remaining writes.
+	if rb := p.Load(); rb != nil {
+		t.Fatalf("Swap(nil) should make subsequent Load return nil, got %v", rb)
+	}
+}
+
+func TestDropBufferLocked_MissingIDIsNoop(t *testing.T) {
+	t.Parallel()
+	m := &Manager{buffers: map[string]*atomic.Pointer[RingBuffer]{}}
+	m.totalBufBytes.Store(100)
+	m.stateMu.Lock()
+	m.dropBufferLocked("missing")
+	m.stateMu.Unlock()
+	if got := m.totalBufBytes.Load(); got != 100 {
+		t.Fatalf("totalBufBytes changed to %d, want 100", got)
+	}
+}
+
+func TestLogBufferBudgetErrorUnwrap(t *testing.T) {
+	t.Parallel()
+	e := &LogBufferBudgetError{UsedBytes: 100, LimitBytes: 50, SystemBytes: 1000}
+	if !errors.Is(e, ErrLogBufferBudgetExceeded) {
+		t.Fatalf("errors.Is should match sentinel")
+	}
+	if e.Error() == "" {
+		t.Fatalf("Error() returned empty")
+	}
+}
+
+// countingSampler counts how many times VirtualMemory() was called. Used to
+// verify the 60s cache in Manager.sampledAvailable.
+type countingSampler struct {
+	calls atomic.Int64
+	stat  MemStat
+	err   error
+}
+
+func (s *countingSampler) VirtualMemory() (MemStat, error) {
+	s.calls.Add(1)
+	return s.stat, s.err
+}
+
+func TestSampledAvailable_CachesFor60s(t *testing.T) {
+	t.Parallel()
+	cs := &countingSampler{stat: MemStat{Total: 16 << 30, Available: 8 << 30, Used: 8 << 30}}
+	m := &Manager{memSampler: cs}
+	now := time.Now()
+
+	avail, err := m.sampledAvailable(now)
+	if err != nil {
+		t.Fatalf("first call err: %v", err)
+	}
+	if avail != 8<<30 {
+		t.Fatalf("avail = %d, want %d", avail, int64(8<<30))
+	}
+	if got := cs.calls.Load(); got != 1 {
+		t.Fatalf("sampler calls after first read = %d, want 1", got)
+	}
+
+	// Second call 30s later should hit the cache (TTL is 60s).
+	if _, err := m.sampledAvailable(now.Add(30 * time.Second)); err != nil {
+		t.Fatalf("second call err: %v", err)
+	}
+	if got := cs.calls.Load(); got != 1 {
+		t.Fatalf("sampler calls after 30s read = %d, want 1 (cache miss)", got)
+	}
+
+	// Third call 90s later must re-sample (cache expired).
+	if _, err := m.sampledAvailable(now.Add(90 * time.Second)); err != nil {
+		t.Fatalf("third call err: %v", err)
+	}
+	if got := cs.calls.Load(); got != 2 {
+		t.Fatalf("sampler calls after 90s read = %d, want 2 (cache refresh)", got)
+	}
+}
+
+func TestSampledAvailable_FallsBackToTotalMinusUsed(t *testing.T) {
+	t.Parallel()
+	// Available=0 in the sampler output should fall back to Total - Used.
+	cs := &countingSampler{stat: MemStat{Total: 4 << 30, Available: 0, Used: 1 << 30}}
+	m := &Manager{memSampler: cs}
+	avail, err := m.sampledAvailable(time.Now())
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	want := int64(4<<30) - int64(1<<30)
+	if avail != want {
+		t.Fatalf("avail = %d, want %d", avail, want)
+	}
+}
+
+func TestSampledAvailable_DefaultSamplerWhenNil(t *testing.T) {
+	t.Parallel()
+	// memSampler=nil → gopsutilMem default. We can't predict the host's
+	// Available, but the call must not panic and must populate the cache.
+	m := &Manager{}
+	avail, err := m.sampledAvailable(time.Now())
+	if err != nil {
+		t.Fatalf("default sampler err: %v", err)
+	}
+	if avail < 0 {
+		t.Fatalf("avail = %d, must be >= 0", avail)
+	}
+	m.memSampleMu.Lock()
+	defer m.memSampleMu.Unlock()
+	if m.lastMemSampleAt.IsZero() {
+		t.Fatalf("lastMemSampleAt should be set after first sample")
+	}
+}
+
+func TestSampledAvailable_SamplerErrorPropagates(t *testing.T) {
+	t.Parallel()
+	cs := &countingSampler{err: errors.New("vmstat down")}
+	m := &Manager{memSampler: cs}
+	if _, err := m.sampledAvailable(time.Now()); err == nil {
+		t.Fatalf("expected error from failing sampler")
 	}
 }
 
@@ -185,7 +423,6 @@ func instance(id, worktreeID, status string) store.ManagedInstance {
 		ID:         id,
 		WorktreeID: worktreeID,
 		Status:     status,
-		LogPath:    "/dev/null",
 	}
 }
 

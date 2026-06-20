@@ -27,7 +27,7 @@ func TestFileStoreLoadSaveRoundTrip(t *testing.T) {
 			{ID: "wt1", Name: "feature-auth", Path: "/tmp/wt", Branch: "feature/auth"},
 		},
 		Instances: []ManagedInstance{
-			{ID: "ins1", WorktreeID: "wt1", Status: "running", LogPath: "/tmp/ins1.log"},
+			{ID: "ins1", WorktreeID: "wt1", Status: "running"},
 		},
 	}
 	if err := fs.Save(src); err != nil {
@@ -264,5 +264,39 @@ func TestSaveWithVersionLegacyFile(t *testing.T) {
 	err = fs.SaveWithVersion(State{Instances: []ManagedInstance{{ID: "stale"}}}, 0)
 	if err != ErrVersionConflict {
 		t.Fatalf("expected conflict after legacy migration, got: %v", err)
+	}
+}
+
+// TestFileStore_IgnoresLegacyLogPath verifies that a state.json written by an
+// older binary (which carried a per-instance `log_path` field) still loads
+// cleanly under the new schema. The field is silently dropped by JSON
+// decoding — this is the contract that protects external tools from a
+// breaking schema change.
+func TestFileStore_IgnoresLegacyLogPath(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "state.json")
+	// Hand-crafted JSON containing the legacy "log_path" field on an
+	// instance. Modern ManagedInstance has no LogPath field; JSON decoding
+	// must ignore it without erroring out.
+	legacyJSON := `{"instances":[{"id":"legacy-1","worktree_id":"wt-1","status":"stopped","log_path":"/tmp/legacy-1.log"}],"tab_order":{}}`
+	if err := os.WriteFile(path, []byte(legacyJSON), 0o600); err != nil {
+		t.Fatalf("write legacy file: %v", err)
+	}
+	fs := FileStore{Path: path}
+	st, err := fs.Load()
+	if err != nil {
+		t.Fatalf("Load failed (legacy log_path should be silently ignored): %v", err)
+	}
+	if len(st.Instances) != 1 {
+		t.Fatalf("expected 1 instance, got %d", len(st.Instances))
+	}
+	if st.Instances[0].ID != "legacy-1" {
+		t.Fatalf("instance ID = %q, want %q", st.Instances[0].ID, "legacy-1")
+	}
+	if st.Instances[0].WorktreeID != "wt-1" {
+		t.Fatalf("WorktreeID = %q, want %q", st.Instances[0].WorktreeID, "wt-1")
+	}
+	if st.Instances[0].Status != "stopped" {
+		t.Fatalf("Status = %q, want %q", st.Instances[0].Status, "stopped")
 	}
 }

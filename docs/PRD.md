@@ -72,6 +72,18 @@
   - 双层认证架构（Portal 层 Cookie + CSRF，实例层 loopback 绕过）
 - 浏览器关闭保护：前端在 `beforeunload` 事件时，无论是否存在运行中实例，均触发浏览器原生确认对话框，防止误操作关闭页面。
 - **Main workspace 分支查询**：`GET /api/main` 返回 `{name, branch}`。branch 字段实时查询（`git rev-parse --abbrev-ref HEAD`），在 detached HEAD 场景（如 CI 浅克隆）下返回空字符串而非错误。
+- **已实现：instance PTY 日志内存化（彻底取消磁盘日志）**：
+  - 旧实现：每条 PTY chunk（1024 字节）写入 `logs/<instanceId>.log`，并在文件达到 10MB 后做"读 10MB + 截断 + 写 10MB"，造成约 10 万倍磁盘写放大；OpenCode 等 TUI 高频重绘场景下数据目录写入量可达 280MB+。
+  - 新实现：每个 running instance 拥有一个进程内的 **有界 ring buffer**（`internal/instance/logbuf.go`）。HTTP/SSE/WS 日志回放端点与 MCP `instance_log_tail` 全部从该 buffer 读取，磁盘 I/O 完全消除。
+  - 容量策略（与 bounded-but-adaptive 原则一致：硬上限防 OOM、富裕时适度放大）：
+    - 单实例下限 16 MB、默认 32 MB、上限 256 MB（硬天花板，永不超过）。
+    - 自适应：未配置时 `clamp(available_memory / 16, 16 MB, 256 MB)`；用户可通过 `~/.config/myworktree/auth.json` 的 `log_buffer_bytes` 字段覆盖。
+    - 全局预算：所有 live buffer 容量合计上限为系统 RAM 的 25%。
+  - 当新实例会突破全局预算时，`POST /api/instances` 返回 `503 Service Unavailable` + 结构化 `log_buffer_budget_exceeded` body，UI 弹出专用对话框提示已用/上限字节并给出处置建议。
+  - 守护进程启动时，`Manager.PurgeOrphanLogFiles()` 一次性清理旧版本遗留的 `.log` 文件（幂等）。
+  - **破坏性 schema 变更**：`state.json` 的 `log_path` 字段已移除；旧文件继续可加载（被 JSON 解码静默忽略），外部读取 `state.json` 的工具应去掉对该字段的依赖。
+  - 守护进程重启会清空所有 buffer，与既有的 `ReconcileRunningOnStartup` 语义一致（重启后日志原本就不能回放，运行中实例会被标记为 stopped）。
+  - 详情见 `docs/ARCHITECTURE.md` §4.1、`docs/API.md` *Start* 端点错误段。
 - **规划新增：分支落后检测**：
   - 侧栏每个 worktree 分支名旁显示红色标签（如 `m↑3` / `d↑1`），标识当前分支是否落后于主分支或集成分支 develop。
   - 如果当前 worktree 就是主分支自身，则不显示标记。

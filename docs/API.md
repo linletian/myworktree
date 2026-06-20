@@ -293,8 +293,30 @@ Example (ad-hoc command without tags):
 
 Response (201):
 ```json
-{ "id":"...","pid":123,"status":"running","log_path":"..." }
+{ "id":"...","pid":123,"status":"running","created_at":"..." }
 ```
+
+**Error: log buffer budget exceeded (`503 Service Unavailable`)**
+
+Returned when starting the new instance would push the per-process log-buffer total past the global budget (default: 25% of system RAM — see `docs/ARCHITECTURE.md` §4.1 *Instance log buffer*). The error code `log_buffer_budget_exceeded` is part of the stable API contract; the UI matches on it to surface a dedicated modal.
+
+Headers:
+- `Content-Type: application/json`
+- `Retry-After: 0` (will not auto-resolve; user must close other instances or raise `log_buffer_bytes` in `auth.json`)
+
+Body:
+```json
+{
+  "error": "log_buffer_budget_exceeded",
+  "message": "Insufficient memory to start new instance: used 100.00 MB, limit 64.00 MB.",
+  "used_bytes": 104857600,
+  "limit_bytes": 67108864,
+  "system_bytes": 268435456,
+  "hint": "Close other instances, raise LogBufferBytes in auth.json, or reduce concurrent tabs."
+}
+```
+
+The same shape is returned by the MCP `instance_start` tool when the budget is exceeded.
 
 ### Rename
 `PATCH /api/instances`
@@ -431,13 +453,15 @@ Body:
 { "id": "<instanceId>" }
 ```
 
-Deletes a stopped (non-running) instance record (best-effort deletes the log file).
+Deletes a stopped (non-running) instance record. The instance's in-memory log buffer is also released, decrementing the global log-buffer accounting.
 
 ### Log replay (tail / incremental)
 `GET /api/instances/log?id=<instanceId>[&since=<byteOffset>]`
 
 - Without `since`: returns recent tail as `text/plain`.
 - With `since`: returns incremental content from byte offset and includes response header `X-Log-Offset: <nextByteOffset>`.
+- Logs live in an in-memory ring buffer attached to the **running** instance (see `docs/ARCHITECTURE.md` §4.1 *Instance log buffer*). After the instance stops, exits, or fails — or after the daemon restarts — the buffer is released and this endpoint returns an empty body. Unknown / never-started instance IDs also return empty.
+- The `byteOffset` cursor is the running total of bytes the instance has produced (monotonic; never decreases). When `since` points to data that has already been evicted from the ring (oldest-byte > since), the response silently clamps to the oldest live byte and `X-Log-Offset` advances accordingly.
 
 Response: `text/plain`
 
@@ -449,6 +473,8 @@ Response: `text/plain`
 ```json
 {"chunk":"...","next":12345}
 ```
+- Same in-memory backing as the tail endpoint above. The cursor `next` is the same monotonic byte counter; clients should echo it as `since` on the next request to receive only new chunks.
+- Polling cadence: 1 s. When no new data is available, the server emits an SSE comment line (`: ping`) as a keep-alive — no `log` event, no cursor update. Clients should treat the absence of a `log` event as "no progress" and keep using the last `next` they saw.
 
 ### Instance resource stats
 `GET /api/instances/stats`
@@ -470,6 +496,8 @@ Response:
       "status": "running",
       "cpu_percent": 3.5,
       "memory_rss_bytes": 52428800,
+      "memory_buffer_bytes": 5242880,
+      "memory_buffer_cap_bytes": 33554432,
       "connection_type": "websocket"
     }
   ],
@@ -485,7 +513,9 @@ Response:
   "global": {
     "total_cpu": 8.7,
     "total_memory": 209715200,
-    "instance_count": 3
+    "instance_count": 3,
+    "daemon_cpu_percent": 1.2,
+    "daemon_memory_bytes": 67108864
   }
 }
 ```
@@ -493,8 +523,11 @@ Response:
 Fields:
 - `cpu_percent`: CPU utilization as a percentage of a single core. 0% on the first measurement (no prior baseline).
 - `memory_rss_bytes`: Resident Set Size — actual physical memory used by the process.
+- `memory_buffer_bytes`: Actual bytes currently held in the instance's in-memory ring buffer (0 if the instance is stopped or has no buffer).
+- `memory_buffer_cap_bytes`: Pre-allocated capacity of the instance's in-memory ring buffer (0 if the instance is stopped or has no buffer). When both `memory_buffer_bytes` and `memory_buffer_cap_bytes` are non-zero, the buffer is active with `used / cap` semantics.
 - `connection_type`: `"websocket"` if the instance has an active WebSocket TTY connection, `"sse"` if using the SSE fallback, `"none"` otherwise.
-- Worktree subtotals and global totals aggregate only `running` instances.
+- Worktree subtotals aggregate only `running` instances (instance RSS only, not buffer memory).
+- Global totals include both all running instances and the daemon process itself (`daemon_cpu_percent`, `daemon_memory_bytes`).
 
 ### 5.9 Instance lifecycle (frontend)
 
