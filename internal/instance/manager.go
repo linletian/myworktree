@@ -971,6 +971,38 @@ func (m *Manager) dropBufferLocked(id string) {
 	delete(m.buffers, id)
 }
 
+// BufferCapBytesFor returns the ring buffer capacity in bytes for a given
+// instance, or 0 if the instance has no active buffer.
+func (m *Manager) BufferCapBytesFor(id string) int64 {
+	m.stateMu.Lock()
+	defer m.stateMu.Unlock()
+	p, ok := m.buffers[id]
+	if !ok || p == nil {
+		return 0
+	}
+	rb := p.Load()
+	if rb == nil {
+		return 0
+	}
+	return rb.CapBytes()
+}
+
+// BufferUsedBytesFor returns the ring buffer actual usage in bytes for a
+// given instance, or 0 if the instance has no active buffer.
+func (m *Manager) BufferUsedBytesFor(id string) int64 {
+	m.stateMu.Lock()
+	defer m.stateMu.Unlock()
+	p, ok := m.buffers[id]
+	if !ok || p == nil {
+		return 0
+	}
+	rb := p.Load()
+	if rb == nil {
+		return 0
+	}
+	return rb.BytesUsed()
+}
+
 func sanitizedEnv(in map[string]string) map[string]string {
 	if len(in) == 0 {
 		return nil

@@ -1572,12 +1572,14 @@ func (s *Server) handleInstanceStats(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		flat = append(flat, monitor.InputInstance{
-			ID:           inst.ID,
-			Name:         inst.Name,
-			WorktreeID:   inst.WorktreeID,
-			WorktreeName: inst.WorktreeName,
-			PID:          inst.PID,
-			Status:       inst.Status,
+			ID:              inst.ID,
+			Name:            inst.Name,
+			WorktreeID:      inst.WorktreeID,
+			WorktreeName:    inst.WorktreeName,
+			PID:             inst.PID,
+			Status:          inst.Status,
+			BufferCapBytes:  s.instanceMgr.BufferCapBytesFor(inst.ID),
+			BufferUsedBytes: s.instanceMgr.BufferUsedBytesFor(inst.ID),
 		})
 	}
 

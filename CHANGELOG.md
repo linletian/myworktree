@@ -15,6 +15,8 @@ Disk write amplification fix for long-running PTY-heavy sessions.
 - **Startup cleanup** — `Manager.PurgeOrphanLogFiles` removes dead `.log` files left behind by the old code path on the first start of the new binary.
 - **Budget-exceeded UX** — when a new instance would push the global buffer budget past 25% of system RAM, the HTTP/MCP API returns `503 Service Unavailable` with a structured `log_buffer_budget_exceeded` body. The dashboard surfaces this as a modal with used/limit numbers and a hint to close other tabs.
 - **Hot-path redesign for heavy TUI workloads** — `pumpLogs` no longer acquires `stateMu` per 1024-byte PTY chunk; the ring buffer pointer is pre-fetched once and the per-chunk lookup is a single `atomic.Pointer.Load`. The ring buffer's backing slice is allocated eagerly so the first Write never blocks on a 32 MB malloc. A new `WriteString` path avoids the `[]byte(chunk)` conversion that would otherwise happen on every chunk.
+- **Daemon resource monitoring** — the resource stats API (`GET /api/instances/stats`) now includes the mw daemon process itself in global totals (`daemon_cpu_percent`, `daemon_memory_bytes`). The UI displays a dedicated "mw daemon" row so users can distinguish daemon overhead from instance resource usage.
+- **Ring buffer usage reporting** — per-instance stats now expose `memory_buffer_bytes` (actual usage) and `memory_buffer_cap_bytes` (pre-allocated capacity). The UI memory column shows the combined `RSS + buffer_used` with a `buf used/cap` annotation for active buffers, giving users visibility into per-instance buffer memory cost.
 
 ## v0.3.0
 

@@ -19,9 +19,11 @@ type InstanceStat struct {
 	WorktreeName   string  `json:"worktree_name"`
 	PID            int     `json:"pid"`
 	Status         string  `json:"status"`
-	CPUPercent     float64 `json:"cpu_percent"`
-	MemoryRSSBytes uint64  `json:"memory_rss_bytes"`
-	ConnectionType string  `json:"connection_type"`
+	CPUPercent            float64 `json:"cpu_percent"`
+	MemoryRSSBytes        uint64  `json:"memory_rss_bytes"`
+	MemoryBufferBytes     int64   `json:"memory_buffer_bytes"`
+	MemoryBufferCapBytes  int64   `json:"memory_buffer_cap_bytes"`
+	ConnectionType        string  `json:"connection_type"`
 }
 
 // WorktreeStat aggregates resource usage for instances within a single worktree.
@@ -35,9 +37,11 @@ type WorktreeStat struct {
 
 // GlobalStat aggregates resource usage across all worktrees.
 type GlobalStat struct {
-	TotalCPU      float64 `json:"total_cpu"`
-	TotalMemory   uint64  `json:"total_memory"`
-	InstanceCount int     `json:"instance_count"`
+	TotalCPU          float64 `json:"total_cpu"`
+	TotalMemory       uint64  `json:"total_memory"`
+	InstanceCount     int     `json:"instance_count"`
+	DaemonCPUPercent  float64 `json:"daemon_cpu_percent"`
+	DaemonMemoryBytes uint64  `json:"daemon_memory_bytes"`
 }
 
 // cpuSnapshot stores per-PID CPU timing for delta-based CPU% calculation.
@@ -49,10 +53,12 @@ type cpuSnapshot struct {
 
 // InputInstance is the minimal instance info needed for resource collection.
 type InputInstance struct {
-	ID           string
-	Name         string
-	WorktreeID   string
-	WorktreeName string
-	PID          int
-	Status       string
+	ID              string
+	Name            string
+	WorktreeID      string
+	WorktreeName    string
+	PID             int
+	Status          string
+	BufferCapBytes  int64
+	BufferUsedBytes int64
 }

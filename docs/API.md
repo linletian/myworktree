@@ -496,6 +496,8 @@ Response:
       "status": "running",
       "cpu_percent": 3.5,
       "memory_rss_bytes": 52428800,
+      "memory_buffer_bytes": 5242880,
+      "memory_buffer_cap_bytes": 33554432,
       "connection_type": "websocket"
     }
   ],
@@ -511,7 +513,9 @@ Response:
   "global": {
     "total_cpu": 8.7,
     "total_memory": 209715200,
-    "instance_count": 3
+    "instance_count": 3,
+    "daemon_cpu_percent": 1.2,
+    "daemon_memory_bytes": 67108864
   }
 }
 ```
@@ -519,8 +523,11 @@ Response:
 Fields:
 - `cpu_percent`: CPU utilization as a percentage of a single core. 0% on the first measurement (no prior baseline).
 - `memory_rss_bytes`: Resident Set Size — actual physical memory used by the process.
+- `memory_buffer_bytes`: Actual bytes currently held in the instance's in-memory ring buffer (0 if the instance is stopped or has no buffer).
+- `memory_buffer_cap_bytes`: Pre-allocated capacity of the instance's in-memory ring buffer (0 if the instance is stopped or has no buffer). When both `memory_buffer_bytes` and `memory_buffer_cap_bytes` are non-zero, the buffer is active with `used / cap` semantics.
 - `connection_type`: `"websocket"` if the instance has an active WebSocket TTY connection, `"sse"` if using the SSE fallback, `"none"` otherwise.
-- Worktree subtotals and global totals aggregate only `running` instances.
+- Worktree subtotals aggregate only `running` instances (instance RSS only, not buffer memory).
+- Global totals include both all running instances and the daemon process itself (`daemon_cpu_percent`, `daemon_memory_bytes`).
 
 ### 5.9 Instance lifecycle (frontend)
 

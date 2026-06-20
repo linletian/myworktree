@@ -3341,11 +3341,17 @@
                         <td>${escapeHTML(inst.status)}</td>
                         <td class="${connClass}">${escapeHTML(connLabel)}</td>
                         <td style="text-align:right">${inst.cpu_percent.toFixed(1)}%</td>
-                        <td style="text-align:right">${formatBytes(inst.memory_rss_bytes)}</td>
+                        <td style="text-align:right">${formatBytes((inst.memory_rss_bytes || 0) + (inst.memory_buffer_bytes || 0))}<span style="font-size:11px;color:var(--text-secondary)">${buildBufferNote(inst)}</span></td>
                     </tr>`;
                 }
             }
+            if (data.global) {
+                html += '<tr class="daemon-row" style="background:var(--surface-secondary)"><td colspan="4">mw daemon</td><td style="text-align:right">' + (data.global.daemon_cpu_percent || 0).toFixed(1) + '%</td><td style="text-align:right">' + formatBytes(data.global.daemon_memory_bytes || 0) + '</td></tr>';
+            }
             tbody.innerHTML = html;
+            const discRow = document.createElement('tr');
+            discRow.innerHTML = '<td colspan="6" style="font-size:12px;color:var(--text-secondary);padding-top:8px;border-top:1px solid var(--border);text-align:center;">实例里运行的孙进程程序不做统计</td>';
+            tbody.appendChild(discRow);
         }
 
         function formatBytes(bytes) {
@@ -3354,6 +3360,13 @@
             if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + " KB";
             if (bytes < 1024 * 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + " MB";
             return (bytes / (1024 * 1024 * 1024)).toFixed(2) + " GB";
+        }
+
+        function buildBufferNote(inst) {
+            const used = inst.memory_buffer_bytes || 0;
+            const cap = inst.memory_buffer_cap_bytes || 0;
+            if (cap <= 0) return "";
+            return " &nbsp;buf " + formatBytes(used) + "/" + formatBytes(cap);
         }
 
         function escapeHTML(s) {
