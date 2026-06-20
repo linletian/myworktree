@@ -530,6 +530,9 @@ func (s *Server) registerAPIs(mux *http.ServeMux) {
 	mux.HandleFunc("/api/worktrees/import", s.handleWorktreeImport)
 	mux.HandleFunc("/api/worktrees/delete", s.handleWorktreeDelete)
 	mux.HandleFunc("/api/worktree/status", s.handleWorktreeStatus)
+
+	mux.HandleFunc("/api/worktree/file/diff", s.handleWorktreeFileDiff)
+	mux.HandleFunc("/api/worktree/file/content", s.handleWorktreeFileContent)
 	mux.HandleFunc("/api/instances", s.handleInstances)
 	mux.HandleFunc("/api/instances/reorder", s.handleInstanceReorder)
 	mux.HandleFunc("/api/instances/stop", s.handleInstanceStop)
@@ -852,6 +855,23 @@ func (s *Server) handleWorktreeDelete(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
+// resolveWorktreePath returns the filesystem path for a worktree id.
+func (s *Server) resolveWorktreePath(id string) (string, error) {
+	if id == instance.MainWorktreeID {
+		return s.root, nil
+	}
+	worktrees, err := s.worktreeMgr.List()
+	if err != nil {
+		return "", err
+	}
+	for _, wt := range worktrees {
+		if wt.ID == id {
+			return wt.Path, nil
+		}
+	}
+	return "", fmt.Errorf("unknown worktree id: %s", id)
+}
+
 func (s *Server) handleWorktreeStatus(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -862,28 +882,10 @@ func (s *Server) handleWorktreeStatus(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, errors.New("id is required"))
 		return
 	}
-
-	var gitRoot string
-	if id == instance.MainWorktreeID {
-		gitRoot = s.root
-	} else {
-		worktrees, err := s.worktreeMgr.List()
-		if err != nil {
-			writeErr(w, http.StatusInternalServerError, err)
-			return
-		}
-		found := false
-		for _, wt := range worktrees {
-			if wt.ID == id {
-				gitRoot = wt.Path
-				found = true
-				break
-			}
-		}
-		if !found {
-			writeErr(w, http.StatusBadRequest, fmt.Errorf("unknown worktree id: %s", id))
-			return
-		}
+	gitRoot, err := s.resolveWorktreePath(id)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
 	}
 
 	type diffResult struct {
@@ -995,6 +997,109 @@ func (s *Server) handleWorktreeStatus(w http.ResponseWriter, r *http.Request) {
 		resp["unstaged"].(map[string]any)["warning"] = untracked.errMsg
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// handleWorktreeFileDiff returns the full git diff for a single file.
+func (s *Server) handleWorktreeFileDiff(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	id := strings.TrimSpace(r.URL.Query().Get("id"))
+	filePath := strings.TrimSpace(r.URL.Query().Get("path"))
+	if id == "" || filePath == "" {
+		writeErr(w, http.StatusBadRequest, errors.New("id and path are required"))
+		return
+	}
+	staged := strings.TrimSpace(r.URL.Query().Get("staged")) == "true"
+
+	gitRoot, err := s.resolveWorktreePath(id)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	if !isPathWithin(gitRoot, filePath) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	if isSensitiveFile(filePath) {
+		http.Error(w, "this file type is not supported for preview", http.StatusForbidden)
+		return
+	}
+
+	args := []string{"diff"}
+	if staged {
+		args = append(args, "--cached")
+	}
+	args = append(args, "--", filePath)
+	out, err := s.gitRunner(2*time.Second, gitRoot, args...)
+	if err != nil {
+		msg := strings.TrimSpace(string(out))
+		if msg == "" {
+			msg = err.Error()
+		}
+		http.Error(w, msg, http.StatusInternalServerError)
+		return
+	}
+	if len(out) > 500<<10 { // 500KB limit
+		http.Error(w, "diff output too large", http.StatusRequestEntityTooLarge)
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Write(out)
+}
+
+// handleWorktreeFileContent returns the raw content of a single file in a worktree.
+func (s *Server) handleWorktreeFileContent(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	id := strings.TrimSpace(r.URL.Query().Get("id"))
+	filePath := strings.TrimSpace(r.URL.Query().Get("path"))
+	if id == "" || filePath == "" {
+		writeErr(w, http.StatusBadRequest, errors.New("id and path are required"))
+		return
+	}
+
+	gitRoot, err := s.resolveWorktreePath(id)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	if !isPathWithin(gitRoot, filePath) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	if isSensitiveFile(filePath) {
+		http.Error(w, "this file type is not supported for preview", http.StatusForbidden)
+		return
+	}
+
+	fullPath := filepath.Join(gitRoot, filePath)
+	info, err := os.Stat(fullPath)
+	if err != nil {
+		http.Error(w, "file not found", http.StatusNotFound)
+		return
+	}
+	if info.Size() > 1<<20 {
+		http.Error(w, "file too large", http.StatusRequestEntityTooLarge)
+		return
+	}
+	data, err := os.ReadFile(fullPath)
+	if err != nil {
+		http.Error(w, "failed to read file", http.StatusInternalServerError)
+		return
+	}
+	if isBinaryData(data) {
+		http.Error(w, "binary file not supported", http.StatusUnsupportedMediaType)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("X-File-Type", detectFileType(filePath))
+	w.Header().Set("X-File-FullPath", fullPath)
+	w.Write(data)
 }
 
 func (s *Server) handleWorktreesDiverged(w http.ResponseWriter, r *http.Request) {
@@ -2183,6 +2288,67 @@ func isBinaryData(data []byte) bool {
 		}
 	}
 	return false
+}
+
+// isPathWithin returns true if filePath resolves inside worktreeRoot,
+// preventing path-traversal attacks.
+func isPathWithin(worktreeRoot, filePath string) bool {
+	absRoot, err := filepath.Abs(worktreeRoot)
+	if err != nil {
+		return false
+	}
+	absPath, err := filepath.Abs(filepath.Join(worktreeRoot, filePath))
+	if err != nil {
+		return false
+	}
+	sep := string(filepath.Separator)
+	return strings.HasPrefix(absPath, absRoot+sep) || absPath == absRoot
+}
+
+// isSensitiveFile returns true if the file should not be previewed
+// because it likely contains secrets or credentials.
+func isSensitiveFile(path string) bool {
+	name := strings.ToLower(filepath.Base(path))
+	ext := strings.ToLower(filepath.Ext(name))
+	// Sensitive extensions
+	switch ext {
+	case ".env", ".pem", ".key", ".pfx", ".p12":
+		return true
+	}
+	// SSH private key filenames
+	switch name {
+	case "id_rsa", "id_ed25519", "id_ecdsa", "id_dsa",
+		"id_rsa.pub", "id_ed25519.pub", "id_ecdsa.pub", "id_dsa.pub":
+		// Allow .pub (public keys are safe), reject private key variants
+		return !strings.HasSuffix(name, ".pub")
+	}
+	// .env and .env.* variants
+	if name == ".env" || strings.HasPrefix(name, ".env.") {
+		return true
+	}
+	// Sensitive keywords in path
+	lower := strings.ToLower(path)
+	for _, kw := range []string{"secret", "token", "credential", "password", "private"} {
+		if strings.Contains(lower, kw) {
+			return true
+		}
+	}
+	return false
+}
+
+// detectFileType returns a hint about the file type based on its extension.
+func detectFileType(path string) string {
+	ext := strings.ToLower(filepath.Ext(path))
+	switch ext {
+	case ".md", ".markdown":
+		return "text/markdown"
+	case ".go", ".js", ".ts", ".tsx", ".jsx", ".py", ".rs", ".java", ".c", ".cpp", ".h", ".hpp",
+		".html", ".css", ".scss", ".less", ".sass", ".json", ".yaml", ".yml", ".toml", ".sh", ".bash", ".zsh",
+		".vue", ".svelte", ".xml", ".svg", ".sql", ".dockerfile":
+		return "text/x-code"
+	default:
+		return "text/plain"
+	}
 }
 
 // parseGitDiffNumStat parses the output of "git diff --numstat HEAD" and
