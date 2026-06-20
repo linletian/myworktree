@@ -13,17 +13,17 @@ type Stats struct {
 
 // InstanceStat describes the resource usage and connection status of a single instance.
 type InstanceStat struct {
-	ID             string  `json:"id"`
-	Name           string  `json:"name"`
-	WorktreeID     string  `json:"worktree_id"`
-	WorktreeName   string  `json:"worktree_name"`
-	PID            int     `json:"pid"`
-	Status         string  `json:"status"`
-	CPUPercent            float64 `json:"cpu_percent"`
-	MemoryRSSBytes        uint64  `json:"memory_rss_bytes"`
-	MemoryBufferBytes     int64   `json:"memory_buffer_bytes"`
-	MemoryBufferCapBytes  int64   `json:"memory_buffer_cap_bytes"`
-	ConnectionType        string  `json:"connection_type"`
+	ID                   string  `json:"id"`
+	Name                 string  `json:"name"`
+	WorktreeID           string  `json:"worktree_id"`
+	WorktreeName         string  `json:"worktree_name"`
+	PID                  int     `json:"pid"`
+	Status               string  `json:"status"`
+	CPUPercent           float64 `json:"cpu_percent"`
+	MemoryRSSBytes       uint64  `json:"memory_rss_bytes"`
+	MemoryBufferBytes    int64   `json:"memory_buffer_bytes"`
+	MemoryBufferCapBytes int64   `json:"memory_buffer_cap_bytes"`
+	ConnectionType       string  `json:"connection_type"`
 }
 
 // WorktreeStat aggregates resource usage for instances within a single worktree.
