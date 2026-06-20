@@ -8,3 +8,5 @@ myworktree_netgo
 .archive/
 /AGENTS.md
 /CLAUDE.md
+.omo/
+.codewhale/

@@ -1,6 +1,7 @@
 package monitor
 
 import (
+	"os"
 	"sync"
 	"time"
 
@@ -17,15 +18,110 @@ type Collector struct {
 // a fully aggregated Stats response. instances is the list of all instances
 // (both running and stopped). connTypes maps instance ID to its current
 // transport ("websocket", "sse", or "").
+type procSample struct {
+	user, system float64
+	hasTimes     bool
+	rss          uint64
+}
+
+func sampleProcess(pid int32) procSample {
+	var s procSample
+	p, err := process.NewProcess(pid)
+	if err != nil {
+		return s
+	}
+	if times, err := p.Times(); err == nil {
+		s.user = times.User
+		s.system = times.System
+		s.hasTimes = true
+	}
+	if mem, err := p.MemoryInfo(); err == nil {
+		s.rss = mem.RSS
+	}
+	return s
+}
+
+func cpuDelta(prev cpuSnapshot, sample procSample, now time.Time) float64 {
+	if !sample.hasTimes {
+		return 0
+	}
+	elapsed := now.Sub(prev.Times).Seconds()
+	if elapsed <= 0 {
+		return 0
+	}
+	deltaUser := sample.user - prev.User
+	deltaSystem := sample.system - prev.System
+	cpu := (deltaUser + deltaSystem) / elapsed * 100
+	if cpu < 0 {
+		return 0
+	}
+	return cpu
+}
+
 func (c *Collector) Collect(instances []InputInstance, connTypes map[string]string) Stats {
 	now := time.Now()
 
+	// Phase 1: collect all process data outside the lock (system calls).
+	daemonPID := os.Getpid()
+	daemonSample := sampleProcess(int32(daemonPID))
+
+	instanceSamples := make(map[int]procSample, len(instances))
+	for _, inst := range instances {
+		if inst.Status != "running" || inst.PID <= 0 {
+			continue
+		}
+		instanceSamples[inst.PID] = sampleProcess(int32(inst.PID))
+	}
+
+	// Phase 2: compute CPU% and update snapshots under the lock.
 	c.mu.Lock()
 	if c.snapshots == nil {
 		c.snapshots = make(map[int]cpuSnapshot)
 	}
-	defer c.mu.Unlock()
 
+	daemonCPU := 0.0
+	if daemonSample.hasTimes {
+		if prev, ok := c.snapshots[daemonPID]; ok {
+			daemonCPU = cpuDelta(prev, daemonSample, now)
+		}
+		c.snapshots[daemonPID] = cpuSnapshot{
+			Times:  now,
+			User:   daemonSample.user,
+			System: daemonSample.system,
+		}
+	}
+
+	instanceCPUs := make(map[int]float64, len(instanceSamples))
+	for pid, sample := range instanceSamples {
+		cpuPct := 0.0
+		if sample.hasTimes {
+			if prev, ok := c.snapshots[pid]; ok {
+				cpuPct = cpuDelta(prev, sample, now)
+			}
+			c.snapshots[pid] = cpuSnapshot{
+				Times:  now,
+				User:   sample.user,
+				System: sample.system,
+			}
+		}
+		instanceCPUs[pid] = cpuPct
+	}
+
+	livePIDs := make(map[int]struct{}, len(instances)+1)
+	livePIDs[daemonPID] = struct{}{}
+	for _, inst := range instances {
+		if inst.Status == "running" && inst.PID > 0 {
+			livePIDs[inst.PID] = struct{}{}
+		}
+	}
+	for pid := range c.snapshots {
+		if _, ok := livePIDs[pid]; !ok {
+			delete(c.snapshots, pid)
+		}
+	}
+	c.mu.Unlock()
+
+	// Phase 3: build result outside the lock (no more snapshot access).
 	var instancesOut []InstanceStat
 	worktreeMap := make(map[string]*WorktreeStat)
 	var globalTotalCPU float64
@@ -40,34 +136,11 @@ func (c *Collector) Collect(instances []InputInstance, connTypes map[string]stri
 
 		cpuPercent := 0.0
 		memRSS := uint64(0)
-
 		if inst.Status == "running" && inst.PID > 0 {
-			p, err := process.NewProcess(int32(inst.PID))
-			if err == nil {
-				times, err := p.Times()
-				if err == nil {
-					prev, ok := c.snapshots[inst.PID]
-					if ok {
-						elapsed := now.Sub(prev.Times).Seconds()
-						if elapsed > 0 {
-							deltaUser := times.User - prev.User
-							deltaSystem := times.System - prev.System
-							cpuPercent = (deltaUser + deltaSystem) / elapsed * 100
-							if cpuPercent < 0 {
-								cpuPercent = 0
-							}
-						}
-					}
-					c.snapshots[inst.PID] = cpuSnapshot{
-						Times:  now,
-						User:   times.User,
-						System: times.System,
-					}
-				}
-
-				mem, err := p.MemoryInfo()
-				if err == nil {
-					memRSS = mem.RSS
+			if sample, ok := instanceSamples[inst.PID]; ok {
+				memRSS = sample.rss
+				if cp, ok := instanceCPUs[inst.PID]; ok {
+					cpuPercent = cp
 				}
 			}
 		}
@@ -79,15 +152,17 @@ func (c *Collector) Collect(instances []InputInstance, connTypes map[string]stri
 		}
 
 		instancesOut = append(instancesOut, InstanceStat{
-			ID:             inst.ID,
-			Name:           inst.Name,
-			WorktreeID:     inst.WorktreeID,
-			WorktreeName:   inst.WorktreeName,
-			PID:            inst.PID,
-			Status:         inst.Status,
-			CPUPercent:     cpuPercent,
-			MemoryRSSBytes: memRSS,
-			ConnectionType: connType,
+			ID:                   inst.ID,
+			Name:                 inst.Name,
+			WorktreeID:           inst.WorktreeID,
+			WorktreeName:         inst.WorktreeName,
+			PID:                  inst.PID,
+			Status:               inst.Status,
+			CPUPercent:           cpuPercent,
+			MemoryRSSBytes:       memRSS,
+			MemoryBufferBytes:    inst.BufferUsedBytes,
+			MemoryBufferCapBytes: inst.BufferCapBytes,
+			ConnectionType:       connType,
 		})
 
 		if inst.Status == "running" {
@@ -111,26 +186,15 @@ func (c *Collector) Collect(instances []InputInstance, connTypes map[string]stri
 		worktreesOut = append(worktreesOut, *ws)
 	}
 
-	// Prune stale snapshots: keep only PIDs that are currently running.
-	livePIDs := make(map[int]struct{}, len(instances))
-	for _, inst := range instances {
-		if inst.Status == "running" && inst.PID > 0 {
-			livePIDs[inst.PID] = struct{}{}
-		}
-	}
-	for pid := range c.snapshots {
-		if _, ok := livePIDs[pid]; !ok {
-			delete(c.snapshots, pid)
-		}
-	}
-
 	return Stats{
 		Instances: instancesOut,
 		Worktrees: worktreesOut,
 		Global: GlobalStat{
-			TotalCPU:      globalTotalCPU,
-			TotalMemory:   globalTotalMem,
-			InstanceCount: globalCount,
+			TotalCPU:          globalTotalCPU + daemonCPU,
+			TotalMemory:       globalTotalMem + daemonSample.rss,
+			InstanceCount:     globalCount,
+			DaemonCPUPercent:  daemonCPU,
+			DaemonMemoryBytes: daemonSample.rss,
 		},
 	}
 }

@@ -196,6 +196,98 @@ Partial failure example (staged succeeded, unstaged failed):
 ```
 - Returns HTTP 400 if `id` is missing or unknown.
 
+### Get single file diff
+`GET /api/worktree/file/diff?id=<worktreeId>&path=<filePath>&staged=true|false`
+
+Returns the unified diff (`git diff [--cached] -- <path>`) for a single file in a worktree.
+
+- `id`: worktree ID (`"__main__"` for the main repo) or a managed worktree ID.
+- `path`: file path relative to the worktree root.
+- `staged`: optional, defaults to `false`. Set to `true` for staged (index) diff.
+- Uses a 2-second timeout.
+- Returns plain text (`Content-Type: text/plain; charset=utf-8`).
+- Returns HTTP 400 if `id` or `path` is missing.
+- Returns HTTP 403 if the path escapes the worktree root or targets a sensitive file.
+- Returns HTTP 413 if the diff output exceeds 500 KB.
+- Returns HTTP 500 on git failure.
+
+**Synthetic diff for untracked files**: when a file is untracked (not in git's index), `git diff` produces no output. In this case the endpoint synthesizes a standard unified diff header with the full file content as an all-addition hunk, mimicking `git diff /dev/null <path>`. The synthetic diff includes `\ No newline at end of file` when the source file lacks a trailing newline, matching native git behaviour.
+Clients that parse this output should be prepared for both real and synthetic diffs.
+
+### Get single file content
+`GET /api/worktree/file/content?id=<worktreeId>&path=<filePath>`
+
+Returns the raw content of a single file in a worktree.
+
+- `id`: worktree ID (`"__main__"` for the main repo) or a managed worktree ID.
+- `path`: file path relative to the worktree root.
+- Returns plain text (`Content-Type: text/plain; charset=utf-8`).
+- Response headers:
+  - `X-File-Type`: hint — `text/markdown`, `text/x-code`, or `text/plain`.
+  - `X-File-FullPath`: absolute filesystem path of the requested file.
+- 1 MB file size limit.
+- Returns HTTP 400 if `id` or `path` is missing.
+- Returns HTTP 403 if the path escapes the worktree root or targets a sensitive file.
+- Returns HTTP 404 if the file does not exist.
+- Returns HTTP 413 if the file exceeds 1 MB.
+- Returns HTTP 415 if the file is binary (detected via null bytes).
+
+### Get all worktrees divergence
+`GET /api/worktrees/diverged`
+
+Returns divergence information for all worktrees: whether each worktree branch is behind the main branch or develop branch.
+
+- Called on page load and every 60 seconds.
+- For each worktree whose branch is the main branch itself, returns an empty object `{}` (no divergence check needed).
+- For each worktree whose branch is develop, checks only main.
+- For all other worktrees, checks both main and develop (if develop exists locally).
+- Uses the local vs remote effective head that is more ahead (`git rev-list --left-right --count`).
+- If the worktree's current branch cannot be determined (e.g., detached HEAD), the worktree entry contains only an `error` field.
+
+Response:
+```json
+{
+  "items": {
+    "wt_abc123": {
+       "mainBranch":    {"diverged": true,  "ahead": 3},
+       "develop": {"diverged": false}
+     },
+     "wt_def456": {
+       "mainBranch":    {"diverged": true,  "ahead": 1},
+      "develop": {"diverged": true,  "ahead": 2}
+    },
+    "wt_detached": {
+       "mainBranch": {"error": "cannot determine branch: git HEAD is detached or malformed"}
+    },
+    "__main__": {}
+  }
+}
+```
+
+- `diverged`: `true` means the upstream branch has commits not yet contained in the worktree branch HEAD.
+- `ahead`: number of commits the upstream effective head is ahead of the worktree HEAD. Only present when `diverged` is `true`.
+- `error`: optional string describing why the check failed (e.g., git command timeout). When present, `diverged` is `false` and `ahead` is absent.
+- `mainBranch` / `develop`: each key may be absent if the check is not applicable (e.g., develop does not exist locally).
+
+### Get single worktree divergence
+`GET /api/worktree/diverged?id=<worktreeId>`
+
+Returns divergence information for a single worktree. Same response structure as above, but only contains the requested worktree entry.
+
+- Called immediately when the user selects a worktree in the sidebar to refresh divergence labels.
+- `id` can be a managed worktree ID, or `"__main__"` for the main repo.
+
+Response:
+```json
+{
+  "items": {
+    "wt_abc123": {
+       "mainBranch":    {"diverged": true,  "ahead": 3}
+    }
+  }
+}
+```
+
 ## 3) Branches
 ### List (default + top 10)
 `GET /api/branches`
@@ -247,8 +339,30 @@ Example (ad-hoc command without tags):
 
 Response (201):
 ```json
-{ "id":"...","pid":123,"status":"running","log_path":"..." }
+{ "id":"...","pid":123,"status":"running","created_at":"..." }
 ```
+
+**Error: log buffer budget exceeded (`503 Service Unavailable`)**
+
+Returned when starting the new instance would push the per-process log-buffer total past the global budget (default: 25% of system RAM — see `docs/ARCHITECTURE.md` §4.1 *Instance log buffer*). The error code `log_buffer_budget_exceeded` is part of the stable API contract; the UI matches on it to surface a dedicated modal.
+
+Headers:
+- `Content-Type: application/json`
+- `Retry-After: 0` (will not auto-resolve; user must close other instances or raise `log_buffer_bytes` in `auth.json`)
+
+Body:
+```json
+{
+  "error": "log_buffer_budget_exceeded",
+  "message": "Insufficient memory to start new instance: used 100.00 MB, limit 64.00 MB.",
+  "used_bytes": 104857600,
+  "limit_bytes": 67108864,
+  "system_bytes": 268435456,
+  "hint": "Close other instances, raise LogBufferBytes in auth.json, or reduce concurrent tabs."
+}
+```
+
+The same shape is returned by the MCP `instance_start` tool when the budget is exceeded.
 
 ### Rename
 `PATCH /api/instances`
@@ -385,13 +499,15 @@ Body:
 { "id": "<instanceId>" }
 ```
 
-Deletes a stopped (non-running) instance record (best-effort deletes the log file).
+Deletes a stopped (non-running) instance record. The instance's in-memory log buffer is also released, decrementing the global log-buffer accounting.
 
 ### Log replay (tail / incremental)
 `GET /api/instances/log?id=<instanceId>[&since=<byteOffset>]`
 
 - Without `since`: returns recent tail as `text/plain`.
 - With `since`: returns incremental content from byte offset and includes response header `X-Log-Offset: <nextByteOffset>`.
+- Logs live in an in-memory ring buffer attached to the **running** instance (see `docs/ARCHITECTURE.md` §4.1 *Instance log buffer*). After the instance stops, exits, or fails — or after the daemon restarts — the buffer is released and this endpoint returns an empty body. Unknown / never-started instance IDs also return empty.
+- The `byteOffset` cursor is the running total of bytes the instance has produced (monotonic; never decreases). When `since` points to data that has already been evicted from the ring (oldest-byte > since), the response silently clamps to the oldest live byte and `X-Log-Offset` advances accordingly.
 
 Response: `text/plain`
 
@@ -403,6 +519,8 @@ Response: `text/plain`
 ```json
 {"chunk":"...","next":12345}
 ```
+- Same in-memory backing as the tail endpoint above. The cursor `next` is the same monotonic byte counter; clients should echo it as `since` on the next request to receive only new chunks.
+- Polling cadence: 1 s. When no new data is available, the server emits an SSE comment line (`: ping`) as a keep-alive — no `log` event, no cursor update. Clients should treat the absence of a `log` event as "no progress" and keep using the last `next` they saw.
 
 ### Instance resource stats
 `GET /api/instances/stats`
@@ -424,6 +542,8 @@ Response:
       "status": "running",
       "cpu_percent": 3.5,
       "memory_rss_bytes": 52428800,
+      "memory_buffer_bytes": 5242880,
+      "memory_buffer_cap_bytes": 33554432,
       "connection_type": "websocket"
     }
   ],
@@ -439,7 +559,9 @@ Response:
   "global": {
     "total_cpu": 8.7,
     "total_memory": 209715200,
-    "instance_count": 3
+    "instance_count": 3,
+    "daemon_cpu_percent": 1.2,
+    "daemon_memory_bytes": 67108864
   }
 }
 ```
@@ -447,8 +569,11 @@ Response:
 Fields:
 - `cpu_percent`: CPU utilization as a percentage of a single core. 0% on the first measurement (no prior baseline).
 - `memory_rss_bytes`: Resident Set Size — actual physical memory used by the process.
+- `memory_buffer_bytes`: Actual bytes currently held in the instance's in-memory ring buffer (0 if the instance is stopped or has no buffer).
+- `memory_buffer_cap_bytes`: Pre-allocated capacity of the instance's in-memory ring buffer (0 if the instance is stopped or has no buffer). When both `memory_buffer_bytes` and `memory_buffer_cap_bytes` are non-zero, the buffer is active with `used / cap` semantics.
 - `connection_type`: `"websocket"` if the instance has an active WebSocket TTY connection, `"sse"` if using the SSE fallback, `"none"` otherwise.
-- Worktree subtotals and global totals aggregate only `running` instances.
+- Worktree subtotals aggregate only `running` instances (instance RSS only, not buffer memory).
+- Global totals include both all running instances and the daemon process itself (`daemon_cpu_percent`, `daemon_memory_bytes`).
 
 ### 5.9 Instance lifecycle (frontend)
 

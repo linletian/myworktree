@@ -459,6 +459,29 @@
             gap: 4px;
         }
 
+        .wt-diverge-badges {
+            display: inline-flex;
+            gap: 3px;
+            align-items: center;
+            margin-left: 2px;
+        }
+
+        .wt-diverge-badge {
+            font-size: 10px;
+            color: var(--danger-text);
+            font-weight: 600;
+            line-height: 1;
+            white-space: nowrap;
+        }
+
+        .wt-diverge-badge-err {
+            font-size: 10px;
+            color: #d4a017;
+            font-weight: 600;
+            line-height: 1;
+            white-space: nowrap;
+        }
+
         .wt-actions {
             margin-left: auto;
             display: flex;
@@ -1332,6 +1355,26 @@
         </div>
     </dialog>
 
+    <!-- Modal: log buffer budget exceeded (server returns 503 + structured body). -->
+    <dialog id="modal-budget-error">
+        <div class="modal-titlebar">
+            <span class="modal-title">Cannot Start Instance</span>
+            <button class="modal-close-btn" onclick="closeModal('modal-budget-error')" title="Close">
+                <svg width="10" height="10" viewBox="0 0 10 10" fill="none" xmlns="http://www.w3.org/2000/svg">
+                    <line x1="1" y1="1" x2="9" y2="9" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                    <line x1="9" y1="1" x2="1" y2="9" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                </svg>
+            </button>
+        </div>
+        <div class="modal-body">
+            <p id="budget-error-message" style="margin-bottom: 12px; line-height: 1.5;"></p>
+            <p id="budget-error-hint" style="color: var(--text-secondary); font-size: 13px; line-height: 1.5; margin-bottom: 16px;"></p>
+            <div class="form-actions">
+                <button onclick="closeModal('modal-budget-error')">Close</button>
+            </div>
+        </div>
+    </dialog>
+
     <!-- Modal: Resource Monitor -->
     <dialog id="modal-monitor">
         <div class="modal-titlebar">
@@ -1381,6 +1424,8 @@
                 <div class="license-item"><span class="license-name">go-ole/go-ole</span><span class="license-sppver">v1.2.6</span><span class="license-type">MIT</span></div>
                 <div class="license-item"><span class="license-name">yusufpapurcu/wmi</span><span class="license-sppver">v1.2.4</span><span class="license-type">MIT</span></div>
                 <div class="license-item"><span class="license-name">xterm.js</span><span class="license-sppver">v6.0.0</span><span class="license-type">MIT</span></div>
+                <div class="license-item"><span class="license-name">highlight.js</span><span class="license-sppver">v11.9.0</span><span class="license-type">BSD-3-Clause</span></div>
+                <div class="license-item"><span class="license-name">marked.js</span><span class="license-sppver">v12.0.2</span><span class="license-type">MIT</span></div>
             </div>
         </div>
     </dialog>
@@ -1417,7 +1462,8 @@
             activeInst: null,
             mainRepo: null,
             renamingInst: null,    // instance id currently being renamed
-            renamingInstValue: ""  // preserved value across re-renders
+            renamingInstValue: "", // preserved value across re-renders
+            diverged: {}           // worktree_id -> {branch: {diverged, ahead}}
         };
 
         let loadingActions = new Set(); // Stores keys like "term:<id>" or "finder:<id>"
@@ -1431,6 +1477,7 @@
         // Terminal & Transport
         let terminalSessions = {};
         let pollTimer = null;
+        let divergeTimer = null;
         let refreshInFlight = null;
         let stateVersion = 0;
 
@@ -1530,6 +1577,8 @@
                     state.branches = branches;
                     reconcileTerminalSessions();
 
+                    fetchDiverge();
+
                     // Fetch main repo info independently — failure is non-blocking.
                     api("/api/main").then(main => {
                         const prevBranch = state.mainRepo ? state.mainRepo.branch : null;
@@ -1572,6 +1621,30 @@
             await refreshInFlight;
         }
 
+        async function fetchDiverge() {
+            try {
+                const data = await api("/api/worktrees/diverged");
+                if (!state.diverged) state.diverged = {};
+                state.diverged = data.items || {};
+                renderSidebar();
+            } catch (e) {
+                console.error("fetch diverge failed:", e);
+            }
+        }
+
+        async function fetchDivergeSingle(id) {
+            try {
+                const data = await api(`/api/worktree/diverged?id=${encodeURIComponent(id)}`);
+                if (!state.diverged) state.diverged = {};
+                if (data.items) {
+                    Object.assign(state.diverged, data.items);
+                }
+                renderSidebar();
+            } catch (e) {
+                console.error("fetch diverge single failed:", e);
+            }
+        }
+
         function init() {
             if (sessionStorage.getItem(SERVER_UPGRADED_FLAG) === "1") {
                 sessionStorage.removeItem(SERVER_UPGRADED_FLAG);
@@ -1587,6 +1660,9 @@
             // Polling for status updates (2s)
             if (pollTimer) clearInterval(pollTimer);
             pollTimer = setInterval(refresh, 2000);
+            // Polling for diverge status (60s)
+            if (divergeTimer) clearInterval(divergeTimer);
+            divergeTimer = setInterval(fetchDiverge, 60000);
 
             // Status bar click -> resource monitor
             document.getElementById("status-bar").addEventListener("click", openModalMonitor);
@@ -1666,6 +1742,29 @@
             if (next) next.classList.add('expanded');
             gitExpandedSection = name;
             renderGitChanges();
+        }
+
+        function openFilePreview(worktreeId, filePath, section) {
+            var wt = null;
+            for (var i = 0; i < state.worktrees.length; i++) {
+                if (state.worktrees[i].id === worktreeId) { wt = state.worktrees[i]; break; }
+            }
+            var branch = '';
+            if (worktreeId === MAIN_WT_ID) {
+                branch = state.mainRepo ? state.mainRepo.branch : '';
+            } else if (wt) {
+                branch = wt.branch || '';
+            }
+            var params = new URLSearchParams();
+            params.set('id', worktreeId);
+            params.set('path', filePath);
+            params.set('repo', state.mainRepo ? state.mainRepo.name : '');
+            params.set('wt_name', wt ? (wt.name || '') : (worktreeId === MAIN_WT_ID ? 'main' : ''));
+            params.set('branch', branch);
+            params.set('file', filePath.split('/').pop());
+            params.set('staged', section === 'staged' ? 'true' : 'false');
+            var pw = window.open('/preview?' + params.toString(), '_blank');
+            if (!pw) { alert('Pop-up blocked. Please allow pop-ups for this site to preview files.'); }
         }
 
         function renderGitChanges() {
@@ -1779,6 +1878,11 @@
                         item.appendChild(stats);
                     }
 
+                    item.style.cursor = 'pointer';
+                    item.addEventListener('click', (function(p, s) {
+                        return function() { openFilePreview(state.activeWT, p, s); };
+                    })(c.path, section));
+
                     list.appendChild(item);
                 });
             });
@@ -1831,6 +1935,23 @@
             renderTabs();
             renderWorkspace();
             renderModals(); // Update options inside modals
+        }
+
+        function divergeBadges(id) {
+            const data = state.diverged && state.diverged[id];
+            if (!data) return '';
+            let badges = '';
+            const branchKeys = Object.keys(data).sort();
+            for (const branch of branchKeys) {
+                const info = data[branch];
+                if (info.error) {
+                    badges += `<span class="wt-diverge-badge-err" title="Error checking ${branch}: ${info.error}">err\u2191</span>`;
+                } else if (info.diverged && info.ahead > 0) {
+                    const label = branch === 'mainBranch' ? 'm' : (branch === 'develop' ? 'd' : branch.substring(0, 1));
+                    badges += `<span class="wt-diverge-badge" title="Behind ${branch} by ${info.ahead} commit${info.ahead > 1 ? 's' : ''}">${label}\u2191${info.ahead}</span>`;
+                }
+            }
+            return badges ? `<span class="wt-diverge-badges">${badges}</span>` : '';
         }
 
         function renderSidebar() {
@@ -1887,7 +2008,7 @@
                 ${githubLinkHtml}
               </div>
               <div class="wt-branch">
-                <span>🏠</span> ${escapeHtml(branchLabel)}
+                <span>🏠</span> ${escapeHtml(branchLabel)}${divergeBadges(MAIN_WT_ID)}
                 <div style="margin-left: auto; display: flex; gap: 4px; align-items: center;">
                     ${shortcuts(MAIN_WT_ID)}
                 </div>
@@ -1907,7 +2028,7 @@
             <li class="wt-item ${isActive ? 'active' : ''}" onclick="selectWorktree('${wIdEsc}')">
               <div class="wt-name">${escapeHtml(w.name)}</div>
               <div class="wt-branch">
-                <span>🌱</span> ${escapeHtml(w.branch)}
+                <span>🌱</span> ${escapeHtml(w.branch)}${divergeBadges(w.id)}
                 <div style="margin-left: auto; display: flex; gap: 4px; align-items: center;">
                     ${shortcuts(w.id)}
                     ${isActive ? `<span style="font-size:10px;cursor:pointer;padding:2px 4px;" onclick="deleteWorktree('${wIdEsc}', event)">✕</span>` : ''}
@@ -2290,6 +2411,8 @@
             } else {
                 refresh(); // Will trigger auto-select instance in renderTabs
             }
+            // Refresh diverge status for the selected worktree immediately.
+            fetchDivergeSingle(id);
             // Reset and start git changes polling for the new worktree.
             if (gitChangesTimer) clearInterval(gitChangesTimer);
             refreshGitChanges();
@@ -2480,7 +2603,32 @@
                 closeModal("modal-start-instance");
                 await refresh();
                 selectInstance(res.id);
-            } catch (e) { alert(e); }
+            } catch (e) {
+                if (e && e.status === 503 && e.body && e.body.error === "log_buffer_budget_exceeded") {
+                    showBudgetError(e.body);
+                    return;
+                }
+                alert(e.message || e);
+            }
+        }
+
+        function showBudgetError(body) {
+            const msgEl = document.getElementById("budget-error-message");
+            const hintEl = document.getElementById("budget-error-hint");
+            msgEl.textContent = body.message || "Insufficient memory to start new instance.";
+            const used = formatBytes(body.used_bytes);
+            const limit = formatBytes(body.limit_bytes);
+            hintEl.textContent = `Used ${used} / limit ${limit}. ${body.hint || ""}`;
+            openModal("modal-budget-error");
+        }
+
+        function formatBytes(n) {
+            if (n == null) return "?";
+            const kb = 1024, mb = 1024 * 1024, gb = 1024 * 1024 * 1024;
+            if (n >= gb) return (n / gb).toFixed(2) + " GB";
+            if (n >= mb) return (n / mb).toFixed(2) + " MB";
+            if (n >= kb) return (n / kb).toFixed(2) + " KB";
+            return n + " B";
         }
 
         async function stopInstance() {
@@ -3196,7 +3344,7 @@
             const dlg = document.getElementById("modal-monitor");
             dlg.showModal();
             fetchMonitorStats();
-            monitorTimer = setInterval(fetchMonitorStats, 1000);
+            monitorTimer = setInterval(fetchMonitorStats, 2000);
         }
 
         function closeMonitorModal() {
@@ -3291,11 +3439,17 @@
                         <td>${escapeHTML(inst.status)}</td>
                         <td class="${connClass}">${escapeHTML(connLabel)}</td>
                         <td style="text-align:right">${inst.cpu_percent.toFixed(1)}%</td>
-                        <td style="text-align:right">${formatBytes(inst.memory_rss_bytes)}</td>
+                        <td style="text-align:right">${formatBytes((inst.memory_rss_bytes || 0) + (inst.memory_buffer_bytes || 0))}<span style="font-size:11px;color:var(--text-secondary)">${buildBufferNote(inst)}</span></td>
                     </tr>`;
                 }
             }
+            if (data.global) {
+                html += '<tr class="daemon-row" style="background:var(--surface-secondary)"><td colspan="4">mw daemon</td><td style="text-align:right">' + (data.global.daemon_cpu_percent || 0).toFixed(1) + '%</td><td style="text-align:right">' + formatBytes(data.global.daemon_memory_bytes || 0) + '</td></tr>';
+            }
             tbody.innerHTML = html;
+            const discRow = document.createElement('tr');
+            discRow.innerHTML = '<td colspan="6" style="font-size:12px;color:var(--text-secondary);padding-top:8px;border-top:1px solid var(--border);text-align:center;">Child processes spawned by instances are not counted</td>';
+            tbody.appendChild(discRow);
         }
 
         function formatBytes(bytes) {
@@ -3304,6 +3458,13 @@
             if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + " KB";
             if (bytes < 1024 * 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + " MB";
             return (bytes / (1024 * 1024 * 1024)).toFixed(2) + " GB";
+        }
+
+        function buildBufferNote(inst) {
+            const used = inst.memory_buffer_bytes || 0;
+            const cap = inst.memory_buffer_cap_bytes || 0;
+            if (cap <= 0) return "";
+            return " &nbsp;buf " + formatBytes(used) + "/" + formatBytes(cap);
         }
 
         function escapeHTML(s) {

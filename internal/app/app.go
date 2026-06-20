@@ -1,6 +1,7 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -128,11 +129,13 @@ func New(cfg Config, logger *log.Logger) (*Server, error) {
 		WorktreesDir: cfg.WorktreesDir,
 		Store:        st,
 	}
+	globalCfg, _ := config.Load()
 	instanceMgr := &instance.Manager{
-		DataDir: dataDir,
-		Root:    root,
-		Store:   st,
-		Logger:  logger,
+		DataDir:        dataDir,
+		Root:           root,
+		Store:          st,
+		Logger:         logger,
+		LogBufferBytes: globalCfg.LogBufferBytes,
 	}
 
 	mux := http.NewServeMux()
@@ -332,6 +335,11 @@ func (s *Server) Start() (string, error) {
 	} else if n > 0 {
 		s.logger.Printf("reconciled %d stale running instances to stopped", n)
 	}
+	if n, err := s.instanceMgr.PurgeOrphanLogFiles(); err != nil {
+		s.logger.Printf("purge orphan log files failed: %v", err)
+	} else if n > 0 {
+		s.logger.Printf("purged %d orphan log files", n)
+	}
 
 	listenAddr, err := resolveRepoListenAddr(s.cfg.ListenAddr, s.dataDir, s.logger)
 	if err != nil {
@@ -379,11 +387,6 @@ func (s *Server) Start() (string, error) {
 		if err := s.portal.Start(); err != nil {
 			s.logger.Printf("[portal] warning: portal.Start failed: %v", err)
 			s.portal = nil
-		} else {
-			s.logger.Printf("[portal] Portal dashboard at: http://0.0.0.0:%d/", s.cfg.PortalPort)
-			if tsName := portal.TailscaleDNSName(); tsName != "" {
-				s.logger.Printf("[portal] Tailscale URL: https://%s/", tsName)
-			}
 		}
 	}
 
@@ -528,6 +531,9 @@ func (s *Server) registerAPIs(mux *http.ServeMux) {
 	mux.HandleFunc("/api/worktrees/import", s.handleWorktreeImport)
 	mux.HandleFunc("/api/worktrees/delete", s.handleWorktreeDelete)
 	mux.HandleFunc("/api/worktree/status", s.handleWorktreeStatus)
+
+	mux.HandleFunc("/api/worktree/file/diff", s.handleWorktreeFileDiff)
+	mux.HandleFunc("/api/worktree/file/content", s.handleWorktreeFileContent)
 	mux.HandleFunc("/api/instances", s.handleInstances)
 	mux.HandleFunc("/api/instances/reorder", s.handleInstanceReorder)
 	mux.HandleFunc("/api/instances/stop", s.handleInstanceStop)
@@ -543,6 +549,8 @@ func (s *Server) registerAPIs(mux *http.ServeMux) {
 	mux.HandleFunc("/api/branches", s.handleBranches)
 	mux.HandleFunc("/api/worktrees/open-terminal", s.handleWorktreeOpenTerminal)
 	mux.HandleFunc("/api/worktrees/open-finder", s.handleWorktreeOpenFinder)
+	mux.HandleFunc("/api/worktrees/diverged", s.handleWorktreesDiverged)
+	mux.HandleFunc("/api/worktree/diverged", s.handleWorktreeDiverged)
 	mux.HandleFunc("/api/mcp/tools", s.handleMCPTools)
 	mux.HandleFunc("/api/mcp/call", s.handleMCPCall)
 	mux.HandleFunc("/api/main", s.handleMain)
@@ -849,6 +857,23 @@ func (s *Server) handleWorktreeDelete(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
+// resolveWorktreePath returns the filesystem path for a worktree id.
+func (s *Server) resolveWorktreePath(id string) (string, error) {
+	if id == instance.MainWorktreeID {
+		return s.root, nil
+	}
+	worktrees, err := s.worktreeMgr.List()
+	if err != nil {
+		return "", err
+	}
+	for _, wt := range worktrees {
+		if wt.ID == id {
+			return wt.Path, nil
+		}
+	}
+	return "", fmt.Errorf("unknown worktree id: %s", id)
+}
+
 func (s *Server) handleWorktreeStatus(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -859,28 +884,10 @@ func (s *Server) handleWorktreeStatus(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, errors.New("id is required"))
 		return
 	}
-
-	var gitRoot string
-	if id == instance.MainWorktreeID {
-		gitRoot = s.root
-	} else {
-		worktrees, err := s.worktreeMgr.List()
-		if err != nil {
-			writeErr(w, http.StatusInternalServerError, err)
-			return
-		}
-		found := false
-		for _, wt := range worktrees {
-			if wt.ID == id {
-				gitRoot = wt.Path
-				found = true
-				break
-			}
-		}
-		if !found {
-			writeErr(w, http.StatusBadRequest, fmt.Errorf("unknown worktree id: %s", id))
-			return
-		}
+	gitRoot, err := s.resolveWorktreePath(id)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
 	}
 
 	type diffResult struct {
@@ -910,10 +917,10 @@ func (s *Server) handleWorktreeStatus(w http.ResponseWriter, r *http.Request) {
 	unstagedCh := make(chan diffResult, 1)
 	untrackedCh := make(chan diffResult, 1)
 
-	go func() { stagedCh <- runDiff("diff", "--cached", "--numstat") }()
-	go func() { unstagedCh <- runDiff("diff", "--numstat") }()
+	go func() { stagedCh <- runDiff("-c", "core.quotePath=false", "diff", "--cached", "--numstat") }()
+	go func() { unstagedCh <- runDiff("-c", "core.quotePath=false", "diff", "--numstat") }()
 	go func() {
-		out, err := s.gitRunner(2*time.Second, gitRoot, "ls-files", "--others", "--exclude-standard")
+		out, err := s.gitRunner(2*time.Second, gitRoot, "-c", "core.quotePath=false", "ls-files", "--others", "--exclude-standard")
 		if err != nil {
 			msg := strings.TrimSpace(string(out))
 			if msg == "" {
@@ -930,7 +937,7 @@ func (s *Server) handleWorktreeStatus(w http.ResponseWriter, r *http.Request) {
 		var changes []map[string]any
 		totalAdds := 0
 		for _, p := range lines {
-			p = strings.TrimSpace(p)
+			p = unquoteGitPath(strings.TrimSpace(p))
 			if p == "" {
 				continue
 			}
@@ -947,9 +954,22 @@ func (s *Server) handleWorktreeStatus(w http.ResponseWriter, r *http.Request) {
 		untrackedCh <- diffResult{changes: changes, total: map[string]int{"additions": totalAdds, "deletions": 0}}
 	}()
 
-	staged := <-stagedCh
-	unstaged := <-unstagedCh
-	untracked := <-untrackedCh
+	var staged, unstaged, untracked diffResult
+	select {
+	case staged = <-stagedCh:
+	case <-r.Context().Done():
+		return
+	}
+	select {
+	case unstaged = <-unstagedCh:
+	case <-r.Context().Done():
+		return
+	}
+	select {
+	case untracked = <-untrackedCh:
+	case <-r.Context().Done():
+		return
+	}
 
 	unstaged.changes = append(unstaged.changes, untracked.changes...)
 	unstaged.total["additions"] += untracked.total["additions"]
@@ -979,6 +999,272 @@ func (s *Server) handleWorktreeStatus(w http.ResponseWriter, r *http.Request) {
 		resp["unstaged"].(map[string]any)["warning"] = untracked.errMsg
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// handleWorktreeFileDiff returns the full git diff for a single file.
+func (s *Server) handleWorktreeFileDiff(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	id := strings.TrimSpace(r.URL.Query().Get("id"))
+	filePath := strings.TrimSpace(r.URL.Query().Get("path"))
+	if id == "" || filePath == "" {
+		writeErr(w, http.StatusBadRequest, errors.New("id and path are required"))
+		return
+	}
+	staged := strings.TrimSpace(r.URL.Query().Get("staged")) == "true"
+
+	gitRoot, err := s.resolveWorktreePath(id)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	if !isPathWithin(gitRoot, filePath) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	if isSensitiveFile(filePath) {
+		http.Error(w, "this file type is not supported for preview", http.StatusForbidden)
+		return
+	}
+
+	args := []string{"-c", "core.quotePath=false", "diff"}
+	if staged {
+		args = append(args, "--cached")
+	}
+	args = append(args, "--", filePath)
+	out, err := s.gitRunner(2*time.Second, gitRoot, args...)
+	if err != nil {
+		msg := strings.TrimSpace(string(out))
+		if msg == "" {
+			msg = err.Error()
+		}
+		http.Error(w, msg, http.StatusInternalServerError)
+		return
+	}
+	if len(out) > 500<<10 { // 500KB limit
+		http.Error(w, "diff output too large", http.StatusRequestEntityTooLarge)
+		return
+	}
+
+	// If diff is empty (e.g. new untracked file), read the file and present
+	// it as a full-addition diff so the user sees the content.
+	if len(out) == 0 {
+		fullPath := filepath.Join(gitRoot, filePath)
+		// Stat first to avoid reading huge files into memory (same 500KB cap).
+		info, err := os.Stat(fullPath)
+		if err == nil && info.Size() <= 500<<10 {
+			data, err := os.ReadFile(fullPath)
+			if err == nil && !isBinaryData(data) {
+				lines := strings.Split(string(data), "\n")
+				nl := len(lines)
+				if nl > 0 && lines[nl-1] == "" {
+					lines = lines[:nl-1]
+				}
+				var buf bytes.Buffer
+				fmt.Fprintf(&buf, "diff --git a/%s b/%s\n", filePath, filePath)
+				buf.WriteString("new file mode 100644\n")
+				buf.WriteString("--- /dev/null\n")
+				fmt.Fprintf(&buf, "+++ b/%s\n", filePath)
+				fmt.Fprintf(&buf, "@@ -0,0 +1,%d @@\n", len(lines))
+				for _, line := range lines {
+					buf.WriteByte('+')
+					buf.WriteString(line)
+					buf.WriteByte('\n')
+				}
+				// git diff appends this marker when the file lacks a trailing newline
+				if len(data) > 0 && data[len(data)-1] != '\n' {
+					buf.WriteString("\\ No newline at end of file\n")
+				}
+				out = buf.Bytes()
+				// Re-check after synthesis: header and '+' prefixes can push a
+				// borderline file over the 500KB limit.
+				if len(out) > 500<<10 {
+					http.Error(w, "diff output too large", http.StatusRequestEntityTooLarge)
+					return
+				}
+			}
+		}
+	}
+
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Write(out)
+}
+
+// handleWorktreeFileContent returns the raw content of a single file in a worktree.
+func (s *Server) handleWorktreeFileContent(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	id := strings.TrimSpace(r.URL.Query().Get("id"))
+	filePath := strings.TrimSpace(r.URL.Query().Get("path"))
+	if id == "" || filePath == "" {
+		writeErr(w, http.StatusBadRequest, errors.New("id and path are required"))
+		return
+	}
+
+	gitRoot, err := s.resolveWorktreePath(id)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	if !isPathWithin(gitRoot, filePath) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	if isSensitiveFile(filePath) {
+		http.Error(w, "this file type is not supported for preview", http.StatusForbidden)
+		return
+	}
+
+	fullPath := filepath.Join(gitRoot, filePath)
+	info, err := os.Stat(fullPath)
+	if err != nil {
+		http.Error(w, "file not found", http.StatusNotFound)
+		return
+	}
+	if info.Size() > 1<<20 {
+		http.Error(w, "file too large", http.StatusRequestEntityTooLarge)
+		return
+	}
+	data, err := os.ReadFile(fullPath)
+	if err != nil {
+		http.Error(w, "failed to read file", http.StatusInternalServerError)
+		return
+	}
+	if isBinaryData(data) {
+		http.Error(w, "binary file not supported", http.StatusUnsupportedMediaType)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("X-File-Type", detectFileType(filePath))
+	w.Header().Set("X-File-FullPath", fullPath)
+	w.Write(data)
+}
+
+func (s *Server) handleWorktreesDiverged(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	result := make(map[string]gitx.DivergedResult)
+
+	worktrees, err := s.worktreeMgr.List()
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+
+	mainBranch := gitx.DefaultBranch(s.root)
+
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+
+	for _, wt := range worktrees {
+		wg.Add(1)
+		go func(wt store.ManagedWorktree) {
+			defer wg.Done()
+			branch, err := gitx.CurrentBranch(wt.Path)
+			var items gitx.DivergedResult
+			if err != nil {
+				items = gitx.DivergedResult{
+					gitx.MainBranchKey: gitx.DivergedStatus{Error: fmt.Sprintf("cannot determine branch: %v", err)},
+				}
+			} else {
+				items = gitx.CheckDiverged(wt.Path, branch, mainBranch)
+			}
+			mu.Lock()
+			if len(items) > 0 {
+				result[wt.ID] = items
+			}
+			mu.Unlock()
+		}(wt)
+	}
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		rootBranch, err := gitx.CurrentBranch(s.root)
+		var items gitx.DivergedResult
+		if err != nil {
+			items = gitx.DivergedResult{
+				gitx.MainBranchKey: gitx.DivergedStatus{Error: fmt.Sprintf("cannot determine branch: %v", err)},
+			}
+		} else {
+			items = gitx.CheckDiverged(s.root, rootBranch, mainBranch)
+		}
+		mu.Lock()
+		if len(items) > 0 {
+			result[instance.MainWorktreeID] = items
+		}
+		mu.Unlock()
+	}()
+
+	wg.Wait()
+
+	writeJSON(w, http.StatusOK, map[string]any{"items": result})
+}
+
+func (s *Server) handleWorktreeDiverged(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	id := strings.TrimSpace(r.URL.Query().Get("id"))
+	if id == "" {
+		writeErr(w, http.StatusBadRequest, errors.New("id is required"))
+		return
+	}
+
+	var worktreePath string
+	if id == instance.MainWorktreeID {
+		worktreePath = s.root
+	} else {
+		worktrees, err := s.worktreeMgr.List()
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, err)
+			return
+		}
+		found := false
+		for _, wt := range worktrees {
+			if wt.ID == id {
+				worktreePath = wt.Path
+				found = true
+				break
+			}
+		}
+		if !found {
+			writeErr(w, http.StatusBadRequest, fmt.Errorf("unknown worktree id: %s", id))
+			return
+		}
+	}
+
+	mainBranch := gitx.DefaultBranch(s.root)
+
+	branch, err := gitx.CurrentBranch(worktreePath)
+	if err != nil {
+		result := map[string]gitx.DivergedResult{
+			id: {
+				gitx.MainBranchKey: gitx.DivergedStatus{Error: fmt.Sprintf("cannot determine branch: %v", err)},
+			},
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"items": result})
+		return
+	}
+
+	items := gitx.CheckDiverged(worktreePath, branch, mainBranch)
+
+	result := make(map[string]gitx.DivergedResult)
+	if len(items) > 0 {
+		result[id] = items
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"items": result})
 }
 
 func (s *Server) handleInstances(w http.ResponseWriter, r *http.Request) {
@@ -1019,6 +1305,11 @@ func (s *Server) handleInstances(w http.ResponseWriter, r *http.Request) {
 			Name:    req.Name,
 		})
 		if err != nil {
+			var budgetErr *instance.LogBufferBudgetError
+			if errors.As(err, &budgetErr) {
+				writeLogBufferBudgetErr(w, budgetErr)
+				return
+			}
 			writeErr(w, http.StatusBadRequest, err)
 			return
 		}
@@ -1429,12 +1720,14 @@ func (s *Server) handleInstanceStats(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		flat = append(flat, monitor.InputInstance{
-			ID:           inst.ID,
-			Name:         inst.Name,
-			WorktreeID:   inst.WorktreeID,
-			WorktreeName: inst.WorktreeName,
-			PID:          inst.PID,
-			Status:       inst.Status,
+			ID:              inst.ID,
+			Name:            inst.Name,
+			WorktreeID:      inst.WorktreeID,
+			WorktreeName:    inst.WorktreeName,
+			PID:             inst.PID,
+			Status:          inst.Status,
+			BufferCapBytes:  s.instanceMgr.BufferCapBytesFor(inst.ID),
+			BufferUsedBytes: s.instanceMgr.BufferUsedBytesFor(inst.ID),
 		})
 	}
 
@@ -1559,6 +1852,11 @@ func (s *Server) handleMCPCall(w http.ResponseWriter, r *http.Request) {
 			Name:       args.Name,
 		})
 		if err != nil {
+			var budgetErr *instance.LogBufferBudgetError
+			if errors.As(err, &budgetErr) {
+				writeLogBufferBudgetErr(w, budgetErr)
+				return
+			}
 			writeErr(w, http.StatusBadRequest, err)
 			return
 		}
@@ -1725,6 +2023,41 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 
 func writeErr(w http.ResponseWriter, status int, err error) {
 	writeJSON(w, status, map[string]string{"error": err.Error()})
+}
+
+// writeLogBufferBudgetErr writes a structured 503 response when a new instance
+// was rejected for exceeding the global log buffer budget. The "error" code
+// "log_buffer_budget_exceeded" is part of the API contract — the dashboard
+// matches on it to display a popup instead of a generic error.
+func writeLogBufferBudgetErr(w http.ResponseWriter, err *instance.LogBufferBudgetError) {
+	body := map[string]any{
+		"error":        "log_buffer_budget_exceeded",
+		"message":      fmt.Sprintf("Insufficient memory to start new instance: used %s, limit %s.", formatBytes(err.UsedBytes), formatBytes(err.LimitBytes)),
+		"used_bytes":   err.UsedBytes,
+		"limit_bytes":  err.LimitBytes,
+		"system_bytes": err.SystemBytes,
+		"hint":         "Close other instances, raise LogBufferBytes in auth.json, or reduce concurrent tabs.",
+	}
+	w.Header().Set("Retry-After", "0")
+	writeJSON(w, http.StatusServiceUnavailable, body)
+}
+
+func formatBytes(b int64) string {
+	const (
+		kb = 1 << 10
+		mb = 1 << 20
+		gb = 1 << 30
+	)
+	switch {
+	case b >= gb:
+		return fmt.Sprintf("%.2f GB", float64(b)/float64(gb))
+	case b >= mb:
+		return fmt.Sprintf("%.2f MB", float64(b)/float64(mb))
+	case b >= kb:
+		return fmt.Sprintf("%.2f KB", float64(b)/float64(kb))
+	default:
+		return fmt.Sprintf("%d B", b)
+	}
 }
 
 func parseInt64Default(s string, def int64) int64 {
@@ -2000,6 +2333,127 @@ func isBinaryData(data []byte) bool {
 	return false
 }
 
+// isPathWithin returns true if filePath resolves inside worktreeRoot,
+// preventing path-traversal attacks.
+func isPathWithin(worktreeRoot, filePath string) bool {
+	absRoot, err := filepath.Abs(worktreeRoot)
+	if err != nil {
+		return false
+	}
+	absPath, err := filepath.Abs(filepath.Join(worktreeRoot, filePath))
+	if err != nil {
+		return false
+	}
+	sep := string(filepath.Separator)
+	return strings.HasPrefix(absPath, absRoot+sep) || absPath == absRoot
+}
+
+// isSensitiveFile returns true if the file should not be previewed
+// because it likely contains secrets or credentials.
+func isSensitiveFile(path string) bool {
+	name := strings.ToLower(filepath.Base(path))
+	ext := strings.ToLower(filepath.Ext(name))
+	// Sensitive extensions
+	switch ext {
+	case ".env", ".pem", ".key", ".pfx", ".p12":
+		return true
+	}
+	// SSH private key filenames
+	switch name {
+	case "id_rsa", "id_ed25519", "id_ecdsa", "id_dsa",
+		"id_rsa.pub", "id_ed25519.pub", "id_ecdsa.pub", "id_dsa.pub":
+		// Allow .pub (public keys are safe), reject private key variants
+		return !strings.HasSuffix(name, ".pub")
+	}
+	// .env and .env.* variants
+	if name == ".env" || strings.HasPrefix(name, ".env.") {
+		return true
+	}
+	// Sensitive keywords in path
+	lower := strings.ToLower(path)
+	for _, kw := range []string{"secret", "token", "credential", "password", "private"} {
+		if strings.Contains(lower, kw) {
+			return true
+		}
+	}
+	return false
+}
+
+// detectFileType returns a hint about the file type based on its extension.
+func detectFileType(path string) string {
+	ext := strings.ToLower(filepath.Ext(path))
+	switch ext {
+	case ".md", ".markdown":
+		return "text/markdown"
+	case ".go", ".js", ".ts", ".tsx", ".jsx", ".py", ".rs", ".java", ".c", ".cpp", ".h", ".hpp",
+		".html", ".css", ".scss", ".less", ".sass", ".json", ".yaml", ".yml", ".toml", ".sh", ".bash", ".zsh",
+		".vue", ".svelte", ".xml", ".svg", ".sql", ".dockerfile":
+		return "text/x-code"
+	default:
+		return "text/plain"
+	}
+}
+
+// unquoteGitPath reverses git's core.quotePath quoting.
+//
+// When core.quotePath=true (git's default), git wraps file paths containing
+// non-ASCII or special characters in double quotes and escapes \t, \n, \\,
+// \" and non-ASCII bytes as \ooo octal sequences.
+//
+// The primary fix is passing -c core.quotePath=false to every git command
+// that produces file paths (see handleWorktreeStatus, handleWorktreeFileDiff).
+// This function is a defense-in-depth safety net: if a future contributor
+// forgets -c on a new call site, or if an older git binary ignores the flag,
+// the path will still be corrected before it reaches API consumers.
+//
+// Callers that parse git output should always apply unquoteGitPath.
+// Do NOT rely on -c core.quotePath=false alone — use both layers.
+func unquoteGitPath(p string) string {
+	if len(p) < 2 || p[0] != '"' || p[len(p)-1] != '"' {
+		return p
+	}
+	s := p[1 : len(p)-1]
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\\' && i+1 < len(s) {
+			switch s[i+1] {
+			case '\\':
+				b.WriteByte('\\')
+				i++
+			case '"':
+				b.WriteByte('"')
+				i++
+			case 't':
+				b.WriteByte('\t')
+				i++
+			case 'n':
+				b.WriteByte('\n')
+				i++
+			default:
+				if s[i+1] >= '0' && s[i+1] <= '7' {
+					val := int(s[i+1] - '0')
+					i++
+					if i+1 < len(s) && s[i+1] >= '0' && s[i+1] <= '7' {
+						val = val*8 + int(s[i+1]-'0')
+						i++
+						if i+1 < len(s) && s[i+1] >= '0' && s[i+1] <= '7' {
+							val = val*8 + int(s[i+1]-'0')
+							i++
+						}
+					}
+					b.WriteByte(byte(val))
+				} else {
+					b.WriteByte('\\')
+				}
+			}
+		} else {
+			b.WriteByte(s[i])
+		}
+	}
+	return b.String()
+}
+
 // parseGitDiffNumStat parses the output of "git diff --numstat HEAD" and
 // returns per-file change info and totals.
 //
@@ -2038,7 +2492,7 @@ func parseGitDiffNumStat(output string) ([]map[string]any, map[string]int) {
 			}
 		}
 
-		path := strings.TrimSpace(parts[2])
+		path := unquoteGitPath(strings.TrimSpace(parts[2]))
 		if path == "" {
 			continue
 		}
