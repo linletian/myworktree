@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -544,6 +545,7 @@ func (s *Server) registerAPIs(mux *http.ServeMux) {
 	mux.HandleFunc("/api/instances/log", s.handleInstanceLog)
 	mux.HandleFunc("/api/instances/log/stream", s.handleInstanceLogStream)
 	mux.HandleFunc("/api/instances/stats", s.handleInstanceStats)
+	mux.HandleFunc("/api/instances/opencode", s.handleInstanceOpencodeInfo)
 	mux.HandleFunc("/api/tags", s.handleTags)
 	mux.HandleFunc("/api/tags/open-dir", s.handleTagsOpenDir)
 	mux.HandleFunc("/api/branches", s.handleBranches)
@@ -558,6 +560,7 @@ func (s *Server) registerAPIs(mux *http.ServeMux) {
 	mux.HandleFunc("/api/llm/test", s.handleLLMTest)
 	mux.HandleFunc("/api/llm/generate", s.handleLLMGenerate)
 	mux.HandleFunc("/login", s.handleLogin)
+	mux.Handle("/__opencode/", http.StripPrefix("/__opencode", ui.OpencodeProxy(s.instanceMgr)))
 }
 
 func (s *Server) handleBranches(w http.ResponseWriter, r *http.Request) {
@@ -1287,6 +1290,7 @@ func (s *Server) handleInstances(w http.ResponseWriter, r *http.Request) {
 			TagID      string `json:"tag_id"`
 			Command    string `json:"command"`
 			Name       string `json:"name"`
+			Kind       string `json:"kind"`
 		}
 		if err := readJSON(r.Body, &req); err != nil {
 			writeErr(w, http.StatusBadRequest, err)
@@ -1303,6 +1307,7 @@ func (s *Server) handleInstances(w http.ResponseWriter, r *http.Request) {
 			TagID:   req.TagID,
 			Command: req.Command,
 			Name:    req.Name,
+			Kind:    req.Kind,
 		})
 		if err != nil {
 			var budgetErr *instance.LogBufferBudgetError
@@ -1336,6 +1341,45 @@ func (s *Server) handleInstances(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
+}
+
+// handleInstanceOpencodeInfo returns iframe src and metadata for an opencode-web instance.
+func (s *Server) handleInstanceOpencodeInfo(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	id := strings.TrimSpace(r.URL.Query().Get("id"))
+	if id == "" {
+		writeErr(w, http.StatusBadRequest, errors.New("id is required"))
+		return
+	}
+	inst, err := s.instanceMgr.Get(id)
+	if err != nil {
+		if errors.Is(err, instance.ErrInstanceNotFound) {
+			writeErr(w, http.StatusNotFound, err)
+			return
+		}
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	if inst.Kind != "opencode-web" {
+		writeErr(w, http.StatusNotFound, errors.New("not an opencode-web instance"))
+		return
+	}
+	worktreeAbs := inst.Extra["worktree_abs"]
+	if worktreeAbs == "" && inst.Cwd != "" {
+		worktreeAbs = inst.Cwd
+	}
+	encoded := base64.StdEncoding.EncodeToString([]byte(worktreeAbs))
+	writeJSON(w, http.StatusOK, map[string]any{
+		"iframe_src":    "/__opencode/" + id + "/" + encoded + "/session/",
+		"api_base":      "/__opencode/" + id,
+		"password_set":  true,
+		"worktree_path": worktreeAbs,
+		"host":          inst.Extra["host"],
+		"port":          inst.Extra["port"],
+	})
 }
 
 func (s *Server) handleInstanceStop(w http.ResponseWriter, r *http.Request) {
