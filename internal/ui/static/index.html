@@ -648,6 +648,19 @@
             display: inline-block;
         }
 
+        .badge-oc {
+            background: var(--accent-color, #4a9eff);
+            color: #fff;
+            padding: 0 4px;
+            border-radius: 3px;
+            font-size: 0.65em;
+            margin-right: 3px;
+            font-weight: 600;
+        }
+
+        #opencode-panel { width: 100%; height: 100%; display: flex; }
+        #opencode-iframe { width: 100%; height: 100%; border: 0; }
+
         .status-running {
             background: var(--status-running);
         }
@@ -1197,6 +1210,9 @@
             <div id="workspace">
                 <div id="empty-state">Select a worktree and instance to start</div>
                 <div id="terminal-container"></div>
+                <div id="opencode-panel" hidden>
+                    <iframe id="opencode-iframe" sandbox="allow-scripts allow-same-origin allow-forms allow-popups"></iframe>
+                </div>
                 <div id="terminal-controls">
                     <button class="term-ctrl-btn" onclick="refreshCurrentInstance()" title="Refresh & Scroll to Bottom">
                         <svg viewBox="0 0 24 24"><path d="M23 4v6h-6"></path><path d="M1 20v-6h6"></path><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg>
@@ -2176,6 +2192,7 @@
                  ondrop="handleDrop('${i.id}', event)"
                  title="Drag to reorder; double-click to rename">
               <span class="tab-status ${statusClass}"></span>
+              ${i.kind === 'opencode-web' ? '<span class="badge-oc">OC</span>' : ''}
                ${displayName}
             </div>
           `;
@@ -2433,6 +2450,36 @@
             const inst = id ? state.instances.find(i => i.id === id) : null;
 
             render(); // update UI highlights
+
+            // If opencode-web instance, switch to iframe panel.
+            if (id && inst && inst.kind === 'opencode-web') {
+                const termContainer = document.getElementById('terminal-container');
+                const ocPanel = document.getElementById('opencode-panel');
+                const ocIframe = document.getElementById('opencode-iframe');
+                if (termContainer) termContainer.style.display = 'none';
+                if (ocPanel) ocPanel.hidden = false;
+                fetch('/api/instances/opencode?id=' + encodeURIComponent(id))
+                    .then(r => r.json())
+                    .then(data => {
+                        if (ocIframe && data.iframe_src) {
+                            ocIframe.src = data.iframe_src;
+                        }
+                    })
+                    .catch(console.error);
+                // Disconnect any existing PTY session.
+                const session = ensureTerminalSession(id);
+                disconnectTTY(session);
+                updateStatus("opencode web ui");
+                maybeDestroyInactiveStoppedSession(previousID);
+                return;
+            }
+            // Switch back to terminal view for PTY instances.
+            if (inst && inst.kind !== 'opencode-web') {
+                const termContainer = document.getElementById('terminal-container');
+                const ocPanel = document.getElementById('opencode-panel');
+                if (termContainer) termContainer.style.display = '';
+                if (ocPanel) ocPanel.hidden = true;
+            }
 
             if (id) {
                 // If stopped, just load log once. If running, connect TTY directly.
