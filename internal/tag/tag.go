@@ -29,6 +29,11 @@ var defaultTags = []Tag{
 	{ID: "docs", Command: "pwd"},
 	{ID: "dev", Command: "pwd"},
 	{ID: "review", Command: "pwd"},
+	{
+		ID:      "opencode-web",
+		Command: "opencode serve --hostname 127.0.0.1 --port 0",
+		Env:     map[string]string{},
+	},
 }
 
 func (m Manager) ensureDefaults() error {

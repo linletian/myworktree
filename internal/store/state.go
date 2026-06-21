@@ -36,6 +36,8 @@ type ManagedInstance struct {
 	Command       string            `json:"command"`
 	Cwd           string            `json:"cwd"`
 	Env           map[string]string `json:"env,omitempty"`
+	Kind          string            `json:"kind,omitempty"`
+	Extra         map[string]string `json:"extra,omitempty"`
 	PID           int               `json:"pid"`
 	Status        string            `json:"status"` // running|exited|stopped|failed
 	RestartedFrom string            `json:"restarted_from,omitempty"`
