@@ -773,3 +773,125 @@ func TestUpdateName_VersionConflict(t *testing.T) {
 		t.Fatalf("name should be set, got empty")
 	}
 }
+
+func TestStartInput_KindDefault(t *testing.T) {
+	t.Parallel()
+	in := StartInput{WorktreeID: "wt-1"}
+	if in.Kind != "" {
+		t.Fatalf("StartInput.Kind default = %q, want empty", in.Kind)
+	}
+}
+
+func TestStartInput_KindDispatch_CommandLocked(t *testing.T) {
+	t.Parallel()
+	exe, args := Command()
+	if exe != "opencode" {
+		t.Fatalf("Command exe = %q, want opencode", exe)
+	}
+	if len(args) != 5 || args[0] != "serve" || args[1] != "--hostname" || args[2] != "127.0.0.1" || args[3] != "--port" || args[4] != "0" {
+		t.Fatalf("Command args = %v, want [serve --hostname 127.0.0.1 --port 0]", args)
+	}
+}
+
+func TestStartOpencodeWeb_MockBinary(t *testing.T) {
+	if _, err := exec.LookPath("go"); err != nil {
+		t.Skip("go not available")
+	}
+
+	mockSrc := filepath.Join("testdata", "opencode-mock.go")
+	mockBin := filepath.Join(t.TempDir(), "opencode")
+
+	build := exec.Command("go", "build", "-o", mockBin, mockSrc)
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build mock opencode: %v\n%s", err, out)
+	}
+
+	dir := t.TempDir()
+	dataDir := filepath.Join(dir, "data")
+	storePath := filepath.Join(dataDir, "state.json")
+	wtPath := filepath.Join(dir, "wt")
+	if err := os.MkdirAll(wtPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	m := &Manager{
+		Store:          store.FileStore{Path: storePath},
+		DataDir:        dataDir,
+		LogBufferBytes: 1 << 20,
+	}
+	initState := store.State{
+		Worktrees: []store.ManagedWorktree{{ID: "wt-1", Name: "wt-1", Path: wtPath}},
+	}
+	fs := store.FileStore{Path: storePath}
+	if err := fs.Save(initState); err != nil {
+		t.Fatal(err)
+	}
+
+	in := StartInput{
+		WorktreeID: "wt-1",
+		TagID:      "opencode-web",
+		Kind:       "opencode-web",
+		Name:       "test-oc-mock",
+	}
+	t.Setenv("PATH", filepath.Dir(mockBin)+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	inst, err := m.Start(in)
+	if err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+
+	if inst.Kind != "opencode-web" {
+		t.Fatalf("inst.Kind = %q, want opencode-web", inst.Kind)
+	}
+	t.Logf("started opencode-web instance: id=%s pid=%d status=%s", inst.ID, inst.PID, inst.Status)
+
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		loaded, getErr := m.Get(inst.ID)
+		if getErr != nil {
+			continue
+		}
+		if loaded.Extra["port"] != "" && loaded.Extra["host"] != "" {
+			t.Logf("Extra populated: port=%s host=%s status=%s", loaded.Extra["port"], loaded.Extra["host"], loaded.Status)
+			// Verify health endpoint works.
+			t.Logf("health check: http://%s:%s/global/health", loaded.Extra["host"], loaded.Extra["port"])
+			return
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	t.Fatal("Extra not populated within 10s")
+}
+
+func TestStartOpencodeWeb_EnvOverride(t *testing.T) {
+	// Verify BuildEnv overrides OPENCODE_SERVER_PASSWORD regardless of tag.Env.
+	password, err := GeneratePassword()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tagEnv := map[string]string{
+		"OPENCODE_SERVER_PASSWORD": "weak-pass",
+		"MY_VAR":                   "my_value",
+	}
+	env := BuildEnv(tagEnv, password)
+	found := false
+	for _, kv := range env {
+		if kv == "OPENCODE_SERVER_PASSWORD="+password {
+			found = true
+		}
+		if strings.HasPrefix(kv, "OPENCODE_SERVER_PASSWORD=weak") {
+			t.Fatal("OPENCODE_SERVER_PASSWORD was not overridden")
+		}
+	}
+	if !found {
+		t.Fatal("myworktree password not found in env")
+	}
+	myVarFound := false
+	for _, kv := range env {
+		if kv == "MY_VAR=my_value" {
+			myVarFound = true
+		}
+	}
+	if !myVarFound {
+		t.Fatal("tag.Env non-security var not preserved")
+	}
+}

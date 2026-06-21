@@ -1,12 +1,14 @@
 package instance
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"log"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -77,6 +79,7 @@ type StartInput struct {
 	TagID      string
 	Command    string // optional if TagID is set; required if TagID is empty
 	Name       string
+	Kind       string // "pty" (default) | "opencode-web"
 }
 
 // ReconcileRunningOnStartup marks stale "running" records as "stopped".
@@ -212,6 +215,9 @@ func (m *Manager) Start(in StartInput) (store.ManagedInstance, error) {
 	if strings.TrimSpace(in.WorktreeID) == "" {
 		return store.ManagedInstance{}, errors.New("worktree_id is required")
 	}
+	if in.Kind == "" {
+		in.Kind = "pty"
+	}
 
 	st, err := m.Store.Load()
 	if err != nil {
@@ -256,15 +262,27 @@ func (m *Manager) Start(in StartInput) (store.ManagedInstance, error) {
 		var ok bool
 		t, ok = tags[effectiveTagID]
 		if !ok {
-			return store.ManagedInstance{}, fmt.Errorf("unknown tag id: %s", effectiveTagID)
+			if in.Kind == "opencode-web" {
+				// Use defaults; tag is a reference label only. Command/env
+				// are hardcoded in startOpencodeWeb regardless of tag content.
+				command = ""
+				env = map[string]string{}
+			} else {
+				return store.ManagedInstance{}, fmt.Errorf("unknown tag id: %s", effectiveTagID)
+			}
+		} else {
+			if in.Kind != "opencode-web" && strings.TrimSpace(t.Command) == "" {
+				return store.ManagedInstance{}, errors.New("tag command is required")
+			}
+			command = t.Command
+			cwdRel = t.Cwd
+			preStart = t.PreStart
+			if t.Env != nil {
+				env = t.Env
+			} else {
+				env = map[string]string{}
+			}
 		}
-		if strings.TrimSpace(t.Command) == "" {
-			return store.ManagedInstance{}, errors.New("tag command is required")
-		}
-		command = t.Command
-		cwdRel = t.Cwd
-		preStart = t.PreStart
-		env = t.Env
 	} else {
 		effectiveTagID = "adhoc"
 		command = strings.TrimSpace(in.Command)
@@ -311,6 +329,10 @@ func (m *Manager) Start(in StartInput) (store.ManagedInstance, error) {
 	capBytes, err := resolveCapFromAvailable(m.LogBufferBytes, sampler, m.totalBufBytes.Load(), capAvail)
 	if err != nil {
 		return store.ManagedInstance{}, err
+	}
+
+	if in.Kind == "opencode-web" {
+		return m.startOpencodeWeb(in.WorktreeID, wtName, effectiveTagID, cwd, env, id, instName, capBytes)
 	}
 
 	cmd := exec.Command("zsh", "-f", "-i")
@@ -397,6 +419,282 @@ func (m *Manager) Start(in StartInput) (store.ManagedInstance, error) {
 	go m.pumpLogs(id, ptmx)
 	go m.wait(id, cmd)
 	return inst, nil
+}
+
+func (m *Manager) startOpencodeWeb(worktreeID, wtName, tagID, cwd string, tagEnv map[string]string, id, instName string, capBytes int64) (store.ManagedInstance, error) {
+	password, err := GeneratePassword()
+	if err != nil {
+		return store.ManagedInstance{}, fmt.Errorf("generate opencode password: %w", err)
+	}
+
+	exe, args := Command()
+	cmd := exec.Command(exe, args...)
+	cmd.Dir = cwd
+	cmd.Env = BuildEnv(tagEnv, password)
+
+	stdoutR, stdoutW := io.Pipe()
+	cmd.Stdout = stdoutW
+	cmd.Stderr = stdoutW
+
+	if err := cmd.Start(); err != nil {
+		stdoutW.Close()
+		stdoutR.Close()
+		return store.ManagedInstance{}, err
+	}
+
+	buf := NewRingBuffer(capBytes)
+	m.totalBufBytes.Add(capBytes)
+
+	now := time.Now().UTC().Format(time.RFC3339)
+	inst := store.ManagedInstance{
+		ID:           id,
+		WorktreeID:   worktreeID,
+		WorktreeName: wtName,
+		TagID:        tagID,
+		Name:         instName,
+		Command:      exe + " " + strings.Join(args, " "),
+		Cwd:          cwd,
+		Env:          sanitizedEnv(tagEnv),
+		Kind:         "opencode-web",
+		Extra:        map[string]string{"password": password, "worktree_abs": cwd},
+		PID:          cmd.Process.Pid,
+		Status:       "starting",
+		CreatedAt:    now,
+	}
+	m.stateMu.Lock()
+	st2, loadErr := m.Store.Load()
+	if loadErr != nil {
+		m.stateMu.Unlock()
+		stdoutW.Close()
+		stdoutR.Close()
+		_ = cmd.Process.Kill()
+		buf.Close()
+		m.totalBufBytes.Add(-capBytes)
+		return store.ManagedInstance{}, loadErr
+	}
+	st2.Instances = append(st2.Instances, inst)
+	if st2.TabOrder == nil {
+		st2.TabOrder = make(map[string][]string)
+	}
+	st2.TabOrder[worktreeID] = append(st2.TabOrder[worktreeID], inst.ID)
+	if saveErr := m.Store.SaveWithVersion(st2, st2.Version); saveErr != nil {
+		m.stateMu.Unlock()
+		stdoutW.Close()
+		stdoutR.Close()
+		_ = cmd.Process.Kill()
+		buf.Close()
+		m.totalBufBytes.Add(-capBytes)
+		return store.ManagedInstance{}, saveErr
+	}
+	if m.buffers == nil {
+		m.buffers = map[string]*atomic.Pointer[RingBuffer]{}
+	}
+	p := &atomic.Pointer[RingBuffer]{}
+	p.Store(buf)
+	m.buffers[id] = p
+	m.stateMu.Unlock()
+
+	m.mu.Lock()
+	m.running[id] = cmd
+	m.inputs[id] = stdoutW
+	m.mu.Unlock()
+
+	go m.pumpAndWatch(id, stdoutR, password, cwd)
+	go m.opencodeHealth(id)
+	go m.wait(id, cmd)
+
+	return inst, nil
+}
+
+// pumpAndWatch reads stdout from an opencode server process, writes to the
+// ring buffer and broadcast, and scans for the "opencode server listening on"
+// address line. On match it updates the instance Extra with host/port and
+// transitions status from "starting" → "running".
+func (m *Manager) pumpAndWatch(id string, r io.Reader, password, worktreeAbs string) {
+	lineBuf := new(strings.Builder)
+	readBuf := make([]byte, 1024)
+	addrFound := false
+
+	for {
+		n, err := r.Read(readBuf)
+		if n > 0 {
+			chunk := redact.Text(string(readBuf[:n]))
+			if !addrFound {
+				lineBuf.WriteString(chunk)
+				accum := lineBuf.String()
+				for {
+					idx := strings.Index(accum, "\n")
+					if idx < 0 {
+						break
+					}
+					line := accum[:idx]
+					accum = accum[idx+1:]
+					if host, port, ok := ExtractListeningAddress(line); ok {
+						extra := map[string]string{
+							"host":         host,
+							"port":         port,
+							"password":     password,
+							"worktree_abs": worktreeAbs,
+							"url_path":     "/__opencode/" + id + "/",
+						}
+						_ = m.UpdateExtra(id, extra)
+						addrFound = true
+					}
+				}
+				if addrFound {
+					lineBuf.Reset()
+				} else {
+					lineBuf.Reset()
+					lineBuf.WriteString(accum)
+				}
+			}
+
+			if rb := m.loadBuffer(id); rb != nil {
+				rb.WriteString(chunk)
+			}
+			m.broadcastOutput(id, chunk)
+		}
+		if err != nil {
+			return
+		}
+	}
+}
+
+func (m *Manager) loadBuffer(id string) *RingBuffer {
+	m.stateMu.Lock()
+	defer m.stateMu.Unlock()
+	p, ok := m.buffers[id]
+	if !ok || p == nil {
+		return nil
+	}
+	return p.Load()
+}
+
+func (m *Manager) opencodeHealth(id string) {
+	for {
+		time.Sleep(5 * time.Second)
+		extra, err := m.ocExtra(id)
+		if err != nil || extra == nil {
+			continue
+		}
+		host := extra["host"]
+		port := extra["port"]
+		password := extra["password"]
+		if port == "" || password == "" {
+			continue
+		}
+		addr := "http://" + host + ":" + port + "/global/health"
+		req, reqErr := http.NewRequestWithContext(context.Background(), http.MethodGet, addr, nil)
+		if reqErr != nil {
+			continue
+		}
+		req.SetBasicAuth("opencode", password)
+		client := &http.Client{Timeout: 3 * time.Second}
+		resp, doErr := client.Do(req)
+		if doErr != nil || (resp != nil && resp.StatusCode >= 400) {
+			m.ocFail(id)
+			if resp != nil {
+				resp.Body.Close()
+			}
+			continue
+		}
+		if resp != nil {
+			resp.Body.Close()
+		}
+		m.ocReset(id)
+	}
+}
+
+func (m *Manager) ocFail(id string) {
+	m.stateMu.Lock()
+	defer m.stateMu.Unlock()
+	st, err := m.Store.Load()
+	if err != nil {
+		return
+	}
+	for i := range st.Instances {
+		if st.Instances[i].ID == id && st.Instances[i].Kind == "opencode-web" {
+			if st.Instances[i].Extra == nil {
+				st.Instances[i].Extra = map[string]string{}
+			}
+			failCount := 1
+			if v, ok := st.Instances[i].Extra["_health_fail_count"]; ok {
+				if n, pErr := fmt.Sscanf(v, "%d", &failCount); pErr == nil && n == 1 {
+					failCount++
+				}
+			}
+			st.Instances[i].Extra["_health_fail_count"] = fmt.Sprintf("%d", failCount)
+			if failCount >= 3 {
+				st.Instances[i].Status = "failed"
+			}
+			break
+		}
+	}
+	_ = m.Store.SaveWithVersion(st, st.Version)
+}
+
+func (m *Manager) ocReset(id string) {
+	m.stateMu.Lock()
+	defer m.stateMu.Unlock()
+	st, err := m.Store.Load()
+	if err != nil {
+		return
+	}
+	for i := range st.Instances {
+		if st.Instances[i].ID == id && st.Instances[i].Kind == "opencode-web" {
+			delete(st.Instances[i].Extra, "_health_fail_count")
+			break
+		}
+	}
+	_ = m.Store.SaveWithVersion(st, st.Version)
+}
+
+func (m *Manager) ocExtra(id string) (map[string]string, error) {
+	st, err := m.Store.Load()
+	if err != nil {
+		return nil, err
+	}
+	for _, inst := range st.Instances {
+		if inst.ID == id {
+			return inst.Extra, nil
+		}
+	}
+	return nil, nil
+}
+
+// Get returns a copy of the instance by ID, or an error.
+func (m *Manager) Get(id string) (store.ManagedInstance, error) {
+	st, err := m.Store.Load()
+	if err != nil {
+		return store.ManagedInstance{}, err
+	}
+	for _, inst := range st.Instances {
+		if inst.ID == id {
+			return inst, nil
+		}
+	}
+	return store.ManagedInstance{}, fmt.Errorf("%w: %s", ErrInstanceNotFound, id)
+}
+
+// UpdateExtra sets the Extra map for an instance (used by opencodeWatch to
+// populate port/host after the listening line is parsed).
+func (m *Manager) UpdateExtra(id string, extra map[string]string) error {
+	m.stateMu.Lock()
+	defer m.stateMu.Unlock()
+	st, err := m.Store.Load()
+	if err != nil {
+		return err
+	}
+	for i := range st.Instances {
+		if st.Instances[i].ID == id {
+			st.Instances[i].Extra = extra
+			if st.Instances[i].Status == "starting" {
+				st.Instances[i].Status = "running"
+			}
+			return m.Store.SaveWithVersion(st, st.Version)
+		}
+	}
+	return fmt.Errorf("%w: %s", ErrInstanceNotFound, id)
 }
 
 func (m *Manager) List() ([]store.ManagedInstance, error) {
