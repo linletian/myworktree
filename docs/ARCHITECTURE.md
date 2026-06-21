@@ -413,3 +413,38 @@ myworktree implements a **dual-layer authentication architecture**:
 ## 7. MCP extensibility
 - Core managers (worktree/instance) are transport-agnostic.
 - `internal/mcp` exposes tool names; server dispatch maps tool calls to existing core managers without rewriting core.
+
+## 8. opencode-web integration (planned)
+
+myworktree can host `opencode serve` processes as managed instances, embedding opencode's official web UI via reverse proxy instead of the PTY + xterm.js path.
+
+```
+Browser
+  │ GET /__opencode/<id>/*
+  ▼
+myworktree mux (withAuth + Token/Cookie)
+  │ ReverseProxy → inject Basic auth + ?directory=<worktree>
+  ▼
+opencode serve (127.0.0.1:<port>)
+  │ serve opencode web UI + HTTP API
+  ▼
+opencode web app (SolidJS, embedded in iframe)
+```
+
+### Design constraints
+
+- **One process per instance**: each `opencode-web` instance = one independent `opencode serve` process. Multiple instances per worktree supported; each has its own session history, provider state, and plugin context.
+- **Command locked**: the command, `--hostname 127.0.0.1`, and `--port 0` are hardcoded in Go (user cannot override via `tags.json`). LAN exposure requires running opencode outside myworktree or as a PTY-backed tag.
+- **Password forced**: `OPENCODE_SERVER_PASSWORD` is generated per-start by `crypto/rand` (32 hex chars) and injected by myworktree, overriding any user-provided value.
+- **Non-security env from tag**: `tag.Env` (e.g., `OPENCODE_EXPERIMENTAL`) is merged into the process environment via `BuildEnv`.
+- **Coexists with PTY**: existing PTY instances are unchanged. The frontend branches on `instance.kind`: `"pty"` → xterm.js, `"opencode-web"` → iframe.
+- **No new dependencies**: proxy implemented with `net/http/httputil.ReverseProxy` (stdlib). No third-party Go packages.
+
+### Related files
+
+- `internal/instance/opencode.go` — helpers (Command, GeneratePassword, BuildEnv, ExtractListeningAddress, IsAPIPath)
+- `internal/instance/manager.go` — Kind dispatch in Start()
+- `internal/ui/proxy.go` — reverse proxy (`/__opencode/<id>/*`)
+- `internal/app/app.go` — API endpoint `GET /api/instances/<id>/opencode`
+- `internal/ui/static/index.html` — OC badge, iframe panel, Kind branch in selectInstance
+- `docs/plans/opencode-native-ui/PLAN.md` — full design document

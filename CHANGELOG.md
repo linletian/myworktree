@@ -4,6 +4,8 @@
 
 Disk write amplification fix for long-running PTY-heavy sessions.
 
+- **feat(instance): add opencode-web kind embedding opencode official web UI (spec)** — `docs/plans/opencode-native-ui/` documents the design for a new instance kind that replaces PTY + xterm.js with opencode's built-in web server embedded via reverse proxy. Spec only; no code changes yet.
+
 ### Breaking changes
 
 - **`state.json` schema: `log_path` field removed** — external tooling that reads instance state files must drop the `log_path` field. Old state files continue to load cleanly (the field is silently ignored by JSON decoding). See `docs/ARCHITECTURE.md` §3.2.
