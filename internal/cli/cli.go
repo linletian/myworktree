@@ -18,7 +18,8 @@ import (
 	"myworktree/internal/app"
 	"myworktree/internal/config"
 	"myworktree/internal/gitx"
-	"myworktree/internal/instance"
+	"context"
+	"myworktree/internal/framework"
 	"myworktree/internal/store"
 	"myworktree/internal/tag"
 	"myworktree/internal/version"
@@ -267,13 +268,10 @@ func instanceCmd(logger *log.Logger, args []string) error {
 		return err
 	}
 	cfg, _ := config.Load()
-	mgr := &instance.Manager{
-		DataDir:        dataDir,
-		Root:           root,
-		Store:          store.FileStore{Path: filepath.Join(dataDir, "state.json")},
-		Logger:         logger,
-		LogBufferBytes: cfg.LogBufferBytes,
-	}
+	mgr := framework.NewManager(framework.Default, store.FileStore{Path: filepath.Join(dataDir, "state.json")}, logger)
+	mgr.DataDir = dataDir
+	mgr.Root = root
+	mgr.LogBufferBytes = cfg.LogBufferBytes
 
 	switch args[0] {
 	case "list":
@@ -299,10 +297,9 @@ func instanceCmd(logger *log.Logger, args []string) error {
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
 		}
-		item, err := mgr.Start(instance.StartInput{
+		item, err := mgr.Start(context.Background(), framework.StartParams{
 			WorktreeID: worktreeID,
 			TagID:      tagID,
-			Command:    command,
 			Name:       name,
 		})
 		if err != nil {

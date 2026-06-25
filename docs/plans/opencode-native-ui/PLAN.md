@@ -75,16 +75,16 @@ myworktree 当前对 opencode 的支持方式是「PTY + xterm.js」：每个 in
 | 命令（`opencode serve`） | 硬编码 | 改它就脱离「托管实例」语义 |
 | `--hostname` | 硬编码 `127.0.0.1` | 改它就能 LAN 暴露；用户真要 LAN 暴露请走 PTY 实例自起 |
 | `--port` | 硬编码 `0`（opencode 自选空闲端口） | 改固定端口无价值且可能冲突；myworktree 需要 stdout 解析出真实端口 |
-| `OPENCODE_SERVER_PASSWORD` | myworktree 用 `crypto/rand` 生成 16 字节 → 32 hex 字符；**强制覆盖** tag 里用户写的值 | 防止弱口令 / 空口令让 opencode 裸奔 |
+| `OPENCODE_SERVER_PASSWORD` | 等于 myworktree `cfg.AuthToken`（**统一认证 token**）；`BuildEnv` 强制覆盖 tag 里用户写的值 | 由 myworktree bearer token 在 `/__opencode/` proxy 层把关；详见 ARCH §8 威胁模型与评审检查表 |
 | `OPENCODE_CLIENT` | 强制设为 `myworktree` | 仅用于 opencode 内部标识 |
 
-**密码持久化**：写到 `state.json` 的 `instance.extra["password"]`；`state.json` 已有 0600 权限（沿用现有 schema）。密码每次启动新生成；旧的 instance 即使 tag/env 改了，密码也是不可预测的。
+**凭证统一**：所有 opencode-web 实例共享 `cfg.AuthToken` 作为上游密码（持久化于 `~/.config/myworktree/auth.json`，0o600）。`state.json` 不再写 per-instance `extra["password"]` 字段——所有实例共用一份凭证，proxy 注入 Basic auth 时也用同一 token。详见 ARCH §8 威胁模型。
 
 **前端透明度**：当用户在 add-instance 选 `opencode-web` tag 时，UI 旁边显示一段说明：
 
 > **托管实例**：仅监听 `127.0.0.1`（loopback），端口由 myworktree 协调（opencode 自选空闲端口）。命令、hostname、port 由 myworktree 固定——如需 LAN 访问请另起 PTY 实例或 myworktree 外自己跑 opencode。
 >
-> 密码由 myworktree 每次启动自动生成并强注入（无法关闭）。可通过 `tag.Env` 设置其他 opencode 配置项（如 `OPENCODE_EXPERIMENTAL`）。
+> 密码由 myworktree 用全局 `cfg.AuthToken` 强注入（所有实例共享同一 token，无法关闭）。可通过 `tag.Env` 设置其他 opencode 配置项（如 `OPENCODE_EXPERIMENTAL`）。详见 ARCH §8 威胁模型。
 
 **残余风险（依赖用户自律或上游修复）**：
 
@@ -141,8 +141,7 @@ Kind string // "pty" (default) | "opencode-web"
 opencode-web 专用 helper：
 
 - `Command() (exe string, args []string)` — 返回 `("opencode", []string{"serve", "--hostname", "127.0.0.1", "--port", "0"})`，**唯一**被 `Manager.Start()` 使用的命令源
-- `GeneratePassword() string` — `crypto/rand` 读 16 字节 → `hex.EncodeToString` → 32 hex 字符（参考 `internal/config/global.go` 现有 token 生成器）
-- `BuildEnv(tagEnv map[string]string, password string) []string` — 合并 env：先 `os.Environ()`，再覆盖 `tagEnv`，最后强制覆盖 `OPENCODE_SERVER_PASSWORD=password`、`OPENCODE_CLIENT=myworktree`。返回 `[]string` 给 `cmd.Env`
+- `BuildEnv(tagEnv map[string]string, authToken string) []string` — 合并 env：先 `os.Environ()`，再覆盖 `tagEnv`，最后强制覆盖 `OPENCODE_SERVER_PASSWORD=authToken`、`OPENCODE_CLIENT=myworktree`。返回 `[]string` 给 `cmd.Env`
 - `extractListeningAddress(line string) (host string, port int, ok bool)` — 正则 `opencode server listening on http://([^:\s]+):(\d+)`，允许行尾空白 / ANSI（剥 ANSI 后再匹配）
 - `IsAPIPath(path string) bool` — 判定 `/api/...`、`/doc`、`/global/...`、`/session/...` 等，proxy 用于决定是否注入 `?directory=`
 
@@ -173,12 +172,12 @@ opencode-web 专用 helper：
   {
     "iframe_src": "/__opencode/<id>/<base64(worktree)>/session/",
     "api_base":   "/__opencode/<id>",
-    "password_set": true,
     "worktree_path": "/abs/path/to/worktree",
+    "host": "127.0.0.1",
     "port": 51234
   }
   ```
-  **不返回 password 本身**（前端不需要，Go 侧代理注入）
+  **不返回 password 本身**（前端不需要，Go 侧代理注入）。`iframe_src` 中的 worktree 路径经 `base64.RawURLEncoding` 编码（与 opencode 的前端 `base64Encode` 一致），拼接 `/session/` 使 iframe 直接打开聊天 session 页面（绕过首页 `HomeRoute`）。
 
 #### `internal/ui/proxy.go`（新建）
 
@@ -275,7 +274,7 @@ mux.Handle("/__opencode/", OpencodeProxy(manager))
 ## 实施步骤（按依赖顺序）
 
 1. **状态字段扩展**（`internal/store/state.go`）：加 `Kind` + `Extra`。`go test ./internal/store/...` 跑过。
-2. **Helper 包**（`internal/instance/opencode.go` + `opencode_test.go`）：`GeneratePassword`、`extractListeningPort`、`IsAPIPath`。单测覆盖。
+2. **Helper 包**（`internal/instance/opencode.go` + `opencode_test.go`）：`BuildEnv`、`extractListeningPort`、`IsAPIPath`。单测覆盖。（`GeneratePassword` 已移除——凭证统一为 `cfg.AuthToken`，由 `Manager` 直接注入，详见 ARCH §8。）
 3. **Default tag**（`internal/tag/tag.go`）：加 `opencode-web`。
 4. **Manager 分支**（`internal/instance/manager.go`）：`Start()` 里按 Kind 分叉；`StartInput` 加 `Kind` 字段。
 5. **API 端点**（`internal/app/app.go`）：`POST /api/instances` 加 `kind`；`GET /api/instances/<id>/opencode` 新增。
@@ -298,7 +297,6 @@ mux.Handle("/__opencode/", OpencodeProxy(manager))
   - 行尾带 `\r\n` / 空格
   - 含 ANSI 颜色码（如 `web.ts:78` 的 `UI.println` 输出，剥 ANSI 后再匹配）
   - 错误输入（空行、纯文本）→ `ok=false`
-- `GeneratePassword` 长度 = 32、charset ∈ `[0-9a-f]`、两次调用结果不同
 - `BuildEnv`：
   - 输入 `tagEnv = {"FOO":"bar", "OPENCODE_SERVER_PASSWORD":"weak"}` + `password = "abc123..."` → 输出 env 含 `FOO=bar`、**`OPENCODE_SERVER_PASSWORD=abc123...`**（被覆盖）、`OPENCODE_CLIENT=myworktree`
   - tagEnv 为 nil 也不崩

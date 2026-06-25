@@ -414,35 +414,57 @@ myworktree implements a **dual-layer authentication architecture**:
 - Core managers (worktree/instance) are transport-agnostic.
 - `internal/mcp` exposes tool names; server dispatch maps tool calls to existing core managers without rewriting core.
 
-## 8. opencode-web integration (planned)
+## 8. opencode-web integration
 
 myworktree can host `opencode serve` processes as managed instances, embedding opencode's official web UI via reverse proxy instead of the PTY + xterm.js path.
 
 ```
-Browser
-  │ GET /__opencode/<id>/*
+Browser (iframe src = /__opencode/<id>/<base64(worktree)>/session/)
+  │ GET /__opencode/<id>/<base64(worktree)>/session/
   ▼
 myworktree mux (withAuth + Token/Cookie)
-  │ ReverseProxy → inject Basic auth + ?directory=<worktree>
+  │ Strip /__opencode/<id> → ReverseProxy → inject Basic auth + ?directory=<worktree>
   ▼
 opencode serve (127.0.0.1:<port>)
-  │ serve opencode web UI + HTTP API
+  │ serve opencode SPA → router matches /:dir/session → SessionRoute
   ▼
-opencode web app (SolidJS, embedded in iframe)
+opencode web app (SolidJS, rendered in iframe — chat session with agent/model selection)
 ```
 
 ### Design constraints
 
 - **One process per instance**: each `opencode-web` instance = one independent `opencode serve` process. Multiple instances per worktree supported; each has its own session history, provider state, and plugin context.
 - **Command locked**: the command, `--hostname 127.0.0.1`, and `--port 0` are hardcoded in Go (user cannot override via `tags.json`). LAN exposure requires running opencode outside myworktree or as a PTY-backed tag.
-- **Password forced**: `OPENCODE_SERVER_PASSWORD` is generated per-start by `crypto/rand` (32 hex chars) and injected by myworktree, overriding any user-provided value.
+- **统一认证 token（unified auth token）**: every opencode-web instance's `OPENCODE_SERVER_PASSWORD = cfg.AuthToken`. Users cannot turn it off or override it (`BuildEnv` always forces this value). The reverse proxy injects Basic auth with the same `cfg.AuthToken` when forwarding to upstream — upstream and myworktree mux share one credential.
 - **Non-security env from tag**: `tag.Env` (e.g., `OPENCODE_EXPERIMENTAL`) is merged into the process environment via `BuildEnv`.
 - **Coexists with PTY**: existing PTY instances are unchanged. The frontend branches on `instance.kind`: `"pty"` → xterm.js, `"opencode-web"` → iframe.
 - **No new dependencies**: proxy implemented with `net/http/httputil.ReverseProxy` (stdlib). No third-party Go packages.
 
+### Threat model & trust boundary (unified auth token)
+
+The current security model relies on these assumptions:
+
+- **Loopback isolation**: every `opencode serve` binds `127.0.0.1:<port>` (see `Command()` in `internal/instance/opencode.go`). The upstream HTTP server is not directly reachable from the network.
+- **Single credential**: `OPENCODE_SERVER_PASSWORD = cfg.AuthToken`, and the reverse proxy injects Basic auth with the same token. Anyone holding the token has full upstream access to every opencode-web instance; the only remaining gate is the bearer/cookie check at the myworktree mux.
+- **Unprivileged remote attackers** (LAN/Wi-Fi sniffer, cloud-sync adversary, dotfiles-repo leak, issue tracker / CI log exposure, sibling-vhost XSS, etc.) gain no new external attack surface from the credential merge — they still only reach the proxy through `/__opencode/<id>/*` and still must pass the mux. Upstream `127.0.0.1` stays unreachable from off-machine.
+- **The real amplification is "in-trust-zone but crossing the loopback boundary"**: any future code path that exposes `127.0.0.1:<opencode-port>` outside the loopback namespace — container with `--net=host` or shared netns, reverse-proxy port forward, debug handler returning host/port for direct connection, MCP tool / worker that talks to upstream without going through the mux, SSH / local-tunnel documentation — turns a single token leak into full compromise of every instance's upstream **and** the entire API. Such paths must be reviewed against this threat model before introduction.
+- **In-memory footprint**: `cfg.AuthToken` now lives in the myworktree daemon, in every spawned `opencode serve` process's `cmd.Env` (as `OPENCODE_SERVER_PASSWORD`), and in any goroutine / struct that captures it. Same-user reads of `/proc/<pid>/environ` get it. This does not weaken the model **as long as the trust zone does not change**; if it does, all of those copies leak together rather than per-instance.
+
+### Review checklist (token leak paths)
+
+Every review that touches authentication, proxy, token handling, opencode-web, or portal paths must verify:
+
+1. **Disk**: `~/.config/myworktree/auth.json` (and any future token file) is `0o600` and only read by the owner.
+2. **Logs**: portal / daemon startup logs, access logs, reverse-proxy logs do not print `cfg.AuthToken` in plaintext. Note existing leak at `internal/portal/portal.go:211` (`Remote access token: %s`).
+3. **Process memory**: `cfg.AuthToken` is not written to `os/exec.Cmd.Env` of any subprocess, captured in goroutine closures, or held in struct fields longer than needed; new subprocesses do not inherit it unintentionally.
+4. **Network**: no endpoint outside the `withAuth` mux forwards to `127.0.0.1:<opencode-port>`; `mw_token` cookie's `Secure` / `Domain` / `Path` are tightened for the deployment (TLS termination, reverse proxy).
+5. **Error responses**: API errors, panic messages, and log lines do not echo the token or `Authorization` header.
+6. **Test data**: tests, mocks, fixtures do not embed real-form tokens; CI logs do not surface them.
+7. **Cross-trust-zone candidates**: any new debug handler, MCP tool, worker, container network config, or SSH / local-tunnel documentation that touches `127.0.0.1:<opencode-port>` or `cfg.AuthToken` — must be re-evaluated against the threat model above before merge.
+
 ### Related files
 
-- `internal/instance/opencode.go` — helpers (Command, GeneratePassword, BuildEnv, ExtractListeningAddress, IsAPIPath)
+- `internal/instance/opencode.go` — helpers (Command, BuildEnv, ExtractListeningAddress, IsAPIPath)
 - `internal/instance/manager.go` — Kind dispatch in Start()
 - `internal/ui/proxy.go` — reverse proxy (`/__opencode/<id>/*`)
 - `internal/app/app.go` — API endpoint `GET /api/instances/<id>/opencode`

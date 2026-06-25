@@ -24,7 +24,7 @@ files:
 
 - [ ] `internal/store/state.go` — add `Kind` + `Extra` to `ManagedInstance` (l.30-45)
 - [ ] `internal/store/state_test.go` — backward compat + round-trip tests
-- [ ] `internal/instance/opencode.go` (new) — `Command()`, `GeneratePassword()`, `BuildEnv()`, `ExtractListeningAddress()`, `IsAPIPath()`
+- [x] `internal/instance/opencode.go` (new) — `Command()`, `BuildEnv()`, `ExtractListeningAddress()`, `IsAPIPath()`（`GeneratePassword` 已移除；凭证统一为 `cfg.AuthToken`，详见 ARCH §8）
 - [ ] `internal/instance/opencode_test.go` (new) — unit tests for all helpers
 - [ ] `internal/tag/tag.go` — add `opencode-web` default tag (l.28-32)
 

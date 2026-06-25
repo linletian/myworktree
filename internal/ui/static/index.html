@@ -658,8 +658,10 @@
             font-weight: 600;
         }
 
-        #opencode-panel { width: 100%; height: 100%; display: flex; }
-        #opencode-iframe { width: 100%; height: 100%; border: 0; }
+        #opencode-panel { width: 100%; height: 100%; display: flex; flex-direction: column; }
+        #opencode-panel[hidden] { display: none !important; }
+        #opencode-iframe { width: 100%; flex: 1; border: 0; min-height: 0; }
+        .opencode-error { color: var(--danger-text, #cb2431) !important; background: var(--danger-hover-bg, #ffeef0) !important; }
 
         .status-running {
             background: var(--status-running);
@@ -931,6 +933,24 @@
                 color: var(--text-primary);
             }
 
+        .form-info {
+            background: var(--bg-secondary, #f6f8fa);
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+            padding: 10px 12px;
+            margin-bottom: 12px;
+            font-size: 12px;
+            line-height: 1.5;
+            color: var(--text-secondary);
+        }
+
+            .form-info code {
+                font-size: 11px;
+                padding: 1px 4px;
+                background: var(--main-bg);
+                border-radius: 3px;
+            }
+
         .form-actions {
             margin-top: 16px;
             display: flex;
@@ -954,6 +974,35 @@
             background: var(--hover-bg);
             border-radius: 6px 6px 0 0;
         }
+
+        .modal-tabs {
+            display: flex;
+            gap: 0;
+            padding: 0 12px;
+            border-bottom: 1px solid var(--border-color);
+            background: var(--hover-bg);
+        }
+        .modal-tab {
+            padding: 8px 14px;
+            background: none;
+            border: none;
+            border-bottom: 2px solid transparent;
+            font-size: 13px;
+            color: var(--text-secondary);
+            cursor: pointer;
+            font-weight: 500;
+            margin-bottom: -1px;
+            transition: color 0.15s, border-color 0.15s;
+        }
+        .modal-tab:hover {
+            color: var(--text-primary);
+        }
+        .modal-tab.active {
+            color: var(--active-color, #005cc5);
+            border-bottom-color: var(--active-color, #005cc5);
+        }
+        .modal-tab-panel { padding-top: 4px; }
+        .modal-tab-panel[hidden] { display: none; }
         .modal-title {
             font-size: 13px;
             font-weight: 600;
@@ -1351,18 +1400,36 @@
                 </svg>
             </button>
         </div>
+        <div class="modal-tabs" role="tablist">
+            <button type="button" class="modal-tab active" data-tab="terminal" role="tab" aria-selected="true" onclick="switchStartInstanceTab('terminal')">Terminal</button>
+            <button type="button" class="modal-tab" data-tab="opencode-web" role="tab" aria-selected="false" onclick="switchStartInstanceTab('opencode-web')">Opencode-Web</button>
+        </div>
         <div class="modal-body">
-            <div class="form-group">
-                <label>Template <span id="template-edit-btn" class="wt-action-btn" style="display:inline-flex;vertical-align:middle;opacity:0.6" title="Edit templates" onclick="openTagsDir(event)"><svg viewBox="0 0 24 24" width="12" height="12" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path></svg></span></label>
-                <select id="tagSelect" onchange="onTagChange()"></select>
+            <div id="modal-tab-terminal" class="modal-tab-panel">
+                <div class="form-group">
+                    <label>Template <span id="template-edit-btn" class="wt-action-btn" style="display:inline-flex;vertical-align:middle;opacity:0.6" title="Edit templates" onclick="openTagsDir(event)"><svg viewBox="0 0 24 24" width="12" height="12" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path></svg></span></label>
+                    <select id="tagSelect" onchange="onTagChange()"></select>
+                </div>
+                <div class="form-group">
+                    <label>Or Custom Command</label>
+                    <input id="cmd" placeholder="e.g. echo hello && zsh" />
+                </div>
+                <div class="form-group">
+                    <label>Name (Optional)</label>
+                    <input id="instName" placeholder="e.g. build-server" />
+                </div>
             </div>
-            <div class="form-group">
-                <label>Or Custom Command</label>
-                <input id="cmd" placeholder="e.g. echo hello && zsh" />
-            </div>
-            <div class="form-group">
-                <label>Name (Optional)</label>
-                <input id="instName" placeholder="e.g. build-server" />
+            <div id="modal-tab-opencode-web" class="modal-tab-panel" hidden>
+                <div class="form-info">
+                    <strong>托管实例</strong>：仅监听 <code>127.0.0.1</code> (loopback)，端口由 myworktree 协调 (opencode 自选空闲端口)。
+                    命令、hostname、port 由 myworktree 固定——如需 LAN 访问请另起 PTY 实例或 myworktree 外自己跑 opencode。
+                    密码由 myworktree 用全局 <code>cfg.AuthToken</code> 强注入（所有实例共享同一 token，无法关闭）。
+                    可通过 <code>tag.Env</code> 设置其他 opencode 配置项（如 <code>OPENCODE_EXPERIMENTAL</code>）。
+                </div>
+                <div class="form-group">
+                    <label>Name (Optional)</label>
+                    <input id="instNameOc" placeholder="e.g. opencode-web" />
+                </div>
             </div>
             <div class="form-actions">
                 <button onclick="closeModal('modal-start-instance')">Cancel</button>
@@ -1449,6 +1516,10 @@
     <link rel="stylesheet" href="/static/vendor/xterm/xterm.css" />
     <script src="/static/vendor/xterm/xterm.js"></script>
     <script src="/static/vendor/xterm-addon-fit/xterm-addon-fit.js"></script>
+    <script src="/static/framework.js"></script>
+    <script src="/static/kinds/renderer.js"></script>
+    <script src="/static/kinds/pty.js"></script>
+    <script src="/static/kinds/opencode_web.js"></script>
     <script>
         const token = new URLSearchParams(location.search).get("token") || "";
         const headers = token ? { Authorization: `Bearer ${token}` } : {};
@@ -1469,18 +1540,6 @@
             .replace(/'/g, "&#39;");
 
         // Global State
-        let state = {
-            worktrees: [],
-            instances: [], // filtered flat list? no, full list.
-            tags: [],
-            branches: [],
-            activeWT: null,
-            activeInst: null,
-            mainRepo: null,
-            renamingInst: null,    // instance id currently being renamed
-            renamingInstValue: "", // preserved value across re-renders
-            diverged: {}           // worktree_id -> {branch: {diverged, ahead}}
-        };
 
         let loadingActions = new Set(); // Stores keys like "term:<id>" or "finder:<id>"
 
@@ -1560,6 +1619,11 @@
 
         function getTerminalSession(id) {
             if (!id) return null;
+            // PtyRenderer owns the session map; legacy helpers
+            // (loadLog, connectTTY, disconnectTTY) still live in
+            // index.html but read/write through this accessor.
+            const r = window.__ptyRenderer;
+            if (r && typeof r.getSession === 'function') return r.getSession(id);
             return terminalSessions[id] || null;
         }
 
@@ -2355,21 +2419,30 @@
         function renderWorkspace() {
             const empty = document.getElementById("empty-state");
             const termContainer = document.getElementById("terminal-container");
+            const ocPanel = document.getElementById("opencode-panel");
             const actions = document.getElementById("instance-actions");
 
             if (state.activeInst) {
                 const inst = state.instances.find(i => i.id === state.activeInst);
+                const isOC = inst && inst.kind === 'opencode-web';
                 empty.style.display = "none";
-                termContainer.style.display = "block";
+                // For opencode-web instances the OpencodeWebRenderer owns the
+                // visibility of #opencode-panel and #terminal-container.
+                // renderWorkspace must NOT overwrite them, or the 8-second
+                // refresh cycle will fight the renderer and hide the iframe.
+                if (!isOC) {
+                    termContainer.style.display = "block";
+                    if (ocPanel) ocPanel.hidden = true;
+                }
                 actions.classList.add("visible");
-                
-                // Styling for stopped instance
-                if (inst && inst.status !== 'running') {
+
+                // Styling for stopped instance (terminal kind only)
+                if (!isOC && inst && inst.status !== 'running') {
                     termContainer.style.opacity = "0.6";
                     termContainer.style.filter = "grayscale(100%)";
                     const session = getActiveTerminalSession();
                     if (session && session.term) session.term.options.cursorBlink = false;
-                } else {
+                } else if (!isOC) {
                     termContainer.style.opacity = "1";
                     termContainer.style.filter = "none";
                     const session = getActiveTerminalSession();
@@ -2380,6 +2453,7 @@
                 empty.style.display = "block";
                 empty.textContent = state.activeWT ? "No instances. Click + to start one." : "Select a worktree.";
                 termContainer.style.display = "none";
+                if (ocPanel) ocPanel.hidden = true;
                 actions.classList.remove("visible");
             }
             renderTerminalSessions();
@@ -2399,8 +2473,12 @@
             // Update Tags select
             const ts = document.getElementById("tagSelect");
             if (state.tags) {
+                // Terminal tab: filter out opencode-web (it's only
+                // available via the Opencode-Web tab — complete
+                // isolation per the product principle).
+                const ptyTags = state.tags.filter(t => t.id !== 'opencode-web');
                 const opts = '<option value="">-- select --</option>' +
-                    state.tags.map(t => {
+                    ptyTags.map(t => {
                         let details = [];
                         if (t.cwd) details.push(`cwd: ${t.cwd}`);
                         if (t.preStart) details.push(`pre: ${t.preStart}`);
@@ -2451,44 +2529,40 @@
 
             render(); // update UI highlights
 
-            // If opencode-web instance, switch to iframe panel.
-            if (id && inst && inst.kind === 'opencode-web') {
-                const termContainer = document.getElementById('terminal-container');
-                const ocPanel = document.getElementById('opencode-panel');
-                const ocIframe = document.getElementById('opencode-iframe');
-                if (termContainer) termContainer.style.display = 'none';
-                if (ocPanel) ocPanel.hidden = false;
-                fetch('/api/instances/opencode?id=' + encodeURIComponent(id))
-                    .then(r => r.json())
-                    .then(data => {
-                        if (ocIframe && data.iframe_src) {
-                            ocIframe.src = data.iframe_src;
-                        }
-                    })
-                    .catch(console.error);
-                // Disconnect any existing PTY session.
-                const session = ensureTerminalSession(id);
-                disconnectTTY(session);
-                updateStatus("opencode web ui");
+            // Dispatch to the per-kind renderer. The framework
+            // does not know about PTY / opencode-web specifics; each
+            // kind's renderer is responsible for showing its panel,
+            // connecting, and tearing down on switch.
+            const kind = (inst && inst.kind) || 'pty';
+            const renderer = (window.KindRenderers || {})[kind];
+            const session = { id: id, instance: inst };
+            // Deactivate the previously-active renderer first so it
+            // can release any listeners / hide its panel cleanly.
+            if (previousID) {
+                const prevInst = state.instances.find(i => i.id === previousID);
+                const prevKind = (prevInst && prevInst.kind) || 'pty';
+                const prevRenderer = (window.KindRenderers || {})[prevKind];
+                if (prevRenderer && prevRenderer !== renderer) {
+                    prevRenderer.deactivate();
+                }
+            }
+            if (id && renderer) {
+                renderer.activate(session, document.getElementById('workspace'));
+                if (kind === 'opencode-web') {
+                    updateStatus('opencode web ui');
+                }
                 maybeDestroyInactiveStoppedSession(previousID);
                 return;
             }
-            // Switch back to terminal view for PTY instances.
-            if (inst && inst.kind !== 'opencode-web') {
-                const termContainer = document.getElementById('terminal-container');
-                const ocPanel = document.getElementById('opencode-panel');
-                if (termContainer) termContainer.style.display = '';
-                if (ocPanel) ocPanel.hidden = true;
-            }
 
+            // Fallback: if no renderer is registered for this kind,
+            // behave like PTY (legacy default).
             if (id) {
-                // If stopped, just load log once. If running, connect TTY directly.
                 if (inst && inst.status !== 'running') {
                     const session = ensureTerminalSession(id);
                     disconnectTTY(session);
                     loadLog(session);
                     updateStatus("stopped");
-                    // Style handled in renderWorkspace
                 } else {
                     const session = ensureTerminalSession(id);
                     if (hasLiveTTYConnection(id)) {
@@ -2565,6 +2639,9 @@
                     list.style.display = 'block';
                 }
             }
+            if (id === 'modal-start-instance' && typeof switchStartInstanceTab === 'function') {
+                switchStartInstanceTab('terminal');
+            }
             el.showModal();
         }
         function closeModal(id) { document.getElementById(id).close(); }
@@ -2579,6 +2656,7 @@
             if (!state.activeWT) { alert("Select a worktree first"); return; }
             document.getElementById("cmd").value = "";
             document.getElementById("instName").value = "";
+            document.getElementById("instNameOc").value = "";
             document.getElementById("tagSelect").value = "";
             openModal("modal-start-instance");
         }
@@ -2590,6 +2668,23 @@
                 document.getElementById("cmd").value = tag.command || "";
                 document.getElementById("instName").value = tag.id || "";
             }
+        }
+
+        // Tab switching for the Start Instance modal. Pure DOM: each
+        // tab button toggles the .active class on itself, hides its
+        // sibling panel, and shows its own. Default tab is Terminal
+        // (set in HTML).
+        function switchStartInstanceTab(tabName) {
+            const tabs = document.querySelectorAll('#modal-start-instance .modal-tab');
+            tabs.forEach(t => {
+                const isActive = t.dataset.tab === tabName;
+                t.classList.toggle('active', isActive);
+                t.setAttribute('aria-selected', isActive ? 'true' : 'false');
+            });
+            const panels = document.querySelectorAll('#modal-start-instance .modal-tab-panel');
+            panels.forEach(p => {
+                p.hidden = p.id !== 'modal-tab-' + tabName;
+            });
         }
 
         // API Calls
@@ -2640,12 +2735,34 @@
 
         async function doStartInstance() {
             try {
-                const body = {
-                    worktree_id: state.activeWT,
-                    tag_id: document.getElementById("tagSelect").value,
-                    command: document.getElementById("cmd").value,
-                    name: document.getElementById("instName").value,
-                };
+                // Determine which tab is active and what kind to send.
+                // The Terminal tab always sends kind="" (backend
+                // normalises to "pty"); the Opencode-Web tab always
+                // sends kind="opencode-web" regardless of any tag
+                // selection (the kind is a UI decision, not a tag
+                // selection — that's the whole point of the tab
+                // split).
+                const activeTab = document.querySelector('#modal-start-instance .modal-tab.active');
+                const tabName = activeTab ? activeTab.dataset.tab : 'terminal';
+                let body;
+                if (tabName === 'opencode-web') {
+                    body = {
+                        worktree_id: state.activeWT,
+                        tag_id: 'opencode-web',
+                        command: '',
+                        name: document.getElementById("instNameOc").value || 'opencode-web',
+                        kind: 'opencode-web',
+                    };
+                } else {
+                    const tagId = document.getElementById("tagSelect").value;
+                    body = {
+                        worktree_id: state.activeWT,
+                        tag_id: tagId,
+                        command: document.getElementById("cmd").value,
+                        name: document.getElementById("instName").value,
+                        kind: '',
+                    };
+                }
                 const res = await api("/api/instances", { method: "POST", body: JSON.stringify(body) });
                 closeModal("modal-start-instance");
                 await refresh();
@@ -2734,6 +2851,25 @@
         }
 
         function createTerminalSession(id) {
+            // PtyRenderer owns session creation since the
+            // renderer split. If a caller still hits this path,
+            // delegate to the renderer; otherwise fall back to
+            // the legacy in-page implementation below.
+            const r = window.__ptyRenderer;
+            if (r && !r.hasSession(id)) {
+                // Renderer hasn't created a session for this id
+                // yet — try to do so. activate() is the proper
+                // entry point; this branch covers callers that
+                // expect a session object outside the activate
+                // flow (e.g. log replay helpers).
+                const termContainer = document.getElementById("terminal-container");
+                const s = r._createSession(id, termContainer);
+                if (s) {
+                    r._sessions.set(id, s);
+                    return s;
+                }
+            }
+            if (r && r.hasSession(id)) return r.getSession(id);
             if (!window.Terminal) return null;
             const host = createTerminalHost(id);
             const session = {
@@ -2825,10 +2961,28 @@
         }
 
         function ensureTerminalSession(id) {
-            return getTerminalSession(id) || createTerminalSession(id);
+            // PtyRenderer owns session creation. We call into it
+            // so legacy helpers (loadLog / connectTTY /
+            // disconnectTTY / sendResize) still work transparently
+            // after the renderer split.
+            const r = window.__ptyRenderer;
+            if (r && r.getSession(id)) return r.getSession(id);
+            if (r && r.hasSession && r.hasSession(id)) return r.getSession(id);
+            // createTerminalSession() is still defined below for
+            // any pre-renderer callers; the renderer prefers its
+            // own implementation.
+            return createTerminalSession(id);
         }
 
         function destroyTerminalSession(id) {
+            // Delegate to the renderer's destroy path; falls back
+            // to the legacy in-page implementation when the
+            // renderer is absent (unit tests / future refactors).
+            const r = window.__ptyRenderer;
+            if (r && typeof r.destroySession === 'function') {
+                r.destroySession(id);
+                return;
+            }
             const session = getTerminalSession(id);
             if (!session) return;
             disconnectTTY(session);
@@ -3742,6 +3896,32 @@
                 btn.title = "Configure LLM settings to enable AI generation";
             }
         }
+
+        // Expose PTY helper entry points on the window object so
+        // kinds/pty.js (PtyRenderer) can call them directly instead
+        // of going through the closure-scoped versions. Once these
+        // functions are fully migrated to pty.js, the exports here
+        // become unnecessary and can be removed.
+        window.loadLog = loadLog;
+        window.loadLogSince = loadLogSince;
+        window.disconnectTTY = disconnectTTY;
+        window.connectTTY = connectTTY;
+        window.hasLiveTTYConnection = hasLiveTTYConnection;
+        window.ensureTerminalSession = ensureTerminalSession;
+        window.maybeDestroyInactiveStoppedSession = maybeDestroyInactiveStoppedSession;
+        window.resetTerminalForSwitch = resetTerminalForSwitch;
+        window.focusTerminalIfPossible = focusTerminalIfPossible;
+        window.updateStatus = updateStatus;
+        window.resetTTYOutputDecoder = resetTTYOutputDecoder;
+        window.writeSanitizedTerminalOutput = writeSanitizedTerminalOutput;
+        window.decodeTTYOutputChunk = decodeTTYOutputChunk;
+        window.isTerminalQueryResponse = isTerminalQueryResponse;
+        window.reportSessionError = reportSessionError;
+        window.sendResize = sendResize;
+        window.syncTerminalToAppliedSize = syncTerminalToAppliedSize;
+        window.applyTTYSize = applyTTYSize;
+        window.parseTTYControlMessage = parseTTYControlMessage;
+        window.renderTerminalSessions = renderTerminalSessions;
 
         // Boot
         init();

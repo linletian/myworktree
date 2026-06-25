@@ -28,8 +28,10 @@ import (
 	"time"
 
 	"myworktree/internal/config"
+	"myworktree/internal/framework"
 	"myworktree/internal/gitx"
-	"myworktree/internal/instance"
+	"myworktree/internal/instance/opencode_web"
+	_ "myworktree/internal/instance/pty" // init(): register kind
 	"myworktree/internal/llm"
 	"myworktree/internal/mcp"
 	"myworktree/internal/monitor"
@@ -70,7 +72,7 @@ type Server struct {
 	httpSrv     *http.Server
 	store       store.FileStore
 	worktreeMgr worktree.Manager
-	instanceMgr *instance.Manager
+	instanceMgr *framework.Manager
 	mcpAdapter  mcp.Adapter
 	monitor     monitor.Collector
 	authMu      sync.Mutex
@@ -131,13 +133,13 @@ func New(cfg Config, logger *log.Logger) (*Server, error) {
 		Store:        st,
 	}
 	globalCfg, _ := config.Load()
-	instanceMgr := &instance.Manager{
-		DataDir:        dataDir,
-		Root:           root,
-		Store:          st,
-		Logger:         logger,
-		LogBufferBytes: globalCfg.LogBufferBytes,
-	}
+	instanceMgr := framework.NewManager(framework.Default, st, logger)
+	instanceMgr.DataDir = dataDir
+	instanceMgr.Root = root
+	instanceMgr.LogBufferBytes = globalCfg.LogBufferBytes
+	instanceMgr.AuthToken = cfg.AuthToken
+	// SetHTTPHandler is wired by Register() below (so the mux exists
+	// before any kind tries to register routes).
 
 	mux := http.NewServeMux()
 	isSecure := cfg.TLSCert != "" && cfg.TLSKey != ""
@@ -560,7 +562,12 @@ func (s *Server) registerAPIs(mux *http.ServeMux) {
 	mux.HandleFunc("/api/llm/test", s.handleLLMTest)
 	mux.HandleFunc("/api/llm/generate", s.handleLLMGenerate)
 	mux.HandleFunc("/login", s.handleLogin)
-	mux.Handle("/__opencode/", http.StripPrefix("/__opencode", ui.OpencodeProxy(s.instanceMgr)))
+	// /__opencode/<id>/ — reverse proxy to opencode web UI.
+	// One handler for ALL instances; path format /__opencode/<id>/<rest...>.
+	// The handler extracts <id>, looks up the instance, reads host:port
+	// from the kind blob, and proxies <rest> to the opencode server with
+	// Basic auth injection and ?directory=<worktree> for API paths.
+	mux.Handle("/__opencode/", http.StripPrefix("/__opencode", opencode_web.ProxyHandler(s.instanceMgr, s.cfg.AuthToken)))
 }
 
 func (s *Server) handleBranches(w http.ResponseWriter, r *http.Request) {
@@ -862,7 +869,7 @@ func (s *Server) handleWorktreeDelete(w http.ResponseWriter, r *http.Request) {
 
 // resolveWorktreePath returns the filesystem path for a worktree id.
 func (s *Server) resolveWorktreePath(id string) (string, error) {
-	if id == instance.MainWorktreeID {
+	if id == framework.MainWorktreeID {
 		return s.root, nil
 	}
 	worktrees, err := s.worktreeMgr.List()
@@ -1202,7 +1209,7 @@ func (s *Server) handleWorktreesDiverged(w http.ResponseWriter, r *http.Request)
 		}
 		mu.Lock()
 		if len(items) > 0 {
-			result[instance.MainWorktreeID] = items
+			result[framework.MainWorktreeID] = items
 		}
 		mu.Unlock()
 	}()
@@ -1225,7 +1232,7 @@ func (s *Server) handleWorktreeDiverged(w http.ResponseWriter, r *http.Request) 
 	}
 
 	var worktreePath string
-	if id == instance.MainWorktreeID {
+	if id == framework.MainWorktreeID {
 		worktreePath = s.root
 	} else {
 		worktrees, err := s.worktreeMgr.List()
@@ -1296,21 +1303,20 @@ func (s *Server) handleInstances(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusBadRequest, err)
 			return
 		}
-		item, err := s.instanceMgr.Start(instance.StartInput{
+		item, err := s.instanceMgr.Start(r.Context(), framework.StartParams{
 			WorktreeID: req.WorktreeID,
 			Root: func() string {
-				if req.WorktreeID == instance.MainWorktreeID {
+				if req.WorktreeID == framework.MainWorktreeID {
 					return s.root
 				}
 				return ""
 			}(),
 			TagID:   req.TagID,
-			Command: req.Command,
-			Name:    req.Name,
 			Kind:    req.Kind,
+			Name:    req.Name,
 		})
 		if err != nil {
-			var budgetErr *instance.LogBufferBudgetError
+			var budgetErr *framework.LogBufferBudgetError
 			if errors.As(err, &budgetErr) {
 				writeLogBufferBudgetErr(w, budgetErr)
 				return
@@ -1330,7 +1336,7 @@ func (s *Server) handleInstances(w http.ResponseWriter, r *http.Request) {
 		}
 		updated, err := s.instanceMgr.UpdateName(req.ID, req.Name)
 		if err != nil {
-			if errors.Is(err, instance.ErrInstanceNotFound) {
+			if errors.Is(err, framework.ErrInstanceNotFound) {
 				writeErr(w, http.StatusNotFound, err)
 				return
 			}
@@ -1356,7 +1362,7 @@ func (s *Server) handleInstanceOpencodeInfo(w http.ResponseWriter, r *http.Reque
 	}
 	inst, err := s.instanceMgr.Get(id)
 	if err != nil {
-		if errors.Is(err, instance.ErrInstanceNotFound) {
+		if errors.Is(err, framework.ErrInstanceNotFound) {
 			writeErr(w, http.StatusNotFound, err)
 			return
 		}
@@ -1367,18 +1373,45 @@ func (s *Server) handleInstanceOpencodeInfo(w http.ResponseWriter, r *http.Reque
 		writeErr(w, http.StatusNotFound, errors.New("not an opencode-web instance"))
 		return
 	}
-	worktreeAbs := inst.Extra["worktree_abs"]
-	if worktreeAbs == "" && inst.Cwd != "" {
+
+	// Connection info is in the per-kind blob (new code path) with
+	// the legacy Extra map as a fallback for pre-refactor state.json
+	// files. The blob is JSON {host, port, worktree_abs, url_path}.
+	var host, port, worktreeAbs string
+	if len(inst.KindBlob) > 0 {
+		var b struct {
+			Host        string `json:"host"`
+			Port        string `json:"port"`
+			WorktreeAbs string `json:"worktree_abs"`
+		}
+		if json.Unmarshal(inst.KindBlob, &b) == nil {
+			host = b.Host
+			port = b.Port
+			worktreeAbs = b.WorktreeAbs
+		}
+	}
+	// Fall back to legacy Extra for pre-refactor state.json compat.
+	if host == "" {
+		host = inst.Extra["host"]
+	}
+	if port == "" {
+		port = inst.Extra["port"]
+	}
+	if worktreeAbs == "" {
+		worktreeAbs = inst.Extra["worktree_abs"]
+	}
+	if worktreeAbs == "" {
 		worktreeAbs = inst.Cwd
 	}
-	encoded := base64.StdEncoding.EncodeToString([]byte(worktreeAbs))
+
+	base64Dir := base64.RawURLEncoding.EncodeToString([]byte(worktreeAbs))
+
 	writeJSON(w, http.StatusOK, map[string]any{
-		"iframe_src":    "/__opencode/" + id + "/" + encoded + "/session/",
+		"iframe_src":    "/__opencode/" + id + "/" + base64Dir + "/session/",
 		"api_base":      "/__opencode/" + id,
-		"password_set":  true,
 		"worktree_path": worktreeAbs,
-		"host":          inst.Extra["host"],
-		"port":          inst.Extra["port"],
+		"host":          host,
+		"port":          port,
 	})
 }
 
@@ -1889,14 +1922,13 @@ func (s *Server) handleMCPCall(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusBadRequest, err)
 			return
 		}
-		item, err := s.instanceMgr.Start(instance.StartInput{
+		item, err := s.instanceMgr.Start(r.Context(), framework.StartParams{
 			WorktreeID: args.WorktreeID,
 			TagID:      args.TagID,
-			Command:    args.Command,
 			Name:       args.Name,
 		})
 		if err != nil {
-			var budgetErr *instance.LogBufferBudgetError
+			var budgetErr *framework.LogBufferBudgetError
 			if errors.As(err, &budgetErr) {
 				writeLogBufferBudgetErr(w, budgetErr)
 				return
@@ -2073,7 +2105,7 @@ func writeErr(w http.ResponseWriter, status int, err error) {
 // was rejected for exceeding the global log buffer budget. The "error" code
 // "log_buffer_budget_exceeded" is part of the API contract — the dashboard
 // matches on it to display a popup instead of a generic error.
-func writeLogBufferBudgetErr(w http.ResponseWriter, err *instance.LogBufferBudgetError) {
+func writeLogBufferBudgetErr(w http.ResponseWriter, err *framework.LogBufferBudgetError) {
 	body := map[string]any{
 		"error":        "log_buffer_budget_exceeded",
 		"message":      fmt.Sprintf("Insufficient memory to start new instance: used %s, limit %s.", formatBytes(err.UsedBytes), formatBytes(err.LimitBytes)),

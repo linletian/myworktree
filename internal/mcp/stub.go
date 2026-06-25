@@ -1,7 +1,7 @@
 package mcp
 
 import (
-	"myworktree/internal/instance"
+	"myworktree/internal/framework"
 	"myworktree/internal/worktree"
 )
 
@@ -9,7 +9,7 @@ import (
 // It keeps the core managers decoupled from transport concerns.
 type Adapter struct {
 	Worktrees worktree.Manager
-	Instances *instance.Manager
+	Instances *framework.Manager
 }
 
 func (a Adapter) ToolNames() []string {

@@ -4,7 +4,7 @@
 
 Disk write amplification fix for long-running PTY-heavy sessions.
 
-- **feat(instance): add opencode-web kind embedding opencode official web UI (spec)** — `docs/plans/opencode-native-ui/` documents the design for a new instance kind that replaces PTY + xterm.js with opencode's built-in web server embedded via reverse proxy. Spec only; no code changes yet.
+- **feat(instance): opencode-web kind embedding opencode official web UI** — implemented: `internal/instance/opencode.go`, `internal/ui/proxy.go`, `/__opencode/<id>/*` reverse proxy, iframe panel + OC badge in `internal/ui/static/index.html`. Design, threat model, and review checklist in `docs/ARCHITECTURE.md` §8.
 
 ### Breaking changes
 
@@ -20,6 +20,11 @@ Disk write amplification fix for long-running PTY-heavy sessions.
 - **Daemon resource monitoring** — the resource stats API (`GET /api/instances/stats`) now includes the mw daemon process itself in global totals (`daemon_cpu_percent`, `daemon_memory_bytes`). The UI displays a dedicated "mw daemon" row so users can distinguish daemon overhead from instance resource usage.
 - **Ring buffer usage reporting** — per-instance stats now expose `memory_buffer_bytes` (actual usage) and `memory_buffer_cap_bytes` (pre-allocated capacity). The UI memory column shows the combined `RSS + buffer_used` with a `buf used/cap` annotation for active buffers, giving users visibility into per-instance buffer memory cost.
 - **Sidebar GitHub link** — main workspace row now shows a small GitHub Mark icon to the right of the project name when `git remote` resolves to `github.com`; clicking opens the canonical `https://github.com/<owner>/<repo>` URL in a new tab. Source of truth is a new `github_url` field on `GET /api/main`, computed via the new `gitx.GitHubURL` helper (prefers `origin`, then falls back to iterating `git remote`; normalizes SCP / HTTPS / `ssh://` forms; strips `.git`). GitHub Enterprise and non-GitHub remotes are intentionally not surfaced.
+- **Unified auth token for opencode-web** — `OPENCODE_SERVER_PASSWORD` now equals `cfg.AuthToken` for every opencode-web instance (replacing per-instance random passwords). The reverse proxy at `/__opencode/<id>/*` injects Basic auth with the same token. `state.json` no longer carries a per-instance `password` field. Threat model and review checklist in `docs/ARCHITECTURE.md` §8.
+- **Graceful goroutine lifecycle** — `Manager` gains `instCtx` + `instWG`. `Restart` / `Delete` cancel the instance context and `Wait()` for `pumpAndWatch` / `opencodeHealth` / `wait` (opencode-web) or `pumpLogs` / `wait` (PTY) to drain before returning, so callers never observe stale goroutines touching `m.buffers[id]` / `m.ocRT[id]` after a lifecycle transition. `Stop` keeps its existing fire-and-forget semantics.
+- **In-memory health-fail counter** — `opencodeHealth` no longer writes `_health_fail_count` to `Extra`; the counter lives in `Manager.ocRT[id]` (atomic Int32, cleared on restart). Reduces store writes from "every probe" to "every successful listen-address parse".
+- **`UpdateExtra` is now merge + retry** — preserves pre-existing keys (e.g., `worktree_abs`), retries on `ErrVersionConflict` so concurrent writers don't silently drop updates, and transitions `starting → running`.
+- **`password_set` removed from `/api/instances/<id>/opencode` response** — was always `true` and no longer meaningful; no frontend consumer. See `docs/API.md` §5.10.
 
 ## v0.3.0
 

@@ -29,11 +29,11 @@ var defaultTags = []Tag{
 	{ID: "docs", Command: "pwd"},
 	{ID: "dev", Command: "pwd"},
 	{ID: "review", Command: "pwd"},
-	{
-		ID:      "opencode-web",
-		Command: "opencode serve --hostname 127.0.0.1 --port 0",
-		Env:     map[string]string{},
-	},
+	// opencode-web intentionally has no Command: Manager.startOpencodeWeb
+	// hardcodes the invocation. Tag is used only as a label / reference key
+	// for the instance, and Env remains empty so users can layer non-secret
+	// env via tags.json without overwriting the forced auth token.
+	{ID: "opencode-web"},
 }
 
 func (m Manager) ensureDefaults() error {
