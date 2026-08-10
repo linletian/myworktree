@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+Reasonix web chat instances (MVP): per-instance `reasonix serve` subprocess with isolated `REASONIX_HOME`, symlinked `~/.reasonix` config/credentials, and a same-origin reverse proxy at `/rx/<id>/` (token cookie injection + HTML URL-prefix rewrite for fetch/EventSource/XHR).
+
 Disk write amplification fix for long-running PTY-heavy sessions.
 
 ### Breaking changes

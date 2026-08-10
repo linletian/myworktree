@@ -13,7 +13,7 @@ It does **not** analyze project code or prevent concurrent write conflicts insid
 - `cmd/myworktree/` — CLI entry.
 - `internal/app/` — HTTP server, auth middleware, API routing.
 - `internal/worktree/` — worktree lifecycle via `git` CLI.
-- `internal/instance/` — instance lifecycle (spawn/stop/list) + in-memory PTY log ring buffer (see §4).
+- `internal/instance/` — instance lifecycle (spawn/stop/list) + in-memory PTY log ring buffer (see §4). `kind` distinguishes PTY terminal instances (`tty`) from Reasonix web-chat instances (`reasonix`, see §4.2): reasonix instances run a `reasonix serve` subprocess per worktree, managed by `internal/instance/reasonix/` and exposed through the `/rx/<id>/` reverse proxy (`internal/app/reasonix_proxy.go`).
 - `internal/tag/` — Tag config loader (MVP: JSON).
 - `internal/store/` — persistent state store (`state.json`) with file locking + atomic writes.
 - `internal/redact/` — secret redaction applied to PTY chunks before they enter the ring buffer / live broadcast (e.g. `sk-...`).
@@ -51,8 +51,9 @@ It does **not** analyze project code or prevent concurrent write conflicts insid
 
 ### 3.2 State model
 - Worktree: id, name, path, branch, baseRef, createdAt
-- Instance: id, worktreeId, tagId, command, cwd, env (sanitized), pid, status, timestamps
+- Instance: id, worktreeId, tagId, command, cwd, env (sanitized), kind (`tty`/`reasonix`; empty means `tty`), pid, status, timestamps
   - **Schema note (v0.4.0)**: the legacy `log_path` field was removed when PTY logs moved to memory. `state.json` files written by older versions still load cleanly — the field is silently ignored by JSON decoding. External tools reading `state.json` should drop their dependency on `log_path`.
+  - **Schema note (reasonix)**: the `kind` field is `omitempty`, so pre-existing instances serialize without it; missing `kind` decodes as `tty`, so no migration is needed.
 - TabOrder (at State level): map of worktree_id to ordered list of instance IDs
 - **Version** (at State level): monotonically increasing int64, incremented on every write via `SaveWithVersion`. Used for optimistic locking on concurrent modification detection.
 - Main Repo: not persisted; served via `GET /api/main` with live git branch
@@ -87,6 +88,7 @@ The sidebar shows a pinned **Main Workspace** item at the top (purple accent), f
 - UI shows transport state (`websocket/sse/polling`) and supports manual WS reconnect.
 - PTY output is captured into a per-instance **in-memory ring buffer**; no disk I/O is involved on the steady state. The buffer feeds the HTTP/SSE/WS replay endpoints and the MCP `instance_log_tail` tool. See §4.1 for sizing, eviction, and budget rules.
 - On server startup, stale persisted `running` records are reconciled to `stopped` because in-memory stdin/stdout bindings cannot be resumed after process restart. The same startup pass also calls `Manager.PurgeOrphanLogFiles()` to remove dead `.log` files left behind by pre-buffer versions; missing or empty `logs/` directories are not an error.
+  - **Exception (reasonix)**: `ReconcileRunningOnStartup` probes reasonix instances via `Reasonix.Health()` (pid liveness + TCP port). A live serve subprocess survives the restart and is kept `running` so Stop/Delete still manage it; a dead one is marked `stopped`. This prevents the restart-then-delete sequence from orphaning a serve process that holds the symlinked provider credentials.
 - **Rename**: `PATCH /api/instances` updates an instance's display name (`name` field). The rename takes effect immediately in the UI and persists to `state.json`.
 - **Tab ordering**: `PATCH /api/instances/reorder` persists per-worktree tab order to `state.json` (`tab_order` map + array order in `State.Instances`). Uses **optimistic locking** — the client sends the `version` observed from `GET /api/instances`. If the state has been modified since (e.g., another user started an instance), the server returns HTTP 409 Conflict and the client refreshes and retries.
 - **Resource monitoring**: A clickable transport status bar in the bottom-right of the workspace opens a resource monitor modal. The modal shows per-instance CPU%, memory RSS, ring buffer usage (actual / capacity), and connection type (WebSocket/SSE) grouped by worktree, with subtotals and a global summary. The global totals include the mw daemon process itself (`daemon_cpu_percent`, `daemon_memory_bytes`). Data is fetched via `GET /api/instances/stats` (1-second polling when open, stops when closed). CPU% uses delta calculation from `process.Times()` with a per-PID baseline stored in the `Collector` struct. The UI includes a disclaimer that grandchild processes spawned inside instances are not individually tracked.
@@ -121,6 +123,16 @@ Each running instance owns a bounded, **in-memory** ring buffer (`internal/insta
 - Budget exceeded → 503 with `log_buffer_budget_exceeded`. The dashboard surfaces a modal showing `used_bytes` / `limit_bytes` and a hint to raise `LogBufferBytes` or close other tabs.
 - Memory sampler fails (e.g. unusual cgroup) → cap falls back to `DefaultBufferCap`; the budget check is skipped for that call.
 - Daemon restart → all buffers are gone. The next `GET /api/instances/log` for a stopped/never-started instance returns empty (documented behaviour).
+
+### 4.2 Reasonix web-chat instances
+
+`kind: "reasonix"` instances run a `reasonix serve` subprocess in the worktree instead of a PTY shell, and the UI embeds the Reasonix web chat page in an iframe.
+
+- **Lifecycle**: `Manager.Start` with `kind=reasonix` delegates to `internal/instance/reasonix` (`Driver.Start`): it launches `reasonix serve --addr 127.0.0.1:0 --auth token --token-file … --port-file … --pid-file … --no-open --resume <fixed session file>` with `cwd` = worktree path. The actual port is read back from the port file (port 0 = kernel-assigned). `Stop` signals the process group (TERM → KILL). `Restart` allocates a fresh instance id and cleans the old state dir. `Delete` (after stop) removes the whole per-instance state dir.
+- **Isolation**: each instance gets `REASONIX_HOME=<data>/reasonix/<id>/home` so sessions never contend on reasonix session leases; `config.toml` and `.env` inside that home are **symlinks** to `~/.reasonix/config.toml` / `~/.reasonix/.env`, so provider credentials stay live without copying. `reasonix serve` must be on `PATH` (or configured via `Driver.ReasonixBin`).
+- **Proxy**: `internal/app/reasonix_proxy.go` serves `/rx/<id>/…` same-origin (single-user local tool, same trust domain as the UI itself), forwarding to the backend with a `reasonix_token` cookie, streaming SSE, and injecting an HTML script that prefixes the page's root-relative `fetch`/`EventSource`/`XMLHttpRequest` calls with `/rx/<id>/`.
+- **Liveness**: `Driver.Health` = pid alive (`kill(pid,0)`) **and** TCP connect to the recorded port succeeds — cross-platform (no `/proc`), so it also works on macOS.
+- **Restart reconciliation**: see the exception note in §4 — a live serve subprocess is re-attached as `running` on startup, keeping it manageable; dead ones are marked `stopped`.
 
 ## 5. Terminal Protocol Timing Specification
 

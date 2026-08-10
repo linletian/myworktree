@@ -324,10 +324,11 @@ Response:
 
 Body:
 ```json
-{ "worktree_id": "<worktreeId>", "tag_id": "optional", "command": "optional", "name": "optional" }
+{ "worktree_id": "<worktreeId>", "tag_id": "optional", "command": "optional", "name": "optional", "kind": "optional" }
 ```
 
 - `worktree_id` can be a regular worktree ID, or `"__main__"` to run an instance in the main (host) git repository. For `"__main__"`, the instance starts in the main repo root directory.
+- `kind`: `""`/`"tty"` (default) starts a PTY terminal instance; `"reasonix"` starts a `reasonix serve` subprocess in the worktree and exposes its web chat UI under `/rx/<id>/` (see section 6). `command`/`tag_id` are ignored for `"reasonix"`.
 
 If both `tag_id` and `command` are empty, the server starts an **interactive shell** instance in the worktree.
 If `command` is provided, it is sent to the shell as the initial command and the shell remains available for further input.
@@ -339,7 +340,7 @@ Example (ad-hoc command without tags):
 
 Response (201):
 ```json
-{ "id":"...","pid":123,"status":"running","created_at":"..." }
+{ "id":"...","pid":123,"status":"running","created_at":"...","kind":"tty" }
 ```
 
 **Error: log buffer budget exceeded (`503 Service Unavailable`)**
@@ -583,6 +584,21 @@ All page close/refresh/navigation events trigger a browser-native confirmation d
 - **Behavior**: Calls `event.preventDefault()` and sets `event.returnValue = ''` to force the browser to show its native confirmation dialog
 - **No backend involvement**: Instances continue running regardless of the user's choice
 - **Condition**: Always triggered on any close action — no dependency on instance state
+
+### 5.10 Reasonix web UI proxy
+
+For `kind: "reasonix"` instances the web chat UI is served same-origin under:
+
+```
+GET /rx/<instanceId>/...
+```
+
+- Mounted in the UI as an `<iframe src="/rx/<id>/">` (see `internal/app/reasonix_proxy.go`).
+- The proxy forwards to the instance's `reasonix serve` at `http://127.0.0.1:<port>` (port read from the per-instance `port` file), injecting `Cookie: reasonix_token=<token>` for auth.
+- HTML responses get a script injected that prefixes the page's root-relative `fetch` / `EventSource` / `XMLHttpRequest` calls with `/rx/<id>/` so the embedded page talks to its own backend.
+- The `Accept-Encoding` header is forced to `identity` and the request query string is dropped upstream (prevents myworktree auth `?token=` from leaking to the subprocess).
+- SSE (`/events`) is streamed through (`FlushInterval=-1`); the upstream sends its own 15s `: ping` keepalive.
+- Returns `404` for unknown/non-reasonix instance ids, `503` when the instance is not running, `502` when the backend is unreachable.
 
 ## 6) MCP
 ### Tool names

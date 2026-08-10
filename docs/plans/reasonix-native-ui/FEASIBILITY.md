@@ -527,6 +527,27 @@ reasonix 侧栏固定 **220px**(`.app{display:grid;grid-template-columns:220px 1
 | 路由 | `/:dir/session`,需剥离前缀 | 无 path router |
 | 会话归属 | 多 workspace,需裁剪/绕过首页 | 按启动目录隔离,天然锁死当前 worktree(侧栏即当前项目会话列表,无跨项目入口) |
 
+### 9.5 安全权衡:同源 iframe 的权限提升面(评审 R-01 论证)
+
+**事实**:`/rx/<id>/` 与 myworktree 主界面同源。同源 iframe 内的 reasonix 页面(其聊天区会渲染 AI 生成内容)可直接携带用户身份调用 myworktree 自身 API(`/api/worktrees`、`/api/instances` 等,可创建/删除 worktree、启动任意命令实例)。`internal/app` 无 CSRF 校验(CSRF 机制仅在 `internal/portal`)。
+
+**鉴权中间件事实**(已核实 `internal/app/app.go` `withAuth`):
+- **loopback 请求直接放行**(`isLoopbackRequest`),不做任何 Origin/Cookie 检查——同源 iframe 在本机场景完全静默、可读写;
+- **非 loopback 请求**先做 `sameOriginHost` 检查(`Origin` 与请求 `Host` 不一致 → 403 forbidden origin),再走 Cookie 鉴权——同源 iframe 的请求 `Origin == Host`,天然通过,携带登录 Cookie 即拥有完整权限。
+
+**威胁等级随访问模式变化**:
+- **远程 / Portal + Tailscale 模式(产品主推场景)**:该权衡风险**最高**——用户为远程已认证会话,"loopback 免登录"前提不成立,同源 iframe 静默调用管理 API 的路径完全存在。**此场景下同源与跨源差异极大**:独立源方案下 iframe 页面(源 `port2`)请求 myworktree API(源 `port1`)时 `Origin != Host` → 被 `sameOriginHost` 403 拒绝,且跨域响应受 CORS 限制无法读取。
+- **本机 loopback 模式**:差异较小——`isLoopbackRequest` 对本机连接直接放行,跨源 iframe 的副作用型请求仍会被服务端执行(但浏览器因 CORS 读不到响应);该场景下本机用户本就拥有完整系统权限,威胁模型本身较弱。
+
+**MVP 决策**:当前实现接受该权衡(记录在案)。理由:
+- MVP 目标为**本机工作流跑通**;远程模式使用 reasonix 实例属于后续场景,届时应同步落地独立源方案(下文方案 1)。
+- 真实攻击链要求 reasonix 聊天区出现 XSS / 提示词注入且能突破 reasonix 自身渲染防线——reasonix 是否具备该防线属上游责任,本仓库无法控制;缓解责任分层。
+
+**后续可选项(MVP 之后,按优先级)**:
+1. **独立源**(推荐,且为**远程场景必需**):把 `/rx/` 反代挂到独立端口(如 `127.0.0.1:<rand>`),iframe `src` 指向该端口。reasonix 页面与 reasonix API 仍同源(无 CORS),但与 myworktree API 跨源:远程场景被 `sameOriginHost` 403 拦截,彻底切断 iframe 静默调用管理 API 的路径。改动量:一个额外 listener + 前端 iframe 地址来源(`/api/instances` 返回 `web_url`)。
+2. **iframe `sandbox`**:受限 sandbox 会同时破坏 reasonix UI(需要 `allow-scripts allow-same-origin`),仅可作纵深防御。
+3. **CSP**:对 `/rx/` 响应加 `Content-Security-Policy: default-src 'self'` 之类,降低注入面;不解决"同源即有权"的根本问题。
+
 ## 10. 参考资料
 
 - reasonix 官方文档: https://reasonix.io/docs/#cli

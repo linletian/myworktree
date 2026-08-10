@@ -53,6 +53,7 @@
   - 输出回放中按模式脱敏主流 AI key（如 `sk-***`）。
 
 ## 7. 当前实现状态（与愿景差异）
+- **已实现 Reasonix web chat 实例（MVP）**：`kind=reasonix` 实例在 worktree 内运行 `reasonix serve` 子进程，其 web 聊天界面经同源反代 `/rx/<id>/` 以 iframe 嵌入实例标签页（创建实例时勾选 *Reasonix (web chat UI)*）。会话按实例隔离（独立 `REASONIX_HOME`），`config.toml`/`.env` 软链自 `~/.reasonix` 以继承 provider 凭据。详见 `docs/plans/reasonix-native-ui/`。
 - 已实现：worktree/instance 管理、Web UI、API、输出回放、脱敏、认证与可选 HTTPS、MCP tools 列表接口。
 - 已实现：侧栏主工作区/各 worktree 项提供两个快捷入口，可一键在宿主机打开对应目录的 Terminal（zsh）与 Finder 窗口，便于在 Web UI 与本机 GUI/CLI 间快速切换。
 - **已实现 Git Changes 面板暂存/未暂存分离**：侧栏底部 CHANGES 区域拆分为 Staged 和 Unstaged 两个互锁折叠 section。默认展开 Unstaged，点击任一标题栏展开当前 section 并自动折叠另一个。每个 section 独立显示暂存/未暂存的文件列表和行数汇总。

@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/creack/pty"
+	"myworktree/internal/instance/reasonix"
 	"myworktree/internal/redact"
 	"myworktree/internal/store"
 	"myworktree/internal/tag"
@@ -34,6 +35,10 @@ type Manager struct {
 	Root    string // git repo root, used for MainWorktreeID resolution
 	Store   store.FileStore
 	Logger  *log.Logger
+
+	// Reasonix drives the reasonix serve subprocess for Kind==KindReasonix
+	// instances. Nil disables reasonix instances.
+	Reasonix *reasonix.Driver
 
 	// LogBufferBytes is the per-instance ring buffer cap from config.
 	// 0 means "use adaptive sizing".
@@ -77,10 +82,14 @@ type StartInput struct {
 	TagID      string
 	Command    string // optional if TagID is set; required if TagID is empty
 	Name       string
+	Kind       string // store.KindTTY or store.KindReasonix; empty means tty
 }
 
 // ReconcileRunningOnStartup marks stale "running" records as "stopped".
-// Process I/O channels are in-memory and cannot be resumed across server restarts.
+// Process I/O channels are in-memory and cannot be resumed across server
+// restarts. reasonix instances are the exception: their serve subprocess
+// survives the restart, so a live one is re-attached (kept "running")
+// instead of being orphaned — this keeps Stop/Delete able to manage it.
 func (m *Manager) ReconcileRunningOnStartup() (int, error) {
 	m.stateMu.Lock()
 	defer m.stateMu.Unlock()
@@ -93,6 +102,11 @@ func (m *Manager) ReconcileRunningOnStartup() (int, error) {
 	for i := range st.Instances {
 		if st.Instances[i].Status != "running" {
 			continue
+		}
+		if st.Instances[i].Kind == store.KindReasonix && m.Reasonix != nil {
+			if _, ok, herr := m.Reasonix.Health(st.Instances[i].ID); herr == nil && ok {
+				continue // serve still healthy; keep managing it
+			}
 		}
 		st.Instances[i].Status = "stopped"
 		if strings.TrimSpace(st.Instances[i].StoppedAt) == "" {
@@ -288,6 +302,14 @@ func (m *Manager) Start(in StartInput) (store.ManagedInstance, error) {
 		cwd = filepath.Join(wtPath, cwdRel)
 	}
 
+	kind := in.Kind
+	if kind == "" {
+		kind = store.KindTTY
+	}
+	if kind == store.KindReasonix {
+		return m.startReasonix(in, id, instName, cwd, effectiveTagID, wtName)
+	}
+
 	// Resolve buffer cap with budget enforcement. Done BEFORE exec.Command /
 	// pty.Start so a budget-exceeded error short-circuits the heavy work
 	// (process spawn, PTY allocation) and leaves no resources to clean up.
@@ -396,6 +418,59 @@ func (m *Manager) Start(in StartInput) (store.ManagedInstance, error) {
 
 	go m.pumpLogs(id, ptmx)
 	go m.wait(id, cmd)
+	return inst, nil
+}
+
+// startReasonix starts the reasonix serve subprocess for a web-UI instance
+// and persists it like a tty instance, minus the PTY/ring-buffer machinery.
+// The serve process is launched by the Reasonix driver; the manager only
+// records the pid and status so stop/restart/delete can find it again.
+func (m *Manager) startReasonix(in StartInput, id, instName, cwd, effectiveTagID, wtName string) (store.ManagedInstance, error) {
+	if m.Reasonix == nil {
+		return store.ManagedInstance{}, errors.New("reasonix instances are not enabled")
+	}
+	info, err := m.Reasonix.Start(reasonix.StartInput{InstanceID: id, WorktreePath: cwd})
+	if err != nil {
+		return store.ManagedInstance{}, err
+	}
+
+	now := time.Now().UTC().Format(time.RFC3339)
+	inst := store.ManagedInstance{
+		ID:           id,
+		WorktreeID:   in.WorktreeID,
+		WorktreeName: wtName,
+		TagID:        effectiveTagID,
+		Name:         instName,
+		Command:      "reasonix serve",
+		Cwd:          cwd,
+		Kind:         store.KindReasonix,
+		PID:          info.PID,
+		Status:       "running",
+		CreatedAt:    now,
+	}
+
+	m.stateMu.Lock()
+	defer m.stateMu.Unlock()
+	st2, err := m.Store.Load()
+	if err != nil {
+		_ = m.Reasonix.Stop(id)
+		return store.ManagedInstance{}, err
+	}
+	st2.Instances = append(st2.Instances, inst)
+	if st2.TabOrder == nil {
+		st2.TabOrder = make(map[string][]string)
+	}
+	st2.TabOrder[in.WorktreeID] = append(st2.TabOrder[in.WorktreeID], inst.ID)
+	if err := m.Store.SaveWithVersion(st2, st2.Version); err != nil {
+		_ = m.Reasonix.Stop(id)
+		return store.ManagedInstance{}, err
+	}
+
+	m.mu.Lock()
+	if m.running == nil {
+		m.running = map[string]*exec.Cmd{}
+	}
+	m.mu.Unlock()
 	return inst, nil
 }
 
@@ -521,6 +596,16 @@ func (m *Manager) Stop(id string) error {
 		return fmt.Errorf("unknown instance id: %s", id)
 	}
 	if inst.Status != "running" {
+		return nil
+	}
+
+	if inst.Kind == store.KindReasonix {
+		if m.Reasonix != nil {
+			if err := m.Reasonix.Stop(id); err != nil {
+				return err
+			}
+		}
+		_ = m.markStopped(id, "stopped")
 		return nil
 	}
 
@@ -657,6 +742,7 @@ func (m *Manager) Restart(id string) (store.ManagedInstance, error) {
 	startIn := StartInput{
 		WorktreeID: old.WorktreeID,
 		Name:       old.Name,
+		Kind:       old.Kind,
 	}
 	if old.WorktreeID == MainWorktreeID {
 		startIn.Root = m.Root
@@ -710,6 +796,12 @@ func (m *Manager) Restart(id string) (store.ManagedInstance, error) {
 	m.stateMu.Lock()
 	m.dropBufferLocked(id)
 	m.stateMu.Unlock()
+
+	// The old reasonix state dir (isolated home + session) can never be
+	// resumed under its old id; drop it so it does not accumulate.
+	if old.Kind == store.KindReasonix && m.Reasonix != nil {
+		_ = m.Reasonix.Cleanup(id)
+	}
 
 	return newInst, nil
 }
@@ -773,11 +865,13 @@ func (m *Manager) Delete(id string) error {
 		return err
 	}
 	idx := -1
+	var kind string
 	for i := range st.Instances {
 		if st.Instances[i].ID == id {
 			if st.Instances[i].Status == "running" {
 				return fmt.Errorf("instance is running: %s", id)
 			}
+			kind = st.Instances[i].Kind
 			idx = i
 			break
 		}
@@ -788,6 +882,15 @@ func (m *Manager) Delete(id string) error {
 	st.Instances = append(st.Instances[:idx], st.Instances[idx+1:]...)
 	if err := m.Store.SaveWithVersion(st, st.Version); err != nil {
 		return err
+	}
+	if kind == store.KindReasonix && m.Reasonix != nil {
+		// Idempotent safety net: if the serve process is still alive (e.g.
+		// Health briefly failed during reconcile, so the record was marked
+		// stopped while the process lingers), kill it before wiping the
+		// state dir — otherwise the process keeps its port and credential
+		// symlinks with no files left to locate it.
+		_ = m.Reasonix.Stop(id)
+		_ = m.Reasonix.Cleanup(id)
 	}
 	m.dropBufferLocked(id)
 	m.mu.Lock()
