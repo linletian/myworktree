@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -431,6 +432,53 @@ func TestDriverAddrCacheRefresh(t *testing.T) {
 	got, err := d.Addr(newID)
 	if err != nil || got.Port != newInfo.Port {
 		t.Fatalf("Addr new = %+v err %v, want port %d", got, err, newInfo.Port)
+	}
+}
+
+// TestDriverConcurrentStart verifies the per-instance Start lock: concurrent
+// Start calls for the same id must not both spawn a serve process (review
+// should-fix #2). Without the lock, two spawns would race on the same
+// port/pid files, the loser's process would be untracked and would survive
+// a single Stop.
+func TestDriverConcurrentStart(t *testing.T) {
+	dataDir := t.TempDir()
+	d := &Driver{DataDir: dataDir, ReasonixBin: fakeServeBin(t)}
+	id := "rx-conc"
+	worktree := t.TempDir()
+
+	const n = 4
+	infos := make([]Info, n)
+	errs := make([]error, n)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			infos[i], errs[i] = d.Start(StartInput{InstanceID: id, WorktreePath: worktree})
+		}(i)
+	}
+	wg.Wait()
+
+	for i := 0; i < n; i++ {
+		if errs[i] != nil {
+			t.Fatalf("concurrent Start %d: %v", i, errs[i])
+		}
+	}
+	// All callers must observe the SAME process: a duplicate spawn would
+	// allocate a new random port and diverge the Infos.
+	for i := 1; i < n; i++ {
+		if infos[i] != infos[0] {
+			t.Fatalf("concurrent Starts returned different Info: %+v vs %+v", infos[i], infos[0])
+		}
+	}
+
+	// One Stop must leave nothing behind: with a stray second process alive,
+	// Health would still report healthy after Stop.
+	if err := d.Stop(id); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if _, ok, _ := d.Health(id); ok {
+		t.Fatal("stray process survived Stop (duplicate spawn under concurrent Start)")
 	}
 }
 

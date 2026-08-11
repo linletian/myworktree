@@ -1333,6 +1333,10 @@ func (s *Server) handleWorktreeDiverged(w http.ResponseWriter, r *http.Request) 
 // reasonix instances pointing at the independent listener (issue #44). The
 // field is intentionally not part of the persisted store schema.
 func (s *Server) instanceView(it store.ManagedInstance) map[string]any {
+	// JSON round-trip (instead of a hand-built map) keeps the API response
+	// field-for-field in sync with the persisted store schema: new
+	// ManagedInstance fields appear in the API automatically. web_url is
+	// appended below only for reasonix instances.
 	var m map[string]any
 	if b, err := json.Marshal(it); err == nil {
 		_ = json.Unmarshal(b, &m)

@@ -1,6 +1,8 @@
 package app
 
 import (
+	"bytes"
+	"compress/gzip"
 	"encoding/json"
 	"io"
 	"log"
@@ -58,7 +60,8 @@ class H(BaseHTTPRequestHandler):
                        b"<html><head><title>t</title></head><body><img src=\"/assets/logo.svg\"><a href=\"/sessions/x\">s</a></body></html>")
         else:
             self._send(200, "text/plain",
-                       ("path=" + self.path + ";cookie=" + self.headers.get("Cookie", "")).encode())
+                       ("path=" + self.path + ";cookie=" + self.headers.get("Cookie", "") +
+                        ";accept-encoding=" + self.headers.get("Accept-Encoding", "")).encode())
     def do_POST(self):
         n = int(self.headers.get("Content-Length", "0"))
         if n:
@@ -131,6 +134,140 @@ func TestReasonixProxyProxiesAndInjectsCookie(t *testing.T) {
 	}
 	if !strings.Contains(body, "cookie=reasonix_token=") {
 		t.Fatalf("backend did not receive reasonix_token cookie: %q", body)
+	}
+}
+
+func TestReasonixProxyStripsTokenKeepsQuery(t *testing.T) {
+	p, m, _ := newProxyTestEnv(t)
+	id := startReasonixViaManager(t, m)
+	defer func() { _ = m.Stop(id) }()
+
+	// The injected prefix() JS keeps the browser's query string, so reasonix
+	// query params (?session=) must reach the backend intact while
+	// myworktree's ?token= credential is stripped (review should-fix).
+	req := httptest.NewRequest(http.MethodGet, "/rx/"+id+"/history?session=abc123&token=myworktree-leak", nil)
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "path=/history?session=abc123") {
+		t.Fatalf("reasonix query param was dropped upstream: %q", body)
+	}
+	if strings.Contains(body, "token=myworktree-leak") {
+		t.Fatalf("myworktree auth token leaked upstream: %q", body)
+	}
+}
+
+func TestReasonixProxyEncodingNegotiation(t *testing.T) {
+	p, m, _ := newProxyTestEnv(t)
+	id := startReasonixViaManager(t, m)
+	defer func() { _ = m.Stop(id) }()
+
+	// HTML navigation request: forced identity so ModifyResponse can splice
+	// the injection into the raw body. (The /page path returns injected HTML,
+	// so assert on the echo path /history which reports the request headers.)
+	nav := httptest.NewRequest(http.MethodGet, "/rx/"+id+"/history", nil)
+	nav.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, nav)
+	if got := rec.Body.String(); !strings.Contains(got, "accept-encoding=identity") {
+		t.Fatalf("HTML navigation was not forced to identity: %q", got)
+	}
+
+	// API request (JSON/SSE): encoding must NOT be forced to identity —
+	// gzip is explicitly negotiated so the Transport forwards compressed
+	// bodies verbatim (compression is safe: ModifyResponse never touches
+	// non-HTML bodies).
+	api := httptest.NewRequest(http.MethodGet, "/rx/"+id+"/history", nil)
+	api.Header.Set("Accept", "application/json")
+	rec2 := httptest.NewRecorder()
+	p.ServeHTTP(rec2, api)
+	if got := rec2.Body.String(); !strings.Contains(got, "accept-encoding=gzip") {
+		t.Fatalf("API request did not negotiate gzip: %q", got)
+	}
+}
+
+// fakeGzipHTMLServeBin writes a serve script that answers every GET with a
+// gzip-compressed text/html body, for the "compressed HTML must not be
+// spliced" guard in ModifyResponse.
+func fakeGzipHTMLServeBin(t *testing.T) string {
+	t.Helper()
+	bin := filepath.Join(t.TempDir(), "fake-gzip-html.py")
+	script := `#!/usr/bin/env python3
+import os, gzip, sys
+import socket
+socket.getfqdn = lambda host="": host if host else "localhost"
+from http.server import BaseHTTPRequestHandler, HTTPServer
+args = sys.argv[1:]
+if args[:1] == ["--version"]:
+    print("reasonix v1.22.0")
+    sys.exit(0)
+def val(flag):
+    try:
+        i = args.index(flag)
+        return args[i + 1]
+    except (ValueError, IndexError):
+        return None
+pidfile = val("--pid-file")
+portfile = val("--port-file")
+class H(BaseHTTPRequestHandler):
+    def do_GET(self):
+        body = gzip.compress(b"<html><head><title>g</title></head><body>plain</body></html>")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Encoding", "gzip")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+    def log_message(self, *a):
+        pass
+srv = HTTPServer(("127.0.0.1", 0), H)
+with open(portfile, "w") as f:
+    f.write("127.0.0.1:%d" % srv.server_address[1])
+with open(pidfile, "w") as f:
+    f.write(str(os.getpid()))
+srv.serve_forever()
+`
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return bin
+}
+
+func TestReasonixProxyGzipHTMLNotInjected(t *testing.T) {
+	p, m, _ := newProxyTestEnv(t)
+	m.Reasonix.ReasonixBin = fakeGzipHTMLServeBin(t)
+	id := startReasonixViaManager(t, m)
+	defer func() { _ = m.Stop(id) }()
+
+	// Non-navigation request (Accept: */*) that the upstream answers with a
+	// compressed HTML body: the injection must NOT splice into the gzip
+	// stream — the response stays compressed and unmodified.
+	req := httptest.NewRequest(http.MethodGet, "/rx/"+id+"/page", nil)
+	req.Header.Set("Accept", "*/*")
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if got := rec.Header().Get("Content-Encoding"); got != "gzip" {
+		t.Fatalf("Content-Encoding = %q, want gzip (compressed HTML passed through untouched)", got)
+	}
+	gz, err := gzip.NewReader(bytes.NewReader(rec.Body.Bytes()))
+	if err != nil {
+		t.Fatalf("response body is not valid gzip: %v", err)
+	}
+	defer gz.Close()
+	plain, err := io.ReadAll(gz)
+	if err != nil {
+		t.Fatalf("gunzip failed: %v", err)
+	}
+	if strings.Contains(string(plain), "<script>") || strings.Contains(string(plain), "/rx/"+id) {
+		t.Fatalf("injection spliced into compressed HTML: %s", plain)
 	}
 }
 

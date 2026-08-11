@@ -52,6 +52,16 @@ type Driver struct {
 	mu    sync.Mutex
 	cache map[string]cachedAddr // issue #46: avoid a file read per proxy request
 
+	// startsMu guards starts: per-instance in-flight Start locks, so two
+	// concurrent Start calls for the same instance cannot both pass the
+	// Health check and spawn duplicate serve processes (a race would leave
+	// the loser's process untracked, both writing the same port/pid files
+	// and contending for the session lease). The second caller blocks until
+	// the first finishes, then sees the healthy process and returns its
+	// Info idempotently.
+	startsMu sync.Mutex
+	starts   map[string]*sync.Mutex
+
 	// verMu guards verPass: per-binary memo of a PASSED version gate, so
 	// repeated Starts of the same reasonix binary do not re-spawn
 	// `reasonix --version` on every call (issue #45). Failures are NOT
@@ -117,6 +127,25 @@ func (d *Driver) homeDir(instanceID string) string {
 	return filepath.Join(d.dir(instanceID), "home")
 }
 
+// lockStart serializes Start calls per instance id: it returns the unlock
+// function for the instance's in-flight lock, creating the lock on first use.
+// Locks are never deleted (at most one small mutex per instance id ever
+// started), which keeps the map race-free.
+func (d *Driver) lockStart(instanceID string) func() {
+	d.startsMu.Lock()
+	if d.starts == nil {
+		d.starts = map[string]*sync.Mutex{}
+	}
+	l, ok := d.starts[instanceID]
+	if !ok {
+		l = &sync.Mutex{}
+		d.starts[instanceID] = l
+	}
+	d.startsMu.Unlock()
+	l.Lock()
+	return l.Unlock
+}
+
 // Start launches (or re-attaches to) the reasonix serve process for an
 // instance and waits until it is listening. It is idempotent: if a healthy
 // process is already tracked in the pid file, it returns its Info.
@@ -130,6 +159,11 @@ func (d *Driver) Start(in StartInput) (Info, error) {
 	if d.DataDir == "" {
 		return Info{}, errors.New("reasonix: data dir is required")
 	}
+
+	// Serialize per instance: see lockStart. The Health check below must run
+	// under the lock so concurrent Starts cannot both decide to spawn.
+	unlock := d.lockStart(in.InstanceID)
+	defer unlock()
 
 	if info, ok, err := d.Health(in.InstanceID); err == nil && ok {
 		d.logf("instance %s already running (pid %d, port %d)", in.InstanceID, info.PID, info.Port)
@@ -195,7 +229,11 @@ func (d *Driver) Start(in StartInput) (Info, error) {
 	portFile := filepath.Join(dir, "port")
 	pidFile := filepath.Join(dir, "pid")
 	logFile := filepath.Join(dir, "serve.log")
-	_ = os.Remove(portFile) // stale port from a previous run
+	// Stale port/pid from a previous run: remove both so waitReady can only
+	// pick up the NEW process's port and pid (a leftover pid file would let
+	// Health report the old dead pid against the new port).
+	_ = os.Remove(portFile)
+	_ = os.Remove(pidFile)
 
 	args := []string{
 		"serve",

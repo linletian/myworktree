@@ -73,16 +73,33 @@ func (p *reasonixProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		req.URL.RawPath = ""
 		// Never forward myworktree's auth query (?token=...) upstream: it is
 		// a credential leak to the reasonix subprocess and reasonix would
-		// reject it anyway (it has its own ?token= scheme).
-		req.URL.RawQuery = ""
+		// reject it anyway (it has its own ?token= scheme). Any OTHER query
+		// params are preserved — the injected prefix() JS keeps the browser's
+		// query string, and reasonix itself uses query params (e.g.
+		// ?session=) that must reach it intact.
+		q := req.URL.Query()
+		q.Del("token")
+		req.URL.RawQuery = q.Encode()
 		// Inject the reasonix auth cookie (single source: reasonix.CookieName)
 		// so every upstream request carries the instance token; myworktree's
 		// own auth query is never forwarded upstream.
 		req.Header.Set("Cookie", reasonix.CookieName+"="+info.Token)
-		// The HTML injection rewrites the body, so never let the upstream
-		// compress it (ModifyResponse would otherwise splice plaintext into
-		// a gzip stream).
-		req.Header.Set("Accept-Encoding", "identity")
+		// Encoding strategy (review nit): the HTML injection rewrites the
+		// body, so an HTML navigation response must reach ModifyResponse
+		// uncompressed — force identity on the browser's HTML navigation
+		// requests (Accept contains text/html). Every other request
+		// (script/style/JSON/SSE) explicitly asks for gzip: without an
+		// explicit Accept-Encoding, Go's Transport would negotiate gzip,
+		// transparently decompress, and strip Content-Encoding, wasting the
+		// negotiated compression (the browser would get a plain body).
+		// Compressed non-HTML bodies are forwarded verbatim; the
+		// ModifyResponse guard below refuses to splice into any HTML response
+		// that is still compressed.
+		if strings.Contains(req.Header.Get("Accept"), "text/html") {
+			req.Header.Set("Accept-Encoding", "identity")
+		} else {
+			req.Header.Set("Accept-Encoding", "gzip")
+		}
 		req.Header.Del("X-Forwarded-For")
 		req.Header.Del("X-Forwarded-Host")
 		req.Header.Del("X-Forwarded-Proto")
@@ -92,6 +109,14 @@ func (p *reasonixProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	proxy.ModifyResponse = func(resp *http.Response) error {
 		if !strings.HasPrefix(resp.Header.Get("Content-Type"), "text/html") {
+			return nil
+		}
+		// Safety net: if the upstream still served a compressed HTML response
+		// (e.g. an XHR fetch of HTML whose Accept: *\/* negotiated gzip), do
+		// not splice the injection into the compressed body — pass it through
+		// untouched. HTML navigation requests are forced to identity above,
+		// so the normal page load still gets the injection.
+		if enc := resp.Header.Get("Content-Encoding"); enc != "" && enc != "identity" {
 			return nil
 		}
 		body, err := io.ReadAll(resp.Body)
