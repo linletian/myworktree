@@ -29,6 +29,7 @@ import (
 	"myworktree/internal/config"
 	"myworktree/internal/gitx"
 	"myworktree/internal/instance"
+	"myworktree/internal/instance/reasonix"
 	"myworktree/internal/llm"
 	"myworktree/internal/mcp"
 	"myworktree/internal/monitor"
@@ -136,6 +137,10 @@ func New(cfg Config, logger *log.Logger) (*Server, error) {
 		Store:          st,
 		Logger:         logger,
 		LogBufferBytes: globalCfg.LogBufferBytes,
+		Reasonix: &reasonix.Driver{
+			DataDir: dataDir,
+			Logger:  logger,
+		},
 	}
 
 	mux := http.NewServeMux()
@@ -544,6 +549,7 @@ func (s *Server) registerAPIs(mux *http.ServeMux) {
 	mux.HandleFunc("/api/instances/log", s.handleInstanceLog)
 	mux.HandleFunc("/api/instances/log/stream", s.handleInstanceLogStream)
 	mux.HandleFunc("/api/instances/stats", s.handleInstanceStats)
+	mux.Handle("/rx/", &reasonixProxy{manager: s.instanceMgr})
 	mux.HandleFunc("/api/tags", s.handleTags)
 	mux.HandleFunc("/api/tags/open-dir", s.handleTagsOpenDir)
 	mux.HandleFunc("/api/branches", s.handleBranches)
@@ -1287,6 +1293,7 @@ func (s *Server) handleInstances(w http.ResponseWriter, r *http.Request) {
 			TagID      string `json:"tag_id"`
 			Command    string `json:"command"`
 			Name       string `json:"name"`
+			Kind       string `json:"kind"`
 		}
 		if err := readJSON(r.Body, &req); err != nil {
 			writeErr(w, http.StatusBadRequest, err)
@@ -1303,6 +1310,7 @@ func (s *Server) handleInstances(w http.ResponseWriter, r *http.Request) {
 			TagID:   req.TagID,
 			Command: req.Command,
 			Name:    req.Name,
+			Kind:    req.Kind,
 		})
 		if err != nil {
 			var budgetErr *instance.LogBufferBudgetError

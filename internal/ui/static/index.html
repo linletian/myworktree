@@ -648,6 +648,19 @@
             display: inline-block;
         }
 
+        .rx-badge {
+            font-size: 9px;
+            line-height: 1;
+            background: var(--badge-bg, rgba(128,128,128,0.25));
+            color: var(--badge-text, inherit);
+            padding: 2px 4px;
+            border-radius: 4px;
+            margin-right: 4px;
+            vertical-align: middle;
+            font-family: monospace;
+            letter-spacing: 0.5px;
+        }
+
         .status-running {
             background: var(--status-running);
         }
@@ -1347,6 +1360,10 @@
             <div class="form-group">
                 <label>Name (Optional)</label>
                 <input id="instName" placeholder="e.g. build-server" />
+            </div>
+            <div class="form-group">
+                <label><input type="checkbox" id="instKindReasonix" /> Reasonix (web chat UI)</label>
+                <div class="muted" style="margin-top:2px;">Runs a Reasonix agent in this worktree and shows its web chat interface instead of a terminal.</div>
             </div>
             <div class="form-actions">
                 <button onclick="closeModal('modal-start-instance')">Cancel</button>
@@ -2176,6 +2193,7 @@
                  ondrop="handleDrop('${i.id}', event)"
                  title="Drag to reorder; double-click to rename">
               <span class="tab-status ${statusClass}"></span>
+              ${i.kind === "reasonix" ? '<span class="rx-badge" title="Reasonix web UI">rx</span>' : ""}
                ${displayName}
             </div>
           `;
@@ -2345,6 +2363,16 @@
                 empty.style.display = "none";
                 termContainer.style.display = "block";
                 actions.classList.add("visible");
+
+                if (inst && inst.kind === "reasonix") {
+                    if (inst.status === "running") {
+                        ensureWebFrame(inst.id);
+                    } else {
+                        removeWebFrame();
+                    }
+                    return;
+                }
+                removeWebFrame();
                 
                 // Styling for stopped instance
                 if (inst && inst.status !== 'running') {
@@ -2424,6 +2452,41 @@
             refresh();
         }
 
+        // Web-UI (Reasonix) instance: render an iframe inside the terminal
+        // container instead of an xterm session. The backend serves the page
+        // same-origin under /rx/<id>/.
+        function ensureWebFrame(id) {
+            let frame = document.getElementById("web-frame");
+            if (!frame) {
+                frame = document.createElement("iframe");
+                frame.id = "web-frame";
+                frame.style.cssText = "width:100%;height:100%;border:0;background:var(--bg, #000);";
+                frame.dataset.instance = "";
+                document.getElementById("terminal-container").appendChild(frame);
+            }
+            // Only navigate when the target instance changes: the 2s poll
+            // calls render() → renderWorkspace() on every tick, and assigning
+            // the same src would reload the iframe each time — the embedded
+            // page would flash/refresh continuously.
+            //
+            // Note the guard only covers "staying on the same reasonix tab".
+            // Switching to another instance removes the iframe entirely
+            // (removeWebFrame), so switching back loads it fresh — chat
+            // scroll position and page state are not preserved across tab
+            // switches (same as before the guard, just without the 2s churn).
+            if (frame.dataset.instance !== id) {
+                frame.dataset.instance = id;
+                frame.src = "/rx/" + id + "/";
+            }
+            frame.style.display = "block";
+            return frame;
+        }
+
+        function removeWebFrame() {
+            const frame = document.getElementById("web-frame");
+            if (frame) frame.remove();
+        }
+
         function selectInstance(id) {
             if (state.activeInst === id) return;
             const previousID = state.activeInst;
@@ -2435,6 +2498,19 @@
             render(); // update UI highlights
 
             if (id) {
+                const instWeb = inst && inst.kind === "reasonix";
+                if (instWeb) {
+                    render();
+                    if (inst.status === 'running') {
+                        ensureWebFrame(inst.id);
+                        updateStatus("reasonix web");
+                    } else {
+                        removeWebFrame();
+                        updateStatus("stopped");
+                    }
+                    maybeDestroyInactiveStoppedSession(previousID);
+                    return;
+                }
                 // If stopped, just load log once. If running, connect TTY directly.
                 if (inst && inst.status !== 'running') {
                     const session = ensureTerminalSession(id);
@@ -2533,6 +2609,7 @@
             document.getElementById("cmd").value = "";
             document.getElementById("instName").value = "";
             document.getElementById("tagSelect").value = "";
+            document.getElementById("instKindReasonix").checked = false;
             openModal("modal-start-instance");
         }
 
@@ -2598,6 +2675,7 @@
                     tag_id: document.getElementById("tagSelect").value,
                     command: document.getElementById("cmd").value,
                     name: document.getElementById("instName").value,
+                    kind: document.getElementById("instKindReasonix").checked ? "reasonix" : "",
                 };
                 const res = await api("/api/instances", { method: "POST", body: JSON.stringify(body) });
                 closeModal("modal-start-instance");
