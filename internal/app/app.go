@@ -66,8 +66,16 @@ type Server struct {
 	serverRev string
 	isSecure  bool
 
-	portal      *portal.Portal
-	httpSrv     *http.Server
+	portal  *portal.Portal
+	httpSrv *http.Server
+
+	// Independent loopback listener serving only the reasonix reverse proxy,
+	// so embedded reasonix pages are cross-origin with the myworktree API
+	// (issue #44). Empty when not enabled (TLS mode → mixed content, falls
+	// back to the same-origin /rx/ route).
+	rxAddr string
+	rxSrv  *http.Server
+
 	store       store.FileStore
 	worktreeMgr worktree.Manager
 	instanceMgr *instance.Manager
@@ -367,6 +375,42 @@ func (s *Server) Start() (string, error) {
 	}
 	s.ln = ln
 
+	// Independent loopback listener serving only /rx/ (issue #44): embedded
+	// reasonix pages become cross-origin with the myworktree API, so content
+	// rendered inside the chat iframe cannot silently call /api/* with the
+	// user's session.
+	//
+	// It is enabled only when the main listener is loopback-only: the
+	// reported web_url is an absolute http://127.0.0.1:<port>, which is only
+	// reachable from the same machine. When the main listener is open to the
+	// network (default 0.0.0.0, or an explicit LAN IP) a remote browser would
+	// resolve that 127.0.0.1 to ITSELF and the iframe would fail — so we fall
+	// back to the same-origin /rx/ route (the frontend then uses the relative
+	// path /rx/<id>/, which follows whatever host the browser is on, and LAN
+	// access works). TLS mode also falls back (an http iframe inside an https
+	// page is blocked as mixed content). In both fallback cases web_url stays
+	// empty and the frontend keeps working via /rx/<id>/.
+	listenHost, _, _ := net.SplitHostPort(s.cfg.ListenAddr) // "" on error → not loopback → fallback
+	if s.cfg.TLSCert == "" && s.cfg.TLSKey == "" && isLoopbackHost(listenHost) {
+		rxLn, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			s.logger.Printf("[reasonix] warning: independent listener failed, falling back to same-origin /rx/: %v", err)
+		} else {
+			rxMux := http.NewServeMux()
+			rxMux.Handle("/rx/", &reasonixProxy{manager: s.instanceMgr})
+			s.rxSrv = &http.Server{Handler: rxMux}
+			s.rxAddr = rxLn.Addr().String()
+			go func() {
+				// A non-ErrServerClosed failure would leave web_url pointing
+				// at a dead port with the iframe failing silently — log it.
+				if err := s.rxSrv.Serve(rxLn); err != nil && !errors.Is(err, http.ErrServerClosed) {
+					s.logger.Printf("[reasonix] independent listener error: %v", err)
+				}
+			}()
+			s.logger.Printf("[reasonix] independent web-ui listener on %s", s.rxAddr)
+		}
+	}
+
 	if s.cfg.PortalPort > 0 {
 		base, err := os.UserConfigDir()
 		if err != nil {
@@ -447,6 +491,18 @@ func waitForServer(port int, timeout time.Duration) error {
 func (s *Server) Shutdown() {
 	if s.portal != nil {
 		s.portal.Stop()
+	}
+	// Stop reasonix serve processes first (behavior parity with tty
+	// instances, which die when their PTY hangs up): their SSE connections
+	// then close, so the HTTP servers below shut down promptly. State dirs
+	// are kept — the next Start resumes the same session.jsonl.
+	if s.instanceMgr != nil {
+		s.instanceMgr.StopAllReasonix()
+	}
+	if s.rxSrv != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = s.rxSrv.Shutdown(ctx)
 	}
 	if s.httpSrv != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -1273,6 +1329,39 @@ func (s *Server) handleWorktreeDiverged(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, map[string]any{"items": result})
 }
 
+// instanceView renders a ManagedInstance for the API, attaching a web_url for
+// reasonix instances pointing at the independent listener (issue #44). The
+// field is intentionally not part of the persisted store schema.
+func (s *Server) instanceView(it store.ManagedInstance) map[string]any {
+	// JSON round-trip (instead of a hand-built map) keeps the API response
+	// field-for-field in sync with the persisted store schema: new
+	// ManagedInstance fields appear in the API automatically. web_url is
+	// appended below only for reasonix instances.
+	var m map[string]any
+	if b, err := json.Marshal(it); err == nil {
+		_ = json.Unmarshal(b, &m)
+	} else {
+		m = map[string]any{}
+	}
+	if it.Kind == store.KindReasonix {
+		if u := s.reasonixWebURL(it.ID); u != "" {
+			m["web_url"] = u
+		}
+	}
+	return m
+}
+
+// reasonixWebURL returns the cross-origin base for a reasonix instance's web
+// UI, or "" when the independent listener is not enabled (TLS mode, or a
+// non-loopback main listener — see Server.Start), in which case the frontend
+// falls back to the same-origin /rx/<id>/ route.
+func (s *Server) reasonixWebURL(id string) string {
+	if s.rxAddr == "" {
+		return ""
+	}
+	return "http://" + s.rxAddr + "/rx/" + id + "/"
+}
+
 func (s *Server) handleInstances(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
@@ -1286,7 +1375,11 @@ func (s *Server) handleInstances(w http.ResponseWriter, r *http.Request) {
 		if err == nil {
 			version = st.Version
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"instances": items, "version": version})
+		view := make([]map[string]any, 0, len(items))
+		for _, it := range items {
+			view = append(view, s.instanceView(it))
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"instances": view, "version": version})
 	case http.MethodPost:
 		var req struct {
 			WorktreeID string `json:"worktree_id"`
@@ -1321,7 +1414,7 @@ func (s *Server) handleInstances(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusBadRequest, err)
 			return
 		}
-		writeJSON(w, http.StatusCreated, item)
+		writeJSON(w, http.StatusCreated, s.instanceView(item))
 	case http.MethodPatch:
 		var req struct {
 			ID   string `json:"id"`

@@ -587,18 +587,20 @@ All page close/refresh/navigation events trigger a browser-native confirmation d
 
 ### 5.10 Reasonix web UI proxy
 
-For `kind: "reasonix"` instances the web chat UI is served same-origin under:
+For `kind: "reasonix"` instances the web chat UI is served under:
 
 ```
 GET /rx/<instanceId>/...
 ```
 
-- Mounted in the UI as an `<iframe src="/rx/<id>/">` (see `internal/app/reasonix_proxy.go`).
-- The proxy forwards to the instance's `reasonix serve` at `http://127.0.0.1:<port>` (port read from the per-instance `port` file), injecting `Cookie: reasonix_token=<token>` for auth.
-- HTML responses get a script injected that prefixes the page's root-relative `fetch` / `EventSource` / `XMLHttpRequest` calls with `/rx/<id>/` so the embedded page talks to its own backend.
+- **Independent origin (loopback only)**: when the main listener is loopback-only (`127.0.0.1` / `localhost`, and no TLS), the proxy is mounted on a dedicated loopback listener (`127.0.0.1:<random>`), reported to the frontend as `web_url` in `GET/POST /api/instances` responses (view-only field, not persisted). The iframe loads that URL, so the embedded reasonix page is **cross-origin** with the myworktree API — a script inside the chat iframe cannot silently call `/api/*` with the user's session (issue #44).
+- **Same-origin fallback (network / TLS)**: when TLS is configured (`--tls-cert/--tls-key`, an `http://127.0.0.1` iframe inside an https page would be blocked as mixed content) **or the main listener is open to the network** (default `0.0.0.0`, or an explicit LAN IP — a remote browser would resolve `127.0.0.1` to itself and the iframe would fail), the independent listener is skipped; `web_url` is empty and the frontend falls back to the **relative** same-origin path `/rx/<id>/`, which follows the browser's current origin — so LAN/remote access works (same as the pre-#44 behavior).
+- The proxy forwards to the instance's `reasonix serve` at `http://127.0.0.1:<port>` (port/token cached in memory by the driver — issue #46), injecting `Cookie: reasonix_token=<token>` (name from `reasonix.CookieName`, single source — issue #45) for auth.
+- HTML responses get a script injected (single injection point before `</head>`) that prefixes the page's root-relative `fetch` / `EventSource` / `XMLHttpRequest` calls with `/rx/<id>/`, plus the issue #48 layout injection: the 220px sidebar is **collapsed by default** on desktop with a dedicated toggle button (`--mw-sidebar-w` CSS var makes the expanded width configurable); narrow screens keep the native mobile sidebar.
 - The `Accept-Encoding` header is forced to `identity` and the request query string is dropped upstream (prevents myworktree auth `?token=` from leaking to the subprocess).
 - SSE (`/events`) is streamed through (`FlushInterval=-1`); the upstream sends its own 15s `: ping` keepalive.
 - Returns `404` for unknown/non-reasonix instance ids, `503` when the instance is not running, `502` when the backend is unreachable.
+- Driver version gate: `Start` runs `reasonix --version` and rejects CLIs older than `1.22.0` (configurable via `Driver.MinVersion`); readiness failures include the tail of the instance `serve.log` (issue #45).
 
 ## 6) MCP
 ### Tool names

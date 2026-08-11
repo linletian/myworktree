@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"myworktree/internal/instance"
+	"myworktree/internal/instance/reasonix"
 	"myworktree/internal/store"
 )
 
@@ -72,13 +73,33 @@ func (p *reasonixProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		req.URL.RawPath = ""
 		// Never forward myworktree's auth query (?token=...) upstream: it is
 		// a credential leak to the reasonix subprocess and reasonix would
-		// reject it anyway (it has its own ?token= scheme).
-		req.URL.RawQuery = ""
-		req.Header.Set("Cookie", "reasonix_token="+info.Token)
-		// The HTML injection rewrites the body, so never let the upstream
-		// compress it (ModifyResponse would otherwise splice plaintext into
-		// a gzip stream).
-		req.Header.Set("Accept-Encoding", "identity")
+		// reject it anyway (it has its own ?token= scheme). Any OTHER query
+		// params are preserved — the injected prefix() JS keeps the browser's
+		// query string, and reasonix itself uses query params (e.g.
+		// ?session=) that must reach it intact.
+		q := req.URL.Query()
+		q.Del("token")
+		req.URL.RawQuery = q.Encode()
+		// Inject the reasonix auth cookie (single source: reasonix.CookieName)
+		// so every upstream request carries the instance token; myworktree's
+		// own auth query is never forwarded upstream.
+		req.Header.Set("Cookie", reasonix.CookieName+"="+info.Token)
+		// Encoding strategy (review nit): the HTML injection rewrites the
+		// body, so an HTML navigation response must reach ModifyResponse
+		// uncompressed — force identity on the browser's HTML navigation
+		// requests (Accept contains text/html). Every other request
+		// (script/style/JSON/SSE) explicitly asks for gzip: without an
+		// explicit Accept-Encoding, Go's Transport would negotiate gzip,
+		// transparently decompress, and strip Content-Encoding, wasting the
+		// negotiated compression (the browser would get a plain body).
+		// Compressed non-HTML bodies are forwarded verbatim; the
+		// ModifyResponse guard below refuses to splice into any HTML response
+		// that is still compressed.
+		if strings.Contains(req.Header.Get("Accept"), "text/html") {
+			req.Header.Set("Accept-Encoding", "identity")
+		} else {
+			req.Header.Set("Accept-Encoding", "gzip")
+		}
 		req.Header.Del("X-Forwarded-For")
 		req.Header.Del("X-Forwarded-Host")
 		req.Header.Del("X-Forwarded-Proto")
@@ -88,6 +109,14 @@ func (p *reasonixProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	proxy.ModifyResponse = func(resp *http.Response) error {
 		if !strings.HasPrefix(resp.Header.Get("Content-Type"), "text/html") {
+			return nil
+		}
+		// Safety net: if the upstream still served a compressed HTML response
+		// (e.g. an XHR fetch of HTML whose Accept: *\/* negotiated gzip), do
+		// not splice the injection into the compressed body — pass it through
+		// untouched. HTML navigation requests are forced to identity above,
+		// so the normal page load still gets the injection.
+		if enc := resp.Header.Get("Content-Encoding"); enc != "" && enc != "identity" {
 			return nil
 		}
 		body, err := io.ReadAll(resp.Body)
@@ -185,7 +214,10 @@ func (p *reasonixProxy) findInstance(id string) (store.ManagedInstance, error) {
 }
 
 // injectReasonixPrefix prepends a script that prefixes every root-relative
-// URL the Reasonix page issues with the mount path (e.g. /rx/abc123).
+// URL the Reasonix page issues with the mount path (e.g. /rx/abc123), and
+// appends the issue #48 layout injection (collapsible sidebar, collapsed by
+// default) right after it. Both are inserted at a single point (right after
+// <head>), so the proxy has exactly one HTML injection site.
 //
 // Coverage split:
 //   - Initial-page static attributes (img/a/link/script/source/form/video)
@@ -238,29 +270,118 @@ func injectReasonixPrefix(html []byte, mount string) []byte {
 })();
 </script>`, mount)
 
-	idx := bytes.Index(html, []byte("<head"))
+	// Issue #48 layout injection: the Reasonix sidebar is a fixed 220px grid
+	// column with no desktop collapse affordance (@media(min-width:769px)
+	// hides #menu-btn; the JS handler only opens, never closes). We add our
+	// own toggle button and drive collapse via an `mw-rx` class on <html>.
+	//
+	// Design (verified against reasonix v1.22.0 index.html):
+	//   - Only the desktop breakpoint (min-width:769px) is overridden; on
+	//     narrow screens the native mobile sidebar (fixed + overlay + #menu-btn)
+	//     is left untouched.
+	//   - Collapsed (default): .app becomes a 0-width first column and the
+	//     sidebar is display:none; chat takes the full width.
+	//   - Grid-placement fix: upstream relies on auto-placement for
+	//     .transcript / .footer (the sidebar's explicit grid-row:1/3 claims
+	//     column 1, pushing them to column 2). Once the sidebar is
+	//     display:none, auto-placement reflows: .transcript would land in the
+	//     0px column and .footer would stretch across row 1 — the chat area
+	//     vanishes while the input bar stays. We pin both explicitly when
+	//     collapsed so they keep upstream's column-2 row-1/row-2 slots.
+	//   - Expanded: .app restores the native grid; the sidebar width is
+	//     configurable via --mw-sidebar-w (default 220px, same as upstream).
+	//   - The toggle is our own #mw-sidebar-toggle button (fixed, top-left,
+	//     moved next to the sidebar edge when expanded) — we deliberately do
+	//     NOT reuse upstream #menu-btn: it is hidden on desktop, its onclick
+	//     runs after our <head> script and would clobber ours.
+	//   - Timing note: the CSS is static and the class flip is synchronous
+	//     (add('mw-rx') runs as the <head> script parses), so there is no
+	//     race; the html:not(.mw-rx) selector simply tracks the current
+	//     state. The layer order guarantee (our <style> after upstream's)
+	//     holds only while upstream keeps its styles in <head> — a future
+	//     upstream change that injects a <style> after </head> would need
+	//     re-verification.
+	//   - Narrow screens (<769px) keep the native mobile sidebar; our toggle
+	//     is hidden there (its styles are desktop-scoped, so without this the
+	//     unstyled button would render at the top of the page flow).
+	//   - Collapsed by default keeps the management scope on the current
+	//     worktree: the sidebar (brand / nav / session list) is what the user
+	//     asked to hide (issue #48).
+	//   - Verified against v1.22.0: the sidebar has NO cross-project entry —
+	//     sessions are scoped by the serve working directory (per-instance
+	//     worktree), so "hiding the project switcher" reduces to collapsing
+	//     the whole sidebar; nothing further to hide when expanded.
+	layout := `<style>
+@media(min-width:769px){
+  :root{--mw-sidebar-w:220px}
+  .mw-rx .app{grid-template-columns:0 1fr}
+  .mw-rx .sidebar{display:none}
+  .mw-rx .transcript{grid-column:2;grid-row:1}
+  .mw-rx .footer{grid-column:2;grid-row:2}
+  .app{grid-template-columns:var(--mw-sidebar-w,220px) 1fr}
+  #mw-sidebar-toggle{position:fixed;top:8px;left:8px;z-index:97;width:34px;height:34px;display:flex;align-items:center;justify-content:center;border-radius:var(--radius,8px);background:var(--panel,#222);border:1px solid var(--border,#333);color:var(--fg-2,#aaa);cursor:pointer;font-size:16px;line-height:1;transition:background .15s,left .25s ease}
+  #mw-sidebar-toggle:hover{background:var(--card-hover,#2a2a2a);color:var(--fg,#eee)}
+  html:not(.mw-rx) #mw-sidebar-toggle{left:calc(var(--mw-sidebar-w,220px) + 6px);color:var(--fg,#eee)}
+  #menu-btn{display:none!important}
+}
+@media(max-width:768px){
+  #mw-sidebar-toggle{display:none!important}
+}
+</style>
+<script>
+(function(){
+  var root=document.documentElement;
+  root.classList.add('mw-rx'); /* collapsed by default */
+  function ensureBtn(){
+    if(document.getElementById('mw-sidebar-toggle'))return;
+    var b=document.createElement('button');
+    b.id='mw-sidebar-toggle';b.type='button';
+    b.setAttribute('aria-label','Toggle sidebar');
+    b.title='Toggle sidebar';b.textContent='\u2630';
+    b.addEventListener('click',function(){root.classList.toggle('mw-rx');});
+    document.body.appendChild(b);
+  }
+  if(document.readyState==='loading'){document.addEventListener('DOMContentLoaded',ensureBtn);}
+  else{ensureBtn();}
+})();
+</script>`
+
+	idx := bytes.Index(html, []byte("</head"))
+	if idx >= 0 {
+		// Insert right before </head>: the injected <style> then sits AFTER
+		// the upstream <style>, so same-specificity rules (e.g. .app grid
+		// columns) resolve in our favour without !important.
+		out := make([]byte, 0, len(html)+len(script)+len(layout))
+		out = append(out, html[:idx]...)
+		out = append(out, script...)
+		out = append(out, layout...)
+		return append(out, html[idx:]...)
+	}
+	idx = bytes.Index(html, []byte("<head"))
 	if idx < 0 {
 		idx = bytes.Index(html, []byte("<html"))
 		if idx < 0 {
-			return append([]byte(script), html...)
+			return append([]byte(script+layout), html...)
 		}
 		// Insert right after <html ...>.
 		end := bytes.IndexByte(html[idx:], '>')
 		if end < 0 {
-			return append([]byte(script), html...)
+			return append([]byte(script+layout), html...)
 		}
-		out := make([]byte, 0, len(html)+len(script))
+		out := make([]byte, 0, len(html)+len(script)+len(layout))
 		out = append(out, html[:idx+end+1]...)
 		out = append(out, script...)
+		out = append(out, layout...)
 		return append(out, html[idx+end+1:]...)
 	}
 	// Insert right after <head> or <head ...>.
 	end := bytes.IndexByte(html[idx:], '>')
 	if end < 0 {
-		return append([]byte(script), html...)
+		return append([]byte(script+layout), html...)
 	}
-	out := make([]byte, 0, len(html)+len(script))
+	out := make([]byte, 0, len(html)+len(script)+len(layout))
 	out = append(out, html[:idx+end+1]...)
 	out = append(out, script...)
+	out = append(out, layout...)
 	return append(out, html[idx+end+1:]...)
 }

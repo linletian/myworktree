@@ -117,7 +117,12 @@ func (fs FileStore) Save(st State) error {
 }
 
 // SaveWithVersion saves only if the current version matches expectedVersion.
-// Use expectedVersion < 0 to skip version check.
+// Semantics of expectedVersion: >= 0 means "must equal the persisted version"
+// (strict optimistic-lock check — callers that persist a versioned state MUST
+// pass the version they loaded, e.g. from GET /api/instances); < 0 means
+// "skip the check". 0 is NOT "skip": it is a strict check against a fresh
+// state whose version is 0, so passing 0 for an already-incremented state
+// always conflicts.
 func (fs FileStore) SaveWithVersion(st State, expectedVersion int64) error {
 	if fs.Path == "" {
 		return errors.New("store path is required")
