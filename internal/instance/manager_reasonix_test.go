@@ -1,8 +1,13 @@
 package instance
 
 import (
+	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -25,6 +30,9 @@ import socket
 socket.getfqdn = lambda host="": host if host else "localhost"
 from http.server import BaseHTTPRequestHandler, HTTPServer
 args = sys.argv[1:]
+if args[:1] == ["--version"]:
+    print("reasonix v1.22.0")
+    sys.exit(0)
 def val(flag):
     try:
         i = args.index(flag)
@@ -35,7 +43,7 @@ pidfile = val("--pid-file")
 portfile = val("--port-file")
 class H(BaseHTTPRequestHandler):
     def do_GET(self):
-        body = b"ok"
+        body = ("env:" + os.environ.get("MW_RX_TEST_ENV", "unset")).encode()
         self.send_response(200)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
@@ -338,5 +346,47 @@ func TestRestartReasonixCleansOldDir(t *testing.T) {
 	}
 	if _, err := os.Stat(oldDir); !os.IsNotExist(err) {
 		t.Fatalf("old reasonix dir still exists after restart: %v", err)
+	}
+}
+
+// TestReasonixTagEnvAndPreStart verifies (DEFERRED §3) that a tag's env flows
+// into the serve process and its preStart runs before serve; the tag command
+// is NOT executed (reasonix instances run the agent, not a shell command).
+func TestReasonixTagEnvAndPreStart(t *testing.T) {
+	m, _ := newReasonixTestManager(t)
+	marker := filepath.Join(m.DataDir, "pre-marker")
+	tagsJSON := fmt.Sprintf(`{"tags":[{"id":"rxenv","command":"echo I-MUST-NOT-RUN","env":{"MW_RX_TEST_ENV":"from-tag"},"preStart":"echo pre-ran > %s"}]}`, marker)
+	if err := os.WriteFile(filepath.Join(m.DataDir, "tags.json"), []byte(tagsJSON), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	inst, err := m.Start(StartInput{WorktreeID: "wt1", TagID: "rxenv", Kind: store.KindReasonix, Name: "chat"})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = m.Stop(inst.ID) }()
+
+	// preStart ran before serve.
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("preStart marker missing (preStart did not run): %v", err)
+	}
+	// The tag command must NOT have been executed.
+	if b, err := os.ReadFile(marker); err == nil && strings.Contains(string(b), "I-MUST-NOT-RUN") {
+		t.Fatalf("tag command was executed for a reasonix instance: %s", b)
+	}
+
+	// Tag env reached the serve process (fake serve echoes it).
+	info, err := m.Reasonix.Addr(inst.ID)
+	if err != nil {
+		t.Fatalf("Addr: %v", err)
+	}
+	resp, err := http.Get("http://127.0.0.1:" + strconv.Itoa(info.Port) + "/")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if !strings.Contains(string(body), "env:from-tag") {
+		t.Fatalf("serve env missing tag env MW_RX_TEST_ENV: %q", body)
 	}
 }

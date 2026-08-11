@@ -37,3 +37,4 @@
   - `Manager` kind 分支(Start/Stop/Restart/Delete + Reconcile 探活保 running)
   - 前端 iframe 渲染 + 创建入口 checkbox + tab 徽标
   - 文档:docs/API.md §5.10、ARCHITECTURE.md §3.2/§4.2、PRD §7 已同步
+- [x] 未决项全部处理(**2026-08-11**):#44 独立源(安全)、#48 侧栏默认折叠布局注入、#46 driver 缓存、#47 Delete 锁范围、#45 版本门 + serve.log 报错 + Cookie 单点、#43 测试隔离、DEFERRED §3 env/preStart 注入;`#49` 经用户确认保持「Restart = 新 session」现状语义后关闭。全部 7 个 issue 已关闭,详见 `DEFERRED.md` §6/§7。

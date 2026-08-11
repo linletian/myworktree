@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -307,7 +308,7 @@ func (m *Manager) Start(in StartInput) (store.ManagedInstance, error) {
 		kind = store.KindTTY
 	}
 	if kind == store.KindReasonix {
-		return m.startReasonix(in, id, instName, cwd, effectiveTagID, wtName)
+		return m.startReasonix(in, id, instName, cwd, effectiveTagID, wtName, env, preStart)
 	}
 
 	// Resolve buffer cap with budget enforcement. Done BEFORE exec.Command /
@@ -425,11 +426,34 @@ func (m *Manager) Start(in StartInput) (store.ManagedInstance, error) {
 // and persists it like a tty instance, minus the PTY/ring-buffer machinery.
 // The serve process is launched by the Reasonix driver; the manager only
 // records the pid and status so stop/restart/delete can find it again.
-func (m *Manager) startReasonix(in StartInput, id, instName, cwd, effectiveTagID, wtName string) (store.ManagedInstance, error) {
+func (m *Manager) startReasonix(in StartInput, id, instName, cwd, effectiveTagID, wtName string, env map[string]string, preStart string) (store.ManagedInstance, error) {
 	if m.Reasonix == nil {
 		return store.ManagedInstance{}, errors.New("reasonix instances are not enabled")
 	}
-	info, err := m.Reasonix.Start(reasonix.StartInput{InstanceID: id, WorktreePath: cwd})
+	info, err := m.Reasonix.Start(reasonix.StartInput{
+		InstanceID:   id,
+		WorktreePath: cwd,
+		// Tag env is injected into the serve process (e.g. HTTP_PROXY);
+		// preStart runs before serve and aborts Start on failure. The tag's
+		// command is deliberately NOT executed — a reasonix instance runs the
+		// agent, not a shell command (DEFERRED §3).
+		Env: envSlice(env),
+		PreStart: func() error {
+			if strings.TrimSpace(preStart) == "" {
+				return nil
+			}
+			pre := exec.Command("zsh", "-lc", preStart)
+			pre.Dir = cwd
+			pre.Env = os.Environ()
+			for k, v := range env {
+				pre.Env = append(pre.Env, k+"="+v)
+			}
+			if out, err := pre.CombinedOutput(); err != nil {
+				return fmt.Errorf("preStart failed: %w: %s", err, strings.TrimSpace(string(out)))
+			}
+			return nil
+		},
+	})
 	if err != nil {
 		return store.ManagedInstance{}, err
 	}
@@ -449,20 +473,29 @@ func (m *Manager) startReasonix(in StartInput, id, instName, cwd, effectiveTagID
 		CreatedAt:    now,
 	}
 
+	cleanup := false
 	m.stateMu.Lock()
-	defer m.stateMu.Unlock()
 	st2, err := m.Store.Load()
 	if err != nil {
-		_ = m.Reasonix.Stop(id)
-		return store.ManagedInstance{}, err
+		m.stateMu.Unlock()
+		cleanup = true
+	} else {
+		st2.Instances = append(st2.Instances, inst)
+		if st2.TabOrder == nil {
+			st2.TabOrder = make(map[string][]string)
+		}
+		st2.TabOrder[in.WorktreeID] = append(st2.TabOrder[in.WorktreeID], inst.ID)
+		err = m.Store.SaveWithVersion(st2, st2.Version)
+		m.stateMu.Unlock()
+		if err != nil {
+			cleanup = true
+		}
 	}
-	st2.Instances = append(st2.Instances, inst)
-	if st2.TabOrder == nil {
-		st2.TabOrder = make(map[string][]string)
-	}
-	st2.TabOrder[in.WorktreeID] = append(st2.TabOrder[in.WorktreeID], inst.ID)
-	if err := m.Store.SaveWithVersion(st2, st2.Version); err != nil {
+	if cleanup {
+		// Out of the state lock (issue #47): Stop can block up to 5s; then
+		// wipe the state dir so a failed start leaves no token/session junk.
 		_ = m.Reasonix.Stop(id)
+		_ = m.Reasonix.Cleanup(id)
 		return store.ManagedInstance{}, err
 	}
 
@@ -858,17 +891,18 @@ func (m *Manager) Delete(id string) error {
 	if id == "" {
 		return errors.New("id is required")
 	}
+	kind := ""
 	m.stateMu.Lock()
-	defer m.stateMu.Unlock()
 	st, err := m.Store.Load()
 	if err != nil {
+		m.stateMu.Unlock()
 		return err
 	}
 	idx := -1
-	var kind string
 	for i := range st.Instances {
 		if st.Instances[i].ID == id {
 			if st.Instances[i].Status == "running" {
+				m.stateMu.Unlock()
 				return fmt.Errorf("instance is running: %s", id)
 			}
 			kind = st.Instances[i].Kind
@@ -877,21 +911,17 @@ func (m *Manager) Delete(id string) error {
 		}
 	}
 	if idx == -1 {
+		m.stateMu.Unlock()
 		return fmt.Errorf("unknown instance id: %s", id)
 	}
 	st.Instances = append(st.Instances[:idx], st.Instances[idx+1:]...)
 	if err := m.Store.SaveWithVersion(st, st.Version); err != nil {
+		m.stateMu.Unlock()
 		return err
 	}
-	if kind == store.KindReasonix && m.Reasonix != nil {
-		// Idempotent safety net: if the serve process is still alive (e.g.
-		// Health briefly failed during reconcile, so the record was marked
-		// stopped while the process lingers), kill it before wiping the
-		// state dir — otherwise the process keeps its port and credential
-		// symlinks with no files left to locate it.
-		_ = m.Reasonix.Stop(id)
-		_ = m.Reasonix.Cleanup(id)
-	}
+	// In-memory cleanup stays under the state lock (buffer ring + tty maps),
+	// matching the previous behaviour; only the reasonix process teardown
+	// moves outside the lock (below).
 	m.dropBufferLocked(id)
 	m.mu.Lock()
 	delete(m.running, id)
@@ -902,6 +932,25 @@ func (m *Manager) Delete(id string) error {
 	}
 	m.closeSubscribersLocked(id)
 	m.mu.Unlock()
+	m.stateMu.Unlock()
+
+	// Out of the state lock: Stop can block up to 5s (SIGTERM → poll →
+	// SIGKILL) when the serve process lingers (issue #47). Holding stateMu
+	// that long would stall every concurrent Start/Stop/Reorder/Rename, so
+	// kill and wipe the reasonix state dir after the record is gone. This is
+	// a safety net: the record was already marked stopped, so normally the
+	// process is dead and Stop returns immediately.
+	//
+	// The unlock→Stop window is intentionally not atomic: a concurrent
+	// Health/Stop for this id can observe "record gone + process alive" for
+	// a few ms. Harmless: Health/Stop look the id up in the store first and
+	// find nothing (unknown instance), and the lingering process is exactly
+	// what this Stop is killing. Making it atomic would require holding
+	// stateMu through Stop, reintroducing issue #47.
+	if kind == store.KindReasonix && m.Reasonix != nil {
+		_ = m.Reasonix.Stop(id)
+		_ = m.Reasonix.Cleanup(id)
+	}
 	return nil
 }
 
@@ -1104,6 +1153,21 @@ func (m *Manager) BufferUsedBytesFor(id string) int64 {
 		return 0
 	}
 	return rb.BytesUsed()
+}
+
+// envSlice flattens an env map into "K=V" entries with a stable order, for
+// injecting tag env into a spawned process.
+func envSlice(in map[string]string) []string {
+	keys := make([]string, 0, len(in))
+	for k := range in {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	out := make([]string, 0, len(in))
+	for _, k := range keys {
+		out = append(out, k+"="+in[k])
+	}
+	return out
 }
 
 func sanitizedEnv(in map[string]string) map[string]string {

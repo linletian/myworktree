@@ -1,8 +1,11 @@
 package reasonix
 
 import (
+	"errors"
 	"fmt"
+	"io"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -183,6 +186,9 @@ import socket
 socket.getfqdn = lambda host="": host if host else "localhost"
 from http.server import BaseHTTPRequestHandler, HTTPServer
 args = sys.argv[1:]
+if args[:1] == ["--version"]:
+    print("reasonix v1.22.0")
+    sys.exit(0)
 def val(flag):
     try:
         i = args.index(flag)
@@ -193,7 +199,7 @@ pidfile = val("--pid-file")
 portfile = val("--port-file")
 class H(BaseHTTPRequestHandler):
     def do_GET(self):
-        body = b"ok"
+        body = ("env:" + os.environ.get("MW_RX_TEST_ENV", "unset")).encode()
         self.send_response(200)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
@@ -223,6 +229,7 @@ func TestStartStopFakeServe(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
+	defer func() { _ = d.Stop(id) }()
 	if info.Port <= 0 {
 		t.Fatalf("port = %d, want > 0", info.Port)
 	}
@@ -297,5 +304,196 @@ func TestStartInvalidInputs(t *testing.T) {
 	bad := &Driver{DataDir: t.TempDir(), ReasonixBin: filepath.Join(t.TempDir(), "does-not-exist")}
 	if _, err := bad.Start(StartInput{InstanceID: "x", WorktreePath: wt}); err == nil {
 		t.Fatal("nonexistent ReasonixBin should error")
+	}
+}
+
+// fakeVersionBin writes a script that prints a fixed `reasonix --version`
+// line and exits — used to exercise the version gate without a real CLI.
+func fakeVersionBin(t *testing.T, versionLine string) string {
+	t.Helper()
+	bin := filepath.Join(t.TempDir(), "fake-version.py")
+	script := "#!/usr/bin/env python3\nimport sys\nprint(" + strconv.Quote(versionLine) + ")\n"
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return bin
+}
+
+func TestDriverVersionGate(t *testing.T) {
+	wt := t.TempDir()
+	tooOld := fakeVersionBin(t, "reasonix v1.20.0")
+	if _, err := (&Driver{DataDir: t.TempDir(), ReasonixBin: tooOld}).Start(StartInput{InstanceID: "x", WorktreePath: wt}); err == nil {
+		t.Fatal("Start with v1.20.0 should fail (min 1.22.0)")
+	} else if !strings.Contains(err.Error(), "1.22.0 required") {
+		t.Fatalf("unexpected version error: %v", err)
+	}
+
+	newEnough := fakeVersionBin(t, "reasonix v1.22.0")
+	d := &Driver{DataDir: t.TempDir(), ReasonixBin: newEnough}
+	// v1.22.0 passes the gate, then Start must fail on the serve phase
+	// (fake-version exits after --version, so no port file appears), and the
+	// error must carry the serve.log tail (issue #45).
+	if _, err := d.Start(StartInput{InstanceID: "x", WorktreePath: wt}); err == nil {
+		t.Fatal("Start should fail after gate: fake version bin never serves")
+	} else if !strings.Contains(err.Error(), "serve.log tail") {
+		t.Fatalf("readiness error should include serve.log tail, got: %v", err)
+	}
+}
+
+func TestDriverVersionGateDevBuild(t *testing.T) {
+	dev := fakeVersionBin(t, "reasonix dev")
+	_, err := (&Driver{DataDir: t.TempDir(), ReasonixBin: dev}).Start(StartInput{InstanceID: "x", WorktreePath: t.TempDir()})
+	if err == nil {
+		t.Fatal("expected serve-phase failure")
+	}
+	if strings.Contains(err.Error(), "required") {
+		t.Fatalf("dev build must not be blocked by the version gate: %v", err)
+	}
+}
+// cache after Start (no file reads), and Stop/Cleanup invalidate it.
+func TestDriverAddrCache(t *testing.T) {
+	dataDir := t.TempDir()
+	worktree := t.TempDir()
+	d := &Driver{DataDir: dataDir, ReasonixBin: fakeServeBin(t)}
+	id := "inst1"
+	info, err := d.Start(StartInput{InstanceID: id, WorktreePath: worktree})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = d.Stop(id) }()
+
+	// Prime the cache.
+	if _, err := d.Addr(id); err != nil {
+		t.Fatalf("Addr: %v", err)
+	}
+	// Remove the backing files: a cached Addr must still succeed without
+	// reading them (this is what the proxy path relies on).
+	dir := d.dir(id)
+	if err := os.Remove(filepath.Join(dir, "port")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(dir, "token")); err != nil {
+		t.Fatal(err)
+	}
+	got, err := d.Addr(id)
+	if err != nil {
+		t.Fatalf("cached Addr failed after files removed: %v", err)
+	}
+	if got.Port != info.Port || got.Token != info.Token {
+		t.Fatalf("cached Addr = %+v, want port %d token %s", got, info.Port, info.Token)
+	}
+
+	// Stop invalidates the cache: Addr now fails (files are gone, no cache).
+	if err := d.Stop(id); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if _, err := d.Addr(id); err == nil {
+		t.Fatal("Addr after Stop must fail (cache invalidated)")
+	}
+}
+
+// TestDriverAddrCacheRefresh verifies Restart semantics: a fresh id gets a
+// fresh cache entry with the new port/token, and the stale entry is dropped
+// with Cleanup.
+func TestDriverAddrCacheRefresh(t *testing.T) {
+	dataDir := t.TempDir()
+	worktree := t.TempDir()
+	d := &Driver{DataDir: dataDir, ReasonixBin: fakeServeBin(t)}
+
+	oldID := "old"
+	oldInfo, err := d.Start(StartInput{InstanceID: oldID, WorktreePath: worktree})
+	if err != nil {
+		t.Fatalf("Start old: %v", err)
+	}
+	defer func() { _ = d.Stop(oldID) }()
+	if _, err := d.Addr(oldID); err != nil {
+		t.Fatalf("Addr old: %v", err)
+	}
+
+	// Simulate Restart: new id, old state dir removed.
+	newID := "new"
+	newInfo, err := d.Start(StartInput{InstanceID: newID, WorktreePath: worktree})
+	if err != nil {
+		t.Fatalf("Start new: %v", err)
+	}
+	defer func() { _ = d.Stop(newID) }()
+	if newInfo.Port == oldInfo.Port {
+		t.Fatalf("ports should differ across starts: %d", oldInfo.Port)
+	}
+
+	if err := d.Cleanup(oldID); err != nil {
+		t.Fatalf("Cleanup old: %v", err)
+	}
+	if _, err := d.Addr(oldID); err == nil {
+		t.Fatal("Addr old after Cleanup must fail (cache dropped)")
+	}
+	got, err := d.Addr(newID)
+	if err != nil || got.Port != newInfo.Port {
+		t.Fatalf("Addr new = %+v err %v, want port %d", got, err, newInfo.Port)
+	}
+}
+
+// TestDriverEnvInjection verifies StartInput.Env reaches the serve process
+// (DEFERRED §3: e.g. HTTP_PROXY injection).
+func TestDriverEnvInjection(t *testing.T) {
+	d := &Driver{DataDir: t.TempDir(), ReasonixBin: fakeServeBin(t)}
+	info, err := d.Start(StartInput{
+		InstanceID:   "inst1",
+		WorktreePath: t.TempDir(),
+		Env:          []string{"MW_RX_TEST_ENV=hello"},
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = d.Stop("inst1") }()
+
+	resp, err := http.Get("http://127.0.0.1:" + strconv.Itoa(info.Port) + "/")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if !strings.Contains(string(body), "env:hello") {
+		t.Fatalf("serve env missing MW_RX_TEST_ENV: %q", body)
+	}
+}
+
+// TestDriverPreStart verifies the PreStart hook runs before serve and that an
+// error aborts Start without launching the process.
+func TestDriverPreStart(t *testing.T) {
+	ran := false
+	d := &Driver{DataDir: t.TempDir(), ReasonixBin: fakeServeBin(t)}
+	info, err := d.Start(StartInput{
+		InstanceID:   "inst1",
+		WorktreePath: t.TempDir(),
+		PreStart: func() error {
+			ran = true
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("Start with ok preStart: %v", err)
+	}
+	defer func() { _ = d.Stop("inst1") }()
+	if !ran || info.Port <= 0 {
+		t.Fatalf("preStart ran=%v port=%d", ran, info.Port)
+	}
+
+	// A failing preStart aborts Start; no serve process is launched, so no
+	// pid file appears.
+	bad := &Driver{DataDir: t.TempDir(), ReasonixBin: fakeServeBin(t)}
+	if _, err := bad.Start(StartInput{
+		InstanceID:   "inst2",
+		WorktreePath: t.TempDir(),
+		PreStart: func() error {
+			return errors.New("boom")
+		},
+	}); err == nil {
+		t.Fatal("Start with failing preStart should error")
+	} else if !strings.Contains(err.Error(), "preStart failed") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(bad.dir("inst2"), "pid")); !os.IsNotExist(err) {
+		t.Fatalf("pid file should not exist after failed preStart (serve must not be spawned)")
 	}
 }

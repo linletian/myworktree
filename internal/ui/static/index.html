@@ -2366,7 +2366,7 @@
 
                 if (inst && inst.kind === "reasonix") {
                     if (inst.status === "running") {
-                        ensureWebFrame(inst.id);
+                        ensureWebFrame(inst);
                     } else {
                         removeWebFrame();
                     }
@@ -2454,29 +2454,42 @@
 
         // Web-UI (Reasonix) instance: render an iframe inside the terminal
         // container instead of an xterm session. The backend serves the page
-        // same-origin under /rx/<id>/.
-        function ensureWebFrame(id) {
+        // on the independent listener (issue #44) and reports it as web_url
+        // (cross-origin with the myworktree API); without it (TLS mode) it
+        // falls back to the same-origin /rx/<id>/ route.
+        function ensureWebFrame(inst) {
             let frame = document.getElementById("web-frame");
             if (!frame) {
                 frame = document.createElement("iframe");
                 frame.id = "web-frame";
                 frame.style.cssText = "width:100%;height:100%;border:0;background:var(--bg, #000);";
                 frame.dataset.instance = "";
+                frame.dataset.src = "";
                 document.getElementById("terminal-container").appendChild(frame);
             }
-            // Only navigate when the target instance changes: the 2s poll
-            // calls render() → renderWorkspace() on every tick, and assigning
-            // the same src would reload the iframe each time — the embedded
-            // page would flash/refresh continuously.
+            // Only navigate when the target changes: the 2s poll calls
+            // render() → renderWorkspace() on every tick, and assigning the
+            // same src would reload the iframe each time — the embedded page
+            // would flash/refresh continuously.
+            //
+            // The guard compares BOTH the instance id and the resolved src.
+            // web_url is a runtime-assigned port (view-only, not persisted):
+            // after a server restart the independent listener gets a fresh
+            // port, so the same instance id resolves to a new web_url. If we
+            // only compared the id, the iframe would keep pointing at the
+            // dead pre-restart port until the user switched tabs — the poll
+            // would pick up the new web_url and this check navigates to it.
             //
             // Note the guard only covers "staying on the same reasonix tab".
             // Switching to another instance removes the iframe entirely
             // (removeWebFrame), so switching back loads it fresh — chat
             // scroll position and page state are not preserved across tab
             // switches (same as before the guard, just without the 2s churn).
-            if (frame.dataset.instance !== id) {
-                frame.dataset.instance = id;
-                frame.src = "/rx/" + id + "/";
+            const src = (inst && inst.web_url) ? inst.web_url : "/rx/" + inst.id + "/";
+            if (frame.dataset.instance !== inst.id || frame.dataset.src !== src) {
+                frame.dataset.instance = inst.id;
+                frame.dataset.src = src;
+                frame.src = src;
             }
             frame.style.display = "block";
             return frame;
@@ -2502,7 +2515,7 @@
                 if (instWeb) {
                     render();
                     if (inst.status === 'running') {
-                        ensureWebFrame(inst.id);
+                        ensureWebFrame(inst);
                         updateStatus("reasonix web");
                     } else {
                         removeWebFrame();
