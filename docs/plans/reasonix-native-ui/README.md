@@ -31,7 +31,7 @@
 - [x] 调研(本目录,含 2026-08-10 整合修订)
 - [x] 关键项实测(2026-08-10,`feature/reasonix-native-ui-verify` 分支:session lease 并发 / 端口行为 / SSE keepalive / token-cookie 注入,详见 FEASIBILITY §8)
 - [x] 决策(**已批准 2026-08-10**):采纳方案 A(反代 + iframe);凭据继承 = REASONIX_HOME 隔离 + symlink 继承;MVP 不含侧栏折叠
-- [x] 实施(**已完成 2026-08-10**,`feature/reasonix-native-ui` 分支):MVP(创建 reasonix 实例 → `/rx/<id>/` 反代 iframe → 端到端跑通)。代码评审意见(R-01~R-08)已逐条核实并按 MVP 边界修复,详见 `REVIEW-reasonix-native-ui.md`(评审底稿,不提交)。实施内容:
+- [x] 实施(**已完成 2026-08-11**,`feature/reasonix-native-ui` 分支):MVP(创建 reasonix 实例 → `/rx/<id>/` 反代 iframe → 端到端跑通)。代码评审(多轮 R/N/T + 运行问题修复)已逐条核实并按 MVP 边界修复;未决项已全部转 issue **#43~#49** 并记录于本目录 `DEFERRED.md` 追溯索引(评审底稿为一次性工作文档,已按要求删除,不进入版本库)。实施内容:
   - `internal/instance/reasonix/`(driver:隔离 REASONIX_HOME + symlink 继承 + 跨平台探活)
   - `internal/app/reasonix_proxy.go`(`/rx/<id>/` 反代:token Cookie 注入 + URL 前缀改写 + SSE 透传)
   - `Manager` kind 分支(Start/Stop/Restart/Delete + Reconcile 探活保 running)

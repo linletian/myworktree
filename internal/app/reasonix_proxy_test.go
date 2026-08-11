@@ -45,7 +45,7 @@ class H(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/page":
             self._send(200, "text/html; charset=utf-8",
-                       b"<html><head><title>t</title></head><body>ok</body></html>")
+                       b"<html><head><title>t</title></head><body><img src=\"/assets/logo.svg\"><a href=\"/sessions/x\">s</a></body></html>")
         else:
             self._send(200, "text/plain",
                        ("path=" + self.path + ";cookie=" + self.headers.get("Cookie", "")).encode())
@@ -146,6 +146,20 @@ func TestReasonixProxyInjectPrefixIntoHTML(t *testing.T) {
 	if !strings.Contains(body, "EventSource") || !strings.Contains(body, "window.fetch") {
 		t.Fatalf("injection script missing fetch/EventSource rewrite: %q", body)
 	}
+	// The initial-page assets must be rewritten server-side (not by a
+	// client-side DOM pass, which would be too late): the img/a attributes
+	// from the upstream HTML must carry the mount prefix.
+	if !strings.Contains(body, "src=\"/rx/"+id+"/assets/logo.svg\"") {
+		t.Fatalf("server-side attribute rewrite missing: %q", body)
+	}
+	if !strings.Contains(body, "href=\"/rx/"+id+"/sessions/x\"") {
+		t.Fatalf("server-side href rewrite missing: %q", body)
+	}
+	// The injected script keeps a MutationObserver fallback for dynamically
+	// inserted nodes (chat message images), and the network-layer shims.
+	if !strings.Contains(body, "MutationObserver") {
+		t.Fatalf("injection script missing MutationObserver fallback: %q", body)
+	}
 }
 
 func TestReasonixProxyUnknownInstance(t *testing.T) {
@@ -188,5 +202,96 @@ func TestSplitReasonixPath(t *testing.T) {
 		if id != c.id || rest != c.rest {
 			t.Fatalf("splitReasonixPath(%q) = (%q, %q), want (%q, %q)", c.path, id, rest, c.id, c.rest)
 		}
+	}
+}
+
+func TestRewriteRootAttrs(t *testing.T) {
+	const mount = "/rx/abc123"
+	cases := []struct {
+		name, in, want string
+	}{
+		{
+			name: "img src",
+			in:   `<html><body><img src="/assets/logo.svg"></body></html>`,
+			want: `<html><body><img src="/rx/abc123/assets/logo.svg"></body></html>`,
+		},
+		{
+			name: "a href and form action",
+			in:   `<a href="/sessions/x">s</a><form action="/submit"></form>`,
+			want: `<a href="/rx/abc123/sessions/x">s</a><form action="/rx/abc123/submit"></form>`,
+		},
+		{
+			name: "script src and source",
+			in:   `<script src="/app.js"></script><source src="/a.webm">`,
+			want: `<script src="/rx/abc123/app.js"></script><source src="/rx/abc123/a.webm">`,
+		},
+		{
+			name: "already-prefixed is left alone",
+			in:   `<img src="/rx/abc123/assets/logo.svg"><img src="https://cdn.example/x.png">`,
+			want: `<img src="/rx/abc123/assets/logo.svg"><img src="https://cdn.example/x.png">`,
+		},
+		{
+			name: "js string literal is not rewritten",
+			in:   `<script>var x = "src=\"/assets/js-only\"";</script>`,
+			want: `<script>var x = "src=\"/assets/js-only\"";</script>`,
+		},
+		{
+			name: "protocol-relative URL is left alone",
+			in:   `<img src="//cdn.example/x.png">`,
+			want: `<img src="//cdn.example/x.png">`,
+		},
+		{
+			name: "data-src is not rewritten",
+			in:   `<div data-src="/keep-me"></div>`,
+			want: `<div data-src="/keep-me"></div>`,
+		},
+		{
+			name: "xlink:href is not rewritten",
+			in:   `<use xlink:href="/icon.svg">`,
+			want: `<use xlink:href="/icon.svg">`,
+		},
+		{
+			// Pins the current behaviour: property-style JS assignments
+			// (`el.src=`, `location.href=`) are NOT rewritten because the
+			// [\s"'] prefix anchor excludes "." — the old \b anchor would
+			// have rewritten these after a "<" comparison. See rootAttrRe's
+			// comment.
+			name: "js property assignment is not rewritten",
+			in:   `<script>for(var i=0;i<n;i++){el.src="/assets/x.png";}</script>`,
+			want: `<script>for(var i=0;i<n;i++){el.src="/assets/x.png";}</script>`,
+		},
+		{
+			name: "poster and action",
+			in:   `<video poster="/thumb.jpg"></video><form action="/submit"></form>`,
+			want: `<video poster="/rx/abc123/thumb.jpg"></video><form action="/rx/abc123/submit"></form>`,
+		},
+		{
+			// F: multiple rewriteable attributes in ONE tag must all be
+			// rewritten (a single regex pass over the whole tag only catches
+			// the last attribute).
+			name: "multiple attrs in one tag",
+			in:   `<video src="/v.mp4" poster="/t.jpg"></video>`,
+			want: `<video src="/rx/abc123/v.mp4" poster="/rx/abc123/t.jpg"></video>`,
+		},
+		{
+			// G: attribute names are case-insensitive in HTML.
+			name: "uppercase attribute name",
+			in:   `<IMG SRC="/x.png">`,
+			want: `<IMG SRC="/rx/abc123/x.png">`,
+		},
+		{
+			// H: unquoted attribute values are valid HTML5.
+			name: "unquoted attribute value",
+			in:   `<img src=/x.png>`,
+			want: `<img src=/rx/abc123/x.png>`,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := string(rewriteRootAttrs([]byte(c.in), mount))
+			if got != c.want {
+				t.Fatalf("rewriteRootAttrs(%q) = %q, want %q", c.in, got, c.want)
+			}
+		})
 	}
 }
