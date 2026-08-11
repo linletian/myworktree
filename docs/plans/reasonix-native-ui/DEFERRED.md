@@ -11,12 +11,12 @@
 - **待用户真机**：浏览器打开 reasonix 实例，发送真实消息确认收到 AI 回复（依赖 `~/.reasonix/.env` 有效 + `[sandbox] bash` 策略——本机无 bwrap 时需 `bash="off"`）。
 - **结论**：非代码缺陷，代码链路已验证；验证动作在用户真实环境执行即可，不转 issue。
 
-## 2. Shutdown 不停 reasonix 实例（与 tty 语义一致）
+## 2. Shutdown 停 reasonix 实例（2026-08-11 起与 tty 行为一致）
 
-- **现状**：`Server.Shutdown()` 仅关 HTTP server，不停止实例进程；myworktree 退出后 reasonix serve 继续运行（与现有 tty 实例行为一致）。
-- **连接影响（评审补记）**：退出时主 server 与独立 listener（`rxSrv`）都以 **5s 优雅超时** 关停——reasonix iframe 的活跃 SSE / 长连接会被断开，**进行中的流式 AI 回复会中断**。但 serve 子进程与会话（`REASONIX_HOME`）均保留：重开 myworktree 后 `Reconcile` 接管存活 serve，重新打开实例即可继续查看/对话，无内容丢失。这是「退出进程必然断开浏览器连接」的固有折衷，与 tty 实例一致。
-- **为何不转 issue**：tty 实例同样如此，单独为 reasonix 引入停机逻辑会破坏一致性；重启后 `Reconcile` 已接管存活进程（R-02），进程不会失控。
-- **边界**：若未来给 tty 实例也做「退出时停实例」，reasonix 应一并纳入（届时再开 issue）。
+- **现状（2026-08-11 变更，用户要求行为一致）**：`Server.Shutdown()` 在关闭 HTTP server **之前**调用 `Manager.StopAllReasonix()`——对所有 running 的 reasonix 实例执行 `Reasonix.Stop`（SIGTERM → 优雅退出 → 兜底 SIGKILL），**不 Cleanup**（保留 `REASONIX_HOME`/`session.jsonl`，下次 Start 同 id `--resume` 同一会话文件，对话延续）。
+- **与 tty 的一致性**：tty 实例因 PTY 挂断随 myworktree 退出自然终止；reasonix 无 PTY，此前会残留为孤儿（本 § 原记录"Shutdown 不停实例"即此行为）。现改为退出时主动停，**效果与 tty 一致**：myworktree 关闭 → 实例进程随之结束。
+- **边界（强杀）**：`kill -9` 等不走 `Shutdown()` 的场景无法执行 `StopAllReasonix`，serve 仍会残留；重启后 `Reconcile` 接管存活进程（Health 探活）继续管理，不会失控。tty 在强杀时 PTY master 也会由内核关闭、zsh 随之挂断，二者在强杀场景仍存在机制差异（reasonix 残留、tty 不残留），属无法在进程被杀后执行代码的内核限制。
+- **连接影响（评审补记）**：退出时主 server 与独立 listener（`rxSrv`）都以 **5s 优雅超时** 关停——reasonix iframe 的活跃 SSE / 长连接会被断开，**进行中的流式 AI 回复会中断**。serve 进程被主动停止后，重新打开 myworktree 需重新 Start 实例（`--resume` 同一会话，历史保留）。
 
 ## 3. reasonix 实例忽略 tag 的 `command` / `env` / `preStart`（有意设计）
 

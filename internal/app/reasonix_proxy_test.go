@@ -406,6 +406,36 @@ func TestReasonixNonLoopbackFallsBack(t *testing.T) {
 	}
 }
 
+// TestServerShutdownStopsReasonix verifies myworktree shutdown stops running
+// reasonix instances (behavior parity with tty instances, which die when
+// their PTY hangs up on process exit).
+func TestServerShutdownStopsReasonix(t *testing.T) {
+	_, m, fs := newProxyTestEnv(t)
+	id := startReasonixViaManager(t, m)
+
+	srv := &Server{
+		cfg:         Config{ListenAddr: "127.0.0.1:0"},
+		logger:      log.New(io.Discard, "", 0),
+		dataDir:     filepath.Dir(fs.Path),
+		store:       fs,
+		instanceMgr: m,
+		mux:         http.NewServeMux(),
+		authFails:   map[string]authFail{},
+	}
+	if _, err := srv.Start(); err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+	if _, ok, herr := m.Reasonix.Health(id); herr != nil || !ok {
+		t.Fatalf("reasonix serve should be healthy before Shutdown (ok=%v err=%v)", ok, herr)
+	}
+
+	srv.Shutdown()
+
+	if _, ok, herr := m.Reasonix.Health(id); herr != nil || ok {
+		t.Fatalf("reasonix serve must be stopped by Shutdown (parity with tty; ok=%v err=%v)", ok, herr)
+	}
+}
+
 func TestSplitReasonixPath(t *testing.T) {
 	cases := []struct {
 		path, id, rest string

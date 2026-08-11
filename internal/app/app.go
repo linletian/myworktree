@@ -492,6 +492,13 @@ func (s *Server) Shutdown() {
 	if s.portal != nil {
 		s.portal.Stop()
 	}
+	// Stop reasonix serve processes first (behavior parity with tty
+	// instances, which die when their PTY hangs up): their SSE connections
+	// then close, so the HTTP servers below shut down promptly. State dirs
+	// are kept — the next Start resumes the same session.jsonl.
+	if s.instanceMgr != nil {
+		s.instanceMgr.StopAllReasonix()
+	}
 	if s.rxSrv != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()

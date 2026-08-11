@@ -507,6 +507,28 @@ func (m *Manager) startReasonix(in StartInput, id, instName, cwd, effectiveTagID
 	return inst, nil
 }
 
+// StopAllReasonix best-effort stops the serve process of every running
+// reasonix instance. Called on server shutdown so reasonix instances do not
+// outlive myworktree — behavior parity with tty instances, which die when
+// their PTY hangs up on process exit (a reasonix serve has no PTY and would
+// otherwise keep running as an orphan). State dirs are deliberately NOT
+// cleaned: the next Start of the same instance --resumes the fixed
+// session.jsonl, so the conversation survives a stop/start cycle.
+func (m *Manager) StopAllReasonix() {
+	if m.Reasonix == nil {
+		return
+	}
+	st, err := m.Store.Load()
+	if err != nil {
+		return
+	}
+	for _, inst := range st.Instances {
+		if inst.Kind == store.KindReasonix && inst.Status == "running" {
+			_ = m.Reasonix.Stop(inst.ID)
+		}
+	}
+}
+
 func (m *Manager) List() ([]store.ManagedInstance, error) {
 	st, err := m.Store.Load()
 	if err != nil {

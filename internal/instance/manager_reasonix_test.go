@@ -349,6 +349,43 @@ func TestRestartReasonixCleansOldDir(t *testing.T) {
 	}
 }
 
+// TestStopAllReasonix verifies Server.Shutdown parity: StopAllReasonix stops
+// every running reasonix serve but leaves stopped instances' state dirs
+// intact, so the conversation can be resumed on the next Start.
+func TestStopAllReasonix(t *testing.T) {
+	m, fs := newReasonixTestManager(t)
+
+	run, err := m.Start(StartInput{WorktreeID: "wt1", Kind: store.KindReasonix, Name: "running"})
+	if err != nil {
+		t.Fatalf("Start running: %v", err)
+	}
+	dead, err := m.Start(StartInput{WorktreeID: "wt1", Kind: store.KindReasonix, Name: "stopped"})
+	if err != nil {
+		t.Fatalf("Start stopped: %v", err)
+	}
+	if err := m.Stop(dead.ID); err != nil {
+		t.Fatalf("Stop dead: %v", err)
+	}
+	waitInstanceNotRunning(t, fs, dead.ID)
+
+	m.StopAllReasonix()
+
+	// The running instance's serve is now stopped (Health fails).
+	if _, ok, herr := m.Reasonix.Health(run.ID); herr != nil || ok {
+		t.Fatalf("running instance should be stopped after StopAllReasonix (ok=%v err=%v)", ok, herr)
+	}
+	// The already-stopped instance is unaffected.
+	if _, ok, herr := m.Reasonix.Health(dead.ID); herr != nil || ok {
+		t.Fatalf("stopped instance should stay stopped (ok=%v err=%v)", ok, herr)
+	}
+	// State dirs are NOT cleaned: session.jsonl survives for --resume.
+	for _, id := range []string{run.ID, dead.ID} {
+		if _, err := os.Stat(filepath.Join(m.DataDir, "reasonix", id, "session.jsonl")); err != nil {
+			t.Fatalf("session.jsonl for %s should survive StopAllReasonix: %v", id, err)
+		}
+	}
+}
+
 // TestReasonixTagEnvAndPreStart verifies (DEFERRED §3) that a tag's env flows
 // into the serve process and its preStart runs before serve; the tag command
 // is NOT executed (reasonix instances run the agent, not a shell command).
