@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -390,6 +391,13 @@ func TestStopAllReasonix(t *testing.T) {
 // into the serve process and its preStart runs before serve; the tag command
 // is NOT executed (reasonix instances run the agent, not a shell command).
 func TestReasonixTagEnvAndPreStart(t *testing.T) {
+	// preStart is executed via `zsh -lc` (same shell contract as the tag
+	// command); skip on hosts without zsh (e.g. bare ubuntu runners) so the
+	// test does not fail on the shell itself. CI installs zsh, so coverage
+	// is retained there.
+	if _, err := exec.LookPath("zsh"); err != nil {
+		t.Skip("zsh not installed; preStart (zsh -lc) not testable")
+	}
 	m, _ := newReasonixTestManager(t)
 	marker := filepath.Join(m.DataDir, "pre-marker")
 	tagsJSON := fmt.Sprintf(`{"tags":[{"id":"rxenv","command":"echo I-MUST-NOT-RUN","env":{"MW_RX_TEST_ENV":"from-tag"},"preStart":"echo pre-ran > %s"}]}`, marker)
