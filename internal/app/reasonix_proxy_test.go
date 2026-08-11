@@ -194,15 +194,15 @@ func TestInjectReasonixLayoutDefaults(t *testing.T) {
 	for _, want := range []string{
 		"classList.add('mw-rx')", // collapsed by default
 		"#mw-sidebar-toggle",
-		"@media(min-width:769px)",       // desktop-only override
+		"@media(min-width:769px)", // desktop-only override
 		".mw-rx .app{grid-template-columns:0 1fr}",
-		".mw-rx .transcript{grid-column:2;grid-row:1}", // pin chat to column 2 (auto-placement would push it into the 0px column)
-		".mw-rx .footer{grid-column:2;grid-row:2}",     // pin input bar to row 2
+		".mw-rx .transcript{grid-column:2;grid-row:1}",              // pin chat to column 2 (auto-placement would push it into the 0px column)
+		".mw-rx .footer{grid-column:2;grid-row:2}",                  // pin input bar to row 2
 		".app{grid-template-columns:var(--mw-sidebar-w,220px) 1fr}", // expanded restores grid
 		"--mw-sidebar-w:220px",
 		"document.addEventListener('DOMContentLoaded'", // button created once body exists
-		"@media(max-width:768px)",                       // narrow screens keep native mobile UI
-		"#mw-sidebar-toggle{display:none!important}",    // ...so our toggle is hidden there
+		"@media(max-width:768px)",                      // narrow screens keep native mobile UI
+		"#mw-sidebar-toggle{display:none!important}",   // ...so our toggle is hidden there
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("layout injection missing %q\n--- injected page ---\n%s", want, got)

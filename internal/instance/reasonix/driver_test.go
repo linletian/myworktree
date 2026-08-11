@@ -350,6 +350,7 @@ func TestDriverVersionGateDevBuild(t *testing.T) {
 		t.Fatalf("dev build must not be blocked by the version gate: %v", err)
 	}
 }
+
 // cache after Start (no file reads), and Stop/Cleanup invalidate it.
 func TestDriverAddrCache(t *testing.T) {
 	dataDir := t.TempDir()

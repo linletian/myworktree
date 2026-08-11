@@ -66,8 +66,8 @@ type Server struct {
 	serverRev string
 	isSecure  bool
 
-	portal      *portal.Portal
-	httpSrv     *http.Server
+	portal  *portal.Portal
+	httpSrv *http.Server
 
 	// Independent loopback listener serving only the reasonix reverse proxy,
 	// so embedded reasonix pages are cross-origin with the myworktree API
