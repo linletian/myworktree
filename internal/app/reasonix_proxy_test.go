@@ -359,6 +359,53 @@ func TestReasonixWebURL(t *testing.T) {
 	}
 }
 
+// TestReasonixNonLoopbackFallsBack verifies the scheme-A fallback: when the
+// main listener is open to the network (default 0.0.0.0, or an explicit LAN
+// IP), the independent listener must NOT be started — an absolute
+// http://127.0.0.1:<port> web_url would be resolved by a remote browser to
+// ITSELF and the iframe would fail. Instead web_url stays empty and the
+// frontend uses the same-origin /rx/<id>/ relative path, which follows the
+// browser's current origin and works over LAN.
+func TestReasonixNonLoopbackFallsBack(t *testing.T) {
+	p, m, fs := newProxyTestEnv(t)
+	id := startReasonixViaManager(t, m)
+	defer func() { _ = m.Stop(id) }()
+
+	srv := &Server{
+		cfg:         Config{ListenAddr: "0.0.0.0:0", AuthToken: "test-token"}, // open to the network
+		logger:      log.New(io.Discard, "", 0),
+		dataDir:     filepath.Dir(fs.Path),
+		store:       fs,
+		instanceMgr: m,
+		mux:         http.NewServeMux(),
+		authFails:   map[string]authFail{},
+	}
+	if _, err := srv.Start(); err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+	defer srv.Shutdown()
+
+	if srv.rxAddr != "" {
+		t.Fatalf("independent listener must NOT be enabled on non-loopback listen (rxAddr=%q)", srv.rxAddr)
+	}
+	if u := srv.reasonixWebURL(id); u != "" {
+		t.Fatalf("web_url must be empty on non-loopback listen, got %q", u)
+	}
+
+	// The same-origin /rx/ route still works through the main mux (this is
+	// the relative path the frontend falls back to over LAN).
+	srv.mux.Handle("/rx/", p)
+	req := httptest.NewRequest(http.MethodGet, "/rx/"+id+"/history", nil)
+	rec := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("same-origin /rx/ over non-loopback listen: status=%d, want 200 (body: %s)", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "cookie=reasonix_token=") {
+		t.Fatalf("same-origin /rx/ did not inject the reasonix cookie: %q", rec.Body.String())
+	}
+}
+
 func TestSplitReasonixPath(t *testing.T) {
 	cases := []struct {
 		path, id, rest string

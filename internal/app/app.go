@@ -378,10 +378,20 @@ func (s *Server) Start() (string, error) {
 	// Independent loopback listener serving only /rx/ (issue #44): embedded
 	// reasonix pages become cross-origin with the myworktree API, so content
 	// rendered inside the chat iframe cannot silently call /api/* with the
-	// user's session. Skipped in TLS mode — an http://127.0.0.1:<port> iframe
-	// inside an https page is blocked as mixed content, so we fall back to the
-	// same-origin /rx/ route (the pre-#44 behavior) and web_url stays empty.
-	if s.cfg.TLSCert == "" && s.cfg.TLSKey == "" {
+	// user's session.
+	//
+	// It is enabled only when the main listener is loopback-only: the
+	// reported web_url is an absolute http://127.0.0.1:<port>, which is only
+	// reachable from the same machine. When the main listener is open to the
+	// network (default 0.0.0.0, or an explicit LAN IP) a remote browser would
+	// resolve that 127.0.0.1 to ITSELF and the iframe would fail — so we fall
+	// back to the same-origin /rx/ route (the frontend then uses the relative
+	// path /rx/<id>/, which follows whatever host the browser is on, and LAN
+	// access works). TLS mode also falls back (an http iframe inside an https
+	// page is blocked as mixed content). In both fallback cases web_url stays
+	// empty and the frontend keeps working via /rx/<id>/.
+	listenHost, _, _ := net.SplitHostPort(s.cfg.ListenAddr) // "" on error → not loopback → fallback
+	if s.cfg.TLSCert == "" && s.cfg.TLSKey == "" && isLoopbackHost(listenHost) {
 		rxLn, err := net.Listen("tcp", "127.0.0.1:0")
 		if err != nil {
 			s.logger.Printf("[reasonix] warning: independent listener failed, falling back to same-origin /rx/: %v", err)
@@ -1331,8 +1341,9 @@ func (s *Server) instanceView(it store.ManagedInstance) map[string]any {
 }
 
 // reasonixWebURL returns the cross-origin base for a reasonix instance's web
-// UI, or "" when the independent listener is not enabled (TLS mode), in which
-// case the frontend falls back to the same-origin /rx/<id>/ route.
+// UI, or "" when the independent listener is not enabled (TLS mode, or a
+// non-loopback main listener — see Server.Start), in which case the frontend
+// falls back to the same-origin /rx/<id>/ route.
 func (s *Server) reasonixWebURL(id string) string {
 	if s.rxAddr == "" {
 		return ""

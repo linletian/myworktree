@@ -34,11 +34,14 @@
 - **现状**：验证轮已实测同目录多 serve 并行启动成功（session lease 按文件路径互斥、fresh 唯一化）；但受 provider key 限制（见 §1），未逐实例验证真实对话收发。
 - **结论**：进程级并发已验证；消息级验证依赖 §1 的真机环境，一并处理。
 
-## 6. 独立源（#44 落地）在远程 https / Tailscale 场景的限制
+## 6. 独立源（#44 落地）的启用范围与远程回退
 
 - **现状（2026-08-11 实施 #44）**：`/rx/` 反代挂到独立 loopback listener（`127.0.0.1:<rand>`），iframe 经 `/api/instances` 返回的 `web_url` 指向该源，与 myworktree API 跨源 → 本机场景 iframe 内静默调用管理 API 的路径被切断（相对 fetch 落在独立源上得 404）。
-- **限制**：**TLS / 远程（portal + Tailscale）模式**下独立源**自动回退同源**——`http://127.0.0.1:<rand>` iframe 在 https 页面内属 mixed content 且远端设备不可达 loopback，`Server.Start` 检测到 TLS 配置时跳过独立 listener，`web_url` 为空、前端 fallback `/rx/<id>/`（即 #44 之前的行为，远程行为不回归）。
-- **后续项**：远程场景的独立源需要可经 portal 反代 / Tailscale 可达的地址（如绑定对外地址或 portal 转发独立端口），届时再评估。当前已记录于 `FEASIBILITY.md §9.5` 与 `app.go` Server.Start 注释。
+- **启用范围（2026-08-11 方案 A 扩展）**：独立源**仅在主监听为 loopback-only（`127.0.0.1`/`localhost` 且非 TLS）时启用**。以下场景一律**自动回退同源**（`web_url` 为空、前端用相对路径 `/rx/<id>/`，跟随浏览器当前 origin）：
+  - **TLS / portal + Tailscale**：`http://127.0.0.1:<rand>` iframe 在 https 页面内属 mixed content，且远端设备不可达 loopback；
+  - **网络开放监听（默认 `0.0.0.0` 或显式 LAN IP）**：绝对 `http://127.0.0.1:<rand>` 会被**远端浏览器解析为远端设备自身**，iframe 必挂——回退同源后 LAN/远程 http 访问 reasonix **可用**，且启动后换 IP 访问不受影响（相对路径随 origin）。
+- **代价**：网络开放场景 reasonix 页面与 myworktree API 回到同源（#44 的跨源隔离仅本机 loopback 模式生效）；该场景本就要求 myworktree token（非 loopback 监听强制 `--auth`）且属受信网络。
+- **后续项**：若未来要为 LAN/远程场景恢复跨源隔离，需独立 listener 绑定浏览器可达地址（如与主 listener 同 host 或经 portal 转发）并同步给独立 listener 加 myworktree 鉴权（否则 LAN 上裸暴露 reasonix UI）——届时再评估。当前记录于 `FEASIBILITY.md §9.5` 与 `app.go` Server.Start 注释。
 
 ## 7. 追溯索引（已转 issue 项，便于反查）
 
