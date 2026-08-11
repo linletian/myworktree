@@ -256,6 +256,13 @@ func injectReasonixPrefix(html []byte, mount string) []byte {
 	//     is left untouched.
 	//   - Collapsed (default): .app becomes a 0-width first column and the
 	//     sidebar is display:none; chat takes the full width.
+	//   - Grid-placement fix: upstream relies on auto-placement for
+	//     .transcript / .footer (the sidebar's explicit grid-row:1/3 claims
+	//     column 1, pushing them to column 2). Once the sidebar is
+	//     display:none, auto-placement reflows: .transcript would land in the
+	//     0px column and .footer would stretch across row 1 — the chat area
+	//     vanishes while the input bar stays. We pin both explicitly when
+	//     collapsed so they keep upstream's column-2 row-1/row-2 slots.
 	//   - Expanded: .app restores the native grid; the sidebar width is
 	//     configurable via --mw-sidebar-w (default 220px, same as upstream).
 	//   - The toggle is our own #mw-sidebar-toggle button (fixed, top-left,
@@ -284,6 +291,8 @@ func injectReasonixPrefix(html []byte, mount string) []byte {
   :root{--mw-sidebar-w:220px}
   .mw-rx .app{grid-template-columns:0 1fr}
   .mw-rx .sidebar{display:none}
+  .mw-rx .transcript{grid-column:2;grid-row:1}
+  .mw-rx .footer{grid-column:2;grid-row:2}
   .app{grid-template-columns:var(--mw-sidebar-w,220px) 1fr}
   #mw-sidebar-toggle{position:fixed;top:8px;left:8px;z-index:97;width:34px;height:34px;display:flex;align-items:center;justify-content:center;border-radius:var(--radius,8px);background:var(--panel,#222);border:1px solid var(--border,#333);color:var(--fg-2,#aaa);cursor:pointer;font-size:16px;line-height:1;transition:background .15s,left .25s ease}
   #mw-sidebar-toggle:hover{background:var(--card-hover,#2a2a2a);color:var(--fg,#eee)}

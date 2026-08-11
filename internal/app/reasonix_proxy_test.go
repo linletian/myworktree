@@ -196,6 +196,8 @@ func TestInjectReasonixLayoutDefaults(t *testing.T) {
 		"#mw-sidebar-toggle",
 		"@media(min-width:769px)",       // desktop-only override
 		".mw-rx .app{grid-template-columns:0 1fr}",
+		".mw-rx .transcript{grid-column:2;grid-row:1}", // pin chat to column 2 (auto-placement would push it into the 0px column)
+		".mw-rx .footer{grid-column:2;grid-row:2}",     // pin input bar to row 2
 		".app{grid-template-columns:var(--mw-sidebar-w,220px) 1fr}", // expanded restores grid
 		"--mw-sidebar-w:220px",
 		"document.addEventListener('DOMContentLoaded'", // button created once body exists
