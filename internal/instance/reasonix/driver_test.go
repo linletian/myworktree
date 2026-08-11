@@ -177,6 +177,10 @@ func fakeServeBin(t *testing.T) string {
 	bin := filepath.Join(t.TempDir(), "fake-serve.py")
 	script := `#!/usr/bin/env python3
 import os, sys
+# Avoid DNS reverse-lookup (socket.getfqdn) hanging on CI hosts with broken
+# DNS (e.g. GitHub macOS runners): HTTPServer.server_bind calls getfqdn.
+import socket
+socket.getfqdn = lambda host="": host if host else "localhost"
 from http.server import BaseHTTPRequestHandler, HTTPServer
 args = sys.argv[1:]
 def val(flag):
