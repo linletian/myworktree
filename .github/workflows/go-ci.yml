@@ -42,6 +42,33 @@ jobs:
       - name: Run tests
         run: go test ./...
 
+      # TEMP DIAGNOSTIC (remove after root cause found): dump python3 env and
+      # serve.log contents when tests fail on this job.
+      - name: Diag python3 + serve.log (on failure)
+        if: failure()
+        run: |
+          echo "== which python3 =="; which python3 || echo "NO python3"
+          echo "== python3 --version =="; python3 --version 2>&1 || true
+          echo "== minimal fake serve repro =="
+          cd "$RUNNER_TEMP"
+          cat > fake.py <<'PYEOF'
+import os
+from http.server import BaseHTTPRequestHandler, HTTPServer
+srv = HTTPServer(("127.0.0.1", 0), BaseHTTPRequestHandler)
+with open(os.path.join(os.environ["RUNNER_TEMP"], "port.out"), "w") as f:
+    f.write("127.0.0.1:%d" % srv.server_address[1])
+print("bound ok", srv.server_address, flush=True)
+PYEOF
+          python3 fake.py &
+          RPPID=$!
+          sleep 4
+          echo "-- port.out:"; cat "$RUNNER_TEMP/port.out" 2>/dev/null || echo "NO PORT FILE"
+          kill $RPPID 2>/dev/null || true
+          echo "== serve.log files =="
+          find /var/folders /tmp -name serve.log -type f 2>/dev/null | while read f; do
+            echo "--- $f ---"; cat "$f"
+          done
+
       - name: Build binaries
         run: |
           go build -v -o /tmp/myworktree ./cmd/myworktree
