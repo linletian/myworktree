@@ -52,13 +52,13 @@ jobs:
           echo "== minimal fake serve repro =="
           cd "$RUNNER_TEMP"
           cat > fake.py <<'PYEOF'
-import os
-from http.server import BaseHTTPRequestHandler, HTTPServer
-srv = HTTPServer(("127.0.0.1", 0), BaseHTTPRequestHandler)
-with open(os.path.join(os.environ["RUNNER_TEMP"], "port.out"), "w") as f:
-    f.write("127.0.0.1:%d" % srv.server_address[1])
-print("bound ok", srv.server_address, flush=True)
-PYEOF
+          import os
+          from http.server import BaseHTTPRequestHandler, HTTPServer
+          srv = HTTPServer(("127.0.0.1", 0), BaseHTTPRequestHandler)
+          with open(os.path.join(os.environ["RUNNER_TEMP"], "port.out"), "w") as f:
+              f.write("127.0.0.1:%d" % srv.server_address[1])
+          print("bound ok", srv.server_address, flush=True)
+          PYEOF
           python3 fake.py &
           RPPID=$!
           sleep 4
