@@ -49,8 +49,36 @@ jobs:
         run: |
           echo "== which python3 =="; which python3 || echo "NO python3"
           echo "== python3 --version =="; python3 --version 2>&1 || true
-          echo "== minimal fake serve repro =="
+          echo "== python detail =="; python3 -c 'import sys; print(sys.executable); print(sys.version)'
+          echo "== step-by-step bind probe =="
           cd "$RUNNER_TEMP"
+          cat > probe.py <<'PYEOF'
+          import socket, sys, traceback
+          def log(m):
+              sys.stdout.write(m + "\n")
+              sys.stdout.flush()
+          try:
+              log("step1: imports")
+              s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+              s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+              log("step2: bind")
+              s.bind(("127.0.0.1", 0))
+              log("step3: bound " + repr(s.getsockname()))
+              from http.server import HTTPServer, BaseHTTPRequestHandler
+              log("step4: http.server imported")
+              srv = HTTPServer(("127.0.0.1", 0), BaseHTTPRequestHandler)
+              log("step5: HTTPServer " + repr(srv.server_address))
+              srv.server_close()
+              log("step6: done")
+          except Exception:
+              log("EXC: " + traceback.format_exc())
+          PYEOF
+          python3 -u probe.py > probe.stdout 2>&1 &
+          PP=$!
+          sleep 5
+          echo "--- probe.stdout ---"; cat probe.stdout 2>/dev/null || echo none
+          kill $PP 2>/dev/null || echo "probe exited on its own"
+          echo "== minimal fake serve repro =="
           cat > fake.py <<'PYEOF'
           import os
           from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -59,11 +87,11 @@ jobs:
               f.write("127.0.0.1:%d" % srv.server_address[1])
           print("bound ok", srv.server_address, flush=True)
           PYEOF
-          python3 fake.py &
-          RPPID=$!
+          python3 -u fake.py > fake.stdout 2>&1 &
+          FP=$!
           sleep 4
-          echo "-- port.out:"; cat "$RUNNER_TEMP/port.out" 2>/dev/null || echo "NO PORT FILE"
-          kill $RPPID 2>/dev/null || true
+          echo "--- fake.stdout ---"; cat fake.stdout 2>/dev/null || echo none
+          kill $FP 2>/dev/null || true
           echo "== serve.log files =="
           find /var/folders /tmp -name serve.log -type f 2>/dev/null | while read f; do
             echo "--- $f ---"; cat "$f"
