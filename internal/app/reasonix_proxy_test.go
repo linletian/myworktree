@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -328,23 +329,49 @@ func TestInjectReasonixLayoutDefaults(t *testing.T) {
 	const mount = "/rx/abc123"
 	page := []byte("<html><head><style>.app{display:grid;grid-template-columns:220px 1fr}</style></head><body></body></html>")
 	got := string(injectReasonixPrefix(page, mount))
+
+	// Stable short tokens (no whitespace/ordering sensitivity) match as plain
+	// substrings; whole-rule checks below use grep-style patterns instead.
 	for _, want := range []string{
 		"classList.add('mw-rx')", // collapsed by default
 		"#mw-sidebar-toggle",
+		"content:'▶'", // CSS arrow: points right — click to expand
+		"content:'◀'", // ...flips left when expanded — click to collapse
 		"@media(min-width:769px)", // desktop-only override
-		".mw-rx .app{grid-template-columns:0 1fr}",
-		".mw-rx .transcript{grid-column:2;grid-row:1}",              // pin chat to column 2 (auto-placement would push it into the 0px column)
-		".mw-rx .footer{grid-column:2;grid-row:2}",                  // pin input bar to row 2
-		".app{grid-template-columns:var(--mw-sidebar-w,220px) 1fr}", // expanded restores grid
 		"--mw-sidebar-w:220px",
 		"document.addEventListener('DOMContentLoaded'", // button created once body exists
 		"@media(max-width:768px)",                      // narrow screens keep native mobile UI
-		"#mw-sidebar-toggle{display:none!important}",   // ...so our toggle is hidden there
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("layout injection missing %q\n--- injected page ---\n%s", want, got)
 		}
 	}
+
+	// Grep-style assertions: one per CSS property, so reordering or adding
+	// properties inside a rule never breaks the test. (A single regexp with
+	// [^}]* gaps would still impose an order between the properties.)
+	for _, p := range []struct{ prop, what string }{
+		{`#mw-sidebar-toggle\{[^}]*top:8px`, "toggle top"},
+		{`#mw-sidebar-toggle\{[^}]*left:2px`, "toggle left"},
+		{`#mw-sidebar-toggle\{[^}]*width:24px`, "toggle width"},
+		{`#mw-sidebar-toggle\{[^}]*height:64px`, "toggle height"},
+		{`\.mw-rx \.app\{[^}]*grid-template-columns:0 1fr`, "collapsed grid (0-width first column)"},
+		{`\.mw-rx \.transcript\{[^}]*grid-column:2`, "chat pinned to column 2"},
+		{`\.mw-rx \.transcript\{[^}]*grid-row:1`, "chat in row 1"},
+		{`\.mw-rx \.footer\{[^}]*grid-column:2`, "input bar in column 2"},
+		{`\.mw-rx \.footer\{[^}]*grid-row:2`, "input bar in row 2"},
+		{`\.app\{[^}]*grid-template-columns:var\(--mw-sidebar-w,220px\) 1fr`, "expanded grid restores with configurable width"},
+		{`#mw-sidebar-toggle\{[^}]*display:none!important`, "toggle hidden on narrow screens"},
+		{`html:not\(\.mw-rx\) #mw-sidebar-toggle\{[^}]*left:calc\(var\(--mw-sidebar-w,220px\) \+ 4px\)`, "expanded toggle sits next to the sidebar edge"},
+	} {
+		assertRe(t, got, p.prop, p.what)
+	}
+	// The arrow must come from CSS only — a leftover JS textContent would
+	// render a second glyph (the old ☰) stacked next to the ::before arrow.
+	if strings.Contains(got, "b.textContent") {
+		t.Fatalf("button textContent must not be set (would double-render with the ::before arrow): %q", got)
+	}
+
 	// The layout injection must not disturb the URL-prefix shim.
 	if !strings.Contains(got, "window.fetch") || !strings.Contains(got, "MutationObserver") {
 		t.Fatalf("url-prefix shim broken by layout injection: %q", got)
@@ -355,6 +382,15 @@ func TestInjectReasonixLayoutDefaults(t *testing.T) {
 	layoutStyle := strings.Index(got, ".app{grid-template-columns:var(--mw-sidebar-w")
 	if headEnd < 0 || layoutStyle < 0 || layoutStyle > headEnd {
 		t.Fatalf("layout <style> must be injected before </head> (layoutStyle=%d headEnd=%d)", layoutStyle, headEnd)
+	}
+}
+
+// assertRe fails unless the regexp pattern matches got. Grep-style: the
+// pattern should tolerate property order/whitespace (e.g. [^}]* gaps).
+func assertRe(t *testing.T, got, pattern, what string) {
+	t.Helper()
+	if !regexp.MustCompile(pattern).MatchString(got) {
+		t.Fatalf("layout injection missing %s (pattern %s)\n--- injected page ---\n%s", what, pattern, got)
 	}
 }
 
