@@ -335,8 +335,8 @@ func TestInjectReasonixLayoutDefaults(t *testing.T) {
 	for _, want := range []string{
 		"classList.add('mw-rx')", // collapsed by default
 		"#mw-sidebar-toggle",
-		"content:'▶'", // CSS arrow: points right — click to expand
-		"content:'◀'", // ...flips left when expanded — click to collapse
+		"content:'▶'",             // CSS arrow: points right — click to expand
+		"content:'◀'",             // ...flips left when expanded — click to collapse
 		"@media(min-width:769px)", // desktop-only override
 		"--mw-sidebar-w:220px",
 		"document.addEventListener('DOMContentLoaded'", // button created once body exists
