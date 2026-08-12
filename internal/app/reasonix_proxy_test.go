@@ -385,6 +385,47 @@ func TestInjectReasonixLayoutDefaults(t *testing.T) {
 	}
 }
 
+// TestInjectReasonixPrefixFallbackSites pins the injectReasonixPrefix
+// fallback chain for HTML shapes that lack </head>: the script+layout must
+// still land before the first body content, so the layout <style> precedes
+// (and wins over) any upstream rules in every accepted shape.
+func TestInjectReasonixPrefixFallbackSites(t *testing.T) {
+	const mount = "/rx/abc123"
+	cases := []struct {
+		name string
+		page string
+	}{
+		{"head without closing tag", "<html><head><style>.app{display:grid}</style><body><main>chat</main></body></html>"},
+		{"html without head", "<html><body><main>chat</main></body></html>"},
+		{"bare fragment (no html/head)", "<div>fragment</div>"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := string(injectReasonixPrefix([]byte(tc.page), mount))
+			for _, want := range []string{
+				"classList.add('mw-rx')", // collapsed by default
+				"#mw-sidebar-toggle",
+				"@media(min-width:769px)", // desktop-only override
+			} {
+				if !strings.Contains(got, want) {
+					t.Fatalf("fallback injection missing %q\n--- injected page ---\n%s", want, got)
+				}
+			}
+			// The layout <style> must precede the first <body> (or, when the
+			// fragment has none, the whole page) so it sits before any body
+			// content — the same invariant the </head> path pins explicitly.
+			layoutStyle := strings.Index(got, ".app{grid-template-columns:var(--mw-sidebar-w")
+			bodyStart := strings.Index(got, "<body")
+			if bodyStart < 0 {
+				bodyStart = len(got)
+			}
+			if layoutStyle < 0 || layoutStyle > bodyStart {
+				t.Fatalf("layout <style> must precede body content (layoutStyle=%d bodyStart=%d)\n--- injected page ---\n%s", layoutStyle, bodyStart, got)
+			}
+		})
+	}
+}
+
 // assertRe fails unless the regexp pattern matches got. Grep-style: the
 // pattern should tolerate property order/whitespace (e.g. [^}]* gaps).
 func assertRe(t *testing.T, got, pattern, what string) {
