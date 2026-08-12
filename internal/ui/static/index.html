@@ -2365,10 +2365,21 @@
                 actions.classList.add("visible");
 
                 if (inst && inst.kind === "reasonix") {
+                    // Issue #55: normalize container styles that an xterm
+                    // instance may have left behind (grayscale/opacity for a
+                    // stopped instance). CSS filter applies to the iframe
+                    // content too, so a leftover grayscale would grey out the
+                    // whole web UI.
+                    termContainer.style.opacity = "1";
+                    termContainer.style.filter = "none";
+                    // Issue #54: hide any leftover xterm hosts. They are
+                    // positioned (position:absolute; inset:0) and would
+                    // overlay/block the static iframe, leaving it blank.
+                    renderTerminalSessions();
                     if (inst.status === "running") {
                         ensureWebFrame(inst);
                     } else {
-                        removeWebFrame();
+                        invalidateWebFrame();
                     }
                     return;
                 }
@@ -2480,11 +2491,12 @@
             // dead pre-restart port until the user switched tabs — the poll
             // would pick up the new web_url and this check navigates to it.
             //
-            // Note the guard only covers "staying on the same reasonix tab".
-            // Switching to another instance removes the iframe entirely
-            // (removeWebFrame), so switching back loads it fresh — chat
-            // scroll position and page state are not preserved across tab
-            // switches (same as before the guard, just without the 2s churn).
+            // Note the guard covers both "staying on the same reasonix tab"
+            // and "switching back" — removeWebFrame only hides the iframe
+            // (issue #53), so the element keeps its dataset and the page
+            // state (chat draft, scroll, sidebar) is preserved across tab
+            // switches. Only a src change (e.g. new port after restart)
+            // triggers a fresh navigation.
             const src = (inst && inst.web_url) ? inst.web_url : "/rx/" + inst.id + "/";
             if (frame.dataset.instance !== inst.id || frame.dataset.src !== src) {
                 frame.dataset.instance = inst.id;
@@ -2495,9 +2507,31 @@
             return frame;
         }
 
+        // Hide the web frame instead of destroying it (issue #53): switching
+        // away must only toggle visibility so the embedded page (chat draft,
+        // scroll position, sidebar session list) survives tab switches. The
+        // iframe element stays in the DOM; the dataset.src guard in
+        // ensureWebFrame still re-navigates only when the resolved src changes
+        // (e.g. after a server restart the independent listener gets a new
+        // port → new web_url).
         function removeWebFrame() {
             const frame = document.getElementById("web-frame");
-            if (frame) frame.remove();
+            if (frame) frame.style.display = "none";
+        }
+
+        // Hide AND invalidate the frame's navigation cache. Used when a
+        // reasonix instance is stopped: the embedded page is dead, and on the
+        // same-origin /rx/<id>/ fallback the src never changes, so without
+        // clearing the dataset a stop→start cycle would keep showing the stale
+        // pre-stop page (review regression on the issue #53 fix). Clearing the
+        // dataset makes ensureWebFrame re-navigate on the next start.
+        function invalidateWebFrame() {
+            const frame = document.getElementById("web-frame");
+            if (frame) {
+                frame.style.display = "none";
+                frame.dataset.instance = "";
+                frame.dataset.src = "";
+            }
         }
 
         function selectInstance(id) {
@@ -2518,7 +2552,7 @@
                         ensureWebFrame(inst);
                         updateStatus("reasonix web");
                     } else {
-                        removeWebFrame();
+                        invalidateWebFrame();
                         updateStatus("stopped");
                     }
                     maybeDestroyInactiveStoppedSession(previousID);
