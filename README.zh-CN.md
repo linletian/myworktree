@@ -277,5 +277,15 @@ mw config
 
 > **说明**：Tailscale 的 WireGuard 隧道已对网络层加密。仅通过 `tailscale serve` 域名访问时使用应用层 HTTPS（Let's Encrypt 证书）。
 
+## 已知限制
+
+### Reasonix 实例与 `REASONIX_HOME`
+
+Reasonix 实例运行 `reasonix serve` 时**不设置** `REASONIX_HOME`，嵌入式 web UI 直接使用你的真实 `~/.reasonix`——与终端里直接运行的 `reasonix` 完全一致。driver 会从宿主环境**剥离**继承的 `REASONIX_HOME` / `REASONIX_STATE_HOME`（并输出一条日志提示），确保实例与终端始终共享同一项目会话池；项目间隔离由 reasonix 自身按 cwd 完成。
+
+需要留意的后果：如果你的 shell 导出了自定义 `REASONIX_HOME`（例如 `~/.custom-reasonix`），终端里运行的 reasonix 会使用该自定义 home，而 myworktree 实例使用默认 `~/.reasonix`——两者将**看不到彼此的**历史会话。这是刻意行为。如需让某个实例指向自定义 home，可在实例 tag 的 `env` 中设置 `REASONIX_HOME`（在剥离之后追加，后值生效）。
+
+实例生命周期不会触碰共享会话池：Start / Stop / Restart / Delete 只管理 `serve` 子进程及其管理文件（实例状态目录下的 `token`/`port`/`pid`/`serve.log`）。会话存放在 `~/.reasonix/projects/<cwd-slug>/sessions`，因此重启实例会打开一个**全新会话**（无 `--resume`），而你的历史会话仍可在侧边栏切换。
+
 ## License
 MIT 协议，详见 [LICENSE](./LICENSE)。

@@ -280,5 +280,15 @@ Set `--portal-port 0` to disable the Portal.
 
 > **Note**: Tailscale's WireGuard tunnel provides network-layer encryption. Application-layer HTTPS is only used when accessing via `tailscale serve` domain (Let's Encrypt certificate).
 
+## Known Limitations
+
+### Reasonix instances and `REASONIX_HOME`
+
+Reasonix instances run `reasonix serve` **without** a `REASONIX_HOME` override, so the embedded web UI uses your real `~/.reasonix` — exactly like a terminal-run `reasonix`. The driver strips any `REASONIX_HOME` / `REASONIX_STATE_HOME` inherited from the host environment (logging a hint), so the instance and your terminal always share the same per-project session pool; project isolation is done by reasonix itself, per cwd.
+
+Consequence to be aware of: if your shell exports a custom `REASONIX_HOME` (e.g. `~/.custom-reasonix`), a terminal-run `reasonix` uses that custom home while myworktree instances use the default `~/.reasonix` — the two will **not** see each other's history. This is deliberate. To point an instance at a custom home, set `REASONIX_HOME` via the instance tag's `env` (applied after stripping).
+
+Instance lifecycle never touches the shared session pool: Start / Stop / Restart / Delete only manage the `serve` subprocess and its management files (`token`/`port`/`pid`/`serve.log` in the instance state dir). Sessions live in `~/.reasonix/projects/<cwd-slug>/sessions`, so restarting an instance opens a **fresh** session (no `--resume`) while your history stays available in the sidebar.
+
 ## License
 MIT. See [LICENSE](./LICENSE).
