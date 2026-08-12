@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## v0.4.0 (2026-08-12)
+
+Release focused on the native Reasonix web UI integration, eliminating PTY log disk write amplification, and workspace visibility improvements.
 
 **PR #58 评审修复（评审后整理）**：`PATCH /api/instances` 与 `POST /api/instances/restart` 的响应改为与 `GET`/`POST` 一致，reasonix 实例补回 `web_url` 字段；`instanceView` 改为直接构造响应 map（去掉每次序列化后的 Marshal→Unmarshal 往返）；reasonix 实例的 `preStart` 环境与 `serve` 一致地剥离继承的 `REASONIX_HOME`/`REASONIX_STATE_HOME`（宿主导出这两个变量时，preStart 与 serve 不再解析到不同的 `~/.reasonix`，覆盖仍通过实例 tag env 生效）；实例停止/删除/重启时清理 per-instance 的 Start 锁 map 条目与管理目录（不再随启停循环无限累积）；侧栏删除实例的确认文案改为 "Delete instance?"。
 
@@ -26,6 +28,10 @@ Disk write amplification fix for long-running PTY-heavy sessions.
 - **Daemon resource monitoring** — the resource stats API (`GET /api/instances/stats`) now includes the mw daemon process itself in global totals (`daemon_cpu_percent`, `daemon_memory_bytes`). The UI displays a dedicated "mw daemon" row so users can distinguish daemon overhead from instance resource usage.
 - **Ring buffer usage reporting** — per-instance stats now expose `memory_buffer_bytes` (actual usage) and `memory_buffer_cap_bytes` (pre-allocated capacity). The UI memory column shows the combined `RSS + buffer_used` with a `buf used/cap` annotation for active buffers, giving users visibility into per-instance buffer memory cost.
 - **Sidebar GitHub link** — main workspace row now shows a small GitHub Mark icon to the right of the project name when `git remote` resolves to `github.com`; clicking opens the canonical `https://github.com/<owner>/<repo>` URL in a new tab. Source of truth is a new `github_url` field on `GET /api/main`, computed via the new `gitx.GitHubURL` helper (prefers `origin`, then falls back to iterating `git remote`; normalizes SCP / HTTPS / `ssh://` forms; strips `.git`). GitHub Enterprise and non-GitHub remotes are intentionally not surfaced.
+- **Text file preview** — click a file in the Changes panel to preview it with line numbers, a formatted view, and a diff view (including a synthetic diff for untracked files, with `quotePath` handled).
+- **Branch divergence badge** — the sidebar now shows a diverge badge when a branch is ahead of / behind its upstream, backed by new API handlers and scheduled refresh.
+- **`mw config regen`** — new CLI command to regenerate the config, plus per-request auth token reload so config/token changes take effect without a daemon restart.
+- **Tags config directory** — open the tags config directory from the UI and use default tags out of the box.
 
 ## v0.3.0
 
