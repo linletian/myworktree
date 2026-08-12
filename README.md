@@ -39,6 +39,12 @@ myworktree is a thin management layer that:
 - Global auth token (HttpOnly Cookie, CSRF protection, tailscale serve integration)
 - Sidebar main workspace shows a GitHub icon next to the project name when the repo's git remote points at `github.com`; clicking opens the canonical `https://github.com/<owner>/<repo>` URL in a new tab. GitHub Enterprise and non-GitHub remotes are intentionally not surfaced.
 - **Reasonix web chat instances (MVP)** — check *Reasonix (web chat UI)* when starting an instance to run a `reasonix serve` agent in that worktree and render its web chat UI in an iframe (`/rx/<id>/`, same-origin reverse proxy with token cookie injection and URL-prefix rewrite). The serve uses the user's real `~/.reasonix` (no per-instance isolation): sessions/history/config/credentials are shared per project exactly like a terminal-run `reasonix`, so the same project's history (including terminal sessions) is visible/switchable in the embedded sidebar. Each Start opens a fresh session (no `--resume`); deleting an instance never touches the shared session pool. Requires a `reasonix` binary on `PATH`; the reasonix UI sidebar (project switching) is intentionally left visible in this MVP.
+- **In-memory PTY log ring buffer** — per-instance PTY logs live in a bounded in-memory ring buffer (default 32 MB per instance, hard ceiling 256 MB, total budget capped at 25% of system RAM) instead of on-disk log files, eliminating disk write amplification on long-running PTY-heavy sessions. `LogBufferBytes` overrides the per-instance cap; a start that would exceed the global budget returns `503` with a structured `log_buffer_budget_exceeded` body.
+- **File preview in the Changes panel** — click any changed or untracked file to preview it with line numbers, a formatted view, and a diff view (synthetic diff for untracked files, `quotePath` handled).
+- **Branch divergence badge** — the sidebar shows a diverge badge when a branch is ahead of / behind its upstream, backed by scheduled refresh.
+- **`mw config regen` & hot auth reload** — regenerate the config from the CLI; auth token / config changes take effect without restarting the daemon.
+- **Tags config directory** — open the tags config directory straight from the UI, with sensible default tags out of the box.
+- **Daemon resource monitoring** — the resource stats API now includes the mw daemon process itself in global totals, shown as a dedicated row in the UI.
 
 ## Requirements
 - macOS 12+ (other platforms are not validated yet)
@@ -61,10 +67,10 @@ Example:
 
 ```bash
 # Pick the archive that matches your Mac, then verify and unpack it.
-curl -LO https://github.com/linletian/myworktree/releases/download/v0.2.0/myworktree_v0.2.0_darwin_arm64.tar.gz
-curl -LO https://github.com/linletian/myworktree/releases/download/v0.2.0/checksums.txt
+curl -LO https://github.com/linletian/myworktree/releases/download/v0.4.0/myworktree_v0.4.0_darwin_arm64.tar.gz
+curl -LO https://github.com/linletian/myworktree/releases/download/v0.4.0/checksums.txt
 shasum -a 256 -c checksums.txt --ignore-missing
-tar -xzf myworktree_v0.2.0_darwin_arm64.tar.gz
+tar -xzf myworktree_v0.4.0_darwin_arm64.tar.gz
 
 # Optional: install into PATH
 sudo install -m 755 ./mw /usr/local/bin/mw
@@ -74,7 +80,7 @@ sudo install -m 755 ./myworktree /usr/local/bin/myworktree
 mw --version
 ```
 
-Start from `v0.2.0` or newer for public release binaries. The earlier `v0.1.0` GitHub Release assets were withdrawn after post-release validation uncovered severe terminal interaction issues, and `v0.2.0` is the current recommended public release.
+Start from `v0.4.0` or newer for public release binaries. The earlier `v0.1.0` GitHub Release assets were withdrawn after post-release validation uncovered severe terminal interaction issues, and `v0.4.0` is the current recommended public release.
 
 Each release archive contains `mw`, `myworktree`, `README.md`, `LICENSE`, and `CHANGELOG.md`.
 If there is no prerelease/release asset yet, or you need a platform we do not publish, follow the source build steps below.
