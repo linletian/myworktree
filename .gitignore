@@ -10,3 +10,7 @@ myworktree_netgo
 /CLAUDE.md
 .omo/
 .codewhale/
+# Agent project-level state: reasonix (and similar agents) create a .reasonix/
+# under the working directory (e.g. .reasonix/tasks/ for background jobs).
+# This is runtime state, not source — keep it out of the repo.
+.reasonix/

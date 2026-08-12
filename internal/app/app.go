@@ -495,7 +495,8 @@ func (s *Server) Shutdown() {
 	// Stop reasonix serve processes first (behavior parity with tty
 	// instances, which die when their PTY hangs up): their SSE connections
 	// then close, so the HTTP servers below shut down promptly. State dirs
-	// are kept — the next Start resumes the same session.jsonl.
+	// (token/port/pid/serve.log) are kept; sessions live in the shared
+	// ~/.reasonix pool and are unaffected by instance lifecycle.
 	if s.instanceMgr != nil {
 		s.instanceMgr.StopAllReasonix()
 	}

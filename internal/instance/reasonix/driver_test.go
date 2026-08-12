@@ -33,37 +33,130 @@ func TestGenerateToken(t *testing.T) {
 	}
 }
 
-func TestSymlinkIfExists(t *testing.T) {
-	dir := t.TempDir()
-	src := filepath.Join(dir, "src-file")
-	if err := os.WriteFile(src, []byte("x"), 0o600); err != nil {
-		t.Fatal(err)
+func TestRemoveEnv(t *testing.T) {
+	in := []string{
+		"PATH=/bin",
+		"REASONIX_HOME=/fake/home",
+		"REASONIX_HOME=/dup", // duplicate key: every occurrence is stripped
+		"HOME=/home/u",
+		"REASONIX_STATE_HOME=/fake/state",
+		"REASONIX_STATE_HOME", // "="less entry for a target key: stripped
+		"OTHER=1",
+		"BAREVAR", // "="less entry for a non-target key: kept as-is
 	}
+	got := removeEnv(in, "REASONIX_HOME", "REASONIX_STATE_HOME")
+	want := []string{"PATH=/bin", "HOME=/home/u", "OTHER=1", "BAREVAR"}
+	if len(got) != len(want) {
+		t.Fatalf("removeEnv = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("removeEnv = %v, want %v", got, want)
+		}
+	}
+}
 
-	target := filepath.Join(dir, "target")
-	if err := symlinkIfExists(src, target); err != nil {
-		t.Fatalf("symlinkIfExists: %v", err)
-	}
-	fi, err := os.Lstat(target)
+// TestStartStripsReasonixHome verifies that a serve spawned by Start does not
+// inherit REASONIX_HOME / REASONIX_STATE_HOME from the parent environment.
+// The fake serve echoes both in its HTTP response, so this check runs on any
+// platform (no /proc dependency). Without it, a host that carries
+// REASONIX_HOME would leak it into the serve and the isolation we removed
+// would silently come back.
+func TestStartStripsReasonixHome(t *testing.T) {
+	t.Setenv("REASONIX_HOME", "/fake/home")
+	t.Setenv("REASONIX_STATE_HOME", "/fake/state")
+
+	dataDir := t.TempDir()
+	worktree := t.TempDir()
+	d := &Driver{DataDir: dataDir, ReasonixBin: fakeServeBin(t)}
+	id := "inst1"
+
+	info, err := d.Start(StartInput{InstanceID: id, WorktreePath: worktree})
 	if err != nil {
-		t.Fatalf("target not created: %v", err)
+		t.Fatalf("Start: %v", err)
 	}
-	if fi.Mode()&os.ModeSymlink == 0 {
-		t.Fatal("target is not a symlink")
-	}
+	defer func() { _ = d.Stop(id) }()
 
-	// Idempotent: existing target is left alone.
-	if err := symlinkIfExists(src, target); err != nil {
-		t.Fatalf("second symlinkIfExists: %v", err)
+	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/", info.Port))
+	if err != nil {
+		t.Fatalf("GET serve: %v", err)
 	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	// Response format: env:<MW_RX_TEST_ENV>;rxhome:<REASONIX_HOME>;rxstate:<REASONIX_STATE_HOME>.
+	if !strings.HasPrefix(string(body), "env:") {
+		t.Fatalf("fake serve response missing env: prefix (corrupt/truncated?): %q", body)
+	}
+	for _, field := range []struct {
+		marker string
+		name   string
+	}{
+		{";rxhome:", "REASONIX_HOME"},
+		{";rxstate:", "REASONIX_STATE_HOME"},
+	} {
+		s := string(body)
+		idx := strings.Index(s, field.marker)
+		if idx < 0 {
+			t.Fatalf("fake serve response missing %s marker: %q", field.name, s)
+		}
+		// The value runs to the next ';' or the end of the response.
+		rest := s[idx+len(field.marker):]
+		val := rest
+		if semi := strings.IndexByte(rest, ';'); semi >= 0 {
+			val = rest[:semi]
+		}
+		if val != "" {
+			t.Fatalf("serve process inherited %s=%q; want empty (stripped)", field.name, val)
+		}
+	}
+}
 
-	// Missing source: no-op, no error.
-	missing := filepath.Join(dir, "missing")
-	if err := symlinkIfExists(missing, filepath.Join(dir, "t2")); err != nil {
-		t.Fatalf("missing source should be a no-op: %v", err)
+// TestConcurrentInstancesSameCwd verifies the driver-level guarantee behind
+// the shared-pool model: several reasonix instances on the SAME worktree
+// (same cwd) start independently — each gets its own serve process, port,
+// token and pid files, and they do not interfere. (Real session-lease
+// serialization lives inside reasonix itself; this guards the driver layer.)
+func TestConcurrentInstancesSameCwd(t *testing.T) {
+	dataDir := t.TempDir()
+	worktree := t.TempDir()
+	d := &Driver{DataDir: dataDir, ReasonixBin: fakeServeBin(t)}
+
+	ids := []string{"inst-a", "inst-b"}
+	infos := make(map[string]Info, len(ids))
+	for _, id := range ids {
+		info, err := d.Start(StartInput{InstanceID: id, WorktreePath: worktree})
+		if err != nil {
+			t.Fatalf("Start %s: %v", id, err)
+		}
+		infos[id] = info
+		defer func(id string) { _ = d.Stop(id) }(id)
 	}
-	if _, err := os.Lstat(filepath.Join(dir, "t2")); !os.IsNotExist(err) {
-		t.Fatal("target for missing source should not exist")
+	if infos["inst-a"].PID == infos["inst-b"].PID {
+		t.Fatal("two instances share the same serve pid")
+	}
+	if infos["inst-a"].Port == infos["inst-b"].Port {
+		t.Fatal("two instances share the same port")
+	}
+	if infos["inst-a"].Token == infos["inst-b"].Token {
+		t.Fatal("two instances share the same token")
+	}
+	// Both stay healthy while running side by side, and both actually serve
+	// HTTP concurrently (not merely "did not deadlock").
+	for _, id := range ids {
+		if _, ok, err := d.Health(id); err != nil || !ok {
+			t.Fatalf("Health %s after concurrent start: ok=%v err=%v", id, ok, err)
+		}
+		resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/", infos[id].Port))
+		if err != nil {
+			t.Fatalf("GET %s serve: %v", id, err)
+		}
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("GET %s serve status = %d, want 200", id, resp.StatusCode)
+		}
 	}
 }
 
@@ -200,7 +293,9 @@ pidfile = val("--pid-file")
 portfile = val("--port-file")
 class H(BaseHTTPRequestHandler):
     def do_GET(self):
-        body = ("env:" + os.environ.get("MW_RX_TEST_ENV", "unset")).encode()
+        body = ("env:" + os.environ.get("MW_RX_TEST_ENV", "unset")
+                + ";rxhome:" + os.environ.get("REASONIX_HOME", "")
+                + ";rxstate:" + os.environ.get("REASONIX_STATE_HOME", "")).encode()
         self.send_response(200)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
@@ -241,13 +336,14 @@ func TestStartStopFakeServe(t *testing.T) {
 		t.Fatalf("token length = %d, want 32", len(info.Token))
 	}
 
-	// State dir contents: token, port, pid, session.jsonl, symlinks skipped.
+	// State dir contents: token, port, pid; NO session.jsonl — sessions live
+	// in the shared ~/.reasonix project pool (per-cwd), not per instance.
 	dir := d.dir(id)
 	if b, err := os.ReadFile(filepath.Join(dir, "token")); err != nil || strings.TrimSpace(string(b)) != info.Token {
 		t.Fatalf("token file = %q, err %v", b, err)
 	}
-	if _, err := os.Stat(filepath.Join(dir, "session.jsonl")); err != nil {
-		t.Fatalf("session.jsonl missing: %v", err)
+	if _, err := os.Stat(filepath.Join(dir, "session.jsonl")); !os.IsNotExist(err) {
+		t.Fatalf("session.jsonl should not exist after isolation removal: %v", err)
 	}
 
 	// Health reports alive.

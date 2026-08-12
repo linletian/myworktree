@@ -352,7 +352,8 @@ func TestRestartReasonixCleansOldDir(t *testing.T) {
 
 // TestStopAllReasonix verifies Server.Shutdown parity: StopAllReasonix stops
 // every running reasonix serve but leaves stopped instances' state dirs
-// intact, so the conversation can be resumed on the next Start.
+// (management files) intact. No per-instance session.jsonl exists — sessions
+// live in the shared ~/.reasonix project pool, untouched by instance lifecycle.
 func TestStopAllReasonix(t *testing.T) {
 	m, fs := newReasonixTestManager(t)
 
@@ -379,10 +380,11 @@ func TestStopAllReasonix(t *testing.T) {
 	if _, ok, herr := m.Reasonix.Health(dead.ID); herr != nil || ok {
 		t.Fatalf("stopped instance should stay stopped (ok=%v err=%v)", ok, herr)
 	}
-	// State dirs are NOT cleaned: session.jsonl survives for --resume.
+	// State dirs (management files) are NOT cleaned, and no session.jsonl is
+	// ever created — sessions live in the shared ~/.reasonix project pool.
 	for _, id := range []string{run.ID, dead.ID} {
-		if _, err := os.Stat(filepath.Join(m.DataDir, "reasonix", id, "session.jsonl")); err != nil {
-			t.Fatalf("session.jsonl for %s should survive StopAllReasonix: %v", id, err)
+		if _, err := os.Stat(filepath.Join(m.DataDir, "reasonix", id, "session.jsonl")); !os.IsNotExist(err) {
+			t.Fatalf("session.jsonl for %s should not exist (shared pool, not per-instance): %v", id, err)
 		}
 	}
 }

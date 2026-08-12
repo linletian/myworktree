@@ -13,16 +13,17 @@
 
 ## 2. Shutdown 停 reasonix 实例（2026-08-11 起与 tty 行为一致）
 
-- **现状（2026-08-11 变更，用户要求行为一致）**：`Server.Shutdown()` 在关闭 HTTP server **之前**调用 `Manager.StopAllReasonix()`——对所有 running 的 reasonix 实例执行 `Reasonix.Stop`（SIGTERM → 优雅退出 → 兜底 SIGKILL），**不 Cleanup**（保留 `REASONIX_HOME`/`session.jsonl`，下次 Start 同 id `--resume` 同一会话文件，对话延续）。
+- **现状（2026-08-11 变更，用户要求行为一致）**：`Server.Shutdown()` 在关闭 HTTP server **之前**调用 `Manager.StopAllReasonix()`——对所有 running 的 reasonix 实例执行 `Reasonix.Stop`（SIGTERM → 优雅退出 → 兜底 SIGKILL），**不 Cleanup**（保留实例状态目录）。
+- **2026-08-12 修订（配合 #56 取消 REASONIX_HOME 隔离）**：实例状态目录只含 `token`/`port`/`pid`/`serve.log`（不再有 `REASONIX_HOME`/`session.jsonl`）；会话归共享 `~/.reasonix` 项目池，与实例生命周期无关。下次 Start 是新会话（无 `--resume`），历史在侧边栏可切。
 - **与 tty 的一致性**：tty 实例因 PTY 挂断随 myworktree 退出自然终止；reasonix 无 PTY，此前会残留为孤儿（本 § 原记录"Shutdown 不停实例"即此行为）。现改为退出时主动停，**效果与 tty 一致**：myworktree 关闭 → 实例进程随之结束。
 - **边界（强杀）**：`kill -9` 等不走 `Shutdown()` 的场景无法执行 `StopAllReasonix`，serve 仍会残留；重启后 `Reconcile` 接管存活进程（Health 探活）继续管理，不会失控。tty 在强杀时 PTY master 也会由内核关闭、zsh 随之挂断，二者在强杀场景仍存在机制差异（reasonix 残留、tty 不残留），属无法在进程被杀后执行代码的内核限制。
-- **连接影响（评审补记）**：退出时主 server 与独立 listener（`rxSrv`）都以 **5s 优雅超时** 关停——reasonix iframe 的活跃 SSE / 长连接会被断开，**进行中的流式 AI 回复会中断**。serve 进程被主动停止后，重新打开 myworktree 需重新 Start 实例（`--resume` 同一会话，历史保留）。
+- **连接影响（评审补记）**：退出时主 server 与独立 listener（`rxSrv`）都以 **5s 优雅超时** 关停——reasonix iframe 的活跃 SSE / 长连接会被断开，**进行中的流式 AI 回复会中断**。serve 进程被主动停止后，重新打开 myworktree 需重新 Start 实例（2026-08-12 起：新会话，历史在共享池侧边栏可切）。
 
 ## 3. reasonix 实例忽略 tag 的 `command` / `env` / `preStart`（有意设计）
 
 - **现状**：`kind=reasonix` 实例固定运行 `reasonix serve`，创建时选择的 tag / command / env / preStart 被忽略（`startReasonix` 不读取）。
 - **为何不转 issue**：MVP 设计如此——reasonix 实例的语义就是「跑 reasonix agent」，不是 shell 命令；忽略参数是有意的。
-- **后续需求（已实现 2026-08-11）**：`StartInput.Env`（追加到 serve 进程环境，如 `HTTP_PROXY`）与 `PreStart` 钩子（serve 启动前执行、失败即中止）已实现；Manager 侧将 tag 的 `env`/`preStart` 接入 reasonix 实例（`command` 仍忽略，保持「跑 agent 而非 shell 命令」语义）。**注意**：注入的 env 追加在 `REASONIX_HOME` 之后，同 key 后值生效——**tag 的 `env` 可显式覆盖 `REASONIX_HOME`**（有意设计，便于指向自建 home 时不受驱动默认值干扰）。
+- **后续需求（已实现 2026-08-11）**：`StartInput.Env`（追加到 serve 进程环境，如 `HTTP_PROXY`）与 `PreStart` 钩子（serve 启动前执行、失败即中止）已实现；Manager 侧将 tag 的 `env`/`preStart` 接入 reasonix 实例（`command` 仍忽略，保持「跑 agent 而非 shell 命令」语义）。**注意（2026-08-12 修订）**：serve 默认**无** `REASONIX_HOME`（driver 从父环境剥离 `REASONIX_HOME`/`REASONIX_STATE_HOME`，走真实 `~/.reasonix`）；tag 的 `env` 在剥离之后追加，可显式设置 `REASONIX_HOME` 作为 **opt-out**（指向自建 home）。
 
 ## 4. PLAN.md / TASK.md 事后补写（豁免留档）
 
@@ -32,6 +33,7 @@
 ## 5. 多实例并发的「实际收发消息」未逐实例验证
 
 - **现状**：验证轮已实测同目录多 serve 并行启动成功（session lease 按文件路径互斥、fresh 唯一化）；但受 provider key 限制（见 §1），未逐实例验证真实对话收发。
+- **2026-08-12 修订（#56 后共享池语义）**：同目录多实例/serve 并行各自新会话（不同 session 文件），driver 层由 `TestConcurrentInstancesSameCwd` 回归保护（各自 pid/port/token 独立、互不影响）；同一历史会话被并发 resume 时由 reasonix 自身 session-file lease 拒绝（非 driver 职责，依赖上游行为——见 FEASIBILITY 修订注与 ARCHITECTURE §4.2 上游依赖说明）。
 - **结论**：进程级并发已验证；消息级验证依赖 §1 的真机环境，一并处理。
 
 ## 6. 独立源（#44 落地）的启用范围与远程回退
