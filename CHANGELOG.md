@@ -1,5 +1,7 @@
 # Changelog
 
+## Unreleased
+
 ## v0.4.0 (2026-08-12)
 
 Release focused on the native Reasonix web UI integration, eliminating PTY log disk write amplification, and workspace visibility improvements.
