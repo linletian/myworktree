@@ -306,7 +306,9 @@ func injectReasonixPrefix(html []byte, mount string) []byte {
 	//     left:calc(var(--mw-sidebar-w) + 4px)). The taller target is easier
 	//     to see and click; a CSS ::before arrow switches ▶/◀ with the
 	//     .mw-rx state (points at the direction the sidebar will move: ▶ to
-	//     expand, ◀ to collapse — no text, no i18n).
+	//     expand, ◀ to collapse — no text, no i18n). The glyph's font-size
+	//     and line-height are declared once on #mw-sidebar-toggle and
+	//     inherited by the ::before pseudo-element.
 	//     Re-verify the gutter width if upstream changes
 	//     .transcript padding.
 	//   - Timing note: the CSS is static and the class flip is synchronous
@@ -319,6 +321,11 @@ func injectReasonixPrefix(html []byte, mount string) []byte {
 	//   - Narrow screens (<769px) keep the native mobile sidebar; our toggle
 	//     is hidden there (its styles are desktop-scoped, so without this the
 	//     unstyled button would render at the top of the page flow).
+	//   - 768px edge: the two @media blocks are disjoint — the native
+	//     #menu-btn !important hide starts at min-width:769px while our
+	//     toggle hides at max-width:768px — so at exactly 768px the native
+	//     mobile #menu-btn remains the visible entry point (upstream's own
+	//     breakpoint). Matches upstream; not a regression from this PR.
 	//   - Collapsed by default keeps the management scope on the current
 	//     worktree: the sidebar (brand / nav / session list) is what the user
 	//     asked to hide (issue #48).
@@ -335,7 +342,7 @@ func injectReasonixPrefix(html []byte, mount string) []byte {
   .mw-rx .footer{grid-column:2;grid-row:2}
   .app{grid-template-columns:var(--mw-sidebar-w,220px) 1fr}
   #mw-sidebar-toggle{position:fixed;top:8px;left:2px;z-index:97;width:24px;height:64px;box-sizing:border-box;display:flex;align-items:center;justify-content:center;border-radius:12px;background:var(--panel,#222);border:1px solid var(--border,#333);color:var(--fg-2,#aaa);cursor:pointer;font-size:15px;line-height:1;transition:background .15s,left .25s ease}
-  #mw-sidebar-toggle::before{content:'▶';font-size:15px;line-height:1}
+  #mw-sidebar-toggle::before{content:'▶'}
   html:not(.mw-rx) #mw-sidebar-toggle::before{content:'◀'}
   #mw-sidebar-toggle:hover{background:var(--card-hover,#2a2a2a);color:var(--fg,#eee)}
   html:not(.mw-rx) #mw-sidebar-toggle{left:calc(var(--mw-sidebar-w,220px) + 4px);color:var(--fg,#eee)}
