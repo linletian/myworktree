@@ -512,8 +512,8 @@ func (m *Manager) startReasonix(in StartInput, id, instName, cwd, effectiveTagID
 // outlive myworktree — behavior parity with tty instances, which die when
 // their PTY hangs up on process exit (a reasonix serve has no PTY and would
 // otherwise keep running as an orphan). State dirs are deliberately NOT
-// cleaned: the next Start of the same instance --resumes the fixed
-// session.jsonl, so the conversation survives a stop/start cycle.
+// cleaned (they only hold token/port/pid/serve.log); sessions live in the
+// shared ~/.reasonix pool and are unaffected by instance lifecycle.
 func (m *Manager) StopAllReasonix() {
 	if m.Reasonix == nil {
 		return
@@ -852,8 +852,9 @@ func (m *Manager) Restart(id string) (store.ManagedInstance, error) {
 	m.dropBufferLocked(id)
 	m.stateMu.Unlock()
 
-	// The old reasonix state dir (isolated home + session) can never be
-	// resumed under its old id; drop it so it does not accumulate.
+	// Restart allocates a fresh instance id, so the old serve-management
+	// state dir is dropped rather than left to accumulate under the old id
+	// (the shared ~/.reasonix session pool is never touched).
 	if old.Kind == store.KindReasonix && m.Reasonix != nil {
 		_ = m.Reasonix.Cleanup(id)
 	}

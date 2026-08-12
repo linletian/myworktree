@@ -30,13 +30,14 @@
 
 - [x] 调研(本目录,含 2026-08-10 整合修订)
 - [x] 关键项实测(2026-08-10,`feature/reasonix-native-ui-verify` 分支:session lease 并发 / 端口行为 / SSE keepalive / token-cookie 注入,详见 FEASIBILITY §8)
-- [x] 决策(**已批准 2026-08-10**):采纳方案 A(反代 + iframe);凭据继承 = REASONIX_HOME 隔离 + symlink 继承;MVP 不含侧栏折叠
+- [x] 决策(**已批准 2026-08-10**):采纳方案 A(反代 + iframe);凭据继承 = REASONIX_HOME 隔离 + symlink 继承;MVP 不含侧栏折叠【2026-08-12 需求修订:REASONIX_HOME 隔离决策**已被取代**,见底部修订条目与 PRD §7】
 - [x] 实施(**已完成 2026-08-11**,`feature/reasonix-native-ui` 分支):MVP(创建 reasonix 实例 → `/rx/<id>/` 反代 iframe → 端到端跑通)。代码评审(多轮 R/N/T + 运行问题修复)已逐条核实并按 MVP 边界修复;未决项已全部转 issue **#43~#49** 并记录于本目录 `DEFERRED.md` 追溯索引(评审底稿为一次性工作文档,已按要求删除,不进入版本库)。实施内容:
-  - `internal/instance/reasonix/`(driver:隔离 REASONIX_HOME + symlink 继承 + 跨平台探活)
+  - `internal/instance/reasonix/`(driver:隔离 REASONIX_HOME + symlink 继承 + 跨平台探活)【2026-08-12 需求修订:隔离/symlink 已取消,见下方修订条目】
   - `internal/app/reasonix_proxy.go`(`/rx/<id>/` 反代:token Cookie 注入 + URL 前缀改写 + SSE 透传)
   - `Manager` kind 分支(Start/Stop/Restart/Delete + Reconcile 探活保 running)
   - 前端 iframe 渲染 + 创建入口 checkbox + tab 徽标
   - 文档:docs/API.md §5.10、ARCHITECTURE.md §3.2/§4.2、PRD §7 已同步
 - [x] 未决项全部处理(**2026-08-11**):#44 独立源(安全)、#48 侧栏默认折叠布局注入、#46 driver 缓存、#47 Delete 锁范围、#45 版本门 + serve.log 报错 + Cookie 单点、#43 测试隔离、DEFERRED §3 env/preStart 注入;`#49` 经用户确认保持「Restart = 新 session」现状语义后关闭。全部 7 个 issue 已关闭,详见 `DEFERRED.md` §6/§7。
 - [x] LAN 远程可用(**2026-08-11,方案 A**):独立源仅在主监听 loopback-only 时启用;网络开放监听(默认 `0.0.0.0`/LAN IP)或 TLS 一律回退同源相对路径 `/rx/<id>/`——远端浏览器 reasonix 可用,且启动后换 IP 访问不受影响。代价:网络场景 reasonix 页面与 myworktree 同源(跨源隔离仅本机 loopback 模式)。详见 `DEFERRED.md` §6。
-- [x] Shutdown 停 reasonix(**2026-08-11,行为一致**):myworktree 退出(Ctrl+C/SIGTERM)时 `StopAllReasonix` 主动停所有 running reasonix serve(与 tty 的 PTY 挂断自然终止对齐),不 Cleanup、会话经 `--resume` 延续;强杀场景 serve 残留由 Reconcile 接管兜底。详见 `DEFERRED.md` §2。
+- [x] Shutdown 停 reasonix(**2026-08-11,行为一致**):myworktree 退出(Ctrl+C/SIGTERM)时 `StopAllReasonix` 主动停所有 running reasonix serve(与 tty 的 PTY 挂断自然终止对齐),不 Cleanup、会话经 `--resume` 延续【2026-08-12 修订:不再有 `--resume`/`session.jsonl`,每次 Start 新会话,历史在共享池侧边栏可切】;强杀场景 serve 残留由 Reconcile 接管兜底。详见 `DEFERRED.md` §2。
+- [x] **需求修订(2026-08-12,见 PRD §7 / issue #56,已实现)**:agent 实例应**少介入产品逻辑**——已取消 REASONIX_HOME 隔离与固定 `--resume`,reasonix 实例的会话/历史与终端直接运行的 CLI/TUI **共享同一项目会话池**(`~/.reasonix/projects/<slug>/sessions`,按 cwd 项目隔离由 reasonix 自身保证),实例侧边栏可见/可切换同项目全部历史会话(含终端产生的);`#49`「Restart = 全新会话」语义保留,`#56`「历史会话不可见 / branches: none」已解决(根因与候选方向见 issue #56 补充评论;并行 lease 争用安全性见 issue #56 第二条评论)。实现:driver 去掉 home/symlink/session.jsonl/`--resume`/`REASONIX_HOME`,状态目录仅 token/port/pid/serve.log。

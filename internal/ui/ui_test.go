@@ -135,6 +135,36 @@ func TestIndexHTMLCoversMultiInstanceSwitching(t *testing.T) {
 	}
 }
 
+func TestIndexHTMLCoversReasonixWebFrame(t *testing.T) {
+	bodyText := fetchIndexHTML(t)
+	checks := []string{
+		// issue #53: hide instead of destroying the iframe on tab switch so
+		// the embedded page (chat draft, scroll, sidebar) survives.
+		"function ensureWebFrame(inst)",
+		"frame.style.display = \"none\";",
+		// ensureWebFrame re-navigates only when id/src actually change
+		"frame.dataset.instance !== inst.id || frame.dataset.src !== src",
+		// issue #54: hide leftover xterm hosts so they cannot overlay the
+		// static iframe.
+		"renderTerminalSessions();",
+		// issue #55: normalize container styles left behind by xterm so the
+		// web UI is never rendered greyed out.
+		"termContainer.style.opacity = \"1\";",
+		"termContainer.style.filter = \"none\";",
+		"inst.kind === \"reasonix\"",
+		// stop→start regression: stopping a reasonix instance must invalidate
+		// the frame's src cache so the next start re-navigates instead of
+		// showing the stale pre-stop page.
+		"function invalidateWebFrame()",
+		"frame.dataset.instance = \"\";",
+	}
+	for _, check := range checks {
+		if !strings.Contains(bodyText, check) {
+			t.Fatalf("GET / should include reasonix web frame hook %q", check)
+		}
+	}
+}
+
 func TestIndexHTMLCoversSessionLifecycle(t *testing.T) {
 	bodyText := fetchIndexHTML(t)
 	checks := []string{

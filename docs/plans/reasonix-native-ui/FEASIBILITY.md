@@ -487,6 +487,8 @@ aa405e0 feat(opencode-web): embed opencode SPA via reverse proxy + iframe
 
 **三项实测验证(2026-08-10,`feature/reasonix-native-ui-verify` 分支,隔离 REASONIX_HOME=/tmp/rx-verify-*,不触碰用户活跃会话)**:
 
+> **2026-08-12 修订（#56 取消 REASONIX_HOME 隔离）**：以下实测基于旧「每实例隔离 REASONIX_HOME」前提（`REASONIX_HOME=/tmp/rx-verify-*`），作为历史记录保留。2026-08-12 起 myworktree 不再设 REASONIX_HOME，serve 走用户真实 `~/.reasonix`——实测结论仍然成立且正是共享池安全性的依据：lease 按 session 文件路径互斥、fresh 会话路径纳秒唯一化、同一状态根下多 serve 并行、`--resume` 同一既有会话才冲突并被拒绝。新模型下「多 serve 并行」变为「同项目共享池中多实例 + 终端并行」，冲突面不变（仅同一会话文件被并发 resume 时）。driver 层回归由 `TestConcurrentInstancesSameCwd` 保护；依赖 reasonix 布局/lease 的上游契约见 ARCHITECTURE §4.2 修订注。
+
 1. **同机多 serve 并发**:lease 按 session 文件路径互斥(`internal/control/session_lease_keeper.go` + `internal/agent/session_lease.go` 双层:进程内 registry + OS 锁文件);fresh session 路径**纳秒唯一化**(`agent/save.go NewSessionPath` 时间戳到纳秒)→ **同一 REASONIX_HOME 下多个 serve 也能并行**(实测三个 serve 同目录同时启动成功,根页面均 200);真实冲突仅发生在 `--resume` 同一既有 session 文件时(实测复现错误:`this session is in use by another Reasonix process (pid 2621204 ...); close the other Reasonix window or process first`)。v1.22.0 无 `--session-id`,但**不需要**:多 worktree 各起一个 serve 子进程,天然不同 session 路径,无 lease 障碍。
 2. **`--addr` 端口行为**:`serve --addr 127.0.0.1:0 --port-file <f>` 实测 port-file 写入实际端口(如 `127.0.0.1:40741`),stdout 打印 `reasonix serve — <label> on http://127.0.0.1:40741`;端口冲突时 **serve 直接失败**(`listen tcp 127.0.0.1:8787: bind: address already in use`),**web 自动 +1**(`port 8787 is in use; using 8788 instead`,最多 100 次,port-file 写实际值)。→ 方案 1 采用 **serve + myworktree 协调端口(递增分配或预探测)+ `--port-file` 权威读取**。
 3. **SSE keepalive**:`/events` 每 **15s** 发 `: ping` 保活注释行(`sseKeepaliveInterval = 15 * time.Second`,serve.go:636-672),连接打开即发 `: connected`;实测 15s 内收到 `: ping`。→ 反代 `FlushInterval=-1` 透传即可,无需额外保活。

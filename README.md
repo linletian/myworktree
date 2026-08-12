@@ -38,7 +38,7 @@ myworktree is a thin management layer that:
 - Portal Dashboard with shared entry port, auto-discovery of running instances across repos
 - Global auth token (HttpOnly Cookie, CSRF protection, tailscale serve integration)
 - Sidebar main workspace shows a GitHub icon next to the project name when the repo's git remote points at `github.com`; clicking opens the canonical `https://github.com/<owner>/<repo>` URL in a new tab. GitHub Enterprise and non-GitHub remotes are intentionally not surfaced.
-- **Reasonix web chat instances (MVP)** — check *Reasonix (web chat UI)* when starting an instance to run a `reasonix serve` agent in that worktree and render its web chat UI in an iframe (`/rx/<id>/`, same-origin reverse proxy with token cookie injection and URL-prefix rewrite). Sessions are isolated per instance (`REASONIX_HOME=<data>/reasonix/<id>/home`) while `config.toml`/`.env` are symlinked from `~/.reasonix` so provider credentials stay live. Requires a `reasonix` binary on `PATH`; the reasonix UI sidebar (project switching) is intentionally left visible in this MVP.
+- **Reasonix web chat instances (MVP)** — check *Reasonix (web chat UI)* when starting an instance to run a `reasonix serve` agent in that worktree and render its web chat UI in an iframe (`/rx/<id>/`, same-origin reverse proxy with token cookie injection and URL-prefix rewrite). The serve uses the user's real `~/.reasonix` (no per-instance isolation): sessions/history/config/credentials are shared per project exactly like a terminal-run `reasonix`, so the same project's history (including terminal sessions) is visible/switchable in the embedded sidebar. Each Start opens a fresh session (no `--resume`); deleting an instance never touches the shared session pool. Requires a `reasonix` binary on `PATH`; the reasonix UI sidebar (project switching) is intentionally left visible in this MVP.
 
 ## Requirements
 - macOS 12+ (other platforms are not validated yet)
@@ -279,6 +279,16 @@ Set `--portal-port 0` to disable the Portal.
 | `tailscale serve` domain | `https://machine.ts.net` → proxy `http://127.0.0.1:PORT` | Let's Encrypt TLS + WireGuard |
 
 > **Note**: Tailscale's WireGuard tunnel provides network-layer encryption. Application-layer HTTPS is only used when accessing via `tailscale serve` domain (Let's Encrypt certificate).
+
+## Known Limitations
+
+### Reasonix instances and `REASONIX_HOME`
+
+Reasonix instances run `reasonix serve` **without** a `REASONIX_HOME` override, so the embedded web UI uses your real `~/.reasonix` — exactly like a terminal-run `reasonix`. The driver strips any `REASONIX_HOME` / `REASONIX_STATE_HOME` inherited from the host environment (logging a hint), so the instance and your terminal always share the same per-project session pool; project isolation is done by reasonix itself, per cwd.
+
+Consequence to be aware of: if your shell exports a custom `REASONIX_HOME` (e.g. `~/.custom-reasonix`), a terminal-run `reasonix` uses that custom home while myworktree instances use the default `~/.reasonix` — the two will **not** see each other's history. This is deliberate. To point an instance at a custom home, set `REASONIX_HOME` via the instance tag's `env` (applied after stripping).
+
+Instance lifecycle never touches the shared session pool: Start / Stop / Restart / Delete only manage the `serve` subprocess and its management files (`token`/`port`/`pid`/`serve.log` in the instance state dir). Sessions live in `~/.reasonix/projects/<cwd-slug>/sessions`, so restarting an instance opens a **fresh** session (no `--resume`) while your history stays available in the sidebar.
 
 ## License
 MIT. See [LICENSE](./LICENSE).

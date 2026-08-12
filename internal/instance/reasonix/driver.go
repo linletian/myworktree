@@ -1,25 +1,25 @@
 // Package reasonix drives a `reasonix serve` subprocess per myworktree
 // instance so the Reasonix web chat UI can be embedded in the instance tab.
 //
-// Lifecycle isolation per instance:
+// Per-instance state under <DataDir>/reasonix/<instanceID>/:
 //
-//	<DataDir>/reasonix/<instanceID>/
-//	  home/            REASONIX_HOME (sessions, history, state)
-//	  home/config.toml symlink -> ~/.reasonix/config.toml (if present)
-//	  home/.env        symlink -> ~/.reasonix/.env (provider credentials, if present)
-//	  token            auth token for --auth token (chmod 600)
-//	  port             actual bound address (written by --port-file)
-//	  pid              serve main process PID (written by --pid-file)
-//	  session.jsonl    fixed session file (--resume), so an instance keeps
-//	                   its conversation across myworktree restarts. Note that
-//	                   an explicit instance Restart allocates a fresh id and a
-//	                   fresh state dir, i.e. it starts a brand-new conversation
-//	                   (the old dir, including this session, is removed).
-//	  serve.log        subprocess stdout/stderr
+//	token            auth token for --auth token (chmod 600)
+//	port             actual bound address (written by --port-file)
+//	pid              serve main process PID (written by --pid-file)
+//	serve.log        subprocess stdout/stderr
 //
-// REASONIX_HOME is isolated per instance so concurrent worktree instances
-// never contend on session leases, while config.toml/.env are symlinked from
-// the user's real ~/.reasonix so provider credentials and settings stay live.
+// The serve runs WITHOUT a REASONIX_HOME override: it uses the user's real
+// ~/.reasonix exactly like a terminal-run reasonix, so sessions, history,
+// config and provider credentials are shared per project (reasonix organizes
+// them under ~/.reasonix/projects/<cwd-slug>/sessions and isolates projects
+// by cwd itself). Each instance Start opens a fresh session (no --resume),
+// matching terminal behaviour; the same project's full history stays visible
+// and switchable in the embedded sidebar. myworktree only manages the serve
+// process, never the agent's session state. Concurrency is handled by
+// reasonix's own per-session-file lease (refuse-style, no silent double
+// write). An explicit instance Restart allocates a fresh id and a fresh
+// state dir — a brand-new session, consistent with the terminal "new
+// session" model.
 package reasonix
 
 import (
@@ -81,8 +81,8 @@ type Driver struct {
 
 // defaultMinVersion is the reasonix CLI version whose flag contract the
 // driver depends on: serve --addr/--auth token/--token-file/--port-file/
-// --pid-file/--no-open/--resume plus the reasonix_token cookie name (proxy
-// side). Verified against v1.22.0 (issue #45).
+// --pid-file/--no-open plus the reasonix_token cookie name (proxy side).
+// Verified against v1.22.0 (issue #45).
 const defaultMinVersion = "1.22.0"
 
 // cachedAddr is a cached {port, token} for one instance, valid until
@@ -97,13 +97,12 @@ type StartInput struct {
 	WorktreePath string // serve working directory (session is scoped to it)
 
 	// Env appends extra "KEY=VALUE" entries to the serve process environment
-	// (e.g. HTTP_PROXY). Appended after REASONIX_HOME so an entry can
-	// deliberately override it.
+	// (e.g. HTTP_PROXY), appended to the inherited environment.
 	Env []string
 
-	// PreStart runs right before spawning serve (after state dirs and
-	// symlinks are ready); an error aborts Start before any process is
-	// launched. Used to prepare the environment (DEFERRED §3).
+	// PreStart runs right before spawning serve (after the state dir is
+	// ready); an error aborts Start before any process is launched. Used to
+	// prepare the environment (DEFERRED §3).
 	PreStart func() error
 }
 
@@ -121,10 +120,6 @@ func (d *Driver) logf(format string, args ...any) {
 
 func (d *Driver) dir(instanceID string) string {
 	return filepath.Join(d.DataDir, "reasonix", instanceID)
-}
-
-func (d *Driver) homeDir(instanceID string) string {
-	return filepath.Join(d.dir(instanceID), "home")
 }
 
 // lockStart serializes Start calls per instance id: it returns the unlock
@@ -170,21 +165,22 @@ func (d *Driver) Start(in StartInput) (Info, error) {
 		return info, nil
 	}
 
+	// State dir only carries myworktree's own serve-management files (token,
+	// port, pid, serve.log). Sessions/config/credentials all live in the
+	// agent's own state root (~/.reasonix) — the same pool a terminal-run
+	// reasonix uses — so we deliberately create no per-instance home.
 	dir := d.dir(in.InstanceID)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return Info{}, fmt.Errorf("reasonix: create state dir: %w", err)
 	}
-	home := d.homeDir(in.InstanceID)
-	if err := os.MkdirAll(home, 0o755); err != nil {
-		return Info{}, fmt.Errorf("reasonix: create home dir: %w", err)
-	}
 
-	// Inherit the user's live config and credentials without copying them.
-	if err := symlinkIfExists(legacyUserPath("config.toml"), filepath.Join(home, "config.toml")); err != nil {
-		return Info{}, err
-	}
-	if err := symlinkIfExists(legacyUserPath(".env"), filepath.Join(home, ".env")); err != nil {
-		return Info{}, err
+	// Legacy migration hint: instances created before the 2026-08-12
+	// revision carry an isolated home/ dir (plus a fixed session.jsonl) that
+	// the driver no longer reads — sessions now live in the shared
+	// ~/.reasonix pool. Leftovers are inert, but surface a hint so the user
+	// knows they can delete the instance (or migrate its sessions manually).
+	if _, err := os.Stat(filepath.Join(dir, "home")); err == nil {
+		d.logf("instance %s has a legacy isolated home/ (pre-2026-08-12); it is no longer read — sessions live in the shared ~/.reasonix pool; delete the instance or migrate its sessions manually", in.InstanceID)
 	}
 
 	bin := d.ReasonixBin
@@ -217,15 +213,6 @@ func (d *Driver) Start(in StartInput) (Info, error) {
 		return Info{}, fmt.Errorf("reasonix: write token: %w", err)
 	}
 
-	// A fixed empty session file makes --resume deterministic and gives the
-	// instance its own lease path (reasonix locks by session file path).
-	sessionFile := filepath.Join(dir, "session.jsonl")
-	if _, err := os.Stat(sessionFile); os.IsNotExist(err) {
-		if err := os.WriteFile(sessionFile, nil, 0o600); err != nil {
-			return Info{}, fmt.Errorf("reasonix: create session file: %w", err)
-		}
-	}
-
 	portFile := filepath.Join(dir, "port")
 	pidFile := filepath.Join(dir, "pid")
 	logFile := filepath.Join(dir, "serve.log")
@@ -243,7 +230,6 @@ func (d *Driver) Start(in StartInput) (Info, error) {
 		"--port-file", portFile,
 		"--pid-file", pidFile,
 		"--no-open",
-		"--resume", sessionFile,
 	}
 	// PreStart hook: run before any process is spawned; an error aborts Start
 	// (DEFERRED §3).
@@ -254,7 +240,24 @@ func (d *Driver) Start(in StartInput) (Info, error) {
 	}
 	cmd := exec.Command(bin, args...)
 	cmd.Dir = in.WorktreePath
-	cmd.Env = append(os.Environ(), "REASONIX_HOME="+home)
+	// Strip any inherited REASONIX_HOME / REASONIX_STATE_HOME so the serve
+	// always uses the user's real ~/.reasonix (same state root as a
+	// terminal-run reasonix) — sessions/config/credentials are then shared
+	// per project by reasonix itself (per-cwd isolation). Opt-out: a host
+	// that deliberately exports either variable can override via the instance
+	// tag env (StartInput.Env), appended afterwards. A stripped host value is
+	// surfaced (key names only, never the value) so a silent ignore never
+	// hides the user's own setting.
+	var strippedHome []string
+	for _, k := range []string{"REASONIX_HOME", "REASONIX_STATE_HOME"} {
+		if os.Getenv(k) != "" {
+			strippedHome = append(strippedHome, k)
+		}
+	}
+	if len(strippedHome) > 0 {
+		d.logf("stripping inherited %s from serve environment (serve uses the real ~/.reasonix); override via the instance tag env if intended", strings.Join(strippedHome, ", "))
+	}
+	cmd.Env = removeEnv(os.Environ(), "REASONIX_HOME", "REASONIX_STATE_HOME")
 	cmd.Env = append(cmd.Env, in.Env...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	f, err := os.OpenFile(logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
@@ -379,7 +382,7 @@ func (d *Driver) checkVersion(bin, minV string) error {
 		return nil
 	}
 	if versionLess(got, minV) {
-		return fmt.Errorf("reasonix: version %s installed, but reasonix >= %s required (the embedded web UI relies on serve --port-file/--token-file/--pid-file/--no-open/--resume); upgrade reasonix or set Driver.MinVersion", got, minV)
+		return fmt.Errorf("reasonix: version %s installed, but reasonix >= %s required (the embedded web UI relies on serve --port-file/--token-file/--pid-file/--no-open); upgrade reasonix or set Driver.MinVersion", got, minV)
 	}
 	d.verMu.Lock()
 	if d.verPass == nil {
@@ -593,11 +596,13 @@ func (d *Driver) Stop(instanceID string) error {
 	return nil
 }
 
-// Cleanup removes the whole per-instance state directory. The instance id is
-// never reused (restart allocates a fresh id), so the isolated REASONIX_HOME
-// and session file can never be resumed; deleting everything avoids unbounded
-// accumulation under <DataDir>/reasonix/ and drops the credential symlinks.
-// Call after Stop when the instance is deleted.
+// Cleanup removes the per-instance serve-management state directory (token,
+// port, pid, serve.log). It does NOT touch the agent's shared state root
+// (~/.reasonix): sessions live in the project's shared session pool and are
+// never deleted by instance lifecycle. The instance id is never reused
+// (restart allocates a fresh id), so removing its management dir avoids
+// unbounded accumulation under <DataDir>/reasonix/. Call after Stop when the
+// instance is deleted.
 func (d *Driver) Cleanup(instanceID string) error {
 	d.dropCache(instanceID)
 	if strings.TrimSpace(instanceID) == "" {
@@ -618,30 +623,27 @@ func generateToken() (string, error) {
 	return hex.EncodeToString(b), nil
 }
 
-// legacyUserPath returns ~/.reasonix/<name> (the Unix default Reasonix home),
-// or "" if the home directory can't be resolved.
-func legacyUserPath(name string) string {
-	home, err := os.UserHomeDir()
-	if err != nil || home == "" {
-		return ""
+// removeEnv returns env with any entries whose KEY (the part before '=')
+// matches one of names removed, preserving the order of the rest. An entry
+// without '=' is treated as a bare KEY and is dropped when its KEY is one of
+// names (kept otherwise). Used to strip inherited REASONIX_HOME /
+// REASONIX_STATE_HOME from the serve environment so the serve always uses the
+// user's real ~/.reasonix, regardless of what the host process environment
+// happens to carry.
+func removeEnv(env []string, names ...string) []string {
+	drop := make(map[string]bool, len(names))
+	for _, n := range names {
+		drop[n] = true
 	}
-	return filepath.Join(home, ".reasonix", name)
-}
-
-// symlinkIfExists creates target -> src when src exists, skipping when target
-// already exists (idempotent across restarts).
-func symlinkIfExists(src, target string) error {
-	if src == "" {
-		return nil
+	out := make([]string, 0, len(env))
+	for _, kv := range env {
+		key := kv
+		if i := strings.IndexByte(kv, '='); i >= 0 {
+			key = kv[:i]
+		}
+		if !drop[key] {
+			out = append(out, kv)
+		}
 	}
-	if _, err := os.Stat(src); err != nil {
-		return nil // user file absent → skip
-	}
-	if _, err := os.Lstat(target); err == nil {
-		return nil // already linked
-	}
-	if err := os.Symlink(src, target); err != nil {
-		return fmt.Errorf("reasonix: symlink %s -> %s: %w", target, src, err)
-	}
-	return nil
+	return out
 }
