@@ -1333,16 +1333,39 @@ func (s *Server) handleWorktreeDiverged(w http.ResponseWriter, r *http.Request) 
 // instanceView renders a ManagedInstance for the API, attaching a web_url for
 // reasonix instances pointing at the independent listener (issue #44). The
 // field is intentionally not part of the persisted store schema.
+//
+// The map is built explicitly (no JSON round-trip) so the API response shape
+// stays stable and cheap; keep the keys and the omitempty conditions in sync
+// with ManagedInstance's json tags when the schema grows.
 func (s *Server) instanceView(it store.ManagedInstance) map[string]any {
-	// JSON round-trip (instead of a hand-built map) keeps the API response
-	// field-for-field in sync with the persisted store schema: new
-	// ManagedInstance fields appear in the API automatically. web_url is
-	// appended below only for reasonix instances.
-	var m map[string]any
-	if b, err := json.Marshal(it); err == nil {
-		_ = json.Unmarshal(b, &m)
-	} else {
-		m = map[string]any{}
+	m := map[string]any{
+		"id":          it.ID,
+		"worktree_id": it.WorktreeID,
+		"tag_id":      it.TagID,
+		"name":        it.Name,
+		"command":     it.Command,
+		"cwd":         it.Cwd,
+		"pid":         it.PID,
+		"status":      it.Status,
+		"created_at":  it.CreatedAt,
+	}
+	if it.WorktreeName != "" {
+		m["worktree_name"] = it.WorktreeName
+	}
+	if len(it.Env) > 0 {
+		m["env"] = it.Env
+	}
+	if it.Kind != "" {
+		m["kind"] = it.Kind
+	}
+	if it.RestartedFrom != "" {
+		m["restarted_from"] = it.RestartedFrom
+	}
+	if it.RestartedTo != "" {
+		m["restarted_to"] = it.RestartedTo
+	}
+	if it.StoppedAt != "" {
+		m["stopped_at"] = it.StoppedAt
 	}
 	if it.Kind == store.KindReasonix {
 		if u := s.reasonixWebURL(it.ID); u != "" {
@@ -1434,7 +1457,7 @@ func (s *Server) handleInstances(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusBadRequest, err)
 			return
 		}
-		writeJSON(w, http.StatusOK, updated)
+		writeJSON(w, http.StatusOK, s.instanceView(updated))
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
@@ -1476,7 +1499,7 @@ func (s *Server) handleInstanceRestart(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, item)
+	writeJSON(w, http.StatusCreated, s.instanceView(item))
 }
 
 func (s *Server) handleInstanceDelete(w http.ResponseWriter, r *http.Request) {

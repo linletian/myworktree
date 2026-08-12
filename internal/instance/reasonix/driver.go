@@ -124,8 +124,8 @@ func (d *Driver) dir(instanceID string) string {
 
 // lockStart serializes Start calls per instance id: it returns the unlock
 // function for the instance's in-flight lock, creating the lock on first use.
-// Locks are never deleted (at most one small mutex per instance id ever
-// started), which keeps the map race-free.
+// The map entry is removed by dropStartLock when the instance is torn down
+// for good (Cleanup), so it cannot grow without bound across restarts.
 func (d *Driver) lockStart(instanceID string) func() {
 	d.startsMu.Lock()
 	if d.starts == nil {
@@ -139,6 +139,18 @@ func (d *Driver) lockStart(instanceID string) func() {
 	d.startsMu.Unlock()
 	l.Lock()
 	return l.Unlock
+}
+
+// dropStartLock removes the per-instance Start lock once the instance is
+// being torn down for good (deleted, or restarted onto a fresh id — the id
+// is never reused, so the entry would otherwise accumulate forever). Safe
+// against in-flight Start calls: a goroutine that already fetched the mutex
+// keeps its unlock closure, and any later Start for this id (none expected
+// after teardown) gets a fresh lock.
+func (d *Driver) dropStartLock(instanceID string) {
+	d.startsMu.Lock()
+	delete(d.starts, instanceID)
+	d.startsMu.Unlock()
 }
 
 // Start launches (or re-attaches to) the reasonix serve process for an
@@ -257,7 +269,7 @@ func (d *Driver) Start(in StartInput) (Info, error) {
 	if len(strippedHome) > 0 {
 		d.logf("stripping inherited %s from serve environment (serve uses the real ~/.reasonix); override via the instance tag env if intended", strings.Join(strippedHome, ", "))
 	}
-	cmd.Env = removeEnv(os.Environ(), "REASONIX_HOME", "REASONIX_STATE_HOME")
+	cmd.Env = RemoveEnv(os.Environ(), "REASONIX_HOME", "REASONIX_STATE_HOME")
 	cmd.Env = append(cmd.Env, in.Env...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	f, err := os.OpenFile(logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
@@ -605,6 +617,7 @@ func (d *Driver) Stop(instanceID string) error {
 // instance is deleted.
 func (d *Driver) Cleanup(instanceID string) error {
 	d.dropCache(instanceID)
+	d.dropStartLock(instanceID)
 	if strings.TrimSpace(instanceID) == "" {
 		return errors.New("reasonix: instance id is required")
 	}
@@ -623,14 +636,15 @@ func generateToken() (string, error) {
 	return hex.EncodeToString(b), nil
 }
 
-// removeEnv returns env with any entries whose KEY (the part before '=')
+// RemoveEnv returns env with any entries whose KEY (the part before '=')
 // matches one of names removed, preserving the order of the rest. An entry
 // without '=' is treated as a bare KEY and is dropped when its KEY is one of
 // names (kept otherwise). Used to strip inherited REASONIX_HOME /
 // REASONIX_STATE_HOME from the serve environment so the serve always uses the
 // user's real ~/.reasonix, regardless of what the host process environment
-// happens to carry.
-func removeEnv(env []string, names ...string) []string {
+// happens to carry. The manager applies the same strip to the preStart
+// environment so both phases run under the same home resolution.
+func RemoveEnv(env []string, names ...string) []string {
 	drop := make(map[string]bool, len(names))
 	for _, n := range names {
 		drop[n] = true

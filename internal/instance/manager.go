@@ -444,7 +444,12 @@ func (m *Manager) startReasonix(in StartInput, id, instName, cwd, effectiveTagID
 			}
 			pre := exec.Command("zsh", "-lc", preStart)
 			pre.Dir = cwd
-			pre.Env = os.Environ()
+			// Strip inherited REASONIX_HOME / REASONIX_STATE_HOME exactly like
+			// the serve process (reasonix.RemoveEnv) so preStart resolves the
+			// same ~/.reasonix home the serve will use — a host-exported
+			// override only takes effect via the instance tag env, identically
+			// in both phases.
+			pre.Env = reasonix.RemoveEnv(os.Environ(), "REASONIX_HOME", "REASONIX_STATE_HOME")
 			for k, v := range env {
 				pre.Env = append(pre.Env, k+"="+v)
 			}
@@ -659,6 +664,13 @@ func (m *Manager) Stop(id string) error {
 			if err := m.Reasonix.Stop(id); err != nil {
 				return err
 			}
+			// The instance id is never reused after Stop (each Start
+			// allocates a fresh id; Restart migrates onto a new id), so tear
+			// down the per-instance serve-management dir and its Start lock
+			// now instead of leaving them until Delete. Cleanup is idempotent
+			// and only touches <DataDir>/reasonix/<id> (token/port/pid/
+			// serve.log) — never the shared ~/.reasonix session pool.
+			_ = m.Reasonix.Cleanup(id)
 		}
 		_ = m.markStopped(id, "stopped")
 		return nil

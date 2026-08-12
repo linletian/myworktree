@@ -319,6 +319,42 @@ func TestHandleInstanceUpdate(t *testing.T) {
 	}
 }
 
+func TestPatchReturnsWebURLForReasonixInstance(t *testing.T) {
+	// PATCH must render through instanceView (like GET/POST) so reasonix
+	// instances keep their web_url in the response; previously it wrote the
+	// bare ManagedInstance and dropped web_url.
+	srv, _ := newIsolatedTestServer(t, store.State{
+		Version: 3,
+		Worktrees: []store.ManagedWorktree{
+			{ID: "wt1", Name: "wt1", Path: t.TempDir()},
+		},
+		Instances: []store.ManagedInstance{
+			{ID: "rx-1", WorktreeID: "wt1", Name: "orig", Kind: store.KindReasonix, Status: "running"},
+		},
+	})
+	srv.rxAddr = "127.0.0.1:9999"
+
+	body := map[string]any{"id": "rx-1", "name": "renamed"}
+	bodyBytes, _ := json.Marshal(body)
+	req := httptest.NewRequest(http.MethodPatch, "/api/instances", bytes.NewReader(bodyBytes))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.handleInstances(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("PATCH: expected 200, got %d", w.Code)
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+	if resp["name"] != "renamed" {
+		t.Fatalf("name = %v, want renamed", resp["name"])
+	}
+	if got, want := resp["web_url"], "http://127.0.0.1:9999/rx/rx-1/"; got != want {
+		t.Fatalf("web_url = %v, want %v", got, want)
+	}
+}
+
 func TestHandleInstanceReorder(t *testing.T) {
 	srv, _ := newIsolatedTestServer(t, store.State{
 		Version: 3,

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+**PR #58 评审修复（评审后整理）**：`PATCH /api/instances` 与 `POST /api/instances/restart` 的响应改为与 `GET`/`POST` 一致，reasonix 实例补回 `web_url` 字段；`instanceView` 改为直接构造响应 map（去掉每次序列化后的 Marshal→Unmarshal 往返）；reasonix 实例的 `preStart` 环境与 `serve` 一致地剥离继承的 `REASONIX_HOME`/`REASONIX_STATE_HOME`（宿主导出这两个变量时，preStart 与 serve 不再解析到不同的 `~/.reasonix`，覆盖仍通过实例 tag env 生效）；实例停止/删除/重启时清理 per-instance 的 Start 锁 map 条目与管理目录（不再随启停循环无限累积）；侧栏删除实例的确认文案改为 "Delete instance?"。
+
 **Reasonix instances run without `REASONIX_HOME` isolation (requirement revision, issue #56)**: `serve` now uses the user's real `~/.reasonix`, so sessions/history/config/credentials are shared per project exactly like a terminal-run `reasonix` — the same project's history (including terminal CLI/TUI sessions) is visible and switchable in the embedded sidebar, and cross-project isolation is done by reasonix itself (per-cwd). The per-instance `home` dir, `session.jsonl`, and config/`.env` symlinks are removed; the instance state dir now only carries `token`/`port`/`pid`/`serve.log`, and deleting an instance never touches the shared session pool. Each Start opens a fresh session (no `--resume`), matching terminal behaviour; issue #49's "Restart = fresh session" semantics stay. The reverse proxy at `/rx/<id>/` (token cookie injection + HTML URL-prefix rewrite for fetch/EventSource/XHR) is unchanged.
 
 **Legacy data (pre-2026-08-12 instances)**: instances created under the old per-instance `REASONIX_HOME` isolation keep an inert `home/` dir and `session.jsonl` that the driver no longer reads (it logs a migration hint on Start). Those sessions are NOT auto-merged into the shared pool — delete the instance to clean the leftover, or export the session manually. No automatic migration is performed.

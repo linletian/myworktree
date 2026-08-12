@@ -44,14 +44,14 @@ func TestRemoveEnv(t *testing.T) {
 		"OTHER=1",
 		"BAREVAR", // "="less entry for a non-target key: kept as-is
 	}
-	got := removeEnv(in, "REASONIX_HOME", "REASONIX_STATE_HOME")
+	got := RemoveEnv(in, "REASONIX_HOME", "REASONIX_STATE_HOME")
 	want := []string{"PATH=/bin", "HOME=/home/u", "OTHER=1", "BAREVAR"}
 	if len(got) != len(want) {
-		t.Fatalf("removeEnv = %v, want %v", got, want)
+		t.Fatalf("RemoveEnv = %v, want %v", got, want)
 	}
 	for i := range want {
 		if got[i] != want[i] {
-			t.Fatalf("removeEnv = %v, want %v", got, want)
+			t.Fatalf("RemoveEnv = %v, want %v", got, want)
 		}
 	}
 }
@@ -536,6 +536,30 @@ func TestDriverAddrCacheRefresh(t *testing.T) {
 // should-fix #2). Without the lock, two spawns would race on the same
 // port/pid files, the loser's process would be untracked and would survive
 // a single Stop.
+// TestCleanupDropsStartLock verifies that tearing an instance down (Cleanup)
+// removes its per-instance Start lock, so the starts map cannot grow without
+// bound across restarts (each restart allocates a fresh id; the old entry
+// would otherwise live forever).
+func TestCleanupDropsStartLock(t *testing.T) {
+	d := &Driver{DataDir: t.TempDir(), ReasonixBin: fakeServeBin(t)}
+	unlock := d.lockStart("rx-drop")
+	unlock()
+	if _, ok := d.starts["rx-drop"]; !ok {
+		t.Fatal("lock should exist after first lockStart")
+	}
+	if err := d.Cleanup("rx-drop"); err != nil {
+		t.Fatalf("Cleanup: %v", err)
+	}
+	if _, ok := d.starts["rx-drop"]; ok {
+		t.Fatal("starts entry must be dropped by Cleanup (id is never reused)")
+	}
+	// A fresh id still starts normally after the drop.
+	if _, err := d.Start(StartInput{InstanceID: "rx-fresh", WorktreePath: t.TempDir()}); err != nil {
+		t.Fatalf("Start after drop: %v", err)
+	}
+	defer func() { _ = d.Stop("rx-fresh") }()
+}
+
 func TestDriverConcurrentStart(t *testing.T) {
 	dataDir := t.TempDir()
 	d := &Driver{DataDir: dataDir, ReasonixBin: fakeServeBin(t)}

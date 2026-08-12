@@ -2777,7 +2777,7 @@
             } catch (e) { alert(e); }
         }
         async function deleteInstance() {
-            if (!state.activeInst || !confirm("Delete instance log?")) return;
+            if (!state.activeInst || !confirm("Delete instance?")) return;
             try { await api("/api/instances/delete", { method: "POST", body: JSON.stringify({ id: state.activeInst }) }); refresh(); } catch (e) { alert(e); }
         }
         // Terminal Logic (Per Instance)

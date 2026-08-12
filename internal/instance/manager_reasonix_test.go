@@ -109,6 +109,15 @@ func TestStartStopReasonixInstance(t *testing.T) {
 	}
 	waitInstanceNotRunning(t, fs, inst.ID)
 
+	// Stop must tear down the per-instance serve-management dir and the
+	// Start lock: the id is never reused, so leaving them would let the
+	// driver's starts map (and token/port/pid files) accumulate across
+	// start→stop cycles.
+	rxDir := filepath.Join(m.DataDir, "reasonix", inst.ID)
+	if _, err := os.Stat(rxDir); !os.IsNotExist(err) {
+		t.Fatalf("serve-management dir %s still exists after Stop (want removed)", rxDir)
+	}
+
 	// Stopping again is a no-op.
 	if err := m.Stop(inst.ID); err != nil {
 		t.Fatalf("second Stop failed: %v", err)
@@ -338,8 +347,15 @@ func TestRestartReasonixCleansOldDir(t *testing.T) {
 		t.Fatalf("Stop failed: %v", err)
 	}
 	oldDir := filepath.Join(m.DataDir, "reasonix", inst.ID)
+	// Stop now tears the serve-management dir down itself, so no leftover
+	// exists to exercise Restart's cleanup; seed an artificial one to prove
+	// Restart still removes any stale dir for the old id (RemoveAll on a
+	// missing dir is a no-op, so this assertion stays meaningful).
+	if err := os.MkdirAll(filepath.Join(oldDir, "stale"), 0o755); err != nil {
+		t.Fatalf("seed stale dir: %v", err)
+	}
 	if _, err := os.Stat(oldDir); err != nil {
-		t.Fatalf("old reasonix dir missing before restart: %v", err)
+		t.Fatalf("stale reasonix dir missing before restart: %v", err)
 	}
 
 	if _, err := m.Restart(inst.ID); err != nil {
@@ -435,5 +451,37 @@ func TestReasonixTagEnvAndPreStart(t *testing.T) {
 	resp.Body.Close()
 	if !strings.Contains(string(body), "env:from-tag") {
 		t.Fatalf("serve env missing tag env MW_RX_TEST_ENV: %q", body)
+	}
+}
+
+func TestReasonixPreStartStripsInheritedHome(t *testing.T) {
+	// preStart must run under the same stripped environment as serve
+	// (reasonix.RemoveEnv), so a host-exported REASONIX_HOME /
+	// REASONIX_STATE_HOME cannot make the two phases resolve different
+	// ~/.reasonix homes. Skip without zsh (same contract as the sibling test).
+	if _, err := exec.LookPath("zsh"); err != nil {
+		t.Skip("zsh not installed; preStart (zsh -lc) not testable")
+	}
+	t.Setenv("REASONIX_HOME", "/fake/host/home")
+	t.Setenv("REASONIX_STATE_HOME", "/fake/host/state")
+	m, _ := newReasonixTestManager(t)
+	marker := filepath.Join(m.DataDir, "pre-env-marker")
+	tagsJSON := fmt.Sprintf(`{"tags":[{"id":"rxenv2","command":"echo I-MUST-NOT-RUN","preStart":"env | grep -E '^(REASONIX_HOME|REASONIX_STATE_HOME)=' > %s; true"}]}`, marker)
+	if err := os.WriteFile(filepath.Join(m.DataDir, "tags.json"), []byte(tagsJSON), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	inst, err := m.Start(StartInput{WorktreeID: "wt1", TagID: "rxenv2", Kind: store.KindReasonix, Name: "chat"})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = m.Stop(inst.ID) }()
+
+	b, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatalf("read preStart env marker: %v", err)
+	}
+	if len(b) != 0 {
+		t.Fatalf("preStart inherited host REASONIX_HOME/REASONIX_STATE_HOME (serve strips them; preStart must too): %q", b)
 	}
 }
