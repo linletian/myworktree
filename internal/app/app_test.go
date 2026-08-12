@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"myworktree/internal/config"
+	"myworktree/internal/gitx"
+	"myworktree/internal/instance"
 	"myworktree/internal/store"
 )
 
@@ -190,11 +192,7 @@ func TestRegisterTTYClientRejectsExcessClients(t *testing.T) {
 }
 
 func TestWorktreeOpenEndpointsRejectNonLoopback(t *testing.T) {
-	nullLogger := log.New(os.Stderr, "", 0)
-	srv, err := New(Config{}, nullLogger)
-	if err != nil {
-		t.Fatalf("New() failed: %v", err)
-	}
+	srv, _ := newIsolatedTestServer(t, store.State{})
 
 	tests := []struct {
 		name    string
@@ -221,12 +219,43 @@ func TestWorktreeOpenEndpointsRejectNonLoopback(t *testing.T) {
 	}
 }
 
-func TestHandleInstanceUpdate(t *testing.T) {
-	nullLogger := log.New(os.Stderr, "", 0)
-	srv, err := New(Config{}, nullLogger)
-	if err != nil {
-		t.Fatalf("New() failed: %v", err)
+// newIsolatedTestServer builds an app Server backed by a temp data dir with
+// controlled worktree/instance state, so handler tests never read/write the
+// developer's real ~/.config/myworktree data (issue #43).
+func newIsolatedTestServer(t *testing.T, st store.State) (*Server, store.FileStore) {
+	t.Helper()
+	dataDir := t.TempDir()
+	fs := store.FileStore{Path: filepath.Join(dataDir, "state.json")}
+	if err := fs.Save(st); err != nil {
+		t.Fatal(err)
 	}
+	m := &instance.Manager{
+		DataDir: dataDir,
+		Store:   fs,
+		Logger:  log.New(os.Stderr, "", 0),
+	}
+	return &Server{
+		cfg:         Config{ListenAddr: "127.0.0.1:0"},
+		logger:      log.New(os.Stderr, "", 0),
+		dataDir:     dataDir,
+		root:        dataDir,
+		store:       fs,
+		instanceMgr: m,
+		mux:         http.NewServeMux(),
+		authFails:   map[string]authFail{},
+	}, fs
+}
+
+func TestHandleInstanceUpdate(t *testing.T) {
+	srv, _ := newIsolatedTestServer(t, store.State{
+		Version: 3,
+		Worktrees: []store.ManagedWorktree{
+			{ID: "wt1", Name: "wt1", Path: t.TempDir()},
+		},
+		Instances: []store.ManagedInstance{
+			{ID: "inst-1", WorktreeID: "wt1", Name: "orig", Status: "stopped"},
+		},
+	})
 
 	// GET /api/instances first to find an instance ID to rename
 	reqList := httptest.NewRequest(http.MethodGet, "/api/instances", nil)
@@ -238,14 +267,17 @@ func TestHandleInstanceUpdate(t *testing.T) {
 	}
 	instancesRaw := listResp["instances"]
 	if instancesRaw == nil {
-		t.Skip("no instances available for rename test")
+		t.Fatal("no instances available for rename test")
 	}
 	instances, ok := instancesRaw.([]any)
 	if !ok || len(instances) == 0 {
-		t.Skip("no instances available for rename test")
+		t.Fatalf("instances = %v, want the seeded one", instancesRaw)
 	}
 	firstInst := instances[0].(map[string]any)
 	instID := firstInst["id"].(string)
+	if instID != "inst-1" {
+		t.Fatalf("unexpected instance id %q, want inst-1", instID)
+	}
 
 	// PATCH → 200 with updated name
 	body := map[string]any{"id": instID, "name": "renamed-instance"}
@@ -287,14 +319,56 @@ func TestHandleInstanceUpdate(t *testing.T) {
 	}
 }
 
-func TestHandleInstanceReorder(t *testing.T) {
-	nullLogger := log.New(os.Stderr, "", 0)
-	srv, err := New(Config{}, nullLogger)
-	if err != nil {
-		t.Fatalf("New() failed: %v", err)
-	}
+func TestPatchReturnsWebURLForReasonixInstance(t *testing.T) {
+	// PATCH must render through instanceView (like GET/POST) so reasonix
+	// instances keep their web_url in the response; previously it wrote the
+	// bare ManagedInstance and dropped web_url.
+	srv, _ := newIsolatedTestServer(t, store.State{
+		Version: 3,
+		Worktrees: []store.ManagedWorktree{
+			{ID: "wt1", Name: "wt1", Path: t.TempDir()},
+		},
+		Instances: []store.ManagedInstance{
+			{ID: "rx-1", WorktreeID: "wt1", Name: "orig", Kind: store.KindReasonix, Status: "running"},
+		},
+	})
+	srv.rxAddr = "127.0.0.1:9999"
 
-	// GET instances to find a worktree with 2+ instances.
+	body := map[string]any{"id": "rx-1", "name": "renamed"}
+	bodyBytes, _ := json.Marshal(body)
+	req := httptest.NewRequest(http.MethodPatch, "/api/instances", bytes.NewReader(bodyBytes))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.handleInstances(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("PATCH: expected 200, got %d", w.Code)
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+	if resp["name"] != "renamed" {
+		t.Fatalf("name = %v, want renamed", resp["name"])
+	}
+	if got, want := resp["web_url"], "http://127.0.0.1:9999/rx/rx-1/"; got != want {
+		t.Fatalf("web_url = %v, want %v", got, want)
+	}
+}
+
+func TestHandleInstanceReorder(t *testing.T) {
+	srv, _ := newIsolatedTestServer(t, store.State{
+		Version: 3,
+		Worktrees: []store.ManagedWorktree{
+			{ID: "wt1", Name: "wt1", Path: t.TempDir()},
+		},
+		Instances: []store.ManagedInstance{
+			{ID: "inst-a", WorktreeID: "wt1", Name: "a", Status: "stopped"},
+			{ID: "inst-b", WorktreeID: "wt1", Name: "b", Status: "stopped"},
+		},
+	})
+
+	// GET instances: read the current version (the real frontend flow) so the
+	// optimistic-lock check in the reorder request is meaningful.
 	reqList := httptest.NewRequest(http.MethodGet, "/api/instances", nil)
 	wList := httptest.NewRecorder()
 	srv.handleInstances(wList, reqList)
@@ -302,48 +376,19 @@ func TestHandleInstanceReorder(t *testing.T) {
 	if err := json.Unmarshal(wList.Body.Bytes(), &listResp); err != nil {
 		t.Fatalf("invalid JSON: %v", err)
 	}
-	instancesRaw := listResp["instances"]
-	if instancesRaw == nil {
-		t.Skip("no instances available for reorder test")
+	version := int64(listResp["version"].(float64))
+	if version != 3 {
+		t.Fatalf("version = %d, want 3", version)
 	}
-	instances, ok := instancesRaw.([]any)
-	if !ok || len(instances) < 2 {
-		t.Skip("need at least 2 instances for reorder test")
+	instances, ok := listResp["instances"].([]any)
+	if !ok || len(instances) != 2 {
+		t.Fatalf("instances = %v, want the two seeded ones", listResp["instances"])
 	}
+	ids := []string{"inst-a", "inst-b"}
 
-	// Group by worktree_id.
-	type pair struct{ id, wt string }
-	var pairs []pair
-	for _, raw := range instances {
-		m := raw.(map[string]any)
-		pairs = append(pairs, pair{id: m["id"].(string), wt: m["worktree_id"].(string)})
-	}
-	wtCounts := map[string]int{}
-	wtIDs := map[string][]string{}
-	for _, p := range pairs {
-		wtCounts[p.wt]++
-		wtIDs[p.wt] = append(wtIDs[p.wt], p.id)
-	}
-	var wtID string
-	var ids []string
-	for w, c := range wtCounts {
-		if c >= 2 {
-			wtID = w
-			ids = wtIDs[w]
-			break
-		}
-	}
-	if wtID == "" {
-		t.Skip("no worktree with 2+ instances")
-	}
-
-	// Test 1: valid reorder — reverse the order.
-	reversed := make([]string, len(ids))
-	copy(reversed, ids)
-	for i, j := 0, len(reversed)-1; i < j; i, j = i+1, j-1 {
-		reversed[i], reversed[j] = reversed[j], reversed[i]
-	}
-	body := map[string]any{"worktree_id": wtID, "order": reversed}
+	// Test 1: valid reorder — reverse the order, with the fetched version.
+	reversed := []string{"inst-b", "inst-a"}
+	body := map[string]any{"worktree_id": "wt1", "order": reversed, "version": version}
 	bodyBytes, _ := json.Marshal(body)
 	req := httptest.NewRequest(http.MethodPatch, "/api/instances/reorder", bytes.NewReader(bodyBytes))
 	req.Header.Set("Content-Type", "application/json")
@@ -363,7 +408,7 @@ func TestHandleInstanceReorder(t *testing.T) {
 	var gotOrder []string
 	for _, raw := range allInsts {
 		m := raw.(map[string]any)
-		if m["worktree_id"].(string) == wtID {
+		if m["worktree_id"].(string) == "wt1" {
 			gotOrder = append(gotOrder, m["id"].(string))
 		}
 	}
@@ -377,7 +422,7 @@ func TestHandleInstanceReorder(t *testing.T) {
 	}
 
 	// Test 2: missing instance → 400.
-	badBody := map[string]any{"worktree_id": wtID, "order": []string{ids[0]}}
+	badBody := map[string]any{"worktree_id": "wt1", "order": []string{ids[0]}}
 	badBytes, _ := json.Marshal(badBody)
 	reqBad := httptest.NewRequest(http.MethodPatch, "/api/instances/reorder", bytes.NewReader(badBytes))
 	reqBad.Header.Set("Content-Type", "application/json")
@@ -388,7 +433,7 @@ func TestHandleInstanceReorder(t *testing.T) {
 	}
 
 	// Test 3: instance from wrong worktree → 400.
-	wrongBody := map[string]any{"worktree_id": wtID, "order": []string{ids[0], ids[1], "nonexistent"}}
+	wrongBody := map[string]any{"worktree_id": "wt1", "order": []string{ids[0], ids[1], "nonexistent"}}
 	wrongBytes, _ := json.Marshal(wrongBody)
 	reqWrong := httptest.NewRequest(http.MethodPatch, "/api/instances/reorder", bytes.NewReader(wrongBytes))
 	reqWrong.Header.Set("Content-Type", "application/json")
@@ -404,6 +449,17 @@ func TestHandleInstanceReorder(t *testing.T) {
 	srv.handleInstanceReorder(w405, reqGet2)
 	if w405.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("GET /api/instances/reorder: expected 405, got %d", w405.Code)
+	}
+
+	// Test 5: stale version → 409 (optimistic lock conflict).
+	staleBody := map[string]any{"worktree_id": "wt1", "order": []string{"inst-a", "inst-b"}, "version": version - 1}
+	staleBytes, _ := json.Marshal(staleBody)
+	reqStale := httptest.NewRequest(http.MethodPatch, "/api/instances/reorder", bytes.NewReader(staleBytes))
+	reqStale.Header.Set("Content-Type", "application/json")
+	wStale := httptest.NewRecorder()
+	srv.handleInstanceReorder(wStale, reqStale)
+	if wStale.Code != http.StatusConflict {
+		t.Fatalf("PATCH with stale version: expected 409, got %d: %s", wStale.Code, wStale.Body.String())
 	}
 }
 
@@ -740,11 +796,7 @@ func TestHandleWorktreeStatusLsFilesFailsDiffSucceeds(t *testing.T) {
 }
 
 func TestHandleMain(t *testing.T) {
-	nullLogger := log.New(os.Stderr, "", 0)
-	srv, err := New(Config{}, nullLogger)
-	if err != nil {
-		t.Fatalf("New() failed: %v", err)
-	}
+	srv, _ := newIsolatedTestServer(t, store.State{})
 
 	// GET → 200 with correct JSON fields
 	req := httptest.NewRequest(http.MethodGet, "/api/main", nil)
@@ -778,6 +830,21 @@ func TestHandleMain(t *testing.T) {
 	// Branch field is present (may be empty string on detached HEAD).
 	if _, ok := resp["branch"]; !ok {
 		t.Fatalf("GET /api/main: missing branch field")
+	}
+
+	// github_url field is present as a string. The expected value is derived
+	// from whatever the resolver (covered by its own tests) produces for the
+	// same git root, so the assertion stays valid across owner / repo
+	// renames, forks, and org transfers. We only require the API to surface
+	// the same string the resolver returns (or "" when the resolver yields
+	// nothing).
+	gh, ok := resp["github_url"].(string)
+	if !ok {
+		t.Fatalf("GET /api/main: expected github_url to be a string, got %T (%v)", resp["github_url"], resp["github_url"])
+	}
+	wantGitHub := gitx.GitHubURL(srv.root)
+	if gh != wantGitHub {
+		t.Fatalf("GET /api/main: github_url = %q, want %q (resolver output)", gh, wantGitHub)
 	}
 
 	// POST → 405

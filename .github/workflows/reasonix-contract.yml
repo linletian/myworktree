@@ -1,0 +1,51 @@
+name: Reasonix contract
+
+# Runs the upstream-reasonix behavior contract check
+# (scripts/verify-reasonix-contract.sh, see docs/ARCHITECTURE.md §4.2) that the
+# reasonix driver depends on: version gate, per-cwd session layout, fresh
+# session uniqueness, and per-session-file lease mutual exclusion.
+#
+# STATUS: PLACEHOLDER. GitHub-hosted runners do not carry a reasonix binary,
+# so the check currently SKIPs (green) on both runners — this job does NOT
+# actually verify anything until a reasonix binary is installed. To enable it,
+# add an install step below (e.g. download the reasonix binary or `go install`
+# it); the script then runs the full check on every push/PR, and a broken
+# contract fails the job. A ::notice:: is emitted on every run so the
+# placeholder state is visible in the job log instead of silently passing.
+
+on:
+  push:
+    branches:
+      - develop
+      - main
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    branches:
+      - develop
+      - main
+
+jobs:
+  verify:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      # Optional: install reasonix here once a canonical install path exists,
+      # e.g.:
+      #   - name: Install reasonix
+      #     run: <download-or-build-reasonix>
+      # Without a binary the script reports SKIP and exits 0 (see its header).
+
+      - name: Verify reasonix contract (SKIPs until reasonix is installed)
+        run: |
+          if ! command -v reasonix >/dev/null 2>&1 && [ -z "${REASONIX_BIN:-}" ]; then
+            echo "::notice::reasonix binary not installed on this runner; the reasonix upstream contract check is in placeholder/SKIP mode. Add an install step to this workflow to enable it."
+          fi
+          bash scripts/verify-reasonix-contract.sh

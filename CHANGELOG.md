@@ -1,5 +1,38 @@
 # Changelog
 
+## v0.4.0 (2026-08-12)
+
+Release focused on the native Reasonix web UI integration, eliminating PTY log disk write amplification, and workspace visibility improvements.
+
+**PR #58 评审修复（评审后整理）**：`PATCH /api/instances` 与 `POST /api/instances/restart` 的响应改为与 `GET`/`POST` 一致，reasonix 实例补回 `web_url` 字段；`instanceView` 改为直接构造响应 map（去掉每次序列化后的 Marshal→Unmarshal 往返）；reasonix 实例的 `preStart` 环境与 `serve` 一致地剥离继承的 `REASONIX_HOME`/`REASONIX_STATE_HOME`（宿主导出这两个变量时，preStart 与 serve 不再解析到不同的 `~/.reasonix`，覆盖仍通过实例 tag env 生效）；实例停止/删除/重启时清理 per-instance 的 Start 锁 map 条目与管理目录（不再随启停循环无限累积）；侧栏删除实例的确认文案改为 "Delete instance?"。
+
+**Reasonix instances run without `REASONIX_HOME` isolation (requirement revision, issue #56)**: `serve` now uses the user's real `~/.reasonix`, so sessions/history/config/credentials are shared per project exactly like a terminal-run `reasonix` — the same project's history (including terminal CLI/TUI sessions) is visible and switchable in the embedded sidebar, and cross-project isolation is done by reasonix itself (per-cwd). The per-instance `home` dir, `session.jsonl`, and config/`.env` symlinks are removed; the instance state dir now only carries `token`/`port`/`pid`/`serve.log`, and deleting an instance never touches the shared session pool. Each Start opens a fresh session (no `--resume`), matching terminal behaviour; issue #49's "Restart = fresh session" semantics stay. The reverse proxy at `/rx/<id>/` (token cookie injection + HTML URL-prefix rewrite for fetch/EventSource/XHR) is unchanged.
+
+**Legacy data (pre-2026-08-12 instances)**: instances created under the old per-instance `REASONIX_HOME` isolation keep an inert `home/` dir and `session.jsonl` that the driver no longer reads (it logs a migration hint on Start). Those sessions are NOT auto-merged into the shared pool — delete the instance to clean the leftover, or export the session manually. No automatic migration is performed.
+
+Disk write amplification fix for long-running PTY-heavy sessions.
+
+**Reasonix sidebar toggle resized to a vertical pill that fits the chat gutter**: the injected hide/expand sidebar button in the embedded Reasonix web chat was 34×34px at (8,8), so it overlapped the conversation. It is now a vertical 24×64px pill at (2,8) with a CSS arrow glyph (▶ when collapsed — click to expand, ◀ when expanded — click to collapse; direction points at where the sidebar moves, so no text or i18n needed): measured against the upstream `.transcript` padding (`24px 28px` on desktop), the button's right edge (26px) stays inside the chat's 28px left gutter, so it never covers message text in either the collapsed or expanded state, and the taller target is easier to see and click.
+
+### Breaking changes
+
+- **`state.json` schema: `log_path` field removed** — external tooling that reads instance state files must drop the `log_path` field. Old state files continue to load cleanly (the field is silently ignored by JSON decoding). See `docs/ARCHITECTURE.md` §3.2.
+
+### Highlights
+
+- **In-memory ring buffer for PTY logs** — replaced per-instance on-disk log files with a bounded ring buffer (default 32 MB per instance, hard ceiling 256 MB, total budget capped at 25% of system RAM). Eliminates the 100,000× write amplification caused by the old `enforceMaxLogSize` loop. No more disk I/O from PTY logging on the steady state.
+- **Bounded adaptive sizing** — new `LogBufferBytes` config knob overrides the per-instance cap (clamped to 16–256 MB). When unset, the cap is `clamp(available / 16, 16 MB, 256 MB)` sampled via gopsutil with a 60 s cache to amortize syscall cost across batch starts.
+- **Startup cleanup** — `Manager.PurgeOrphanLogFiles` removes dead `.log` files left behind by the old code path on the first start of the new binary.
+- **Budget-exceeded UX** — when a new instance would push the global buffer budget past 25% of system RAM, the HTTP/MCP API returns `503 Service Unavailable` with a structured `log_buffer_budget_exceeded` body. The dashboard surfaces this as a modal with used/limit numbers and a hint to close other tabs.
+- **Hot-path redesign for heavy TUI workloads** — `pumpLogs` no longer acquires `stateMu` per 1024-byte PTY chunk; the ring buffer pointer is pre-fetched once and the per-chunk lookup is a single `atomic.Pointer.Load`. The ring buffer's backing slice is allocated eagerly so the first Write never blocks on a 32 MB malloc. A new `WriteString` path avoids the `[]byte(chunk)` conversion that would otherwise happen on every chunk.
+- **Daemon resource monitoring** — the resource stats API (`GET /api/instances/stats`) now includes the mw daemon process itself in global totals (`daemon_cpu_percent`, `daemon_memory_bytes`). The UI displays a dedicated "mw daemon" row so users can distinguish daemon overhead from instance resource usage.
+- **Ring buffer usage reporting** — per-instance stats now expose `memory_buffer_bytes` (actual usage) and `memory_buffer_cap_bytes` (pre-allocated capacity). The UI memory column shows the combined `RSS + buffer_used` with a `buf used/cap` annotation for active buffers, giving users visibility into per-instance buffer memory cost.
+- **Sidebar GitHub link** — main workspace row now shows a small GitHub Mark icon to the right of the project name when `git remote` resolves to `github.com`; clicking opens the canonical `https://github.com/<owner>/<repo>` URL in a new tab. Source of truth is a new `github_url` field on `GET /api/main`, computed via the new `gitx.GitHubURL` helper (prefers `origin`, then falls back to iterating `git remote`; normalizes SCP / HTTPS / `ssh://` forms; strips `.git`). GitHub Enterprise and non-GitHub remotes are intentionally not surfaced.
+- **Text file preview** — click a file in the Changes panel to preview it with line numbers, a formatted view, and a diff view (including a synthetic diff for untracked files, with `quotePath` handled).
+- **Branch divergence badge** — the sidebar now shows a diverge badge when a branch is ahead of / behind its upstream, backed by new API handlers and scheduled refresh.
+- **`mw config regen`** — new CLI command to regenerate the config, plus per-request auth token reload so config/token changes take effect without a daemon restart.
+- **Tags config directory** — open the tags config directory from the UI and use default tags out of the box.
+
 ## v0.3.0
 
 Release focused on remote collaboration, build robustness, and Apple Silicon reliability.

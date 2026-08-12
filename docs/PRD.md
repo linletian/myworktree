@@ -15,12 +15,14 @@
 4. 支持 **Tag（启动模板）**：启动命令、preStart 脚本、env、cwd。
 5. 单用户远程访问：非 loopback 必须认证；可选内置 HTTPS。
 6. 预留扩展为 MCP server 的接口形态。
+7. **agent 实例与终端语义一致**：`kind=reasonix` 等 agent 实例的会话/历史按项目（worktree）组织，同一项目内与终端直接运行的 agent CLI/TUI **互通**（共享同一会话池，可互相切换）；myworktree 仅做工作区与实例管理，**不介入 agent 的会话/项目/分支产品逻辑**。
 
 ## 3. 非目标（Non-Goals）
 - **不解决**同一 worktree 内多 instance 并发写文件导致的冲突/竞态。
 - 不处理任何项目具体内容：不解析代码、不做索引、不做质量分析。
 - 不管理非 myworktree 启动的进程/终端实例。
 - 不做多人协作权限体系。
+- **不实现 agent 的会话/项目/分支管理**：项目隔离、历史会话切换、会话并发（lease 争用）等语义全部由 agent 自身负责（如 reasonix 按 cwd 组织 `~/.reasonix/projects/<slug>/sessions`）；myworktree **不复制、不隔离、不代管** agent 会话状态。
 
 ## 4. 术语
 - **Worktree**：`git worktree` 创建的独立工作区目录。
@@ -36,6 +38,7 @@
   - LLM 模式：调用 LLM 将任务描述转换为分支名（如 `fix/auth-bug`），保留 `/` 分组前缀（如 `feature/auth` → `feature/auth`）。
   - 自定义输入：用户在 Branch Name 输入框直接输入时，直接使用该值作为分支名。
   - 命名冲突：如目标分支已存在，自动给 `<name>` 加 `-2/-3` 后缀避免冲突；并支持将既有 worktree **纳入管理（import）**。
+- **agent 实例语义边界**：agent 实例（如 `kind=reasonix`）的会话数据归属 agent 自身状态根（默认 `~/.reasonix`），myworktree **不设独立 `REASONIX_HOME`、不绑定固定会话文件**来改变 agent 语义；实例生命周期（启停/重启/删除）只作用于 serve 子进程，**不改动共享会话池**。并行冲突由 agent 自身的 session lease 机制处理（拒绝式，不静默双写），myworktree 不额外加锁。**opt-out**：driver 会从 serve 环境剥离继承的 `REASONIX_HOME`/`REASONIX_STATE_HOME`（确保走真实 `~/.reasonix`），如需自定义 home，用实例 tag 的 `env` 显式设置即可（剥离后追加，后值生效）。
 
 ## 6. 安全
 - 默认监听 `0.0.0.0:0`，自动选择端口并持久化。
@@ -53,6 +56,10 @@
   - 输出回放中按模式脱敏主流 AI key（如 `sk-***`）。
 
 ## 7. 当前实现状态（与愿景差异）
+- **Reasonix web chat 实例（MVP 完结，含需求修订 2026-08-12）**：`kind=reasonix` 实例在 worktree 内运行 `reasonix serve` 子进程，其 web 聊天界面经反代 `/rx/<id>/` 以 iframe 嵌入实例标签页（创建实例时勾选 *Reasonix (web chat UI)*）。
+  - **语义基线（需求修订 2026-08-12，见 §2 Goal 7 / §5 关键规则）**：实例 = 在该 worktree 项目里打开 reasonix 的 web UI。项目间隔离由 reasonix 自身按 cwd 组织（`~/.reasonix/projects/<slug>/sessions`）；同一项目的全部历史会话（含终端直接跑 reasonix CLI/TUI 产生的）在实例侧边栏**可见、可切换**，与终端行为一致。myworktree 只负责 worktree/实例生命周期与 `/rx/<id>/` 反代，不介入 agent 的会话/项目/分支语义。
+  - **实现状态（2026-08-12 已按新基线实现）**：已取消 `REASONIX_HOME` 隔离与固定 `--resume` 会话文件，serve 直接使用 `~/.reasonix`（与终端运行一致），会话按项目由 reasonix 自身组织、同项目历史会话（含终端产生的）在实例侧边栏可见可切换，`#56` 期望满足。`#49`「Restart = 全新会话」语义保留（重启开新会话，历史仍在共享会话池中可切换）。
+  - 已实现且不变：安全加固（#44 独立源跨源隔离）、侧栏默认折叠布局注入（#48）、生命周期/性能（#46 缓存、#47 锁范围）、driver 健壮性（#45 版本门 + serve.log 报错）、测试隔离（#43）；`env`/`preStart` 注入已支持（DEFERRED §3）。详见 `docs/plans/reasonix-native-ui/`。
 - 已实现：worktree/instance 管理、Web UI、API、输出回放、脱敏、认证与可选 HTTPS、MCP tools 列表接口。
 - 已实现：侧栏主工作区/各 worktree 项提供两个快捷入口，可一键在宿主机打开对应目录的 Terminal（zsh）与 Finder 窗口，便于在 Web UI 与本机 GUI/CLI 间快速切换。
 - **已实现 Git Changes 面板暂存/未暂存分离**：侧栏底部 CHANGES 区域拆分为 Staged 和 Unstaged 两个互锁折叠 section。默认展开 Unstaged，点击任一标题栏展开当前 section 并自动折叠另一个。每个 section 独立显示暂存/未暂存的文件列表和行数汇总。
@@ -71,7 +78,27 @@
   - ~~Tailscale Serve 自动管理（自动配置 `tailscale serve` 提供 `https://<machine>.ts.net` 域名访问）~~ **（暂未启用，见 §6 安全说明）**
   - 双层认证架构（Portal 层 Cookie + CSRF，实例层 loopback 绕过）
 - 浏览器关闭保护：前端在 `beforeunload` 事件时，无论是否存在运行中实例，均触发浏览器原生确认对话框，防止误操作关闭页面。
-- **Main workspace 分支查询**：`GET /api/main` 返回 `{name, branch}`。branch 字段实时查询（`git rev-parse --abbrev-ref HEAD`），在 detached HEAD 场景（如 CI 浅克隆）下返回空字符串而非错误。
+- **Main workspace 分支查询**：`GET /api/main` 返回 `{name, branch, github_url}`。branch 字段实时查询（`git rev-parse --abbrev-ref HEAD`），在 detached HEAD 场景（如 CI 浅克隆）下返回空字符串而非错误。github_url 字段基于 `git remote` 推算（优先 origin，回退到 `git remote` 列表），规范化 SCP / HTTPS / ssh:// 三种形式，仅识别 `github.com`，返回 `https://github.com/<owner>/<repo>`，其它情况返回空串。
+- **已实现侧栏主工作区 GitHub 链接**：侧栏主工作区项目名右侧条件渲染 GitHub 图标，链接到 `state.mainRepo.github_url`（来源：`/api/main` 的 github_url 字段，由 `gitx.GitHubURL` 计算）。点击在新窗口打开，使用 `<a target="_blank" rel="noopener noreferrer">` 并通过 `event.stopPropagation()` 避免触发 `selectWorktree`。非 GitHub remote、无 remote 或解析失败时不渲染图标。仅识别 `github.com`，不含 GitHub Enterprise。
+- **已实现：instance PTY 日志内存化（彻底取消磁盘日志）**：
+  - 旧实现：每条 PTY chunk（1024 字节）写入 `logs/<instanceId>.log`，并在文件达到 10MB 后做"读 10MB + 截断 + 写 10MB"，造成约 10 万倍磁盘写放大；OpenCode 等 TUI 高频重绘场景下数据目录写入量可达 280MB+。
+  - 新实现：每个 running instance 拥有一个进程内的 **有界 ring buffer**（`internal/instance/logbuf.go`）。HTTP/SSE/WS 日志回放端点与 MCP `instance_log_tail` 全部从该 buffer 读取，磁盘 I/O 完全消除。
+  - 容量策略（与 bounded-but-adaptive 原则一致：硬上限防 OOM、富裕时适度放大）：
+    - 单实例下限 16 MB、默认 32 MB、上限 256 MB（硬天花板，永不超过）。
+    - 自适应：未配置时 `clamp(available_memory / 16, 16 MB, 256 MB)`；用户可通过 `~/.config/myworktree/auth.json` 的 `log_buffer_bytes` 字段覆盖。
+    - 全局预算：所有 live buffer 容量合计上限为系统 RAM 的 25%。
+  - 当新实例会突破全局预算时，`POST /api/instances` 返回 `503 Service Unavailable` + 结构化 `log_buffer_budget_exceeded` body，UI 弹出专用对话框提示已用/上限字节并给出处置建议。
+  - 守护进程启动时，`Manager.PurgeOrphanLogFiles()` 一次性清理旧版本遗留的 `.log` 文件（幂等）。
+  - **破坏性 schema 变更**：`state.json` 的 `log_path` 字段已移除；旧文件继续可加载（被 JSON 解码静默忽略），外部读取 `state.json` 的工具应去掉对该字段的依赖。
+  - 守护进程重启会清空所有 buffer，与既有的 `ReconcileRunningOnStartup` 语义一致（重启后日志原本就不能回放，运行中实例会被标记为 stopped）。
+  - 详情见 `docs/ARCHITECTURE.md` §4.1、`docs/API.md` *Start* 端点错误段。
+- **规划新增：分支落后检测**：
+  - 侧栏每个 worktree 分支名旁显示红色标签（如 `m↑3` / `d↑1`），标识当前分支是否落后于主分支或集成分支 develop。
+  - 如果当前 worktree 就是主分支自身，则不显示标记。
+  - 判断逻辑：计算当前 HEAD 到上游 effective head（本地和远端中更领先的一方）的 ahead 数量，结果 `> 0` 即落后。
+  - 远端发现优先 `origin`，其次取其他 remote 中领先最多的；无远端则仅用本地判断。
+  - 标签常驻显示，60 秒定时刷新；切换 worktree 时立即刷新。
+  - 详情见 `docs/plans/git-commit-history-graph/DESIGN.md`。
 
 ## 8. 验收标准（MVP）
 - 可创建/列出/删除 worktree（dirty 删除被拒绝）。

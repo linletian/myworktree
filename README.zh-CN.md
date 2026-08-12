@@ -37,6 +37,14 @@ myworktree 只做管理，不碰项目具体内容：
 - MCP 接口（`/api/mcp/tools`、`/api/mcp/call`）
 - Portal 仪表板：共享入口端口，跨仓库自动发现运行实例
 - 全局认证 Token（HttpOnly Cookie、CSRF 防护、Tailscale Serve 自动集成）
+- 侧栏主工作区项目名旁在仓库 remote 指向 `github.com` 时渲染 GitHub 图标；点击在新窗口打开 `https://github.com/<owner>/<repo>` 规范 URL。GitHub Enterprise 与非 GitHub remote 不展示。
+- **Reasonix Web 聊天实例（MVP）** — 启动实例时勾选 *Reasonix (web chat UI)*，即可在该 worktree 中运行 `reasonix serve` 智能体，并通过 iframe 渲染其 Web 聊天界面（`/rx/<id>/`，同源反向代理，注入 token cookie 并重写 URL 前缀）。serve 使用你真实的 `~/.reasonix`（不做 per-instance 隔离）：会话/历史/配置/凭据按项目与终端运行的 `reasonix` 完全共享，同一项目的历史（含终端会话）可在内嵌侧栏中查看/切换。每次 Start 打开全新会话（无 `--resume`）；删除实例绝不触碰共享会话池。需要在 `PATH` 中提供 `reasonix` 二进制；该 MVP 有意保留 reasonix UI 侧栏（项目切换）。
+- **PTY 日志改为内存环形缓冲** — 每个实例的 PTY 日志存放在有界的内存环形缓冲（默认每实例 32 MB、硬上限 256 MB、全局预算不超过系统内存的 25%）而不是磁盘日志文件，消除长时间 PTY 重负载会话的磁盘写放大。`LogBufferBytes` 可覆盖单实例上限；启动后若超出全局预算，接口返回 `503` 及结构化 `log_buffer_budget_exceeded` 响应体。
+- **Changes 面板文件预览** — 点击任意已变更或未跟踪文件即可预览：带行号、格式化视图与差异视图（未跟踪文件提供合成 diff，已处理 `quotePath`）。
+- **分支 divergence 徽标** — 侧栏在分支相对上游 ahead/behind 时显示分歧徽标，支持定时刷新。
+- **`mw config regen` 与认证热加载** — 命令行重新生成配置；认证 token / 配置变更无需重启 daemon 即生效。
+- **Tags 配置目录** — 可直接从 UI 打开 tags 配置目录，开箱自带合理的默认 tags。
+- **daemon 资源监控** — 资源统计 API 现在把 mw daemon 进程本身计入全局合计，UI 中以独立行展示。
 
 ## 运行环境
 - macOS 12+ 其他平台未验证
@@ -59,10 +67,10 @@ myworktree 只做管理，不碰项目具体内容：
 
 ```bash
 # 根据你的 Mac 机型选择对应压缩包，然后校验并解压
-curl -LO https://github.com/linletian/myworktree/releases/download/v0.2.0/myworktree_v0.2.0_darwin_arm64.tar.gz
-curl -LO https://github.com/linletian/myworktree/releases/download/v0.2.0/checksums.txt
+curl -LO https://github.com/linletian/myworktree/releases/download/v0.4.0/myworktree_v0.4.0_darwin_arm64.tar.gz
+curl -LO https://github.com/linletian/myworktree/releases/download/v0.4.0/checksums.txt
 shasum -a 256 -c checksums.txt --ignore-missing
-tar -xzf myworktree_v0.2.0_darwin_arm64.tar.gz
+tar -xzf myworktree_v0.4.0_darwin_arm64.tar.gz
 
 # 可选：安装到 PATH
 sudo install -m 755 ./mw /usr/local/bin/mw
@@ -72,7 +80,7 @@ sudo install -m 755 ./myworktree /usr/local/bin/myworktree
 mw --version
 ```
 
-建议从 `v0.2.0` 或更新版本开始使用公开发布版二进制。更早的 `v0.1.0` GitHub Release 资产在补充实测中发现严重终端交互问题后已撤回，而 `v0.2.0` 是当前推荐的公开发布版本。
+建议从 `v0.4.0` 或更新版本开始使用公开发布版二进制。更早的 `v0.1.0` GitHub Release 资产在补充实测中发现严重终端交互问题后已撤回，而 `v0.4.0` 是当前推荐的公开发布版本。
 
 每个发布压缩包内都包含 `mw`、`myworktree`、`README.md`、`LICENSE` 和 `CHANGELOG.md`。
 如果当前还没有预发布/正式发布压缩包，或者你的平台暂无对应产物，就直接使用下面的源码编译步骤。
@@ -275,6 +283,16 @@ mw config
 | `tailscale serve` 域名 | `https://machine.ts.net` → 代理 `http://127.0.0.1:PORT` | Let's Encrypt TLS + WireGuard |
 
 > **说明**：Tailscale 的 WireGuard 隧道已对网络层加密。仅通过 `tailscale serve` 域名访问时使用应用层 HTTPS（Let's Encrypt 证书）。
+
+## 已知限制
+
+### Reasonix 实例与 `REASONIX_HOME`
+
+Reasonix 实例运行 `reasonix serve` 时**不设置** `REASONIX_HOME`，嵌入式 web UI 直接使用你的真实 `~/.reasonix`——与终端里直接运行的 `reasonix` 完全一致。driver 会从宿主环境**剥离**继承的 `REASONIX_HOME` / `REASONIX_STATE_HOME`（并输出一条日志提示），确保实例与终端始终共享同一项目会话池；项目间隔离由 reasonix 自身按 cwd 完成。
+
+需要留意的后果：如果你的 shell 导出了自定义 `REASONIX_HOME`（例如 `~/.custom-reasonix`），终端里运行的 reasonix 会使用该自定义 home，而 myworktree 实例使用默认 `~/.reasonix`——两者将**看不到彼此的**历史会话。这是刻意行为。如需让某个实例指向自定义 home，可在实例 tag 的 `env` 中设置 `REASONIX_HOME`（在剥离之后追加，后值生效）。
+
+实例生命周期不会触碰共享会话池：Start / Stop / Restart / Delete 只管理 `serve` 子进程及其管理文件（实例状态目录下的 `token`/`port`/`pid`/`serve.log`）。会话存放在 `~/.reasonix/projects/<cwd-slug>/sessions`，因此重启实例会打开一个**全新会话**（无 `--resume`），而你的历史会话仍可在侧边栏切换。
 
 ## License
 MIT 协议，详见 [LICENSE](./LICENSE)。

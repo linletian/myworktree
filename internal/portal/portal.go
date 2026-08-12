@@ -70,8 +70,10 @@ type Portal struct {
 	srv        *http.Server
 	ln         net.Listener
 	done       chan struct{}
+	ready      chan struct{}
 	wg         sync.WaitGroup
 	closeOnce  sync.Once
+	readyOnce  sync.Once
 	// stoppedTailscaleServe is a one-way latch set when tailscale management
 	// is permanently unavailable (binary not installed, JSON parse failures).
 	// Once true, tailscale serve management is disabled for the lifetime of this instance.
@@ -106,6 +108,7 @@ func New(cfg Config) *Portal {
 		cfg:        cfg,
 		instanceID: generateInstanceID(),
 		done:       make(chan struct{}),
+		ready:      make(chan struct{}),
 		csrfState:  newCSRFState(),
 	}
 }
@@ -120,7 +123,6 @@ func generateInstanceID() string {
 
 func (p *Portal) Start() error {
 	p.writeRegistration()
-	// tailscaleServeLoop not started here — see comment block at top of file
 	p.wg.Add(3)
 	go p.claimerLoop()
 	go p.csrfState.cleanupLoop(p.done, &p.wg)
@@ -178,8 +180,8 @@ func (p *Portal) claimerLoop() {
 		addr := fmt.Sprintf("%s:%d", p.cfg.Host, p.cfg.PortalPort)
 		ln, err := net.Listen("tcp", addr)
 		if err != nil {
-			if failCount == 9 {
-				log.Printf("[portal] claimer: portal port %d unavailable after 10 attempts, consider --portal-port or --portal-port 0", p.cfg.PortalPort)
+			if failCount == 0 {
+				log.Printf("[portal] portal port %d is already in use, waiting for it to become available...", p.cfg.PortalPort)
 			}
 			failCount++
 			backoff := 10*time.Second + time.Duration(rand.Intn(5000))*time.Millisecond
@@ -191,6 +193,7 @@ func (p *Portal) claimerLoop() {
 			}
 		}
 
+		isTakeover := failCount > 0
 		failCount = 0
 
 		p.mu.Lock()
@@ -199,8 +202,15 @@ func (p *Portal) claimerLoop() {
 		p.srv = srv
 		p.mu.Unlock()
 
+		p.readyOnce.Do(func() { close(p.ready) })
+
+		if isTakeover {
+			log.Printf("[portal] Took over portal port %d (previous holder exited)", p.cfg.PortalPort)
+		}
+		log.Printf("[portal] Portal dashboard at: http://0.0.0.0:%d/", p.cfg.PortalPort)
+		log.Printf("[portal] Remote access token: %s", p.cfg.AuthToken)
+
 		p.writePortalStatus()
-		// cleanupStaleTailscaleServe() not called here — disabled, see top of file
 
 		err = srv.Serve(ln)
 		if err != nil && err != http.ErrServerClosed {

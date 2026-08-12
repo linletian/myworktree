@@ -409,12 +409,77 @@
             word-break: break-all;
         }
 
+        /* Main row hosts a flex layout (name + optional GitHub link icon). */
+        .wt-item-main .wt-name {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .wt-item-main .wt-name-text {
+            flex: 1;
+            min-width: 0;
+        }
+
+        .wt-github-link {
+            flex-shrink: 0;
+            margin-left: auto;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            color: var(--text-muted);
+            border-radius: 3px;
+            padding: 1px 2px;
+            text-decoration: none;
+            transition: color 0.15s, background 0.15s;
+        }
+
+        .wt-github-link:hover {
+            color: var(--text-primary);
+            background: var(--hover-bg);
+        }
+
+        .wt-github-link:focus-visible {
+            outline: 2px solid var(--active-color);
+            outline-offset: 1px;
+        }
+
+        .wt-github-link svg {
+            width: 14px;
+            height: 14px;
+            fill: currentColor;
+            display: block;
+        }
+
         .wt-branch {
             font-size: 11px;
             color: var(--text-muted);
             display: flex;
             align-items: center;
             gap: 4px;
+        }
+
+        .wt-diverge-badges {
+            display: inline-flex;
+            gap: 3px;
+            align-items: center;
+            margin-left: 2px;
+        }
+
+        .wt-diverge-badge {
+            font-size: 10px;
+            color: var(--danger-text);
+            font-weight: 600;
+            line-height: 1;
+            white-space: nowrap;
+        }
+
+        .wt-diverge-badge-err {
+            font-size: 10px;
+            color: #d4a017;
+            font-weight: 600;
+            line-height: 1;
+            white-space: nowrap;
         }
 
         .wt-actions {
@@ -581,6 +646,19 @@
             height: 8px;
             border-radius: 50%;
             display: inline-block;
+        }
+
+        .rx-badge {
+            font-size: 9px;
+            line-height: 1;
+            background: var(--badge-bg, rgba(128,128,128,0.25));
+            color: var(--badge-text, inherit);
+            padding: 2px 4px;
+            border-radius: 4px;
+            margin-right: 4px;
+            vertical-align: middle;
+            font-family: monospace;
+            letter-spacing: 0.5px;
         }
 
         .status-running {
@@ -1283,9 +1361,33 @@
                 <label>Name (Optional)</label>
                 <input id="instName" placeholder="e.g. build-server" />
             </div>
+            <div class="form-group">
+                <label><input type="checkbox" id="instKindReasonix" /> Reasonix (web chat UI)</label>
+                <div class="muted" style="margin-top:2px;">Runs a Reasonix agent in this worktree and shows its web chat interface instead of a terminal.</div>
+            </div>
             <div class="form-actions">
                 <button onclick="closeModal('modal-start-instance')">Cancel</button>
                 <button class="primary" onclick="doStartInstance()">Start</button>
+            </div>
+        </div>
+    </dialog>
+
+    <!-- Modal: log buffer budget exceeded (server returns 503 + structured body). -->
+    <dialog id="modal-budget-error">
+        <div class="modal-titlebar">
+            <span class="modal-title">Cannot Start Instance</span>
+            <button class="modal-close-btn" onclick="closeModal('modal-budget-error')" title="Close">
+                <svg width="10" height="10" viewBox="0 0 10 10" fill="none" xmlns="http://www.w3.org/2000/svg">
+                    <line x1="1" y1="1" x2="9" y2="9" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                    <line x1="9" y1="1" x2="1" y2="9" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                </svg>
+            </button>
+        </div>
+        <div class="modal-body">
+            <p id="budget-error-message" style="margin-bottom: 12px; line-height: 1.5;"></p>
+            <p id="budget-error-hint" style="color: var(--text-secondary); font-size: 13px; line-height: 1.5; margin-bottom: 16px;"></p>
+            <div class="form-actions">
+                <button onclick="closeModal('modal-budget-error')">Close</button>
             </div>
         </div>
     </dialog>
@@ -1339,6 +1441,8 @@
                 <div class="license-item"><span class="license-name">go-ole/go-ole</span><span class="license-sppver">v1.2.6</span><span class="license-type">MIT</span></div>
                 <div class="license-item"><span class="license-name">yusufpapurcu/wmi</span><span class="license-sppver">v1.2.4</span><span class="license-type">MIT</span></div>
                 <div class="license-item"><span class="license-name">xterm.js</span><span class="license-sppver">v6.0.0</span><span class="license-type">MIT</span></div>
+                <div class="license-item"><span class="license-name">highlight.js</span><span class="license-sppver">v11.9.0</span><span class="license-type">BSD-3-Clause</span></div>
+                <div class="license-item"><span class="license-name">marked.js</span><span class="license-sppver">v12.0.2</span><span class="license-type">MIT</span></div>
             </div>
         </div>
     </dialog>
@@ -1355,6 +1459,16 @@
         let knownServerRev = "";
         let serverRevReloading = false;
 
+        // escapeHtml neutralises the five HTML metacharacters so that
+        // user-controlled strings (worktree names, branch labels) can be
+        // safely interpolated into innerHTML templates.
+        const escapeHtml = (s) => String(s ?? "")
+            .replace(/&/g, "&amp;")
+            .replace(/</g, "&lt;")
+            .replace(/>/g, "&gt;")
+            .replace(/"/g, "&quot;")
+            .replace(/'/g, "&#39;");
+
         // Global State
         let state = {
             worktrees: [],
@@ -1365,7 +1479,8 @@
             activeInst: null,
             mainRepo: null,
             renamingInst: null,    // instance id currently being renamed
-            renamingInstValue: ""  // preserved value across re-renders
+            renamingInstValue: "", // preserved value across re-renders
+            diverged: {}           // worktree_id -> {branch: {diverged, ahead}}
         };
 
         let loadingActions = new Set(); // Stores keys like "term:<id>" or "finder:<id>"
@@ -1379,6 +1494,7 @@
         // Terminal & Transport
         let terminalSessions = {};
         let pollTimer = null;
+        let divergeTimer = null;
         let refreshInFlight = null;
         let stateVersion = 0;
 
@@ -1478,6 +1594,8 @@
                     state.branches = branches;
                     reconcileTerminalSessions();
 
+                    fetchDiverge();
+
                     // Fetch main repo info independently — failure is non-blocking.
                     api("/api/main").then(main => {
                         const prevBranch = state.mainRepo ? state.mainRepo.branch : null;
@@ -1520,6 +1638,30 @@
             await refreshInFlight;
         }
 
+        async function fetchDiverge() {
+            try {
+                const data = await api("/api/worktrees/diverged");
+                if (!state.diverged) state.diverged = {};
+                state.diverged = data.items || {};
+                renderSidebar();
+            } catch (e) {
+                console.error("fetch diverge failed:", e);
+            }
+        }
+
+        async function fetchDivergeSingle(id) {
+            try {
+                const data = await api(`/api/worktree/diverged?id=${encodeURIComponent(id)}`);
+                if (!state.diverged) state.diverged = {};
+                if (data.items) {
+                    Object.assign(state.diverged, data.items);
+                }
+                renderSidebar();
+            } catch (e) {
+                console.error("fetch diverge single failed:", e);
+            }
+        }
+
         function init() {
             if (sessionStorage.getItem(SERVER_UPGRADED_FLAG) === "1") {
                 sessionStorage.removeItem(SERVER_UPGRADED_FLAG);
@@ -1535,6 +1677,9 @@
             // Polling for status updates (2s)
             if (pollTimer) clearInterval(pollTimer);
             pollTimer = setInterval(refresh, 2000);
+            // Polling for diverge status (60s)
+            if (divergeTimer) clearInterval(divergeTimer);
+            divergeTimer = setInterval(fetchDiverge, 60000);
 
             // Status bar click -> resource monitor
             document.getElementById("status-bar").addEventListener("click", openModalMonitor);
@@ -1614,6 +1759,29 @@
             if (next) next.classList.add('expanded');
             gitExpandedSection = name;
             renderGitChanges();
+        }
+
+        function openFilePreview(worktreeId, filePath, section) {
+            var wt = null;
+            for (var i = 0; i < state.worktrees.length; i++) {
+                if (state.worktrees[i].id === worktreeId) { wt = state.worktrees[i]; break; }
+            }
+            var branch = '';
+            if (worktreeId === MAIN_WT_ID) {
+                branch = state.mainRepo ? state.mainRepo.branch : '';
+            } else if (wt) {
+                branch = wt.branch || '';
+            }
+            var params = new URLSearchParams();
+            params.set('id', worktreeId);
+            params.set('path', filePath);
+            params.set('repo', state.mainRepo ? state.mainRepo.name : '');
+            params.set('wt_name', wt ? (wt.name || '') : (worktreeId === MAIN_WT_ID ? 'main' : ''));
+            params.set('branch', branch);
+            params.set('file', filePath.split('/').pop());
+            params.set('staged', section === 'staged' ? 'true' : 'false');
+            var pw = window.open('/preview?' + params.toString(), '_blank');
+            if (!pw) { alert('Pop-up blocked. Please allow pop-ups for this site to preview files.'); }
         }
 
         function renderGitChanges() {
@@ -1727,6 +1895,11 @@
                         item.appendChild(stats);
                     }
 
+                    item.style.cursor = 'pointer';
+                    item.addEventListener('click', (function(p, s) {
+                        return function() { openFilePreview(state.activeWT, p, s); };
+                    })(c.path, section));
+
                     list.appendChild(item);
                 });
             });
@@ -1781,6 +1954,23 @@
             renderModals(); // Update options inside modals
         }
 
+        function divergeBadges(id) {
+            const data = state.diverged && state.diverged[id];
+            if (!data) return '';
+            let badges = '';
+            const branchKeys = Object.keys(data).sort();
+            for (const branch of branchKeys) {
+                const info = data[branch];
+                if (info.error) {
+                    badges += `<span class="wt-diverge-badge-err" title="Error checking ${branch}: ${info.error}">err\u2191</span>`;
+                } else if (info.diverged && info.ahead > 0) {
+                    const label = branch === 'mainBranch' ? 'm' : (branch === 'develop' ? 'd' : branch.substring(0, 1));
+                    badges += `<span class="wt-diverge-badge" title="Behind ${branch} by ${info.ahead} commit${info.ahead > 1 ? 's' : ''}">${label}\u2191${info.ahead}</span>`;
+                }
+            }
+            return badges ? `<span class="wt-diverge-badges">${badges}</span>` : '';
+        }
+
         function renderSidebar() {
             const list = document.getElementById("wt-list");
             let html = "";
@@ -1803,10 +1993,10 @@
 
                 return `
                 <div class="wt-actions">
-                    <span class="wt-action-btn ${isTermLoading ? 'loading' : ''}" title="Open Terminal" onclick="openTerminal('${id}', event)">
+                    <span class="wt-action-btn ${isTermLoading ? 'loading' : ''}" title="Open Terminal" onclick="openTerminal('${escapeHtml(id)}', event)">
                         ${termIcon}
                     </span>
-                    <span class="wt-action-btn ${isFinderLoading ? 'loading' : ''}" title="Open Finder" onclick="openFinder('${id}', event)">
+                    <span class="wt-action-btn ${isFinderLoading ? 'loading' : ''}" title="Open Finder" onclick="openFinder('${escapeHtml(id)}', event)">
                         ${finderIcon}
                     </span>
                 </div>`;
@@ -1816,11 +2006,26 @@
             if (state.mainRepo) {
                 const branchLabel = state.mainRepo.branch;
                 const isMainActive = state.activeWT === MAIN_WT_ID;
+                // GitHub link is rendered only when the backend resolved a
+                // github.com remote. Older backends that don't expose this
+                // field also leave the icon hidden (falsy short-circuit).
+                const githubUrl = state.mainRepo.github_url;
+                const githubLinkHtml = githubUrl ? `
+                    <a class="wt-github-link" href="${encodeURI(githubUrl)}" target="_blank" rel="noopener noreferrer"
+                       title="Open GitHub repository" aria-label="Open GitHub repository in a new tab"
+                       onclick="event.stopPropagation();">
+                        <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                            <path d="M12 .5C5.65.5.5 5.65.5 12c0 5.08 3.29 9.39 7.86 10.91.58.11.79-.25.79-.56 0-.28-.01-1.02-.02-2-3.2.7-3.87-1.54-3.87-1.54-.52-1.33-1.27-1.69-1.27-1.69-1.04-.71.08-.7.08-.7 1.15.08 1.76 1.18 1.76 1.18 1.02 1.76 2.69 1.25 3.34.96.1-.74.4-1.25.72-1.54-2.55-.29-5.24-1.28-5.24-5.7 0-1.26.45-2.29 1.18-3.1-.12-.29-.51-1.46.11-3.04 0 0 .97-.31 3.18 1.18a11.1 11.1 0 0 1 5.79 0c2.21-1.5 3.18-1.18 3.18-1.18.63 1.58.24 2.75.12 3.04.74.81 1.18 1.84 1.18 3.1 0 4.43-2.7 5.41-5.26 5.69.41.36.78 1.06.78 2.14 0 1.55-.01 2.79-.01 3.17 0 .31.21.68.8.56C20.21 21.39 23.5 17.08 23.5 12 23.5 5.65 18.35.5 12 .5Z"/>
+                        </svg>
+                    </a>` : '';
                 html += `
             <li class="wt-item wt-item-main ${isMainActive ? 'active' : ''}" onclick="selectWorktree(MAIN_WT_ID)">
-              <div class="wt-name">${state.mainRepo.name}</div>
+              <div class="wt-name">
+                <span class="wt-name-text">${escapeHtml(state.mainRepo.name)}</span>
+                ${githubLinkHtml}
+              </div>
               <div class="wt-branch">
-                <span>🏠</span> ${branchLabel}
+                <span>🏠</span> ${escapeHtml(branchLabel)}${divergeBadges(MAIN_WT_ID)}
                 <div style="margin-left: auto; display: flex; gap: 4px; align-items: center;">
                     ${shortcuts(MAIN_WT_ID)}
                 </div>
@@ -1835,14 +2040,15 @@
             // Regular worktrees
             html += state.worktrees.map(w => {
                 const isActive = state.activeWT === w.id;
+                const wIdEsc = escapeHtml(w.id);
                 return `
-            <li class="wt-item ${isActive ? 'active' : ''}" onclick="selectWorktree('${w.id}')">
-              <div class="wt-name">${w.name}</div>
+            <li class="wt-item ${isActive ? 'active' : ''}" onclick="selectWorktree('${wIdEsc}')">
+              <div class="wt-name">${escapeHtml(w.name)}</div>
               <div class="wt-branch">
-                <span>🌱</span> ${w.branch}
+                <span>🌱</span> ${escapeHtml(w.branch)}${divergeBadges(w.id)}
                 <div style="margin-left: auto; display: flex; gap: 4px; align-items: center;">
                     ${shortcuts(w.id)}
-                    ${isActive ? `<span style="font-size:10px;cursor:pointer;padding:2px 4px;" onclick="deleteWorktree('${w.id}', event)">✕</span>` : ''}
+                    ${isActive ? `<span style="font-size:10px;cursor:pointer;padding:2px 4px;" onclick="deleteWorktree('${wIdEsc}', event)">✕</span>` : ''}
                 </div>
               </div>
             </li>
@@ -1987,6 +2193,7 @@
                  ondrop="handleDrop('${i.id}', event)"
                  title="Drag to reorder; double-click to rename">
               <span class="tab-status ${statusClass}"></span>
+              ${i.kind === "reasonix" ? '<span class="rx-badge" title="Reasonix web UI">rx</span>' : ""}
                ${displayName}
             </div>
           `;
@@ -2156,6 +2363,27 @@
                 empty.style.display = "none";
                 termContainer.style.display = "block";
                 actions.classList.add("visible");
+
+                if (inst && inst.kind === "reasonix") {
+                    // Issue #55: normalize container styles that an xterm
+                    // instance may have left behind (grayscale/opacity for a
+                    // stopped instance). CSS filter applies to the iframe
+                    // content too, so a leftover grayscale would grey out the
+                    // whole web UI.
+                    termContainer.style.opacity = "1";
+                    termContainer.style.filter = "none";
+                    // Issue #54: hide any leftover xterm hosts. They are
+                    // positioned (position:absolute; inset:0) and would
+                    // overlay/block the static iframe, leaving it blank.
+                    renderTerminalSessions();
+                    if (inst.status === "running") {
+                        ensureWebFrame(inst);
+                    } else {
+                        invalidateWebFrame();
+                    }
+                    return;
+                }
+                removeWebFrame();
                 
                 // Styling for stopped instance
                 if (inst && inst.status !== 'running') {
@@ -2222,6 +2450,8 @@
             } else {
                 refresh(); // Will trigger auto-select instance in renderTabs
             }
+            // Refresh diverge status for the selected worktree immediately.
+            fetchDivergeSingle(id);
             // Reset and start git changes polling for the new worktree.
             if (gitChangesTimer) clearInterval(gitChangesTimer);
             refreshGitChanges();
@@ -2231,6 +2461,77 @@
         function selectWorktreeByID(id) {
             state.activeWT = id;
             refresh();
+        }
+
+        // Web-UI (Reasonix) instance: render an iframe inside the terminal
+        // container instead of an xterm session. The backend serves the page
+        // on the independent listener (issue #44) and reports it as web_url
+        // (cross-origin with the myworktree API); without it (TLS mode) it
+        // falls back to the same-origin /rx/<id>/ route.
+        function ensureWebFrame(inst) {
+            let frame = document.getElementById("web-frame");
+            if (!frame) {
+                frame = document.createElement("iframe");
+                frame.id = "web-frame";
+                frame.style.cssText = "width:100%;height:100%;border:0;background:var(--bg, #000);";
+                frame.dataset.instance = "";
+                frame.dataset.src = "";
+                document.getElementById("terminal-container").appendChild(frame);
+            }
+            // Only navigate when the target changes: the 2s poll calls
+            // render() → renderWorkspace() on every tick, and assigning the
+            // same src would reload the iframe each time — the embedded page
+            // would flash/refresh continuously.
+            //
+            // The guard compares BOTH the instance id and the resolved src.
+            // web_url is a runtime-assigned port (view-only, not persisted):
+            // after a server restart the independent listener gets a fresh
+            // port, so the same instance id resolves to a new web_url. If we
+            // only compared the id, the iframe would keep pointing at the
+            // dead pre-restart port until the user switched tabs — the poll
+            // would pick up the new web_url and this check navigates to it.
+            //
+            // Note the guard covers both "staying on the same reasonix tab"
+            // and "switching back" — removeWebFrame only hides the iframe
+            // (issue #53), so the element keeps its dataset and the page
+            // state (chat draft, scroll, sidebar) is preserved across tab
+            // switches. Only a src change (e.g. new port after restart)
+            // triggers a fresh navigation.
+            const src = (inst && inst.web_url) ? inst.web_url : "/rx/" + inst.id + "/";
+            if (frame.dataset.instance !== inst.id || frame.dataset.src !== src) {
+                frame.dataset.instance = inst.id;
+                frame.dataset.src = src;
+                frame.src = src;
+            }
+            frame.style.display = "block";
+            return frame;
+        }
+
+        // Hide the web frame instead of destroying it (issue #53): switching
+        // away must only toggle visibility so the embedded page (chat draft,
+        // scroll position, sidebar session list) survives tab switches. The
+        // iframe element stays in the DOM; the dataset.src guard in
+        // ensureWebFrame still re-navigates only when the resolved src changes
+        // (e.g. after a server restart the independent listener gets a new
+        // port → new web_url).
+        function removeWebFrame() {
+            const frame = document.getElementById("web-frame");
+            if (frame) frame.style.display = "none";
+        }
+
+        // Hide AND invalidate the frame's navigation cache. Used when a
+        // reasonix instance is stopped: the embedded page is dead, and on the
+        // same-origin /rx/<id>/ fallback the src never changes, so without
+        // clearing the dataset a stop→start cycle would keep showing the stale
+        // pre-stop page (review regression on the issue #53 fix). Clearing the
+        // dataset makes ensureWebFrame re-navigate on the next start.
+        function invalidateWebFrame() {
+            const frame = document.getElementById("web-frame");
+            if (frame) {
+                frame.style.display = "none";
+                frame.dataset.instance = "";
+                frame.dataset.src = "";
+            }
         }
 
         function selectInstance(id) {
@@ -2244,6 +2545,19 @@
             render(); // update UI highlights
 
             if (id) {
+                const instWeb = inst && inst.kind === "reasonix";
+                if (instWeb) {
+                    render();
+                    if (inst.status === 'running') {
+                        ensureWebFrame(inst);
+                        updateStatus("reasonix web");
+                    } else {
+                        invalidateWebFrame();
+                        updateStatus("stopped");
+                    }
+                    maybeDestroyInactiveStoppedSession(previousID);
+                    return;
+                }
                 // If stopped, just load log once. If running, connect TTY directly.
                 if (inst && inst.status !== 'running') {
                     const session = ensureTerminalSession(id);
@@ -2342,6 +2656,7 @@
             document.getElementById("cmd").value = "";
             document.getElementById("instName").value = "";
             document.getElementById("tagSelect").value = "";
+            document.getElementById("instKindReasonix").checked = false;
             openModal("modal-start-instance");
         }
 
@@ -2407,12 +2722,38 @@
                     tag_id: document.getElementById("tagSelect").value,
                     command: document.getElementById("cmd").value,
                     name: document.getElementById("instName").value,
+                    kind: document.getElementById("instKindReasonix").checked ? "reasonix" : "",
                 };
                 const res = await api("/api/instances", { method: "POST", body: JSON.stringify(body) });
                 closeModal("modal-start-instance");
                 await refresh();
                 selectInstance(res.id);
-            } catch (e) { alert(e); }
+            } catch (e) {
+                if (e && e.status === 503 && e.body && e.body.error === "log_buffer_budget_exceeded") {
+                    showBudgetError(e.body);
+                    return;
+                }
+                alert(e.message || e);
+            }
+        }
+
+        function showBudgetError(body) {
+            const msgEl = document.getElementById("budget-error-message");
+            const hintEl = document.getElementById("budget-error-hint");
+            msgEl.textContent = body.message || "Insufficient memory to start new instance.";
+            const used = formatBytes(body.used_bytes);
+            const limit = formatBytes(body.limit_bytes);
+            hintEl.textContent = `Used ${used} / limit ${limit}. ${body.hint || ""}`;
+            openModal("modal-budget-error");
+        }
+
+        function formatBytes(n) {
+            if (n == null) return "?";
+            const kb = 1024, mb = 1024 * 1024, gb = 1024 * 1024 * 1024;
+            if (n >= gb) return (n / gb).toFixed(2) + " GB";
+            if (n >= mb) return (n / mb).toFixed(2) + " MB";
+            if (n >= kb) return (n / kb).toFixed(2) + " KB";
+            return n + " B";
         }
 
         async function stopInstance() {
@@ -2436,7 +2777,7 @@
             } catch (e) { alert(e); }
         }
         async function deleteInstance() {
-            if (!state.activeInst || !confirm("Delete instance log?")) return;
+            if (!state.activeInst || !confirm("Delete instance?")) return;
             try { await api("/api/instances/delete", { method: "POST", body: JSON.stringify({ id: state.activeInst }) }); refresh(); } catch (e) { alert(e); }
         }
         // Terminal Logic (Per Instance)
@@ -3128,7 +3469,7 @@
             const dlg = document.getElementById("modal-monitor");
             dlg.showModal();
             fetchMonitorStats();
-            monitorTimer = setInterval(fetchMonitorStats, 1000);
+            monitorTimer = setInterval(fetchMonitorStats, 2000);
         }
 
         function closeMonitorModal() {
@@ -3223,11 +3564,17 @@
                         <td>${escapeHTML(inst.status)}</td>
                         <td class="${connClass}">${escapeHTML(connLabel)}</td>
                         <td style="text-align:right">${inst.cpu_percent.toFixed(1)}%</td>
-                        <td style="text-align:right">${formatBytes(inst.memory_rss_bytes)}</td>
+                        <td style="text-align:right">${formatBytes((inst.memory_rss_bytes || 0) + (inst.memory_buffer_bytes || 0))}<span style="font-size:11px;color:var(--text-secondary)">${buildBufferNote(inst)}</span></td>
                     </tr>`;
                 }
             }
+            if (data.global) {
+                html += '<tr class="daemon-row" style="background:var(--surface-secondary)"><td colspan="4">mw daemon</td><td style="text-align:right">' + (data.global.daemon_cpu_percent || 0).toFixed(1) + '%</td><td style="text-align:right">' + formatBytes(data.global.daemon_memory_bytes || 0) + '</td></tr>';
+            }
             tbody.innerHTML = html;
+            const discRow = document.createElement('tr');
+            discRow.innerHTML = '<td colspan="6" style="font-size:12px;color:var(--text-secondary);padding-top:8px;border-top:1px solid var(--border);text-align:center;">Child processes spawned by instances are not counted</td>';
+            tbody.appendChild(discRow);
         }
 
         function formatBytes(bytes) {
@@ -3236,6 +3583,13 @@
             if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + " KB";
             if (bytes < 1024 * 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + " MB";
             return (bytes / (1024 * 1024 * 1024)).toFixed(2) + " GB";
+        }
+
+        function buildBufferNote(inst) {
+            const used = inst.memory_buffer_bytes || 0;
+            const cap = inst.memory_buffer_cap_bytes || 0;
+            if (cap <= 0) return "";
+            return " &nbsp;buf " + formatBytes(used) + "/" + formatBytes(cap);
         }
 
         function escapeHTML(s) {
