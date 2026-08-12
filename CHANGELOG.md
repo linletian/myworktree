@@ -8,6 +8,8 @@
 
 Disk write amplification fix for long-running PTY-heavy sessions.
 
+**Reasonix sidebar toggle resized to a vertical pill that fits the chat gutter**: the injected hide/expand sidebar button in the embedded Reasonix web chat was 34×34px at (8,8), so it overlapped the conversation. It is now a vertical 24×64px pill at (2,8) with a CSS arrow glyph (▶ when collapsed — click to expand, ◀ when expanded — click to collapse; direction points at where the sidebar moves, so no text or i18n needed): measured against the upstream `.transcript` padding (`24px 28px` on desktop), the button's right edge (26px) stays inside the chat's 28px left gutter, so it never covers message text in either the collapsed or expanded state, and the taller target is easier to see and click.
+
 ### Breaking changes
 
 - **`state.json` schema: `log_path` field removed** — external tooling that reads instance state files must drop the `log_path` field. Old state files continue to load cleanly (the field is silently ignored by JSON decoding). See `docs/ARCHITECTURE.md` §3.2.

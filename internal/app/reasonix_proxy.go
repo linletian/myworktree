@@ -294,6 +294,23 @@ func injectReasonixPrefix(html []byte, mount string) []byte {
 	//     moved next to the sidebar edge when expanded) — we deliberately do
 	//     NOT reuse upstream #menu-btn: it is hidden on desktop, its onclick
 	//     runs after our <head> script and would clobber ours.
+	//   - Button sizing (measured against v1.22.0): the desktop
+	//     .transcript has padding:24px 28px, so the collapsed chat's left
+	//     gutter is 28px wide (the narrow-screen padding:16px only applies
+	//     under max-width:768px, where our toggle is hidden anyway). The
+	//     button is a vertical 24x64px pill at (2,8): its right edge at
+	//     2+24=26px stays inside the 28px gutter, so the height may extend
+	//     freely without ever overlapping message text — in both the
+	//     collapsed and expanded states (expanded, the chat gutter starts at
+	//     the sidebar's right edge and the button sits right next to it at
+	//     left:calc(var(--mw-sidebar-w) + 4px)). The taller target is easier
+	//     to see and click; a CSS ::before arrow switches ▶/◀ with the
+	//     .mw-rx state (points at the direction the sidebar will move: ▶ to
+	//     expand, ◀ to collapse — no text, no i18n). The glyph's font-size
+	//     and line-height are declared once on #mw-sidebar-toggle and
+	//     inherited by the ::before pseudo-element.
+	//     Re-verify the gutter width if upstream changes
+	//     .transcript padding.
 	//   - Timing note: the CSS is static and the class flip is synchronous
 	//     (add('mw-rx') runs as the <head> script parses), so there is no
 	//     race; the html:not(.mw-rx) selector simply tracks the current
@@ -304,6 +321,11 @@ func injectReasonixPrefix(html []byte, mount string) []byte {
 	//   - Narrow screens (<769px) keep the native mobile sidebar; our toggle
 	//     is hidden there (its styles are desktop-scoped, so without this the
 	//     unstyled button would render at the top of the page flow).
+	//   - 768px edge: the two @media blocks are disjoint — the native
+	//     #menu-btn !important hide starts at min-width:769px while our
+	//     toggle hides at max-width:768px — so at exactly 768px the native
+	//     mobile #menu-btn remains the visible entry point (upstream's own
+	//     breakpoint). Matches upstream; not a regression from this PR.
 	//   - Collapsed by default keeps the management scope on the current
 	//     worktree: the sidebar (brand / nav / session list) is what the user
 	//     asked to hide (issue #48).
@@ -319,9 +341,11 @@ func injectReasonixPrefix(html []byte, mount string) []byte {
   .mw-rx .transcript{grid-column:2;grid-row:1}
   .mw-rx .footer{grid-column:2;grid-row:2}
   .app{grid-template-columns:var(--mw-sidebar-w,220px) 1fr}
-  #mw-sidebar-toggle{position:fixed;top:8px;left:8px;z-index:97;width:34px;height:34px;display:flex;align-items:center;justify-content:center;border-radius:var(--radius,8px);background:var(--panel,#222);border:1px solid var(--border,#333);color:var(--fg-2,#aaa);cursor:pointer;font-size:16px;line-height:1;transition:background .15s,left .25s ease}
+  #mw-sidebar-toggle{position:fixed;top:8px;left:2px;z-index:97;width:24px;height:64px;box-sizing:border-box;display:flex;align-items:center;justify-content:center;border-radius:12px;background:var(--panel,#222);border:1px solid var(--border,#333);color:var(--fg-2,#aaa);cursor:pointer;font-size:15px;line-height:1;transition:background .15s,left .25s ease}
+  #mw-sidebar-toggle::before{content:'▶'}
+  html:not(.mw-rx) #mw-sidebar-toggle::before{content:'◀'}
   #mw-sidebar-toggle:hover{background:var(--card-hover,#2a2a2a);color:var(--fg,#eee)}
-  html:not(.mw-rx) #mw-sidebar-toggle{left:calc(var(--mw-sidebar-w,220px) + 6px);color:var(--fg,#eee)}
+  html:not(.mw-rx) #mw-sidebar-toggle{left:calc(var(--mw-sidebar-w,220px) + 4px);color:var(--fg,#eee)}
   #menu-btn{display:none!important}
 }
 @media(max-width:768px){
@@ -337,7 +361,7 @@ func injectReasonixPrefix(html []byte, mount string) []byte {
     var b=document.createElement('button');
     b.id='mw-sidebar-toggle';b.type='button';
     b.setAttribute('aria-label','Toggle sidebar');
-    b.title='Toggle sidebar';b.textContent='\u2630';
+    b.title='Toggle sidebar';
     b.addEventListener('click',function(){root.classList.toggle('mw-rx');});
     document.body.appendChild(b);
   }
