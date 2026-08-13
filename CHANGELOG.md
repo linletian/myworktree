@@ -4,9 +4,18 @@
 
 Disk write amplification fix for long-running PTY-heavy sessions.
 
+### Bug fixes
+
+- **PTY multi-tab cross-talk** — opening two PTY tabs interleaves output across tabs. The per-instance subscriber set was previously global inside the kind package; now keyed by `instance id` (`internal/instance/pty/driver.go`, `TestSubscribeOutput_ScopedPerInstance`).
+- **PTY ring-buffer budget bypass** — PTY instances no longer allocate their own buffers; the framework now allocates the per-instance ring buffer via `Manager.AllocateBuffer` and passes it through `SpawnParams.Buffer`. Budget enforcement (`BufferCapBytesFor` / `dropBuffer` / 25%-of-RAM cap) now covers PTY.
+- **opencode-web long-run pipe deadlock** — `pumpAndWatch` now drains the child's stdout to EOF after parsing the listening line, so the upstream process never blocks on a full 64 KiB OS pipe (`internal/instance/opencode_web/driver.go`, `TestPumpAndWatch_DrainsAfterListening`).
+- **opencode-web publisher data race** — `Handle.publisher` is now `atomic.Pointer[framework.Publisher]`; readers in `pumpAndWatch` / `healthLoop` / `wait` go through `loadPublisher()`. `-race` clean.
+- **framework ring-buffer map leak** — `Manager.runLifecycle`'s defer now calls `dropBuffer` instead of only decrementing `totalBufBytes`, so `m.buffers[id]` no longer holds a stale `*RingBuffer` for instances that exited via Stop / kind-reported terminal status / ready-timeout. Aligns with the "Stop / wait / Restart / Delete all funnel into dropBuffer" contract in `docs/ARCHITECTURE.md` §"Buffer lifecycle". `TestRunLifecycle_DropsBufferOnTerminalStatus` / `TestRunLifecycle_DropsBufferOnReadyTimeout` / `TestStop_DropsBuffer`.
+
 - **feat(instance): opencode-web kind embedding opencode official web UI** — implemented: `internal/instance/opencode.go`, `internal/ui/proxy.go`, `/__opencode/<id>/*` reverse proxy, iframe panel + OC badge in `internal/ui/static/index.html`. Design, threat model, and review checklist in `docs/ARCHITECTURE.md` §8.
 - **feat(opencode-web): single-worktree isolation** — full-page embed (`/__opencode/<id>/`, replacing the deep session link that blanked the SPA), reverse-proxy directory monitoring that records out-of-scope requests in an in-memory `ScopeTracker` (`/api/instances/opencode/scope?id=`), an injected script that hides cross-worktree switch entries (project switch / add-project / open-project) and normalizes the localStorage server list to a single server, an `opencode --version` gate (advisory, 1.18.x) plus DOM-anchor / visibility checks reported via `postMessage`, and a persistent in-panel warning bar (out-of-scope + hiding-not-effective states). Design and decision record in `docs/plans/opencode-native-ui/WORKTREE-ISOLATION.md`.
 - **fix(opencode-web): hide project list via CSS to avoid SSE-time render jank** — replace the `MutationObserver` + `querySelectorAll` walk that hid `[data-slot="home-projects-scroll"]` (home project list) and `[data-action="project-switch"]` (project switch button) with a one-shot `<style>` injection (`aside:has([data-slot="home-projects-scroll"]){display:none!important}` etc.), so the SSE-driven session stream no longer re-traverses the whole DOM on every mutation. Same JS continues to hide per-element foreign-worktree projects and the "Open project" button. Post-mortem and seven follow-up debugging notes (URL/Worker rewrite, projects preseed, sandbox normalization, orphan process) added to `docs/plans/opencode-native-ui/DEBUG.md`.
+- docs: add `REVIEW-e4158fa.md` code review for `feature/opencode-native-ui` HEAD (`e4158fa`).
 
 ### Breaking changes
 

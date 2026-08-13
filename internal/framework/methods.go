@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -326,6 +325,10 @@ func (m *Manager) BufferUsedBytesFor(id string) int64 {
 // SubscribeOutput returns a channel that receives output chunks
 // from the instance. PTY kind broadcasts to this channel; other
 // kinds return an error.
+//
+// The id is passed to the kind so kinds that fan output can scope
+// the subscription to one instance. Without it, every PTY tab would
+// receive every other PTY tab's output.
 func (m *Manager) SubscribeOutput(id string) (<-chan string, func(), error) {
 	m.mu.Lock()
 	ri, ok := m.running[id]
@@ -334,14 +337,14 @@ func (m *Manager) SubscribeOutput(id string) (<-chan string, func(), error) {
 		return nil, nil, fmt.Errorf("instance not running: %s", id)
 	}
 	type outputSub interface {
-		SubscribeOutput() (<-chan string, func(), error)
+		SubscribeOutput(id string) (<-chan string, func(), error)
 	}
 	k, kerr := m.Registry.Get(ri.handle.KindName)
 	if kerr != nil {
 		return nil, nil, kerr
 	}
 	if s, ok := k.(outputSub); ok {
-		return s.SubscribeOutput()
+		return s.SubscribeOutput(id)
 	}
 	return nil, nil, fmt.Errorf("kind %q does not support output subscription", ri.handle.KindName)
 }
@@ -430,7 +433,7 @@ func (m *Manager) AllocateBuffer(id string, capBytes int64) *RingBuffer {
 }
 
 // --- ensure unused imports stay referenced ---
-
-var (
-	_ sync.Mutex
-)
+//
+// (kept removed: methods.go's `sync` package is genuinely used by the
+// mutex types threaded through Manager; the previous `var (_ sync.Mutex)`
+// placeholder was vestigial and has been deleted along with it.)

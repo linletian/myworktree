@@ -11,7 +11,6 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
-	"os"
 	"regexp"
 	"strings"
 
@@ -30,6 +29,7 @@ import (
 //     (username "opencode", password = authToken)
 //   - adds ?directory=<worktree> for GET/HEAD requests to API paths
 func ProxyHandler(m *framework.Manager, authToken string, tracker *ScopeTracker) http.Handler {
+	logger := proxyLogger(m)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Path after StripPrefix is "/<id>/<rest...>".
 		path := strings.TrimPrefix(r.URL.Path, "/")
@@ -83,8 +83,15 @@ func ProxyHandler(m *framework.Manager, authToken string, tracker *ScopeTracker)
 			})
 		}
 
-		fmt.Fprintf(os.Stderr, "[opencode-proxy] %s %s → http://%s:%s%s (directory=%q scope=%s)\n",
-			r.Method, r.URL.Path, host, port, rest, dir, scope)
+		// Per-request access log. SSE streams through this handler at
+		// high frequency, so write via the framework's *log.Logger
+		// (default: io.Discard) rather than os.Stderr — that previous
+		// behaviour spammed stderr in production and racy with other
+		// concurrent writers. Nil logger → skip silently.
+		if logger != nil {
+			logger.Printf("[opencode-proxy] %s %s → http://%s:%s%s (directory=%q scope=%s)",
+				r.Method, r.URL.Path, host, port, rest, dir, scope)
+		}
 
 		target := &url.URL{Scheme: "http", Host: host + ":" + port}
 		proxy := httputil.NewSingleHostReverseProxy(target)
@@ -348,5 +355,13 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
-var _ = log.Printf
-var _ = io.Discard
+// proxyLogger returns the framework Manager's logger so the proxy
+// can write per-request access lines. NewManager defaults to
+// io.Discard, so production runs stay quiet unless the operator wires
+// a real logger into the Manager.
+func proxyLogger(m *framework.Manager) *log.Logger {
+	if m == nil {
+		return nil
+	}
+	return m.Logger
+}

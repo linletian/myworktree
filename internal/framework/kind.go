@@ -24,6 +24,13 @@ type KindInfo struct {
 // It deliberately omits anything kind-specific (the auth token is
 // passed through because every managed kind needs SOME form of secret
 // to identify itself to the worktree framework).
+//
+// Buffer is pre-allocated by the framework for kinds that capture
+// output (PTY). Kinds that need a buffer MUST use this one (not
+// create their own) so that BufferCapBytesFor / dropBuffer see the
+// same bytes the kind writes into. nil means "framework does not
+// expect this kind to buffer output"; the kind is free to create its
+// own or skip buffering entirely.
 type SpawnParams struct {
 	WorktreeID   string
 	WorktreePath string
@@ -33,6 +40,20 @@ type SpawnParams struct {
 	KindEnv      map[string]string
 	AuthToken    string            // myworktree bearer; reused as upstream password by opencode-web
 	ExtraEnv     map[string]string // from tag.Env
+
+	// InstanceID is the framework-assigned id for this instance. Kinds
+	// that fan output to subscribers (PTY) use it to scope broadcast
+	// channels — without it, every PTY tab would receive every other
+	// PTY tab's output (a real regression from the pre-kind-refactor
+	// Manager, which keyed subscribers per-instance).
+	InstanceID string
+
+	// Buffer is the pre-allocated ring buffer the framework tracks
+	// against the instance. Kinds that capture output MUST write into
+	// this buffer (not their own) so BufferCapBytesFor /
+	// BufferUsedBytesFor / dropBuffer see the same bytes. See the
+	// type-level doc above.
+	Buffer *RingBuffer
 }
 
 // Handle is the opaque per-instance state owned by a kind. The

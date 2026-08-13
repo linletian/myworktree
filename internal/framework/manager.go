@@ -39,10 +39,22 @@ type InstanceStore interface {
 // server. Spawns new instances by delegating to the registered kind,
 // watches them via a single goroutine per instance that owns the
 // kind's Handle and the ReadySignal.
+//
+// Lock order (if a function must hold more than one of mu / connsMu /
+// stateMu at once, acquire them in this order to avoid deadlock):
+//
+//	mu → connsMu → stateMu
+//
+// Single-lock acquisitions may take any of the three; the order only
+// matters when nesting (e.g. Manager.Delete at methods.go:55-60).
 type Manager struct {
 	Registry *Registry
 
 	Store   InstanceStore
+	// Logger is the structured logger kinds and the proxy use for
+	// diagnostic output. NewManager defaults this to io.Discard; operators
+	// must wire a real logger here to see per-request proxy lines and
+	// per-instance state-transition logs.
 	Logger  *log.Logger
 	Root    string // git repo root for MainWorktreeID resolution
 	DataDir string
@@ -57,9 +69,9 @@ type Manager struct {
 
 	memSampler MemSampler
 
-	stateMu      sync.Mutex
-	mu           sync.Mutex
-	running      map[string]*runningInstance // id -> live instance state
+	stateMu       sync.Mutex
+	mu            sync.Mutex
+	running       map[string]*runningInstance // id -> live instance state
 	totalBufBytes atomic.Int64
 
 	// buffers holds the per-instance ring buffer pointers used by kinds that capture output (PTY).
@@ -167,6 +179,13 @@ func (m *Manager) Start(ctx context.Context, in StartParams) (store.ManagedInsta
 		return store.ManagedInstance{}, err
 	}
 
+	// Pre-allocate the per-instance ring buffer so kinds that capture
+	// output (PTY) write into the SAME buffer the framework tracks.
+	// AllocateBuffer already adds capBytes to totalBufBytes; the
+	// explicit m.totalBufBytes.Add below was the old (pre-AllocateBuffer)
+	// bookkeeping and would double-count if left in place.
+	buf := m.AllocateBuffer(id, capBytes)
+
 	params := SpawnParams{
 		WorktreeID:   in.WorktreeID,
 		WorktreePath: wtPath,
@@ -175,10 +194,13 @@ func (m *Manager) Start(ctx context.Context, in StartParams) (store.ManagedInsta
 		Name:         inst.Name,
 		AuthToken:    m.AuthToken,
 		ExtraEnv:     in.ExtraEnv,
+		InstanceID:   id,
+		Buffer:       buf,
 	}
 
 	handle, ready, err := k.Spawn(ctx, params)
 	if err != nil {
+		m.dropBuffer(id)
 		m.markFailed(id, err)
 		return store.ManagedInstance{}, err
 	}
@@ -208,17 +230,25 @@ func (m *Manager) Start(ctx context.Context, in StartParams) (store.ManagedInsta
 	m.running[id] = ri
 	m.mu.Unlock()
 
-	m.totalBufBytes.Add(capBytes)
-
-	go m.runLifecycle(runCtx, inst, ri, capBytes)
+	go m.runLifecycle(runCtx, inst, ri)
 
 	return inst, nil
 }
 
 // runLifecycle waits for ReadySignal then polls the kind for terminal status.
-func (m *Manager) runLifecycle(ctx context.Context, inst store.ManagedInstance, ri *runningInstance, capBytes int64) {
+func (m *Manager) runLifecycle(ctx context.Context, inst store.ManagedInstance, ri *runningInstance) {
 	defer ri.wg.Done()
-	defer m.totalBufBytes.Add(-capBytes)
+	// Funnel buffer cleanup through dropBuffer (the same path used by
+	// Stop / Delete / Restart per docs/ARCHITECTURE.md §"Buffer
+	// lifecycle"): Swap(nil) the ring buffer pointer, decrement
+	// totalBufBytes via rb.CapBytes(), and delete the map entry.
+	// Previously this deferred only m.totalBufBytes.Add(-capBytes),
+	// which left m.buffers[id] holding a stale *RingBuffer for every
+	// instance that exited via lifecycle (Stop / ready-timeout / kind
+	// reported terminal status). Per-instance PTY buffers are ~4 MiB;
+	// long-running daemons accumulated dead buffers proportional to
+	// total stop/start cycles.
+	defer m.dropBuffer(inst.ID)
 
 	select {
 	case <-ri.ready.Channel():
@@ -226,6 +256,11 @@ func (m *Manager) runLifecycle(ctx context.Context, inst store.ManagedInstance, 
 	case <-ctx.Done():
 		return
 	case <-time.After(60 * time.Second):
+		// TODO(kinds): surface per-kind timeouts via ReadySignal context or
+		// a SpawnParams knob. PTY is ready in <1s, opencode-web in 1-3s; a
+		// slow CI box can need 30s+ for opencode-web to compile its plugin
+		// chain. The 60s value is empirically safe but is a ceiling, not a
+		// target.
 		m.markFailed(inst.ID, errors.New("instance did not become ready within 60s"))
 		m.mu.Lock()
 		delete(m.running, inst.ID)
@@ -425,10 +460,10 @@ type kindPublisher struct {
 	id string
 }
 
-func (p *kindPublisher) InstanceID() string              { return p.id }
-func (p *kindPublisher) MarkRunning() error              { return p.m.MarkRunning(p.id) }
-func (p *kindPublisher) MarkFailed(r string) error       { return p.m.MarkFailed(p.id, r) }
-func (p *kindPublisher) MarkExited(c int) error          { return p.m.MarkExited(p.id, c) }
+func (p *kindPublisher) InstanceID() string        { return p.id }
+func (p *kindPublisher) MarkRunning() error        { return p.m.MarkRunning(p.id) }
+func (p *kindPublisher) MarkFailed(r string) error { return p.m.MarkFailed(p.id, r) }
+func (p *kindPublisher) MarkExited(c int) error    { return p.m.MarkExited(p.id, c) }
 func (p *kindPublisher) UpdateKindBlob(b json.RawMessage) error {
 	return p.m.UpdateKindBlob(p.id, b)
 }

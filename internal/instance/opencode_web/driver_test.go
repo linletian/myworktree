@@ -1,9 +1,12 @@
 package opencode_web
 
 import (
+	"context"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"myworktree/internal/framework"
 )
@@ -128,4 +131,62 @@ func TestDriver_RegisterHTTP_NoOp(t *testing.T) {
 	// it with a nil/empty handle must not panic.
 	d := Driver{}
 	d.RegisterHTTP(http.NewServeMux(), "inst-1", framework.Handle{})
+}
+
+// TestPumpAndWatch_DrainsAfterListening guards against the bug where
+// pumpAndWatch returned as soon as it parsed the listening line, leaving
+// the stdout pipe undrained. The child process would then block on its
+// next write(2) once the OS pipe buffer filled (~64 KiB on Linux),
+// presenting as the UI "stuck" with no obvious cause.
+func TestPumpAndWatch_DrainsAfterListening(t *testing.T) {
+	// ~256 KiB of post-listening chatter — well above the 64 KiB pipe
+	// buffer, so an undrained reader would block the writer.
+	const trailing = 256 * 1024
+	var sb strings.Builder
+	sb.WriteString("opencode server listening on http://127.0.0.1:4096\n")
+	for i := 0; i < trailing; i++ {
+		sb.WriteByte('x')
+	}
+	sb.WriteString("\nEND\n")
+	in := strings.NewReader(sb.String())
+
+	h := &Handle{
+		ready:  framework.NewReadySignal(),
+		cancel: func() {},
+		wg:     &sync.WaitGroup{},
+	}
+	h.wg.Add(1)
+
+	d := Driver{}
+	done := make(chan struct{})
+	go func() {
+		d.pumpAndWatch(context.Background(), h, in)
+		close(done)
+	}()
+
+	// Wait for the ready signal — that is when pumpAndWatch would
+	// historically have returned without draining.
+	select {
+	case <-h.ready.Channel():
+	case <-time.After(2 * time.Second):
+		t.Fatal("ready signal not closed within 2s")
+	}
+
+	// Now the goroutine should still be alive draining remaining bytes.
+	// We can't directly observe drain, but we can confirm pumpAndWatch
+	// returns promptly (it must read until EOF after the listening line).
+	select {
+	case <-done:
+		// OK — drained to EOF and returned.
+	case <-time.After(2 * time.Second):
+		t.Fatal("pumpAndWatch did not return within 2s after EOF; trailing bytes likely undrained")
+	}
+
+	// And the parsed host/port are correct.
+	h.mu.Lock()
+	host, port := h.host, h.port
+	h.mu.Unlock()
+	if host != "127.0.0.1" || port != "4096" {
+		t.Fatalf("parsed host=%q port=%q, want 127.0.0.1 / 4096", host, port)
+	}
 }

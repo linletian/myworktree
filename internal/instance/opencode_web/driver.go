@@ -102,8 +102,10 @@ type Handle struct {
 	failCount  atomic.Int32
 
 	// publisher set by SetPublishers, called by kind to push state
-	// changes back to the framework.
-	publisher framework.Publisher
+	// changes back to the framework. atomic.Pointer so SetPublishers
+	// (called once after Spawn) and the readers in pumpAndWatch /
+	// healthLoop / wait don't race on the bare field.
+	publisher atomic.Pointer[framework.Publisher]
 }
 
 // Spawn launches opencode serve and parses its stdout for the
@@ -161,22 +163,52 @@ func (h *Handle) AttachInstanceID(id string) {
 // goroutines (pumpAndWatch, healthLoop, wait) learn about state
 // transitions before the Manager's periodic Status() poll would
 // notice — pushing inline keeps the state.json consistent.
+//
+// The Publisher is stored in an atomic.Pointer so the readers
+// (pumpAndWatch, healthLoop, wait) don't have to take h.mu on every
+// state transition; the data race detector would otherwise flag the
+// bare-field read in those hot paths.
+// SetPublishers must be called exactly once between Spawn returning and
+// any goroutine starting (see framework/kind.go SetPublishers doc). A
+// second call is a framework bug — surface it loudly.
 func (Driver) SetPublishers(handle framework.Handle, p framework.Publisher) {
 	h := mustHandle(handle)
-	h.publisher = p
+	// atomic.Pointer[T].CompareAndSwap compares the stored *T (here
+	// *framework.Publisher), so pass nil for the zero value, not a
+	// pointer to a local interface variable.
+	if !h.publisher.CompareAndSwap(nil, &p) {
+		panic("opencode-web: SetPublishers called twice on the same handle (framework bug)")
+	}
 	h.AttachInstanceID(p.InstanceID())
 }
 
-// Stop terminates the opencode serve process.
+// loadPublisher returns the Publisher (if any) for this handle.
+func (h *Handle) loadPublisher() framework.Publisher {
+	if p := h.publisher.Load(); p != nil {
+		return *p
+	}
+	return nil
+}
+
+// Stop terminates the opencode serve process. graceSeconds is the
+// time allowed between SIGTERM and SIGKILL; values <= 0 fall back to
+// the package default (stopGrace). The framework passes its
+// configured stopGraceSeconds through (see framework.Manager.Stop),
+// so a user-configured shorter grace period actually shortens the
+// wait — previously this was hardcoded and the parameter was dead.
 func (d Driver) Stop(handle framework.Handle, graceSeconds int) error {
 	h := mustHandle(handle)
 	if h.cmd == nil || h.cmd.Process == nil {
 		return nil
 	}
 	pid := h.cmd.Process.Pid
+	grace := time.Duration(graceSeconds) * time.Second
+	if grace <= 0 {
+		grace = stopGrace
+	}
 	_ = terminatePID(pid, syscall.SIGTERM)
 	go func() {
-		time.Sleep(stopGrace)
+		time.Sleep(grace)
 		_ = terminatePID(pid, syscall.SIGKILL)
 	}()
 	return nil
@@ -323,8 +355,10 @@ func (d Driver) probeVersion(ctx context.Context, h *Handle) {
 	h.blob.VersionSupported = isSupportedVersion(v)
 	blob, err := json.Marshal(h.blob)
 	h.mu.Unlock()
-	if err == nil && h.publisher != nil {
-		_ = h.publisher.UpdateKindBlob(blob)
+	if err == nil {
+		if p := h.loadPublisher(); p != nil {
+			_ = p.UpdateKindBlob(blob)
+		}
 	}
 }
 
@@ -357,13 +391,22 @@ func (d Driver) pumpAndWatch(ctx context.Context, h *Handle, r io.Reader) {
 			// which writes h.blob.Version under the same mutex.
 			blob, err := json.Marshal(h.blob)
 			h.mu.Unlock()
-			if err == nil && h.publisher != nil {
-				_ = h.publisher.UpdateKindBlob(blob)
+			if err == nil {
+				if p := h.loadPublisher(); p != nil {
+					_ = p.UpdateKindBlob(blob)
+				}
 			}
 			h.ready.Close()
-			if h.publisher != nil {
-				_ = h.publisher.MarkRunning()
+			if p := h.loadPublisher(); p != nil {
+				_ = p.MarkRunning()
 			}
+			// Drain remaining stdout: the scanner stops reading once we
+			// return, and stdoutR is an io.PipeReader (OS pipe under the
+			// hood, ~64 KiB on Linux). If the child process keeps writing
+			// after we've parsed the listening line, the pipe fills and
+			// opencode blocks on its next write(2) — leaving the UI
+			// "stuck" with no obvious cause. Discard until EOF / ctx cancel.
+			_, _ = io.Copy(io.Discard, r)
 			return
 		}
 	}
@@ -391,8 +434,8 @@ func (d Driver) healthLoop(ctx context.Context, h *Handle) {
 			}
 			n := h.failCount.Add(1)
 			if int(n) >= healthFailThreshold {
-				if h.publisher != nil {
-					_ = h.publisher.MarkFailed("opencode health probe failed")
+				if p := h.loadPublisher(); p != nil {
+					_ = p.MarkFailed("opencode health probe failed")
 				}
 				return
 			}
@@ -408,8 +451,8 @@ func (d Driver) wait(ctx context.Context, h *Handle) {
 	if h.cmd.ProcessState != nil {
 		exitCode = h.cmd.ProcessState.ExitCode()
 	}
-	if h.publisher != nil {
-		_ = h.publisher.MarkExited(exitCode)
+	if p := h.loadPublisher(); p != nil {
+		_ = p.MarkExited(exitCode)
 	}
 }
 
@@ -433,7 +476,7 @@ func mustHandle(h framework.Handle) *Handle {
 	if hh, ok := h.Unwrap().(*Handle); ok {
 		return hh
 	}
-	return &Handle{}
+	panic("opencode-web: framework.Handle inner is not *Handle")
 }
 
 // init registers the opencode-web kind with the framework registry.

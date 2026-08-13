@@ -49,9 +49,10 @@ func (Driver) Manifest() framework.KindInfo {
 // framework holds onto it via framework.Handle; the PTY kind is the
 // only code that ever reads its fields.
 type Handle struct {
-	cmd    *exec.Cmd
-	ptmx   *os.File
-	buf    *framework.RingBuffer
+	id   string
+	cmd  *exec.Cmd
+	ptmx *os.File
+	buf  *framework.RingBuffer
 
 	cancel context.CancelFunc
 	wg     *sync.WaitGroup
@@ -75,13 +76,21 @@ func (d Driver) Spawn(ctx context.Context, params framework.SpawnParams) (framew
 		return framework.Handle{}, nil, fmt.Errorf("pty start: %w", err)
 	}
 
-	buf := framework.NewRingBuffer(framework.DefaultBufferCap)
+	// The framework pre-allocates the per-instance ring buffer
+	// (params.Buffer) in Manager.Start before calling Spawn. A nil here is
+	// a framework bug, not a user input — Manager.Start unconditionally
+	// wires params.Buffer from m.AllocateBuffer(id, capBytes).
+	if params.Buffer == nil {
+		panic("pty: SpawnParams.Buffer must be set by framework.Manager.Start (framework bug, not user error)")
+	}
+	buf := params.Buffer
 
 	runCtx, cancel := context.WithCancel(context.Background())
 	wg := &sync.WaitGroup{}
 	wg.Add(2)
 
 	h := &Handle{
+		id:     params.InstanceID,
 		cmd:    cmd,
 		ptmx:   ptmx,
 		buf:    buf,
@@ -208,11 +217,16 @@ func (d Driver) SendInput(handle framework.Handle, input string) error {
 }
 
 // SubscribeOutput (extension interface) returns a buffered channel
-// that receives redacted PTY output chunks. framework.Manager calls
-// this via an outputSub type assertion when a WebSocket client
+// that receives redacted PTY output chunks for ONE instance. framework.Manager
+// calls this via an outputSub type assertion when a WebSocket client
 // subscribes to the instance's live output stream.
-func (d Driver) SubscribeOutput() (<-chan string, func(), error) {
-	return SubscribeOutput()
+//
+// The id argument scopes the subscription to a single instance —
+// without it, every PTY tab would receive every other PTY tab's
+// output (a regression from the pre-kind-refactor Manager, which
+// keyed subscribers per-instance).
+func (d Driver) SubscribeOutput(id string) (<-chan string, func(), error) {
+	return SubscribeOutput(id)
 }
 
 // --- handle internals ---
@@ -227,7 +241,7 @@ func (h *Handle) pumpLogs() {
 			if h.buf != nil {
 				h.buf.WriteString(chunk)
 			}
-			broadcast(chunk)
+			broadcast(h.id, chunk)
 		}
 		if err != nil {
 			return
@@ -251,18 +265,21 @@ func mustHandle(h framework.Handle) *Handle {
 
 // --- subscriber broadcast ---
 
+// subs is keyed by instance id so a WS subscriber to instance A does
+// not also receive instance B's PTY output. (Pre-kind-refactor
+// Manager.broadcastOutput was per-instance; this is the equivalent.)
 var (
 	subsMu sync.Mutex
-	subs   map[chan string]struct{}
+	subs   map[string]map[chan string]struct{}
 )
 
-func broadcast(chunk string) {
-	if chunk == "" {
+func broadcast(id string, chunk string) {
+	if chunk == "" || id == "" {
 		return
 	}
 	subsMu.Lock()
 	defer subsMu.Unlock()
-	for ch := range subs {
+	for ch := range subs[id] {
 		select {
 		case ch <- chunk:
 		default:
@@ -270,18 +287,31 @@ func broadcast(chunk string) {
 	}
 }
 
-// SubscribeOutput is exposed to the websocket handler.
-func SubscribeOutput() (<-chan string, func(), error) {
+// SubscribeOutput registers a channel for one instance's PTY output
+// and returns the channel and a cancel func that unsubscribes.
+//
+// id is required: an empty id is rejected so a buggy caller does not
+// accidentally receive every PTY instance's output.
+func SubscribeOutput(id string) (<-chan string, func(), error) {
+	if id == "" {
+		return nil, nil, errors.New("pty: SubscribeOutput requires instance id")
+	}
 	subsMu.Lock()
 	if subs == nil {
-		subs = map[chan string]struct{}{}
+		subs = map[string]map[chan string]struct{}{}
+	}
+	if subs[id] == nil {
+		subs[id] = map[chan string]struct{}{}
 	}
 	ch := make(chan string, 64)
-	subs[ch] = struct{}{}
+	subs[id][ch] = struct{}{}
 	subsMu.Unlock()
 	cancel := func() {
 		subsMu.Lock()
-		delete(subs, ch)
+		delete(subs[id], ch)
+		if len(subs[id]) == 0 {
+			delete(subs, id)
+		}
 		subsMu.Unlock()
 		close(ch)
 	}
