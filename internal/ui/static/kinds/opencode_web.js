@@ -18,6 +18,19 @@
 //   - When the user switches tabs (deactivate), cancel the poll so
 //     it doesn't leak; the next activate() starts a fresh poll.
 //
+// Keep-alive across tab switches (mirrors the reasonix web-frame fix):
+//   - The iframe element is never reset to about:blank and its src is
+//     only assigned when the target actually changes
+//     (dataset.instance / dataset.src guard, same as ensureWebFrame).
+//     Switching away only hides the panel; switching back to the same
+//     running instance keeps the loaded opencode page (chat draft,
+//     scroll, app state) alive instead of reloading it.
+//   - When the instance is stopped, the iframe is hidden and the
+//     navigation cache is invalidated (like invalidateWebFrame) so a
+//     later start re-navigates instead of showing the stale pre-stop
+//     page. The iframe src /__opencode/<id>/ never changes for the
+//     same instance, so the src guard alone cannot detect a restart.
+//
 // Scope monitoring (WORKTREE-ISOLATION.md):
 //   - Poll /api/instances/opencode/scope?id=... every ~1.5s for the
 //     out-of-scope state the reverse proxy records, and render a
@@ -36,9 +49,30 @@ class OpencodeWebRenderer {
 
         if (termContainer) termContainer.style.display = 'none';
         if (ocPanel) ocPanel.hidden = false;
+
+        const inst = session.instance;
         if (ocIframe) {
-            ocIframe.style.visibility = 'hidden';
-            ocIframe.src = 'about:blank';
+            if (inst && inst.status !== 'running') {
+                // Stopped instance: the embedded page is dead. Hide and
+                // invalidate the navigation cache (like invalidateWebFrame)
+                // so the next start re-navigates instead of showing the
+                // stale pre-stop page.
+                ocIframe.style.visibility = 'hidden';
+                ocIframe.dataset.instance = '';
+                ocIframe.dataset.src = '';
+            } else if (ocIframe.dataset.instance === session.id && ocIframe.dataset.src) {
+                // Already showing this instance's page — keep it alive.
+                // Do NOT reset src (no about:blank) and do not navigate:
+                // the page (chat draft, scroll, app state) survives the
+                // tab switch. The poll below only re-navigates when the
+                // resolved src actually changes.
+                ocIframe.style.visibility = '';
+            } else {
+                // First activation for this instance (or switching between
+                // two opencode-web instances): hide until the poll resolves
+                // the port, then navigate.
+                ocIframe.style.visibility = 'hidden';
+            }
         }
         if (ocWarning) {
             ocWarning.hidden = true;
@@ -135,8 +169,21 @@ class OpencodeWebRenderer {
                             'version:   ' + (data.version || 'unknown') + (data.version && !data.version_supported ? ' (unsupported)' : '')
                         ].join('\n');
                         if (ocIframe) {
+                            // Only navigate when the target changes
+                            // (same guard as reasonix ensureWebFrame):
+                            // assigning the same src would reload the
+                            // embedded page and lose its state on every
+                            // tab switch. The dataset persists across
+                            // deactivate()/activate() cycles, so switching
+                            // back to a running instance keeps the loaded
+                            // page alive.
+                            const src = data.iframe_src;
+                            if (ocIframe.dataset.instance !== id || ocIframe.dataset.src !== src) {
+                                ocIframe.dataset.instance = id;
+                                ocIframe.dataset.src = src;
+                                ocIframe.src = src;
+                            }
                             ocIframe.style.visibility = '';
-                            ocIframe.src = data.iframe_src;
                         }
                         return;
                     }

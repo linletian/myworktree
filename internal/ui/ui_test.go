@@ -135,6 +135,57 @@ func TestIndexHTMLCoversMultiInstanceSwitching(t *testing.T) {
 	}
 }
 
+func TestOpencodeWebRendererKeepsFrameAlive(t *testing.T) {
+	mux := http.NewServeMux()
+	if err := Register(mux, "myworktree", nil); err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/static/kinds/opencode_web.js")
+	if err != nil {
+		t.Fatalf("GET /static/kinds/opencode_web.js failed: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /static/kinds/opencode_web.js status: %d", resp.StatusCode)
+	}
+	js := string(body)
+
+	checks := []string{
+		// re-navigation is guarded by the dataset (ensureWebFrame pattern):
+		// assigning the same src would reload the embedded page.
+		"ocIframe.dataset.instance !== id || ocIframe.dataset.src !== src",
+		// switching back to the same running instance keeps the page alive
+		// (dataset.instance === session.id check in activate()).
+		"ocIframe.dataset.instance === session.id && ocIframe.dataset.src",
+		// stop→start regression: stopping must invalidate the cache so the
+		// next start re-navigates instead of showing the stale pre-stop page.
+		"ocIframe.dataset.instance = '';",
+		"ocIframe.dataset.src = '';",
+	}
+	negativeChecks := []string{
+		// activate() must NEVER reset the iframe to about:blank — that would
+		// kill the loaded opencode page on every tab switch.
+		"ocIframe.src = 'about:blank'",
+		// activate()/poll must never unconditionally assign src. If this line
+		// reappears the page reloads on every tab switch.
+		"ocIframe.src = data.iframe_src;",
+	}
+	for _, check := range checks {
+		if !strings.Contains(js, check) {
+			t.Fatalf("opencode_web.js should include keep-alive hook %q", check)
+		}
+	}
+	for _, check := range negativeChecks {
+		if strings.Contains(js, check) {
+			t.Fatalf("opencode_web.js should not contain unconditional navigation %q", check)
+		}
+	}
+}
+
 func TestIndexHTMLCoversSessionLifecycle(t *testing.T) {
 	bodyText := fetchIndexHTML(t)
 	checks := []string{
