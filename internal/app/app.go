@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
-	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -73,6 +72,7 @@ type Server struct {
 	store       store.FileStore
 	worktreeMgr worktree.Manager
 	instanceMgr *framework.Manager
+	ocScope     *opencode_web.ScopeTracker
 	mcpAdapter  mcp.Adapter
 	monitor     monitor.Collector
 	authMu      sync.Mutex
@@ -153,6 +153,7 @@ func New(cfg Config, logger *log.Logger) (*Server, error) {
 		store:       st,
 		worktreeMgr: worktreeMgr,
 		instanceMgr: instanceMgr,
+		ocScope:     opencode_web.NewScopeTracker(),
 		mcpAdapter: mcp.Adapter{
 			Worktrees: worktreeMgr,
 			Instances: instanceMgr,
@@ -548,6 +549,7 @@ func (s *Server) registerAPIs(mux *http.ServeMux) {
 	mux.HandleFunc("/api/instances/log/stream", s.handleInstanceLogStream)
 	mux.HandleFunc("/api/instances/stats", s.handleInstanceStats)
 	mux.HandleFunc("/api/instances/opencode", s.handleInstanceOpencodeInfo)
+	mux.HandleFunc("/api/instances/opencode/scope", s.handleInstanceOpencodeScope)
 	mux.HandleFunc("/api/tags", s.handleTags)
 	mux.HandleFunc("/api/tags/open-dir", s.handleTagsOpenDir)
 	mux.HandleFunc("/api/branches", s.handleBranches)
@@ -567,7 +569,7 @@ func (s *Server) registerAPIs(mux *http.ServeMux) {
 	// The handler extracts <id>, looks up the instance, reads host:port
 	// from the kind blob, and proxies <rest> to the opencode server with
 	// Basic auth injection and ?directory=<worktree> for API paths.
-	mux.Handle("/__opencode/", http.StripPrefix("/__opencode", opencode_web.ProxyHandler(s.instanceMgr, s.cfg.AuthToken)))
+	mux.Handle("/__opencode/", http.StripPrefix("/__opencode", opencode_web.ProxyHandler(s.instanceMgr, s.cfg.AuthToken, s.ocScope)))
 }
 
 func (s *Server) handleBranches(w http.ResponseWriter, r *http.Request) {
@@ -1378,16 +1380,22 @@ func (s *Server) handleInstanceOpencodeInfo(w http.ResponseWriter, r *http.Reque
 	// the legacy Extra map as a fallback for pre-refactor state.json
 	// files. The blob is JSON {host, port, worktree_abs, url_path}.
 	var host, port, worktreeAbs string
+	var version string
+	var versionSupported bool
 	if len(inst.KindBlob) > 0 {
 		var b struct {
-			Host        string `json:"host"`
-			Port        string `json:"port"`
-			WorktreeAbs string `json:"worktree_abs"`
+			Host             string `json:"host"`
+			Port             string `json:"port"`
+			WorktreeAbs      string `json:"worktree_abs"`
+			Version          string `json:"version"`
+			VersionSupported bool   `json:"version_supported"`
 		}
 		if json.Unmarshal(inst.KindBlob, &b) == nil {
 			host = b.Host
 			port = b.Port
 			worktreeAbs = b.WorktreeAbs
+			version = b.Version
+			versionSupported = b.VersionSupported
 		}
 	}
 	// Fall back to legacy Extra for pre-refactor state.json compat.
@@ -1404,15 +1412,49 @@ func (s *Server) handleInstanceOpencodeInfo(w http.ResponseWriter, r *http.Reque
 		worktreeAbs = inst.Cwd
 	}
 
-	base64Dir := base64.RawURLEncoding.EncodeToString([]byte(worktreeAbs))
-
 	writeJSON(w, http.StatusOK, map[string]any{
-		"iframe_src":    "/__opencode/" + id + "/" + base64Dir + "/session/",
-		"api_base":      "/__opencode/" + id,
-		"worktree_path": worktreeAbs,
-		"host":          host,
-		"port":          port,
+		"iframe_src":        "/__opencode/" + id + "/",
+		"api_base":          "/__opencode/" + id,
+		"worktree_path":     worktreeAbs,
+		"host":              host,
+		"port":              port,
+		"version":           version,
+		"version_supported": versionSupported,
 	})
+}
+
+// handleInstanceOpencodeScope returns the current out-of-scope state for an
+// opencode-web instance. The reverse proxy records directory-bearing requests
+// in the in-memory ScopeTracker; this endpoint lets the frontend poll it to
+// render the persistent warning bar.
+func (s *Server) handleInstanceOpencodeScope(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	id := strings.TrimSpace(r.URL.Query().Get("id"))
+	if id == "" {
+		writeErr(w, http.StatusBadRequest, errors.New("id is required"))
+		return
+	}
+	inst, err := s.instanceMgr.Get(id)
+	if err != nil {
+		if errors.Is(err, framework.ErrInstanceNotFound) {
+			writeErr(w, http.StatusNotFound, err)
+			return
+		}
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	if inst.Kind != "opencode-web" {
+		writeErr(w, http.StatusNotFound, errors.New("not an opencode-web instance"))
+		return
+	}
+	state, ok := s.ocScope.Get(id)
+	if !ok {
+		state = opencode_web.ScopeState{Scope: opencode_web.ScopeInScope}
+	}
+	writeJSON(w, http.StatusOK, state)
 }
 
 func (s *Server) handleInstanceStop(w http.ResponseWriter, r *http.Request) {

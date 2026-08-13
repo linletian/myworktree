@@ -1,5 +1,7 @@
 # OpenCode 原生 Web UI 实例 — 实施计划
 
+> ⚠️ **本计划已过时**：方案 A 的「iframe 直跳 session 页」路径在实施中反复失败（见 `DEBUG.md` 问题 7–10），已被 `WORKTREE-ISOLATION.md` 的「完整页嵌入 + 目录监测 + 隐藏切换入口」方案取代并落地。当前实施现状见 `WORKTREE-ISOLATION.md` §8。
+
 > **范围**：在 myworktree 中新增一种 instance 类型 `opencode-web`，与现有 PTY 实例并存；把 `opencode serve` 进程作为 instance 托管，复用现有 tag / 实例生命周期 / tab 切换 UI，把 opencode 官方 web UI 嵌入主面板。
 >
 > **本目录三份文档的关系**：

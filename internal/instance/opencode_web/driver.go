@@ -28,8 +28,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/http/httputil"
-	"net/url"
 	"os"
 	"os/exec"
 	"regexp"
@@ -76,6 +74,12 @@ type Blob struct {
 	Port        string `json:"port,omitempty"`
 	WorktreeAbs string `json:"worktree_abs,omitempty"`
 	IframeURL   string `json:"url_path,omitempty"`
+	// Version is the installed opencode CLI version probed at spawn time;
+	// VersionSupported reports whether it is within the range the injected
+	// hide script targets. Advisory only — the instance still starts either
+	// way (WORKTREE-ISOLATION.md §4.7 L1).
+	Version          string `json:"version,omitempty"`
+	VersionSupported bool   `json:"version_supported,omitempty"`
 }
 
 // Handle is the per-instance runtime state owned by the opencode-web
@@ -122,7 +126,7 @@ func (d Driver) Spawn(ctx context.Context, params framework.SpawnParams) (framew
 	ready := framework.NewReadySignal()
 	runCtx, cancel := context.WithCancel(context.Background())
 	wg := &sync.WaitGroup{}
-	wg.Add(3) // pumpAndWatch + health + wait
+	wg.Add(3) // pumpAndWatch + healthLoop + wait (probeVersion is fire-and-forget: it exits via runCtx cancel, not the WaitGroup)
 
 	h := &Handle{
 		cmd:       cmd,
@@ -138,6 +142,7 @@ func (d Driver) Spawn(ctx context.Context, params framework.SpawnParams) (framew
 	go d.pumpAndWatch(runCtx, h, stdoutR)
 	go d.healthLoop(runCtx, h)
 	go d.wait(runCtx, h)
+	go d.probeVersion(runCtx, h)
 
 	return framework.NewHandle("opencode-web", h), ready, nil
 }
@@ -208,17 +213,17 @@ func (d Driver) KindBlob(handle framework.Handle) (json.RawMessage, error) {
 	return json.Marshal(h.blob)
 }
 
-// HTTPHint returns the prefix where the proxy should be mounted.
+// HTTPHint returns the prefix where the proxy should be mounted. The
+// opencode-web reverse proxy is registered globally in app.go (one handler
+// for ALL instances at /__opencode/), not per-instance here, so this kind
+// declares no per-instance HTTP surface and returns "".
 func (d Driver) HTTPHint(instanceID string) string {
-	return "/__opencode/" + instanceID + "/"
+	return ""
 }
 
-// RegisterHTTP wires the reverse proxy for this instance onto the
-// supplied mux.
-func (d Driver) RegisterHTTP(mux *http.ServeMux, instanceID string, handle framework.Handle) {
-	h := mustHandle(handle)
-	mux.HandleFunc("/", makeProxyHandler(instanceID, h))
-}
+// RegisterHTTP is a no-op: the opencode-web reverse proxy is registered
+// globally in app.go, so no per-instance routes are wired here.
+func (d Driver) RegisterHTTP(mux *http.ServeMux, instanceID string, handle framework.Handle) {}
 
 // --- helpers ---
 
@@ -296,11 +301,32 @@ func terminatePID(pid int, sig syscall.Signal) error {
 	return nil
 }
 
-func base64Encode(s string) string {
-	return base64.StdEncoding.EncodeToString([]byte(s))
-}
-
 // --- lifecycle goroutines ---
+
+// probeVersion runs `opencode --version` and records the result (advisory
+// only) so the frontend can warn when the installed version is outside the
+// range the injected hide script targets. A failed or unparseable probe is
+// tolerated (Version stays empty → treated as supported).
+func (d Driver) probeVersion(ctx context.Context, h *Handle) {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "opencode", "--version").Output()
+	if err != nil {
+		return
+	}
+	v, _ := parseVersion(string(out))
+	if v == "" {
+		return
+	}
+	h.mu.Lock()
+	h.blob.Version = v
+	h.blob.VersionSupported = isSupportedVersion(v)
+	blob, err := json.Marshal(h.blob)
+	h.mu.Unlock()
+	if err == nil && h.publisher != nil {
+		_ = h.publisher.UpdateKindBlob(blob)
+	}
+}
 
 func (d Driver) pumpAndWatch(ctx context.Context, h *Handle, r io.Reader) {
 	defer h.wg.Done()
@@ -320,14 +346,19 @@ func (d Driver) pumpAndWatch(ctx context.Context, h *Handle, r io.Reader) {
 			h.blob.Host = host
 			h.blob.Port = port
 			if h.instanceID != "" {
-				base64Dir := base64.RawURLEncoding.EncodeToString([]byte(h.cwd))
-				h.blob.IframeURL = "/__opencode/" + h.instanceID + "/" + base64Dir + "/session/"
+				// Full-page embed (WORKTREE-ISOLATION.md §0.4): load the
+				// SPA root, not the /:dir/session/:id deep link. The SPA
+				// Router matches HomeRoute when the shim strips the proxy
+				// prefix; deep-linking a session page has repeatedly failed
+				// (blank screen — see DEBUG.md).
+				h.blob.IframeURL = "/__opencode/" + h.instanceID + "/"
 			}
+			// Marshal inside the lock so it never races with probeVersion,
+			// which writes h.blob.Version under the same mutex.
+			blob, err := json.Marshal(h.blob)
 			h.mu.Unlock()
-			if h.publisher != nil {
-				if blob, err := json.Marshal(h.blob); err == nil {
-					_ = h.publisher.UpdateKindBlob(blob)
-				}
+			if err == nil && h.publisher != nil {
+				_ = h.publisher.UpdateKindBlob(blob)
 			}
 			h.ready.Close()
 			if h.publisher != nil {
@@ -396,75 +427,6 @@ func probeHealth(ctx context.Context, host, port, authToken string) bool {
 	}
 	defer resp.Body.Close()
 	return resp.StatusCode < 400
-}
-
-// --- proxy handler ---
-
-// makeProxyHandler returns the reverse-proxy handler for one
-// instance. The framework strips /__opencode/<id> from the request
-// path before routing here, so r.URL.Path is the upstream path
-// (e.g. /session/ for /__opencode/<id>/session/). The worktree
-// path is read from the Handle (h.blob.WorktreeAbs) and injected
-// as ?directory= on GET/HEAD API requests.
-func makeProxyHandler(instanceID string, h *Handle) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		rest := r.URL.Path
-		if rest == "" {
-			rest = "/"
-		}
-
-		h.mu.Lock()
-		host, port, worktree := h.host, h.port, h.blob.WorktreeAbs
-		h.mu.Unlock()
-
-		if port == "" {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusServiceUnavailable)
-			_, _ = io.WriteString(w, `{"error":"opencode server not yet ready"}`)
-			return
-		}
-
-		addDir := (r.Method == http.MethodGet || r.Method == http.MethodHead) &&
-			isAPIPath(rest) && !r.URL.Query().Has("directory") && worktree != ""
-		var dirLabel string
-		if addDir {
-			dirLabel = worktree
-		} else {
-			dirLabel = "(none)"
-		}
-		fmt.Fprintf(os.Stderr, "[opencode-proxy] %s %s → http://%s:%s%s (directory=%s)\n",
-			r.Method, r.URL.Path, host, port, rest, dirLabel)
-
-		target := &url.URL{Scheme: "http", Host: host + ":" + port}
-		proxy := httputil.NewSingleHostReverseProxy(target)
-		proxy.FlushInterval = -1
-
-		origDirector := proxy.Director
-		proxy.Director = func(req *http.Request) {
-			origDirector(req)
-			req.Host = target.Host
-			req.URL.Path = rest
-			req.URL.RawPath = ""
-			req.URL.RawQuery = r.URL.RawQuery
-			req.Header.Set("Authorization", "Basic "+basicAuth("opencode", h.authToken))
-			if (r.Method == http.MethodGet || r.Method == http.MethodHead) &&
-				isAPIPath(rest) &&
-				!req.URL.Query().Has("directory") &&
-				worktree != "" {
-				q := req.URL.Query()
-				q.Set("directory", worktree)
-				req.URL.RawQuery = q.Encode()
-			}
-		}
-
-		proxy.ErrorHandler = func(w http.ResponseWriter, req *http.Request, err error) {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusBadGateway)
-			_, _ = io.WriteString(w, `{"error":"opencode server unreachable"}`)
-		}
-
-		proxy.ServeHTTP(w, r)
-	}
 }
 
 func mustHandle(h framework.Handle) *Handle {

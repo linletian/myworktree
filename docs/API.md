@@ -588,30 +588,51 @@ All page close/refresh/navigation events trigger a browser-native confirmation d
 
 `GET /api/instances/<id>/opencode`
 
-Returns the iframe source URL and metadata for an opencode-web instance. Only valid for instances with `kind: "opencode-web"`; returns `404` for other kinds or non-existent instances. Returns `503` if the opencode server process is not yet ready (port/extras not populated).
+Returns the iframe source URL and metadata for an opencode-web instance. Only valid for instances with `kind: "opencode-web"`; returns `404` for other kinds or non-existent instances. Returns `503` if the opencode server process is not yet ready (port not populated).
 
 Response (200):
 ```json
 {
-  "iframe_src": "/__opencode/<id>/<base64(worktree)>/session/",
+  "iframe_src": "/__opencode/<id>/",
   "api_base": "/__opencode/<id>",
   "worktree_path": "/abs/path/to/worktree",
   "host": "127.0.0.1",
-  "port": 51234
+  "port": 51234,
+  "version": "1.18.16",
+  "version_supported": true
 }
 ```
 
-`host` and `port` are the opencode server's bound address. `iframe_src` is the path to load in the iframe. The upstream `OPENCODE_SERVER_PASSWORD` is `cfg.AuthToken` (unified auth token — every opencode-web instance shares the same upstream password, gated by the myworktree bearer token at the proxy); see `docs/ARCHITECTURE.md` §8 for the threat model and the review checklist.
+`host` and `port` are the opencode server's bound address. `iframe_src` is the full-page SPA root to load in the iframe (the deep `/session/` link was replaced by the full page — see `docs/plans/opencode-native-ui/WORKTREE-ISOLATION.md` §0.4). `version` is the installed `opencode --version` probed at spawn; `version_supported` is `false` when it is outside the `1.18.x` range the injected hide script targets (advisory only — the instance still starts). The upstream `OPENCODE_SERVER_PASSWORD` is `cfg.AuthToken` (unified auth token — every opencode-web instance shares the same upstream password, gated by the myworktree bearer token at the proxy); see `docs/ARCHITECTURE.md` §8 for the threat model and the review checklist.
 
 ### 5.11 opencode reverse proxy
 
 `/__opencode/<id>/*`
 
-Reverse proxy to the opencode HTTP server backing the given instance. Protected by myworktree's global token authentication (same as all instance routes). Go-side proxy injects `Authorization: Basic base64("opencode:"+password)` and adds `?directory=<worktree>` to GET/HEAD API requests when missing from the original query.
+Reverse proxy to the opencode HTTP server backing the given instance. Protected by myworktree's global token authentication (same as all instance routes). Go-side proxy injects `Authorization: Basic base64("opencode:"+password)` and adds `?directory=<worktree>` to GET/HEAD API requests when missing from the original query. HTML navigation responses are rewritten (assets re-routed through the proxy, `<base>` + injected script for URL rewriting, localStorage server-list normalization, and cross-worktree switch-entry hiding) with a matching CSP hash.
 
 - Returns `404` if the instance does not exist or `kind` is not `"opencode-web"`
 - Returns `503` if the opencode server is not yet listening
 - Returns `502` if the opencode server is unreachable during proxying
+
+### 5.12 opencode-web scope (out-of-scope state)
+
+`GET /api/instances/opencode/scope?id=<id>`
+
+Returns the last observed out-of-scope state for an opencode-web instance, recorded in-memory by the reverse proxy from directory-bearing requests. The frontend polls it (~1.5s) to render the persistent warning bar. See `docs/plans/opencode-native-ui/WORKTREE-ISOLATION.md` §4.4.
+
+Response (200):
+```json
+{
+  "scope": "out-of-scope",
+  "directory": "/abs/path/to/other/worktree",
+  "cross_project": false,
+  "at": 1753500000,
+  "csp_anchor_missing": false
+}
+```
+
+`scope` is `in-scope` / `out-of-scope` / `cross-project`; `csp_anchor_missing` marks structural drift (the homepage CSP lost the `'wasm-unsafe-eval'` anchor the injected script's hash is appended after), which the frontend surfaces as the "hiding not effective" warning.
 
 ## 6) MCP
 ### Tool names

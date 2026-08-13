@@ -661,6 +661,9 @@
         #opencode-panel { width: 100%; height: 100%; display: flex; flex-direction: column; }
         #opencode-panel[hidden] { display: none !important; }
         #opencode-iframe { width: 100%; flex: 1; border: 0; min-height: 0; }
+        #opencode-scope-warning { flex: 0 0 auto; width: 100%; box-sizing: border-box; padding: 6px 12px; font-size: 12px; line-height: 1.4; color: #7c2d12; background: #ffedd5; border-bottom: 1px solid #fdba74; word-break: break-all; }
+        #opencode-scope-warning[hidden] { display: none !important; }
+        #opencode-scope-warning.opencode-warning-danger { color: #991b1b; background: #fee2e2; border-color: #fca5a5; }
         .opencode-error { color: var(--danger-text, #cb2431) !important; background: var(--danger-hover-bg, #ffeef0) !important; }
 
         .status-running {
@@ -1260,6 +1263,7 @@
                 <div id="empty-state">Select a worktree and instance to start</div>
                 <div id="terminal-container"></div>
                 <div id="opencode-panel" hidden>
+                    <div id="opencode-scope-warning" hidden></div>
                     <iframe id="opencode-iframe" sandbox="allow-scripts allow-same-origin allow-forms allow-popups"></iframe>
                 </div>
                 <div id="terminal-controls">

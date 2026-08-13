@@ -419,32 +419,36 @@ myworktree implements a **dual-layer authentication architecture**:
 myworktree can host `opencode serve` processes as managed instances, embedding opencode's official web UI via reverse proxy instead of the PTY + xterm.js path.
 
 ```
-Browser (iframe src = /__opencode/<id>/<base64(worktree)>/session/)
-  │ GET /__opencode/<id>/<base64(worktree)>/session/
+Browser (iframe src = /__opencode/<id>/ — full-page SPA root)
+  │ GET /__opencode/<id>/
   ▼
 myworktree mux (withAuth + Token/Cookie)
-  │ Strip /__opencode/<id> → ReverseProxy → inject Basic auth + ?directory=<worktree>
+  │ Strip /__opencode → ReverseProxy → inject Basic auth + ?directory=<worktree>
+  │   + classify request directory vs instance worktree → in/out-of-scope
+  │   + rewrite HTML (assets re-route, <base> + injected script, CSP hash)
   ▼
 opencode serve (127.0.0.1:<port>)
-  │ serve opencode SPA → router matches /:dir/session → SessionRoute
+  │ serve opencode SPA → router matches HomeRoute (full page)
   ▼
-opencode web app (SolidJS, rendered in iframe — chat session with agent/model selection)
+opencode web app (SolidJS, rendered in iframe — single-worktree view; cross-worktree switch entries hidden)
 ```
 
 ### Design constraints
 
 - **One process per instance**: each `opencode-web` instance = one independent `opencode serve` process. Multiple instances per worktree supported; each has its own session history, provider state, and plugin context.
 - **Command locked**: the command, `--hostname 127.0.0.1`, and `--port 0` are hardcoded in Go (user cannot override via `tags.json`). LAN exposure requires running opencode outside myworktree or as a PTY-backed tag.
-- **统一认证 token（unified auth token）**: every opencode-web instance's `OPENCODE_SERVER_PASSWORD = cfg.AuthToken`. Users cannot turn it off or override it (`BuildEnv` always forces this value). The reverse proxy injects Basic auth with the same `cfg.AuthToken` when forwarding to upstream — upstream and myworktree mux share one credential.
-- **Non-security env from tag**: `tag.Env` (e.g., `OPENCODE_EXPERIMENTAL`) is merged into the process environment via `BuildEnv`.
+- **统一认证 token（unified auth token）**: every opencode-web instance's `OPENCODE_SERVER_PASSWORD = cfg.AuthToken`. Users cannot turn it off or override it (`buildEnv` always forces this value). The reverse proxy injects Basic auth with the same `cfg.AuthToken` when forwarding to upstream — upstream and myworktree mux share one credential.
+- **Non-security env from tag**: `tag.Env` (e.g., `OPENCODE_EXPERIMENTAL`) is merged into the process environment via `buildEnv`.
 - **Coexists with PTY**: existing PTY instances are unchanged. The frontend branches on `instance.kind`: `"pty"` → xterm.js, `"opencode-web"` → iframe.
 - **No new dependencies**: proxy implemented with `net/http/httputil.ReverseProxy` (stdlib). No third-party Go packages.
+- **单 worktree 视角（single-worktree view）**: the reverse proxy classifies every directory-bearing request against the instance worktree and records out-of-scope drift in an in-memory `ScopeTracker`; an injected script hides cross-worktree switch entries (project switch / add-project / open-project) and normalizes the localStorage server list to a single server. This is防误操作 (accident-prevention), not a hard boundary — the user can still reach other directories, and any such navigation surfaces a persistent warning bar. Full design and decision record in `docs/plans/opencode-native-ui/WORKTREE-ISOLATION.md`.
+- **版本门 + 隐藏有效性兜底（version gate + hide-effectiveness）**: the injected hide script targets `1.18.x` DOM anchors. A spawn-time `opencode --version` probe (advisory — never blocks startup), plus in-page DOM-anchor / visibility checks reported via `postMessage` and a CSP-anchor drift flag, surface a persistent "hiding not effective" warning when opencode upgrades break the hiding.
 
 ### Threat model & trust boundary (unified auth token)
 
 The current security model relies on these assumptions:
 
-- **Loopback isolation**: every `opencode serve` binds `127.0.0.1:<port>` (see `Command()` in `internal/instance/opencode.go`). The upstream HTTP server is not directly reachable from the network.
+- **Loopback isolation**: every `opencode serve` binds `127.0.0.1:<port>` (the invocation is hardcoded in `internal/instance/opencode_web/driver.go` `Spawn`). The upstream HTTP server is not directly reachable from the network.
 - **Single credential**: `OPENCODE_SERVER_PASSWORD = cfg.AuthToken`, and the reverse proxy injects Basic auth with the same token. Anyone holding the token has full upstream access to every opencode-web instance; the only remaining gate is the bearer/cookie check at the myworktree mux.
 - **Unprivileged remote attackers** (LAN/Wi-Fi sniffer, cloud-sync adversary, dotfiles-repo leak, issue tracker / CI log exposure, sibling-vhost XSS, etc.) gain no new external attack surface from the credential merge — they still only reach the proxy through `/__opencode/<id>/*` and still must pass the mux. Upstream `127.0.0.1` stays unreachable from off-machine.
 - **The real amplification is "in-trust-zone but crossing the loopback boundary"**: any future code path that exposes `127.0.0.1:<opencode-port>` outside the loopback namespace — container with `--net=host` or shared netns, reverse-proxy port forward, debug handler returning host/port for direct connection, MCP tool / worker that talks to upstream without going through the mux, SSH / local-tunnel documentation — turns a single token leak into full compromise of every instance's upstream **and** the entire API. Such paths must be reviewed against this threat model before introduction.
@@ -464,9 +468,10 @@ Every review that touches authentication, proxy, token handling, opencode-web, o
 
 ### Related files
 
-- `internal/instance/opencode.go` — helpers (Command, BuildEnv, ExtractListeningAddress, IsAPIPath)
-- `internal/instance/manager.go` — Kind dispatch in Start()
-- `internal/ui/proxy.go` — reverse proxy (`/__opencode/<id>/*`)
-- `internal/app/app.go` — API endpoint `GET /api/instances/<id>/opencode`
-- `internal/ui/static/index.html` — OC badge, iframe panel, Kind branch in selectInstance
-- `docs/plans/opencode-native-ui/PLAN.md` — full design document
+- `internal/instance/opencode_web/driver.go` — Kind implementation (`opencode serve` spawn, listening-address scan, health probe, `--version` probe)
+- `internal/instance/opencode_web/proxy.go` — reverse proxy + HTML injection (`/__opencode/<id>/*`, `rewriteRootAttrs`, `buildInjectScript`, CSP hash)
+- `internal/instance/opencode_web/scope.go` — directory classification + `ScopeTracker`
+- `internal/instance/opencode_web/version.go` — version-gate helpers (`parseVersion`, `isSupportedVersion`)
+- `internal/app/app.go` — API endpoints `GET /api/instances/<id>/opencode` and `GET /api/instances/opencode/scope`
+- `internal/ui/static/index.html` + `internal/ui/static/kinds/opencode_web.js` — iframe panel, warning bar, scope polling + hidden-report listener
+- `docs/plans/opencode-native-ui/WORKTREE-ISOLATION.md` — full design + decision record

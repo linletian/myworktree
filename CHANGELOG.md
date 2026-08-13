@@ -5,6 +5,7 @@
 Disk write amplification fix for long-running PTY-heavy sessions.
 
 - **feat(instance): opencode-web kind embedding opencode official web UI** — implemented: `internal/instance/opencode.go`, `internal/ui/proxy.go`, `/__opencode/<id>/*` reverse proxy, iframe panel + OC badge in `internal/ui/static/index.html`. Design, threat model, and review checklist in `docs/ARCHITECTURE.md` §8.
+- **feat(opencode-web): single-worktree isolation** — full-page embed (`/__opencode/<id>/`, replacing the deep session link that blanked the SPA), reverse-proxy directory monitoring that records out-of-scope requests in an in-memory `ScopeTracker` (`/api/instances/opencode/scope?id=`), an injected script that hides cross-worktree switch entries (project switch / add-project / open-project) and normalizes the localStorage server list to a single server, an `opencode --version` gate (advisory, 1.18.x) plus DOM-anchor / visibility checks reported via `postMessage`, and a persistent in-panel warning bar (out-of-scope + hiding-not-effective states). Design and decision record in `docs/plans/opencode-native-ui/WORKTREE-ISOLATION.md`.
 
 ### Breaking changes
 

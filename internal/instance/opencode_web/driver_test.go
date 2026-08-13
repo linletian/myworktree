@@ -2,7 +2,6 @@ package opencode_web
 
 import (
 	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -118,27 +117,15 @@ func TestIsAPIPath(t *testing.T) {
 
 func TestDriver_HTTPHint(t *testing.T) {
 	d := Driver{}
-	if got := d.HTTPHint("abc123"); got != "/__opencode/abc123/" {
-		t.Fatalf("HTTPHint = %q, want /__opencode/abc123/", got)
+	if got := d.HTTPHint("abc123"); got != "" {
+		t.Fatalf("HTTPHint = %q, want empty (proxy is registered globally in app.go)", got)
 	}
 }
 
-func TestDriver_RegisterHTTP_BasicMount(t *testing.T) {
+func TestDriver_RegisterHTTP_NoOp(t *testing.T) {
+	// RegisterHTTP must be a safe no-op: the reverse proxy is registered
+	// globally in app.go, so no per-instance routes are wired here. Calling
+	// it with a nil/empty handle must not panic.
 	d := Driver{}
-	h := framework.NewHandle("opencode-web", &Handle{instanceID: "inst-1"})
-	mux := http.NewServeMux()
-	d.RegisterHTTP(mux, "inst-1", h)
-
-	// Hit the proxy with a valid path but port empty → expect 503
-	// JSON (opencode server not yet ready). The path "/__opencode/inst-1/api/foo"
-	// extracts id="inst-1", rest="/api/foo".
-	req := httptest.NewRequest(http.MethodGet, "/__opencode/inst-1/api/foo", nil)
-	rec := httptest.NewRecorder()
-	mux.ServeHTTP(rec, req)
-	if rec.Code != http.StatusServiceUnavailable {
-		t.Fatalf("status = %d, want 503 (port empty → not ready); body=%s", rec.Code, rec.Body.String())
-	}
-	if !strings.Contains(rec.Body.String(), "opencode server not yet ready") {
-		t.Fatalf("body = %q, want 503 + 'not yet ready' message", rec.Body.String())
-	}
+	d.RegisterHTTP(http.NewServeMux(), "inst-1", framework.Handle{})
 }
