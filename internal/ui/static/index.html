@@ -11,6 +11,7 @@
             --bg-color: #f9f9f9;
             --border-color: #e1e4e8;
             --active-color: #005cc5;
+            --accent-color: #4a9eff;
             --active-bg: #f1f8ff;
             --hover-bg: #f6f8fa;
             --term-bg: #0b1020;
@@ -75,6 +76,7 @@
                 --bg-color: #0d1117;
                 --border-color: #30363d;
                 --active-color: #58a6ff;
+                --accent-color: #1f6feb;
                 --active-bg: #0f2647;
                 --hover-bg: #161b22;
                 --main-accent: #a371f7;
@@ -649,7 +651,7 @@
         }
 
         .badge-oc {
-            background: var(--accent-color, #4a9eff);
+            background: var(--accent-color);
             color: #fff;
             padding: 0 4px;
             border-radius: 3px;
@@ -937,7 +939,7 @@
             }
 
         .form-info {
-            background: var(--bg-secondary, #f6f8fa);
+            background: var(--hover-bg);
             border: 1px solid var(--border-color);
             border-radius: 6px;
             padding: 10px 12px;
@@ -987,22 +989,27 @@
         }
         .modal-tab {
             padding: 8px 14px;
+            cursor: pointer;
+            border: 1px solid transparent;
+            border-bottom: none;
+            border-radius: 4px 4px 0 0;
             background: none;
-            border: none;
-            border-bottom: 2px solid transparent;
             font-size: 13px;
             color: var(--text-secondary);
-            cursor: pointer;
             font-weight: 500;
             margin-bottom: -1px;
-            transition: color 0.15s, border-color 0.15s;
+            user-select: none;
+            transition: color 0.15s, border-color 0.15s, background 0.15s;
         }
         .modal-tab:hover {
             color: var(--text-primary);
+            background: var(--hover-bg);
         }
         .modal-tab.active {
-            color: var(--active-color, #005cc5);
-            border-bottom-color: var(--active-color, #005cc5);
+            background: var(--main-bg);
+            border-color: var(--border-color);
+            color: var(--text-primary);
+            border-top: 2px solid var(--active-color);
         }
         .modal-tab-panel { padding-top: 4px; }
         .modal-tab-panel[hidden] { display: none; }
@@ -1425,10 +1432,8 @@
             </div>
             <div id="modal-tab-opencode-web" class="modal-tab-panel" hidden>
                 <div class="form-info">
-                    <strong>托管实例</strong>：仅监听 <code>127.0.0.1</code> (loopback)，端口由 myworktree 协调 (opencode 自选空闲端口)。
-                    命令、hostname、port 由 myworktree 固定——如需 LAN 访问请另起 PTY 实例或 myworktree 外自己跑 opencode。
-                    密码由 myworktree 用全局 <code>cfg.AuthToken</code> 强注入（所有实例共享同一 token，无法关闭）。
-                    可通过 <code>tag.Env</code> 设置其他 opencode 配置项（如 <code>OPENCODE_EXPERIMENTAL</code>）。
+                    <strong>在浏览器里使用 opencode 原生 web UI。</strong>
+                    无需填写命令、端口或密码，myworktree 会自动启动并登录，打开即可在网页中对话与编写代码。
                 </div>
                 <div class="form-group">
                     <label>Name (Optional)</label>
