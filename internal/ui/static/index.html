@@ -662,7 +662,15 @@
 
         #opencode-panel { width: 100%; height: 100%; display: flex; flex-direction: column; }
         #opencode-panel[hidden] { display: none !important; }
-        #opencode-iframe { width: 100%; flex: 1; border: 0; min-height: 0; }
+        #opencode-frames { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+        .opencode-frame { width: 100%; flex: 1; min-height: 0; border: 0; }
+        /* The hidden attribute must unconditionally win over any future
+           display rule added to .opencode-frame (a flex item), so hide/show
+           stays deterministic. !important mirrors the existing
+           #opencode-panel[hidden] / #opencode-scope-warning[hidden] rules;
+           it is scoped to this [hidden] toggle only — don't copy it onto
+           general layout rules. */
+        .opencode-frame[hidden] { display: none !important; }
         #opencode-scope-warning { flex: 0 0 auto; width: 100%; box-sizing: border-box; padding: 6px 12px; font-size: 12px; line-height: 1.4; color: #7c2d12; background: #ffedd5; border-bottom: 1px solid #fdba74; word-break: break-all; }
         #opencode-scope-warning[hidden] { display: none !important; }
         #opencode-scope-warning.opencode-warning-danger { color: #991b1b; background: #fee2e2; border-color: #fca5a5; }
@@ -1271,7 +1279,7 @@
                 <div id="terminal-container"></div>
                 <div id="opencode-panel" hidden>
                     <div id="opencode-scope-warning" hidden></div>
-                    <iframe id="opencode-iframe" sandbox="allow-scripts allow-same-origin allow-forms allow-popups"></iframe>
+                    <div id="opencode-frames"></div>
                 </div>
                 <div id="terminal-controls">
                     <button class="term-ctrl-btn" onclick="refreshCurrentInstance()" title="Refresh & Scroll to Bottom">
@@ -2806,8 +2814,17 @@
 
         async function stopInstance() {
             if (!state.activeInst) return;
+            const stoppedId = state.activeInst;
+            const stoppedInst = state.instances.find(i => i.id === stoppedId);
             try { 
-                await api("/api/instances/stop", { method: "POST", body: JSON.stringify({ id: state.activeInst }) }); 
+                await api("/api/instances/stop", { method: "POST", body: JSON.stringify({ id: stoppedId }) }); 
+                // Release a stopped opencode-web instance's cached iframe
+                // immediately (its backend is gone); otherwise it lingers in
+                // the DOM until the next tab switch.
+                if (stoppedInst && stoppedInst.kind === 'opencode-web') {
+                    const ocRenderer = (window.KindRenderers || {})['opencode-web'];
+                    if (ocRenderer && typeof ocRenderer.destroyFrame === 'function') ocRenderer.destroyFrame(stoppedId);
+                }
                 // Render stop banner immediately before refresh/reload
                 const session = getActiveTerminalSession();
                 if (session && session.term) session.term.write("\r\n\r\n\x1b[41;37m[Process Stopped]\x1b[0m\r\n");
@@ -2826,7 +2843,15 @@
         }
         async function deleteInstance() {
             if (!state.activeInst || !confirm("Delete instance log?")) return;
-            try { await api("/api/instances/delete", { method: "POST", body: JSON.stringify({ id: state.activeInst }) }); refresh(); } catch (e) { alert(e); }
+            const deletedId = state.activeInst;
+            try {
+                await api("/api/instances/delete", { method: "POST", body: JSON.stringify({ id: deletedId }) });
+                // Release the deleted opencode-web instance's cached iframe
+                // so it doesn't linger in the DOM / keep the page loaded.
+                const ocRenderer = (window.KindRenderers || {})['opencode-web'];
+                if (ocRenderer && typeof ocRenderer.destroyFrame === 'function') ocRenderer.destroyFrame(deletedId);
+                refresh();
+            } catch (e) { alert(e); }
         }
         // Terminal Logic (Per Instance)
         let windowHasFocus = true;

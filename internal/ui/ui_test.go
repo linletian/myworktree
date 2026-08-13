@@ -157,22 +157,41 @@ func TestOpencodeWebRendererKeepsFrameAlive(t *testing.T) {
 	checks := []string{
 		// re-navigation is guarded by the dataset (ensureWebFrame pattern):
 		// assigning the same src would reload the embedded page.
-		"ocIframe.dataset.instance !== id || ocIframe.dataset.src !== src",
+		"frame.dataset.instance !== id || frame.dataset.src !== src",
 		// switching back to the same running instance keeps the page alive
 		// (dataset.instance === session.id check in activate()).
-		"ocIframe.dataset.instance === session.id && ocIframe.dataset.src",
-		// stop→start regression: stopping must invalidate the cache so the
-		// next start re-navigates instead of showing the stale pre-stop page.
-		"ocIframe.dataset.instance = '';",
-		"ocIframe.dataset.src = '';",
+		"frame.dataset.instance === session.id && frame.dataset.src",
+		// a fresh iframe starts with an empty navigation cache, so the poll
+		// navigates on first activation.
+		"frame.dataset.instance = '';",
+		"frame.dataset.src = '';",
+		// stopping an instance releases its iframe immediately (no page state
+		// to keep, no lingering memory); the next start builds a fresh one.
+		"this.destroyFrame(session.id)",
+		// per-instance iframe cache: each opencode-web instance keeps its own
+		// iframe, so switching between two running instances only hides/shows
+		// frames instead of re-navigating (multi-instance keep-alive).
+		"this._frames = new Map()",
+		"this._frames.set(id, frame)",
+		"this._showOnly(frame)",
+		// prune must never drop the currently-active instance's frame, or the
+		// next activate() would rebuild it and reload a running instance.
+		"live.has(id) || id === activeId",
+		// cross-instance hidden-report isolation: only the currently-active
+		// frame's postMessage drives the warning. This is the key guard against
+		// cross-talk between multiple same-origin iframes.
+		"event.source !== this._currentFrame.contentWindow",
+		// prune/destroy must clear _currentFrame when they remove the active
+		// frame, so a later message event can't trust a detached frame.
+		"this._currentFrame === frame",
 	}
 	negativeChecks := []string{
 		// activate() must NEVER reset the iframe to about:blank — that would
 		// kill the loaded opencode page on every tab switch.
-		"ocIframe.src = 'about:blank'",
+		"frame.src = 'about:blank'",
 		// activate()/poll must never unconditionally assign src. If this line
 		// reappears the page reloads on every tab switch.
-		"ocIframe.src = data.iframe_src;",
+		"frame.src = data.iframe_src;",
 	}
 	for _, check := range checks {
 		if !strings.Contains(js, check) {
