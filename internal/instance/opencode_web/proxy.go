@@ -182,7 +182,7 @@ func fixProxyHTML(resp *http.Response, proxyPrefix, baseTag, worktree string) (c
 	// the localStorage server list to a single server, hide cross-worktree switch
 	// entries, and intercept fetch/EventSource/XHR as defense-in-depth.
 	worktreeB64 := base64.RawURLEncoding.EncodeToString([]byte(worktree))
-	inject := buildInjectScript(proxyPrefix, worktreeB64)
+	inject := buildInjectScript(proxyPrefix, worktreeB64, worktree)
 	injectScript := "<script>" + inject + "</script>"
 	body = bytes.Replace(body, []byte("<head>"), []byte("<head>"+baseTag+injectScript), 1)
 
@@ -214,9 +214,9 @@ func fixProxyHTML(resp *http.Response, proxyPrefix, baseTag, worktree string) (c
 // proxyPrefix is the mount path (e.g. /__opencode/<id>); worktreeB64 is the
 // base64url-encoded worktree path, used to match opencode's data-project
 // attribute (opencode's base64Encode == Go base64.RawURLEncoding).
-func buildInjectScript(proxyPrefix, worktreeB64 string) string {
+func buildInjectScript(proxyPrefix, worktreeB64, worktree string) string {
 	return fmt.Sprintf(`(function(){
-var p=%q,wt=%q;
+var p=%q,wt=%q,wtp=%q;
 var a=location.pathname.slice(p.length);
 if(a)history.replaceState(null,'',a);
 var pu=location.origin+p;
@@ -224,23 +224,31 @@ try{localStorage.setItem('opencode.settings.dat:defaultServerUrl',pu)}catch(_){}
 try{
   var sk='opencode.global.dat:server';
   var sr=localStorage.getItem(sk);
-  if(sr){
-    var sd=JSON.parse(sr);
-    if(Array.isArray(sd.list)&&sd.list.length>0){sd.list=[];localStorage.setItem(sk,JSON.stringify(sd));}
-  }
+  var sd=sr?JSON.parse(sr):{};
+  var ch=false;
+  if(!Array.isArray(sd.list)||sd.list.length===0||sd.list[0]!==pu){sd.list=[pu];ch=true;}
+  if(!sd.projects||typeof sd.projects!=='object'){sd.projects={};ch=true;}
+  if(!Array.isArray(sd.projects[pu])||sd.projects[pu].length===0){sd.projects[pu]=[{worktree:wtp,expanded:true}];ch=true;}
+  if(ch)localStorage.setItem(sk,JSON.stringify(sd));
 }catch(_){}
 var o=location.origin,pl=o.length;
-function r(u){if(typeof u!=='string')return u;if(u.indexOf(p)!==-1)return u;if(u.startsWith(o+'/'))return o+p+u.slice(pl);var lo='http://127.0.0.1';if(u.startsWith(lo)){var c=u.indexOf(':',lo.length);if(c===-1)return u;var s=u.indexOf('/',c);if(s===-1)s=u.length;return o+p+u.slice(s)}return u}
-function ri(i){if(typeof i==='string')return r(i);if(i&&i.url){var n=r(i.url);if(n!==i.url){var q=new Request(n,i);if(i.timeout!==undefined)q.timeout=i.timeout;return q}}return i}
+function r(u){if(typeof u!=='string')return u;if(u.indexOf(p)!==-1)return u;if(u.startsWith(o+'/'))return o+p+u.slice(pl);if(u.charAt(0)==='/'&&u.charAt(1)!=='/')return o+p+u;var lo='http://127.0.0.1';if(u.startsWith(lo)){var c=u.indexOf(':',lo.length);if(c===-1)return u;var s=u.indexOf('/',c);if(s===-1)s=u.length;return o+p+u.slice(s)}return u}
+function ri(i){if(typeof i==='string')return r(i);if(i&&i.url){var n=r(i.url);if(n!==i.url){var q=new Request(n,i);if(i.timeout!==undefined)q.timeout=i.timeout;return q}}if(i&&i.href&&typeof i.href==='string'){var h=r(i.href);if(h!==i.href)return new URL(h)}return i}
 var of=fetch;window.fetch=function(i,ni){return of.call(this,ri(i),ni)};
 var OE=EventSource;window.EventSource=function(u,opts){return new OE(r(u),opts)};window.EventSource.prototype=OE.prototype;
 var hp=Object.prototype.hasOwnProperty;for(var k in OE){if(hp.call(OE,k))try{window.EventSource[k]=OE[k]}catch(_){}}
 var xo=XMLHttpRequest.prototype.open;XMLHttpRequest.prototype.open=function(m,u){return xo.call(this,m,r(u))};
+var OW=Worker;window.Worker=function(u,opts){return new OW(r(u),opts)};window.Worker.prototype=OW.prototype;
 function hide(el){if(!el)return;try{el.style.setProperty('display','none','important');el.setAttribute('aria-hidden','true');}catch(_){}}
 function foreign(el){var d=el.getAttribute?el.getAttribute('data-project'):null;return !!d&&d!==wt;}
+var hidHome=false;
 function filter(root){
   if(!wt||!root||!root.querySelectorAll)return;
   var i,els;
+  if(!hidHome){
+    els=root.querySelectorAll('[data-slot="home-projects-scroll"]');for(i=0;i<els.length;i++){var a=els[i].closest('aside');if(a){hide(a);hidHome=true;break;}}
+  }
+  els=root.querySelectorAll('[data-action="project-switch"]');for(i=0;i<els.length;i++)hide(els[i]);
   els=root.querySelectorAll('[data-project]');for(i=0;i<els.length;i++){if(foreign(els[i]))hide(els[i]);}
   els=root.querySelectorAll('[data-action="home-add-project"]');for(i=0;i<els.length;i++)hide(els[i]);
   els=root.querySelectorAll('button[aria-label="Open project"]');for(i=0;i<els.length;i++)hide(els[i]);
@@ -262,7 +270,7 @@ var mo=new MutationObserver(function(muts){
 function obs(){if(document.documentElement)mo.observe(document.documentElement,{childList:true,subtree:true});}
 if(document.readyState==='loading'){document.addEventListener('DOMContentLoaded',obs);}else{obs();}
 function report(status,detail){try{parent.postMessage({type:'mw-oc/hidden-report',status:status,detail:detail},'*');}catch(_){}}
-function anchorsPresent(){return !!(document.querySelector('[data-component="sidebar-rail"]')||document.querySelector('[data-action="project-switch"]'));}
+function anchorsPresent(){return !!(document.querySelector('[data-component="sidebar-rail"]')||document.querySelector('[data-action="project-switch"]')||document.querySelector('[data-component="home-session-search"]')||document.querySelector('[data-action="home-add-project"]'));}
 var checks=0,maxChecks=20;
 var l2=setInterval(function(){
   checks++;
@@ -281,7 +289,7 @@ function runL3(){
   if(foreignVisible>0||currentHidden){report('hide-failed',JSON.stringify({foreignVisible:foreignVisible,currentHidden:currentHidden}));}
   else{report('ok','');}
 }
-})();`, proxyPrefix, worktreeB64)
+})();`, proxyPrefix, worktreeB64, worktree)
 }
 
 // rewriteTagRe/rewriteAttrRe match a root-relative URL inside an HTML tag

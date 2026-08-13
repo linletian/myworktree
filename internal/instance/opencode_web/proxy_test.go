@@ -97,7 +97,7 @@ func TestFixProxyHTMLCSPAnchor(t *testing.T) {
 }
 
 func TestBuildInjectScript(t *testing.T) {
-	s := buildInjectScript("/__opencode/abc123", "d3Q") // base64url("wt")
+	s := buildInjectScript("/__opencode/abc123", "d3Q", "/tmp/wt") // base64url("wt")
 	for _, want := range []string{
 		"history.replaceState",
 		"opencode.settings.dat:defaultServerUrl",
@@ -107,7 +107,24 @@ func TestBuildInjectScript(t *testing.T) {
 		"MutationObserver",
 		"d3Q", // the worktree base64url is embedded
 		"mw-oc/hidden-report", // L2/L3 hide-effectiveness report
-		"sidebar-rail",        // L2 structural anchor
+		"sidebar-rail",        // L2 structural anchor (session page)
+		"home-session-search", // L2 structural anchor (home page, full-page embed lands here)
+		// URL rewriting must also cover root-relative paths and URL objects,
+		// otherwise opencode's promise client (which fetches `new URL(path,
+		// baseUrl)`) hits the myworktree origin instead of the proxy and 404s.
+		"u.charAt(0)==='/'",    // root-relative path rewrite
+		"i.href",               // URL-object branch
+		"return new URL(h)",    // rewrite a URL object's href
+		// Preseed the persisted project list with the worktree so opencode's
+		// "new session" button has a project to open (empty projects → the
+		// home page's create button silently no-ops).
+		"worktree:wtp",         // project list preseed
+		"expanded:true",        // project list preseed
+		"/tmp/wt",              // raw worktree path is embedded
+		"sd.list=[pu]",         // server list pinned to the proxy URL (not emptied)
+		"var OW=Worker",        // rewrite Worker() script URLs (markdown highlight worker)
+		"home-projects-scroll", // hide the home page project list (project/dir switcher)
+		"project-switch",       // hide session-page project switcher
 	} {
 		if !strings.Contains(s, want) {
 			t.Fatalf("buildInjectScript missing %q", want)
