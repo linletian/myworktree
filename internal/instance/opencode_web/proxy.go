@@ -254,7 +254,7 @@ function filter(root){
   els=root.querySelectorAll('[data-project]');for(i=0;i<els.length;i++){if(foreign(els[i]))hide(els[i]);}
   els=root.querySelectorAll('button[aria-label="Open project"]');for(i=0;i<els.length;i++)hide(els[i]);
 }
-var st=document.createElement('style');st.textContent='aside:has([data-slot="home-projects-scroll"]){display:none!important}[data-action="project-switch"]{display:none!important}';(document.head||document.documentElement).appendChild(st);
+var st=document.createElement('style');st.textContent='aside:has([data-slot="home-projects-scroll"]){display:none!important}[data-action="project-switch"]:not([data-project="'+wt+'"]){display:none!important}';(document.head||document.documentElement).appendChild(st);
 function run(){filter(document);}
 if(document.readyState==='loading'){document.addEventListener('DOMContentLoaded',run);}else{run();}
 var mo=new MutationObserver(function(muts){

@@ -125,6 +125,10 @@ func TestBuildInjectScript(t *testing.T) {
 		"var OW=Worker",        // rewrite Worker() script URLs (markdown highlight worker)
 		"home-projects-scroll", // hide the home page project list (project/dir switcher)
 		"project-switch",       // hide session-page project switcher
+		// The project-switch button must hide only NON-current worktree entries:
+		// the current entry doubles as the sidebar expand/collapse toggle and
+		// must stay visible (WORKTREE-ISOLATION.md §2.4 entry 2: keep current).
+		`[data-action="project-switch"]:not([data-project="`,
 	} {
 		if !strings.Contains(s, want) {
 			t.Fatalf("buildInjectScript missing %q", want)
