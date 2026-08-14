@@ -67,7 +67,7 @@ class OpencodeWebRenderer {
         this._pruneStaleFrames();
 
         const inst = session.instance;
-        if (inst && inst.status !== 'running') {
+        if (inst && inst.status === 'stopped') {
             // Stopped instance: the backend is gone and the embedded
             // page is dead — release its iframe (there is no page state
             // worth keeping) so it doesn't linger in the DOM eating
@@ -81,6 +81,10 @@ class OpencodeWebRenderer {
             this._stopScopeMonitoring();
             this._resetScopeState();
             this._currentFrame = null;
+            this._showLoading(ocPanel, {
+                title: 'opencode 实例已停止',
+                lines: ['instance:  ' + session.id],
+            });
             const bar = this._ensureDebugBar(ocPanel);
             if (bar) {
                 bar.hidden = false;
@@ -114,10 +118,16 @@ class OpencodeWebRenderer {
             // tab switch. The poll below only re-navigates when the
             // resolved src actually changes.
             frame.hidden = false;
+            this._hideLoading(ocPanel);
         } else {
             // First activation for this instance: hide until the poll
-            // resolves the port, then navigate.
+            // resolves the port, then navigate. Show the loading
+            // overlay meanwhile (starting status keeps polling — the
+            // instance appears automatically once the server is up).
             frame.hidden = true;
+            this._showLoading(ocPanel, {
+                lines: ['instance:  ' + session.id],
+            });
         }
 
         if (ocWarning) {
@@ -139,6 +149,12 @@ class OpencodeWebRenderer {
     deactivate() {
         if (this._abort) this._abort.aborted = true;
         this._stopScopeMonitoring();
+        // Hide the current iframe when leaving the tab (the page state
+        // survives — keep-alive is a visibility toggle, not a teardown).
+        // Without this, switching worktrees/instances left the old
+        // instance's page visible on an empty panel (cross-instance
+        // “串台” while the new instance is still starting).
+        if (this._currentFrame) this._currentFrame.hidden = true;
         this._currentFrame = null;
         const ocPanel = document.getElementById('opencode-panel');
         const bar = ocPanel && ocPanel.querySelector('.opencode-debug-bar');
@@ -192,6 +208,44 @@ class OpencodeWebRenderer {
         bar.hidden = false;
         bar.classList.remove('opencode-error');
         return bar;
+    }
+
+    // Loading overlay — shared pattern for web-ui kinds. Shown while the
+    // upstream server is starting (or after it stops); info lines mirror the
+    // debug bar so the user sees which instance is being waited on and what
+    // its connection info is. Future web-ui kinds can reuse #opencode-loading
+    // and these helpers.
+    _ensureLoading(ocPanel) {
+        if (!ocPanel) return null;
+        let el = ocPanel.querySelector('#opencode-loading');
+        if (!el) {
+            el = document.createElement('div');
+            el.id = 'opencode-loading';
+            el.innerHTML =
+                '<div class="opencode-loading-spinner"></div>' +
+                '<div class="opencode-loading-title">正在启动 opencode server…</div>' +
+                '<div class="opencode-loading-info"></div>';
+            const frames = ocPanel.querySelector('#opencode-frames');
+            if (frames) ocPanel.insertBefore(el, frames);
+            else ocPanel.appendChild(el);
+        }
+        return el;
+    }
+
+    _showLoading(ocPanel, info) {
+        const el = this._ensureLoading(ocPanel);
+        if (!el) return;
+        if (info) {
+            if (info.title) el.querySelector('.opencode-loading-title').textContent = info.title;
+            const infoEl = el.querySelector('.opencode-loading-info');
+            if (infoEl) infoEl.textContent = info.lines ? info.lines.join('\n') : '';
+        }
+        el.hidden = false;
+    }
+
+    _hideLoading(ocPanel) {
+        const el = ocPanel && ocPanel.querySelector('#opencode-loading');
+        if (el) el.hidden = true;
     }
 
     // Get or create the iframe dedicated to this instance. Each
@@ -275,6 +329,10 @@ class OpencodeWebRenderer {
                 const lastError = inst ? (inst.last_error || '') : '';
                 bar.textContent = 'opencode server failed to start within 60s (status: ' + status + (lastError ? ', ' + lastError : '') + '). Use Stop and try again.';
                 bar.classList.add('opencode-error');
+                this._showLoading(ocPanel, {
+                    title: '启动超时 (60s)',
+                    lines: ['instance:  ' + id, 'status:    ' + status + (lastError ? ' — ' + lastError : '')],
+                });
                 return;
             }
             try {
@@ -313,6 +371,7 @@ class OpencodeWebRenderer {
                             }
                             frame.hidden = false;
                         }
+                        this._hideLoading(ocPanel);
                         return;
                     }
                 }
@@ -321,6 +380,9 @@ class OpencodeWebRenderer {
             }
             var elapsed = Math.floor((Date.now() - startedAt) / 1000);
             bar.textContent = 'opencode server starting... (' + elapsed + 's)';
+            this._showLoading(ocPanel, {
+                lines: ['instance:  ' + id, 'elapsed:   ' + elapsed + 's'],
+            });
             setTimeout(tick, POLL_MS);
         };
         tick();
@@ -384,7 +446,7 @@ class OpencodeWebRenderer {
         if (this._versionUnsupported || this._cspAnchorMissing || (this._hiddenStatus && this._hiddenStatus !== 'ok')) {
             ocWarning.hidden = false;
             ocWarning.classList.add('opencode-warning-danger');
-            ocWarning.textContent = '⚠ opencode web UI 版本过新或结构变化,切换入口隐藏未生效,请升级 myworktree 或使用受支持版本(1.18.x)';
+            ocWarning.textContent = '⚠ opencode web UI 版本过新或结构变化,切换入口禁用未生效,请升级 myworktree 或使用受支持版本(1.18.x)';
             return;
         }
         // 2. Out of scope (proxy observed a directory != worktree).
