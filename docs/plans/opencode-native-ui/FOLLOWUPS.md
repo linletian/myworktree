@@ -46,7 +46,19 @@
   - 恢复时把 worktree 设为当前 worktree（worktree 字段是项目级单值，未来在其他 worktree 起实例会换路径提示）；
   - proxy 宽容「同 git 仓库」目录（需比较 git common dir，复杂且削弱监测，不推荐）。
 
-## 六、端到端验证清单（重启 myworktree 后逐项确认）
+## 六、pty 切换回归修复 —— 隐藏终端 WS 常驻策略（来源：方向 1 修复评审）
+
+- 🕐 **观察期：隐藏中的 pty 会话保持 WS 常驻、不设显式上限**（`kinds/pty.js` `deactivate()` 只隐藏容器不断连）：
+  - 成本有界性：服务端 ring buffer（默认 32MB/实例）与 WS 无关，实例启动即常驻；隐藏会话的增量成本 = 1 条浏览器 WS + 1 条订阅 channel + xterm buffer（受 `scrollback: 10000` 行封顶）。该行为与 main/develop fork 前完全一致（原实现从不主动断连），非本分支新引入的风险。
+  - 触发升级条件（满足任一即实现 LRU 上限）：并发运行 pty 实例经常 > 10 个；或浏览器内存出现可观测压力。
+  - 实现上限的**前置条件**：先修复 `loadLog` 重放截断（单请求 64KB + `since=0` 被 ring 钳制到最老存活字节）——分页拉取全量或断开时记录 `logCursor` 做增量恢复；否则被逐出的会话切回时必现"老缓存"症状。之后在 `PtyRenderer` 增加 `lastActive` 时间戳，`activate()` 隐藏其他会话时按 LRU `disconnectTTY` 超出阈值的隐藏会话（仅断 WS，保留 xterm 会话与容器）。
+- ⬜ **legacy `terminalSessions` map 迁移（renderer 单一权威）**（来源：同一轮评审 #2/#4）：
+  - 现状：`PtyRenderer._sessions` 是生产环境唯一会话来源；`renderTerminalSessions` / `reconcileTerminalSessions` / `reconnectRunningTerminalSessions` 已收敛为「renderer 存在时只走 `allSessions()`，否则退回 legacy map」——无双源合并（避免 O(n²)），legacy map 仅在 renderer 缺失（单测/未加载 pty.js 的 embed）时兜底。
+  - 已顺带修复的 renderer 拆分遗留缺口：`reconcileTerminalSessions`（stopped 会话刷新清理）与 `reconnectRunningTerminalSessions`（连接恢复重连）此前只遍历 legacy map，对 renderer 会话静默 no-op——已收敛。
+  - 迁移终点：删除 legacy map 与其兜底分支（`getTerminalSession` / `createTerminalSession` / `destroyTerminalSession` 的 fallback），以 renderer 为唯一权威；前置条件 = 该 UI 无 renderer 缺失的运行形态（当前 embed 固定加载 `kinds/pty.js`，仅单测依赖兜底）。
+  - 测试覆盖现状：本仓库 static UI 无 JS 单测框架；切换路径已由 2026-08-14 手动 Playwright E2E 覆盖（pty↔opencode-web 往返：WS 常驻、无重放、实时输出、iframe 完好），CI 化的 Playwright 冒烟测试见第二节。
+
+## 七、端到端验证清单（重启 myworktree 后逐项确认）
 
 - [ ] 单 server 模式：home 页左侧无多余 server 行（无双 `HomeServerRow`），仅项目列表
 - [ ] 多实例并存：各实例 home 页显示**各自** worktree 的项目（localStorage 键隔离生效）

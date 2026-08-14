@@ -3075,26 +3075,37 @@
 
         function reconcileTerminalSessions() {
             const instanceMap = new Map(state.instances.map(i => [i.id, i]));
-            for (const id of Object.keys(terminalSessions)) {
-                const inst = instanceMap.get(id);
+            // The renderer is the single authority for live sessions
+            // when present; the legacy map is the pre-renderer
+            // fallback only (unit tests / embeds without pty.js).
+            const r = window.__ptyRenderer;
+            const sessions = (r && typeof r.allSessions === 'function')
+                ? r.allSessions()
+                : Object.values(terminalSessions);
+            for (const session of sessions) {
+                const inst = instanceMap.get(session.id);
                 if (!inst) {
-                    destroyTerminalSession(id);
+                    destroyTerminalSession(session.id);
                     continue;
                 }
                 if (inst.status !== 'running') {
-                    if (id === state.activeInst) {
-                        disconnectTTY(terminalSessions[id]);
+                    if (session.id === state.activeInst) {
+                        disconnectTTY(session);
                     } else {
-                        destroyTerminalSession(id);
+                        destroyTerminalSession(session.id);
                     }
                 }
             }
         }
 
         function reconnectRunningTerminalSessions() {
-            for (const [id, session] of Object.entries(terminalSessions)) {
-                const inst = state.instances.find(i => i.id === id);
-                if (inst && inst.status === 'running' && !hasLiveTTYConnection(id)) {
+            const r = window.__ptyRenderer;
+            const sessions = (r && typeof r.allSessions === 'function')
+                ? r.allSessions()
+                : Object.values(terminalSessions);
+            for (const session of sessions) {
+                const inst = state.instances.find(i => i.id === session.id);
+                if (inst && inst.status === 'running' && !hasLiveTTYConnection(session.id)) {
                     connectTTY(session);
                 }
             }
@@ -3102,7 +3113,19 @@
 
         function renderTerminalSessions() {
             const activeID = state.activeInst;
-            for (const session of Object.values(terminalSessions)) {
+            // The renderer is the single authority for live sessions
+            // when present; the legacy map is the pre-renderer
+            // fallback only (unit tests / embeds without pty.js).
+            const r = window.__ptyRenderer;
+            const sessions = (r && typeof r.allSessions === 'function')
+                ? r.allSessions()
+                : Object.values(terminalSessions);
+            for (const session of sessions) {
+                // Defensive: map-resident sessions always have a
+                // container today (destroy paths remove them from the
+                // maps synchronously); the guard protects future
+                // async teardown paths from crashing the loop.
+                if (!session.container) continue;
                 session.container.style.display = session.id === activeID ? "block" : "none";
             }
             const activeSession = getActiveTerminalSession();

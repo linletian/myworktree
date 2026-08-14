@@ -86,12 +86,17 @@ class PtyRenderer {
     deactivate() {
         // Hide all PTY hosts when switching away. We keep the
         // session objects alive so re-activating is instant.
+        //
+        // The WebSocket is deliberately NOT disconnected here.
+        // Keeping it live means the terminal buffer stays
+        // up-to-date while hidden, so re-activating shows the
+        // latest content immediately (matches the pre-renderer
+        // behavior on main/develop). Disconnecting on every
+        // switch forced a log replay on the way back, and that
+        // replay is capped at 64KB per request, so long-running
+        // agent TUI sessions rendered stale content.
         this._sessions.forEach(s => {
             if (s.container) s.container.style.display = 'none';
-            // Disconnect the WebSocket so the daemon sees the
-            // transport mark clear promptly. The next activate()
-            // will reconnect.
-            if (window.disconnectTTY) window.disconnectTTY(s);
         });
         const ocPanel = document.getElementById('opencode-panel');
         if (ocPanel) ocPanel.hidden = true;
@@ -224,6 +229,14 @@ class PtyRenderer {
     // connectTTY etc.) that still live outside the renderer.
     getSession(id) { return this._sessions.get(id); }
     hasSession(id) { return this._sessions.has(id); }
+
+    /**
+     * All live pty sessions. The returned array is a fresh copy, but
+     * the session objects are renderer-owned and MUST NOT be mutated
+     * by callers — this is a read-only view (UI helpers only).
+     * @returns {Array<{id: string, container: HTMLElement, term: object, ttyState: string}>}
+     */
+    allSessions() { return Array.from(this._sessions.values()); }
     destroySession(id) {
         const s = this._sessions.get(id);
         if (s) {
