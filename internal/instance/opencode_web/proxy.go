@@ -12,6 +12,7 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"path/filepath"
+	"strconv"
 	"regexp"
 	"strings"
 
@@ -233,35 +234,67 @@ func fixProxyHTML(resp *http.Response, proxyPrefix, baseTag, worktree string) (c
 // untouched — the proxy only observes the request directory and surfaces
 // out-of-scope state via the ScopeTracker.
 func buildInjectScript(proxyPrefix, worktreeB64, worktree string) string {
-	dn, _ := json.Marshal(filepath.Base(worktree)) // JS string literal for server displayName
+	// jsQuote produces a JS string literal that is also safe to splice into
+	// an HTML <script> tag: strconv.Quote escapes quotes/backslashes/control
+	// chars, and `<` becomes \u003c so a worktree path can never break out of
+	// the script element (security: script-tag breakout via </script>).
+	jsQuote := func(s string) string {
+		return strings.ReplaceAll(strconv.Quote(s), "<", `\u003c`)
+	}
+	dn := jsQuote(filepath.Base(worktree)) // server displayName literal (same escaping as p/wt/wtp)
 	return fmt.Sprintf(`(function(){
-var p=%q,wt=%q,wtp=%q,dn=%s;
+var p=%s,wt=%s,wtp=%s,dn=%s;
 var a=location.pathname.slice(p.length);
 if(a)history.replaceState(null,'',a);
-var pu=location.origin+p;
-try{localStorage.setItem('opencode.settings.dat:defaultServerUrl',pu)}catch(_){}
+// Instance-scoped server store: every opencode-web instance iframe shares
+// this origin (the /__opencode/<id> prefix is only a path), so the raw
+// 'opencode.global.dat:server' key would be shared across instances too —
+// two instances would overwrite each other's project preseed (last writer
+// wins) and the losing instance's home page would show the winner's
+// project. Redirect that ONE key to an instance-unique key so each instance
+// keeps its own list/projects/lastProject while still presenting a single
+// server (bare origin, merged with entry.tsx's canonical server below).
+var sk='opencode.global.dat:server';
+var ski=sk+p;
 try{
-  var sk='opencode.global.dat:server';
+  var gs=localStorage.getItem, ss=localStorage.setItem, rs=localStorage.removeItem;
+  localStorage.getItem=function(k){return gs.call(this,k===sk?ski:k)};
+  localStorage.setItem=function(k,v){return ss.call(this,k===sk?ski:k,v)};
+  localStorage.removeItem=function(k){return rs.call(this,k===sk?ski:k)};
+}catch(_){}
+// Single-server mode: the persisted server entry must use the bare origin
+// (same key as opencode's own canonical server from entry.tsx), so
+// resolveServerList merges them into one server and the home page renders
+// the single-server layout exactly like a native opencode web launch.
+// The SDK then requests against the bare origin and the r() rewrite below
+// re-attaches the /__opencode/[id] prefix (URL objects + root-relative
+// paths are covered). defaultServerUrl must also be the origin, otherwise
+// state.active points at a key absent from the merged server list and the
+// project preseed (scoped under the canonical "local" key) is never read.
+try{localStorage.setItem('opencode.settings.dat:defaultServerUrl',location.origin)}catch(_){}
+try{
   var sr=localStorage.getItem(sk);
   var sd=sr?JSON.parse(sr):{};
   var ch=false;
   if(!Array.isArray(sd.list)){sd.list=[];ch=true;}
-  var pu0={type:"http",http:{url:pu},displayName:dn};
+  var origin0={type:"http",http:{url:location.origin},displayName:dn};
   var cur=Array.isArray(sd.list)&&sd.list[0];
-  var ok=cur&&cur.http&&cur.http.url===pu;
-  if(!ok){sd.list=[pu0];ch=true;}
+  var ok=cur&&cur.http&&cur.http.url===location.origin;
+  if(!ok){sd.list=[origin0];ch=true;}
   if(!sd.projects||typeof sd.projects!=='object'){sd.projects={};ch=true;}
-  if(!Array.isArray(sd.projects[pu])||sd.projects[pu].length===0){sd.projects[pu]=[{worktree:wtp,expanded:true}];ch=true;}
+  if(!Array.isArray(sd.projects['local'])||sd.projects['local'].length===0){sd.projects['local']=[{worktree:wtp,expanded:true}];ch=true;}
   if(ch)localStorage.setItem(sk,JSON.stringify(sd));
 }catch(_){}
 var o=location.origin,pl=o.length;
-function r(u){if(typeof u!=='string')return u;if(u.indexOf(p)!==-1)return u;if(u.startsWith(o+'/'))return o+p+u.slice(pl);if(u.charAt(0)==='/'&&u.charAt(1)!=='/')return o+p+u;var lo='http://127.0.0.1';if(u.startsWith(lo)){var c=u.indexOf(':',lo.length);if(c===-1)return u;var s=u.indexOf('/',c);if(s===-1)s=u.length;return o+p+u.slice(s)}return u}
+function r(u){if(typeof u!=='string')return u;if(u.indexOf(p)!==-1)return u;if(u.startsWith(o+'/'))return o+p+u.slice(pl);if(u.charAt(0)==='/'&&u.charAt(1)!=='/')return o+p+u;var lo='http://127.0.0.1';if(u.startsWith(lo)){var c=u.indexOf(':',lo.length);if(c===-1)return u;var s=u.indexOf('/',c);if(s===-1)s=u.length;return o+p+u.slice(s)}var wss=u.slice(0,2)==='ws';if(wss||u.slice(0,3)==='wss'){var h=u.indexOf('/',7);if(h===-1)return u;return u.slice(0,h)+p+u.slice(h)}return u}
 function ri(i){if(typeof i==='string')return r(i);if(i&&i.url){var n=r(i.url);if(n!==i.url){var q=new Request(n,i);if(i.timeout!==undefined)q.timeout=i.timeout;return q}}if(i&&i.href&&typeof i.href==='string'){var h=r(i.href);if(h!==i.href)return new URL(h)}return i}
 var of=fetch;window.fetch=function(i,ni){return of.call(this,ri(i),ni)};
 var OE=EventSource;window.EventSource=function(u,opts){return new OE(r(u),opts)};window.EventSource.prototype=OE.prototype;
 var hp=Object.prototype.hasOwnProperty;for(var k in OE){if(hp.call(OE,k))try{window.EventSource[k]=OE[k]}catch(_){}}
 var xo=XMLHttpRequest.prototype.open;XMLHttpRequest.prototype.open=function(m,u){return xo.call(this,m,r(u))};
 var OW=Worker;window.Worker=function(u,opts){return new OW(r(u),opts)};window.Worker.prototype=OW.prototype;
+var nb=navigator.sendBeacon;if(typeof nb==='function'){navigator.sendBeacon=function(u,d){return nb.call(navigator,r(u),d)}}
+var WS=window.WebSocket;if(WS){window.WebSocket=function(u,prot){return new WS(r(u),prot)};window.WebSocket.prototype=WS.prototype;}
 function disable(el){if(!el)return;try{el.style.setProperty('pointer-events','none','important');el.style.setProperty('opacity','0.45','important');el.setAttribute('aria-disabled','true');}catch(_){}}
 function foreign(el){var d=el.getAttribute?el.getAttribute('data-project'):null;return !!d&&d!==wt;}
 function filter(root){
@@ -307,7 +340,7 @@ function runL3(){
   if(foreignEnabled>0||currentDisabled){report('disable-failed',JSON.stringify({foreignEnabled:foreignEnabled,currentDisabled:currentDisabled}));}
   else{report('ok','');}
 }
-})();`, proxyPrefix, worktreeB64, worktree, dn)
+})();`, jsQuote(proxyPrefix), jsQuote(worktreeB64), jsQuote(worktree), dn)
 }
 
 // rewriteTagRe/rewriteAttrRe match a root-relative URL inside an HTML tag
