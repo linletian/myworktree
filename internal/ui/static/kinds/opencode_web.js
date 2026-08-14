@@ -145,6 +145,11 @@ class OpencodeWebRenderer {
         // “串台” while the new instance is still starting).
         if (this._currentFrame) this._currentFrame.hidden = true;
         this._currentFrame = null;
+        // Hide the panel itself: web-ui panels are mutually exclusive,
+        // and leaving it visible would stack it with the next kind's
+        // panel (half/half layout).
+        const ocPanel = document.getElementById('opencode-panel');
+        if (ocPanel) ocPanel.hidden = true;
     }
 
     cleanup() {

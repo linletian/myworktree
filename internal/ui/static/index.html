@@ -2624,6 +2624,14 @@
             const kind = (inst && inst.kind) || 'pty';
             const renderer = (window.KindRenderers || {})[kind];
             const session = { id: id, instance: inst };
+            // Web-ui panels are mutually exclusive: hide both before
+            // dispatching so the activated renderer's panel is the only
+            // visible one (prevents the stacked half/half layout when
+            // switching between opencode-web and reasonix).
+            const ocPanel = document.getElementById('opencode-panel');
+            const rxPanel = document.getElementById('reasonix-panel');
+            if (ocPanel) ocPanel.hidden = true;
+            if (rxPanel) rxPanel.hidden = true;
             // Deactivate the previously-active renderer first so it
             // can release any listeners / hide its panel cleanly.
             if (previousID) {

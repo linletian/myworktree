@@ -230,12 +230,16 @@ func TestReasonixRendererKeepsFrameAlive(t *testing.T) {
 		"frame.dataset.instance !== id || frame.dataset.src !== src",
 		// hide instead of destroying the iframe on tab switch so the
 		// embedded page (chat draft, scroll, sidebar) survives.
-		"this._currentFrame.hidden = true",
+		"this._frame.hidden = true",
 		// a fresh iframe starts with an empty navigation cache, so the
-		// first activation navigates; a stop→start cycle (fresh id)
-		// builds a fresh iframe (invalidateWebFrame coverage).
+		// first activation navigates; invalidateWebFrame coverage for the
+		// stop→start same-src fallback.
 		"frame.dataset.instance = '';",
 		"frame.dataset.src = '';",
+		"this._invalidate()",
+		// only a running (or still-flipping starting) instance has a live
+		// page to load.
+		"inst.status !== 'running' && inst.status !== 'starting'",
 		// issue #54: hide leftover xterm hosts so they cannot overlay the
 		// static iframe.
 		"renderTerminalSessions();",
@@ -246,18 +250,20 @@ func TestReasonixRendererKeepsFrameAlive(t *testing.T) {
 		// web_url (cross-origin listener) preferred, same-origin /rx/ fallback.
 		`"/rx/" + id + "/"`,
 		"inst.web_url",
-		// per-instance iframe cache: cross-instance switches only
-		// hide/show frames instead of re-navigating.
-		"this._frames = new Map()",
-		"this._frames.set(id, frame)",
-		"this._showOnly(frame)",
-		// stopping an instance releases its iframe immediately.
-		"this.destroyFrame(session.id)",
+		// single shared iframe (main-branch parity): created once, kept
+		// alive across non-reasonix tab switches.
+		"this._frame && this._frame.isConnected",
 	}
 	for _, check := range checks {
 		if !strings.Contains(js, check) {
 			t.Fatalf("reasonix.js should include keep-alive hook %q", check)
 		}
+	}
+	// The per-instance frame cache (several reasonix SPA pages alive at
+	// once under one origin) is deliberately NOT used: the shared-frame
+	// model matches the proven v0.4.0 behaviour.
+	if strings.Contains(js, "this._frames = new Map()") {
+		t.Fatalf("reasonix.js must use the single shared-frame model (v0.4.0 parity), not a per-instance frame cache")
 	}
 }
 
