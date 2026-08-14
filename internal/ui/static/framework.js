@@ -40,24 +40,6 @@ window.state = {
 
 // ---- API helper ------------------------------------------------------
 
-// authURL(path) — appends the session token to a same-origin URL when
-// the UI is accessed with ?token= in the address bar (portal / remote
-// access pattern). Same-origin iframes (reasonix /rx/<id>/, opencode
-// /__opencode/<id>/) navigate with relative URLs, which drop the query
-// token — without this suffix the server redirects them to /login and
-// the panel shows the login page instead of the app. When the session
-// is authenticated via the mw_token cookie, the browser sends it on
-// the iframe navigation automatically and no suffix is needed. (The
-// reverse proxies strip `token` before forwarding upstream.)
-window.authURL = function (path) {
-    try {
-        const p = new URLSearchParams(window.location.search);
-        const t = p.get('token');
-        if (t) return path + (path.indexOf('?') >= 0 ? '&' : '?') + 'token=' + encodeURIComponent(t);
-    } catch (e) { /* fall through to the plain path */ }
-    return path;
-};
-
 window.api = async function (path, opts = {}) {
     const headers = Object.assign({
         'Content-Type': 'application/json',

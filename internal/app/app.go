@@ -2240,6 +2240,27 @@ func (s *Server) withAuth(next http.Handler) http.Handler {
 			return
 		}
 		s.resetAuthAttempts(clientIP(r.RemoteAddr))
+		// Sync the address-bar token into the session cookie (remote
+		// access / portal pattern). Same-origin iframes (reasonix /rx/,
+		// opencode /__opencode/) navigate with relative URLs that carry
+		// no query, so they can only authenticate via the cookie — the
+		// server must hand it out. Refreshing it on every page
+		// navigation that carries ?token= also makes auth-token
+		// rotation self-heal without a re-login. (The token is never
+		// appended to iframe URLs, so embedded documents never see it in
+		// location.search; both reverse proxies additionally strip any
+		// stray token before forwarding upstream.)
+		if r.URL.Query().Get("token") != "" {
+			http.SetCookie(w, &http.Cookie{
+				Name:     "mw_token",
+				Value:    token,
+				Path:     "/",
+				MaxAge:   86400,
+				SameSite: http.SameSiteLaxMode,
+				HttpOnly: true,
+				Secure:   r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https",
+			})
+		}
 		next.ServeHTTP(w, r)
 	})
 }

@@ -161,9 +161,6 @@ func TestOpencodeWebRendererKeepsFrameAlive(t *testing.T) {
 		// switching back to the same running instance keeps the page alive
 		// (dataset.instance === session.id check in activate()).
 		"frame.dataset.instance === session.id && frame.dataset.src",
-		// remote access: the iframe src carries the session token so
-		// withAuth accepts the same-origin embed (proxy strips it upstream).
-		"window.authURL",
 		// a fresh iframe starts with an empty navigation cache, so the poll
 		// navigates on first activation.
 		"frame.dataset.instance = '';",
@@ -263,9 +260,6 @@ func TestReasonixRendererKeepsFrameAlive(t *testing.T) {
 		// web_url (cross-origin listener) preferred, same-origin /rx/ fallback.
 		`"/rx/" + id + "/"`,
 		"inst.web_url",
-		// remote access: the same-origin fallback URL carries the session
-		// token so withAuth accepts the iframe (proxy strips it upstream).
-		"window.authURL",
 		// shell hook: stop/delete releases the instance's frame.
 		"destroyFrame(id) {",
 		// panel mutual exclusion (no stacked half/half layout).
@@ -302,36 +296,6 @@ func TestReasonixTabIsFixedCommandNoTemplate(t *testing.T) {
 	}
 	if strings.Contains(bodyText, "tagSelectRx") {
 		t.Fatalf("GET / must not contain the removed reasonix template select (decision B)")
-	}
-}
-
-// TestAuthURLHelperServed pins the remote-access token bridge: framework.js
-// must ship the authURL helper that appends the session token to same-origin
-// iframe URLs (?token= address-bar pattern), so /rx/ and /__opencode/ embeds
-// pass withAuth instead of being redirected to /login.
-func TestAuthURLHelperServed(t *testing.T) {
-	mux := http.NewServeMux()
-	if err := Register(mux, "myworktree", nil); err != nil {
-		t.Fatal(err)
-	}
-	srv := httptest.NewServer(mux)
-	defer srv.Close()
-
-	resp, err := http.Get(srv.URL + "/static/framework.js")
-	if err != nil {
-		t.Fatalf("GET /static/framework.js failed: %v", err)
-	}
-	body, _ := io.ReadAll(resp.Body)
-	_ = resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("GET /static/framework.js status: %d", resp.StatusCode)
-	}
-	js := string(body)
-	if !strings.Contains(js, "window.authURL = function") {
-		t.Fatalf("framework.js must define the window.authURL helper")
-	}
-	if !strings.Contains(js, "token=") || !strings.Contains(js, "URLSearchParams") {
-		t.Fatalf("authURL helper must append the ?token= query param")
 	}
 }
 

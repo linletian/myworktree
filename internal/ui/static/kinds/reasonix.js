@@ -168,8 +168,11 @@ class ReasonixRenderer {
         // independent listener gets a fresh port, so the same instance
         // id resolves to a new web_url — the guard picks that up and
         // re-navigates instead of keeping a dead pre-restart port.
-        const src = (inst && inst.web_url) ? inst.web_url
-            : (window.authURL ? window.authURL("/rx/" + id + "/") : "/rx/" + id + "/");
+        // Same-origin fallback: the server syncs the address-bar token
+        // into the mw_token cookie (see withAuth), so the iframe
+        // navigates with a plain relative URL — the token never appears
+        // in the embedded document's location.search.
+        const src = (inst && inst.web_url) ? inst.web_url : "/rx/" + id + "/";
         if (frame.dataset.instance !== id || frame.dataset.src !== src) {
             console.debug('[reasonix-renderer] navigate', id, src);
             frame.dataset.instance = id;

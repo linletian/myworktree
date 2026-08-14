@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 
+	"myworktree/internal/authq"
 	"myworktree/internal/framework"
 	"myworktree/internal/instance/reasonix"
 	"myworktree/internal/store"
@@ -80,10 +81,9 @@ func (p *reasonixProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// reject it anyway (it has its own ?token= scheme). Any OTHER query
 		// params are preserved — the injected prefix() JS keeps the browser's
 		// query string, and reasonix itself uses query params (e.g.
-		// ?session=) that must reach it intact.
-		q := req.URL.Query()
-		q.Del("token")
-		req.URL.RawQuery = q.Encode()
+		// ?session=) that must reach it intact. authq.StripToken is the
+		// single shared stripping path (see internal/authq).
+		req.URL.RawQuery = authq.StripToken(req.URL.RawQuery)
 		// Inject the reasonix auth cookie (single source: reasonix.CookieName)
 		// so every upstream request carries the instance token; myworktree's
 		// own auth query is never forwarded upstream.
@@ -171,17 +171,18 @@ var (
 	// loads it without blocking; onload flips media to "all" so the
 	// typography is identical whenever the fonts do arrive, and system
 	// fonts render otherwise.
-	fontLinkStyleRe = regexp.MustCompile(`(?i)<link\b[^>]*\brel=["']stylesheet["'][^>]*>`)
-	fontGoogleRe    = regexp.MustCompile(`(?i)\bhref=["']https://fonts\.googleapis\.com/`)
+	fontLinkStyleRe  = regexp.MustCompile(`(?i)<link\b[^>]*\brel=["']stylesheet["'][^>]*>`)
+	fontGoogleRe     = regexp.MustCompile(`(?i)\bhref=["']https://fonts\.googleapis\.com/`)
+	fontMediaPrintRe = regexp.MustCompile(`(?i)\bmedia\s*=\s*["']print["']`)
 )
 
 // defuseBlockingFontLinks converts the Google-Fonts stylesheet link into
 // a non-blocking load (see fontLinkStyleRe). Idempotent: links already
-// carrying media="print" are skipped, and non-Google stylesheets are
-// left untouched.
+// carrying media="print" (either quote style) are skipped, and
+// non-Google stylesheets are left untouched.
 func defuseBlockingFontLinks(html []byte) []byte {
 	return fontLinkStyleRe.ReplaceAllFunc(html, func(m []byte) []byte {
-		if !fontGoogleRe.Match(m) || bytes.Contains(m, []byte(`media="print"`)) {
+		if !fontGoogleRe.Match(m) || fontMediaPrintRe.Match(m) {
 			return m
 		}
 		closeIdx := bytes.LastIndexByte(m, '>')

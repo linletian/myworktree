@@ -1158,3 +1158,56 @@ func TestIsValidRedirectPath(t *testing.T) {
 		})
 	}
 }
+
+// TestWithAuth_SyncsURLTokenToCookie pins the remote-access bridge: a
+// browser request authenticated by the address-bar token must receive
+// the mw_token cookie in the response, so same-origin iframes (reasonix
+// /rx/, opencode /__opencode/) authenticate on their plain relative
+// navigations without ever carrying the token in their own URL.
+func TestWithAuth_SyncsURLTokenToCookie(t *testing.T) {
+	tmpDir := t.TempDir()
+	testConfigPath := filepath.Join(tmpDir, "myworktree", "auth.json")
+	reset := config.SetPathForTest(func() (string, error) { return testConfigPath, nil })
+	defer reset()
+
+	if err := os.MkdirAll(filepath.Dir(testConfigPath), 0o755); err != nil {
+		t.Fatalf("mkdir failed: %v", err)
+	}
+	if err := os.WriteFile(testConfigPath, []byte(`{"auth_token":"test-token"}`), 0o600); err != nil {
+		t.Fatalf("write failed: %v", err)
+	}
+
+	nullLogger := log.New(os.Stderr, "", 0)
+	srv, err := New(Config{AuthToken: "test-token"}, nullLogger)
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+	handler := srv.withAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/?token=test-token", nil)
+	req.RemoteAddr = "192.168.1.5:12345"
+	req.Host = "192.168.1.5:8080"
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 with address-bar token, got %d", rec.Code)
+	}
+	var got *http.Cookie
+	for _, c := range rec.Result().Cookies() {
+		if c.Name == "mw_token" {
+			got = c
+		}
+	}
+	if got == nil {
+		t.Fatalf("response must sync the address-bar token into an mw_token cookie; got %v", rec.Result().Cookies())
+	}
+	if got.Value != "test-token" {
+		t.Fatalf("mw_token cookie = %q, want %q", got.Value, "test-token")
+	}
+	if !got.HttpOnly {
+		t.Fatalf("mw_token cookie must be HttpOnly (embedded documents must not read it via JS)")
+	}
+}

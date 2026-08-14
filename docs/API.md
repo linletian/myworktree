@@ -597,7 +597,8 @@ GET /rx/<instanceId>/...
 - **Same-origin fallback (network / TLS)**: when TLS is configured (`--tls-cert/--tls-key`, an `http://127.0.0.1` iframe inside an https page would be blocked as mixed content) **or the main listener is open to the network** (default `0.0.0.0`, or an explicit LAN IP — a remote browser would resolve `127.0.0.1` to itself and the iframe would fail), the independent listener is skipped; `web_url` is empty and the frontend falls back to the **relative** same-origin path `/rx/<id>/`, which follows the browser's current origin — so LAN/remote access works (same as the pre-#44 behavior).
 - The proxy forwards to the instance's `reasonix serve` at `http://127.0.0.1:<port>` (port/token cached in memory by the driver — issue #46), injecting `Cookie: reasonix_token=<token>` (name from `reasonix.CookieName`, single source — issue #45) for auth.
 - HTML responses get a script injected (single injection point before `</head>`) that prefixes the page's root-relative `fetch` / `EventSource` / `XMLHttpRequest` calls with `/rx/<id>/`, plus the issue #48 layout injection: the 220px sidebar is **collapsed by default** on desktop with a dedicated toggle button (`--mw-sidebar-w` CSS var makes the expanded width configurable); narrow screens keep the native mobile sidebar.
-- The `Accept-Encoding` header is forced to `identity` and the request query string is dropped upstream (prevents myworktree auth `?token=` from leaking to the subprocess).
+- The `Accept-Encoding` header is forced to `identity`; only the myworktree auth `?token=` parameter is stripped from the query before forwarding upstream (`authq.StripToken` — every other query parameter, e.g. `?session=`, passes through; parse-failed queries are still token-scrubbed rather than forwarded raw).
+- **Remote-access authentication**: when the UI is opened with `?token=` in the address bar (portal jump / remote access), the server syncs the token into the HttpOnly `mw_token` cookie on the response (`withAuth`); the iframe then navigates with a plain relative `/rx/<id>/` URL and authenticates via the cookie — the token never appears in the embedded document's `location.search`, and a rotated token self-heals on the next cookie refresh.
 - SSE (`/events`) is streamed through (`FlushInterval=-1`); the upstream sends its own 15s `: ping` keepalive.
 - Returns `404` for unknown/non-reasonix instance ids, `503` when the instance is not running, `502` when the backend is unreachable.
 - Driver version gate: `Start` runs `reasonix --version` and rejects CLIs older than `1.22.0` (configurable via `Driver.MinVersion`); readiness failures include the tail of the instance `serve.log` (issue #45).
@@ -633,6 +634,7 @@ Reverse proxy to the opencode HTTP server backing the given instance. Protected 
 - Returns `404` if the instance does not exist or `kind` is not `"opencode-web"`
 - Returns `503` if the opencode server is not yet listening
 - Returns `502` if the opencode server is unreachable during proxying
+- The myworktree auth `?token=` parameter is stripped from the query before forwarding upstream (`authq.StripToken`, shared with the `/rx/` proxy) — the opencode subprocess never sees the credential. Remote-access iframe navigations authenticate via the `mw_token` cookie synced by `withAuth` (see §5.10), so the token is not needed in the iframe URL.
 
 ### 5.13 opencode-web scope (out-of-scope state)
 

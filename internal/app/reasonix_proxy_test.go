@@ -15,6 +15,7 @@ import (
 	"testing"
 
 	"context"
+	"myworktree/internal/config"
 	"myworktree/internal/framework"
 	"myworktree/internal/instance/reasonix"
 	"myworktree/internal/store"
@@ -784,4 +785,87 @@ func TestDefuseBlockingFontLinks(t *testing.T) {
 	if got := string(defuseBlockingFontLinks([]byte(`<html><head><link rel="stylesheet" href="/app.css" /></head></html>`))); got != `<html><head><link rel="stylesheet" href="/app.css" /></head></html>` {
 		t.Fatalf("non-Google stylesheet was modified: %q", got)
 	}
+	// Idempotent for BOTH quote styles: an already-defused link (single
+	// quotes) must not gain a duplicate media attribute.
+	single := `<html><head><link href='https://fonts.googleapis.com/css2?family=X' rel='stylesheet' media='print' onload="this.media='all'" /></head></html>`
+	if got := string(defuseBlockingFontLinks([]byte(single))); got != single {
+		t.Fatalf("already-defused single-quote link was modified: %q", got)
+	}
+}
+
+// TestReasonixProxyAuthTokenEndToEnd pins the full remote-access chain:
+// the address-bar token authenticates a non-loopback iframe navigation,
+// withAuth syncs it into the mw_token cookie, the /rx/ proxy serves the
+// page, and the upstream NEVER sees the myworktree token in its query.
+func TestReasonixProxyAuthTokenEndToEnd(t *testing.T) {
+	tmpDir := t.TempDir()
+	testConfigPath := filepath.Join(tmpDir, "myworktree", "auth.json")
+	reset := config.SetPathForTest(func() (string, error) { return testConfigPath, nil })
+	defer reset()
+
+	if err := os.MkdirAll(filepath.Dir(testConfigPath), 0o755); err != nil {
+		t.Fatalf("mkdir failed: %v", err)
+	}
+	if err := os.WriteFile(testConfigPath, []byte(`{"auth_token":"test-token"}`), 0o600); err != nil {
+		t.Fatalf("write failed: %v", err)
+	}
+
+	p, m, drv, fs := newProxyTestEnv(t)
+	id := startReasonixViaManager(t, m)
+	defer func() { _ = m.Stop(id) }()
+
+	srv := &Server{
+		cfg:         Config{ListenAddr: "127.0.0.1:0", AuthToken: "test-token"},
+		logger:      log.New(io.Discard, "", 0),
+		dataDir:     filepath.Dir(fs.Path),
+		store:       fs,
+		instanceMgr: m,
+		rxDriver:    drv,
+		mux:         http.NewServeMux(),
+		authFails:   map[string]authFail{},
+	}
+	srv.registerAPIs(srv.mux)
+	handler := srv.withServerRevision(srv.withAuth(srv.mux))
+
+	// 1) Unauthenticated non-loopback iframe-style navigation → redirect
+	// to /login (this was the white-screen: the login page in the panel).
+	req := httptest.NewRequest(http.MethodGet, "/rx/"+id+"/", nil)
+	req.RemoteAddr = "192.168.1.5:12345"
+	req.Host = "192.168.1.5:8080"
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusFound {
+		t.Fatalf("unauthenticated iframe navigation: status=%d, want 302", rec.Code)
+	}
+
+	// 2) Address-bar token authenticates; the response carries the synced
+	// cookie; the proxy serves the page; the upstream saw no token.
+	req2 := httptest.NewRequest(http.MethodGet, "/rx/"+id+"/history?token=test-token", nil)
+	req2.RemoteAddr = "192.168.1.5:12345"
+	req2.Host = "192.168.1.5:8080"
+	rec2 := httptest.NewRecorder()
+	handler.ServeHTTP(rec2, req2)
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("authed /rx/ navigation: status=%d, want 200 (body: %s)", rec2.Code, rec2.Body.String())
+	}
+	hasCookie := false
+	for _, c := range rec2.Result().Cookies() {
+		if c.Name == "mw_token" && c.Value == "test-token" {
+			hasCookie = true
+		}
+	}
+	if !hasCookie {
+		t.Fatalf("authed response must sync the mw_token cookie; got %v", rec2.Result().Cookies())
+	}
+	body := rec2.Body.String()
+	if !strings.Contains(body, "path=/history") {
+		t.Fatalf("upstream did not receive the stripped path: %q", body)
+	}
+	if strings.Contains(body, "token=test-token") {
+		t.Fatalf("myworktree auth token leaked upstream: %q", body)
+	}
+	if !strings.Contains(body, "cookie=reasonix_token=") {
+		t.Fatalf("reasonix token cookie was not injected: %q", body)
+	}
+	_ = p
 }

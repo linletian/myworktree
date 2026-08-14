@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 
+	"myworktree/internal/authq"
 	"myworktree/internal/framework"
 )
 
@@ -106,7 +107,11 @@ func ProxyHandler(m *framework.Manager, authToken string, tracker *ScopeTracker)
 			req.URL.Host = target.Host
 			req.URL.Path = rest
 			req.URL.RawPath = ""
-			req.URL.RawQuery = stripAuthQuery(r.URL.RawQuery)
+			// Never forward myworktree's auth query (?token=...) upstream:
+			// it is a credential leak to the opencode subprocess. authq is
+			// the single shared stripping path for every proxy (see
+			// internal/authq).
+			req.URL.RawQuery = authq.StripToken(r.URL.RawQuery)
 			req.Header.Set("Authorization", "Basic "+basicAuth("opencode", authToken))
 			if (r.Method == http.MethodGet || r.Method == http.MethodHead) &&
 				isAPIPath(rest) && !req.URL.Query().Has("directory") && worktree != "" {
@@ -406,25 +411,8 @@ func rewriteRootAttrs(html []byte, mount string) []byte {
 	})
 }
 
-// stripAuthQuery removes myworktree's ?token= from a query string so the
-// upstream never sees the credential. Remote access appends it to the
-// iframe URL so withAuth accepts the same-origin embed; other query
-// params (e.g. ?directory=, ?session=) pass through unchanged.
-func stripAuthQuery(rawQuery string) string {
-	if rawQuery == "" {
-		return ""
-	}
-	q, err := url.ParseQuery(rawQuery)
-	if err != nil {
-		return rawQuery
-	}
-	if !q.Has("token") {
-		return rawQuery
-	}
-	q.Del("token")
-	return q.Encode()
-}
-
+// readBlob parses the per-kind blob persisted by the opencode-web
+// driver (host/port/worktree) from the instance record.
 func readBlob(raw json.RawMessage) (host, port, worktree string) {
 	if len(raw) == 0 {
 		return

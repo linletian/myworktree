@@ -483,6 +483,8 @@ Every review that touches authentication, proxy, token handling, opencode-web, o
 5. **Error responses**: API errors, panic messages, and log lines do not echo the token or `Authorization` header.
 6. **Test data**: tests, mocks, fixtures do not embed real-form tokens; CI logs do not surface them.
 7. **Cross-trust-zone candidates**: any new debug handler, MCP tool, worker, container network config, or SSH / local-tunnel documentation that touches `127.0.0.1:<opencode-port>` or `cfg.AuthToken` — must be re-evaluated against the threat model above before merge.
+8. **iframe URL credential path (added 2026-08-14)**: embedded iframe documents must never receive `cfg.AuthToken` in their own URL (`location.search`) — a script inside the embed could read it. Remote access works because `withAuth` syncs the address-bar `?token=` into the HttpOnly `mw_token` cookie on the response, and the panels navigate with plain relative URLs (`/rx/<id>/`, `/__opencode/<id>/`). The portal mirrors this: `portal.withAuth` accepts `?token=` on `/api/list` and writes the same cookie. Any new embed or panel must use the cookie, not a token-bearing URL; the two `withAuth` implementations (daemon + portal) must stay aligned — tighten or loosen one, update the other in the same change.
+9. **Reverse-proxy token scrubbing (added 2026-08-14)**: every reverse proxy that forwards a browser query upstream must run the query through `authq.StripToken` — a forgotten path leaks the credential to the upstream subprocess. When adding a proxied route, grep the proxy code for raw `RawQuery` assignments; do not re-implement stripping locally.
 
 ### Related files
 

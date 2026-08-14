@@ -324,11 +324,11 @@ class OpencodeWebRenderer {
                             // tab switch. The dataset persists across
                             // deactivate()/activate() cycles, so switching
                             // back to a running instance keeps the loaded
-                            // page alive.
-                            // Remote access (?token= in the address bar):
-                            // append the token so the same-origin embed
-                            // passes withAuth; the proxy strips it upstream.
-                            const src = window.authURL ? window.authURL(data.iframe_src) : data.iframe_src;
+                            // page alive. The server syncs the address-bar
+                            // token into the mw_token cookie (withAuth),
+                            // so the plain relative src authenticates
+                            // without putting the token in the iframe URL.
+                            const src = data.iframe_src;
                             if (frame.dataset.instance !== id || frame.dataset.src !== src) {
                                 frame.dataset.instance = id;
                                 frame.dataset.src = src;
