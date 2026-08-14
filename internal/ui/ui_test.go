@@ -271,6 +271,10 @@ func TestReasonixTabIsFixedCommandNoTemplate(t *testing.T) {
 		`data-tab="reasonix"`,
 		"kind: 'reasonix',",
 		"tag_id: '',",
+		// The renderer must actually be loaded, or selectInstance falls
+		// back to the PTY path (TTY WS → "does not support output
+		// subscription" loop) and the web UI never renders.
+		`<script src="/static/kinds/reasonix.js">`,
 	}
 	for _, check := range checks {
 		if !strings.Contains(bodyText, check) {
