@@ -34,14 +34,21 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 
 	"myworktree/internal/framework"
+	"myworktree/internal/redact"
 )
 
 // KindName is the framework registry name for the reasonix kind. Kept
 // in sync with store.KindReasonix (a store-level constant; asserted by
 // TestKindNameMatchesStoreConstant).
 const KindName = "reasonix"
+
+// preStartTimeout bounds tag preStart execution (see Spawn). Long
+// enough for the documented `npm install` example, short enough that a
+// hanging template cannot stall a Start request indefinitely.
+const preStartTimeout = 2 * time.Minute
 
 // Kind implements framework.Kind for reasonix serve instances.
 type Kind struct {
@@ -95,11 +102,21 @@ func (k *Kind) Spawn(ctx context.Context, params framework.SpawnParams) (framewo
 			if strings.TrimSpace(params.PreStart) == "" {
 				return nil
 			}
-			pre := exec.Command("zsh", "-lc", params.PreStart)
+			// Bounded: a hanging template must not stall Start forever
+			// (Spawn has not returned, so the framework's ready-timeout has
+			// not started either). Output is redacted before it is surfaced
+			// to the caller (a debug preStart may echo tag env values).
+			preCtx, cancel := context.WithTimeout(context.Background(), preStartTimeout)
+			pre := exec.CommandContext(preCtx, "zsh", "-lc", params.PreStart)
 			pre.Dir = params.WorktreePath
 			pre.Env = env
-			if out, err := pre.CombinedOutput(); err != nil {
-				return fmt.Errorf("preStart failed: %w: %s", err, strings.TrimSpace(string(out)))
+			out, err := pre.CombinedOutput()
+			cancel()
+			if preCtx.Err() == context.DeadlineExceeded {
+				return fmt.Errorf("preStart timed out after %s", preStartTimeout)
+			}
+			if err != nil {
+				return fmt.Errorf("preStart failed: %w: %s", err, strings.TrimSpace(redact.Text(string(out))))
 			}
 			return nil
 		},

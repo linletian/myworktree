@@ -98,6 +98,36 @@ func TestFixProxyHTMLCSPAnchor(t *testing.T) {
 	}
 }
 
+// TestFixProxyHTMLInjectsCaseInsensitiveHead pins the <head> injection
+// to case-insensitive / attribute-tolerant matching: HTML permits
+// <HEAD lang="en"> and <head >, and the single-worktree isolation
+// depends on the injection landing. Only the first head tag receives
+// the injection.
+func TestFixProxyHTMLInjectsCaseInsensitiveHead(t *testing.T) {
+	for _, html := range []string{
+		`<html><HEAD lang="en"></HEAD><body></body></html>`,
+		`<html><head ></head><body></body></html>`,
+		`<html><HeAd></HeAd><body></body></html>`,
+	} {
+		resp := newHTMLResponse(t, html)
+		fixProxyHTML(resp, "/__opencode/x", "<base>", "/tmp/wt")
+		body := readBody(t, resp)
+		if !strings.Contains(body, "<base>") || !strings.Contains(body, "<script>") {
+			t.Fatalf("injection missing for %q, body: %s", html, body)
+		}
+		if !strings.Contains(body, "</HEAD") && !strings.Contains(body, "</HeAd") && !strings.Contains(body, "</head") {
+			t.Fatalf("head tag mangled for %q, body: %s", html, body)
+		}
+	}
+
+	// No head at all → body passes through without injection.
+	resp := newHTMLResponse(t, `<html><body>no head</body></html>`)
+	fixProxyHTML(resp, "/__opencode/x", "<base>", "/tmp/wt")
+	if strings.Contains(readBody(t, resp), "<base>") {
+		t.Fatal("injection should not apply without a head tag")
+	}
+}
+
 func TestBuildInjectScript(t *testing.T) {
 	s := buildInjectScript("/__opencode/abc123", "d3Q", "/tmp/wt") // base64url("wt")
 	for _, want := range []string{

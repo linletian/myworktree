@@ -200,7 +200,7 @@ func fixProxyHTML(resp *http.Response, proxyPrefix, baseTag, worktree string) (c
 	worktreeB64 := base64.RawURLEncoding.EncodeToString([]byte(worktree))
 	inject := buildInjectScript(proxyPrefix, worktreeB64, worktree)
 	injectScript := "<script>" + inject + "</script>"
-	body = bytes.Replace(body, []byte("<head>"), []byte("<head>"+baseTag+injectScript), 1)
+	body = injectAfterHead(body, baseTag+injectScript)
 
 	// Patch CSP to allow the injected inline script. Per CSP spec the hash
 	// covers the script content (between tags), not the <script> wrapper.
@@ -223,6 +223,23 @@ func fixProxyHTML(resp *http.Response, proxyPrefix, baseTag, worktree string) (c
 	resp.ContentLength = int64(len(body))
 	resp.Header.Set("Content-Length", fmt.Sprintf("%d", len(body)))
 	return cspAnchorMissing
+}
+
+// injectAfterHead splices payload right after the first <head> opening
+// tag (matched by headTagRe), preserving the tag itself. If no head
+// tag is found the body is returned untouched (same "no injection"
+// outcome as the previous literal `<head>` bytes.Replace, which only
+// matched the exact lowercase form).
+func injectAfterHead(body []byte, payload string) []byte {
+	loc := headTagRe.FindIndex(body)
+	if loc == nil {
+		return body
+	}
+	head := body[loc[0]:loc[1]]
+	replacement := make([]byte, 0, len(head)+len(payload))
+	replacement = append(replacement, head...)
+	replacement = append(replacement, payload...)
+	return append(body[:loc[0]], append(replacement, body[loc[1]:]...)...)
 }
 
 // buildInjectScript builds the inline script injected into every HTML
@@ -382,6 +399,14 @@ function runL3(){
 var (
 	rewriteTagRe  = regexp.MustCompile(`(?i)<[a-zA-Z][^>]*>`)
 	rewriteAttrRe = regexp.MustCompile(`(?i)([\s"'](?:src|href|action|poster)\s*=\s*["']?)(/[^"'>\s]*)`)
+
+	// headTagRe matches the document <head> opening tag for script
+	// injection. Case-insensitive and tolerant of attributes
+	// (<HEAD lang="en">, <head >) — HTML allows both, and the injection
+	// silently not applying (single-worktree isolation off, no warning)
+	// is worse than a liberal match. Injection targets the first match
+	// only, mirroring the previous bytes.Replace(..., 1).
+	headTagRe = regexp.MustCompile(`(?i)<head\b[^>]*>`)
 )
 
 // rewriteRootAttrs prefixes every root-relative src/href/action/poster value

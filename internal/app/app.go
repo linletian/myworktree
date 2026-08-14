@@ -520,13 +520,22 @@ func (s *Server) Shutdown() {
 	if s.portal != nil {
 		s.portal.Stop()
 	}
-	// Stop reasonix serve processes first (behavior parity with tty
-	// instances, which die when their PTY hangs up): their SSE connections
-	// then close, so the HTTP servers below shut down promptly. State dirs
-	// (token/port/pid/serve.log) are kept; sessions live in the shared
-	// ~/.reasonix pool and are unaffected by instance lifecycle.
+	// Stop managed subprocesses that would otherwise outlive myworktree:
+	// - reasonix serve: stopped first (behavior parity with tty
+	//   instances, which die when their PTY hangs up); their SSE
+	//   connections then close, so the HTTP servers below shut down
+	//   promptly. State dirs (token/port/pid/serve.log) are kept;
+	//   sessions live in the shared ~/.reasonix pool and are unaffected
+	//   by instance lifecycle.
+	// - opencode serve: unlike reasonix, the opencode-web kind does NOT
+	//   implement RestartSurvivor (no Reattach), so a surviving process
+	//   would be orphaned — the next startup marks its record "stopped"
+	//   while the unmanaged serve keeps running and holding its port.
+	//   Stop it explicitly so the kind contract (Stop exactly once after
+	//   a successful Spawn, framework/kind.go) holds for every instance.
 	if s.instanceMgr != nil {
 		s.instanceMgr.StopAllKind(store.KindReasonix)
+		s.instanceMgr.StopAllKind(store.KindOpenCodeWeb)
 	}
 	if s.rxSrv != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -789,6 +798,13 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		if nextURL == "" || !isValidRedirectPath(nextURL) {
 			nextURL = "/"
 		}
+		// SameSite=Lax, not Strict, deliberately: Lax already blocks the
+		// cross-site POST/form cases that matter for CSRF (every mutating
+		// endpoint is POST), while still letting a top-level GET navigation
+		// from an external link (e.g. a Tailscale/remote bookmark shared
+		// out-of-band) arrive already authenticated. Strict would force a
+		// re-auth on every cross-site entry for no real gain, since the
+		// embedded iframes are same-origin either way.
 		cookie := &http.Cookie{
 			Name:     "mw_token",
 			Value:    token,
@@ -1531,7 +1547,7 @@ func (s *Server) handleInstanceOpencodeInfo(w http.ResponseWriter, r *http.Reque
 		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
-	if inst.Kind != "opencode-web" {
+	if inst.Kind != store.KindOpenCodeWeb {
 		writeErr(w, http.StatusNotFound, errors.New("not an opencode-web instance"))
 		return
 	}
@@ -1606,7 +1622,7 @@ func (s *Server) handleInstanceOpencodeScope(w http.ResponseWriter, r *http.Requ
 		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
-	if inst.Kind != "opencode-web" {
+	if inst.Kind != store.KindOpenCodeWeb {
 		writeErr(w, http.StatusNotFound, errors.New("not an opencode-web instance"))
 		return
 	}

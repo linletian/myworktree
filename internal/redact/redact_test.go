@@ -1,6 +1,9 @@
 package redact
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestText(t *testing.T) {
 	in := "before sk-abcdefghijklmnopqrstuvwxyz and Bearer abcdefghijklmnopqrstuvwxyz after"
@@ -133,5 +136,24 @@ func TestEnvKey(t *testing.T) {
 	}
 	if got := EnvKey("path", "/usr/local/bin"); got != "/usr/local/bin" {
 		t.Fatalf("path should not be masked, got %q", got)
+	}
+}
+
+func TestSecret(t *testing.T) {
+	secret := "sup3r-s3cr3t-auth-token-1234"
+	in := "preStart: env OPENCODE_SERVER_PASSWORD=" + secret + " printed twice: " + secret
+	got := Secret(in, secret)
+	if strings.Contains(got, secret) {
+		t.Fatalf("secret still present after redaction: %q", got)
+	}
+	if n := strings.Count(got, "REDACTED"); n != 2 {
+		t.Fatalf("expected 2 redactions, got %d in %q", n, got)
+	}
+	// Short or empty secrets are a no-op.
+	if got := Secret("keep-this", "short"); got != "keep-this" {
+		t.Fatalf("short secret should be ignored, got %q", got)
+	}
+	if got := Secret("keep-this", ""); got != "keep-this" {
+		t.Fatalf("empty secret should be a no-op, got %q", got)
 	}
 }

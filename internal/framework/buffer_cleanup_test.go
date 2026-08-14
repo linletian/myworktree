@@ -2,6 +2,7 @@ package framework
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 )
@@ -128,6 +129,68 @@ func TestRunLifecycle_DropsBufferOnReadyTimeout(t *testing.T) {
 	}
 	if got := mgr.totalBufBytes.Load(); got != 0 {
 		t.Fatalf("totalBufBytes=%d after ctx cancel, want 0", got)
+	}
+}
+
+// TestRunLifecycle_ReadyTimeoutStopsInstance pins the 60s ready-timeout
+// branch: on timeout the framework must call the kind's Stop (the
+// kind contract — Stop exactly once after a successful Spawn —
+// otherwise the child process and the kind's goroutines leak with no
+// way to stop them, because the id is removed from m.running), and
+// only then mark the instance failed and drop the buffer.
+func TestRunLifecycle_ReadyTimeoutStopsInstance(t *testing.T) {
+	t.Parallel()
+	k := fakeKindBlocking() // blockReady=true → ready never closes
+	reg := NewRegistry()
+	reg.Register(k)
+	mgr, _ := newTestManager(t, reg, t.TempDir())
+	mgr.readyTimeout = 200 * time.Millisecond
+
+	inst, err := mgr.Start(context.Background(), StartParams{WorktreeID: "wt1", Kind: "fake-block", Name: "t1"})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	// Wait for the timeout branch to run: status flips to failed and the
+	// instance leaves m.running.
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		mgr.mu.Lock()
+		_, stillRunning := mgr.running[inst.ID]
+		mgr.mu.Unlock()
+		if !stillRunning {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	// The kind must have observed exactly one Stop.
+	select {
+	case <-k.stopped:
+	default:
+		t.Fatal("ready-timeout branch did not call kind.Stop; child process would leak")
+	}
+
+	got, err := mgr.Get(inst.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Status != StatusFailed.String() {
+		t.Fatalf("status=%s, want failed", got.Status)
+	}
+	if !strings.Contains(got.LastError, "did not become ready") {
+		t.Fatalf("LastError=%q, want ready-timeout reason", got.LastError)
+	}
+
+	// Buffer must be dropped by the same defer.
+	mgr.stateMu.Lock()
+	_, stillThere := mgr.buffers[inst.ID]
+	mgr.stateMu.Unlock()
+	if stillThere {
+		t.Fatalf("m.buffers[%q] still present after ready-timeout", inst.ID)
+	}
+	if got := mgr.totalBufBytes.Load(); got != 0 {
+		t.Fatalf("totalBufBytes=%d after ready-timeout, want 0", got)
 	}
 }
 

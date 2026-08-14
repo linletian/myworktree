@@ -94,6 +94,11 @@ type Manager struct {
 	// stopGraceSeconds is the grace period before SIGKILL during Stop. Defaults to 5s.
 	stopGraceSeconds int
 
+	// readyTimeout is how long runLifecycle waits for the ReadySignal
+	// before declaring the instance failed and tearing it down. Defaults
+	// to 60s; tests override it.
+	readyTimeout time.Duration
+
 	// httpHandler is the server-supplied mux onto which kinds register HTTP routes via RegisterHTTP. nil disables HTTP routing.
 	httpHandler *http.ServeMux
 }
@@ -118,6 +123,7 @@ func NewManager(reg *Registry, s InstanceStore, logger *log.Logger) *Manager {
 		Store:            s,
 		Logger:           logger,
 		stopGraceSeconds: 5,
+		readyTimeout:     60 * time.Second,
 	}
 }
 
@@ -147,10 +153,7 @@ func (m *Manager) Start(ctx context.Context, in StartParams) (store.ManagedInsta
 	if strings.TrimSpace(in.WorktreeID) == "" {
 		return store.ManagedInstance{}, errors.New("worktree_id is required")
 	}
-	kindName := strings.TrimSpace(in.Kind)
-	if kindName == "" {
-		kindName = "pty"
-	}
+	kindName := store.CanonicalKind(strings.TrimSpace(in.Kind))
 
 	k, err := m.Registry.Get(kindName)
 	if err != nil {
@@ -321,13 +324,29 @@ func (m *Manager) runLifecycle(ctx context.Context, inst store.ManagedInstance, 
 		m.setStatus(inst.ID, StatusRunning.String(), "")
 	case <-ctx.Done():
 		return
-	case <-time.After(60 * time.Second):
+	case <-time.After(m.readyTimeout):
 		// TODO(kinds): surface per-kind timeouts via ReadySignal context or
 		// a SpawnParams knob. PTY is ready in <1s, opencode-web in 1-3s; a
 		// slow CI box can need 30s+ for opencode-web to compile its plugin
 		// chain. The 60s value is empirically safe but is a ceiling, not a
 		// target.
-		m.markFailed(inst.ID, errors.New("instance did not become ready within 60s"))
+		//
+		// The kind contract (kind.go) requires Stop to be called exactly
+		// once after a successful Spawn. Skipping it here would leak the
+		// child process and the kind's internal goroutines (stdout pump /
+		// health loop / wait) with no way to stop them later: the id is
+		// removed from m.running below, so a subsequent Manager.Stop(id)
+		// no-ops and the process lives forever. Stop first so the kind's
+		// own terminal writes (e.g. MarkExited) land, then overwrite the
+		// status with the timeout failure — "failed, did not become ready"
+		// is the accurate terminal state.
+		if k, kerr := m.Registry.Get(ri.handle.KindName); kerr == nil {
+			if err := k.Stop(ri.handle, m.stopGraceSeconds); err != nil {
+				m.logf("runLifecycle(%s): ready-timeout Stop: %v", inst.ID, err)
+			}
+		}
+		ri.cancel()
+		m.markFailed(inst.ID, fmt.Errorf("instance did not become ready within %s", m.readyTimeout))
 		m.mu.Lock()
 		delete(m.running, inst.ID)
 		m.mu.Unlock()
@@ -342,7 +361,7 @@ func (m *Manager) runLifecycle(ctx context.Context, inst store.ManagedInstance, 
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			k, kerr := m.Registry.Get(inst.Kind)
+			k, kerr := m.Registry.Get(store.CanonicalKind(inst.Kind))
 			if kerr != nil {
 				continue
 			}
@@ -543,10 +562,7 @@ func (m *Manager) registerReattached(inst store.ManagedInstance, handle Handle, 
 
 // KindFromInstance returns the kind registered for the given instance.
 func (m *Manager) KindFromInstance(inst store.ManagedInstance) (Kind, error) {
-	if inst.Kind == "" {
-		inst.Kind = "pty"
-	}
-	return m.Registry.Get(inst.Kind)
+	return m.Registry.Get(store.CanonicalKind(inst.Kind))
 }
 
 // kindPublisher is the per-instance Publisher handed to kinds via PublisherBinder.
