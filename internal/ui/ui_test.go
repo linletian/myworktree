@@ -261,6 +261,27 @@ func TestReasonixRendererKeepsFrameAlive(t *testing.T) {
 	}
 }
 
+// TestReasonixTabIsFixedCommandNoTemplate pins decision B: the Reasonix
+// start tab has no template picker — the serve command is fixed and the
+// UI sends an empty tag_id (tag env/preStart remain reachable via the
+// API/CLI tag_id parameter, backend support is intentionally kept).
+func TestReasonixTabIsFixedCommandNoTemplate(t *testing.T) {
+	bodyText := fetchIndexHTML(t)
+	checks := []string{
+		`data-tab="reasonix"`,
+		"kind: 'reasonix',",
+		"tag_id: '',",
+	}
+	for _, check := range checks {
+		if !strings.Contains(bodyText, check) {
+			t.Fatalf("GET / should include reasonix fixed-command hook %q", check)
+		}
+	}
+	if strings.Contains(bodyText, "tagSelectRx") {
+		t.Fatalf("GET / must not contain the removed reasonix template select (decision B)")
+	}
+}
+
 func TestIndexHTMLCoversSessionLifecycle(t *testing.T) {
 	bodyText := fetchIndexHTML(t)
 	checks := []string{

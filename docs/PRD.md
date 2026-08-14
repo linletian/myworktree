@@ -56,7 +56,7 @@
   - 输出回放中按模式脱敏主流 AI key（如 `sk-***`）。
 
 ## 7. 当前实现状态（与愿景差异）
-- **Reasonix web chat 实例（MVP 完结，含需求修订 2026-08-12）**：`kind=reasonix` 实例在 worktree 内运行 `reasonix serve` 子进程，其 web 聊天界面经反代 `/rx/<id>/` 以 iframe 嵌入实例标签页（创建实例时选择 *Reasonix* 标签页；可选模板的 env/preStart 生效，command 被忽略）。
+- **Reasonix web chat 实例（MVP 完结，含需求修订 2026-08-12）**：`kind=reasonix` 实例在 worktree 内运行 `reasonix serve` 子进程，其 web 聊天界面经反代 `/rx/<id>/` 以 iframe 嵌入实例标签页（创建实例时选择 *Reasonix* 标签页，仅需名称——启动命令固定为 reasonix serve；tag 的 env/preStart 仍可经 API/CLI 的 tag_id 注入，command 始终忽略）。
   - **语义基线（需求修订 2026-08-12，见 §2 Goal 7 / §5 关键规则）**：实例 = 在该 worktree 项目里打开 reasonix 的 web UI。项目间隔离由 reasonix 自身按 cwd 组织（`~/.reasonix/projects/<slug>/sessions`）；同一项目的全部历史会话（含终端直接跑 reasonix CLI/TUI 产生的）在实例侧边栏**可见、可切换**，与终端行为一致。myworktree 只负责 worktree/实例生命周期与 `/rx/<id>/` 反代，不介入 agent 的会话/项目/分支语义。
   - **实现状态（2026-08-12 已按新基线实现）**：已取消 `REASONIX_HOME` 隔离与固定 `--resume` 会话文件，serve 直接使用 `~/.reasonix`（与终端运行一致），会话按项目由 reasonix 自身组织、同项目历史会话（含终端产生的）在实例侧边栏可见可切换，`#56` 期望满足。`#49`「Restart = 全新会话」语义保留（重启开新会话，历史仍在共享会话池中可切换）。
   - 已实现且不变：安全加固（#44 独立源跨源隔离）、侧栏默认折叠布局注入（#48）、生命周期/性能（#46 缓存、#47 锁范围）、driver 健壮性（#45 版本门 + serve.log 报错）、测试隔离（#43）；`env`/`preStart` 注入已支持（DEFERRED §3）。详见 `docs/plans/reasonix-native-ui/`。

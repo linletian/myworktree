@@ -1488,11 +1488,7 @@
             <div id="modal-tab-reasonix" class="modal-tab-panel" hidden>
                 <div class="form-info">
                     <strong>在浏览器里使用 Reasonix 网页聊天界面。</strong>
-                    在所选 worktree 里启动 reasonix serve，并在实例页签中内嵌其 web chat UI。可选一个模板：模板的 env / preStart 会生效，command 被忽略（reasonix 实例运行的是 agent 而非 shell 命令）。
-                </div>
-                <div class="form-group">
-                    <label>Template (env / preStart)</label>
-                    <select id="tagSelectRx"></select>
+                    在所选 worktree 里启动 reasonix serve，并在实例页签中内嵌其 web chat UI。启动命令固定为 reasonix serve（会话历史与终端运行的 reasonix 共享 ~/.reasonix 会话池）。
                 </div>
                 <div class="form-group">
                     <label>Name (Optional)</label>
@@ -2573,22 +2569,6 @@
                     }).join("");
                 if (ts.innerHTML !== opts) ts.innerHTML = opts;
             }
-            // Reasonix tab template select: same list as Terminal (the
-            // tag's env / preStart apply; its command is ignored by the
-            // reasonix kind).
-            const tsRx = document.getElementById("tagSelectRx");
-            if (tsRx && state.tags) {
-                const rxTags = state.tags.filter(t => t.id !== 'opencode-web');
-                const opts = '<option value="">-- no template --</option>' +
-                    rxTags.map(t => {
-                        let details = [];
-                        if (t.preStart) details.push(`pre: ${t.preStart}`);
-                        if (t.env && Object.keys(t.env).length > 0) details.push(`env: ${Object.keys(t.env).join(",")}`);
-                        const title = details.length ? ` (${details.join("; ")})` : "";
-                        return `<option value="${t.id}" title="${title}">${t.id}</option>`;
-                    }).join("");
-                if (tsRx.innerHTML !== opts) tsRx.innerHTML = opts;
-            }
             const isLocal = window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1";
             const editBtn = document.getElementById("template-edit-btn");
             if (editBtn) editBtn.style.display = isLocal ? "inline-flex" : "none";
@@ -2770,8 +2750,6 @@
             document.getElementById("instNameOc").value = "";
             document.getElementById("instNameRx").value = "";
             document.getElementById("tagSelect").value = "";
-            const tsRx = document.getElementById("tagSelectRx");
-            if (tsRx) tsRx.value = "";
             openModal("modal-start-instance");
         }
 
@@ -2867,10 +2845,11 @@
                         kind: 'opencode-web',
                     };
                 } else if (tabName === 'reasonix') {
-                    const tsRx = document.getElementById("tagSelectRx");
+                    // Fixed command, no template entry in the UI (decision B:
+                    // tag env/preStart remain available via API/CLI tag_id).
                     body = {
                         worktree_id: state.activeWT,
-                        tag_id: tsRx ? tsRx.value : '',
+                        tag_id: '',
                         command: '',
                         name: document.getElementById("instNameRx").value || 'reasonix',
                         kind: 'reasonix',
