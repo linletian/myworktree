@@ -1,6 +1,6 @@
 # myworktree
 
-A lightweight agents team management tool: fully leveraging the independent workspace feature of git worktree, diversifying the capabilities of coding CLI instances (long-running processes), and providing a minimal viable Web UI and output playback.
+> **An ORCA-like lightweight agents team orchestrator** — spin up multiple AI coding CLIs side-by-side, each in its own isolated git worktree with a persistent re-attachable terminal, and steer them all from a minimal Web UI.
 
 - 中文说明: [README.zh-CN.md](./README.zh-CN.md)
 - Docs: [PRD](./docs/PRD.md) · [Architecture](./docs/ARCHITECTURE.md) · [API](./docs/API.md)
@@ -9,6 +9,24 @@ A lightweight agents team management tool: fully leveraging the independent work
 
 ![](docs/webui.png)
 
+## Features
+
+- **One worktree per task, kept apart by git** — every agent lives in its own isolated worktree (typically its own branch), so half-finished changes, dependency installs, and experiments never collide.
+- **Persistent, re-attachable terminals** — every agent runs in a managed instance that survives page reloads and browser closes; reopen anytime, scroll back the full output, and keep going.
+- **Output replay without disk writes** — every keystroke lands in a bounded in-memory ring buffer, so you can scrub back through what an agent did while you were away.
+- **Bring your own agents** — OpenCode and Reasonix run out of the box (Reasonix even with its native web chat UI embedded in the sidebar); for everything else, drop a Tag template (`command/env/preStart/cwd`) and bring up Claude Code, Codex, GLM, Qwen, or any other CLI.
+- **One place to see what's running** — worktrees, instances, output, and PTY state in a single minimal Web UI — no IDE, no editor, no context switch.
+
+## What makes myworktree different
+
+- **Single Go binary, zero runtime deps** — no desktop app, no bundled editor; just `mw` and a browser tab.
+- **Headless-friendly by design** — drop it on a server, a VM, or a CI box; everything is reachable over Tailscale.
+- **Portal Dashboard** — a single shared entry port auto-discovers running instances across every repo on the host.
+- **Global auth & CSRF out of the box** — HttpOnly Cookie + double-submit CSRF, plus an auto-generated 32-char hex token on first run.
+- **Hot config reload** — `mw config regen` rotates the auth token and reapplies settings without restarting the daemon.
+- **File preview & diff in the Changes panel** — click any changed or untracked file for a line-numbered, diff-aware preview.
+- **Reasonix web-chat instances** — tick one box to run `reasonix serve` in a worktree, with its web chat UI embedded in the same sidebar.
+- **Branch divergence badge** — see at a glance when a branch is ahead of or behind its upstream, with scheduled refresh.
 
 ## Background & pain points
 When you’re juggling multiple coding tasks in the same repo (often with multiple AI coding CLIs collaborating/reviewing each other), it’s easy to end up with:
