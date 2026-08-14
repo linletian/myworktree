@@ -684,7 +684,6 @@
         #opencode-scope-warning { flex: 0 0 auto; width: 100%; box-sizing: border-box; padding: 6px 12px; font-size: 12px; line-height: 1.4; color: #7c2d12; background: #ffedd5; border-bottom: 1px solid #fdba74; word-break: break-all; }
         #opencode-scope-warning[hidden] { display: none !important; }
         #opencode-scope-warning.opencode-warning-danger { color: #991b1b; background: #fee2e2; border-color: #fca5a5; }
-        .opencode-error { color: var(--danger-text, #cb2431) !important; background: var(--danger-hover-bg, #ffeef0) !important; }
 
         .status-running {
             background: var(--status-running);
@@ -1196,6 +1195,10 @@
                 flex-direction: column;
                 gap: var(--term-ctrl-btn-gap);
                 z-index: 20;
+            }
+
+            #terminal-controls.oc-hidden {
+                display: none;
             }
 
             .term-ctrl-btn {
@@ -2448,11 +2451,21 @@
             const termContainer = document.getElementById("terminal-container");
             const ocPanel = document.getElementById("opencode-panel");
             const actions = document.getElementById("instance-actions");
+            const controls = document.getElementById("terminal-controls");
 
             if (state.activeInst) {
                 const inst = state.instances.find(i => i.id === state.activeInst);
                 const isOC = inst && inst.kind === 'opencode-web';
                 empty.style.display = "none";
+                // The refresh / scroll-to-bottom shortcuts overlay the
+                // terminal's top-right corner; they are meaningless for the
+                // embedded opencode-web page (the page owns its own UI), so
+                // hide them for that kind and keep them for terminal kinds.
+                // A class (not inline style) so CSS retains control over the
+                // element's default layout. toggle(name, flag) in both
+                // branches — keep the forms identical so future edge
+                // conditions (e.g. hide while loading) can't mis-match.
+                if (controls) controls.classList.toggle("oc-hidden", !!isOC);
                 // For opencode-web instances the OpencodeWebRenderer owns the
                 // visibility of #opencode-panel and #terminal-container.
                 // renderWorkspace must NOT overwrite them, or the 8-second
@@ -2481,6 +2494,7 @@
                 empty.textContent = state.activeWT ? "No instances. Click + to start one." : "Select a worktree.";
                 termContainer.style.display = "none";
                 if (ocPanel) ocPanel.hidden = true;
+                if (controls) controls.classList.toggle("oc-hidden", true);
                 actions.classList.remove("visible");
             }
             renderTerminalSessions();

@@ -11,8 +11,8 @@
 //     503 JSON body that the /__opencode/<id>/ proxy returns when
 //     not ready.
 //   - When port is non-empty, set iframe.src = data.iframe_src. The
-//     iframe loads opencode's official web UI from the proxy. The
-//     bottom debug bar stays visible showing instance connection info.
+//     iframe loads opencode's official web UI from the proxy and fills
+//     the whole panel (no debug bar — the page owns its own status UI).
 //   - On timeout: show "opencode server failed to start within 60s"
 //     with the last known status, and stop polling.
 //   - When the user switches tabs (deactivate), cancel the poll so
@@ -85,16 +85,6 @@ class OpencodeWebRenderer {
                 title: 'opencode 实例已停止',
                 lines: ['instance:  ' + session.id],
             });
-            const bar = this._ensureDebugBar(ocPanel);
-            if (bar) {
-                bar.hidden = false;
-                bar.classList.remove('opencode-error');
-                // The debug bar is English by convention (it shows raw
-                // connection info like instance/upstream/version), so this
-                // status line stays English too — distinct from the Chinese
-                // scope-warning banner above the iframe.
-                bar.textContent = 'opencode instance is stopped.';
-            }
             return;
         }
 
@@ -140,7 +130,6 @@ class OpencodeWebRenderer {
         // leak timers/listeners pointing at the old instance.
         this._stopScopeMonitoring();
         this._resetScopeState();
-        this._ensureDebugBar(ocPanel);
         this._currentFrame = frame;
         this._startPolling(session, ocPanel, frame);
         this._startScopeMonitoring(session, ocPanel, ocWarning);
@@ -156,9 +145,6 @@ class OpencodeWebRenderer {
         // “串台” while the new instance is still starting).
         if (this._currentFrame) this._currentFrame.hidden = true;
         this._currentFrame = null;
-        const ocPanel = document.getElementById('opencode-panel');
-        const bar = ocPanel && ocPanel.querySelector('.opencode-debug-bar');
-        if (bar) bar.hidden = true;
     }
 
     cleanup() {
@@ -196,25 +182,10 @@ class OpencodeWebRenderer {
         this._cspAnchorMissing = false;
     }
 
-    _ensureDebugBar(ocPanel) {
-        if (!ocPanel) return null;
-        let bar = ocPanel.querySelector('.opencode-debug-bar');
-        if (!bar) {
-            bar = document.createElement('div');
-            bar.className = 'opencode-debug-bar';
-            bar.style.cssText = 'flex:0 0 auto;width:100%;max-height:4.5em;overflow-y:auto;color:var(--text-secondary,#586069);font-size:12px;padding:4px 12px;text-align:left;font-family:monospace;border-top:1px solid var(--border-color,#e1e4e8);background:var(--hover-bg,#f6f8fa);line-height:1.4;white-space:pre-wrap;word-break:break-all;';
-            ocPanel.appendChild(bar);
-        }
-        bar.hidden = false;
-        bar.classList.remove('opencode-error');
-        return bar;
-    }
-
     // Loading overlay — shared pattern for web-ui kinds. Shown while the
-    // upstream server is starting (or after it stops); info lines mirror the
-    // debug bar so the user sees which instance is being waited on and what
-    // its connection info is. Future web-ui kinds can reuse #opencode-loading
-    // and these helpers.
+    // upstream server is starting (or after it stops); info lines show which
+    // instance is being waited on and its connection status. Future web-ui
+    // kinds can reuse #opencode-loading and these helpers.
     _ensureLoading(ocPanel) {
         if (!ocPanel) return null;
         let el = ocPanel.querySelector('#opencode-loading');
@@ -307,9 +278,6 @@ class OpencodeWebRenderer {
     }
 
     _startPolling(session, ocPanel, frame) {
-        const bar = this._ensureDebugBar(ocPanel);
-        if (!bar) return;
-
         if (this._abort) this._abort.aborted = true;
         const abort = { aborted: false };
         this._abort = abort;
@@ -327,8 +295,6 @@ class OpencodeWebRenderer {
                     : null;
                 const status = inst ? inst.status : 'unknown';
                 const lastError = inst ? (inst.last_error || '') : '';
-                bar.textContent = 'opencode server failed to start within 60s (status: ' + status + (lastError ? ', ' + lastError : '') + '). Use Stop and try again.';
-                bar.classList.add('opencode-error');
                 this._showLoading(ocPanel, {
                     title: '启动超时 (60s)',
                     lines: ['instance:  ' + id, 'status:    ' + status + (lastError ? ' — ' + lastError : '')],
@@ -345,15 +311,6 @@ class OpencodeWebRenderer {
                         // version was actually probed and is out of range.
                         this._versionUnsupported = !!(data.version && !data.version_supported);
                         this._refreshWarning(document.getElementById('opencode-scope-warning'));
-                        bar.classList.remove('opencode-error');
-                        bar.style.color = '';
-                        bar.textContent = [
-                            'instance:  ' + id,
-                            'upstream:  http://' + data.host + ':' + data.port,
-                            'proxy:     ' + (data.iframe_src || ''),
-                            'worktree:  ' + (data.worktree_path || ''),
-                            'version:   ' + (data.version || 'unknown') + (data.version && !data.version_supported ? ' (unsupported)' : '')
-                        ].join('\n');
                         if (frame) {
                             // Only navigate when the target changes
                             // (same guard as reasonix ensureWebFrame):
@@ -379,7 +336,6 @@ class OpencodeWebRenderer {
                 // network blip; continue polling
             }
             var elapsed = Math.floor((Date.now() - startedAt) / 1000);
-            bar.textContent = 'opencode server starting... (' + elapsed + 's)';
             this._showLoading(ocPanel, {
                 lines: ['instance:  ' + id, 'elapsed:   ' + elapsed + 's'],
             });

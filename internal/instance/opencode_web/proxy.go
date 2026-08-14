@@ -287,7 +287,32 @@ try{
 }catch(_){}
 var o=location.origin,pl=o.length;
 function r(u){if(typeof u!=='string')return u;if(u.indexOf(p)!==-1)return u;if(u.startsWith(o+'/'))return o+p+u.slice(pl);if(u.charAt(0)==='/'&&u.charAt(1)!=='/')return o+p+u;var lo='http://127.0.0.1';if(u.startsWith(lo)){var c=u.indexOf(':',lo.length);if(c===-1)return u;var s=u.indexOf('/',c);if(s===-1)s=u.length;return o+p+u.slice(s)}var wss=u.slice(0,2)==='ws';if(wss||u.slice(0,3)==='wss'){var h=u.indexOf('/',7);if(h===-1)return u;return u.slice(0,h)+p+u.slice(h)}return u}
-function ri(i){if(typeof i==='string')return r(i);if(i&&i.url){var n=r(i.url);if(n!==i.url){var q=new Request(n,i);if(i.timeout!==undefined)q.timeout=i.timeout;return q}}if(i&&i.href&&typeof i.href==='string'){var h=r(i.href);if(h!==i.href)return new URL(h)}return i}
+function ri(i){if(typeof i==='string')return r(i);if(i&&i.url){var n=r(i.url);if(n!==i.url){try{var q=new Request(n,{method:i.method,headers:i.headers,body:i.body,duplex:'half',cache:i.cache,credentials:i.credentials,integrity:i.integrity,keepalive:i.keepalive,mode:i.mode,redirect:i.redirect,referrer:i.referrer,referrerPolicy:i.referrerPolicy,signal:i.signal});if(i.timeout!==undefined)q.timeout=i.timeout;return q}catch(e){try{console.warn('[mw-oc] request rewrite failed, forwarding original request:',e)}catch(_2){}}}}if(i&&i.href&&typeof i.href==='string'){var h=r(i.href);if(h!==i.href)return new URL(h)}return i}
+var OR=window.Request;
+if(OR){
+  // Rewrite at construction time: the SDK builds every request with
+  // new Request(url, init). Prefixing the URL here means the request
+  // object the SDK later hands to fetch() already carries the instance
+  // prefix, so ri() below returns it unchanged — no Request rebuild, no
+  // body/duplex round-trip. This matches the pre-single-server path
+  // exactly (which worked on every browser, including Safari's stricter
+  // ReadableStream handling). The ri() rebuild stays as a fallback for
+  // any code that still constructs requests with a bare-origin string.
+  // Covered URL shapes: string, URL object (href), Request copy
+  // construction (url). Any other shape falls through to new OR(u,init)
+  // un-prefixed — extend this list if the SDK ever changes how it builds
+  // requests; do NOT move prefixing back into fetch() (Safari stream
+  // upload regression, see FOLLOWUPS.md).
+  window.Request=function(u,init){
+    try{
+      if(typeof u==='string')return new OR(r(u),init);
+      if(u&&u.href&&typeof u.href==='string')return new OR(r(u.href),init);
+      if(u&&u.url&&typeof u.url==='string')return new OR(r(u.url),init==null?u:init);
+    }catch(_){}
+    return new OR(u,init);
+  };
+  window.Request.prototype=OR.prototype;
+}
 var of=fetch;window.fetch=function(i,ni){return of.call(this,ri(i),ni)};
 var OE=EventSource;window.EventSource=function(u,opts){return new OE(r(u),opts)};window.EventSource.prototype=OE.prototype;
 var hp=Object.prototype.hasOwnProperty;for(var k in OE){if(hp.call(OE,k))try{window.EventSource[k]=OE[k]}catch(_){}}

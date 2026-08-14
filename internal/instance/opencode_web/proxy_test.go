@@ -351,7 +351,31 @@ global.document = {
   head: { appendChild() {} },
 };
 global.window = global;
-global.fetch = (u) => { calls.push("fetch:" + String(u)); return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({}), text: () => Promise.resolve("") }); };
+global.fetch = async (u) => {
+  calls.push("fetch:" + (u && u.url ? u.url : String(u)));
+  if (u instanceof Request) {
+    calls.push("fetch-duplex:" + u.duplex + ":" + u.method);
+    // Read the rewritten body back: it must still be a readable
+    // ReadableStream carrying the original payload (duplex:'half'
+    // alone is not enough — a rebuild that drops/clones the stream
+    // would pass the duplex check but lose the message). The guard is
+    // written so a MISSING body still lands in the call log instead of
+    // silently skipping the read.
+    const reader = u.body && u.body.getReader ? u.body.getReader() : null;
+    if (reader) {
+      const chunks = [];
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        chunks.push(new TextDecoder().decode(value));
+      }
+      calls.push("fetch-body:" + chunks.join(""));
+    } else {
+      calls.push("fetch-body:MISSING");
+    }
+  }
+  return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({}), text: () => Promise.resolve("") });
+};
 global.EventSource = function (u) { calls.push("es:" + u); };
 global.XMLHttpRequest = function () {};
 global.XMLHttpRequest.prototype.open = function (m, u) { calls.push("xhr:" + u); };
@@ -367,10 +391,45 @@ const __script = __SCRIPT__;
 eval(__script);
 
 const P = "/__opencode/A";
+const encoder = new TextEncoder();
+function streamBody() {
+  return new ReadableStream({ start(c) { c.enqueue(encoder.encode("hello")); c.close(); } });
+}
+// Rewrite-at-construction: the SDK builds every request via
+// new Request(url, init); after the inject script runs, that
+// constructor must prefix bare-origin URLs itself (so fetch() gets an
+// already-prefixed Request and ri() returns it unchanged).
+const built = new Request(origin + "/session/2/message", { method: "POST", body: JSON.stringify({ content: "hi" }), headers: { "content-type": "application/json" } });
+assert.strictEqual(built.url, origin + P + "/session/2/message", "Request constructor must prefix bare-origin URLs");
+assert.strictEqual(built.method, "POST");
+// Request copy construction (new Request(existing)) must also keep the
+// prefix: the SDK's rewrite() uses new Request(url, request), and a pure
+// copy (init omitted) exercises the u.url branch of the wrapper.
+const copied = new Request(built);
+assert.strictEqual(copied.url, origin + P + "/session/2/message", "copied Request must keep the prefix");
+assert.strictEqual(copied.method, "POST");
+// Copy with an override init must apply the override on the prefixed URL.
+const copied2 = new Request(built, { method: "GET" });
+assert.strictEqual(copied2.url, origin + P + "/session/2/message", "copied Request with override init must keep the prefix");
+assert.strictEqual(copied2.method, "GET");
+
 Promise.resolve()
+  .then(async () => {
+    // Copy construction must keep the body (u.url branch passes the source
+    // Request as init when no init is given). Use a dedicated source here:
+    // undici does not tee the body on Request copy (browsers do), so
+    // reading the copy would lock the shared stream and break fetch(built)
+    // below.
+    const bodySrc = new Request(origin + "/session/9/message", { method: "POST", body: JSON.stringify({ content: "hi" }) });
+    const bodyCopy = new Request(bodySrc);
+    const cbody = await bodyCopy.text();
+    assert.strictEqual(cbody, JSON.stringify({ content: "hi" }), "copied Request must keep the body");
+  })
   .then(() => fetch(origin + "/session"))
   .then(() => fetch(new URL("/config", origin)))
   .then(() => fetch("https://example.com/remote"))
+  .then(() => fetch(built))
+  .then(() => fetch(new Request(origin + "/session/1/message", { method: "POST", body: streamBody(), duplex: "half" })))
   .then(() => { new XMLHttpRequest().open("GET", "/api/event"); })
   .then(() => { new EventSource("/api/health"); })
   .then(() => { navigator.sendBeacon("/telemetry", "{}"); })
@@ -380,6 +439,16 @@ Promise.resolve()
       "fetch:" + origin + P + "/session",
       "fetch:" + origin + P + "/config",
       "fetch:https://example.com/remote",
+      "fetch:" + origin + P + "/session/2/message",
+      "fetch-duplex:half:POST",
+      "fetch-body:" + JSON.stringify({ content: "hi" }),
+      "fetch:" + origin + P + "/session/1/message",
+      // Streaming upload (chat message) must keep duplex:'half', the
+      // method, AND the body stream itself after the rewrite — otherwise
+      // Chromium rejects the Request with "ReadableStream uploading is not
+      // supported" or the message payload silently vanishes.
+      "fetch-duplex:half:POST",
+      "fetch-body:hello",
       "xhr:" + origin + P + "/api/event",
       "es:" + origin + P + "/api/health",
       "beacon:" + origin + P + "/telemetry",
