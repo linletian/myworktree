@@ -11,6 +11,12 @@ import (
 
 func TestNormalizeDir(t *testing.T) {
 	dir := t.TempDir()
+	// Canonicalize the base the same way normalizeDir does: on macOS
+	// os.TempDir() lives under /var, which is a symlink to /private/var,
+	// so EvalSymlinks rewrites the prefix and a raw comparison fails.
+	if resolved, err := filepath.EvalSymlinks(dir); err == nil {
+		dir = resolved
+	}
 	sub := filepath.Join(dir, "a", "b")
 	if err := os.MkdirAll(sub, 0o755); err != nil {
 		t.Fatal(err)

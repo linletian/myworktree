@@ -94,6 +94,13 @@ type Handle struct {
 	cancel context.CancelFunc
 	wg     *sync.WaitGroup
 
+	// exited closes after the serve process has been reaped AND the
+	// kind's final store write (MarkExited) has completed. Stop waits on
+	// it so that when Stop returns, no goroutine can still be persisting
+	// state for this instance (otherwise teardown of the data dir races
+	// with MarkExited's state.json write — observed on macOS CI).
+	exited chan struct{}
+
 	mu         sync.Mutex
 	host       string
 	port       string
@@ -149,6 +156,7 @@ func (d Driver) Spawn(ctx context.Context, params framework.SpawnParams) (framew
 		ready:     ready,
 		cancel:    cancel,
 		wg:        wg,
+		exited:    make(chan struct{}),
 		blob:      Blob{WorktreeAbs: params.WorktreePath},
 	}
 
@@ -210,6 +218,13 @@ func (h *Handle) loadPublisher() framework.Publisher {
 // configured stopGraceSeconds through (see framework.Manager.Stop),
 // so a user-configured shorter grace period actually shortens the
 // wait — previously this was hardcoded and the parameter was dead.
+//
+// Stop blocks until the process has been reaped and the kind's final
+// MarkExited store write has landed. Returning early (the previous
+// behaviour: SIGKILL escalation was fire-and-forget) let the wait
+// goroutine's state.json write race with whatever tears the instance
+// down next — tests that remove the data dir right after Stop hit
+// "directory not empty" on macOS.
 func (d Driver) Stop(handle framework.Handle, graceSeconds int) error {
 	h := mustHandle(handle)
 	if h.cmd == nil || h.cmd.Process == nil {
@@ -221,10 +236,15 @@ func (d Driver) Stop(handle framework.Handle, graceSeconds int) error {
 		grace = stopGrace
 	}
 	_ = terminatePID(pid, syscall.SIGTERM)
-	go func() {
-		time.Sleep(grace)
+	select {
+	case <-h.exited:
+	case <-time.After(grace):
 		_ = terminatePID(pid, syscall.SIGKILL)
-	}()
+		// The process is SIGKILLed; it cannot outlive this wait, so
+		// blocking here is bounded. ESRCH from either signal just means
+		// the process exited and wait() reaps it, closing h.exited.
+		<-h.exited
+	}
 	return nil
 }
 
@@ -468,6 +488,10 @@ func (d Driver) wait(ctx context.Context, h *Handle) {
 	if p := h.loadPublisher(); p != nil {
 		_ = p.MarkExited(exitCode)
 	}
+	// Close AFTER MarkExited: Stop waits on this channel, so by the time
+	// Stop returns the final store write is done and no further writes
+	// for this instance can happen.
+	close(h.exited)
 }
 
 func probeHealth(ctx context.Context, host, port, authToken string) bool {
