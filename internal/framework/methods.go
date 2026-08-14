@@ -66,9 +66,11 @@ func (m *Manager) Delete(id string) error {
 		return err
 	}
 	idx := -1
+	kindName := ""
 	for i, inst := range st.Instances {
 		if inst.ID == id {
 			idx = i
+			kindName = inst.Kind
 			break
 		}
 	}
@@ -76,7 +78,14 @@ func (m *Manager) Delete(id string) error {
 		return nil // already gone; idempotent
 	}
 	st.Instances = append(st.Instances[:idx], st.Instances[idx+1:]...)
-	return m.Store.SaveWithVersion(st, st.Version)
+	if err := m.Store.SaveWithVersion(st, st.Version); err != nil {
+		return err
+	}
+	// Out of the state lock: kind-owned per-instance resources that only
+	// Delete should wipe (reasonix state dir). Best-effort; the id is
+	// never reused after teardown.
+	m.cleanupKind(kindName, id)
+	return nil
 }
 
 // Restart creates a new instance from a stopped one's configuration.
@@ -119,6 +128,11 @@ func (m *Manager) Restart(id string) (store.ManagedInstance, error) {
 	if err != nil {
 		return store.ManagedInstance{}, err
 	}
+
+	// The restart migrates onto a fresh id, so the old kind-managed
+	// state dir is dropped rather than left to accumulate under the old
+	// id (parity with pre-refactor reasonix cleanup).
+	m.cleanupKind(old.Kind, id)
 
 	// Save the RestartedFrom link. The runLifecycle goroutine may
 	// concurrently mark the new instance "running", so retry on
@@ -219,7 +233,11 @@ func (m *Manager) ReorderInstances(worktreeID string, orderIDs []string, expecte
 }
 
 // ReconcileRunningOnStartup marks stale "running" / "starting"
-// instances as "stopped". The previous server's PIDs are dead.
+// instances as "stopped". The previous server's PIDs are dead — with
+// one exception: kinds implementing RestartSurvivor (reasonix) may
+// keep a live subprocess across restarts, so the framework asks the
+// kind to re-attach; on success the record stays "running" and gets an
+// in-memory handle, on failure it is marked stopped like any other.
 func (m *Manager) ReconcileRunningOnStartup() (int, error) {
 	m.stateMu.Lock()
 	defer m.stateMu.Unlock()
@@ -234,6 +252,19 @@ func (m *Manager) ReconcileRunningOnStartup() (int, error) {
 			st.Instances[i].Status != StatusStarting.String() {
 			continue
 		}
+		kindName := st.Instances[i].Kind
+		if kindName == "" {
+			kindName = "pty"
+		}
+		if k, kerr := m.Registry.Get(kindName); kerr == nil {
+			if rs, ok := k.(RestartSurvivor); ok {
+				handle, ready, rerr := rs.Reattach(context.Background(), st.Instances[i].ID)
+				if rerr == nil {
+					m.registerReattached(st.Instances[i], handle, ready)
+					continue
+				}
+			}
+		}
 		st.Instances[i].Status = StatusStopped.String()
 		if strings.TrimSpace(st.Instances[i].StoppedAt) == "" {
 			st.Instances[i].StoppedAt = now
@@ -247,6 +278,46 @@ func (m *Manager) ReconcileRunningOnStartup() (int, error) {
 		return changed, err
 	}
 	return changed, nil
+}
+
+// StopAllKind best-effort stops every in-memory running instance of
+// the given kind. Called on server shutdown for kinds whose processes
+// would otherwise outlive myworktree (reasonix serve has no PTY to die
+// with). Kinds whose processes die with the server need no call.
+func (m *Manager) StopAllKind(kindName string) {
+	m.mu.Lock()
+	ids := make([]string, 0, len(m.running))
+	for id, ri := range m.running {
+		if ri.handle.KindName == kindName {
+			ids = append(ids, id)
+		}
+	}
+	m.mu.Unlock()
+	for _, id := range ids {
+		if err := m.Stop(id); err != nil {
+			m.logf("StopAllKind(%s): Stop(%s): %v", kindName, id, err)
+		}
+	}
+}
+
+// cleanupKind releases kind-managed per-instance resources (see
+// ResourceCleaner). Best-effort and nil-safe; unknown kinds are
+// skipped.
+func (m *Manager) cleanupKind(kindName, id string) {
+	if kindName == "" {
+		return
+	}
+	k, err := m.Registry.Get(kindName)
+	if err != nil {
+		return
+	}
+	rc, ok := k.(ResourceCleaner)
+	if !ok {
+		return
+	}
+	if err := rc.Cleanup(id); err != nil {
+		m.logf("Cleanup(%s/%s): %v", kindName, id, err)
+	}
 }
 
 // PurgeOrphanLogFiles removes stray *.log files from DataDir/logs/.

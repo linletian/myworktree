@@ -205,6 +205,62 @@ func TestOpencodeWebRendererKeepsFrameAlive(t *testing.T) {
 	}
 }
 
+func TestReasonixRendererKeepsFrameAlive(t *testing.T) {
+	mux := http.NewServeMux()
+	if err := Register(mux, "myworktree", nil); err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/static/kinds/reasonix.js")
+	if err != nil {
+		t.Fatalf("GET /static/kinds/reasonix.js failed: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /static/kinds/reasonix.js status: %d", resp.StatusCode)
+	}
+	js := string(body)
+
+	checks := []string{
+		// issue #53: re-navigation is guarded by the dataset (id + src);
+		// assigning the same src would reload the embedded page.
+		"frame.dataset.instance !== id || frame.dataset.src !== src",
+		// hide instead of destroying the iframe on tab switch so the
+		// embedded page (chat draft, scroll, sidebar) survives.
+		"this._currentFrame.hidden = true",
+		// a fresh iframe starts with an empty navigation cache, so the
+		// first activation navigates; a stop→start cycle (fresh id)
+		// builds a fresh iframe (invalidateWebFrame coverage).
+		"frame.dataset.instance = '';",
+		"frame.dataset.src = '';",
+		// issue #54: hide leftover xterm hosts so they cannot overlay the
+		// static iframe.
+		"renderTerminalSessions();",
+		// issue #55: normalize container styles left behind by xterm so the
+		// web UI is never rendered greyed out.
+		`termContainer.style.opacity = "1";`,
+		`termContainer.style.filter = "none";`,
+		// web_url (cross-origin listener) preferred, same-origin /rx/ fallback.
+		`"/rx/" + id + "/"`,
+		"inst.web_url",
+		// per-instance iframe cache: cross-instance switches only
+		// hide/show frames instead of re-navigating.
+		"this._frames = new Map()",
+		"this._frames.set(id, frame)",
+		"this._showOnly(frame)",
+		// stopping an instance releases its iframe immediately.
+		"this.destroyFrame(session.id)",
+	}
+	for _, check := range checks {
+		if !strings.Contains(js, check) {
+			t.Fatalf("reasonix.js should include keep-alive hook %q", check)
+		}
+	}
+}
+
 func TestIndexHTMLCoversSessionLifecycle(t *testing.T) {
 	bodyText := fetchIndexHTML(t)
 	checks := []string{
@@ -229,9 +285,9 @@ func TestIndexHTMLCoversReconcileLogic(t *testing.T) {
 	checks := []string{
 		"function reconcileTerminalSessions()",
 		"destroyTerminalSession(id);",
-		"disconnectTTY(terminalSessions[id]);",
+		"disconnectTTY(session);",
 		"function reconnectRunningTerminalSessions()",
-		"if (inst && inst.status === 'running' && !hasLiveTTYConnection(id)) {",
+		"if (inst && inst.status === 'running' && !hasLiveTTYConnection(session.id)) {",
 		"connectTTY(session);",
 	}
 	for _, check := range checks {

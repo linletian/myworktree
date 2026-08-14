@@ -1,8 +1,18 @@
 # Changelog
 
-## Unreleased
+## v0.4.0 (2026-08-12)
+
+Release focused on the native Reasonix web UI integration, eliminating PTY log disk write amplification, and workspace visibility improvements.
+
+**PR #58 评审修复（评审后整理）**：`PATCH /api/instances` 与 `POST /api/instances/restart` 的响应改为与 `GET`/`POST` 一致，reasonix 实例补回 `web_url` 字段；`instanceView` 改为直接构造响应 map（去掉每次序列化后的 Marshal→Unmarshal 往返）；reasonix 实例的 `preStart` 环境与 `serve` 一致地剥离继承的 `REASONIX_HOME`/`REASONIX_STATE_HOME`（宿主导出这两个变量时，preStart 与 serve 不再解析到不同的 `~/.reasonix`，覆盖仍通过实例 tag env 生效）；实例停止/删除/重启时清理 per-instance 的 Start 锁 map 条目与管理目录（不再随启停循环无限累积）；侧栏删除实例的确认文案改为 "Delete instance?"。
+
+**Reasonix instances run without `REASONIX_HOME` isolation (requirement revision, issue #56)**: `serve` now uses the user's real `~/.reasonix`, so sessions/history/config/credentials are shared per project exactly like a terminal-run `reasonix` — the same project's history (including terminal CLI/TUI sessions) is visible and switchable in the embedded sidebar, and cross-project isolation is done by reasonix itself (per-cwd). The per-instance `home` dir, `session.jsonl`, and config/`.env` symlinks are removed; the instance state dir now only carries `token`/`port`/`pid`/`serve.log`, and deleting an instance never touches the shared session pool. Each Start opens a fresh session (no `--resume`), matching terminal behaviour; issue #49's "Restart = fresh session" semantics stay. The reverse proxy at `/rx/<id>/` (token cookie injection + HTML URL-prefix rewrite for fetch/EventSource/XHR) is unchanged.
+
+**Legacy data (pre-2026-08-12 instances)**: instances created under the old per-instance `REASONIX_HOME` isolation keep an inert `home/` dir and `session.jsonl` that the driver no longer reads (it logs a migration hint on Start). Those sessions are NOT auto-merged into the shared pool — delete the instance to clean the leftover, or export the session manually. No automatic migration is performed.
 
 Disk write amplification fix for long-running PTY-heavy sessions.
+
+**Merged main → feature/opencode-native-ui (reasonix + opencode-web unification)** — the reasonix web-UI feature released in v0.4.0 is now implemented as a third `framework.Kind` (`internal/instance/reasonix/kind.go`) inside the opencode-native-ui kind architecture, replacing the pre-refactor `internal/instance/manager.go` integration. All v0.4.0 reasonix behaviour is preserved: `/rx/<id>/` reverse proxy (token cookie + HTML URL-prefix rewrite), independent loopback listener with `web_url` (cross-origin, issue #44) and same-origin fallback for TLS/network listeners, sidebar-toggle injection, SSE streaming, CLI version gate (1.22.0), per-instance Start lock, state-dir cleanup on stop/restart/delete, shutdown `StopAllKind("reasonix")`, and re-attach of live serve processes on daemon restart (`RestartSurvivor`). Frontend: a dedicated Reasonix modal tab and `kinds/reasonix.js` renderer (per-instance iframe keep-alive across tab switches, issues #53/#54/#55). Tag semantics (`tag.Env` / `preStart` / `Command` / `Cwd`) restored for all kinds — a regression of the framework refactor that had left tags inert at instance start. `state.json` `kind` values are `pty` / `opencode-web` / `reasonix` (empty means `pty`).
 
 ### Bug fixes
 
@@ -16,6 +26,8 @@ Disk write amplification fix for long-running PTY-heavy sessions.
 - **feat(opencode-web): single-worktree isolation** — full-page embed (`/__opencode/<id>/`, replacing the deep session link that blanked the SPA), reverse-proxy directory monitoring that records out-of-scope requests in an in-memory `ScopeTracker` (`/api/instances/opencode/scope?id=`), an injected script that hides cross-worktree switch entries (project switch / add-project / open-project) and normalizes the localStorage server list to a single server, an `opencode --version` gate (advisory, 1.18.x) plus DOM-anchor / visibility checks reported via `postMessage`, and a persistent in-panel warning bar (out-of-scope + hiding-not-effective states). Design and decision record in `docs/plans/opencode-native-ui/WORKTREE-ISOLATION.md`.
 - **fix(opencode-web): hide project list via CSS to avoid SSE-time render jank** — replace the `MutationObserver` + `querySelectorAll` walk that hid `[data-slot="home-projects-scroll"]` (home project list) and `[data-action="project-switch"]` (project switch button) with a one-shot `<style>` injection (`aside:has([data-slot="home-projects-scroll"]){display:none!important}` etc.), so the SSE-driven session stream no longer re-traverses the whole DOM on every mutation. Same JS continues to hide per-element foreign-worktree projects and the "Open project" button. Post-mortem and seven follow-up debugging notes (URL/Worker rewrite, projects preseed, sandbox normalization, orphan process) added to `docs/plans/opencode-native-ui/DEBUG.md`.
 - docs: add `REVIEW-e4158fa.md` code review for `feature/opencode-native-ui` HEAD (`e4158fa`).
+
+**Reasonix sidebar toggle resized to a vertical pill that fits the chat gutter**: the injected hide/expand sidebar button in the embedded Reasonix web chat was 34×34px at (8,8), so it overlapped the conversation. It is now a vertical 24×64px pill at (2,8) with a CSS arrow glyph (▶ when collapsed — click to expand, ◀ when expanded — click to collapse; direction points at where the sidebar moves, so no text or i18n needed): measured against the upstream `.transcript` padding (`24px 28px` on desktop), the button's right edge (26px) stays inside the chat's 28px left gutter, so it never covers message text in either the collapsed or expanded state, and the taller target is easier to see and click.
 
 ### Breaking changes
 
@@ -36,6 +48,10 @@ Disk write amplification fix for long-running PTY-heavy sessions.
 - **In-memory health-fail counter** — `opencodeHealth` no longer writes `_health_fail_count` to `Extra`; the counter lives in `Manager.ocRT[id]` (atomic Int32, cleared on restart). Reduces store writes from "every probe" to "every successful listen-address parse".
 - **`UpdateExtra` is now merge + retry** — preserves pre-existing keys (e.g., `worktree_abs`), retries on `ErrVersionConflict` so concurrent writers don't silently drop updates, and transitions `starting → running`.
 - **`password_set` removed from `/api/instances/<id>/opencode` response** — was always `true` and no longer meaningful; no frontend consumer. See `docs/API.md` §5.10.
+- **Text file preview** — click a file in the Changes panel to preview it with line numbers, a formatted view, and a diff view (including a synthetic diff for untracked files, with `quotePath` handled).
+- **Branch divergence badge** — the sidebar now shows a diverge badge when a branch is ahead of / behind its upstream, backed by new API handlers and scheduled refresh.
+- **`mw config regen`** — new CLI command to regenerate the config, plus per-request auth token reload so config/token changes take effect without a daemon restart.
+- **Tags config directory** — open the tags config directory from the UI and use default tags out of the box.
 
 ## v0.3.0
 

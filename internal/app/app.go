@@ -30,7 +30,8 @@ import (
 	"myworktree/internal/framework"
 	"myworktree/internal/gitx"
 	"myworktree/internal/instance/opencode_web"
-	_ "myworktree/internal/instance/pty" // init(): register kind
+	"myworktree/internal/instance/pty"
+	"myworktree/internal/instance/reasonix"
 	"myworktree/internal/llm"
 	"myworktree/internal/mcp"
 	"myworktree/internal/monitor"
@@ -67,8 +68,20 @@ type Server struct {
 	serverRev string
 	isSecure  bool
 
-	portal      *portal.Portal
-	httpSrv     *http.Server
+	portal  *portal.Portal
+	httpSrv *http.Server
+
+	// Independent loopback listener serving only the reasonix reverse proxy,
+	// so embedded reasonix pages are cross-origin with the myworktree API
+	// (issue #44). Empty when not enabled (TLS mode → mixed content, falls
+	// back to the same-origin /rx/ route).
+	rxAddr string
+	rxSrv  *http.Server
+
+	// rxDriver owns the reasonix serve subprocesses and is shared by the
+	// reasonix kind (registered below) and the /rx/ reverse proxy.
+	rxDriver *reasonix.Driver
+
 	store       store.FileStore
 	worktreeMgr worktree.Manager
 	instanceMgr *framework.Manager
@@ -133,11 +146,34 @@ func New(cfg Config, logger *log.Logger) (*Server, error) {
 		Store:        st,
 	}
 	globalCfg, _ := config.Load()
-	instanceMgr := framework.NewManager(framework.Default, st, logger)
+	// Dedicated kind registry per server: registering into framework.Default
+	// would panic on the second New() in the same process (tests). The kinds
+	// are explicitly registered here instead of relying on init().
+	reg := framework.NewRegistry()
+	reg.Register(pty.Driver{})
+	reg.Register(opencode_web.Driver{})
+
+	// The reasonix serve driver and its framework kind.
+	rxDriver := &reasonix.Driver{
+		DataDir: dataDir,
+		Logger:  logger,
+	}
+	reg.Register(reasonix.NewKind(rxDriver))
+
+	instanceMgr := framework.NewManager(reg, st, logger)
 	instanceMgr.DataDir = dataDir
 	instanceMgr.Root = root
 	instanceMgr.LogBufferBytes = globalCfg.LogBufferBytes
 	instanceMgr.AuthToken = cfg.AuthToken
+	// Tags drive tag.Env / preStart / Command / Cwd resolution at instance
+	// start (global defaults + per-project tags.json) — restored tag
+	// semantics shared by every kind.
+	if base, err := os.UserConfigDir(); err == nil {
+		instanceMgr.Tags = tag.Manager{
+			GlobalPath:  filepath.Join(base, "myworktree", "tags.json"),
+			ProjectPath: filepath.Join(dataDir, "tags.json"),
+		}
+	}
 	// SetHTTPHandler is wired by Register() below (so the mux exists
 	// before any kind tries to register routes).
 
@@ -154,6 +190,7 @@ func New(cfg Config, logger *log.Logger) (*Server, error) {
 		worktreeMgr: worktreeMgr,
 		instanceMgr: instanceMgr,
 		ocScope:     opencode_web.NewScopeTracker(),
+		rxDriver:    rxDriver,
 		mcpAdapter: mcp.Adapter{
 			Worktrees: worktreeMgr,
 			Instances: instanceMgr,
@@ -366,6 +403,42 @@ func (s *Server) Start() (string, error) {
 	}
 	s.ln = ln
 
+	// Independent loopback listener serving only /rx/ (issue #44): embedded
+	// reasonix pages become cross-origin with the myworktree API, so content
+	// rendered inside the chat iframe cannot silently call /api/* with the
+	// user's session.
+	//
+	// It is enabled only when the main listener is loopback-only: the
+	// reported web_url is an absolute http://127.0.0.1:<port>, which is only
+	// reachable from the same machine. When the main listener is open to the
+	// network (default 0.0.0.0, or an explicit LAN IP) a remote browser would
+	// resolve that 127.0.0.1 to ITSELF and the iframe would fail — so we fall
+	// back to the same-origin /rx/ route (the frontend then uses the relative
+	// path /rx/<id>/, which follows whatever host the browser is on, and LAN
+	// access works). TLS mode also falls back (an http iframe inside an https
+	// page is blocked as mixed content). In both fallback cases web_url stays
+	// empty and the frontend keeps working via /rx/<id>/.
+	listenHost, _, _ := net.SplitHostPort(s.cfg.ListenAddr) // "" on error → not loopback → fallback
+	if s.cfg.TLSCert == "" && s.cfg.TLSKey == "" && isLoopbackHost(listenHost) {
+		rxLn, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			s.logger.Printf("[reasonix] warning: independent listener failed, falling back to same-origin /rx/: %v", err)
+		} else {
+			rxMux := http.NewServeMux()
+			rxMux.Handle("/rx/", &reasonixProxy{manager: s.instanceMgr, driver: s.rxDriver})
+			s.rxSrv = &http.Server{Handler: rxMux}
+			s.rxAddr = rxLn.Addr().String()
+			go func() {
+				// A non-ErrServerClosed failure would leave web_url pointing
+				// at a dead port with the iframe failing silently — log it.
+				if err := s.rxSrv.Serve(rxLn); err != nil && !errors.Is(err, http.ErrServerClosed) {
+					s.logger.Printf("[reasonix] independent listener error: %v", err)
+				}
+			}()
+			s.logger.Printf("[reasonix] independent web-ui listener on %s", s.rxAddr)
+		}
+	}
+
 	if s.cfg.PortalPort > 0 {
 		base, err := os.UserConfigDir()
 		if err != nil {
@@ -446,6 +519,19 @@ func waitForServer(port int, timeout time.Duration) error {
 func (s *Server) Shutdown() {
 	if s.portal != nil {
 		s.portal.Stop()
+	}
+	// Stop reasonix serve processes first (behavior parity with tty
+	// instances, which die when their PTY hangs up): their SSE connections
+	// then close, so the HTTP servers below shut down promptly. State dirs
+	// (token/port/pid/serve.log) are kept; sessions live in the shared
+	// ~/.reasonix pool and are unaffected by instance lifecycle.
+	if s.instanceMgr != nil {
+		s.instanceMgr.StopAllKind(store.KindReasonix)
+	}
+	if s.rxSrv != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = s.rxSrv.Shutdown(ctx)
 	}
 	if s.httpSrv != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -550,6 +636,7 @@ func (s *Server) registerAPIs(mux *http.ServeMux) {
 	mux.HandleFunc("/api/instances/stats", s.handleInstanceStats)
 	mux.HandleFunc("/api/instances/opencode", s.handleInstanceOpencodeInfo)
 	mux.HandleFunc("/api/instances/opencode/scope", s.handleInstanceOpencodeScope)
+	mux.Handle("/rx/", &reasonixProxy{manager: s.instanceMgr, driver: s.rxDriver})
 	mux.HandleFunc("/api/tags", s.handleTags)
 	mux.HandleFunc("/api/tags/open-dir", s.handleTagsOpenDir)
 	mux.HandleFunc("/api/branches", s.handleBranches)
@@ -1279,6 +1366,74 @@ func (s *Server) handleWorktreeDiverged(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, map[string]any{"items": result})
 }
 
+// instanceView renders a ManagedInstance for the API, attaching a web_url for
+// reasonix instances pointing at the independent listener (issue #44). The
+// field is intentionally not part of the persisted store schema.
+//
+// The map is built explicitly (no JSON round-trip) so the API response shape
+// stays stable and cheap; keep the keys and the omitempty conditions in sync
+// with ManagedInstance's json tags when the schema grows.
+func (s *Server) instanceView(it store.ManagedInstance) map[string]any {
+	m := map[string]any{
+		"id":          it.ID,
+		"worktree_id": it.WorktreeID,
+		"tag_id":      it.TagID,
+		"name":        it.Name,
+		"command":     it.Command,
+		"cwd":         it.Cwd,
+		"pid":         it.PID,
+		"status":      it.Status,
+		"created_at":  it.CreatedAt,
+	}
+	if it.WorktreeName != "" {
+		m["worktree_name"] = it.WorktreeName
+	}
+	if len(it.Env) > 0 {
+		m["env"] = it.Env
+	}
+	if it.Kind != "" {
+		m["kind"] = it.Kind
+	}
+	if len(it.Extra) > 0 {
+		m["extra"] = it.Extra
+	}
+	if len(it.KindBlob) > 0 {
+		m["kind_blob"] = json.RawMessage(it.KindBlob)
+	}
+	if it.LastError != "" {
+		m["last_error"] = it.LastError
+	}
+	if it.ExitCode != 0 {
+		m["exit_code"] = it.ExitCode
+	}
+	if it.RestartedFrom != "" {
+		m["restarted_from"] = it.RestartedFrom
+	}
+	if it.RestartedTo != "" {
+		m["restarted_to"] = it.RestartedTo
+	}
+	if it.StoppedAt != "" {
+		m["stopped_at"] = it.StoppedAt
+	}
+	if it.Kind == store.KindReasonix {
+		if u := s.reasonixWebURL(it.ID); u != "" {
+			m["web_url"] = u
+		}
+	}
+	return m
+}
+
+// reasonixWebURL returns the cross-origin base for a reasonix instance's web
+// UI, or "" when the independent listener is not enabled (TLS mode, or a
+// non-loopback main listener — see Server.Start), in which case the frontend
+// falls back to the same-origin /rx/<id>/ route.
+func (s *Server) reasonixWebURL(id string) string {
+	if s.rxAddr == "" {
+		return ""
+	}
+	return "http://" + s.rxAddr + "/rx/" + id + "/"
+}
+
 func (s *Server) handleInstances(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
@@ -1292,7 +1447,11 @@ func (s *Server) handleInstances(w http.ResponseWriter, r *http.Request) {
 		if err == nil {
 			version = st.Version
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"instances": items, "version": version})
+		view := make([]map[string]any, 0, len(items))
+		for _, it := range items {
+			view = append(view, s.instanceView(it))
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"instances": view, "version": version})
 	case http.MethodPost:
 		var req struct {
 			WorktreeID string `json:"worktree_id"`
@@ -1314,6 +1473,7 @@ func (s *Server) handleInstances(w http.ResponseWriter, r *http.Request) {
 				return ""
 			}(),
 			TagID:   req.TagID,
+			Command: req.Command,
 			Kind:    req.Kind,
 			Name:    req.Name,
 		})
@@ -1326,7 +1486,7 @@ func (s *Server) handleInstances(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusBadRequest, err)
 			return
 		}
-		writeJSON(w, http.StatusCreated, item)
+		writeJSON(w, http.StatusCreated, s.instanceView(item))
 	case http.MethodPatch:
 		var req struct {
 			ID   string `json:"id"`
@@ -1345,7 +1505,7 @@ func (s *Server) handleInstances(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusBadRequest, err)
 			return
 		}
-		writeJSON(w, http.StatusOK, updated)
+		writeJSON(w, http.StatusOK, s.instanceView(updated))
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
@@ -1493,7 +1653,7 @@ func (s *Server) handleInstanceRestart(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, item)
+	writeJSON(w, http.StatusCreated, s.instanceView(item))
 }
 
 func (s *Server) handleInstanceDelete(w http.ResponseWriter, r *http.Request) {

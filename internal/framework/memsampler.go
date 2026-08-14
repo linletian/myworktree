@@ -11,10 +11,10 @@ import (
 // pre-refactor internal/instance/sizing.go exposed; kept here so the
 // framework owns the policy and kinds just ask for "a buffer".
 const (
-	DefaultBufferCap int64 = 32 << 20 // 32 MB
-	MinBufferCap     int64 = 16 << 20 // 16 MB
+	DefaultBufferCap int64 = 32 << 20  // 32 MB
+	MinBufferCap     int64 = 16 << 20  // 16 MB
 	MaxBufferCap     int64 = 256 << 20 // 256 MB
-	MaxTotalFraction       = 0.25       // sum of live buffers ≤ 25% of system RAM
+	MaxTotalFraction       = 0.25      // sum of live buffers ≤ 25% of system RAM
 )
 
 // ErrLogBufferBudgetExceeded is the sentinel wrapped by

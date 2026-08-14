@@ -15,12 +15,14 @@
 4. 支持 **Tag（启动模板）**：启动命令、preStart 脚本、env、cwd。
 5. 单用户远程访问：非 loopback 必须认证；可选内置 HTTPS。
 6. 预留扩展为 MCP server 的接口形态。
+7. **agent 实例与终端语义一致**：`kind=reasonix` 等 agent 实例的会话/历史按项目（worktree）组织，同一项目内与终端直接运行的 agent CLI/TUI **互通**（共享同一会话池，可互相切换）；myworktree 仅做工作区与实例管理，**不介入 agent 的会话/项目/分支产品逻辑**。
 
 ## 3. 非目标（Non-Goals）
 - **不解决**同一 worktree 内多 instance 并发写文件导致的冲突/竞态。
 - 不处理任何项目具体内容：不解析代码、不做索引、不做质量分析。
 - 不管理非 myworktree 启动的进程/终端实例。
 - 不做多人协作权限体系。
+- **不实现 agent 的会话/项目/分支管理**：项目隔离、历史会话切换、会话并发（lease 争用）等语义全部由 agent 自身负责（如 reasonix 按 cwd 组织 `~/.reasonix/projects/<slug>/sessions`）；myworktree **不复制、不隔离、不代管** agent 会话状态。
 
 ## 4. 术语
 - **Worktree**：`git worktree` 创建的独立工作区目录。
@@ -36,6 +38,7 @@
   - LLM 模式：调用 LLM 将任务描述转换为分支名（如 `fix/auth-bug`），保留 `/` 分组前缀（如 `feature/auth` → `feature/auth`）。
   - 自定义输入：用户在 Branch Name 输入框直接输入时，直接使用该值作为分支名。
   - 命名冲突：如目标分支已存在，自动给 `<name>` 加 `-2/-3` 后缀避免冲突；并支持将既有 worktree **纳入管理（import）**。
+- **agent 实例语义边界**：agent 实例（如 `kind=reasonix`）的会话数据归属 agent 自身状态根（默认 `~/.reasonix`），myworktree **不设独立 `REASONIX_HOME`、不绑定固定会话文件**来改变 agent 语义；实例生命周期（启停/重启/删除）只作用于 serve 子进程，**不改动共享会话池**。并行冲突由 agent 自身的 session lease 机制处理（拒绝式，不静默双写），myworktree 不额外加锁。**opt-out**：driver 会从 serve 环境剥离继承的 `REASONIX_HOME`/`REASONIX_STATE_HOME`（确保走真实 `~/.reasonix`），如需自定义 home，用实例 tag 的 `env` 显式设置即可（剥离后追加，后值生效）。
 
 ## 6. 安全
 - 默认监听 `0.0.0.0:0`，自动选择端口并持久化。
@@ -53,6 +56,10 @@
   - 输出回放中按模式脱敏主流 AI key（如 `sk-***`）。
 
 ## 7. 当前实现状态（与愿景差异）
+- **Reasonix web chat 实例（MVP 完结，含需求修订 2026-08-12）**：`kind=reasonix` 实例在 worktree 内运行 `reasonix serve` 子进程，其 web 聊天界面经反代 `/rx/<id>/` 以 iframe 嵌入实例标签页（创建实例时选择 *Reasonix* 标签页；可选模板的 env/preStart 生效，command 被忽略）。
+  - **语义基线（需求修订 2026-08-12，见 §2 Goal 7 / §5 关键规则）**：实例 = 在该 worktree 项目里打开 reasonix 的 web UI。项目间隔离由 reasonix 自身按 cwd 组织（`~/.reasonix/projects/<slug>/sessions`）；同一项目的全部历史会话（含终端直接跑 reasonix CLI/TUI 产生的）在实例侧边栏**可见、可切换**，与终端行为一致。myworktree 只负责 worktree/实例生命周期与 `/rx/<id>/` 反代，不介入 agent 的会话/项目/分支语义。
+  - **实现状态（2026-08-12 已按新基线实现）**：已取消 `REASONIX_HOME` 隔离与固定 `--resume` 会话文件，serve 直接使用 `~/.reasonix`（与终端运行一致），会话按项目由 reasonix 自身组织、同项目历史会话（含终端产生的）在实例侧边栏可见可切换，`#56` 期望满足。`#49`「Restart = 全新会话」语义保留（重启开新会话，历史仍在共享会话池中可切换）。
+  - 已实现且不变：安全加固（#44 独立源跨源隔离）、侧栏默认折叠布局注入（#48）、生命周期/性能（#46 缓存、#47 锁范围）、driver 健壮性（#45 版本门 + serve.log 报错）、测试隔离（#43）；`env`/`preStart` 注入已支持（DEFERRED §3）。详见 `docs/plans/reasonix-native-ui/`。
 - 已实现：worktree/instance 管理、Web UI、API、输出回放、脱敏、认证与可选 HTTPS、MCP tools 列表接口。
 - 已实现：侧栏主工作区/各 worktree 项提供两个快捷入口，可一键在宿主机打开对应目录的 Terminal（zsh）与 Finder 窗口，便于在 Web UI 与本机 GUI/CLI 间快速切换。
 - **已实现 Git Changes 面板暂存/未暂存分离**：侧栏底部 CHANGES 区域拆分为 Staged 和 Unstaged 两个互锁折叠 section。默认展开 Unstaged，点击任一标题栏展开当前 section 并自动折叠另一个。每个 section 独立显示暂存/未暂存的文件列表和行数汇总。

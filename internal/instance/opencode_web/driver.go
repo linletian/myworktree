@@ -115,6 +115,17 @@ func (d Driver) Spawn(ctx context.Context, params framework.SpawnParams) (framew
 	cmd.Dir = params.WorktreePath
 	cmd.Env = buildEnv(params.ExtraEnv, params.AuthToken)
 
+	// Tag preStart runs with the same environment the serve process
+	// will get (buildEnv output incl. the forced auth token).
+	if strings.TrimSpace(params.PreStart) != "" {
+		pre := exec.Command("zsh", "-lc", params.PreStart)
+		pre.Dir = cmd.Dir
+		pre.Env = cmd.Env
+		if out, err := pre.CombinedOutput(); err != nil {
+			return framework.Handle{}, nil, fmt.Errorf("preStart failed: %w: %s", err, strings.TrimSpace(string(out)))
+		}
+	}
+
 	stdoutR, stdoutW := io.Pipe()
 	cmd.Stdout = stdoutW
 	cmd.Stderr = stdoutW
@@ -180,6 +191,9 @@ func (Driver) SetPublishers(handle framework.Handle, p framework.Publisher) {
 		panic("opencode-web: SetPublishers called twice on the same handle (framework bug)")
 	}
 	h.AttachInstanceID(p.InstanceID())
+	if h.cmd != nil && h.cmd.Process != nil {
+		_ = p.SetPID(h.cmd.Process.Pid)
+	}
 }
 
 // loadPublisher returns the Publisher (if any) for this handle.

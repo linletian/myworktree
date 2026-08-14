@@ -660,6 +660,19 @@
             font-weight: 600;
         }
 
+        .rx-badge {
+            font-size: 9px;
+            line-height: 1;
+            background: var(--badge-bg, rgba(128,128,128,0.25));
+            color: var(--badge-text, inherit);
+            padding: 2px 4px;
+            border-radius: 4px;
+            margin-right: 4px;
+            vertical-align: middle;
+            font-family: monospace;
+            letter-spacing: 0.5px;
+        }
+
         #opencode-panel { width: 100%; height: 100%; display: flex; flex-direction: column; }
         #opencode-panel[hidden] { display: none !important; }
         #opencode-frames { flex: 1; min-height: 0; display: flex; flex-direction: column; }
@@ -684,6 +697,13 @@
         #opencode-scope-warning { flex: 0 0 auto; width: 100%; box-sizing: border-box; padding: 6px 12px; font-size: 12px; line-height: 1.4; color: #7c2d12; background: #ffedd5; border-bottom: 1px solid #fdba74; word-break: break-all; }
         #opencode-scope-warning[hidden] { display: none !important; }
         #opencode-scope-warning.opencode-warning-danger { color: #991b1b; background: #fee2e2; border-color: #fca5a5; }
+        /* Reasonix web frame — same per-instance iframe cache pattern as
+           opencode-web (kinds/reasonix.js), hosted inside its own panel. */
+        #reasonix-panel { width: 100%; height: 100%; display: flex; flex-direction: column; }
+        #reasonix-panel[hidden] { display: none !important; }
+        #reasonix-frames { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+        .reasonix-frame { width: 100%; flex: 1; min-height: 0; border: 0; }
+        .reasonix-frame[hidden] { display: none !important; }
 
         .status-running {
             background: var(--status-running);
@@ -1294,6 +1314,9 @@
                     <div id="opencode-scope-warning" hidden></div>
                     <div id="opencode-frames"></div>
                 </div>
+                <div id="reasonix-panel" hidden>
+                    <div id="reasonix-frames"></div>
+                </div>
                 <div id="terminal-controls">
                     <button class="term-ctrl-btn" onclick="refreshCurrentInstance()" title="Refresh & Scroll to Bottom">
                         <svg viewBox="0 0 24 24"><path d="M23 4v6h-6"></path><path d="M1 20v-6h6"></path><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg>
@@ -1435,6 +1458,7 @@
         <div class="modal-tabs" role="tablist">
             <button type="button" class="modal-tab active" data-tab="terminal" role="tab" aria-selected="true" onclick="switchStartInstanceTab('terminal')">Terminal</button>
             <button type="button" class="modal-tab" data-tab="opencode-web" role="tab" aria-selected="false" onclick="switchStartInstanceTab('opencode-web')">Opencode-Web</button>
+            <button type="button" class="modal-tab" data-tab="reasonix" role="tab" aria-selected="false" onclick="switchStartInstanceTab('reasonix')">Reasonix</button>
         </div>
         <div class="modal-body">
             <div id="modal-tab-terminal" class="modal-tab-panel">
@@ -1459,6 +1483,20 @@
                 <div class="form-group">
                     <label>Name (Optional)</label>
                     <input id="instNameOc" placeholder="e.g. opencode-web" />
+                </div>
+            </div>
+            <div id="modal-tab-reasonix" class="modal-tab-panel" hidden>
+                <div class="form-info">
+                    <strong>在浏览器里使用 Reasonix 网页聊天界面。</strong>
+                    在所选 worktree 里启动 reasonix serve，并在实例页签中内嵌其 web chat UI。可选一个模板：模板的 env / preStart 会生效，command 被忽略（reasonix 实例运行的是 agent 而非 shell 命令）。
+                </div>
+                <div class="form-group">
+                    <label>Template (env / preStart)</label>
+                    <select id="tagSelectRx"></select>
+                </div>
+                <div class="form-group">
+                    <label>Name (Optional)</label>
+                    <input id="instNameRx" placeholder="e.g. reasonix" />
                 </div>
             </div>
             <div class="form-actions">
@@ -2287,6 +2325,7 @@
                  title="Drag to reorder; double-click to rename">
               <span class="tab-status ${statusClass}"></span>
               ${i.kind === 'opencode-web' ? '<span class="badge-oc">OC</span>' : ''}
+              ${i.kind === "reasonix" ? '<span class="rx-badge" title="Reasonix web UI">rx</span>' : ""}
                ${displayName}
             </div>
           `;
@@ -2450,39 +2489,43 @@
             const empty = document.getElementById("empty-state");
             const termContainer = document.getElementById("terminal-container");
             const ocPanel = document.getElementById("opencode-panel");
+            const rxPanel = document.getElementById("reasonix-panel");
             const actions = document.getElementById("instance-actions");
             const controls = document.getElementById("terminal-controls");
 
             if (state.activeInst) {
                 const inst = state.instances.find(i => i.id === state.activeInst);
                 const isOC = inst && inst.kind === 'opencode-web';
+                const isRX = inst && inst.kind === 'reasonix';
                 empty.style.display = "none";
                 // The refresh / scroll-to-bottom shortcuts overlay the
                 // terminal's top-right corner; they are meaningless for the
-                // embedded opencode-web page (the page owns its own UI), so
-                // hide them for that kind and keep them for terminal kinds.
+                // embedded web-ui pages (the pages own their UI), so hide
+                // them for those kinds and keep them for terminal kinds.
                 // A class (not inline style) so CSS retains control over the
                 // element's default layout. toggle(name, flag) in both
                 // branches — keep the forms identical so future edge
                 // conditions (e.g. hide while loading) can't mis-match.
-                if (controls) controls.classList.toggle("oc-hidden", !!isOC);
-                // For opencode-web instances the OpencodeWebRenderer owns the
-                // visibility of #opencode-panel and #terminal-container.
-                // renderWorkspace must NOT overwrite them, or the 8-second
-                // refresh cycle will fight the renderer and hide the iframe.
-                if (!isOC) {
+                if (controls) controls.classList.toggle("oc-hidden", !!(isOC || isRX));
+                // For opencode-web / reasonix instances the kind renderers
+                // own the visibility of their panels and the terminal
+                // container. renderWorkspace must NOT overwrite them, or the
+                // 8-second refresh cycle will fight the renderer and hide
+                // the iframe.
+                if (!isOC && !isRX) {
                     termContainer.style.display = "block";
                     if (ocPanel) ocPanel.hidden = true;
+                    if (rxPanel) rxPanel.hidden = true;
                 }
                 actions.classList.add("visible");
 
                 // Styling for stopped instance (terminal kind only)
-                if (!isOC && inst && inst.status !== 'running') {
+                if (!isOC && !isRX && inst && inst.status !== 'running') {
                     termContainer.style.opacity = "0.6";
                     termContainer.style.filter = "grayscale(100%)";
                     const session = getActiveTerminalSession();
                     if (session && session.term) session.term.options.cursorBlink = false;
-                } else if (!isOC) {
+                } else if (!isOC && !isRX) {
                     termContainer.style.opacity = "1";
                     termContainer.style.filter = "none";
                     const session = getActiveTerminalSession();
@@ -2494,6 +2537,7 @@
                 empty.textContent = state.activeWT ? "No instances. Click + to start one." : "Select a worktree.";
                 termContainer.style.display = "none";
                 if (ocPanel) ocPanel.hidden = true;
+                if (rxPanel) rxPanel.hidden = true;
                 if (controls) controls.classList.toggle("oc-hidden", true);
                 actions.classList.remove("visible");
             }
@@ -2529,6 +2573,22 @@
                     }).join("");
                 if (ts.innerHTML !== opts) ts.innerHTML = opts;
             }
+            // Reasonix tab template select: same list as Terminal (the
+            // tag's env / preStart apply; its command is ignored by the
+            // reasonix kind).
+            const tsRx = document.getElementById("tagSelectRx");
+            if (tsRx && state.tags) {
+                const rxTags = state.tags.filter(t => t.id !== 'opencode-web');
+                const opts = '<option value="">-- no template --</option>' +
+                    rxTags.map(t => {
+                        let details = [];
+                        if (t.preStart) details.push(`pre: ${t.preStart}`);
+                        if (t.env && Object.keys(t.env).length > 0) details.push(`env: ${Object.keys(t.env).join(",")}`);
+                        const title = details.length ? ` (${details.join("; ")})` : "";
+                        return `<option value="${t.id}" title="${title}">${t.id}</option>`;
+                    }).join("");
+                if (tsRx.innerHTML !== opts) tsRx.innerHTML = opts;
+            }
             const isLocal = window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1";
             const editBtn = document.getElementById("template-edit-btn");
             if (editBtn) editBtn.style.display = isLocal ? "inline-flex" : "none";
@@ -2559,6 +2619,12 @@
             state.activeWT = id;
             refresh();
         }
+
+        // Web-UI (Reasonix) instance rendering lives in
+        // kinds/reasonix.js (ReasonixRenderer), following the
+        // opencode-web renderer pattern: per-instance iframe cache,
+        // dataset id/src navigation guard, web_url vs same-origin
+        // /rx/<id>/ fallback, and xterm host/container-style cleanup.
 
         function selectInstance(id) {
             if (state.activeInst === id) return;
@@ -2592,6 +2658,9 @@
                 if (kind === 'opencode-web') {
                     updateStatus('opencode web ui');
                 }
+                if (kind === 'reasonix') {
+                    updateStatus(inst && inst.status === 'running' ? 'reasonix web' : 'stopped');
+                }
                 maybeDestroyInactiveStoppedSession(previousID);
                 return;
             }
@@ -2599,6 +2668,7 @@
             // Fallback: if no renderer is registered for this kind,
             // behave like PTY (legacy default).
             if (id) {
+                // If stopped, just load log once. If running, connect TTY directly.
                 if (inst && inst.status !== 'running') {
                     const session = ensureTerminalSession(id);
                     disconnectTTY(session);
@@ -2698,7 +2768,10 @@
             document.getElementById("cmd").value = "";
             document.getElementById("instName").value = "";
             document.getElementById("instNameOc").value = "";
+            document.getElementById("instNameRx").value = "";
             document.getElementById("tagSelect").value = "";
+            const tsRx = document.getElementById("tagSelectRx");
+            if (tsRx) tsRx.value = "";
             openModal("modal-start-instance");
         }
 
@@ -2778,11 +2851,10 @@
             try {
                 // Determine which tab is active and what kind to send.
                 // The Terminal tab always sends kind="" (backend
-                // normalises to "pty"); the Opencode-Web tab always
-                // sends kind="opencode-web" regardless of any tag
-                // selection (the kind is a UI decision, not a tag
-                // selection — that's the whole point of the tab
-                // split).
+                // normalises to "pty"); the Opencode-Web / Reasonix tabs
+                // always send their kind regardless of any tag selection
+                // (the kind is a UI decision, not a tag selection —
+                // that's the whole point of the tab split).
                 const activeTab = document.querySelector('#modal-start-instance .modal-tab.active');
                 const tabName = activeTab ? activeTab.dataset.tab : 'terminal';
                 let body;
@@ -2793,6 +2865,15 @@
                         command: '',
                         name: document.getElementById("instNameOc").value || 'opencode-web',
                         kind: 'opencode-web',
+                    };
+                } else if (tabName === 'reasonix') {
+                    const tsRx = document.getElementById("tagSelectRx");
+                    body = {
+                        worktree_id: state.activeWT,
+                        tag_id: tsRx ? tsRx.value : '',
+                        command: '',
+                        name: document.getElementById("instNameRx").value || 'reasonix',
+                        kind: 'reasonix',
                     };
                 } else {
                     const tagId = document.getElementById("tagSelect").value;
@@ -2842,12 +2923,12 @@
             const stoppedInst = state.instances.find(i => i.id === stoppedId);
             try { 
                 await api("/api/instances/stop", { method: "POST", body: JSON.stringify({ id: stoppedId }) }); 
-                // Release a stopped opencode-web instance's cached iframe
+                // Release a stopped web-ui instance's cached iframe
                 // immediately (its backend is gone); otherwise it lingers in
                 // the DOM until the next tab switch.
-                if (stoppedInst && stoppedInst.kind === 'opencode-web') {
-                    const ocRenderer = (window.KindRenderers || {})['opencode-web'];
-                    if (ocRenderer && typeof ocRenderer.destroyFrame === 'function') ocRenderer.destroyFrame(stoppedId);
+                if (stoppedInst && (stoppedInst.kind === 'opencode-web' || stoppedInst.kind === 'reasonix')) {
+                    const renderer = (window.KindRenderers || {})[stoppedInst.kind];
+                    if (renderer && typeof renderer.destroyFrame === 'function') renderer.destroyFrame(stoppedId);
                 }
                 // Render stop banner immediately before refresh/reload
                 const session = getActiveTerminalSession();
@@ -2866,14 +2947,16 @@
             } catch (e) { alert(e); }
         }
         async function deleteInstance() {
-            if (!state.activeInst || !confirm("Delete instance log?")) return;
+            if (!state.activeInst || !confirm("Delete instance?")) return;
             const deletedId = state.activeInst;
             try {
                 await api("/api/instances/delete", { method: "POST", body: JSON.stringify({ id: deletedId }) });
-                // Release the deleted opencode-web instance's cached iframe
-                // so it doesn't linger in the DOM / keep the page loaded.
-                const ocRenderer = (window.KindRenderers || {})['opencode-web'];
-                if (ocRenderer && typeof ocRenderer.destroyFrame === 'function') ocRenderer.destroyFrame(deletedId);
+                // Release the deleted web-ui instance's cached iframe so it
+                // doesn't linger in the DOM / keep the page loaded.
+                for (const kind of ['opencode-web', 'reasonix']) {
+                    const renderer = (window.KindRenderers || {})[kind];
+                    if (renderer && typeof renderer.destroyFrame === 'function') renderer.destroyFrame(deletedId);
+                }
                 refresh();
             } catch (e) { alert(e); }
         }

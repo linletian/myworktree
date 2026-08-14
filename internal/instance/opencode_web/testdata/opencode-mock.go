@@ -7,8 +7,9 @@
 // GET /global/health with 200 OK (the health probe expects that).
 //
 // Usage:
-//   go build -o /path/to/mock-opencode internal/instance/opencode_web/testdata/opencode-mock.go
-//   export PATH=$PATH:/path/to/
+//
+//	go build -o /path/to/mock-opencode internal/instance/opencode_web/testdata/opencode-mock.go
+//	export PATH=$PATH:/path/to/
 //
 // The test picks it up by overriding the binary in PATH.
 package main

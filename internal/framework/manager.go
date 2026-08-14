@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"myworktree/internal/store"
+	"myworktree/internal/tag"
 )
 
 // MainWorktreeID is the sentinel ID for the primary worktree (the
@@ -50,7 +51,7 @@ type InstanceStore interface {
 type Manager struct {
 	Registry *Registry
 
-	Store   InstanceStore
+	Store InstanceStore
 	// Logger is the structured logger kinds and the proxy use for
 	// diagnostic output. NewManager defaults this to io.Discard; operators
 	// must wire a real logger here to see per-request proxy lines and
@@ -63,6 +64,12 @@ type Manager struct {
 	// need an upstream credential (opencode-web). Empty means no
 	// token is injected; kinds that require one will surface that.
 	AuthToken string
+
+	// Tags resolves tag.Env / tag.preStart / tag.Command / tag.Cwd at
+	// Start time (restored tag semantics shared by every kind). The
+	// zero value disables tag resolution: Start with a TagID then
+	// errors instead of silently ignoring the tag.
+	Tags tag.Manager
 
 	// LogBufferBytes is the per-instance ring buffer cap from config. 0 means use adaptive sizing.
 	LogBufferBytes int64
@@ -129,6 +136,7 @@ type StartParams struct {
 	WorktreeID string
 	Root       string // optional override (used for MainWorktreeID)
 	TagID      string
+	Command    string // ad-hoc initial command (ignored when TagID is set)
 	Name       string
 	Kind       string // "pty", "opencode-web", ...; must be registered
 	ExtraEnv   map[string]string
@@ -149,9 +157,54 @@ func (m *Manager) Start(ctx context.Context, in StartParams) (store.ManagedInsta
 		return store.ManagedInstance{}, fmt.Errorf("kind %q not registered", kindName)
 	}
 
+	// Restored tag semantics (pre-kind-refactor parity): a TagID loads
+	// the tag and resolves its command / cwd / preStart / env; an empty
+	// TagID with a Command is an ad-hoc start; both empty is an idle
+	// shell. Tag command-required enforcement is left to the kind (PTY
+	// requires one; opencode-web / reasonix deliberately ignore it).
+	tagID := strings.TrimSpace(in.TagID)
+	if tagID == "adhoc" || tagID == "idle" {
+		// Pre-refactor sentinel values persisted on the record and passed
+		// back by Restart; treat them as "no tag".
+		tagID = ""
+	}
+	var (
+		command        string
+		cwdRel         string
+		preStart       string
+		extraEnv       map[string]string
+		effectiveTagID = tagID
+	)
+	if tagID != "" {
+		if m.Tags.GlobalPath == "" && m.Tags.ProjectPath == "" {
+			return store.ManagedInstance{}, errors.New("tag support is not configured")
+		}
+		tags, err := m.Tags.LoadMerged()
+		if err != nil {
+			return store.ManagedInstance{}, err
+		}
+		t, ok := tags[tagID]
+		if !ok {
+			return store.ManagedInstance{}, fmt.Errorf("unknown tag id: %s", tagID)
+		}
+		command = t.Command
+		cwdRel = t.Cwd
+		preStart = t.PreStart
+		extraEnv = t.Env
+	} else {
+		effectiveTagID = "adhoc"
+		command = strings.TrimSpace(in.Command)
+		if command == "" {
+			effectiveTagID = "idle"
+		}
+	}
+
 	wtPath, wtName, err := m.resolveWorktree(in)
 	if err != nil {
 		return store.ManagedInstance{}, err
+	}
+	if strings.TrimSpace(cwdRel) != "" && cwdRel != "." {
+		wtPath = filepath.Join(wtPath, cwdRel)
 	}
 
 	capBytes, err := ResolveCap(m.LogBufferBytes, m.sampler(), m.totalBufBytes.Load())
@@ -164,13 +217,24 @@ func (m *Manager) Start(ctx context.Context, in StartParams) (store.ManagedInsta
 		return store.ManagedInstance{}, err
 	}
 
+	instName := strings.TrimSpace(in.Name)
+	if instName == "" {
+		instName = effectiveTagID
+	}
+	if len(extraEnv) == 0 {
+		extraEnv = nil
+	}
+
 	now := time.Now().UTC().Format(time.RFC3339)
 	inst := store.ManagedInstance{
 		ID:           id,
 		WorktreeID:   in.WorktreeID,
 		WorktreeName: wtName,
-		TagID:        strings.TrimSpace(in.TagID),
-		Name:         strings.TrimSpace(in.Name),
+		TagID:        effectiveTagID,
+		Name:         instName,
+		Command:      command,
+		Cwd:          wtPath,
+		Env:          extraEnv,
 		Kind:         kindName,
 		Status:       StatusStarting.String(),
 		CreatedAt:    now,
@@ -190,10 +254,12 @@ func (m *Manager) Start(ctx context.Context, in StartParams) (store.ManagedInsta
 		WorktreeID:   in.WorktreeID,
 		WorktreePath: wtPath,
 		WorktreeName: wtName,
-		TagID:        inst.TagID,
-		Name:         inst.Name,
+		TagID:        tagID,
+		Name:         instName,
 		AuthToken:    m.AuthToken,
-		ExtraEnv:     in.ExtraEnv,
+		ExtraEnv:     extraEnv,
+		Command:      command,
+		PreStart:     preStart,
 		InstanceID:   id,
 		Buffer:       buf,
 	}
@@ -446,6 +512,35 @@ func (m *Manager) MarkExited(id string, exitCode int) error {
 	})
 }
 
+// SetInstancePID persists the spawned process id for an instance.
+// Kinds call this once after Spawn (via the Publisher) so resource
+// stats can sample the right process.
+func (m *Manager) SetInstancePID(id string, pid int) error {
+	return m.updateStore(id, func(inst *store.ManagedInstance) error {
+		inst.PID = pid
+		return nil
+	})
+}
+
+// registerReattached wires a re-attached handle (see RestartSurvivor)
+// into the in-memory running map and starts the lifecycle watcher,
+// mirroring the tail of Start.
+func (m *Manager) registerReattached(inst store.ManagedInstance, handle Handle, ready *ReadySignal) {
+	runCtx, cancel := context.WithCancel(context.Background())
+	wg := &sync.WaitGroup{}
+	wg.Add(1)
+	ri := &runningInstance{handle: handle, ready: ready, cancel: cancel, wg: wg}
+
+	m.mu.Lock()
+	if m.running == nil {
+		m.running = map[string]*runningInstance{}
+	}
+	m.running[inst.ID] = ri
+	m.mu.Unlock()
+
+	go m.runLifecycle(runCtx, inst, ri)
+}
+
 // KindFromInstance returns the kind registered for the given instance.
 func (m *Manager) KindFromInstance(inst store.ManagedInstance) (Kind, error) {
 	if inst.Kind == "" {
@@ -464,6 +559,7 @@ func (p *kindPublisher) InstanceID() string        { return p.id }
 func (p *kindPublisher) MarkRunning() error        { return p.m.MarkRunning(p.id) }
 func (p *kindPublisher) MarkFailed(r string) error { return p.m.MarkFailed(p.id, r) }
 func (p *kindPublisher) MarkExited(c int) error    { return p.m.MarkExited(p.id, c) }
+func (p *kindPublisher) SetPID(pid int) error      { return p.m.SetInstancePID(p.id, pid) }
 func (p *kindPublisher) UpdateKindBlob(b json.RawMessage) error {
 	return p.m.UpdateKindBlob(p.id, b)
 }
@@ -500,16 +596,32 @@ func (m *Manager) resolveWorktree(in StartParams) (path, name string, err error)
 }
 
 func (m *Manager) persistNewInstance(inst store.ManagedInstance) error {
-	st, err := m.Store.Load()
-	if err != nil {
-		return err
+	// Retry on version conflict: the runLifecycle watcher of a previous
+	// Start can flip that instance to "running" concurrently, so a rapid
+	// batch of Starts must not lose the append to a stale version.
+	const maxRetries = 3
+	var lastErr error
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		st, err := m.Store.Load()
+		if err != nil {
+			return err
+		}
+		st.Instances = append(st.Instances, inst)
+		if st.TabOrder == nil {
+			st.TabOrder = map[string][]string{}
+		}
+		st.TabOrder[inst.WorktreeID] = append(st.TabOrder[inst.WorktreeID], inst.ID)
+		if err := m.Store.SaveWithVersion(st, st.Version); err != nil {
+			if errors.Is(err, store.ErrVersionConflict) {
+				lastErr = err
+				time.Sleep(10 * time.Millisecond)
+				continue
+			}
+			return err
+		}
+		return nil
 	}
-	st.Instances = append(st.Instances, inst)
-	if st.TabOrder == nil {
-		st.TabOrder = map[string][]string{}
-	}
-	st.TabOrder[inst.WorktreeID] = append(st.TabOrder[inst.WorktreeID], inst.ID)
-	return m.Store.SaveWithVersion(st, st.Version)
+	return fmt.Errorf("persist instance: %w (after %d retries)", lastErr, maxRetries)
 }
 
 func (m *Manager) setStatus(id, status, lastErr string) error {

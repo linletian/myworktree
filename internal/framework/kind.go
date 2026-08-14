@@ -41,6 +41,18 @@ type SpawnParams struct {
 	AuthToken    string            // myworktree bearer; reused as upstream password by opencode-web
 	ExtraEnv     map[string]string // from tag.Env
 
+	// Command is the tag command (or the ad-hoc command) resolved by the
+	// framework. Kinds that run an interactive shell (PTY) send it as the
+	// initial input; HTTP-backed kinds (opencode-web, reasonix) ignore it.
+	Command string
+
+	// PreStart is the tag's preStart script. The framework does NOT run
+	// it: each kind executes it right before spawning its process, using
+	// the same environment the process will get, so per-kind environment
+	// handling (e.g. reasonix's REASONIX_HOME stripping) stays consistent
+	// between preStart and the real process. Empty means no-op.
+	PreStart string
+
 	// InstanceID is the framework-assigned id for this instance. Kinds
 	// that fan output to subscribers (PTY) use it to scope broadcast
 	// channels — without it, every PTY tab would receive every other
@@ -288,6 +300,7 @@ type Publisher interface {
 	MarkRunning() error
 	MarkFailed(reason string) error
 	MarkExited(exitCode int) error
+	SetPID(pid int) error
 	UpdateKindBlob(blob json.RawMessage) error
 }
 
@@ -301,4 +314,36 @@ type Publisher interface {
 // Spawn returned and the periodic Status() poll.
 type PublisherBinder interface {
 	SetPublishers(handle Handle, p Publisher)
+}
+
+// RestartSurvivor is an optional extension for kinds whose processes
+// outlive a myworktree server restart (the record stays "running" in
+// the store while no in-memory handle exists). During
+// ReconcileRunningOnStartup the framework asks the kind to re-attach
+// to the live process instead of marking the record "stopped".
+//
+// Reattach must:
+//   - verify the process is still alive (or return an error, in which
+//     case the framework marks the record stopped);
+//   - return a Handle and a ReadySignal the framework can feed into
+//     the normal runLifecycle pipeline (the signal may be closed
+//     immediately);
+//   - be safe to call for ids the kind has never spawned (return an
+//     error — the framework then stops the record).
+//
+// Kinds whose processes die with the server (PTY) do NOT implement
+// this interface; the framework keeps their pre-existing mark-stopped
+// behaviour.
+type RestartSurvivor interface {
+	Reattach(ctx context.Context, instanceID string) (Handle, *ReadySignal, error)
+}
+
+// ResourceCleaner is an optional extension kinds implement to release
+// per-instance resources that are NOT covered by Stop (e.g. a state
+// dir that only Delete/Restart should wipe). The framework calls
+// Cleanup(id) after deleting an instance record and after a restart
+// migrates onto a fresh id. Best-effort: errors are logged, never
+// fatal. The id is never reused after teardown.
+type ResourceCleaner interface {
+	Cleanup(instanceID string) error
 }

@@ -27,6 +27,16 @@ type ManagedWorktree struct {
 	CreatedAt string `json:"created_at"` // RFC3339
 }
 
+// Instance kinds. An empty Kind in persisted state (pre-refactor and
+// pre-reasonix state files) means the PTY kind ("pty"), so old stores
+// need no migration. The framework kind registry is the source of
+// truth for kind names; these constants cover the kinds the app layer
+// needs to match on.
+const (
+	KindPTY      = "pty"
+	KindReasonix = "reasonix"
+)
+
 // ManagedInstance is the persisted record for one running (or
 // recently-exited) instance. Fields tagged omitempty are written only
 // when non-empty so pre-refactor state.json files round-trip without
@@ -52,7 +62,7 @@ type ManagedInstance struct {
 	Command       string            `json:"command"`
 	Cwd           string            `json:"cwd"`
 	Env           map[string]string `json:"env,omitempty"`
-	Kind          string            `json:"kind,omitempty"`
+	Kind          string            `json:"kind,omitempty"`      // "" (legacy) means "pty"; see KindPTY/KindReasonix
 	Extra         map[string]string `json:"extra,omitempty"`     // legacy: pre-refactor per-kind blob (read-only after refactor)
 	KindBlob      json.RawMessage   `json:"kind_blob,omitempty"` // opaque per-kind blob owned by the kind's driver
 	PID           int               `json:"pid"`
@@ -130,7 +140,12 @@ func (fs FileStore) Save(st State) error {
 }
 
 // SaveWithVersion saves only if the current version matches expectedVersion.
-// Use expectedVersion < 0 to skip version check.
+// Semantics of expectedVersion: >= 0 means "must equal the persisted version"
+// (strict optimistic-lock check — callers that persist a versioned state MUST
+// pass the version they loaded, e.g. from GET /api/instances); < 0 means
+// "skip the check". 0 is NOT "skip": it is a strict check against a fresh
+// state whose version is 0, so passing 0 for an already-incremented state
+// always conflicts.
 func (fs FileStore) SaveWithVersion(st State, expectedVersion int64) error {
 	if fs.Path == "" {
 		return errors.New("store path is required")

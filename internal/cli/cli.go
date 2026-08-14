@@ -15,11 +15,11 @@ import (
 
 	"golang.org/x/term"
 
+	"context"
 	"myworktree/internal/app"
 	"myworktree/internal/config"
-	"myworktree/internal/gitx"
-	"context"
 	"myworktree/internal/framework"
+	"myworktree/internal/gitx"
 	"myworktree/internal/store"
 	"myworktree/internal/tag"
 	"myworktree/internal/version"
@@ -272,6 +272,14 @@ func instanceCmd(logger *log.Logger, args []string) error {
 	mgr.DataDir = dataDir
 	mgr.Root = root
 	mgr.LogBufferBytes = cfg.LogBufferBytes
+	// Restored tag semantics: tag.Env / preStart / Command / Cwd resolve
+	// from the global defaults + per-project tags.json (same as the daemon).
+	if base, err := os.UserConfigDir(); err == nil {
+		mgr.Tags = tag.Manager{
+			GlobalPath:  filepath.Join(base, "myworktree", "tags.json"),
+			ProjectPath: filepath.Join(dataDir, "tags.json"),
+		}
+	}
 
 	switch args[0] {
 	case "list":
@@ -300,6 +308,7 @@ func instanceCmd(logger *log.Logger, args []string) error {
 		item, err := mgr.Start(context.Background(), framework.StartParams{
 			WorktreeID: worktreeID,
 			TagID:      tagID,
+			Command:    command,
 			Name:       name,
 		})
 		if err != nil {

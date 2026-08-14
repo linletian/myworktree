@@ -324,10 +324,11 @@ Response:
 
 Body:
 ```json
-{ "worktree_id": "<worktreeId>", "tag_id": "optional", "command": "optional", "name": "optional", "kind": "pty" }
+{ "worktree_id": "<worktreeId>", "tag_id": "optional", "command": "optional", "name": "optional", "kind": "optional" }
 ```
 
 - `worktree_id` can be a regular worktree ID, or `"__main__"` to run an instance in the main (host) git repository. For `"__main__"`, the instance starts in the main repo root directory.
+- `kind`: `""`/`"pty"` (default) starts a PTY terminal instance; `"opencode-web"` starts an `opencode serve` subprocess embedded via `/__opencode/<id>/` (see section 5.11); `"reasonix"` starts a `reasonix serve` subprocess in the worktree and exposes its web chat UI under `/rx/<id>/` (see section 5.10). For `"reasonix"` the tag's `command` is ignored; tag `env` / `preStart` are applied.
 
 If both `tag_id` and `command` are empty, the server starts an **interactive shell** instance in the worktree.
 If `command` is provided, it is sent to the shell as the initial command and the shell remains available for further input.
@@ -339,7 +340,7 @@ Example (ad-hoc command without tags):
 
 Response (201):
 ```json
-{ "id":"...","pid":123,"status":"running","created_at":"..." }
+{ "id":"...","pid":123,"status":"running","created_at":"...","kind":"pty" }
 ```
 
 **Error: log buffer budget exceeded (`503 Service Unavailable`)**
@@ -584,7 +585,25 @@ All page close/refresh/navigation events trigger a browser-native confirmation d
 - **No backend involvement**: Instances continue running regardless of the user's choice
 - **Condition**: Always triggered on any close action — no dependency on instance state
 
-### 5.10 opencode-web info (instance proxy metadata)
+### 5.10 Reasonix web UI proxy
+
+For `kind: "reasonix"` instances the web chat UI is served under:
+
+```
+GET /rx/<instanceId>/...
+```
+
+- **Independent origin (loopback only)**: when the main listener is loopback-only (`127.0.0.1` / `localhost`, and no TLS), the proxy is mounted on a dedicated loopback listener (`127.0.0.1:<random>`), reported to the frontend as `web_url` in `GET/POST /api/instances` responses (view-only field, not persisted). The iframe loads that URL, so the embedded reasonix page is **cross-origin** with the myworktree API — a script inside the chat iframe cannot silently call `/api/*` with the user's session (issue #44).
+- **Same-origin fallback (network / TLS)**: when TLS is configured (`--tls-cert/--tls-key`, an `http://127.0.0.1` iframe inside an https page would be blocked as mixed content) **or the main listener is open to the network** (default `0.0.0.0`, or an explicit LAN IP — a remote browser would resolve `127.0.0.1` to itself and the iframe would fail), the independent listener is skipped; `web_url` is empty and the frontend falls back to the **relative** same-origin path `/rx/<id>/`, which follows the browser's current origin — so LAN/remote access works (same as the pre-#44 behavior).
+- The proxy forwards to the instance's `reasonix serve` at `http://127.0.0.1:<port>` (port/token cached in memory by the driver — issue #46), injecting `Cookie: reasonix_token=<token>` (name from `reasonix.CookieName`, single source — issue #45) for auth.
+- HTML responses get a script injected (single injection point before `</head>`) that prefixes the page's root-relative `fetch` / `EventSource` / `XMLHttpRequest` calls with `/rx/<id>/`, plus the issue #48 layout injection: the 220px sidebar is **collapsed by default** on desktop with a dedicated toggle button (`--mw-sidebar-w` CSS var makes the expanded width configurable); narrow screens keep the native mobile sidebar.
+- The `Accept-Encoding` header is forced to `identity` and the request query string is dropped upstream (prevents myworktree auth `?token=` from leaking to the subprocess).
+- SSE (`/events`) is streamed through (`FlushInterval=-1`); the upstream sends its own 15s `: ping` keepalive.
+- Returns `404` for unknown/non-reasonix instance ids, `503` when the instance is not running, `502` when the backend is unreachable.
+- Driver version gate: `Start` runs `reasonix --version` and rejects CLIs older than `1.22.0` (configurable via `Driver.MinVersion`); readiness failures include the tail of the instance `serve.log` (issue #45).
+- Tag semantics apply like other kinds: `tag.Env` is injected into the serve environment, `tag.preStart` runs before serve (with `REASONIX_HOME` / `REASONIX_STATE_HOME` stripped exactly like serve), and `tag.Command` is ignored (a reasonix instance runs the agent, not a shell command).
+
+### 5.11 opencode-web info (instance proxy metadata)
 
 `GET /api/instances/<id>/opencode`
 
@@ -605,7 +624,7 @@ Response (200):
 
 `host` and `port` are the opencode server's bound address. `iframe_src` is the full-page SPA root to load in the iframe (the deep `/session/` link was replaced by the full page — see `docs/plans/opencode-native-ui/WORKTREE-ISOLATION.md` §0.4). `version` is the installed `opencode --version` probed at spawn; `version_supported` is `false` when it is outside the `1.18.x` range the injected hide script targets (advisory only — the instance still starts). The upstream `OPENCODE_SERVER_PASSWORD` is `cfg.AuthToken` (unified auth token — every opencode-web instance shares the same upstream password, gated by the myworktree bearer token at the proxy); see `docs/ARCHITECTURE.md` §8 for the threat model and the review checklist.
 
-### 5.11 opencode reverse proxy
+### 5.12 opencode reverse proxy
 
 `/__opencode/<id>/*`
 
@@ -615,7 +634,7 @@ Reverse proxy to the opencode HTTP server backing the given instance. Protected 
 - Returns `503` if the opencode server is not yet listening
 - Returns `502` if the opencode server is unreachable during proxying
 
-### 5.12 opencode-web scope (out-of-scope state)
+### 5.13 opencode-web scope (out-of-scope state)
 
 `GET /api/instances/opencode/scope?id=<id>`
 

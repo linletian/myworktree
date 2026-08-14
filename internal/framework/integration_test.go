@@ -38,10 +38,10 @@ func fakeKindPTY() *fakeKind {
 
 func fakeKindBlocking() *fakeKind {
 	return &fakeKind{
-		manifest:  KindInfo{Name: "fake-block", Label: "Blocking"},
+		manifest:   KindInfo{Name: "fake-block", Label: "Blocking"},
 		blockReady: true,
-		spawned:   make(chan struct{}, 2),
-		stopped:   make(chan struct{}, 2),
+		spawned:    make(chan struct{}, 2),
+		stopped:    make(chan struct{}, 2),
 	}
 }
 
@@ -75,8 +75,8 @@ func (f *fakeKind) ReadLogs(h Handle, since, max int64) (string, int64, error) {
 	return "fake-log\n", since + 9, nil
 }
 
-func (f *fakeKind) KindBlob(h Handle) (json.RawMessage, error) { return json.RawMessage(`{}`), nil }
-func (f *fakeKind) HTTPHint(id string) string                  { return "" }
+func (f *fakeKind) KindBlob(h Handle) (json.RawMessage, error)           { return json.RawMessage(`{}`), nil }
+func (f *fakeKind) HTTPHint(id string) string                            { return "" }
 func (f *fakeKind) RegisterHTTP(mux *http.ServeMux, id string, h Handle) {}
 
 func newTestManager(t *testing.T, reg *Registry, worktreePath string) (*Manager, store.FileStore) {

@@ -76,7 +76,7 @@ func TestBuildEnv_ForcesAuthToken(t *testing.T) {
 func TestExtractListeningAddress(t *testing.T) {
 	tests := []struct {
 		name, line, wantH, wantP string
-		wantOK                    bool
+		wantOK                   bool
 	}{
 		{"normal", "opencode server listening on http://127.0.0.1:4096", "127.0.0.1", "4096", true},
 		{"trailing whitespace", "opencode server listening on http://127.0.0.1:4096  ", "127.0.0.1", "4096", true},

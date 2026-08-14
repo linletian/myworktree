@@ -22,8 +22,10 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/creack/pty"
 	"myworktree/internal/framework"
@@ -53,6 +55,7 @@ type Handle struct {
 	cmd  *exec.Cmd
 	ptmx *os.File
 	buf  *framework.RingBuffer
+	pub  framework.Publisher
 
 	cancel context.CancelFunc
 	wg     *sync.WaitGroup
@@ -62,13 +65,40 @@ type Handle struct {
 // beyond what ManagedInstance already stores, so the blob is empty.
 type blob struct{}
 
+// SetPublishers wires the per-instance publisher and persists the
+// spawned PID so resource stats can sample the right process.
+func (d Driver) SetPublishers(handle framework.Handle, p framework.Publisher) {
+	h := handle.Unwrap().(*Handle)
+	h.pub = p
+	if h.cmd != nil && h.cmd.Process != nil {
+		_ = p.SetPID(h.cmd.Process.Pid)
+	}
+}
+
 // Spawn launches a zsh shell inside the worktree path.
 func (d Driver) Spawn(ctx context.Context, params framework.SpawnParams) (framework.Handle, *framework.ReadySignal, error) {
+	// Tag parity: a tag-backed PTY must carry a command (the pre-refactor
+	// Manager rejected tag command-less starts). Ad-hoc starts (empty
+	// TagID) may run an idle shell.
+	if params.TagID != "" && strings.TrimSpace(params.Command) == "" {
+		return framework.Handle{}, nil, errors.New("tag command is required")
+	}
+
 	cmd := exec.Command("zsh", "-f", "-i")
 	cmd.Dir = params.WorktreePath
 	cmd.Env = os.Environ()
 	for k, v := range params.ExtraEnv {
 		cmd.Env = append(cmd.Env, k+"="+v)
+	}
+
+	// Tag preStart runs with the same environment the shell will get.
+	if strings.TrimSpace(params.PreStart) != "" {
+		pre := exec.Command("zsh", "-lc", params.PreStart)
+		pre.Dir = cmd.Dir
+		pre.Env = cmd.Env
+		if out, err := pre.CombinedOutput(); err != nil {
+			return framework.Handle{}, nil, fmt.Errorf("preStart failed: %w: %s", err, strings.TrimSpace(string(out)))
+		}
 	}
 
 	ptmx, err := pty.Start(cmd)
@@ -103,6 +133,15 @@ func (d Driver) Spawn(ctx context.Context, params framework.SpawnParams) (framew
 
 	go h.pumpLogs()
 	go h.wait(runCtx)
+
+	// Send the tag / ad-hoc command as initial input (pre-refactor
+	// parity: 150ms after start so the shell has finished init).
+	if strings.TrimSpace(params.Command) != "" {
+		go func() {
+			time.Sleep(150 * time.Millisecond)
+			_, _ = io.WriteString(ptmx, params.Command+"\n")
+		}()
+	}
 
 	return framework.NewHandle("pty", h), ready, nil
 }
