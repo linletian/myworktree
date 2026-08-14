@@ -236,12 +236,32 @@ func (p *Portal) newServer() *http.Server {
 	mux.HandleFunc("/", p.handleDashboard)
 	mux.HandleFunc("/api/csrf-token", p.handleCSRFToken)
 	mux.HandleFunc("/api/auth", p.handleAuth)
-	mux.HandleFunc("/api/list", p.handleList)
+	mux.HandleFunc("/api/list", p.withAuth(p.handleList))
 	mux.HandleFunc("/api/portal-status", p.handlePortalStatus)
 	mux.HandleFunc("/api/logout", p.handleLogout)
 
 	return &http.Server{
 		Handler: mux,
+	}
+}
+
+// withAuth guards a portal route and syncs the credential into the
+// HttpOnly mw_token cookie — the portal-side mirror of the daemon's
+// withAuth: the address-bar ?token= (portal jump / remote access) is
+// accepted AND written to the cookie, so same-origin embeds and any
+// future portal route authenticate via the cookie alone. The cookie is
+// refreshed on every authenticated request (24h sliding expiration).
+// Kept in exactly one place per side so auth tightening cannot drift
+// between the daemon and the portal: when one side's token handling
+// changes, update the other's withAuth in the same change.
+func (p *Portal) withAuth(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !p.checkAuth(r) {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+		p.refreshAuthCookie(w, r)
+		next(w, r)
 	}
 }
 
@@ -643,12 +663,7 @@ func (p *Portal) handleAuth(w http.ResponseWriter, r *http.Request) {
 func (p *Portal) handleList(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
-	if !p.checkAuth(r) {
-		http.Error(w, "Unauthorized", http.StatusUnauthorized)
-		return
-	}
-
-	p.refreshAuthCookie(w, r)
+	// Auth + cookie sync happen in p.withAuth (registered on the route).
 
 	processes := []map[string]interface{}{}
 	if p.cfg.RegistryDir != "" {

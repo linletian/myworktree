@@ -27,8 +27,10 @@ import (
 	"time"
 
 	"myworktree/internal/config"
+	"myworktree/internal/framework"
 	"myworktree/internal/gitx"
-	"myworktree/internal/instance"
+	"myworktree/internal/instance/opencode_web"
+	"myworktree/internal/instance/pty"
 	"myworktree/internal/instance/reasonix"
 	"myworktree/internal/llm"
 	"myworktree/internal/mcp"
@@ -76,9 +78,14 @@ type Server struct {
 	rxAddr string
 	rxSrv  *http.Server
 
+	// rxDriver owns the reasonix serve subprocesses and is shared by the
+	// reasonix kind (registered below) and the /rx/ reverse proxy.
+	rxDriver *reasonix.Driver
+
 	store       store.FileStore
 	worktreeMgr worktree.Manager
-	instanceMgr *instance.Manager
+	instanceMgr *framework.Manager
+	ocScope     *opencode_web.ScopeTracker
 	mcpAdapter  mcp.Adapter
 	monitor     monitor.Collector
 	authMu      sync.Mutex
@@ -139,17 +146,36 @@ func New(cfg Config, logger *log.Logger) (*Server, error) {
 		Store:        st,
 	}
 	globalCfg, _ := config.Load()
-	instanceMgr := &instance.Manager{
-		DataDir:        dataDir,
-		Root:           root,
-		Store:          st,
-		Logger:         logger,
-		LogBufferBytes: globalCfg.LogBufferBytes,
-		Reasonix: &reasonix.Driver{
-			DataDir: dataDir,
-			Logger:  logger,
-		},
+	// Dedicated kind registry per server: registering into framework.Default
+	// would panic on the second New() in the same process (tests). The kinds
+	// are explicitly registered here instead of relying on init().
+	reg := framework.NewRegistry()
+	reg.Register(pty.Driver{})
+	reg.Register(opencode_web.Driver{})
+
+	// The reasonix serve driver and its framework kind.
+	rxDriver := &reasonix.Driver{
+		DataDir: dataDir,
+		Logger:  logger,
 	}
+	reg.Register(reasonix.NewKind(rxDriver))
+
+	instanceMgr := framework.NewManager(reg, st, logger)
+	instanceMgr.DataDir = dataDir
+	instanceMgr.Root = root
+	instanceMgr.LogBufferBytes = globalCfg.LogBufferBytes
+	instanceMgr.AuthToken = cfg.AuthToken
+	// Tags drive tag.Env / preStart / Command / Cwd resolution at instance
+	// start (global defaults + per-project tags.json) — restored tag
+	// semantics shared by every kind.
+	if base, err := os.UserConfigDir(); err == nil {
+		instanceMgr.Tags = tag.Manager{
+			GlobalPath:  filepath.Join(base, "myworktree", "tags.json"),
+			ProjectPath: filepath.Join(dataDir, "tags.json"),
+		}
+	}
+	// SetHTTPHandler is wired by Register() below (so the mux exists
+	// before any kind tries to register routes).
 
 	mux := http.NewServeMux()
 	isSecure := cfg.TLSCert != "" && cfg.TLSKey != ""
@@ -163,6 +189,8 @@ func New(cfg Config, logger *log.Logger) (*Server, error) {
 		store:       st,
 		worktreeMgr: worktreeMgr,
 		instanceMgr: instanceMgr,
+		ocScope:     opencode_web.NewScopeTracker(),
+		rxDriver:    rxDriver,
 		mcpAdapter: mcp.Adapter{
 			Worktrees: worktreeMgr,
 			Instances: instanceMgr,
@@ -397,7 +425,7 @@ func (s *Server) Start() (string, error) {
 			s.logger.Printf("[reasonix] warning: independent listener failed, falling back to same-origin /rx/: %v", err)
 		} else {
 			rxMux := http.NewServeMux()
-			rxMux.Handle("/rx/", &reasonixProxy{manager: s.instanceMgr})
+			rxMux.Handle("/rx/", &reasonixProxy{manager: s.instanceMgr, driver: s.rxDriver})
 			s.rxSrv = &http.Server{Handler: rxMux}
 			s.rxAddr = rxLn.Addr().String()
 			go func() {
@@ -498,7 +526,7 @@ func (s *Server) Shutdown() {
 	// (token/port/pid/serve.log) are kept; sessions live in the shared
 	// ~/.reasonix pool and are unaffected by instance lifecycle.
 	if s.instanceMgr != nil {
-		s.instanceMgr.StopAllReasonix()
+		s.instanceMgr.StopAllKind(store.KindReasonix)
 	}
 	if s.rxSrv != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -606,7 +634,9 @@ func (s *Server) registerAPIs(mux *http.ServeMux) {
 	mux.HandleFunc("/api/instances/log", s.handleInstanceLog)
 	mux.HandleFunc("/api/instances/log/stream", s.handleInstanceLogStream)
 	mux.HandleFunc("/api/instances/stats", s.handleInstanceStats)
-	mux.Handle("/rx/", &reasonixProxy{manager: s.instanceMgr})
+	mux.HandleFunc("/api/instances/opencode", s.handleInstanceOpencodeInfo)
+	mux.HandleFunc("/api/instances/opencode/scope", s.handleInstanceOpencodeScope)
+	mux.Handle("/rx/", &reasonixProxy{manager: s.instanceMgr, driver: s.rxDriver})
 	mux.HandleFunc("/api/tags", s.handleTags)
 	mux.HandleFunc("/api/tags/open-dir", s.handleTagsOpenDir)
 	mux.HandleFunc("/api/branches", s.handleBranches)
@@ -621,6 +651,12 @@ func (s *Server) registerAPIs(mux *http.ServeMux) {
 	mux.HandleFunc("/api/llm/test", s.handleLLMTest)
 	mux.HandleFunc("/api/llm/generate", s.handleLLMGenerate)
 	mux.HandleFunc("/login", s.handleLogin)
+	// /__opencode/<id>/ — reverse proxy to opencode web UI.
+	// One handler for ALL instances; path format /__opencode/<id>/<rest...>.
+	// The handler extracts <id>, looks up the instance, reads host:port
+	// from the kind blob, and proxies <rest> to the opencode server with
+	// Basic auth injection and ?directory=<worktree> for API paths.
+	mux.Handle("/__opencode/", http.StripPrefix("/__opencode", opencode_web.ProxyHandler(s.instanceMgr, s.cfg.AuthToken, s.ocScope)))
 }
 
 func (s *Server) handleBranches(w http.ResponseWriter, r *http.Request) {
@@ -922,7 +958,7 @@ func (s *Server) handleWorktreeDelete(w http.ResponseWriter, r *http.Request) {
 
 // resolveWorktreePath returns the filesystem path for a worktree id.
 func (s *Server) resolveWorktreePath(id string) (string, error) {
-	if id == instance.MainWorktreeID {
+	if id == framework.MainWorktreeID {
 		return s.root, nil
 	}
 	worktrees, err := s.worktreeMgr.List()
@@ -1262,7 +1298,7 @@ func (s *Server) handleWorktreesDiverged(w http.ResponseWriter, r *http.Request)
 		}
 		mu.Lock()
 		if len(items) > 0 {
-			result[instance.MainWorktreeID] = items
+			result[framework.MainWorktreeID] = items
 		}
 		mu.Unlock()
 	}()
@@ -1285,7 +1321,7 @@ func (s *Server) handleWorktreeDiverged(w http.ResponseWriter, r *http.Request) 
 	}
 
 	var worktreePath string
-	if id == instance.MainWorktreeID {
+	if id == framework.MainWorktreeID {
 		worktreePath = s.root
 	} else {
 		worktrees, err := s.worktreeMgr.List()
@@ -1358,6 +1394,18 @@ func (s *Server) instanceView(it store.ManagedInstance) map[string]any {
 	if it.Kind != "" {
 		m["kind"] = it.Kind
 	}
+	if len(it.Extra) > 0 {
+		m["extra"] = it.Extra
+	}
+	if len(it.KindBlob) > 0 {
+		m["kind_blob"] = json.RawMessage(it.KindBlob)
+	}
+	if it.LastError != "" {
+		m["last_error"] = it.LastError
+	}
+	if it.ExitCode != 0 {
+		m["exit_code"] = it.ExitCode
+	}
 	if it.RestartedFrom != "" {
 		m["restarted_from"] = it.RestartedFrom
 	}
@@ -1416,21 +1464,21 @@ func (s *Server) handleInstances(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusBadRequest, err)
 			return
 		}
-		item, err := s.instanceMgr.Start(instance.StartInput{
+		item, err := s.instanceMgr.Start(r.Context(), framework.StartParams{
 			WorktreeID: req.WorktreeID,
 			Root: func() string {
-				if req.WorktreeID == instance.MainWorktreeID {
+				if req.WorktreeID == framework.MainWorktreeID {
 					return s.root
 				}
 				return ""
 			}(),
 			TagID:   req.TagID,
 			Command: req.Command,
-			Name:    req.Name,
 			Kind:    req.Kind,
+			Name:    req.Name,
 		})
 		if err != nil {
-			var budgetErr *instance.LogBufferBudgetError
+			var budgetErr *framework.LogBufferBudgetError
 			if errors.As(err, &budgetErr) {
 				writeLogBufferBudgetErr(w, budgetErr)
 				return
@@ -1450,7 +1498,7 @@ func (s *Server) handleInstances(w http.ResponseWriter, r *http.Request) {
 		}
 		updated, err := s.instanceMgr.UpdateName(req.ID, req.Name)
 		if err != nil {
-			if errors.Is(err, instance.ErrInstanceNotFound) {
+			if errors.Is(err, framework.ErrInstanceNotFound) {
 				writeErr(w, http.StatusNotFound, err)
 				return
 			}
@@ -1461,6 +1509,112 @@ func (s *Server) handleInstances(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
+}
+
+// handleInstanceOpencodeInfo returns iframe src and metadata for an opencode-web instance.
+func (s *Server) handleInstanceOpencodeInfo(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	id := strings.TrimSpace(r.URL.Query().Get("id"))
+	if id == "" {
+		writeErr(w, http.StatusBadRequest, errors.New("id is required"))
+		return
+	}
+	inst, err := s.instanceMgr.Get(id)
+	if err != nil {
+		if errors.Is(err, framework.ErrInstanceNotFound) {
+			writeErr(w, http.StatusNotFound, err)
+			return
+		}
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	if inst.Kind != "opencode-web" {
+		writeErr(w, http.StatusNotFound, errors.New("not an opencode-web instance"))
+		return
+	}
+
+	// Connection info is in the per-kind blob (new code path) with
+	// the legacy Extra map as a fallback for pre-refactor state.json
+	// files. The blob is JSON {host, port, worktree_abs, url_path}.
+	var host, port, worktreeAbs string
+	var version string
+	var versionSupported bool
+	if len(inst.KindBlob) > 0 {
+		var b struct {
+			Host             string `json:"host"`
+			Port             string `json:"port"`
+			WorktreeAbs      string `json:"worktree_abs"`
+			Version          string `json:"version"`
+			VersionSupported bool   `json:"version_supported"`
+		}
+		if json.Unmarshal(inst.KindBlob, &b) == nil {
+			host = b.Host
+			port = b.Port
+			worktreeAbs = b.WorktreeAbs
+			version = b.Version
+			versionSupported = b.VersionSupported
+		}
+	}
+	// Fall back to legacy Extra for pre-refactor state.json compat.
+	if host == "" {
+		host = inst.Extra["host"]
+	}
+	if port == "" {
+		port = inst.Extra["port"]
+	}
+	if worktreeAbs == "" {
+		worktreeAbs = inst.Extra["worktree_abs"]
+	}
+	if worktreeAbs == "" {
+		worktreeAbs = inst.Cwd
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"iframe_src":        "/__opencode/" + id + "/",
+		"api_base":          "/__opencode/" + id,
+		"worktree_path":     worktreeAbs,
+		"host":              host,
+		"port":              port,
+		"version":           version,
+		"version_supported": versionSupported,
+	})
+}
+
+// handleInstanceOpencodeScope returns the current out-of-scope state for an
+// opencode-web instance. The reverse proxy records directory-bearing requests
+// in the in-memory ScopeTracker; this endpoint lets the frontend poll it to
+// render the persistent warning bar.
+func (s *Server) handleInstanceOpencodeScope(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	id := strings.TrimSpace(r.URL.Query().Get("id"))
+	if id == "" {
+		writeErr(w, http.StatusBadRequest, errors.New("id is required"))
+		return
+	}
+	inst, err := s.instanceMgr.Get(id)
+	if err != nil {
+		if errors.Is(err, framework.ErrInstanceNotFound) {
+			writeErr(w, http.StatusNotFound, err)
+			return
+		}
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	if inst.Kind != "opencode-web" {
+		writeErr(w, http.StatusNotFound, errors.New("not an opencode-web instance"))
+		return
+	}
+	state, ok := s.ocScope.Get(id)
+	if !ok {
+		state = opencode_web.ScopeState{Scope: opencode_web.ScopeInScope}
+	}
+	writeJSON(w, http.StatusOK, state)
 }
 
 func (s *Server) handleInstanceStop(w http.ResponseWriter, r *http.Request) {
@@ -1970,14 +2124,13 @@ func (s *Server) handleMCPCall(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusBadRequest, err)
 			return
 		}
-		item, err := s.instanceMgr.Start(instance.StartInput{
+		item, err := s.instanceMgr.Start(r.Context(), framework.StartParams{
 			WorktreeID: args.WorktreeID,
 			TagID:      args.TagID,
-			Command:    args.Command,
 			Name:       args.Name,
 		})
 		if err != nil {
-			var budgetErr *instance.LogBufferBudgetError
+			var budgetErr *framework.LogBufferBudgetError
 			if errors.As(err, &budgetErr) {
 				writeLogBufferBudgetErr(w, budgetErr)
 				return
@@ -2087,6 +2240,27 @@ func (s *Server) withAuth(next http.Handler) http.Handler {
 			return
 		}
 		s.resetAuthAttempts(clientIP(r.RemoteAddr))
+		// Sync the address-bar token into the session cookie (remote
+		// access / portal pattern). Same-origin iframes (reasonix /rx/,
+		// opencode /__opencode/) navigate with relative URLs that carry
+		// no query, so they can only authenticate via the cookie — the
+		// server must hand it out. Refreshing it on every page
+		// navigation that carries ?token= also makes auth-token
+		// rotation self-heal without a re-login. (The token is never
+		// appended to iframe URLs, so embedded documents never see it in
+		// location.search; both reverse proxies additionally strip any
+		// stray token before forwarding upstream.)
+		if r.URL.Query().Get("token") != "" {
+			http.SetCookie(w, &http.Cookie{
+				Name:     "mw_token",
+				Value:    token,
+				Path:     "/",
+				MaxAge:   86400,
+				SameSite: http.SameSiteLaxMode,
+				HttpOnly: true,
+				Secure:   r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https",
+			})
+		}
 		next.ServeHTTP(w, r)
 	})
 }
@@ -2154,7 +2328,7 @@ func writeErr(w http.ResponseWriter, status int, err error) {
 // was rejected for exceeding the global log buffer budget. The "error" code
 // "log_buffer_budget_exceeded" is part of the API contract — the dashboard
 // matches on it to display a popup instead of a generic error.
-func writeLogBufferBudgetErr(w http.ResponseWriter, err *instance.LogBufferBudgetError) {
+func writeLogBufferBudgetErr(w http.ResponseWriter, err *framework.LogBufferBudgetError) {
 	body := map[string]any{
 		"error":        "log_buffer_budget_exceeded",
 		"message":      fmt.Sprintf("Insufficient memory to start new instance: used %s, limit %s.", formatBytes(err.UsedBytes), formatBytes(err.LimitBytes)),

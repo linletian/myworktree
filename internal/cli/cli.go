@@ -15,10 +15,11 @@ import (
 
 	"golang.org/x/term"
 
+	"context"
 	"myworktree/internal/app"
 	"myworktree/internal/config"
+	"myworktree/internal/framework"
 	"myworktree/internal/gitx"
-	"myworktree/internal/instance"
 	"myworktree/internal/store"
 	"myworktree/internal/tag"
 	"myworktree/internal/version"
@@ -267,12 +268,17 @@ func instanceCmd(logger *log.Logger, args []string) error {
 		return err
 	}
 	cfg, _ := config.Load()
-	mgr := &instance.Manager{
-		DataDir:        dataDir,
-		Root:           root,
-		Store:          store.FileStore{Path: filepath.Join(dataDir, "state.json")},
-		Logger:         logger,
-		LogBufferBytes: cfg.LogBufferBytes,
+	mgr := framework.NewManager(framework.Default, store.FileStore{Path: filepath.Join(dataDir, "state.json")}, logger)
+	mgr.DataDir = dataDir
+	mgr.Root = root
+	mgr.LogBufferBytes = cfg.LogBufferBytes
+	// Restored tag semantics: tag.Env / preStart / Command / Cwd resolve
+	// from the global defaults + per-project tags.json (same as the daemon).
+	if base, err := os.UserConfigDir(); err == nil {
+		mgr.Tags = tag.Manager{
+			GlobalPath:  filepath.Join(base, "myworktree", "tags.json"),
+			ProjectPath: filepath.Join(dataDir, "tags.json"),
+		}
 	}
 
 	switch args[0] {
@@ -299,7 +305,7 @@ func instanceCmd(logger *log.Logger, args []string) error {
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
 		}
-		item, err := mgr.Start(instance.StartInput{
+		item, err := mgr.Start(context.Background(), framework.StartParams{
 			WorktreeID: worktreeID,
 			TagID:      tagID,
 			Command:    command,

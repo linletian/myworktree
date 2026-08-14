@@ -11,7 +11,8 @@ import (
 	"strconv"
 	"strings"
 
-	"myworktree/internal/instance"
+	"myworktree/internal/authq"
+	"myworktree/internal/framework"
 	"myworktree/internal/instance/reasonix"
 	"myworktree/internal/store"
 )
@@ -27,7 +28,8 @@ import (
 //     mounted under /rx/<id>/, those would hit myworktree's own routes. A
 //     script injected into HTML responses rewrites them to carry the prefix.
 type reasonixProxy struct {
-	manager *instance.Manager
+	manager *framework.Manager
+	driver  *reasonix.Driver
 }
 
 func (p *reasonixProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -46,11 +48,14 @@ func (p *reasonixProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	if inst.Status != "running" || p.manager.Reasonix == nil {
+	// "starting" is accepted: the framework persists the record before the
+	// lifecycle watcher flips it to "running", but Driver.Start already
+	// waited for the listen port, so the serve answers requests either way.
+	if (inst.Status != "running" && inst.Status != "starting") || p.driver == nil {
 		http.Error(w, "instance is not running", http.StatusServiceUnavailable)
 		return
 	}
-	info, err := p.manager.Reasonix.Addr(id)
+	info, err := p.driver.Addr(id)
 	if err != nil {
 		http.Error(w, "reasonix backend unavailable: "+err.Error(), http.StatusServiceUnavailable)
 		return
@@ -76,10 +81,9 @@ func (p *reasonixProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// reject it anyway (it has its own ?token= scheme). Any OTHER query
 		// params are preserved — the injected prefix() JS keeps the browser's
 		// query string, and reasonix itself uses query params (e.g.
-		// ?session=) that must reach it intact.
-		q := req.URL.Query()
-		q.Del("token")
-		req.URL.RawQuery = q.Encode()
+		// ?session=) that must reach it intact. authq.StripToken is the
+		// single shared stripping path (see internal/authq).
+		req.URL.RawQuery = authq.StripToken(req.URL.RawQuery)
 		// Inject the reasonix auth cookie (single source: reasonix.CookieName)
 		// so every upstream request carries the instance token; myworktree's
 		// own auth query is never forwarded upstream.
@@ -129,6 +133,7 @@ func (p *reasonixProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// them (a client-side DOMContentLoaded pass would be too late — the
 		// browser fetches <img src="/assets/..."> before any script runs).
 		rewritten := rewriteRootAttrs(body, "/rx/"+id)
+		rewritten = defuseBlockingFontLinks(rewritten)
 		injected := injectReasonixPrefix(rewritten, "/rx/"+id)
 		resp.Body = io.NopCloser(bytes.NewReader(injected))
 		resp.Header.Set("Content-Length", strconv.Itoa(len(injected)))
@@ -155,7 +160,43 @@ func (p *reasonixProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 var (
 	tagRe  = regexp.MustCompile(`(?i)<[a-zA-Z][^>]*>`)
 	attrRe = regexp.MustCompile(`(?i)([\s"'](?:src|href|action|poster)\s*=\s*["']?)(/[^"'>\s]*)`)
+
+	// fontLinkStyleRe matches any rel="stylesheet" <link>. The Google-Fonts
+	// stylesheet is the only render-blocking third-party resource on the
+	// page: a browser that cannot reach fonts.googleapis.com (remote
+	// access, firewalled networks) would keep the page blank — a pending
+	// stylesheet blocks rendering AND defers every script after it, which
+	// on this page is the entire inline SPA. defuseBlockingFontLinks keeps
+	// the stylesheet but removes it from the blocking path: media="print"
+	// loads it without blocking; onload flips media to "all" so the
+	// typography is identical whenever the fonts do arrive, and system
+	// fonts render otherwise.
+	fontLinkStyleRe  = regexp.MustCompile(`(?i)<link\b[^>]*\brel=["']stylesheet["'][^>]*>`)
+	fontGoogleRe     = regexp.MustCompile(`(?i)\bhref=["']https://fonts\.googleapis\.com/`)
+	fontMediaPrintRe = regexp.MustCompile(`(?i)\bmedia\s*=\s*["']print["']`)
 )
+
+// defuseBlockingFontLinks converts the Google-Fonts stylesheet link into
+// a non-blocking load (see fontLinkStyleRe). Idempotent: links already
+// carrying media="print" (either quote style) are skipped, and
+// non-Google stylesheets are left untouched.
+func defuseBlockingFontLinks(html []byte) []byte {
+	return fontLinkStyleRe.ReplaceAllFunc(html, func(m []byte) []byte {
+		if !fontGoogleRe.Match(m) || fontMediaPrintRe.Match(m) {
+			return m
+		}
+		closeIdx := bytes.LastIndexByte(m, '>')
+		if closeIdx < 0 {
+			return m
+		}
+		attrs := []byte(` media="print" onload="this.media='all'"`)
+		out := make([]byte, 0, len(m)+len(attrs))
+		out = append(out, m[:closeIdx]...)
+		out = append(out, attrs...)
+		out = append(out, m[closeIdx:]...)
+		return out
+	})
+}
 
 // rewriteRootAttrs prefixes every root-relative src/href/action/poster value
 // with mount (e.g. /rx/abc123). It first extracts each whole tag, then
@@ -201,16 +242,7 @@ func splitReasonixPath(path string) (string, string) {
 }
 
 func (p *reasonixProxy) findInstance(id string) (store.ManagedInstance, error) {
-	items, err := p.manager.List()
-	if err != nil {
-		return store.ManagedInstance{}, err
-	}
-	for _, it := range items {
-		if it.ID == id {
-			return it, nil
-		}
-	}
-	return store.ManagedInstance{}, fmt.Errorf("unknown instance: %s", id)
+	return p.manager.Get(id)
 }
 
 // injectReasonixPrefix prepends a script that prefixes every root-relative

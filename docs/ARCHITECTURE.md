@@ -88,7 +88,8 @@ The sidebar shows a pinned **Main Workspace** item at the top (purple accent), f
 - UI shows transport state (`websocket/sse/polling`) and supports manual WS reconnect.
 - PTY output is captured into a per-instance **in-memory ring buffer**; no disk I/O is involved on the steady state. The buffer feeds the HTTP/SSE/WS replay endpoints and the MCP `instance_log_tail` tool. See §4.1 for sizing, eviction, and budget rules.
 - On server startup, stale persisted `running` records are reconciled to `stopped` because in-memory stdin/stdout bindings cannot be resumed after process restart. The same startup pass also calls `Manager.PurgeOrphanLogFiles()` to remove dead `.log` files left behind by pre-buffer versions; missing or empty `logs/` directories are not an error.
-  - **Exception (reasonix)**: `ReconcileRunningOnStartup` probes reasonix instances via `Reasonix.Health()` (pid liveness + TCP port). A live serve subprocess survives the restart and is kept `running` so Stop/Delete still manage it; a dead one is marked `stopped`. This prevents the restart-then-delete sequence from orphaning a serve process that holds the symlinked provider credentials.
+  - **Exception (reasonix, `RestartSurvivor`)**: `ReconcileRunningOnStartup` asks reasonix-kind instances to re-attach (`reasonix.Kind.Reattach` → `Driver.Health()`: pid liveness + TCP port). A live serve subprocess survives the restart and is kept `running` (its handle is registered back into the framework so Stop/Delete still manage it); a dead one is marked `stopped`. This prevents the restart-then-delete sequence from orphaning a serve process that holds the symlinked provider credentials.
+- **Tag semantics (restored for all kinds)**: starting an instance with a `tag_id` resolves the tag exactly like the pre-kind-refactor Manager — `tag.Env` is merged into the spawned process environment, `tag.preStart` runs right before spawn with the same environment the process will get (aborting Start on failure; for reasonix it runs with `REASONIX_HOME`/`REASONIX_STATE_HOME` stripped exactly like serve), `tag.Command` is sent as the PTY initial input (an ad-hoc `command` without a tag likewise), and `tag.Cwd` is joined onto the worktree path. `tag.Command` is ignored by `opencode-web` and `reasonix`. The resolved values are persisted on the instance record (`command` / `cwd` / `env`), and the record's `tag_id` stores the effective id (`<tag>` / `adhoc` / `idle`).
 - **Rename**: `PATCH /api/instances` updates an instance's display name (`name` field). The rename takes effect immediately in the UI and persists to `state.json`.
 - **Tab ordering**: `PATCH /api/instances/reorder` persists per-worktree tab order to `state.json` (`tab_order` map + array order in `State.Instances`). Uses **optimistic locking** — the client sends the `version` observed from `GET /api/instances`. If the state has been modified since (e.g., another user started an instance), the server returns HTTP 409 Conflict and the client refreshes and retries.
 - **Resource monitoring**: A clickable transport status bar in the bottom-right of the workspace opens a resource monitor modal. The modal shows per-instance CPU%, memory RSS, ring buffer usage (actual / capacity), and connection type (WebSocket/SSE) grouped by worktree, with subtotals and a global summary. The global totals include the mw daemon process itself (`daemon_cpu_percent`, `daemon_memory_bytes`). Data is fetched via `GET /api/instances/stats` (1-second polling when open, stops when closed). CPU% uses delta calculation from `process.Times()` with a per-PID baseline stored in the `Collector` struct. The UI includes a disclaimer that grandchild processes spawned inside instances are not individually tracked.
@@ -128,12 +129,12 @@ Each running instance owns a bounded, **in-memory** ring buffer (`internal/insta
 
 `kind: "reasonix"` instances run a `reasonix serve` subprocess in the worktree instead of a PTY shell, and the UI embeds the Reasonix web chat page in an iframe.
 
-- **Lifecycle**: `Manager.Start` with `kind=reasonix` delegates to `internal/instance/reasonix` (`Driver.Start`): it launches `reasonix serve --addr 127.0.0.1:0 --auth token --token-file … --port-file … --pid-file … --no-open` with `cwd` = worktree path (no `--resume`, no `REASONIX_HOME`). The actual port is read back from the port file (port 0 = kernel-assigned). `Stop` signals the process group (TERM → KILL). `Restart` allocates a fresh instance id and cleans the old state dir (Restart = a brand-new session, matching the terminal "new session" model). `Delete` (after stop) removes the per-instance serve-management state dir **after** releasing the state lock, so the 5s worst-case `Stop` never blocks concurrent Start/Stop/Reorder/Rename (issue #47); it never touches the shared `~/.reasonix` session pool. On server shutdown `Manager.StopAllReasonix` stops every running serve (parity with tty instances, which die when their PTY hangs up) without cleaning the state dir.
+- **Lifecycle**: `framework.Manager.Start` with `kind=reasonix` dispatches to the reasonix kind (`internal/instance/reasonix/kind.go`, wrapping `internal/instance/reasonix.Driver.Start`): it launches `reasonix serve --addr 127.0.0.1:0 --auth token --token-file … --port-file … --pid-file … --no-open` with `cwd` = worktree path (no `--resume`, no `REASONIX_HOME`). The actual port is read back from the port file (port 0 = kernel-assigned). `Stop` signals the process group (TERM → KILL) and tears down the per-instance serve-management state dir. `Restart` allocates a fresh instance id and cleans the old state dir (Restart = a brand-new session, matching the terminal "new session" model). `Delete` (after stop) removes the per-instance serve-management state dir via the kind's `Cleanup` (best-effort, includes a Stop for stale-stopped records whose process outlived the marking); it never touches the shared `~/.reasonix` session pool. On server shutdown `framework.Manager.StopAllKind("reasonix")` stops every running serve (parity with tty instances, which die when their PTY hangs up).
 - **Version gate & readiness**: before spawning, `Driver.Start` runs `reasonix --version` and rejects CLIs older than `1.22.0` (`Driver.MinVersion` overrides) with a readable error instead of a 15s timeout (issue #45); readiness/early-exit errors include the `serve.log` tail. Tag `env` is injected into the serve process and tag `preStart` runs before serve (aborting on failure); the tag `command` is deliberately not executed (issue DEFERRED §3).
 - **No session isolation**: the serve runs **without** a `REASONIX_HOME` override — it uses the user's real `~/.reasonix`, exactly like a terminal-run reasonix. Sessions/history/config/credentials are shared per project: reasonix organizes them under `~/.reasonix/projects/<cwd-slug>/sessions` and isolates projects by cwd itself, so the same project's full history (including sessions created by terminal CLI/TUI) is visible and switchable in the embedded sidebar. Each Start opens a fresh session (no `--resume`); concurrency is handled by reasonix's own per-session-file lease (refuse-style, no silent double-write). `reasonix serve` must be on `PATH` (or configured via `Driver.ReasonixBin`).
 - **Proxy**: `internal/app/reasonix_proxy.go` serves `/rx/<id>/…`. When the main listener is **loopback-only** (and no TLS) it is mounted on a dedicated loopback listener (issue #44) and the frontend iframe uses the `web_url` reported by `/api/instances` — the embedded page is **cross-origin** with the myworktree API, so content inside the chat iframe cannot silently call `/api/*` with the user's session. In **TLS mode or with a network-open main listener** (default `0.0.0.0`, or an explicit LAN IP — an absolute `http://127.0.0.1:<port>` web_url would be unreachable from a remote browser) the independent listener is skipped and the iframe falls back to the **relative** same-origin `/rx/<id>/` route, which follows the browser's current origin and keeps LAN/remote access working. The proxy injects the `reasonix_token` cookie (`reasonix.CookieName`, single source), streams SSE, and injects at one HTML point the URL-prefix shim plus the issue #48 layout: desktop sidebar **collapsed by default** with a toggle (`--mw-sidebar-w` width), native mobile behavior untouched. Backend port/token come from a per-instance in-memory cache (issue #46), so the proxy path does not read files per request.
 - **Liveness**: `Driver.Health` = pid alive (`kill(pid,0)`) **and** TCP connect to the recorded port succeeds — cross-platform (no `/proc`), so it also works on macOS.
-- **Restart reconciliation**: see the exception note in §4 — a live serve subprocess is re-attached as `running` on startup, keeping it manageable; dead ones are marked `stopped`.
+- **Restart reconciliation**: see the exception note in §4 — via the `RestartSurvivor` optional interface, a live serve subprocess is re-attached as `running` on startup (its handle is registered back into the framework so Stop/Delete keep managing it); dead ones are marked `stopped`.
 
 > **Requirement revision (2026-08-12, see docs/PRD.md §7) — implemented**: the per-instance `REASONIX_HOME` isolation this section previously described is **removed**. myworktree does not intervene in the agent's product logic: sessions live in the agent's own state root (`~/.reasonix`), organized per project by reasonix itself, and instance lifecycle never touches the shared session pool. Issue #49's "Restart = fresh session" semantics stay; issue #56 (sidebar history/branches empty) is resolved.
 >
@@ -430,3 +431,67 @@ myworktree implements a **dual-layer authentication architecture**:
 ## 7. MCP extensibility
 - Core managers (worktree/instance) are transport-agnostic.
 - `internal/mcp` exposes tool names; server dispatch maps tool calls to existing core managers without rewriting core.
+
+## 8. opencode-web integration
+
+myworktree can host `opencode serve` processes as managed instances, embedding opencode's official web UI via reverse proxy instead of the PTY + xterm.js path.
+
+```
+Browser (iframe src = /__opencode/<id>/ — full-page SPA root)
+  │ GET /__opencode/<id>/
+  ▼
+myworktree mux (withAuth + Token/Cookie)
+  │ Strip /__opencode → ReverseProxy → inject Basic auth + ?directory=<worktree>
+  │   + classify request directory vs instance worktree → in/out-of-scope
+  │   + rewrite HTML (assets re-route, <base> + injected script, CSP hash)
+  ▼
+opencode serve (127.0.0.1:<port>)
+  │ serve opencode SPA → router matches HomeRoute (full page)
+  ▼
+opencode web app (SolidJS, rendered in iframe — single-worktree view; cross-worktree switch entries hidden)
+```
+
+### Design constraints
+
+- **One process per instance**: each `opencode-web` instance = one independent `opencode serve` process. Multiple instances per worktree supported; each has its own session history, provider state, and plugin context.
+- **Command locked**: the command, `--hostname 127.0.0.1`, and `--port 0` are hardcoded in Go (user cannot override via `tags.json`). LAN exposure requires running opencode outside myworktree or as a PTY-backed tag.
+- **统一认证 token（unified auth token）**: every opencode-web instance's `OPENCODE_SERVER_PASSWORD = cfg.AuthToken`. Users cannot turn it off or override it (`buildEnv` always forces this value). The reverse proxy injects Basic auth with the same `cfg.AuthToken` when forwarding to upstream — upstream and myworktree mux share one credential.
+- **Non-security env from tag**: `tag.Env` (e.g., `OPENCODE_EXPERIMENTAL`) is merged into the process environment via `buildEnv`.
+- **Coexists with PTY**: existing PTY instances are unchanged. The frontend branches on `instance.kind`: `"pty"` → xterm.js, `"opencode-web"` → iframe.
+- **No new dependencies**: proxy implemented with `net/http/httputil.ReverseProxy` (stdlib). No third-party Go packages.
+- **单 worktree 视角（single-worktree view）**: the reverse proxy classifies every directory-bearing request against the instance worktree and records out-of-scope drift in an in-memory `ScopeTracker`; an injected script hides cross-worktree switch entries (project switch / add-project / open-project) and normalizes the localStorage server list to a single server. This is防误操作 (accident-prevention), not a hard boundary — the user can still reach other directories, and any such navigation surfaces a persistent warning bar. Full design and decision record in `docs/plans/opencode-native-ui/WORKTREE-ISOLATION.md`.
+- **版本门 + 隐藏有效性兜底（version gate + hide-effectiveness）**: the injected hide script targets `1.18.x` DOM anchors. A spawn-time `opencode --version` probe (advisory — never blocks startup), plus in-page DOM-anchor / visibility checks reported via `postMessage` and a CSP-anchor drift flag, surface a persistent "hiding not effective" warning when opencode upgrades break the hiding.
+
+### Threat model & trust boundary (unified auth token)
+
+The current security model relies on these assumptions:
+
+- **Loopback isolation**: every `opencode serve` binds `127.0.0.1:<port>` (the invocation is hardcoded in `internal/instance/opencode_web/driver.go` `Spawn`). The upstream HTTP server is not directly reachable from the network.
+- **Single credential**: `OPENCODE_SERVER_PASSWORD = cfg.AuthToken`, and the reverse proxy injects Basic auth with the same token. Anyone holding the token has full upstream access to every opencode-web instance; the only remaining gate is the bearer/cookie check at the myworktree mux.
+- **Unprivileged remote attackers** (LAN/Wi-Fi sniffer, cloud-sync adversary, dotfiles-repo leak, issue tracker / CI log exposure, sibling-vhost XSS, etc.) gain no new external attack surface from the credential merge — they still only reach the proxy through `/__opencode/<id>/*` and still must pass the mux. Upstream `127.0.0.1` stays unreachable from off-machine.
+- **The real amplification is "in-trust-zone but crossing the loopback boundary"**: any future code path that exposes `127.0.0.1:<opencode-port>` outside the loopback namespace — container with `--net=host` or shared netns, reverse-proxy port forward, debug handler returning host/port for direct connection, MCP tool / worker that talks to upstream without going through the mux, SSH / local-tunnel documentation — turns a single token leak into full compromise of every instance's upstream **and** the entire API. Such paths must be reviewed against this threat model before introduction.
+- **In-memory footprint**: `cfg.AuthToken` now lives in the myworktree daemon, in every spawned `opencode serve` process's `cmd.Env` (as `OPENCODE_SERVER_PASSWORD`), and in any goroutine / struct that captures it. Same-user reads of `/proc/<pid>/environ` get it. This does not weaken the model **as long as the trust zone does not change**; if it does, all of those copies leak together rather than per-instance.
+
+### Review checklist (token leak paths)
+
+Every review that touches authentication, proxy, token handling, opencode-web, or portal paths must verify:
+
+1. **Disk**: `~/.config/myworktree/auth.json` (and any future token file) is `0o600` and only read by the owner.
+2. **Logs**: portal / daemon startup logs, access logs, reverse-proxy logs do not print `cfg.AuthToken` in plaintext. Note existing leak at `internal/portal/portal.go:211` (`Remote access token: %s`).
+3. **Process memory**: `cfg.AuthToken` is not written to `os/exec.Cmd.Env` of any subprocess, captured in goroutine closures, or held in struct fields longer than needed; new subprocesses do not inherit it unintentionally.
+4. **Network**: no endpoint outside the `withAuth` mux forwards to `127.0.0.1:<opencode-port>`; `mw_token` cookie's `Secure` / `Domain` / `Path` are tightened for the deployment (TLS termination, reverse proxy).
+5. **Error responses**: API errors, panic messages, and log lines do not echo the token or `Authorization` header.
+6. **Test data**: tests, mocks, fixtures do not embed real-form tokens; CI logs do not surface them.
+7. **Cross-trust-zone candidates**: any new debug handler, MCP tool, worker, container network config, or SSH / local-tunnel documentation that touches `127.0.0.1:<opencode-port>` or `cfg.AuthToken` — must be re-evaluated against the threat model above before merge.
+8. **iframe URL credential path (added 2026-08-14)**: embedded iframe documents must never receive `cfg.AuthToken` in their own URL (`location.search`) — a script inside the embed could read it. Remote access works because `withAuth` syncs the address-bar `?token=` into the HttpOnly `mw_token` cookie on the response, and the panels navigate with plain relative URLs (`/rx/<id>/`, `/__opencode/<id>/`). The portal mirrors this: `portal.withAuth` accepts `?token=` on `/api/list` and writes the same cookie. Any new embed or panel must use the cookie, not a token-bearing URL; the two `withAuth` implementations (daemon + portal) must stay aligned — tighten or loosen one, update the other in the same change.
+9. **Reverse-proxy token scrubbing (added 2026-08-14)**: every reverse proxy that forwards a browser query upstream must run the query through `authq.StripToken` — a forgotten path leaks the credential to the upstream subprocess. When adding a proxied route, grep the proxy code for raw `RawQuery` assignments; do not re-implement stripping locally.
+
+### Related files
+
+- `internal/instance/opencode_web/driver.go` — Kind implementation (`opencode serve` spawn, listening-address scan, health probe, `--version` probe)
+- `internal/instance/opencode_web/proxy.go` — reverse proxy + HTML injection (`/__opencode/<id>/*`, `rewriteRootAttrs`, `buildInjectScript`, CSP hash)
+- `internal/instance/opencode_web/scope.go` — directory classification + `ScopeTracker`
+- `internal/instance/opencode_web/version.go` — version-gate helpers (`parseVersion`, `isSupportedVersion`)
+- `internal/app/app.go` — API endpoints `GET /api/instances/<id>/opencode` and `GET /api/instances/opencode/scope`
+- `internal/ui/static/index.html` + `internal/ui/static/kinds/opencode_web.js` — iframe panel, warning bar, scope polling + hidden-report listener
+- `docs/plans/opencode-native-ui/WORKTREE-ISOLATION.md` — full design + decision record

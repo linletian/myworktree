@@ -1,6 +1,7 @@
-package instance
+package framework_test
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -13,8 +14,10 @@ import (
 	"testing"
 	"time"
 
+	"myworktree/internal/framework"
 	"myworktree/internal/instance/reasonix"
 	"myworktree/internal/store"
+	"myworktree/internal/tag"
 )
 
 // fakeServeBinT writes a python3 script that emulates `reasonix serve`: it
@@ -64,10 +67,36 @@ srv.serve_forever()
 	return bin
 }
 
-func newReasonixTestManager(t *testing.T) (*Manager, store.FileStore) {
+// rxTempDir creates a tracked temp dir (helper unique to the reasonix
+// framework tests; other framework tests bring their own).
+func rxTempDir(t *testing.T, prefix string) string {
 	t.Helper()
-	dataDir := mustTempDir(t, "mw-rx-data-")
-	workDir := mustTempDir(t, "mw-rx-work-")
+	dir, err := os.MkdirTemp("", prefix)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return dir
+}
+
+// newReasonixTestManagerOn builds a framework Manager with a fresh registry
+// containing only the reasonix kind (driven by drv), over the given store
+// and data dir. Reusing it with a shared fs/drv simulates a server restart
+// (fresh in-memory state, persisted state intact).
+func newReasonixTestManagerOn(t *testing.T, fs store.FileStore, dataDir string, drv *reasonix.Driver) *framework.Manager {
+	t.Helper()
+	reg := framework.NewRegistry()
+	reg.Register(reasonix.NewKind(drv))
+	m := framework.NewManager(reg, fs, nil)
+	m.DataDir = dataDir
+	m.Tags = tag.Manager{ProjectPath: filepath.Join(dataDir, "tags.json")}
+	return m
+}
+
+func newReasonixTestManager(t *testing.T) (*framework.Manager, store.FileStore, *reasonix.Driver) {
+	t.Helper()
+	dataDir := rxTempDir(t, "mw-rx-data-")
+	workDir := rxTempDir(t, "mw-rx-work-")
 	fs := store.FileStore{Path: filepath.Join(dataDir, "state.json")}
 	if err := fs.Save(store.State{
 		Worktrees: []store.ManagedWorktree{
@@ -76,38 +105,70 @@ func newReasonixTestManager(t *testing.T) (*Manager, store.FileStore) {
 	}); err != nil {
 		t.Fatalf("seed state failed: %v", err)
 	}
-	m := &Manager{
-		DataDir: dataDir,
-		Store:   fs,
-		Reasonix: &reasonix.Driver{
-			DataDir:     dataDir,
-			ReasonixBin: fakeServeBinT(t),
-		},
+	drv := &reasonix.Driver{
+		DataDir:     dataDir,
+		ReasonixBin: fakeServeBinT(t),
 	}
-	return m, fs
+	return newReasonixTestManagerOn(t, fs, dataDir, drv), fs, drv
+}
+
+// waitInstanceStatus polls the store until the instance reaches want.
+func waitInstanceStatus(t *testing.T, fs store.FileStore, id, want string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		st, err := fs.Load()
+		if err == nil {
+			for _, it := range st.Instances {
+				if it.ID == id && it.Status == want {
+					return
+				}
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("instance %s never reached status %q", id, want)
+}
+
+// instanceByID loads the record for id from the store.
+func instanceByID(t *testing.T, fs store.FileStore, id string) store.ManagedInstance {
+	t.Helper()
+	st, err := fs.Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	for _, it := range st.Instances {
+		if it.ID == id {
+			return it
+		}
+	}
+	t.Fatalf("instance %q not found in store", id)
+	return store.ManagedInstance{}
 }
 
 func TestStartStopReasonixInstance(t *testing.T) {
-	m, fs := newReasonixTestManager(t)
+	m, fs, _ := newReasonixTestManager(t)
 
-	inst, err := m.Start(StartInput{WorktreeID: "wt1", Kind: store.KindReasonix, Name: "chat"})
+	inst, err := m.Start(context.Background(), framework.StartParams{WorktreeID: "wt1", Kind: reasonix.KindName, Name: "chat"})
 	if err != nil {
 		t.Fatalf("Start reasonix failed: %v", err)
 	}
-	if inst.Kind != store.KindReasonix {
-		t.Fatalf("Kind = %q, want %q", inst.Kind, store.KindReasonix)
+	if inst.Kind != reasonix.KindName {
+		t.Fatalf("Kind = %q, want %q", inst.Kind, reasonix.KindName)
 	}
-	if inst.PID <= 0 {
-		t.Fatalf("PID = %d, want > 0", inst.PID)
+	waitInstanceStatus(t, fs, inst.ID, "running")
+	got := instanceByID(t, fs, inst.ID)
+	if got.PID <= 0 {
+		t.Fatalf("persisted PID = %d, want > 0", got.PID)
 	}
-	if inst.Status != "running" {
-		t.Fatalf("Status = %q, want running", inst.Status)
+	if got.Status != "running" {
+		t.Fatalf("Status = %q, want running", got.Status)
 	}
 
 	if err := m.Stop(inst.ID); err != nil {
 		t.Fatalf("Stop failed: %v", err)
 	}
-	waitInstanceNotRunning(t, fs, inst.ID)
+	waitInstanceStatus(t, fs, inst.ID, "stopped")
 
 	// Stop must tear down the per-instance serve-management dir and the
 	// Start lock: the id is never reused, so leaving them would let the
@@ -125,8 +186,8 @@ func TestStartStopReasonixInstance(t *testing.T) {
 }
 
 func TestStartReasonixDisabled(t *testing.T) {
-	dataDir := mustTempDir(t, "mw-rx-dis-")
-	workDir := mustTempDir(t, "mw-rx-work-")
+	dataDir := rxTempDir(t, "mw-rx-dis-")
+	workDir := rxTempDir(t, "mw-rx-work-")
 	fs := store.FileStore{Path: filepath.Join(dataDir, "state.json")}
 	if err := fs.Save(store.State{
 		Worktrees: []store.ManagedWorktree{
@@ -135,55 +196,59 @@ func TestStartReasonixDisabled(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("seed state failed: %v", err)
 	}
-	// No Reasonix driver configured → reasonix instances must be rejected.
-	m := &Manager{DataDir: dataDir, Store: fs}
-	if _, err := m.Start(StartInput{WorktreeID: "wt1", Kind: store.KindReasonix}); err == nil {
-		t.Fatal("Start with nil Reasonix driver should error")
+	// No reasonix kind registered → reasonix instances must be rejected.
+	m := framework.NewManager(framework.NewRegistry(), fs, nil)
+	m.DataDir = dataDir
+	if _, err := m.Start(context.Background(), framework.StartParams{WorktreeID: "wt1", Kind: reasonix.KindName}); err == nil {
+		t.Fatal("Start with unregistered reasonix kind should error")
 	}
 }
 
 func TestRestartReasonixKeepsKind(t *testing.T) {
-	m, fs := newReasonixTestManager(t)
+	m, fs, _ := newReasonixTestManager(t)
 
-	inst, err := m.Start(StartInput{WorktreeID: "wt1", Kind: store.KindReasonix, Name: "chat"})
+	inst, err := m.Start(context.Background(), framework.StartParams{WorktreeID: "wt1", Kind: reasonix.KindName, Name: "chat"})
 	if err != nil {
 		t.Fatalf("Start failed: %v", err)
 	}
+	waitInstanceStatus(t, fs, inst.ID, "running")
 	if err := m.Stop(inst.ID); err != nil {
 		t.Fatalf("Stop failed: %v", err)
 	}
-	waitInstanceNotRunning(t, fs, inst.ID)
+	waitInstanceStatus(t, fs, inst.ID, "stopped")
 
 	newInst, err := m.Restart(inst.ID)
 	if err != nil {
 		t.Fatalf("Restart failed: %v", err)
 	}
-	if newInst.Kind != store.KindReasonix {
-		t.Fatalf("restarted Kind = %q, want %q", newInst.Kind, store.KindReasonix)
+	if newInst.Kind != reasonix.KindName {
+		t.Fatalf("restarted Kind = %q, want %q", newInst.Kind, reasonix.KindName)
 	}
 	if newInst.ID == inst.ID {
 		t.Fatalf("restart should allocate a new instance id, got same %q", newInst.ID)
 	}
+	waitInstanceStatus(t, fs, newInst.ID, "running")
 	if err := m.Stop(newInst.ID); err != nil {
 		t.Fatalf("Stop restarted failed: %v", err)
 	}
 }
 
 func TestDeleteReasonixInstance(t *testing.T) {
-	m, fs := newReasonixTestManager(t)
+	m, fs, _ := newReasonixTestManager(t)
 
-	inst, err := m.Start(StartInput{WorktreeID: "wt1", Kind: store.KindReasonix, Name: "chat"})
+	inst, err := m.Start(context.Background(), framework.StartParams{WorktreeID: "wt1", Kind: reasonix.KindName, Name: "chat"})
 	if err != nil {
 		t.Fatalf("Start failed: %v", err)
 	}
-	// Delete requires a stopped instance (same as tty semantics).
+	waitInstanceStatus(t, fs, inst.ID, "running")
+	// Delete requires a stopped instance (same as pty semantics).
 	if err := m.Delete(inst.ID); err == nil {
 		t.Fatal("Delete of a running instance should error")
 	}
 	if err := m.Stop(inst.ID); err != nil {
 		t.Fatalf("Stop failed: %v", err)
 	}
-	waitInstanceNotRunning(t, fs, inst.ID)
+	waitInstanceStatus(t, fs, inst.ID, "stopped")
 	if err := m.Delete(inst.ID); err != nil {
 		t.Fatalf("Delete failed: %v", err)
 	}
@@ -209,21 +274,23 @@ func TestDeleteReasonixInstance(t *testing.T) {
 // regardless of whether the process survived — polling it would make this
 // test vacuously pass (T-01).
 func TestDeleteReasonixStaleStoppedStopsProcess(t *testing.T) {
-	m, fs := newReasonixTestManager(t)
+	m, fs, drv := newReasonixTestManager(t)
 
-	inst, err := m.Start(StartInput{WorktreeID: "wt1", Kind: store.KindReasonix, Name: "chat"})
+	inst, err := m.Start(context.Background(), framework.StartParams{WorktreeID: "wt1", Kind: reasonix.KindName, Name: "chat"})
 	if err != nil {
 		t.Fatalf("Start failed: %v", err)
 	}
+	waitInstanceStatus(t, fs, inst.ID, "running")
 	// Capture the live pid before Delete wipes the state dir.
-	info, ok, herr := m.Reasonix.Health(inst.ID)
+	info, ok, herr := drv.Health(inst.ID)
 	if herr != nil || !ok || info.PID <= 0 {
 		t.Fatalf("no live serve pid before Delete: ok=%v err=%v", ok, herr)
 	}
 	pid := info.PID
 
-	// Force the state to "stopped" while the process is still alive, without
-	// touching the manager's runtime view.
+	// Force the state to "stopped" while the process is still alive, and
+	// simulate a server restart (fresh manager, no in-memory running
+	// entry) — the production shape of this window.
 	st, err := fs.Load()
 	if err != nil {
 		t.Fatalf("Load: %v", err)
@@ -236,13 +303,12 @@ func TestDeleteReasonixStaleStoppedStopsProcess(t *testing.T) {
 	if err := fs.Save(st); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
+	m2 := newReasonixTestManagerOn(t, fs, m.DataDir, drv)
 
-	if err := m.Delete(inst.ID); err != nil {
+	if err := m2.Delete(inst.ID); err != nil {
 		t.Fatalf("Delete failed: %v", err)
 	}
-	// The lingering serve process must be gone. kill(pid, 0) is the probe:
-	// zombies cannot linger here because the driver's cmd.Wait goroutine
-	// reaps the process it started.
+	// The lingering serve process must be gone. kill(pid, 0) is the probe.
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		if err := syscall.Kill(pid, 0); err != nil {
@@ -256,58 +322,52 @@ func TestDeleteReasonixStaleStoppedStopsProcess(t *testing.T) {
 }
 
 func TestReconcileKeepsLiveReasonixRunning(t *testing.T) {
-	m, fs := newReasonixTestManager(t)
+	m, fs, drv := newReasonixTestManager(t)
 
-	inst, err := m.Start(StartInput{WorktreeID: "wt1", Kind: store.KindReasonix, Name: "chat"})
+	inst, err := m.Start(context.Background(), framework.StartParams{WorktreeID: "wt1", Kind: reasonix.KindName, Name: "chat"})
 	if err != nil {
 		t.Fatalf("Start failed: %v", err)
 	}
+	waitInstanceStatus(t, fs, inst.ID, "running")
 
-	// The serve subprocess survives a server restart; Reconcile must re-attach
-	// it (keep "running") instead of marking it stopped and orphaning it.
-	changed, err := m.ReconcileRunningOnStartup()
+	// The serve subprocess survives a server restart; Reconcile on a fresh
+	// manager must re-attach it (keep "running") instead of marking it
+	// stopped and orphaning it.
+	m2 := newReasonixTestManagerOn(t, fs, m.DataDir, drv)
+	changed, err := m2.ReconcileRunningOnStartup()
 	if err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
 	if changed != 0 {
 		t.Fatalf("Reconcile changed %d instances, want 0 (live reasonix kept running)", changed)
 	}
-	st, err := fs.Load()
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	found := false
-	for _, it := range st.Instances {
-		if it.ID == inst.ID {
-			found = true
-			if it.Status != "running" {
-				t.Fatalf("live reasonix instance status = %q, want running", it.Status)
-			}
-		}
-	}
-	if !found {
-		t.Fatalf("instance %q missing after Reconcile", inst.ID)
+	if got := instanceByID(t, fs, inst.ID); got.Status != "running" {
+		t.Fatalf("live reasonix instance status = %q, want running", got.Status)
 	}
 
-	if err := m.Stop(inst.ID); err != nil {
+	// The re-attached handle must be stoppable through the fresh manager.
+	if err := m2.Stop(inst.ID); err != nil {
 		t.Fatalf("cleanup Stop failed: %v", err)
 	}
+	waitInstanceStatus(t, fs, inst.ID, "stopped")
 }
 
 func TestReconcileStopsDeadReasonix(t *testing.T) {
-	m, fs := newReasonixTestManager(t)
+	m, fs, drv := newReasonixTestManager(t)
 
-	inst, err := m.Start(StartInput{WorktreeID: "wt1", Kind: store.KindReasonix, Name: "chat"})
+	inst, err := m.Start(context.Background(), framework.StartParams{WorktreeID: "wt1", Kind: reasonix.KindName, Name: "chat"})
 	if err != nil {
 		t.Fatalf("Start failed: %v", err)
 	}
+	waitInstanceStatus(t, fs, inst.ID, "running")
+	pid := instanceByID(t, fs, inst.ID).PID
 	// Kill the serve process out-of-band; state still says "running".
-	if err := syscall.Kill(inst.PID, syscall.SIGKILL); err != nil {
+	if err := syscall.Kill(pid, syscall.SIGKILL); err != nil {
 		t.Fatalf("kill serve: %v", err)
 	}
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		if _, ok, _ := m.Reasonix.Health(inst.ID); !ok {
+		if _, ok, _ := drv.Health(inst.ID); !ok {
 			break
 		}
 		if time.Now().After(deadline) {
@@ -316,36 +376,31 @@ func TestReconcileStopsDeadReasonix(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}
 
-	changed, err := m.ReconcileRunningOnStartup()
+	m2 := newReasonixTestManagerOn(t, fs, m.DataDir, drv)
+	changed, err := m2.ReconcileRunningOnStartup()
 	if err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
 	if changed != 1 {
 		t.Fatalf("Reconcile changed %d instances, want 1 (dead reasonix marked stopped)", changed)
 	}
-	st, err := fs.Load()
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	for _, it := range st.Instances {
-		if it.ID == inst.ID {
-			if it.Status != "stopped" {
-				t.Fatalf("dead reasonix instance status = %q, want stopped", it.Status)
-			}
-		}
+	if got := instanceByID(t, fs, inst.ID); got.Status != "stopped" {
+		t.Fatalf("dead reasonix instance status = %q, want stopped", got.Status)
 	}
 }
 
 func TestRestartReasonixCleansOldDir(t *testing.T) {
-	m, _ := newReasonixTestManager(t)
+	m, fs, _ := newReasonixTestManager(t)
 
-	inst, err := m.Start(StartInput{WorktreeID: "wt1", Kind: store.KindReasonix, Name: "chat"})
+	inst, err := m.Start(context.Background(), framework.StartParams{WorktreeID: "wt1", Kind: reasonix.KindName, Name: "chat"})
 	if err != nil {
 		t.Fatalf("Start failed: %v", err)
 	}
+	waitInstanceStatus(t, fs, inst.ID, "running")
 	if err := m.Stop(inst.ID); err != nil {
 		t.Fatalf("Stop failed: %v", err)
 	}
+	waitInstanceStatus(t, fs, inst.ID, "stopped")
 	oldDir := filepath.Join(m.DataDir, "reasonix", inst.ID)
 	// Stop now tears the serve-management dir down itself, so no leftover
 	// exists to exercise Restart's cleanup; seed an artificial one to prove
@@ -366,42 +421,38 @@ func TestRestartReasonixCleansOldDir(t *testing.T) {
 	}
 }
 
-// TestStopAllReasonix verifies Server.Shutdown parity: StopAllReasonix stops
-// every running reasonix serve but leaves stopped instances' state dirs
-// (management files) intact. No per-instance session.jsonl exists — sessions
-// live in the shared ~/.reasonix project pool, untouched by instance lifecycle.
-func TestStopAllReasonix(t *testing.T) {
-	m, fs := newReasonixTestManager(t)
+// TestStopAllKind verifies Server.Shutdown parity: StopAllKind stops
+// every running reasonix serve but leaves stopped instances untouched.
+// No per-instance session.jsonl exists — sessions live in the shared
+// ~/.reasonix project pool, untouched by instance lifecycle.
+func TestStopAllKind(t *testing.T) {
+	m, fs, drv := newReasonixTestManager(t)
 
-	run, err := m.Start(StartInput{WorktreeID: "wt1", Kind: store.KindReasonix, Name: "running"})
+	run, err := m.Start(context.Background(), framework.StartParams{WorktreeID: "wt1", Kind: reasonix.KindName, Name: "running"})
 	if err != nil {
 		t.Fatalf("Start running: %v", err)
 	}
-	dead, err := m.Start(StartInput{WorktreeID: "wt1", Kind: store.KindReasonix, Name: "stopped"})
+	dead, err := m.Start(context.Background(), framework.StartParams{WorktreeID: "wt1", Kind: reasonix.KindName, Name: "stopped"})
 	if err != nil {
 		t.Fatalf("Start stopped: %v", err)
 	}
+	waitInstanceStatus(t, fs, run.ID, "running")
+	waitInstanceStatus(t, fs, dead.ID, "running")
 	if err := m.Stop(dead.ID); err != nil {
 		t.Fatalf("Stop dead: %v", err)
 	}
-	waitInstanceNotRunning(t, fs, dead.ID)
+	waitInstanceStatus(t, fs, dead.ID, "stopped")
 
-	m.StopAllReasonix()
+	m.StopAllKind(reasonix.KindName)
 
 	// The running instance's serve is now stopped (Health fails).
-	if _, ok, herr := m.Reasonix.Health(run.ID); herr != nil || ok {
-		t.Fatalf("running instance should be stopped after StopAllReasonix (ok=%v err=%v)", ok, herr)
+	if _, ok, herr := drv.Health(run.ID); herr != nil || ok {
+		t.Fatalf("running instance should be stopped after StopAllKind (ok=%v err=%v)", ok, herr)
 	}
-	// The already-stopped instance is unaffected.
-	if _, ok, herr := m.Reasonix.Health(dead.ID); herr != nil || ok {
-		t.Fatalf("stopped instance should stay stopped (ok=%v err=%v)", ok, herr)
-	}
-	// State dirs (management files) are NOT cleaned, and no session.jsonl is
-	// ever created — sessions live in the shared ~/.reasonix project pool.
-	for _, id := range []string{run.ID, dead.ID} {
-		if _, err := os.Stat(filepath.Join(m.DataDir, "reasonix", id, "session.jsonl")); !os.IsNotExist(err) {
-			t.Fatalf("session.jsonl for %s should not exist (shared pool, not per-instance): %v", id, err)
-		}
+	// No per-instance session.jsonl is ever created — sessions live in the
+	// shared ~/.reasonix project pool.
+	if _, err := os.Stat(filepath.Join(m.DataDir, "reasonix", run.ID, "session.jsonl")); !os.IsNotExist(err) {
+		t.Fatalf("session.jsonl for %s should not exist (shared pool, not per-instance): %v", run.ID, err)
 	}
 }
 
@@ -416,14 +467,14 @@ func TestReasonixTagEnvAndPreStart(t *testing.T) {
 	if _, err := exec.LookPath("zsh"); err != nil {
 		t.Skip("zsh not installed; preStart (zsh -lc) not testable")
 	}
-	m, _ := newReasonixTestManager(t)
+	m, _, drv := newReasonixTestManager(t)
 	marker := filepath.Join(m.DataDir, "pre-marker")
 	tagsJSON := fmt.Sprintf(`{"tags":[{"id":"rxenv","command":"echo I-MUST-NOT-RUN","env":{"MW_RX_TEST_ENV":"from-tag"},"preStart":"echo pre-ran > %s"}]}`, marker)
 	if err := os.WriteFile(filepath.Join(m.DataDir, "tags.json"), []byte(tagsJSON), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
-	inst, err := m.Start(StartInput{WorktreeID: "wt1", TagID: "rxenv", Kind: store.KindReasonix, Name: "chat"})
+	inst, err := m.Start(context.Background(), framework.StartParams{WorktreeID: "wt1", TagID: "rxenv", Kind: reasonix.KindName, Name: "chat"})
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -439,7 +490,7 @@ func TestReasonixTagEnvAndPreStart(t *testing.T) {
 	}
 
 	// Tag env reached the serve process (fake serve echoes it).
-	info, err := m.Reasonix.Addr(inst.ID)
+	info, err := drv.Addr(inst.ID)
 	if err != nil {
 		t.Fatalf("Addr: %v", err)
 	}
@@ -464,14 +515,14 @@ func TestReasonixPreStartStripsInheritedHome(t *testing.T) {
 	}
 	t.Setenv("REASONIX_HOME", "/fake/host/home")
 	t.Setenv("REASONIX_STATE_HOME", "/fake/host/state")
-	m, _ := newReasonixTestManager(t)
+	m, _, _ := newReasonixTestManager(t)
 	marker := filepath.Join(m.DataDir, "pre-env-marker")
 	tagsJSON := fmt.Sprintf(`{"tags":[{"id":"rxenv2","command":"echo I-MUST-NOT-RUN","preStart":"env | grep -E '^(REASONIX_HOME|REASONIX_STATE_HOME)=' > %s; true"}]}`, marker)
 	if err := os.WriteFile(filepath.Join(m.DataDir, "tags.json"), []byte(tagsJSON), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
-	inst, err := m.Start(StartInput{WorktreeID: "wt1", TagID: "rxenv2", Kind: store.KindReasonix, Name: "chat"})
+	inst, err := m.Start(context.Background(), framework.StartParams{WorktreeID: "wt1", TagID: "rxenv2", Kind: reasonix.KindName, Name: "chat"})
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -483,5 +534,14 @@ func TestReasonixPreStartStripsInheritedHome(t *testing.T) {
 	}
 	if len(b) != 0 {
 		t.Fatalf("preStart inherited host REASONIX_HOME/REASONIX_STATE_HOME (serve strips them; preStart must too): %q", b)
+	}
+}
+
+// TestKindNameMatchesStoreConstant guards the duplicated "reasonix"
+// string in store.KindReasonix and reasonix.KindName (the two packages
+// cannot reference each other without an import cycle).
+func TestKindNameMatchesStoreConstant(t *testing.T) {
+	if reasonix.KindName != store.KindReasonix {
+		t.Fatalf("reasonix.KindName = %q, store.KindReasonix = %q — keep them in sync", reasonix.KindName, store.KindReasonix)
 	}
 }

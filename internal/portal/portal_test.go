@@ -1174,7 +1174,7 @@ func TestEndToEndAuthFlow(t *testing.T) {
 	listReq := httptest.NewRequest("GET", "/api/list", nil)
 	listReq.AddCookie(&http.Cookie{Name: "mw_token", Value: tokenCookieValue})
 	listRec := httptest.NewRecorder()
-	p.handleList(listRec, listReq)
+	p.withAuth(p.handleList)(listRec, listReq)
 	if listRec.Code != http.StatusOK {
 		t.Fatalf("list request failed: %d", listRec.Code)
 	}
@@ -1229,7 +1229,7 @@ func TestEndToEndAuthFlow(t *testing.T) {
 
 	afterLogoutReq := httptest.NewRequest("GET", "/api/list", nil)
 	afterLogoutRec := httptest.NewRecorder()
-	p.handleList(afterLogoutRec, afterLogoutReq)
+	p.withAuth(p.handleList)(afterLogoutRec, afterLogoutReq)
 	if afterLogoutRec.Code != http.StatusUnauthorized {
 		t.Fatalf("after logout without cookie: expected 401, got %d", afterLogoutRec.Code)
 	}
@@ -1259,5 +1259,45 @@ func TestLogPrefixVerification(t *testing.T) {
 	output := logBuf.String()
 	if !strings.Contains(output, "[portal]") {
 		t.Errorf("expected log output to contain [portal] prefix, got: %s", output)
+	}
+}
+
+// TestPortalWithAuthSyncsCookie pins the portal↔daemon symmetry: a
+// request authenticated via the address-bar token must land the mw_token
+// cookie, exactly like the daemon's withAuth, so portal embeds and
+// future routes authenticate via the cookie alone.
+func TestPortalWithAuthSyncsCookie(t *testing.T) {
+	p := New(Config{
+		PortalPort: 12345,
+		Host:       "localhost",
+		AuthToken:  "test-token",
+	})
+
+	// Unauthenticated → 401.
+	req := httptest.NewRequest(http.MethodGet, "/api/list", nil)
+	rec := httptest.NewRecorder()
+	p.withAuth(p.handleList)(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated /api/list: status=%d, want 401", rec.Code)
+	}
+
+	// Address-bar token authenticates and lands the cookie.
+	req2 := httptest.NewRequest(http.MethodGet, "/api/list?token=test-token", nil)
+	rec2 := httptest.NewRecorder()
+	p.withAuth(p.handleList)(rec2, req2)
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("authed /api/list: status=%d, want 200", rec2.Code)
+	}
+	var got *http.Cookie
+	for _, c := range rec2.Result().Cookies() {
+		if c.Name == "mw_token" {
+			got = c
+		}
+	}
+	if got == nil {
+		t.Fatalf("authed portal response must sync the mw_token cookie; got %v", rec2.Result().Cookies())
+	}
+	if got.Value != "test-token" || !got.HttpOnly {
+		t.Fatalf("mw_token cookie = %+v, want value test-token, HttpOnly", got)
 	}
 }

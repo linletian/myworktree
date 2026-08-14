@@ -29,6 +29,11 @@ var defaultTags = []Tag{
 	{ID: "docs", Command: "pwd"},
 	{ID: "dev", Command: "pwd"},
 	{ID: "review", Command: "pwd"},
+	// opencode-web intentionally has no Command: Manager.startOpencodeWeb
+	// hardcodes the invocation. Tag is used only as a label / reference key
+	// for the instance, and Env remains empty so users can layer non-secret
+	// env via tags.json without overwriting the forced auth token.
+	{ID: "opencode-web"},
 }
 
 func (m Manager) ensureDefaults() error {
@@ -49,11 +54,24 @@ func (m Manager) ensureDefaults() error {
 	return os.WriteFile(m.GlobalPath, b, 0644)
 }
 
+// LoadMerged returns the effective tag set: the built-in default tags as
+// the base, overlaid by the global file, then the project file (later
+// layers win per id). The defaults are merged at load time — not only at
+// file creation — so built-ins the product depends on (e.g. the
+// command-less "opencode-web" reference tag) resolve even for users
+// whose tags.json predates them. Unknown non-default tag ids still
+// surface as "unknown tag id" at Start.
 func (m Manager) LoadMerged() (map[string]Tag, error) {
 	if err := m.ensureDefaults(); err != nil {
 		return nil, err
 	}
 	merged := map[string]Tag{}
+	for _, t := range defaultTags {
+		if t.ID == "" {
+			continue
+		}
+		merged[t.ID] = t
+	}
 	if err := loadInto(merged, m.GlobalPath); err != nil {
 		return nil, err
 	}

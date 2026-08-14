@@ -264,7 +264,7 @@ When `--auth` is not provided and no token exists in `auth.json`, the CLI **auto
 
 - Lists all running instances across repos with auto-discovery
 - Click an instance to jump to its Web UI (directly via instance port — Portal reverse proxy `/s/<repo-hash>/` is planned but not yet implemented)
-- Uses **HttpOnly Cookie** (`mw_token`) for authentication — token never appears in URL or JS
+- Uses **HttpOnly Cookie** (`mw_token`) for authentication — embedded iframe documents never receive the token in their own URL; the portal's address-bar `?token=` (portal jump) is accepted by the server and synced into the cookie on the response, so panels authenticate via the cookie alone
 - **CSRF protection** via double-submit cookie pattern on login/logout endpoints
 - Cookie has 24-hour **sliding expiration** (refreshed on each auth-successful request)
 

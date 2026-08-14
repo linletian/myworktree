@@ -14,7 +14,9 @@ import (
 	"strings"
 	"testing"
 
-	"myworktree/internal/instance"
+	"context"
+	"myworktree/internal/config"
+	"myworktree/internal/framework"
 	"myworktree/internal/instance/reasonix"
 	"myworktree/internal/store"
 )
@@ -83,7 +85,7 @@ srv.serve_forever()
 	return bin
 }
 
-func newProxyTestEnv(t *testing.T) (*reasonixProxy, *instance.Manager, store.FileStore) {
+func newProxyTestEnv(t *testing.T) (*reasonixProxy, *framework.Manager, *reasonix.Driver, store.FileStore) {
 	t.Helper()
 	dataDir := t.TempDir()
 	workDir := t.TempDir()
@@ -95,22 +97,22 @@ func newProxyTestEnv(t *testing.T) (*reasonixProxy, *instance.Manager, store.Fil
 	}); err != nil {
 		t.Fatalf("seed state failed: %v", err)
 	}
-	m := &instance.Manager{
-		DataDir: dataDir,
-		Store:   fs,
-		Reasonix: &reasonix.Driver{
-			DataDir:     dataDir,
-			ReasonixBin: fakeHTTPServeBin(t),
-		},
+	drv := &reasonix.Driver{
+		DataDir:     dataDir,
+		ReasonixBin: fakeHTTPServeBin(t),
 	}
-	return &reasonixProxy{manager: m}, m, fs
+	reg := framework.NewRegistry()
+	reg.Register(reasonix.NewKind(drv))
+	m := framework.NewManager(reg, fs, nil)
+	m.DataDir = dataDir
+	return &reasonixProxy{manager: m, driver: drv}, m, drv, fs
 }
 
 // startReasonixViaManager starts a reasonix instance through the manager and
 // returns its id.
-func startReasonixViaManager(t *testing.T, m *instance.Manager) string {
+func startReasonixViaManager(t *testing.T, m *framework.Manager) string {
 	t.Helper()
-	inst, err := m.Start(instance.StartInput{WorktreeID: "wt1", Kind: store.KindReasonix, Name: "chat"})
+	inst, err := m.Start(context.Background(), framework.StartParams{WorktreeID: "wt1", Kind: reasonix.KindName, Name: "chat"})
 	if err != nil {
 		t.Fatalf("Start reasonix failed: %v", err)
 	}
@@ -118,7 +120,7 @@ func startReasonixViaManager(t *testing.T, m *instance.Manager) string {
 }
 
 func TestReasonixProxyProxiesAndInjectsCookie(t *testing.T) {
-	p, m, _ := newProxyTestEnv(t)
+	p, m, _, _ := newProxyTestEnv(t)
 	id := startReasonixViaManager(t, m)
 	defer func() { _ = m.Stop(id) }()
 
@@ -139,7 +141,7 @@ func TestReasonixProxyProxiesAndInjectsCookie(t *testing.T) {
 }
 
 func TestReasonixProxyStripsTokenKeepsQuery(t *testing.T) {
-	p, m, _ := newProxyTestEnv(t)
+	p, m, _, _ := newProxyTestEnv(t)
 	id := startReasonixViaManager(t, m)
 	defer func() { _ = m.Stop(id) }()
 
@@ -163,7 +165,7 @@ func TestReasonixProxyStripsTokenKeepsQuery(t *testing.T) {
 }
 
 func TestReasonixProxyEncodingNegotiation(t *testing.T) {
-	p, m, _ := newProxyTestEnv(t)
+	p, m, _, _ := newProxyTestEnv(t)
 	id := startReasonixViaManager(t, m)
 	defer func() { _ = m.Stop(id) }()
 
@@ -239,8 +241,8 @@ srv.serve_forever()
 }
 
 func TestReasonixProxyGzipHTMLNotInjected(t *testing.T) {
-	p, m, _ := newProxyTestEnv(t)
-	m.Reasonix.ReasonixBin = fakeGzipHTMLServeBin(t)
+	p, m, _, _ := newProxyTestEnv(t)
+	p.driver.ReasonixBin = fakeGzipHTMLServeBin(t)
 	id := startReasonixViaManager(t, m)
 	defer func() { _ = m.Stop(id) }()
 
@@ -273,7 +275,7 @@ func TestReasonixProxyGzipHTMLNotInjected(t *testing.T) {
 }
 
 func TestReasonixProxyInjectPrefixIntoHTML(t *testing.T) {
-	p, m, _ := newProxyTestEnv(t)
+	p, m, _, _ := newProxyTestEnv(t)
 	id := startReasonixViaManager(t, m)
 	defer func() { _ = m.Stop(id) }()
 
@@ -436,7 +438,7 @@ func assertRe(t *testing.T, got, pattern, what string) {
 }
 
 func TestReasonixProxyUnknownInstance(t *testing.T) {
-	p, m, _ := newProxyTestEnv(t)
+	p, m, _, _ := newProxyTestEnv(t)
 	_ = m
 	req := httptest.NewRequest(http.MethodGet, "/rx/doesnotexist/history", nil)
 	rec := httptest.NewRecorder()
@@ -447,7 +449,7 @@ func TestReasonixProxyUnknownInstance(t *testing.T) {
 }
 
 func TestReasonixProxyStoppedInstance(t *testing.T) {
-	p, m, _ := newProxyTestEnv(t)
+	p, m, _, _ := newProxyTestEnv(t)
 	id := startReasonixViaManager(t, m)
 	if err := m.Stop(id); err != nil {
 		t.Fatalf("Stop failed: %v", err)
@@ -467,7 +469,7 @@ func TestReasonixProxyStoppedInstance(t *testing.T) {
 // not answer /api/* — a cross-origin iframe script calling /api/instances
 // gets 404, never the user's data.
 func TestReasonixIndependentListener(t *testing.T) {
-	_, m, fs := newProxyTestEnv(t)
+	_, m, drv, fs := newProxyTestEnv(t)
 	id := startReasonixViaManager(t, m)
 	defer func() { _ = m.Stop(id) }()
 
@@ -477,6 +479,7 @@ func TestReasonixIndependentListener(t *testing.T) {
 		dataDir:     filepath.Dir(fs.Path),
 		store:       fs,
 		instanceMgr: m,
+		rxDriver:    drv,
 		mux:         http.NewServeMux(),
 		authFails:   map[string]authFail{},
 	}
@@ -514,7 +517,7 @@ func TestReasonixIndependentListener(t *testing.T) {
 // TestReasonixWebURL verifies /api/instances reports web_url (pointing at the
 // independent listener) for reasonix instances and nothing for tty instances.
 func TestReasonixWebURL(t *testing.T) {
-	_, m, fs := newProxyTestEnv(t)
+	_, m, drv, fs := newProxyTestEnv(t)
 	id := startReasonixViaManager(t, m)
 	defer func() { _ = m.Stop(id) }()
 	st, err := fs.Load()
@@ -532,6 +535,7 @@ func TestReasonixWebURL(t *testing.T) {
 		dataDir:     filepath.Dir(fs.Path),
 		store:       fs,
 		instanceMgr: m,
+		rxDriver:    drv,
 		mux:         http.NewServeMux(),
 		authFails:   map[string]authFail{},
 	}
@@ -581,7 +585,7 @@ func TestReasonixWebURL(t *testing.T) {
 // frontend uses the same-origin /rx/<id>/ relative path, which follows the
 // browser's current origin and works over LAN.
 func TestReasonixNonLoopbackFallsBack(t *testing.T) {
-	p, m, fs := newProxyTestEnv(t)
+	p, m, drv, fs := newProxyTestEnv(t)
 	id := startReasonixViaManager(t, m)
 	defer func() { _ = m.Stop(id) }()
 
@@ -591,6 +595,7 @@ func TestReasonixNonLoopbackFallsBack(t *testing.T) {
 		dataDir:     filepath.Dir(fs.Path),
 		store:       fs,
 		instanceMgr: m,
+		rxDriver:    drv,
 		mux:         http.NewServeMux(),
 		authFails:   map[string]authFail{},
 	}
@@ -624,7 +629,7 @@ func TestReasonixNonLoopbackFallsBack(t *testing.T) {
 // reasonix instances (behavior parity with tty instances, which die when
 // their PTY hangs up on process exit).
 func TestServerShutdownStopsReasonix(t *testing.T) {
-	_, m, fs := newProxyTestEnv(t)
+	_, m, drv, fs := newProxyTestEnv(t)
 	id := startReasonixViaManager(t, m)
 
 	srv := &Server{
@@ -633,19 +638,20 @@ func TestServerShutdownStopsReasonix(t *testing.T) {
 		dataDir:     filepath.Dir(fs.Path),
 		store:       fs,
 		instanceMgr: m,
+		rxDriver:    drv,
 		mux:         http.NewServeMux(),
 		authFails:   map[string]authFail{},
 	}
 	if _, err := srv.Start(); err != nil {
 		t.Fatalf("Start failed: %v", err)
 	}
-	if _, ok, herr := m.Reasonix.Health(id); herr != nil || !ok {
+	if _, ok, herr := drv.Health(id); herr != nil || !ok {
 		t.Fatalf("reasonix serve should be healthy before Shutdown (ok=%v err=%v)", ok, herr)
 	}
 
 	srv.Shutdown()
 
-	if _, ok, herr := m.Reasonix.Health(id); herr != nil || ok {
+	if _, ok, herr := drv.Health(id); herr != nil || ok {
 		t.Fatalf("reasonix serve must be stopped by Shutdown (parity with tty; ok=%v err=%v)", ok, herr)
 	}
 }
@@ -757,4 +763,109 @@ func TestRewriteRootAttrs(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestDefuseBlockingFontLinks(t *testing.T) {
+	page := []byte(`<html><head><link rel="preconnect" href="https://fonts.googleapis.com" /><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin /><link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;700&family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" /><style>.x{}</style></head><body></body></html>`)
+	got := string(defuseBlockingFontLinks(page))
+	if strings.Contains(got, `rel="stylesheet" />`) {
+		t.Fatalf("font stylesheet still render-blocking after defuse: %q", got)
+	}
+	if !strings.Contains(got, `media="print"`) || !strings.Contains(got, `this.media='all'`) {
+		t.Fatalf("defused link missing non-blocking attributes: %q", got)
+	}
+	// preconnect links and other styles are untouched.
+	if !strings.Contains(got, `rel="preconnect" href="https://fonts.googleapis.com"`) {
+		t.Fatalf("preconnect link was modified: %q", got)
+	}
+	if !strings.Contains(got, `<style>.x{}</style>`) {
+		t.Fatalf("inline style was modified: %q", got)
+	}
+	// Idempotent-ish: a page without the font link is unchanged.
+	if got := string(defuseBlockingFontLinks([]byte(`<html><head><link rel="stylesheet" href="/app.css" /></head></html>`))); got != `<html><head><link rel="stylesheet" href="/app.css" /></head></html>` {
+		t.Fatalf("non-Google stylesheet was modified: %q", got)
+	}
+	// Idempotent for BOTH quote styles: an already-defused link (single
+	// quotes) must not gain a duplicate media attribute.
+	single := `<html><head><link href='https://fonts.googleapis.com/css2?family=X' rel='stylesheet' media='print' onload="this.media='all'" /></head></html>`
+	if got := string(defuseBlockingFontLinks([]byte(single))); got != single {
+		t.Fatalf("already-defused single-quote link was modified: %q", got)
+	}
+}
+
+// TestReasonixProxyAuthTokenEndToEnd pins the full remote-access chain:
+// the address-bar token authenticates a non-loopback iframe navigation,
+// withAuth syncs it into the mw_token cookie, the /rx/ proxy serves the
+// page, and the upstream NEVER sees the myworktree token in its query.
+func TestReasonixProxyAuthTokenEndToEnd(t *testing.T) {
+	tmpDir := t.TempDir()
+	testConfigPath := filepath.Join(tmpDir, "myworktree", "auth.json")
+	reset := config.SetPathForTest(func() (string, error) { return testConfigPath, nil })
+	defer reset()
+
+	if err := os.MkdirAll(filepath.Dir(testConfigPath), 0o755); err != nil {
+		t.Fatalf("mkdir failed: %v", err)
+	}
+	if err := os.WriteFile(testConfigPath, []byte(`{"auth_token":"test-token"}`), 0o600); err != nil {
+		t.Fatalf("write failed: %v", err)
+	}
+
+	p, m, drv, fs := newProxyTestEnv(t)
+	id := startReasonixViaManager(t, m)
+	defer func() { _ = m.Stop(id) }()
+
+	srv := &Server{
+		cfg:         Config{ListenAddr: "127.0.0.1:0", AuthToken: "test-token"},
+		logger:      log.New(io.Discard, "", 0),
+		dataDir:     filepath.Dir(fs.Path),
+		store:       fs,
+		instanceMgr: m,
+		rxDriver:    drv,
+		mux:         http.NewServeMux(),
+		authFails:   map[string]authFail{},
+	}
+	srv.registerAPIs(srv.mux)
+	handler := srv.withServerRevision(srv.withAuth(srv.mux))
+
+	// 1) Unauthenticated non-loopback iframe-style navigation → redirect
+	// to /login (this was the white-screen: the login page in the panel).
+	req := httptest.NewRequest(http.MethodGet, "/rx/"+id+"/", nil)
+	req.RemoteAddr = "192.168.1.5:12345"
+	req.Host = "192.168.1.5:8080"
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusFound {
+		t.Fatalf("unauthenticated iframe navigation: status=%d, want 302", rec.Code)
+	}
+
+	// 2) Address-bar token authenticates; the response carries the synced
+	// cookie; the proxy serves the page; the upstream saw no token.
+	req2 := httptest.NewRequest(http.MethodGet, "/rx/"+id+"/history?token=test-token", nil)
+	req2.RemoteAddr = "192.168.1.5:12345"
+	req2.Host = "192.168.1.5:8080"
+	rec2 := httptest.NewRecorder()
+	handler.ServeHTTP(rec2, req2)
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("authed /rx/ navigation: status=%d, want 200 (body: %s)", rec2.Code, rec2.Body.String())
+	}
+	hasCookie := false
+	for _, c := range rec2.Result().Cookies() {
+		if c.Name == "mw_token" && c.Value == "test-token" {
+			hasCookie = true
+		}
+	}
+	if !hasCookie {
+		t.Fatalf("authed response must sync the mw_token cookie; got %v", rec2.Result().Cookies())
+	}
+	body := rec2.Body.String()
+	if !strings.Contains(body, "path=/history") {
+		t.Fatalf("upstream did not receive the stripped path: %q", body)
+	}
+	if strings.Contains(body, "token=test-token") {
+		t.Fatalf("myworktree auth token leaked upstream: %q", body)
+	}
+	if !strings.Contains(body, "cookie=reasonix_token=") {
+		t.Fatalf("reasonix token cookie was not injected: %q", body)
+	}
+	_ = p
 }
