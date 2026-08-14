@@ -56,7 +56,7 @@
   - 输出回放中按模式脱敏主流 AI key（如 `sk-***`）。
 
 ## 7. 当前实现状态（与愿景差异）
-- **Reasonix web chat 实例（MVP 完结，含需求修订 2026-08-12）**：`kind=reasonix` 实例在 worktree 内运行 `reasonix serve` 子进程，其 web 聊天界面经反代 `/rx/<id>/` 以 iframe 嵌入实例标签页（创建实例时勾选 *Reasonix (web chat UI)*）。
+- **Reasonix web chat 实例（MVP 完结，含需求修订 2026-08-12）**：`kind=reasonix` 实例在 worktree 内运行 `reasonix serve` 子进程，其 web 聊天界面经反代 `/rx/<id>/` 以 iframe 嵌入实例标签页（创建实例时选择 *Reasonix* 标签页，仅需名称——启动命令固定为 reasonix serve；tag 的 env/preStart 仍可经 API/CLI 的 tag_id 注入，command 始终忽略）。
   - **语义基线（需求修订 2026-08-12，见 §2 Goal 7 / §5 关键规则）**：实例 = 在该 worktree 项目里打开 reasonix 的 web UI。项目间隔离由 reasonix 自身按 cwd 组织（`~/.reasonix/projects/<slug>/sessions`）；同一项目的全部历史会话（含终端直接跑 reasonix CLI/TUI 产生的）在实例侧边栏**可见、可切换**，与终端行为一致。myworktree 只负责 worktree/实例生命周期与 `/rx/<id>/` 反代，不介入 agent 的会话/项目/分支语义。
   - **实现状态（2026-08-12 已按新基线实现）**：已取消 `REASONIX_HOME` 隔离与固定 `--resume` 会话文件，serve 直接使用 `~/.reasonix`（与终端运行一致），会话按项目由 reasonix 自身组织、同项目历史会话（含终端产生的）在实例侧边栏可见可切换，`#56` 期望满足。`#49`「Restart = 全新会话」语义保留（重启开新会话，历史仍在共享会话池中可切换）。
   - 已实现且不变：安全加固（#44 独立源跨源隔离）、侧栏默认折叠布局注入（#48）、生命周期/性能（#46 缓存、#47 锁范围）、driver 健壮性（#45 版本门 + serve.log 报错）、测试隔离（#43）；`env`/`preStart` 注入已支持（DEFERRED §3）。详见 `docs/plans/reasonix-native-ui/`。
@@ -71,6 +71,7 @@
    - 超时降级：客户端若在 5 秒内未收到 WebSocket `ready` 握手消息，则自动关闭 WebSocket 并回退到 SSE 方案。
   - 运行中的实例在前端按实例维护各自的终端会话；切换标签时隐藏非活动终端，而不是强制断开其 PTY 连接。
   - 终端配置：Web TTY 的缓冲区（scrollback）、主题、字体等参数由前端灵活配置，以适应不同的调试和使用场景。
+- **opencode-web 实例类型**（已实现；设计详见 `docs/plans/opencode-native-ui/WORKTREE-ISOLATION.md`；威胁模型与评审检查表见 `docs/ARCHITECTURE.md` §8）—— 跳过 PTY/xterm.js，直接内嵌 opencode 官方 web UI。每个 opencode-web instance = 1 个独立的 `opencode serve` 进程（命令、`--hostname 127.0.0.1`、`--port 0` 由 myworktree 硬编码；`OPENCODE_SERVER_PASSWORD = cfg.AuthToken`——统一认证 token，全部实例共享，**不允许关闭**）。非安全 env 通过 `tag.Env` 合并。浏览器通过 `/__opencode/<id>/` iframe 加载 opencode **完整页**（HomeRoute；反向代理路径 `/__opencode/<id>/*`，myworktree bearer token 校验 → Go 端注入 Basic auth + `?directory=<worktree>`）。为防跨 worktree 误操作：proxy 层监测请求 directory 并记录越界状态（越界时 iframe 上方常驻警告），注入脚本隐藏跨 worktree 切换入口（项目/目录切换 + server 切换/添加，仅保留当前 worktree 入口），并以 `opencode --version` 版本门 + DOM 锚点检测兜底隐藏失效。前端按 instance kind 分支：PTY 仍显示 xterm.js，opencode-web 显示 iframe。多 session 切换复用 myworktree instance tab。
 - 规划增强：**Portal Dashboard MVP**（已实现）：
   - 全局 Token 配置（`mw config` 交互式引导，`~/.config/myworktree/auth.json`，`0o600` 权限）
   - Portal 仪表板（共享入口端口，自动发现所有仓库的运行实例，HttpOnly Cookie 认证，CSRF 防护）

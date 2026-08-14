@@ -328,7 +328,7 @@ Body:
 ```
 
 - `worktree_id` can be a regular worktree ID, or `"__main__"` to run an instance in the main (host) git repository. For `"__main__"`, the instance starts in the main repo root directory.
-- `kind`: `""`/`"tty"` (default) starts a PTY terminal instance; `"reasonix"` starts a `reasonix serve` subprocess in the worktree and exposes its web chat UI under `/rx/<id>/` (see section 6). `command`/`tag_id` are ignored for `"reasonix"`.
+- `kind`: `""`/`"pty"` (default) starts a PTY terminal instance; `"opencode-web"` starts an `opencode serve` subprocess embedded via `/__opencode/<id>/` (see section 5.11); `"reasonix"` starts a `reasonix serve` subprocess in the worktree and exposes its web chat UI under `/rx/<id>/` (see section 5.10). For `"reasonix"` the tag's `command` is ignored; tag `env` / `preStart` are applied.
 
 If both `tag_id` and `command` are empty, the server starts an **interactive shell** instance in the worktree.
 If `command` is provided, it is sent to the shell as the initial command and the shell remains available for further input.
@@ -340,7 +340,7 @@ Example (ad-hoc command without tags):
 
 Response (201):
 ```json
-{ "id":"...","pid":123,"status":"running","created_at":"...","kind":"tty" }
+{ "id":"...","pid":123,"status":"running","created_at":"...","kind":"pty" }
 ```
 
 **Error: log buffer budget exceeded (`503 Service Unavailable`)**
@@ -597,10 +597,63 @@ GET /rx/<instanceId>/...
 - **Same-origin fallback (network / TLS)**: when TLS is configured (`--tls-cert/--tls-key`, an `http://127.0.0.1` iframe inside an https page would be blocked as mixed content) **or the main listener is open to the network** (default `0.0.0.0`, or an explicit LAN IP — a remote browser would resolve `127.0.0.1` to itself and the iframe would fail), the independent listener is skipped; `web_url` is empty and the frontend falls back to the **relative** same-origin path `/rx/<id>/`, which follows the browser's current origin — so LAN/remote access works (same as the pre-#44 behavior).
 - The proxy forwards to the instance's `reasonix serve` at `http://127.0.0.1:<port>` (port/token cached in memory by the driver — issue #46), injecting `Cookie: reasonix_token=<token>` (name from `reasonix.CookieName`, single source — issue #45) for auth.
 - HTML responses get a script injected (single injection point before `</head>`) that prefixes the page's root-relative `fetch` / `EventSource` / `XMLHttpRequest` calls with `/rx/<id>/`, plus the issue #48 layout injection: the 220px sidebar is **collapsed by default** on desktop with a dedicated toggle button (`--mw-sidebar-w` CSS var makes the expanded width configurable); narrow screens keep the native mobile sidebar.
-- The `Accept-Encoding` header is forced to `identity` and the request query string is dropped upstream (prevents myworktree auth `?token=` from leaking to the subprocess).
+- The `Accept-Encoding` header is forced to `identity`; only the myworktree auth `?token=` parameter is stripped from the query before forwarding upstream (`authq.StripToken` — every other query parameter, e.g. `?session=`, passes through; parse-failed queries are still token-scrubbed rather than forwarded raw).
+- **Remote-access authentication**: when the UI is opened with `?token=` in the address bar (portal jump / remote access), the server syncs the token into the HttpOnly `mw_token` cookie on the response (`withAuth`); the iframe then navigates with a plain relative `/rx/<id>/` URL and authenticates via the cookie — the token never appears in the embedded document's `location.search`, and a rotated token self-heals on the next cookie refresh.
 - SSE (`/events`) is streamed through (`FlushInterval=-1`); the upstream sends its own 15s `: ping` keepalive.
 - Returns `404` for unknown/non-reasonix instance ids, `503` when the instance is not running, `502` when the backend is unreachable.
 - Driver version gate: `Start` runs `reasonix --version` and rejects CLIs older than `1.22.0` (configurable via `Driver.MinVersion`); readiness failures include the tail of the instance `serve.log` (issue #45).
+- Tag semantics apply like other kinds: `tag.Env` is injected into the serve environment, `tag.preStart` runs before serve (with `REASONIX_HOME` / `REASONIX_STATE_HOME` stripped exactly like serve), and `tag.Command` is ignored (a reasonix instance runs the agent, not a shell command).
+
+### 5.11 opencode-web info (instance proxy metadata)
+
+`GET /api/instances/<id>/opencode`
+
+Returns the iframe source URL and metadata for an opencode-web instance. Only valid for instances with `kind: "opencode-web"`; returns `404` for other kinds or non-existent instances. Returns `503` if the opencode server process is not yet ready (port not populated).
+
+Response (200):
+```json
+{
+  "iframe_src": "/__opencode/<id>/",
+  "api_base": "/__opencode/<id>",
+  "worktree_path": "/abs/path/to/worktree",
+  "host": "127.0.0.1",
+  "port": 51234,
+  "version": "1.18.16",
+  "version_supported": true
+}
+```
+
+`host` and `port` are the opencode server's bound address. `iframe_src` is the full-page SPA root to load in the iframe (the deep `/session/` link was replaced by the full page — see `docs/plans/opencode-native-ui/WORKTREE-ISOLATION.md` §0.4). `version` is the installed `opencode --version` probed at spawn; `version_supported` is `false` when it is outside the `1.18.x` range the injected hide script targets (advisory only — the instance still starts). The upstream `OPENCODE_SERVER_PASSWORD` is `cfg.AuthToken` (unified auth token — every opencode-web instance shares the same upstream password, gated by the myworktree bearer token at the proxy); see `docs/ARCHITECTURE.md` §8 for the threat model and the review checklist.
+
+### 5.12 opencode reverse proxy
+
+`/__opencode/<id>/*`
+
+Reverse proxy to the opencode HTTP server backing the given instance. Protected by myworktree's global token authentication (same as all instance routes). Go-side proxy injects `Authorization: Basic base64("opencode:"+password)` and adds `?directory=<worktree>` to GET/HEAD API requests when missing from the original query. HTML navigation responses are rewritten (assets re-routed through the proxy, `<base>` + injected script for URL rewriting, localStorage server-list normalization, and cross-worktree switch-entry hiding) with a matching CSP hash.
+
+- Returns `404` if the instance does not exist or `kind` is not `"opencode-web"`
+- Returns `503` if the opencode server is not yet listening
+- Returns `502` if the opencode server is unreachable during proxying
+- The myworktree auth `?token=` parameter is stripped from the query before forwarding upstream (`authq.StripToken`, shared with the `/rx/` proxy) — the opencode subprocess never sees the credential. Remote-access iframe navigations authenticate via the `mw_token` cookie synced by `withAuth` (see §5.10), so the token is not needed in the iframe URL.
+
+### 5.13 opencode-web scope (out-of-scope state)
+
+`GET /api/instances/opencode/scope?id=<id>`
+
+Returns the last observed out-of-scope state for an opencode-web instance, recorded in-memory by the reverse proxy from directory-bearing requests. The frontend polls it (~1.5s) to render the persistent warning bar. See `docs/plans/opencode-native-ui/WORKTREE-ISOLATION.md` §4.4.
+
+Response (200):
+```json
+{
+  "scope": "out-of-scope",
+  "directory": "/abs/path/to/other/worktree",
+  "cross_project": false,
+  "at": 1753500000,
+  "csp_anchor_missing": false
+}
+```
+
+`scope` is `in-scope` / `out-of-scope` / `cross-project`; `csp_anchor_missing` marks structural drift (the homepage CSP lost the `'wasm-unsafe-eval'` anchor the injected script's hash is appended after), which the frontend surfaces as the "hiding not effective" warning.
 
 ## 6) MCP
 ### Tool names

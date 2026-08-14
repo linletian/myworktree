@@ -300,3 +300,79 @@ func TestFileStore_IgnoresLegacyLogPath(t *testing.T) {
 		t.Fatalf("Status = %q, want %q", st.Instances[0].Status, "stopped")
 	}
 }
+
+func TestManagedInstance_BackwardCompatKindExtra(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "state.json")
+	// Old state.json without Kind/Extra fields — must load with zero values.
+	oldJSON := `{"instances":[{"id":"old-1","worktree_id":"wt-1","status":"running","command":"pwd","pid":99}],"tab_order":{}}`
+	if err := os.WriteFile(path, []byte(oldJSON), 0o600); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+	fs := FileStore{Path: path}
+	st, err := fs.Load()
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if len(st.Instances) != 1 {
+		t.Fatalf("expected 1 instance, got %d", len(st.Instances))
+	}
+	inst := st.Instances[0]
+	if inst.Kind != "" {
+		t.Fatalf("Kind = %q, want empty (backward compat)", inst.Kind)
+	}
+	if inst.Extra != nil {
+		t.Fatalf("Extra = %v, want nil (backward compat)", inst.Extra)
+	}
+}
+
+func TestManagedInstance_KindExtraRoundTrip(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "state.json")
+	st := State{
+		Instances: []ManagedInstance{{
+			ID:         "oc-1",
+			WorktreeID: "wt-1",
+			Status:     "running",
+			Kind:       "opencode-web",
+			Extra:      map[string]string{"port": "4096", "host": "127.0.0.1"},
+		}},
+	}
+	fs := FileStore{Path: path}
+	if err := fs.Save(st); err != nil {
+		t.Fatalf("Save failed: %v", err)
+	}
+	loaded, err := fs.Load()
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if len(loaded.Instances) != 1 {
+		t.Fatalf("expected 1 instance, got %d", len(loaded.Instances))
+	}
+	inst := loaded.Instances[0]
+	if inst.Kind != "opencode-web" {
+		t.Fatalf("Kind = %q, want opencode-web", inst.Kind)
+	}
+	if inst.Extra["port"] != "4096" {
+		t.Fatalf("Extra[port] = %q, want 4096", inst.Extra["port"])
+	}
+	if inst.Extra["host"] != "127.0.0.1" {
+		t.Fatalf("Extra[host] = %q, want 127.0.0.1", inst.Extra["host"])
+	}
+}
+
+func TestCanonicalKind(t *testing.T) {
+	cases := map[string]string{
+		"":             KindPTY,
+		"tty":          KindPTY, // v0.4.0 internal name; alias kept for hand-edited / develop-built stores
+		"pty":          KindPTY,
+		"reasonix":     KindReasonix,
+		"opencode-web": KindOpenCodeWeb,
+		"unknown":      "unknown",
+	}
+	for in, want := range cases {
+		if got := CanonicalKind(in); got != want {
+			t.Errorf("CanonicalKind(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

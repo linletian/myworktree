@@ -11,6 +11,7 @@
             --bg-color: #f9f9f9;
             --border-color: #e1e4e8;
             --active-color: #005cc5;
+            --accent-color: #4a9eff;
             --active-bg: #f1f8ff;
             --hover-bg: #f6f8fa;
             --term-bg: #0b1020;
@@ -75,6 +76,7 @@
                 --bg-color: #0d1117;
                 --border-color: #30363d;
                 --active-color: #58a6ff;
+                --accent-color: #1f6feb;
                 --active-bg: #0f2647;
                 --hover-bg: #161b22;
                 --main-accent: #a371f7;
@@ -648,6 +650,16 @@
             display: inline-block;
         }
 
+        .badge-oc {
+            background: var(--accent-color);
+            color: #fff;
+            padding: 0 4px;
+            border-radius: 3px;
+            font-size: 0.65em;
+            margin-right: 3px;
+            font-weight: 600;
+        }
+
         .rx-badge {
             font-size: 9px;
             line-height: 1;
@@ -660,6 +672,38 @@
             font-family: monospace;
             letter-spacing: 0.5px;
         }
+
+        #opencode-panel { width: 100%; height: 100%; display: flex; flex-direction: column; }
+        #opencode-panel[hidden] { display: none !important; }
+        #opencode-frames { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+        /* Loading overlay for web-ui kinds (opencode-web and future kinds).
+           Shown while the upstream server is starting; info lines mirror the
+           debug bar (instance/upstream/proxy/worktree) so the user can see
+           what is being waited on. */
+        #opencode-loading { flex: 1; min-height: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; color: var(--text-secondary, #586069); font-size: 13px; padding: 12px; box-sizing: border-box; }
+        #opencode-loading[hidden] { display: none !important; }
+        .opencode-loading-spinner { width: 26px; height: 26px; border: 3px solid rgba(9,105,218,0.2); border-top-color: #0969da; border-radius: 50%; animation: opencode-loading-spin 0.8s linear infinite; }
+        @keyframes opencode-loading-spin { to { transform: rotate(360deg); } }
+        .opencode-loading-title { font-size: 14px; font-weight: 600; }
+        .opencode-loading-info { font-family: monospace; font-size: 12px; line-height: 1.6; white-space: pre-wrap; word-break: break-all; background: rgba(0,0,0,0.04); border: 1px solid var(--border-color, #e1e4e8); border-radius: 6px; padding: 8px 12px; max-width: 92%; }
+        .opencode-frame { width: 100%; flex: 1; min-height: 0; border: 0; }
+        /* The hidden attribute must unconditionally win over any future
+           display rule added to .opencode-frame (a flex item), so hide/show
+           stays deterministic. !important mirrors the existing
+           #opencode-panel[hidden] / #opencode-scope-warning[hidden] rules;
+           it is scoped to this [hidden] toggle only — don't copy it onto
+           general layout rules. */
+        .opencode-frame[hidden] { display: none !important; }
+        #opencode-scope-warning { flex: 0 0 auto; width: 100%; box-sizing: border-box; padding: 6px 12px; font-size: 12px; line-height: 1.4; color: #7c2d12; background: #ffedd5; border-bottom: 1px solid #fdba74; word-break: break-all; }
+        #opencode-scope-warning[hidden] { display: none !important; }
+        #opencode-scope-warning.opencode-warning-danger { color: #991b1b; background: #fee2e2; border-color: #fca5a5; }
+        /* Reasonix web frame — same per-instance iframe cache pattern as
+           opencode-web (kinds/reasonix.js), hosted inside its own panel. */
+        #reasonix-panel { width: 100%; height: 100%; display: flex; flex-direction: column; }
+        #reasonix-panel[hidden] { display: none !important; }
+        #reasonix-frames { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+        .reasonix-frame { width: 100%; flex: 1; min-height: 0; border: 0; }
+        .reasonix-frame[hidden] { display: none !important; }
 
         .status-running {
             background: var(--status-running);
@@ -931,6 +975,24 @@
                 color: var(--text-primary);
             }
 
+        .form-info {
+            background: var(--hover-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+            padding: 10px 12px;
+            margin-bottom: 12px;
+            font-size: 12px;
+            line-height: 1.5;
+            color: var(--text-secondary);
+        }
+
+            .form-info code {
+                font-size: 11px;
+                padding: 1px 4px;
+                background: var(--main-bg);
+                border-radius: 3px;
+            }
+
         .form-actions {
             margin-top: 16px;
             display: flex;
@@ -954,6 +1016,40 @@
             background: var(--hover-bg);
             border-radius: 6px 6px 0 0;
         }
+
+        .modal-tabs {
+            display: flex;
+            gap: 0;
+            padding: 0 12px;
+            border-bottom: 1px solid var(--border-color);
+            background: var(--hover-bg);
+        }
+        .modal-tab {
+            padding: 8px 14px;
+            cursor: pointer;
+            border: 1px solid transparent;
+            border-bottom: none;
+            border-radius: 4px 4px 0 0;
+            background: none;
+            font-size: 13px;
+            color: var(--text-secondary);
+            font-weight: 500;
+            margin-bottom: -1px;
+            user-select: none;
+            transition: color 0.15s, border-color 0.15s, background 0.15s;
+        }
+        .modal-tab:hover {
+            color: var(--text-primary);
+            background: var(--hover-bg);
+        }
+        .modal-tab.active {
+            background: var(--main-bg);
+            border-color: var(--border-color);
+            color: var(--text-primary);
+            border-top: 2px solid var(--active-color);
+        }
+        .modal-tab-panel { padding-top: 4px; }
+        .modal-tab-panel[hidden] { display: none; }
         .modal-title {
             font-size: 13px;
             font-weight: 600;
@@ -1121,6 +1217,10 @@
                 z-index: 20;
             }
 
+            #terminal-controls.oc-hidden {
+                display: none;
+            }
+
             .term-ctrl-btn {
                 width: var(--term-ctrl-btn-size);
                 height: var(--term-ctrl-btn-size);
@@ -1210,6 +1310,13 @@
             <div id="workspace">
                 <div id="empty-state">Select a worktree and instance to start</div>
                 <div id="terminal-container"></div>
+                <div id="opencode-panel" hidden>
+                    <div id="opencode-scope-warning" hidden></div>
+                    <div id="opencode-frames"></div>
+                </div>
+                <div id="reasonix-panel" hidden>
+                    <div id="reasonix-frames"></div>
+                </div>
                 <div id="terminal-controls">
                     <button class="term-ctrl-btn" onclick="refreshCurrentInstance()" title="Refresh & Scroll to Bottom">
                         <svg viewBox="0 0 24 24"><path d="M23 4v6h-6"></path><path d="M1 20v-6h6"></path><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg>
@@ -1348,22 +1455,45 @@
                 </svg>
             </button>
         </div>
+        <div class="modal-tabs" role="tablist">
+            <button type="button" class="modal-tab active" data-tab="terminal" role="tab" aria-selected="true" onclick="switchStartInstanceTab('terminal')">Terminal</button>
+            <button type="button" class="modal-tab" data-tab="opencode-web" role="tab" aria-selected="false" onclick="switchStartInstanceTab('opencode-web')">Opencode-Web</button>
+            <button type="button" class="modal-tab" data-tab="reasonix" role="tab" aria-selected="false" onclick="switchStartInstanceTab('reasonix')">Reasonix</button>
+        </div>
         <div class="modal-body">
-            <div class="form-group">
-                <label>Template <span id="template-edit-btn" class="wt-action-btn" style="display:inline-flex;vertical-align:middle;opacity:0.6" title="Edit templates" onclick="openTagsDir(event)"><svg viewBox="0 0 24 24" width="12" height="12" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path></svg></span></label>
-                <select id="tagSelect" onchange="onTagChange()"></select>
+            <div id="modal-tab-terminal" class="modal-tab-panel">
+                <div class="form-group">
+                    <label>Template <span id="template-edit-btn" class="wt-action-btn" style="display:inline-flex;vertical-align:middle;opacity:0.6" title="Edit templates" onclick="openTagsDir(event)"><svg viewBox="0 0 24 24" width="12" height="12" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path></svg></span></label>
+                    <select id="tagSelect" onchange="onTagChange()"></select>
+                </div>
+                <div class="form-group">
+                    <label>Or Custom Command</label>
+                    <input id="cmd" placeholder="e.g. echo hello && zsh" />
+                </div>
+                <div class="form-group">
+                    <label>Name (Optional)</label>
+                    <input id="instName" placeholder="e.g. build-server" />
+                </div>
             </div>
-            <div class="form-group">
-                <label>Or Custom Command</label>
-                <input id="cmd" placeholder="e.g. echo hello && zsh" />
+            <div id="modal-tab-opencode-web" class="modal-tab-panel" hidden>
+                <div class="form-info">
+                    <strong>在浏览器里使用 opencode 原生 web UI。</strong>
+                    无需填写命令、端口或密码，myworktree 会自动启动并登录，打开即可在网页中对话与编写代码。
+                </div>
+                <div class="form-group">
+                    <label>Name (Optional)</label>
+                    <input id="instNameOc" placeholder="e.g. opencode-web" />
+                </div>
             </div>
-            <div class="form-group">
-                <label>Name (Optional)</label>
-                <input id="instName" placeholder="e.g. build-server" />
-            </div>
-            <div class="form-group">
-                <label><input type="checkbox" id="instKindReasonix" /> Reasonix (web chat UI)</label>
-                <div class="muted" style="margin-top:2px;">Runs a Reasonix agent in this worktree and shows its web chat interface instead of a terminal.</div>
+            <div id="modal-tab-reasonix" class="modal-tab-panel" hidden>
+                <div class="form-info">
+                    <strong>在浏览器里使用 Reasonix 网页聊天界面。</strong>
+                    在所选 worktree 里启动 reasonix serve，并在实例页签中内嵌其 web chat UI。启动命令固定为 reasonix serve（会话历史与终端运行的 reasonix 共享 ~/.reasonix 会话池）。
+                </div>
+                <div class="form-group">
+                    <label>Name (Optional)</label>
+                    <input id="instNameRx" placeholder="e.g. reasonix" />
+                </div>
             </div>
             <div class="form-actions">
                 <button onclick="closeModal('modal-start-instance')">Cancel</button>
@@ -1450,6 +1580,11 @@
     <link rel="stylesheet" href="/static/vendor/xterm/xterm.css" />
     <script src="/static/vendor/xterm/xterm.js"></script>
     <script src="/static/vendor/xterm-addon-fit/xterm-addon-fit.js"></script>
+    <script src="/static/framework.js"></script>
+    <script src="/static/kinds/renderer.js"></script>
+    <script src="/static/kinds/pty.js"></script>
+    <script src="/static/kinds/opencode_web.js"></script>
+    <script src="/static/kinds/reasonix.js"></script>
     <script>
         const token = new URLSearchParams(location.search).get("token") || "";
         const headers = token ? { Authorization: `Bearer ${token}` } : {};
@@ -1470,18 +1605,6 @@
             .replace(/'/g, "&#39;");
 
         // Global State
-        let state = {
-            worktrees: [],
-            instances: [], // filtered flat list? no, full list.
-            tags: [],
-            branches: [],
-            activeWT: null,
-            activeInst: null,
-            mainRepo: null,
-            renamingInst: null,    // instance id currently being renamed
-            renamingInstValue: "", // preserved value across re-renders
-            diverged: {}           // worktree_id -> {branch: {diverged, ahead}}
-        };
 
         let loadingActions = new Set(); // Stores keys like "term:<id>" or "finder:<id>"
 
@@ -1561,6 +1684,11 @@
 
         function getTerminalSession(id) {
             if (!id) return null;
+            // PtyRenderer owns the session map; legacy helpers
+            // (loadLog, connectTTY, disconnectTTY) still live in
+            // index.html but read/write through this accessor.
+            const r = window.__ptyRenderer;
+            if (r && typeof r.getSession === 'function') return r.getSession(id);
             return terminalSessions[id] || null;
         }
 
@@ -2193,6 +2321,7 @@
                  ondrop="handleDrop('${i.id}', event)"
                  title="Drag to reorder; double-click to rename">
               <span class="tab-status ${statusClass}"></span>
+              ${i.kind === 'opencode-web' ? '<span class="badge-oc">OC</span>' : ''}
               ${i.kind === "reasonix" ? '<span class="rx-badge" title="Reasonix web UI">rx</span>' : ""}
                ${displayName}
             </div>
@@ -2356,42 +2485,44 @@
         function renderWorkspace() {
             const empty = document.getElementById("empty-state");
             const termContainer = document.getElementById("terminal-container");
+            const ocPanel = document.getElementById("opencode-panel");
+            const rxPanel = document.getElementById("reasonix-panel");
             const actions = document.getElementById("instance-actions");
+            const controls = document.getElementById("terminal-controls");
 
             if (state.activeInst) {
                 const inst = state.instances.find(i => i.id === state.activeInst);
+                const isOC = inst && inst.kind === 'opencode-web';
+                const isRX = inst && inst.kind === 'reasonix';
                 empty.style.display = "none";
-                termContainer.style.display = "block";
+                // The refresh / scroll-to-bottom shortcuts overlay the
+                // terminal's top-right corner; they are meaningless for the
+                // embedded web-ui pages (the pages own their UI), so hide
+                // them for those kinds and keep them for terminal kinds.
+                // A class (not inline style) so CSS retains control over the
+                // element's default layout. toggle(name, flag) in both
+                // branches — keep the forms identical so future edge
+                // conditions (e.g. hide while loading) can't mis-match.
+                if (controls) controls.classList.toggle("oc-hidden", !!(isOC || isRX));
+                // For opencode-web / reasonix instances the kind renderers
+                // own the visibility of their panels and the terminal
+                // container. renderWorkspace must NOT overwrite them, or the
+                // 8-second refresh cycle will fight the renderer and hide
+                // the iframe.
+                if (!isOC && !isRX) {
+                    termContainer.style.display = "block";
+                    if (ocPanel) ocPanel.hidden = true;
+                    if (rxPanel) rxPanel.hidden = true;
+                }
                 actions.classList.add("visible");
 
-                if (inst && inst.kind === "reasonix") {
-                    // Issue #55: normalize container styles that an xterm
-                    // instance may have left behind (grayscale/opacity for a
-                    // stopped instance). CSS filter applies to the iframe
-                    // content too, so a leftover grayscale would grey out the
-                    // whole web UI.
-                    termContainer.style.opacity = "1";
-                    termContainer.style.filter = "none";
-                    // Issue #54: hide any leftover xterm hosts. They are
-                    // positioned (position:absolute; inset:0) and would
-                    // overlay/block the static iframe, leaving it blank.
-                    renderTerminalSessions();
-                    if (inst.status === "running") {
-                        ensureWebFrame(inst);
-                    } else {
-                        invalidateWebFrame();
-                    }
-                    return;
-                }
-                removeWebFrame();
-                
-                // Styling for stopped instance
-                if (inst && inst.status !== 'running') {
+                // Styling for stopped instance (terminal kind only)
+                if (!isOC && !isRX && inst && inst.status !== 'running') {
                     termContainer.style.opacity = "0.6";
                     termContainer.style.filter = "grayscale(100%)";
                     const session = getActiveTerminalSession();
                     if (session && session.term) session.term.options.cursorBlink = false;
-                } else {
+                } else if (!isOC && !isRX) {
                     termContainer.style.opacity = "1";
                     termContainer.style.filter = "none";
                     const session = getActiveTerminalSession();
@@ -2402,6 +2533,9 @@
                 empty.style.display = "block";
                 empty.textContent = state.activeWT ? "No instances. Click + to start one." : "Select a worktree.";
                 termContainer.style.display = "none";
+                if (ocPanel) ocPanel.hidden = true;
+                if (rxPanel) rxPanel.hidden = true;
+                if (controls) controls.classList.toggle("oc-hidden", true);
                 actions.classList.remove("visible");
             }
             renderTerminalSessions();
@@ -2421,8 +2555,12 @@
             // Update Tags select
             const ts = document.getElementById("tagSelect");
             if (state.tags) {
+                // Terminal tab: filter out opencode-web (it's only
+                // available via the Opencode-Web tab — complete
+                // isolation per the product principle).
+                const ptyTags = state.tags.filter(t => t.id !== 'opencode-web');
                 const opts = '<option value="">-- select --</option>' +
-                    state.tags.map(t => {
+                    ptyTags.map(t => {
                         let details = [];
                         if (t.cwd) details.push(`cwd: ${t.cwd}`);
                         if (t.preStart) details.push(`pre: ${t.preStart}`);
@@ -2463,76 +2601,11 @@
             refresh();
         }
 
-        // Web-UI (Reasonix) instance: render an iframe inside the terminal
-        // container instead of an xterm session. The backend serves the page
-        // on the independent listener (issue #44) and reports it as web_url
-        // (cross-origin with the myworktree API); without it (TLS mode) it
-        // falls back to the same-origin /rx/<id>/ route.
-        function ensureWebFrame(inst) {
-            let frame = document.getElementById("web-frame");
-            if (!frame) {
-                frame = document.createElement("iframe");
-                frame.id = "web-frame";
-                frame.style.cssText = "width:100%;height:100%;border:0;background:var(--bg, #000);";
-                frame.dataset.instance = "";
-                frame.dataset.src = "";
-                document.getElementById("terminal-container").appendChild(frame);
-            }
-            // Only navigate when the target changes: the 2s poll calls
-            // render() → renderWorkspace() on every tick, and assigning the
-            // same src would reload the iframe each time — the embedded page
-            // would flash/refresh continuously.
-            //
-            // The guard compares BOTH the instance id and the resolved src.
-            // web_url is a runtime-assigned port (view-only, not persisted):
-            // after a server restart the independent listener gets a fresh
-            // port, so the same instance id resolves to a new web_url. If we
-            // only compared the id, the iframe would keep pointing at the
-            // dead pre-restart port until the user switched tabs — the poll
-            // would pick up the new web_url and this check navigates to it.
-            //
-            // Note the guard covers both "staying on the same reasonix tab"
-            // and "switching back" — removeWebFrame only hides the iframe
-            // (issue #53), so the element keeps its dataset and the page
-            // state (chat draft, scroll, sidebar) is preserved across tab
-            // switches. Only a src change (e.g. new port after restart)
-            // triggers a fresh navigation.
-            const src = (inst && inst.web_url) ? inst.web_url : "/rx/" + inst.id + "/";
-            if (frame.dataset.instance !== inst.id || frame.dataset.src !== src) {
-                frame.dataset.instance = inst.id;
-                frame.dataset.src = src;
-                frame.src = src;
-            }
-            frame.style.display = "block";
-            return frame;
-        }
-
-        // Hide the web frame instead of destroying it (issue #53): switching
-        // away must only toggle visibility so the embedded page (chat draft,
-        // scroll position, sidebar session list) survives tab switches. The
-        // iframe element stays in the DOM; the dataset.src guard in
-        // ensureWebFrame still re-navigates only when the resolved src changes
-        // (e.g. after a server restart the independent listener gets a new
-        // port → new web_url).
-        function removeWebFrame() {
-            const frame = document.getElementById("web-frame");
-            if (frame) frame.style.display = "none";
-        }
-
-        // Hide AND invalidate the frame's navigation cache. Used when a
-        // reasonix instance is stopped: the embedded page is dead, and on the
-        // same-origin /rx/<id>/ fallback the src never changes, so without
-        // clearing the dataset a stop→start cycle would keep showing the stale
-        // pre-stop page (review regression on the issue #53 fix). Clearing the
-        // dataset makes ensureWebFrame re-navigate on the next start.
-        function invalidateWebFrame() {
-            const frame = document.getElementById("web-frame");
-            if (frame) {
-                frame.style.display = "none";
-                frame.dataset.instance = "";
-                frame.dataset.src = "";
-            }
-        }
+        // Web-UI (Reasonix) instance rendering lives in
+        // kinds/reasonix.js (ReasonixRenderer), following the
+        // opencode-web renderer pattern: per-instance iframe cache,
+        // dataset id/src navigation guard, web_url vs same-origin
+        // /rx/<id>/ fallback, and xterm host/container-style cleanup.
 
         function selectInstance(id) {
             if (state.activeInst === id) return;
@@ -2544,27 +2617,52 @@
 
             render(); // update UI highlights
 
-            if (id) {
-                const instWeb = inst && inst.kind === "reasonix";
-                if (instWeb) {
-                    render();
-                    if (inst.status === 'running') {
-                        ensureWebFrame(inst);
-                        updateStatus("reasonix web");
-                    } else {
-                        invalidateWebFrame();
-                        updateStatus("stopped");
-                    }
-                    maybeDestroyInactiveStoppedSession(previousID);
-                    return;
+            // Dispatch to the per-kind renderer. The framework
+            // does not know about PTY / opencode-web specifics; each
+            // kind's renderer is responsible for showing its panel,
+            // connecting, and tearing down on switch.
+            const kind = (inst && inst.kind) || 'pty';
+            const renderer = (window.KindRenderers || {})[kind];
+            const session = { id: id, instance: inst };
+            // Web-ui panels are mutually exclusive: hide both before
+            // dispatching so the activated renderer's panel is the only
+            // visible one (prevents the stacked half/half layout when
+            // switching between opencode-web and reasonix).
+            const ocPanel = document.getElementById('opencode-panel');
+            const rxPanel = document.getElementById('reasonix-panel');
+            if (ocPanel) ocPanel.hidden = true;
+            if (rxPanel) rxPanel.hidden = true;
+            // Deactivate the previously-active renderer first so it
+            // can release any listeners / hide its panel cleanly.
+            if (previousID) {
+                const prevInst = state.instances.find(i => i.id === previousID);
+                const prevKind = (prevInst && prevInst.kind) || 'pty';
+                const prevRenderer = (window.KindRenderers || {})[prevKind];
+                if (prevRenderer && prevRenderer !== renderer) {
+                    prevRenderer.deactivate();
                 }
+            }
+            if (id && renderer) {
+                renderer.activate(session, document.getElementById('workspace'));
+                if (kind === 'opencode-web') {
+                    updateStatus('opencode web ui');
+                }
+                if (kind === 'reasonix') {
+                    updateStatus(inst && inst.status === 'running' ? 'reasonix web' : 'stopped');
+                }
+                maybeDestroyInactiveStoppedSession(previousID);
+                return;
+            }
+
+            // Fallback: if no renderer is registered for this kind,
+            // behave like PTY (legacy default).
+            if (id) {
                 // If stopped, just load log once. If running, connect TTY directly.
                 if (inst && inst.status !== 'running') {
                     const session = ensureTerminalSession(id);
                     disconnectTTY(session);
                     loadLog(session);
                     updateStatus("stopped");
-                    // Style handled in renderWorkspace
                 } else {
                     const session = ensureTerminalSession(id);
                     if (hasLiveTTYConnection(id)) {
@@ -2641,6 +2739,9 @@
                     list.style.display = 'block';
                 }
             }
+            if (id === 'modal-start-instance' && typeof switchStartInstanceTab === 'function') {
+                switchStartInstanceTab('terminal');
+            }
             el.showModal();
         }
         function closeModal(id) { document.getElementById(id).close(); }
@@ -2655,8 +2756,9 @@
             if (!state.activeWT) { alert("Select a worktree first"); return; }
             document.getElementById("cmd").value = "";
             document.getElementById("instName").value = "";
+            document.getElementById("instNameOc").value = "";
+            document.getElementById("instNameRx").value = "";
             document.getElementById("tagSelect").value = "";
-            document.getElementById("instKindReasonix").checked = false;
             openModal("modal-start-instance");
         }
 
@@ -2667,6 +2769,23 @@
                 document.getElementById("cmd").value = tag.command || "";
                 document.getElementById("instName").value = tag.id || "";
             }
+        }
+
+        // Tab switching for the Start Instance modal. Pure DOM: each
+        // tab button toggles the .active class on itself, hides its
+        // sibling panel, and shows its own. Default tab is Terminal
+        // (set in HTML).
+        function switchStartInstanceTab(tabName) {
+            const tabs = document.querySelectorAll('#modal-start-instance .modal-tab');
+            tabs.forEach(t => {
+                const isActive = t.dataset.tab === tabName;
+                t.classList.toggle('active', isActive);
+                t.setAttribute('aria-selected', isActive ? 'true' : 'false');
+            });
+            const panels = document.querySelectorAll('#modal-start-instance .modal-tab-panel');
+            panels.forEach(p => {
+                p.hidden = p.id !== 'modal-tab-' + tabName;
+            });
         }
 
         // API Calls
@@ -2717,13 +2836,43 @@
 
         async function doStartInstance() {
             try {
-                const body = {
-                    worktree_id: state.activeWT,
-                    tag_id: document.getElementById("tagSelect").value,
-                    command: document.getElementById("cmd").value,
-                    name: document.getElementById("instName").value,
-                    kind: document.getElementById("instKindReasonix").checked ? "reasonix" : "",
-                };
+                // Determine which tab is active and what kind to send.
+                // The Terminal tab always sends kind="" (backend
+                // normalises to "pty"); the Opencode-Web / Reasonix tabs
+                // always send their kind regardless of any tag selection
+                // (the kind is a UI decision, not a tag selection —
+                // that's the whole point of the tab split).
+                const activeTab = document.querySelector('#modal-start-instance .modal-tab.active');
+                const tabName = activeTab ? activeTab.dataset.tab : 'terminal';
+                let body;
+                if (tabName === 'opencode-web') {
+                    body = {
+                        worktree_id: state.activeWT,
+                        tag_id: 'opencode-web',
+                        command: '',
+                        name: document.getElementById("instNameOc").value || 'opencode-web',
+                        kind: 'opencode-web',
+                    };
+                } else if (tabName === 'reasonix') {
+                    // Fixed command, no template entry in the UI (decision B:
+                    // tag env/preStart remain available via API/CLI tag_id).
+                    body = {
+                        worktree_id: state.activeWT,
+                        tag_id: '',
+                        command: '',
+                        name: document.getElementById("instNameRx").value || 'reasonix',
+                        kind: 'reasonix',
+                    };
+                } else {
+                    const tagId = document.getElementById("tagSelect").value;
+                    body = {
+                        worktree_id: state.activeWT,
+                        tag_id: tagId,
+                        command: document.getElementById("cmd").value,
+                        name: document.getElementById("instName").value,
+                        kind: '',
+                    };
+                }
                 const res = await api("/api/instances", { method: "POST", body: JSON.stringify(body) });
                 closeModal("modal-start-instance");
                 await refresh();
@@ -2758,8 +2907,17 @@
 
         async function stopInstance() {
             if (!state.activeInst) return;
+            const stoppedId = state.activeInst;
+            const stoppedInst = state.instances.find(i => i.id === stoppedId);
             try { 
-                await api("/api/instances/stop", { method: "POST", body: JSON.stringify({ id: state.activeInst }) }); 
+                await api("/api/instances/stop", { method: "POST", body: JSON.stringify({ id: stoppedId }) }); 
+                // Release a stopped web-ui instance's cached iframe
+                // immediately (its backend is gone); otherwise it lingers in
+                // the DOM until the next tab switch.
+                if (stoppedInst && (stoppedInst.kind === 'opencode-web' || stoppedInst.kind === 'reasonix')) {
+                    const renderer = (window.KindRenderers || {})[stoppedInst.kind];
+                    if (renderer && typeof renderer.destroyFrame === 'function') renderer.destroyFrame(stoppedId);
+                }
                 // Render stop banner immediately before refresh/reload
                 const session = getActiveTerminalSession();
                 if (session && session.term) session.term.write("\r\n\r\n\x1b[41;37m[Process Stopped]\x1b[0m\r\n");
@@ -2778,7 +2936,17 @@
         }
         async function deleteInstance() {
             if (!state.activeInst || !confirm("Delete instance?")) return;
-            try { await api("/api/instances/delete", { method: "POST", body: JSON.stringify({ id: state.activeInst }) }); refresh(); } catch (e) { alert(e); }
+            const deletedId = state.activeInst;
+            try {
+                await api("/api/instances/delete", { method: "POST", body: JSON.stringify({ id: deletedId }) });
+                // Release the deleted web-ui instance's cached iframe so it
+                // doesn't linger in the DOM / keep the page loaded.
+                for (const kind of ['opencode-web', 'reasonix']) {
+                    const renderer = (window.KindRenderers || {})[kind];
+                    if (renderer && typeof renderer.destroyFrame === 'function') renderer.destroyFrame(deletedId);
+                }
+                refresh();
+            } catch (e) { alert(e); }
         }
         // Terminal Logic (Per Instance)
         let windowHasFocus = true;
@@ -2812,6 +2980,25 @@
         }
 
         function createTerminalSession(id) {
+            // PtyRenderer owns session creation since the
+            // renderer split. If a caller still hits this path,
+            // delegate to the renderer; otherwise fall back to
+            // the legacy in-page implementation below.
+            const r = window.__ptyRenderer;
+            if (r && !r.hasSession(id)) {
+                // Renderer hasn't created a session for this id
+                // yet — try to do so. activate() is the proper
+                // entry point; this branch covers callers that
+                // expect a session object outside the activate
+                // flow (e.g. log replay helpers).
+                const termContainer = document.getElementById("terminal-container");
+                const s = r._createSession(id, termContainer);
+                if (s) {
+                    r._sessions.set(id, s);
+                    return s;
+                }
+            }
+            if (r && r.hasSession(id)) return r.getSession(id);
             if (!window.Terminal) return null;
             const host = createTerminalHost(id);
             const session = {
@@ -2903,10 +3090,28 @@
         }
 
         function ensureTerminalSession(id) {
-            return getTerminalSession(id) || createTerminalSession(id);
+            // PtyRenderer owns session creation. We call into it
+            // so legacy helpers (loadLog / connectTTY /
+            // disconnectTTY / sendResize) still work transparently
+            // after the renderer split.
+            const r = window.__ptyRenderer;
+            if (r && r.getSession(id)) return r.getSession(id);
+            if (r && r.hasSession && r.hasSession(id)) return r.getSession(id);
+            // createTerminalSession() is still defined below for
+            // any pre-renderer callers; the renderer prefers its
+            // own implementation.
+            return createTerminalSession(id);
         }
 
         function destroyTerminalSession(id) {
+            // Delegate to the renderer's destroy path; falls back
+            // to the legacy in-page implementation when the
+            // renderer is absent (unit tests / future refactors).
+            const r = window.__ptyRenderer;
+            if (r && typeof r.destroySession === 'function') {
+                r.destroySession(id);
+                return;
+            }
             const session = getTerminalSession(id);
             if (!session) return;
             disconnectTTY(session);
@@ -2941,26 +3146,37 @@
 
         function reconcileTerminalSessions() {
             const instanceMap = new Map(state.instances.map(i => [i.id, i]));
-            for (const id of Object.keys(terminalSessions)) {
-                const inst = instanceMap.get(id);
+            // The renderer is the single authority for live sessions
+            // when present; the legacy map is the pre-renderer
+            // fallback only (unit tests / embeds without pty.js).
+            const r = window.__ptyRenderer;
+            const sessions = (r && typeof r.allSessions === 'function')
+                ? r.allSessions()
+                : Object.values(terminalSessions);
+            for (const session of sessions) {
+                const inst = instanceMap.get(session.id);
                 if (!inst) {
-                    destroyTerminalSession(id);
+                    destroyTerminalSession(session.id);
                     continue;
                 }
                 if (inst.status !== 'running') {
-                    if (id === state.activeInst) {
-                        disconnectTTY(terminalSessions[id]);
+                    if (session.id === state.activeInst) {
+                        disconnectTTY(session);
                     } else {
-                        destroyTerminalSession(id);
+                        destroyTerminalSession(session.id);
                     }
                 }
             }
         }
 
         function reconnectRunningTerminalSessions() {
-            for (const [id, session] of Object.entries(terminalSessions)) {
-                const inst = state.instances.find(i => i.id === id);
-                if (inst && inst.status === 'running' && !hasLiveTTYConnection(id)) {
+            const r = window.__ptyRenderer;
+            const sessions = (r && typeof r.allSessions === 'function')
+                ? r.allSessions()
+                : Object.values(terminalSessions);
+            for (const session of sessions) {
+                const inst = state.instances.find(i => i.id === session.id);
+                if (inst && inst.status === 'running' && !hasLiveTTYConnection(session.id)) {
                     connectTTY(session);
                 }
             }
@@ -2968,7 +3184,19 @@
 
         function renderTerminalSessions() {
             const activeID = state.activeInst;
-            for (const session of Object.values(terminalSessions)) {
+            // The renderer is the single authority for live sessions
+            // when present; the legacy map is the pre-renderer
+            // fallback only (unit tests / embeds without pty.js).
+            const r = window.__ptyRenderer;
+            const sessions = (r && typeof r.allSessions === 'function')
+                ? r.allSessions()
+                : Object.values(terminalSessions);
+            for (const session of sessions) {
+                // Defensive: map-resident sessions always have a
+                // container today (destroy paths remove them from the
+                // maps synchronously); the guard protects future
+                // async teardown paths from crashing the loop.
+                if (!session.container) continue;
                 session.container.style.display = session.id === activeID ? "block" : "none";
             }
             const activeSession = getActiveTerminalSession();
@@ -3820,6 +4048,32 @@
                 btn.title = "Configure LLM settings to enable AI generation";
             }
         }
+
+        // Expose PTY helper entry points on the window object so
+        // kinds/pty.js (PtyRenderer) can call them directly instead
+        // of going through the closure-scoped versions. Once these
+        // functions are fully migrated to pty.js, the exports here
+        // become unnecessary and can be removed.
+        window.loadLog = loadLog;
+        window.loadLogSince = loadLogSince;
+        window.disconnectTTY = disconnectTTY;
+        window.connectTTY = connectTTY;
+        window.hasLiveTTYConnection = hasLiveTTYConnection;
+        window.ensureTerminalSession = ensureTerminalSession;
+        window.maybeDestroyInactiveStoppedSession = maybeDestroyInactiveStoppedSession;
+        window.resetTerminalForSwitch = resetTerminalForSwitch;
+        window.focusTerminalIfPossible = focusTerminalIfPossible;
+        window.updateStatus = updateStatus;
+        window.resetTTYOutputDecoder = resetTTYOutputDecoder;
+        window.writeSanitizedTerminalOutput = writeSanitizedTerminalOutput;
+        window.decodeTTYOutputChunk = decodeTTYOutputChunk;
+        window.isTerminalQueryResponse = isTerminalQueryResponse;
+        window.reportSessionError = reportSessionError;
+        window.sendResize = sendResize;
+        window.syncTerminalToAppliedSize = syncTerminalToAppliedSize;
+        window.applyTTYSize = applyTTYSize;
+        window.parseTTYControlMessage = parseTTYControlMessage;
+        window.renderTerminalSessions = renderTerminalSessions;
 
         // Boot
         init();

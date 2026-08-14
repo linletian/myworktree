@@ -1,6 +1,6 @@
 # myworktree
 
-一个轻量的 agents team 管理工具：充分利用 **git worktree** 工作区独立特性，多样化 **coding CLI instance（长期运行进程）** 的能力，并提供最小可用 Web UI 与输出回放。
+> **一个类似 ORCA 的轻量级 agents team 编排工具** —— 让多个 AI coding CLI 在同一仓库里并行工作，每个 CLI 拥有独立的 git worktree 工作区与可重连的长连接终端，统一的最小可用 Web UI 让你随时查看、回放输出并继续交互。
 
 - English: [README.md](./README.md)
 - 文档： [PRD](./docs/PRD.md) · [架构](./docs/ARCHITECTURE.md) · [API](./docs/API.md)
@@ -8,6 +8,25 @@
 ![](docs/codecliteams.png)
 
 ![](docs/webui.png)
+
+## 核心能力
+
+- **一个 worktree 一个任务，git 帮你隔开** —— 每个 agent 独占一个隔离的 git worktree（通常对应独立分支），半成品改动、依赖安装、临时实验互不污染。
+- **持久化、可重连的终端** —— 每个 agent 跑在一个受管 instance 里，页面刷新、浏览器关闭都不影响；随时重连、完整回滚输出、继续交互。
+- **输出回放，告别磁盘写放大** —— 每个按键都进有界内存环形缓冲（不写盘），随时回放 agent 之前做了什么。
+- **自带工具，按模板接入** —— OpenCode 和 Reasonix 开箱即跑（Reasonix 还把原生 Web 聊天界面内嵌到侧栏）；其它 Claude Code、Codex、GLM、Qwen 等任意 CLI 用 Tag 模板（`command/env/preStart/cwd`）一键拉起。
+- **一站式查看运行态** —— worktree、instance、输出、PTY 状态全在一个最小 Web UI 里完成 —— 不绑 IDE、不绑编辑器。
+
+## myworktree 的特色
+
+- **单个 Go 二进制，运行时零依赖** —— 无桌面端、不绑编辑器，一个 `mw` + 一个浏览器标签页就够了。
+- **原生对无头环境友好** —— 放到服务器、虚拟机、CI 机器上都行；Tailscale 隧道打通远程访问。
+- **Portal 仪表板** —— 单一共享入口端口，自动发现本机所有仓库里正在跑的实例。
+- **开箱即用的全局认证 + CSRF** —— HttpOnly Cookie + double-submit CSRF，首次启动自动生成 32 字符 hex token。
+- **配置热加载** —— `mw config regen` 重新生成 token / 重新载入配置，无需重启 daemon。
+- **Changes 面板里的文件预览 & 差异** —— 点击任意已变更或未跟踪文件即可看带行号的预览和 diff。
+- **Reasonix Web 聊天实例** —— 勾选一下就能在 worktree 里跑 `reasonix serve`，其 Web 聊天界面内嵌在同一个侧栏。
+- **分支 divergence 徽标** —— 一眼看清分支相对上游 ahead / behind 状态，支持定时刷新。
 
 ## 背景与痛点
 当你在同一个项目里并行多个需求/修复（尤其需要多个 AI coding CLI 工具并行协作与互相审核）时，常见问题是：
@@ -67,10 +86,10 @@ myworktree 只做管理，不碰项目具体内容：
 
 ```bash
 # 根据你的 Mac 机型选择对应压缩包，然后校验并解压
-curl -LO https://github.com/linletian/myworktree/releases/download/v0.4.0/myworktree_v0.4.0_darwin_arm64.tar.gz
-curl -LO https://github.com/linletian/myworktree/releases/download/v0.4.0/checksums.txt
+curl -LO https://github.com/linletian/myworktree/releases/download/v0.4.2/myworktree_v0.4.2_darwin_arm64.tar.gz
+curl -LO https://github.com/linletian/myworktree/releases/download/v0.4.2/checksums.txt
 shasum -a 256 -c checksums.txt --ignore-missing
-tar -xzf myworktree_v0.4.0_darwin_arm64.tar.gz
+tar -xzf myworktree_v0.4.2_darwin_arm64.tar.gz
 
 # 可选：安装到 PATH
 sudo install -m 755 ./mw /usr/local/bin/mw
@@ -80,7 +99,7 @@ sudo install -m 755 ./myworktree /usr/local/bin/myworktree
 mw --version
 ```
 
-建议从 `v0.4.0` 或更新版本开始使用公开发布版二进制。更早的 `v0.1.0` GitHub Release 资产在补充实测中发现严重终端交互问题后已撤回，而 `v0.4.0` 是当前推荐的公开发布版本。
+建议从 `v0.4.2` 或更新版本开始使用公开发布版二进制。更早的 `v0.1.0` GitHub Release 资产在补充实测中发现严重终端交互问题后已撤回，而 `v0.4.2` 是当前推荐的公开发布版本。
 
 每个发布压缩包内都包含 `mw`、`myworktree`、`README.md`、`LICENSE` 和 `CHANGELOG.md`。
 如果当前还没有预发布/正式发布压缩包，或者你的平台暂无对应产物，就直接使用下面的源码编译步骤。

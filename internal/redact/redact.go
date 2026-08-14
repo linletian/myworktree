@@ -37,6 +37,18 @@ func Text(s string) string {
 	return s
 }
 
+// Secret replaces every occurrence of the exact secret string with
+// "REDACTED". Callers pass a concrete known secret (e.g. the app auth
+// token that preStart output may have echoed) that Text's pattern
+// rules cannot cover. Short secrets (< 8 chars) are ignored so
+// coincidental substrings are not mangled; an empty secret is a no-op.
+func Secret(s, secret string) string {
+	if len(secret) < 8 || !strings.Contains(s, secret) {
+		return s
+	}
+	return strings.ReplaceAll(s, secret, "REDACTED")
+}
+
 func EnvKey(key, value string) string {
 	k := strings.ToUpper(strings.TrimSpace(key))
 	if strings.Contains(k, "TOKEN") || strings.Contains(k, "SECRET") || strings.Contains(k, "KEY") || strings.Contains(k, "PASSWORD") {

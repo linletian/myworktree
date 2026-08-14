@@ -135,33 +135,167 @@ func TestIndexHTMLCoversMultiInstanceSwitching(t *testing.T) {
 	}
 }
 
-func TestIndexHTMLCoversReasonixWebFrame(t *testing.T) {
-	bodyText := fetchIndexHTML(t)
+func TestOpencodeWebRendererKeepsFrameAlive(t *testing.T) {
+	mux := http.NewServeMux()
+	if err := Register(mux, "myworktree", nil); err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/static/kinds/opencode_web.js")
+	if err != nil {
+		t.Fatalf("GET /static/kinds/opencode_web.js failed: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /static/kinds/opencode_web.js status: %d", resp.StatusCode)
+	}
+	js := string(body)
+
 	checks := []string{
-		// issue #53: hide instead of destroying the iframe on tab switch so
-		// the embedded page (chat draft, scroll, sidebar) survives.
-		"function ensureWebFrame(inst)",
-		"frame.style.display = \"none\";",
-		// ensureWebFrame re-navigates only when id/src actually change
-		"frame.dataset.instance !== inst.id || frame.dataset.src !== src",
+		// re-navigation is guarded by the dataset (ensureWebFrame pattern):
+		// assigning the same src would reload the embedded page.
+		"frame.dataset.instance !== id || frame.dataset.src !== src",
+		// switching back to the same running instance keeps the page alive
+		// (dataset.instance === session.id check in activate()).
+		"frame.dataset.instance === session.id && frame.dataset.src",
+		// a fresh iframe starts with an empty navigation cache, so the poll
+		// navigates on first activation.
+		"frame.dataset.instance = '';",
+		"frame.dataset.src = '';",
+		// stopping an instance releases its iframe immediately (no page state
+		// to keep, no lingering memory); the next start builds a fresh one.
+		"this.destroyFrame(session.id)",
+		// per-instance iframe cache: each opencode-web instance keeps its own
+		// iframe, so switching between two running instances only hides/shows
+		// frames instead of re-navigating (multi-instance keep-alive).
+		"this._frames = new Map()",
+		"this._frames.set(id, frame)",
+		"this._showOnly(frame)",
+		// prune must never drop the currently-active instance's frame, or the
+		// next activate() would rebuild it and reload a running instance.
+		"live.has(id) || id === activeId",
+		// cross-instance hidden-report isolation: only the currently-active
+		// frame's postMessage drives the warning. This is the key guard against
+		// cross-talk between multiple same-origin iframes.
+		"event.source !== this._currentFrame.contentWindow",
+		// prune/destroy must clear _currentFrame when they remove the active
+		// frame, so a later message event can't trust a detached frame.
+		"this._currentFrame === frame",
+	}
+	negativeChecks := []string{
+		// activate() must NEVER reset the iframe to about:blank — that would
+		// kill the loaded opencode page on every tab switch.
+		"frame.src = 'about:blank'",
+		// activate()/poll must never unconditionally assign src. If this line
+		// reappears the page reloads on every tab switch.
+		"frame.src = data.iframe_src;",
+	}
+	for _, check := range checks {
+		if !strings.Contains(js, check) {
+			t.Fatalf("opencode_web.js should include keep-alive hook %q", check)
+		}
+	}
+	for _, check := range negativeChecks {
+		if strings.Contains(js, check) {
+			t.Fatalf("opencode_web.js should not contain unconditional navigation %q", check)
+		}
+	}
+}
+
+func TestReasonixRendererKeepsFrameAlive(t *testing.T) {
+	mux := http.NewServeMux()
+	if err := Register(mux, "myworktree", nil); err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/static/kinds/reasonix.js")
+	if err != nil {
+		t.Fatalf("GET /static/kinds/reasonix.js failed: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /static/kinds/reasonix.js status: %d", resp.StatusCode)
+	}
+	js := string(body)
+
+	checks := []string{
+		// issue #53: re-navigation is guarded by the dataset (id + src);
+		// assigning the same src would reload the embedded page.
+		"frame.dataset.instance !== id || frame.dataset.src !== src",
+		// hide instead of destroying the iframe on tab switch so the
+		// embedded page (chat draft, scroll, sidebar) survives.
+		"this._currentFrame.hidden = true",
+		// per-instance iframe cache: cross-instance switches only
+		// hide/show frames instead of re-navigating, so instance A's
+		// draft survives even after switching to B and back (goes
+		// beyond main's single shared frame, which reloaded).
+		"this._frames = new Map()",
+		"this._frames.set(id, frame)",
+		"this._showOnly(frame)",
+		// a fresh iframe starts with an empty navigation cache, so the
+		// first activation navigates; the same clearing covers the
+		// stop→start same-src fallback.
+		"frame.dataset.instance = '';",
+		"frame.dataset.src = '';",
+		// only a running (or still-flipping starting) instance has a
+		// live page to load.
+		"inst.status !== 'running' && inst.status !== 'starting'",
+		// 2s self-healing poll: re-navigates on web_url port changes
+		// (daemon restart) and invalidates on stop/failure — main ran
+		// the same check on every render tick.
+		"setInterval",
 		// issue #54: hide leftover xterm hosts so they cannot overlay the
 		// static iframe.
 		"renderTerminalSessions();",
 		// issue #55: normalize container styles left behind by xterm so the
 		// web UI is never rendered greyed out.
-		"termContainer.style.opacity = \"1\";",
-		"termContainer.style.filter = \"none\";",
-		"inst.kind === \"reasonix\"",
-		// stop→start regression: stopping a reasonix instance must invalidate
-		// the frame's src cache so the next start re-navigates instead of
-		// showing the stale pre-stop page.
-		"function invalidateWebFrame()",
-		"frame.dataset.instance = \"\";",
+		`termContainer.style.opacity = "1";`,
+		`termContainer.style.filter = "none";`,
+		// web_url (cross-origin listener) preferred, same-origin /rx/ fallback.
+		`"/rx/" + id + "/"`,
+		"inst.web_url",
+		// shell hook: stop/delete releases the instance's frame.
+		"destroyFrame(id) {",
+		// panel mutual exclusion (no stacked half/half layout).
+		"rxPanel.hidden = true",
+		// lifecycle diagnostics for white-screen reports.
+		"[reasonix-renderer]",
+	}
+	for _, check := range checks {
+		if !strings.Contains(js, check) {
+			t.Fatalf("reasonix.js should include keep-alive hook %q", check)
+		}
+	}
+}
+
+// TestReasonixTabIsFixedCommandNoTemplate pins decision B: the Reasonix
+// start tab has no template picker — the serve command is fixed and the
+// UI sends an empty tag_id (tag env/preStart remain reachable via the
+// API/CLI tag_id parameter, backend support is intentionally kept).
+func TestReasonixTabIsFixedCommandNoTemplate(t *testing.T) {
+	bodyText := fetchIndexHTML(t)
+	checks := []string{
+		`data-tab="reasonix"`,
+		"kind: 'reasonix',",
+		"tag_id: '',",
+		// The renderer must actually be loaded, or selectInstance falls
+		// back to the PTY path (TTY WS → "does not support output
+		// subscription" loop) and the web UI never renders.
+		`<script src="/static/kinds/reasonix.js">`,
 	}
 	for _, check := range checks {
 		if !strings.Contains(bodyText, check) {
-			t.Fatalf("GET / should include reasonix web frame hook %q", check)
+			t.Fatalf("GET / should include reasonix fixed-command hook %q", check)
 		}
+	}
+	if strings.Contains(bodyText, "tagSelectRx") {
+		t.Fatalf("GET / must not contain the removed reasonix template select (decision B)")
 	}
 }
 
@@ -189,9 +323,9 @@ func TestIndexHTMLCoversReconcileLogic(t *testing.T) {
 	checks := []string{
 		"function reconcileTerminalSessions()",
 		"destroyTerminalSession(id);",
-		"disconnectTTY(terminalSessions[id]);",
+		"disconnectTTY(session);",
 		"function reconnectRunningTerminalSessions()",
-		"if (inst && inst.status === 'running' && !hasLiveTTYConnection(id)) {",
+		"if (inst && inst.status === 'running' && !hasLiveTTYConnection(session.id)) {",
 		"connectTTY(session);",
 	}
 	for _, check := range checks {

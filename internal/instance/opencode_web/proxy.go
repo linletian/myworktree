@@ -1,0 +1,497 @@
+package opencode_web
+
+import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log"
+	"net/http"
+	"net/http/httputil"
+	"net/url"
+	"path/filepath"
+	"regexp"
+	"strconv"
+	"strings"
+
+	"myworktree/internal/authq"
+	"myworktree/internal/framework"
+)
+
+// ProxyHandler returns a single reverse-proxy handler for ALL
+// opencode-web instances. Registered once at /__opencode/ in the
+// main mux. The path format is /__opencode/<id>/<rest...>.
+//
+// Each request:
+//   - extracts the instance id from the first path segment
+//   - looks up the instance via the framework Manager
+//   - reads the upstream host:port from the instance's KindBlob
+//   - forwards <rest> to http://host:port/<rest> with Basic auth
+//     (username "opencode", password = authToken)
+//   - adds ?directory=<worktree> for GET/HEAD requests to API paths
+func ProxyHandler(m *framework.Manager, authToken string, tracker *ScopeTracker) http.Handler {
+	logger := proxyLogger(m)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Path after StripPrefix is "/<id>/<rest...>".
+		path := strings.TrimPrefix(r.URL.Path, "/")
+		if path == "" {
+			http.Error(w, "missing instance id", http.StatusBadRequest)
+			return
+		}
+		idx := strings.Index(path, "/")
+		var id, rest string
+		if idx < 0 {
+			id = path
+			rest = "/"
+		} else {
+			id = path[:idx]
+			rest = path[idx:]
+		}
+
+		inst, err := m.Get(id)
+		if err != nil {
+			http.Error(w, `{"error":"instance not found"}`, http.StatusNotFound)
+			return
+		}
+		if inst.Kind != "opencode-web" {
+			http.Error(w, `{"error":"not an opencode-web instance"}`, http.StatusNotFound)
+			return
+		}
+
+		host, port, worktree := readBlob(inst.KindBlob)
+
+		if port == "" {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{
+				"error": "opencode server not yet ready",
+			})
+			return
+		}
+
+		// Scope monitoring (WORKTREE-ISOLATION.md §4.2): classify the
+		// directory this request targets BEFORE forwarding. Only
+		// directory-bearing requests (or scope=project) are recorded, so
+		// static assets and directory-less global endpoints do not clobber
+		// a previous out-of-scope observation.
+		dir, hasDir := parseDirectory(r)
+		crossProject := r.URL.Query().Get("scope") == "project"
+		scope := ScopeInScope
+		if hasDir || crossProject {
+			scope = classify(worktree, dir, crossProject)
+			tracker.Record(id, ScopeState{
+				Scope:        scope,
+				Directory:    dir,
+				CrossProject: crossProject,
+			})
+		}
+
+		// Per-request access log. SSE streams through this handler at
+		// high frequency, so write via the framework's *log.Logger
+		// (default: io.Discard) rather than os.Stderr — that previous
+		// behaviour spammed stderr in production and racy with other
+		// concurrent writers. Nil logger → skip silently.
+		if logger != nil {
+			logger.Printf("[opencode-proxy] %s %s → http://%s:%s%s (directory=%q scope=%s)",
+				r.Method, r.URL.Path, host, port, rest, dir, scope)
+		}
+
+		target := &url.URL{Scheme: "http", Host: host + ":" + port}
+		proxy := httputil.NewSingleHostReverseProxy(target)
+		proxy.FlushInterval = -1
+
+		origDirector := proxy.Director
+		proxy.Director = func(req *http.Request) {
+			origDirector(req)
+			req.URL.Scheme = target.Scheme
+			req.URL.Host = target.Host
+			req.URL.Path = rest
+			req.URL.RawPath = ""
+			// Never forward myworktree's auth query (?token=...) upstream:
+			// it is a credential leak to the opencode subprocess. authq is
+			// the single shared stripping path for every proxy (see
+			// internal/authq).
+			req.URL.RawQuery = authq.StripToken(r.URL.RawQuery)
+			req.Header.Set("Authorization", "Basic "+basicAuth("opencode", authToken))
+			if (r.Method == http.MethodGet || r.Method == http.MethodHead) &&
+				isAPIPath(rest) && !req.URL.Query().Has("directory") && worktree != "" {
+				q := req.URL.Query()
+				q.Set("directory", worktree)
+				req.URL.RawQuery = q.Encode()
+			}
+			// Accept-Encoding negotiation: the HTML injection rewrites the
+			// body, so a navigation request (Accept contains text/html) must
+			// reach ModifyResponse uncompressed — force identity. SSE streams
+			// (text/event-stream) are also forced to identity: gzip buys
+			// nothing for an already-compressed event stream and can add
+			// buffering latency on a live channel. Everything else
+			// (JS/CSS/JSON) asks for gzip; without an explicit
+			// Accept-Encoding Go's Transport negotiates gzip, transparently
+			// decompresses, and strips Content-Encoding, wasting the
+			// negotiated compression.
+			accept := req.Header.Get("Accept")
+			if strings.Contains(accept, "text/html") || strings.Contains(accept, "text/event-stream") {
+				req.Header.Set("Accept-Encoding", "identity")
+			} else {
+				req.Header.Set("Accept-Encoding", "gzip")
+			}
+		}
+
+		// Rewrite HTML so all assets route through the proxy.
+		// opencode SPA emits absolute paths (/assets/*.js, /favicon*,
+		// /site.webmanifest, etc.) which <base> does NOT affect.
+		// We rewrite every src="/…" and href="/…" to include the
+		// proxy prefix, then inject <base> for the remaining
+		// root-relative paths (API calls, client-side routes).
+		proxyPrefix := "/__opencode/" + id
+		baseTag := "<base href=\"" + proxyPrefix + "/\">"
+		proxy.ModifyResponse = func(resp *http.Response) error {
+			ct := resp.Header.Get("Content-Type")
+			if strings.Contains(ct, "text/html") {
+				missing := fixProxyHTML(resp, proxyPrefix, baseTag, worktree)
+				tracker.SetCSPAnchorMissing(id, missing)
+			}
+			return nil
+		}
+
+		proxy.ErrorHandler = func(w http.ResponseWriter, req *http.Request, err error) {
+			writeJSON(w, http.StatusBadGateway, map[string]string{
+				"error": "opencode server unreachable",
+			})
+		}
+
+		proxy.ServeHTTP(w, r)
+	})
+}
+
+// fixProxyHTML rewrites absolute asset paths in the HTML so they route
+// through the reverse proxy, then injects the <base> tag. The <base> tag
+// alone only helps root-relative URLs — opencode emits absolute paths
+// (src="/assets/…", href="/favicon…", etc.) that bypass <base>.
+func fixProxyHTML(resp *http.Response, proxyPrefix, baseTag, worktree string) (cspAnchorMissing bool) {
+	// Safety net: if upstream still served a compressed HTML response (e.g.
+	// an XHR fetch of HTML whose Accept: */* negotiated gzip), do not splice
+	// the injection into the compressed body — pass it through untouched.
+	// Navigation requests are forced to identity in the Director, so the
+	// normal page load still gets the injection.
+	if enc := resp.Header.Get("Content-Encoding"); enc != "" && enc != "identity" {
+		return
+	}
+	body, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if err != nil {
+		return
+	}
+
+	// Rewrite root-relative asset attributes (src/href/action/poster) so
+	// the browser never issues a wrong first request for them. regex-based
+	// (idempotent, attribute whitelist — see rewriteRootAttrs), which covers
+	// more attributes than a naive src="/…" href="/…" string replace and
+	// does not touch data-src / xlink:href.
+	body = rewriteRootAttrs(body, proxyPrefix)
+
+	// Inject a single inline script (right after <head>) that adapts the SPA
+	// to the proxy and enforces the single-worktree view (WORKTREE-ISOLATION.md
+	// §4.6): strip the proxy prefix from the URL, set defaultServerUrl, collapse
+	// the localStorage server list to a single server (self-healing the project
+	// preseed / lastProject / displayName to the instance worktree on every
+	// load — a stale instance-scoped store from a previous worktree otherwise
+	// pins the UI to a deleted directory), DISABLE cross-worktree
+	// switch entries (visible but non-interactive, so opencode keeps its
+	// cross-directory capability while the UI discourages accidental switches),
+	// and intercept fetch/EventSource/XHR as defense-in-depth.
+	worktreeB64 := base64.RawURLEncoding.EncodeToString([]byte(worktree))
+	inject := buildInjectScript(proxyPrefix, worktreeB64, worktree)
+	injectScript := "<script>" + inject + "</script>"
+	body = injectAfterHead(body, baseTag+injectScript)
+
+	// Patch CSP to allow the injected inline script. Per CSP spec the hash
+	// covers the script content (between tags), not the <script> wrapper.
+	if csp := resp.Header.Get("Content-Security-Policy"); csp != "" {
+		const anchor = "'wasm-unsafe-eval'"
+		if !strings.Contains(csp, anchor) {
+			// CSP structure drifted: the hash cannot be appended safely, so
+			// the injected script will likely be blocked. Flag it for the
+			// frontend instead of silently losing the single-worktree hiding.
+			cspAnchorMissing = true
+		} else {
+			h := sha256.Sum256([]byte(inject))
+			hashB64 := base64.StdEncoding.EncodeToString(h[:])
+			csp = strings.Replace(csp, anchor, anchor+" 'sha256-"+hashB64+"'", 1)
+		}
+		resp.Header.Set("Content-Security-Policy", csp)
+	}
+
+	resp.Body = io.NopCloser(bytes.NewReader(body))
+	resp.ContentLength = int64(len(body))
+	resp.Header.Set("Content-Length", fmt.Sprintf("%d", len(body)))
+	return cspAnchorMissing
+}
+
+// injectAfterHead splices payload right after the first <head> opening
+// tag (matched by headTagRe), preserving the tag itself. If no head
+// tag is found the body is returned untouched (same "no injection"
+// outcome as the previous literal `<head>` bytes.Replace, which only
+// matched the exact lowercase form).
+func injectAfterHead(body []byte, payload string) []byte {
+	loc := headTagRe.FindIndex(body)
+	if loc == nil {
+		return body
+	}
+	head := body[loc[0]:loc[1]]
+	replacement := make([]byte, 0, len(head)+len(payload))
+	replacement = append(replacement, head...)
+	replacement = append(replacement, payload...)
+	return append(body[:loc[0]], append(replacement, body[loc[1]:]...)...)
+}
+
+// buildInjectScript builds the inline script injected into every HTML
+// navigation response. It is a single IIFE so the CSP needs only one hash.
+// proxyPrefix is the mount path (e.g. /__opencode/<id>); worktreeB64 is the
+// base64url-encoded worktree path, used to match opencode's data-project
+// attribute (opencode's base64Encode == Go base64.RawURLEncoding).
+//
+// Cross-worktree switch entries (project list, Open project button,
+// project-switch menu) are DISABLED rather than hidden: they stay visible so
+// the user can see opencode's other projects, but pointer events are blocked
+// and the entries are greyed out (aria-disabled). opencode's own
+// cross-directory capability (agent cd, session history across worktrees) is
+// untouched — the proxy only observes the request directory and surfaces
+// out-of-scope state via the ScopeTracker.
+//
+// The server-list / project preseed is SELF-HEALING: list[0], projects[local]
+// and lastProject[local] are rewritten to the current worktree whenever they
+// differ from it. opencode persists those fields itself when the user opens
+// sessions/projects in other directories, and the store is instance-scoped
+// per origin (localStorage), so a browser that once loaded this instance in
+// an earlier worktree would otherwise keep showing the stale (deleted) path
+// indefinitely — the fill-if-empty preseed never repaired non-empty data.
+func buildInjectScript(proxyPrefix, worktreeB64, worktree string) string {
+	// jsQuote produces a JS string literal that is also safe to splice into
+	// an HTML <script> tag: strconv.Quote escapes quotes/backslashes/control
+	// chars, and `<` becomes \u003c so a worktree path can never break out of
+	// the script element (security: script-tag breakout via </script>).
+	jsQuote := func(s string) string {
+		return strings.ReplaceAll(strconv.Quote(s), "<", `\u003c`)
+	}
+	dn := jsQuote(filepath.Base(worktree)) // server displayName literal (same escaping as p/wt/wtp)
+	return fmt.Sprintf(`(function(){
+var p=%s,wt=%s,wtp=%s,dn=%s;
+var a=location.pathname.slice(p.length);
+if(a)history.replaceState(null,'',a);
+// Instance-scoped server store: every opencode-web instance iframe shares
+// this origin (the /__opencode/<id> prefix is only a path), so the raw
+// 'opencode.global.dat:server' key would be shared across instances too —
+// two instances would overwrite each other's project preseed (last writer
+// wins) and the losing instance's home page would show the winner's
+// project. Redirect that ONE key to an instance-unique key so each instance
+// keeps its own list/projects/lastProject while still presenting a single
+// server (bare origin, merged with entry.tsx's canonical server below).
+var sk='opencode.global.dat:server';
+var ski=sk+p;
+try{
+  var gs=localStorage.getItem, ss=localStorage.setItem, rs=localStorage.removeItem;
+  localStorage.getItem=function(k){return gs.call(this,k===sk?ski:k)};
+  localStorage.setItem=function(k,v){return ss.call(this,k===sk?ski:k,v)};
+  localStorage.removeItem=function(k){return rs.call(this,k===sk?ski:k)};
+}catch(_){}
+// Single-server mode: the persisted server entry must use the bare origin
+// (same key as opencode's own canonical server from entry.tsx), so
+// resolveServerList merges them into one server and the home page renders
+// the single-server layout exactly like a native opencode web launch.
+// The SDK then requests against the bare origin and the r() rewrite below
+// re-attaches the /__opencode/[id] prefix (URL objects + root-relative
+// paths are covered). defaultServerUrl must also be the origin, otherwise
+// state.active points at a key absent from the merged server list and the
+// project preseed (scoped under the canonical "local" key) is never read.
+try{localStorage.setItem('opencode.settings.dat:defaultServerUrl',location.origin)}catch(_){}
+try{
+  var sr=localStorage.getItem(sk);
+  var sd=sr?JSON.parse(sr):{};
+  var ch=false;
+  var origin0={type:"http",http:{url:location.origin},displayName:dn};
+  // Self-heal, not just fill-if-empty: the instance-scoped store is the
+  // SPA's single source of truth for the home page's project list
+  // (projects[scope]), the autoselected project (lastProject[scope]) and the
+  // server displayName. opencode itself mutates these keys whenever the user
+  // navigates to another directory (projects.open/touch on session open,
+  // project pick, …), and an instance restarted/moved across worktrees leaves
+  // the old-era values in place. Preseeding only when empty therefore pins
+  // the UI to a stale (possibly deleted) worktree forever — the SPA shows the
+  // old path on every load. Rewrite the three fields to the current worktree
+  // whenever they differ, so any pollution is repaired on the next load
+  // (compare-then-write keeps the key untouched when already correct).
+  var cur=Array.isArray(sd.list)&&sd.list[0];
+  var ok=cur&&cur.http&&cur.http.url===location.origin&&cur.displayName===dn;
+  if(!ok){sd.list=[origin0];ch=true;}
+  if(!sd.projects||typeof sd.projects!=='object'||Array.isArray(sd.projects)){sd.projects={};ch=true;}
+  var prj=Array.isArray(sd.projects['local'])?sd.projects['local']:null;
+  if(!prj||prj.length!==1||prj[0].worktree!==wtp||prj[0].expanded!==true){sd.projects['local']=[{worktree:wtp,expanded:true}];ch=true;}
+  if(!sd.lastProject||typeof sd.lastProject!=='object'||Array.isArray(sd.lastProject)){sd.lastProject={};ch=true;}
+  if(sd.lastProject['local']!==wtp){sd.lastProject['local']=wtp;ch=true;}
+  if(ch)localStorage.setItem(sk,JSON.stringify(sd));
+}catch(_){}
+var o=location.origin,pl=o.length;
+function r(u){if(typeof u!=='string')return u;if(u.indexOf(p)!==-1)return u;if(u.startsWith(o+'/'))return o+p+u.slice(pl);if(u.charAt(0)==='/'&&u.charAt(1)!=='/')return o+p+u;var lo='http://127.0.0.1';if(u.startsWith(lo)){var c=u.indexOf(':',lo.length);if(c===-1)return u;var s=u.indexOf('/',c);if(s===-1)s=u.length;return o+p+u.slice(s)}var wss=u.slice(0,2)==='ws';if(wss||u.slice(0,3)==='wss'){var h=u.indexOf('/',7);if(h===-1)return u;return u.slice(0,h)+p+u.slice(h)}return u}
+function ri(i){if(typeof i==='string')return r(i);if(i&&i.url){var n=r(i.url);if(n!==i.url){try{var q=new Request(n,{method:i.method,headers:i.headers,body:i.body,duplex:'half',cache:i.cache,credentials:i.credentials,integrity:i.integrity,keepalive:i.keepalive,mode:i.mode,redirect:i.redirect,referrer:i.referrer,referrerPolicy:i.referrerPolicy,signal:i.signal});if(i.timeout!==undefined)q.timeout=i.timeout;return q}catch(e){try{console.warn('[mw-oc] request rewrite failed, forwarding original request:',e)}catch(_2){}}}}if(i&&i.href&&typeof i.href==='string'){var h=r(i.href);if(h!==i.href)return new URL(h)}return i}
+var OR=window.Request;
+if(OR){
+  // Rewrite at construction time: the SDK builds every request with
+  // new Request(url, init). Prefixing the URL here means the request
+  // object the SDK later hands to fetch() already carries the instance
+  // prefix, so ri() below returns it unchanged — no Request rebuild, no
+  // body/duplex round-trip. This matches the pre-single-server path
+  // exactly (which worked on every browser, including Safari's stricter
+  // ReadableStream handling). The ri() rebuild stays as a fallback for
+  // any code that still constructs requests with a bare-origin string.
+  // Covered URL shapes: string, URL object (href), Request copy
+  // construction (url). Any other shape falls through to new OR(u,init)
+  // un-prefixed — extend this list if the SDK ever changes how it builds
+  // requests; do NOT move prefixing back into fetch() (Safari stream
+  // upload regression, see FOLLOWUPS.md).
+  window.Request=function(u,init){
+    try{
+      if(typeof u==='string')return new OR(r(u),init);
+      if(u&&u.href&&typeof u.href==='string')return new OR(r(u.href),init);
+      if(u&&u.url&&typeof u.url==='string')return new OR(r(u.url),init==null?u:init);
+    }catch(_){}
+    return new OR(u,init);
+  };
+  window.Request.prototype=OR.prototype;
+}
+var of=fetch;window.fetch=function(i,ni){return of.call(this,ri(i),ni)};
+var OE=EventSource;window.EventSource=function(u,opts){return new OE(r(u),opts)};window.EventSource.prototype=OE.prototype;
+var hp=Object.prototype.hasOwnProperty;for(var k in OE){if(hp.call(OE,k))try{window.EventSource[k]=OE[k]}catch(_){}}
+var xo=XMLHttpRequest.prototype.open;XMLHttpRequest.prototype.open=function(m,u){return xo.call(this,m,r(u))};
+var OW=Worker;window.Worker=function(u,opts){return new OW(r(u),opts)};window.Worker.prototype=OW.prototype;
+var nb=navigator.sendBeacon;if(typeof nb==='function'){navigator.sendBeacon=function(u,d){return nb.call(navigator,r(u),d)}}
+var WS=window.WebSocket;if(WS){window.WebSocket=function(u,prot){return new WS(r(u),prot)};window.WebSocket.prototype=WS.prototype;}
+function disable(el){if(!el)return;try{el.style.setProperty('pointer-events','none','important');el.style.setProperty('opacity','0.45','important');el.setAttribute('aria-disabled','true');}catch(_){}}
+function foreign(el){var d=el.getAttribute?el.getAttribute('data-project'):null;return !!d&&d!==wt;}
+function filter(root){
+  if(!wt||!root||!root.querySelectorAll)return;
+  var i,els;
+  els=root.querySelectorAll('[data-project]');for(i=0;i<els.length;i++){if(foreign(els[i]))disable(els[i]);}
+  els=root.querySelectorAll('button[aria-label="Open project"]');for(i=0;i<els.length;i++)disable(els[i]);
+}
+var st=document.createElement('style');st.textContent='aside:has([data-slot="home-projects-scroll"]){pointer-events:none!important;opacity:.45!important}[data-action="project-switch"]:not([data-project="'+wt+'"]){pointer-events:none!important;opacity:.45!important}';(document.head||document.documentElement).appendChild(st);
+function run(){filter(document);}
+if(document.readyState==='loading'){document.addEventListener('DOMContentLoaded',run);}else{run();}
+var mo=new MutationObserver(function(muts){
+  for(var i=0;i<muts.length;i++){
+    var ns=muts[i].addedNodes;
+    for(var j=0;j<ns.length;j++){
+      var n=ns[j];
+      if(n&&n.nodeType===1){
+        if(n.getAttribute&&n.getAttribute('data-project')&&foreign(n))disable(n);
+        if(n.querySelectorAll)filter(n);
+      }
+    }
+  }
+});
+function obs(){if(document.documentElement)mo.observe(document.documentElement,{childList:true,subtree:true});}
+if(document.readyState==='loading'){document.addEventListener('DOMContentLoaded',obs);}else{obs();}
+function report(status,detail){try{parent.postMessage({type:'mw-oc/hidden-report',status:status,detail:detail},'*');}catch(_){}}
+function anchorsPresent(){return !!(document.querySelector('[data-component="sidebar-rail"]')||document.querySelector('[data-action="project-switch"]')||document.querySelector('[data-component="home-session-search"]')||document.querySelector('[data-action="home-add-project"]'));}
+var checks=0,maxChecks=20;
+var l2=setInterval(function(){
+  checks++;
+  if(anchorsPresent()){clearInterval(l2);runL3();return;}
+  if(checks>=maxChecks){clearInterval(l2);report('structure-changed','no sidebar anchor after 10s');}
+},500);
+function runL3(){
+  var foreignEnabled=0,currentDisabled=false,els=document.querySelectorAll('[data-project]');
+  for(var i=0;i<els.length;i++){
+    var el=els[i],d=el.getAttribute('data-project');
+    if(!d)continue;
+    var disabled=el.getAttribute('aria-disabled')==='true';
+    if(d!==wt&&!disabled)foreignEnabled++;
+    if(d===wt&&disabled)currentDisabled=true;
+  }
+  if(foreignEnabled>0||currentDisabled){report('disable-failed',JSON.stringify({foreignEnabled:foreignEnabled,currentDisabled:currentDisabled}));}
+  else{report('ok','');}
+}
+})();`, jsQuote(proxyPrefix), jsQuote(worktreeB64), jsQuote(worktree), dn)
+}
+
+// rewriteTagRe/rewriteAttrRe match a root-relative URL inside an HTML tag
+// attribute. Anchored on "<tag … " plus a whitespace/quote before the
+// attribute name ([\s"']), so data-src / xlink:href are NOT matched, and
+// property-style JS assignments (`el.src="/x"`) are NOT matched (no
+// whitespace/quote before "src"). Idempotent: protocol-relative URLs and
+// values already carrying the mount prefix are left untouched.
+var (
+	rewriteTagRe  = regexp.MustCompile(`(?i)<[a-zA-Z][^>]*>`)
+	rewriteAttrRe = regexp.MustCompile(`(?i)([\s"'](?:src|href|action|poster)\s*=\s*["']?)(/[^"'>\s]*)`)
+
+	// headTagRe matches the document <head> opening tag for script
+	// injection. Case-insensitive and tolerant of attributes
+	// (<HEAD lang="en">, <head >) — HTML allows both, and the injection
+	// silently not applying (single-worktree isolation off, no warning)
+	// is worse than a liberal match. Injection targets the first match
+	// only, mirroring the previous bytes.Replace(..., 1).
+	headTagRe = regexp.MustCompile(`(?i)<head\b[^>]*>`)
+)
+
+// rewriteRootAttrs prefixes every root-relative src/href/action/poster value
+// with mount (e.g. /__opencode/abc123). Each whole tag is extracted first,
+// then all matching attributes inside it are rewritten, so a tag with several
+// rewriteable attributes (<video src=… poster=…>) is fully covered.
+func rewriteRootAttrs(html []byte, mount string) []byte {
+	if len(html) == 0 || mount == "" {
+		return html
+	}
+	return rewriteTagRe.ReplaceAllFunc(html, func(tag []byte) []byte {
+		return rewriteAttrRe.ReplaceAllFunc(tag, func(m []byte) []byte {
+			sub := rewriteAttrRe.FindSubmatch(m)
+			if len(sub) != 3 {
+				return m
+			}
+			path := sub[2]
+			if bytes.HasPrefix(path, []byte("//")) || bytes.HasPrefix(path, []byte(mount)) {
+				return m // protocol-relative or already prefixed
+			}
+			out := make([]byte, 0, len(sub[1])+len(mount)+len(path))
+			out = append(out, sub[1]...)
+			out = append(out, mount...)
+			out = append(out, path...)
+			return out
+		})
+	})
+}
+
+// readBlob parses the per-kind blob persisted by the opencode-web
+// driver (host/port/worktree) from the instance record.
+func readBlob(raw json.RawMessage) (host, port, worktree string) {
+	if len(raw) == 0 {
+		return
+	}
+	var b struct {
+		Host        string `json:"host"`
+		Port        string `json:"port"`
+		WorktreeAbs string `json:"worktree_abs"`
+	}
+	if json.Unmarshal(raw, &b) == nil {
+		host = b.Host
+		port = b.Port
+		worktree = b.WorktreeAbs
+	}
+	return
+}
+
+func writeJSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(v)
+}
+
+// proxyLogger returns the framework Manager's logger so the proxy
+// can write per-request access lines. NewManager defaults to
+// io.Discard, so production runs stay quiet unless the operator wires
+// a real logger into the Manager.
+func proxyLogger(m *framework.Manager) *log.Logger {
+	if m == nil {
+		return nil
+	}
+	return m.Logger
+}

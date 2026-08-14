@@ -27,13 +27,50 @@ type ManagedWorktree struct {
 	CreatedAt string `json:"created_at"` // RFC3339
 }
 
-// Instance kinds. An empty Kind in persisted state (pre-2026 state files)
-// means KindTTY, so old stores need no migration.
+// Instance kinds. An empty Kind in persisted state (pre-refactor and
+// pre-reasonix state files) means the PTY kind ("pty"), so old stores
+// need no migration. "tty" was the v0.4.0 internal dispatch name for
+// the PTY kind; no released version ever persisted it (v0.4.0's PTY
+// records omit the Kind field entirely, and only the reasonix record
+// carried an explicit kind), but CanonicalKind still accepts it as an
+// alias so hand-edited or develop-built stores cannot brick an
+// instance. The framework kind registry is the source of truth for
+// kind names; these constants cover the kinds the app layer needs to
+// match on.
 const (
-	KindTTY      = "tty"
-	KindReasonix = "reasonix"
+	KindPTY         = "pty"
+	KindReasonix    = "reasonix"
+	KindOpenCodeWeb = "opencode-web"
 )
 
+// CanonicalKind maps persisted kind names to their current canonical
+// form: "" (legacy stores) and "tty" (the v0.4.0 internal name) both
+// mean the PTY kind; every other value passes through unchanged.
+func CanonicalKind(kind string) string {
+	switch kind {
+	case "", "tty":
+		return KindPTY
+	default:
+		return kind
+	}
+}
+
+// ManagedInstance is the persisted record for one running (or
+// recently-exited) instance. Fields tagged omitempty are written only
+// when non-empty so pre-refactor state.json files round-trip without
+// adding noise.
+//
+// Schema evolution:
+//   - Status is now framework.Status (string wire format unchanged:
+//     "starting" / "running" / "stopped" / "failed" / "exited" plus the
+//     new "unhealthy" / "stopping").
+//   - LastError / ExitCode are new; populated when Status is Failed /
+//     Exited respectively. Both are diagnostic, never used for control
+//     flow.
+//   - KindBlob replaces Extra as the per-kind opaque storage. Pre-
+//     refactor state.json files with `extra` keys are still loaded
+//     (Extra field remains for backward compat) but new code should
+//     write/read KindBlob only.
 type ManagedInstance struct {
 	ID            string            `json:"id"`
 	WorktreeID    string            `json:"worktree_id"`
@@ -43,9 +80,13 @@ type ManagedInstance struct {
 	Command       string            `json:"command"`
 	Cwd           string            `json:"cwd"`
 	Env           map[string]string `json:"env,omitempty"`
-	Kind          string            `json:"kind,omitempty"` // tty|reasonix; empty means tty
+	Kind          string            `json:"kind,omitempty"`      // "" (legacy) means "pty"; see KindPTY/KindReasonix
+	Extra         map[string]string `json:"extra,omitempty"`     // legacy: pre-refactor per-kind blob (read-only after refactor)
+	KindBlob      json.RawMessage   `json:"kind_blob,omitempty"` // opaque per-kind blob owned by the kind's driver
 	PID           int               `json:"pid"`
-	Status        string            `json:"status"` // running|exited|stopped|failed
+	Status        string            `json:"status"`
+	LastError     string            `json:"last_error,omitempty"`
+	ExitCode      int               `json:"exit_code,omitempty"`
 	RestartedFrom string            `json:"restarted_from,omitempty"`
 	RestartedTo   string            `json:"restarted_to,omitempty"`
 	CreatedAt     string            `json:"created_at"`

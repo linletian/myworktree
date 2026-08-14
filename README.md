@@ -1,6 +1,6 @@
 # myworktree
 
-A lightweight agents team management tool: fully leveraging the independent workspace feature of git worktree, diversifying the capabilities of coding CLI instances (long-running processes), and providing a minimal viable Web UI and output playback.
+> **An ORCA-like lightweight agents team orchestrator** — spin up multiple AI coding CLIs side-by-side, each in its own isolated git worktree with a persistent re-attachable terminal, and steer them all from a minimal Web UI.
 
 - 中文说明: [README.zh-CN.md](./README.zh-CN.md)
 - Docs: [PRD](./docs/PRD.md) · [Architecture](./docs/ARCHITECTURE.md) · [API](./docs/API.md)
@@ -9,6 +9,24 @@ A lightweight agents team management tool: fully leveraging the independent work
 
 ![](docs/webui.png)
 
+## Features
+
+- **One worktree per task, kept apart by git** — every agent lives in its own isolated worktree (typically its own branch), so half-finished changes, dependency installs, and experiments never collide.
+- **Persistent, re-attachable terminals** — every agent runs in a managed instance that survives page reloads and browser closes; reopen anytime, scroll back the full output, and keep going.
+- **Output replay without disk writes** — every keystroke lands in a bounded in-memory ring buffer, so you can scrub back through what an agent did while you were away.
+- **Bring your own agents** — OpenCode and Reasonix run out of the box (Reasonix even with its native web chat UI embedded in the sidebar); for everything else, drop a Tag template (`command/env/preStart/cwd`) and bring up Claude Code, Codex, GLM, Qwen, or any other CLI.
+- **One place to see what's running** — worktrees, instances, output, and PTY state in a single minimal Web UI — no IDE, no editor, no context switch.
+
+## What makes myworktree different
+
+- **Single Go binary, zero runtime deps** — no desktop app, no bundled editor; just `mw` and a browser tab.
+- **Headless-friendly by design** — drop it on a server, a VM, or a CI box; everything is reachable over Tailscale.
+- **Portal Dashboard** — a single shared entry port auto-discovers running instances across every repo on the host.
+- **Global auth & CSRF out of the box** — HttpOnly Cookie + double-submit CSRF, plus an auto-generated 32-char hex token on first run.
+- **Hot config reload** — `mw config regen` rotates the auth token and reapplies settings without restarting the daemon.
+- **File preview & diff in the Changes panel** — click any changed or untracked file for a line-numbered, diff-aware preview.
+- **Reasonix web-chat instances** — tick one box to run `reasonix serve` in a worktree, with its web chat UI embedded in the same sidebar.
+- **Branch divergence badge** — see at a glance when a branch is ahead of or behind its upstream, with scheduled refresh.
 
 ## Background & pain points
 When you’re juggling multiple coding tasks in the same repo (often with multiple AI coding CLIs collaborating/reviewing each other), it’s easy to end up with:
@@ -67,10 +85,10 @@ Example:
 
 ```bash
 # Pick the archive that matches your Mac, then verify and unpack it.
-curl -LO https://github.com/linletian/myworktree/releases/download/v0.4.0/myworktree_v0.4.0_darwin_arm64.tar.gz
-curl -LO https://github.com/linletian/myworktree/releases/download/v0.4.0/checksums.txt
+curl -LO https://github.com/linletian/myworktree/releases/download/v0.4.2/myworktree_v0.4.2_darwin_arm64.tar.gz
+curl -LO https://github.com/linletian/myworktree/releases/download/v0.4.2/checksums.txt
 shasum -a 256 -c checksums.txt --ignore-missing
-tar -xzf myworktree_v0.4.0_darwin_arm64.tar.gz
+tar -xzf myworktree_v0.4.2_darwin_arm64.tar.gz
 
 # Optional: install into PATH
 sudo install -m 755 ./mw /usr/local/bin/mw
@@ -80,7 +98,7 @@ sudo install -m 755 ./myworktree /usr/local/bin/myworktree
 mw --version
 ```
 
-Start from `v0.4.0` or newer for public release binaries. The earlier `v0.1.0` GitHub Release assets were withdrawn after post-release validation uncovered severe terminal interaction issues, and `v0.4.0` is the current recommended public release.
+Start from `v0.4.2` or newer for public release binaries. The earlier `v0.1.0` GitHub Release assets were withdrawn after post-release validation uncovered severe terminal interaction issues, and `v0.4.2` is the current recommended public release.
 
 Each release archive contains `mw`, `myworktree`, `README.md`, `LICENSE`, and `CHANGELOG.md`.
 If there is no prerelease/release asset yet, or you need a platform we do not publish, follow the source build steps below.
@@ -264,7 +282,7 @@ When `--auth` is not provided and no token exists in `auth.json`, the CLI **auto
 
 - Lists all running instances across repos with auto-discovery
 - Click an instance to jump to its Web UI (directly via instance port — Portal reverse proxy `/s/<repo-hash>/` is planned but not yet implemented)
-- Uses **HttpOnly Cookie** (`mw_token`) for authentication — token never appears in URL or JS
+- Uses **HttpOnly Cookie** (`mw_token`) for authentication — embedded iframe documents never receive the token in their own URL; the portal's address-bar `?token=` (portal jump) is accepted by the server and synced into the cookie on the response, so panels authenticate via the cookie alone
 - **CSRF protection** via double-submit cookie pattern on login/logout endpoints
 - Cookie has 24-hour **sliding expiration** (refreshed on each auth-successful request)
 
