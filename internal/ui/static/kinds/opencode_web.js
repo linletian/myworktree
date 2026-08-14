@@ -325,7 +325,10 @@ class OpencodeWebRenderer {
                             // deactivate()/activate() cycles, so switching
                             // back to a running instance keeps the loaded
                             // page alive.
-                            const src = data.iframe_src;
+                            // Remote access (?token= in the address bar):
+                            // append the token so the same-origin embed
+                            // passes withAuth; the proxy strips it upstream.
+                            const src = window.authURL ? window.authURL(data.iframe_src) : data.iframe_src;
                             if (frame.dataset.instance !== id || frame.dataset.src !== src) {
                                 frame.dataset.instance = id;
                                 frame.dataset.src = src;

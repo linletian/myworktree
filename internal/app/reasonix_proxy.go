@@ -133,6 +133,7 @@ func (p *reasonixProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// them (a client-side DOMContentLoaded pass would be too late — the
 		// browser fetches <img src="/assets/..."> before any script runs).
 		rewritten := rewriteRootAttrs(body, "/rx/"+id)
+		rewritten = defuseBlockingFontLinks(rewritten)
 		injected := injectReasonixPrefix(rewritten, "/rx/"+id)
 		resp.Body = io.NopCloser(bytes.NewReader(injected))
 		resp.Header.Set("Content-Length", strconv.Itoa(len(injected)))
@@ -159,7 +160,42 @@ func (p *reasonixProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 var (
 	tagRe  = regexp.MustCompile(`(?i)<[a-zA-Z][^>]*>`)
 	attrRe = regexp.MustCompile(`(?i)([\s"'](?:src|href|action|poster)\s*=\s*["']?)(/[^"'>\s]*)`)
+
+	// fontLinkStyleRe matches any rel="stylesheet" <link>. The Google-Fonts
+	// stylesheet is the only render-blocking third-party resource on the
+	// page: a browser that cannot reach fonts.googleapis.com (remote
+	// access, firewalled networks) would keep the page blank — a pending
+	// stylesheet blocks rendering AND defers every script after it, which
+	// on this page is the entire inline SPA. defuseBlockingFontLinks keeps
+	// the stylesheet but removes it from the blocking path: media="print"
+	// loads it without blocking; onload flips media to "all" so the
+	// typography is identical whenever the fonts do arrive, and system
+	// fonts render otherwise.
+	fontLinkStyleRe = regexp.MustCompile(`(?i)<link\b[^>]*\brel=["']stylesheet["'][^>]*>`)
+	fontGoogleRe    = regexp.MustCompile(`(?i)\bhref=["']https://fonts\.googleapis\.com/`)
 )
+
+// defuseBlockingFontLinks converts the Google-Fonts stylesheet link into
+// a non-blocking load (see fontLinkStyleRe). Idempotent: links already
+// carrying media="print" are skipped, and non-Google stylesheets are
+// left untouched.
+func defuseBlockingFontLinks(html []byte) []byte {
+	return fontLinkStyleRe.ReplaceAllFunc(html, func(m []byte) []byte {
+		if !fontGoogleRe.Match(m) || bytes.Contains(m, []byte(`media="print"`)) {
+			return m
+		}
+		closeIdx := bytes.LastIndexByte(m, '>')
+		if closeIdx < 0 {
+			return m
+		}
+		attrs := []byte(` media="print" onload="this.media='all'"`)
+		out := make([]byte, 0, len(m)+len(attrs))
+		out = append(out, m[:closeIdx]...)
+		out = append(out, attrs...)
+		out = append(out, m[closeIdx:]...)
+		return out
+	})
+}
 
 // rewriteRootAttrs prefixes every root-relative src/href/action/poster value
 // with mount (e.g. /rx/abc123). It first extracts each whole tag, then

@@ -763,3 +763,25 @@ func TestRewriteRootAttrs(t *testing.T) {
 		})
 	}
 }
+
+func TestDefuseBlockingFontLinks(t *testing.T) {
+	page := []byte(`<html><head><link rel="preconnect" href="https://fonts.googleapis.com" /><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin /><link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;700&family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" /><style>.x{}</style></head><body></body></html>`)
+	got := string(defuseBlockingFontLinks(page))
+	if strings.Contains(got, `rel="stylesheet" />`) {
+		t.Fatalf("font stylesheet still render-blocking after defuse: %q", got)
+	}
+	if !strings.Contains(got, `media="print"`) || !strings.Contains(got, `this.media='all'`) {
+		t.Fatalf("defused link missing non-blocking attributes: %q", got)
+	}
+	// preconnect links and other styles are untouched.
+	if !strings.Contains(got, `rel="preconnect" href="https://fonts.googleapis.com"`) {
+		t.Fatalf("preconnect link was modified: %q", got)
+	}
+	if !strings.Contains(got, `<style>.x{}</style>`) {
+		t.Fatalf("inline style was modified: %q", got)
+	}
+	// Idempotent-ish: a page without the font link is unchanged.
+	if got := string(defuseBlockingFontLinks([]byte(`<html><head><link rel="stylesheet" href="/app.css" /></head></html>`))); got != `<html><head><link rel="stylesheet" href="/app.css" /></head></html>` {
+		t.Fatalf("non-Google stylesheet was modified: %q", got)
+	}
+}
