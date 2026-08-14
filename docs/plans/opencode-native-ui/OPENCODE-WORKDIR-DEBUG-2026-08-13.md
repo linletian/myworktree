@@ -136,3 +136,12 @@
 | home 页单/多 server 渲染分支 `servers().length > 1` | `packages/app/src/pages/home/home-projects-view.tsx` |
 | myworktree 注入脚本 / ScopeTracker / 监测 | `internal/instance/opencode_web/proxy.go`、`scope.go` |
 | myworktree 门户 UI（loading 层、controls、iframe 管理） | `internal/ui/static/index.html`、`internal/ui/static/kinds/opencode_web.js` |
+
+---
+
+## 6. 后续排查：跨 origin 陈旧工作目录状态
+
+2026-08-14 追加：worktree 删除后 web UI 仍显示旧路径、且远程/本地/隐私窗口三态不一致的问题
+（preseed 仅空时写入 → 旧目录状态被 opencode 前端写回实例键后永不修正 → 按 origin 隔离放大）。
+完整分析、证据（headless Chromium 四场景复现）与修复（preseed 自愈）见
+**[`OPENCODE-WORKDIR-DEBUG-2026-08-14.md`](OPENCODE-WORKDIR-DEBUG-2026-08-14.md)**。

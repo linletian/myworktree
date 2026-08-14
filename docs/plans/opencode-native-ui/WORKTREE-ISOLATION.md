@@ -280,7 +280,7 @@ out-of-scope ──(持续越界请求)──▶ 保持,更新 dir 显示
 4. **SSE 长连接**:判定在握手时,之后目录不会中途变(SSE 按 directory 建立),无需处理。
 5. **scope=project 防御**:UI 正常路径未使用,但作为盲区防御保留标记。
 6. **D1 子目录推论**:workspace 切换会报警——即使用户有意切换也会提醒(防误操作设计下的可接受噪音;只提醒不阻断)。若后续希望"worktree 内子工作区不报",需改判定为"子目录也算 in-scope"。
-7. **localStorage 单 server 归一(配合 D4)**:即便隐藏入口 5/7,`server.v3.list` 残留仍会:①喂给入口 6 的分组判定(`server.list.length > 1` 时跨 server 合并项目)、②影响 server key 路由。实施时注入重置 localStorage 为"仅当前实例"(保留 `projects`/`lastProject` schema,只清 `list`),避免 DEBUG.md #8 全量清洗破坏 persisted store 的坑。
+7. **localStorage 单 server 归一(配合 D4)**:即便隐藏入口 5/7,`server.v3.list` 残留仍会:①喂给入口 6 的分组判定(`server.list.length > 1` 时跨 server 合并项目)、②影响 server key 路由。注入脚本重置为"仅当前实例",**且为自愈**:实例键 `opencode.global.dat:server/<id>` 的 `list[0]`(含 `displayName`)、`projects.local`、`lastProject.local` 三项每次加载都和当前 worktree 比对,不一致即重写为当前实例值,一致则零写入(`recentlyClosed` 不触碰)。该键是 opencode 主页项目列表/选中态/启动 autoselect 的唯一真实来源,且按 origin 隔离;受污染浏览器下次刷新即自愈,无需清 localStorage。避免 DEBUG.md #8 全量清洗破坏 persisted store 的坑。详细分析与四场景 headless 复现见 `OPENCODE-WORKDIR-DEBUG-2026-08-14.md`,回归测试为 `TestBuildInjectScriptSingleServer` phase 3。
 8. **版本检测的边界**:①L2 锚点缺失优先归因"加载慢",超时后才报(检测窗口需覆盖 SPA 异步首屏);②`opencode --version` 输出格式需在实施时确认并锁定(实测 1.18.16 输出 `1.18.16`,格式稳定);③L2 只报"锚点全缺",单锚点缺失不报(可能是数据空态);④受支持版本范围需随 myworktree 发布记录,升级 opencode 后由 L1 门禁提示。
 
 ---
@@ -318,7 +318,7 @@ out-of-scope ──(持续越界请求)──▶ 保持,更新 dir 显示
 | 完整页嵌入(§0.4) | `driver.go`、`app.go` | `IframeURL`/`iframe_src` 由 `/<base64>/session/` 改为 `/`(完整页);清理 `RegisterHTTP`/`makeProxyHandler` 死代码 |
 | HTML 注入重构 | `proxy.go` | `rewriteRootAttrs`(正则白名单 `src|href|action|poster`)替换 `bytes.ReplaceAll`;Accept-Encoding 协商 + 压缩 HTML 拒绝注入 |
 | 切换入口隐藏(D4) | `proxy.go` `buildInjectScript` | 按 `data-project`(base64url worktree)过滤侧栏非当前项,隐藏 `home-add-project` 与 "Open project" 入口;`MutationObserver` 兜底 |
-| localStorage 单 server 归一(§5.7) | `proxy.go` `buildInjectScript` | 清空 `opencode.global.dat:server` 的 `list`(保留 projects/lastProject/recentlyClosed) |
+| localStorage 单 server 归一 + 陈旧状态自愈(§5.7) | `proxy.go` `buildInjectScript` | 实例键 `opencode.global.dat:server/<id>` 的 `list[0]`(含 `displayName`)、`projects.local`、`lastProject.local` 三项 **compare-then-write 自愈**:与当前 worktree 比对,不一致即重写为当前实例值,一致则零写入;`recentlyClosed` 不触碰。受污染 origin 刷新即恢复,无需清 localStorage(2026-08-14,见 `OPENCODE-WORKDIR-DEBUG-2026-08-14.md`)。|
 | 版本门(D5 L1) | `version.go`、`driver.go` | `parseVersion`/`versionLess`/`isSupportedVersion` 锁定 1.18.x(≥1.18.0 且 <1.19.0);`probeVersion` goroutine 探测 `opencode --version` 写入 blob;告警不拒绝启动 |
 | 隐藏有效性检测(D5 L2/L3) | `proxy.go` `buildInjectScript` | L2 轮询检测 `[data-component="sidebar-rail"]`/`[data-action="project-switch"]` 锚点(500ms×20);L3 可见性验证;`parent.postMessage({type:"mw-oc/hidden-report"})` 上报 |
 | 前端警告条 | `internal/ui/static/index.html`、`kinds/opencode_web.js` | `#opencode-scope-warning` 常驻条(iframe 上方占位);轮询 scope 端点(~1.5s)+ 监听 hidden-report;三态(正常/越界/隐藏失效) |

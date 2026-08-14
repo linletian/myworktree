@@ -28,9 +28,11 @@
 
 ## 三、旧数据清理策略（来源：评审第一轮问题 3）
 
+- ✅ **实例键内的陈旧 worktree 状态（`projects.local` / `lastProject.local` / displayName）**：已由注入脚本 preseed 自愈修复——每次加载与当前 worktree 比对，不一致即重写（2026-08-14，详见 `OPENCODE-WORKDIR-DEBUG-2026-08-14.md`）。被污染浏览器刷新即恢复，无需清理 localStorage。
 - 🕐 **`projects[origin+p]` 旧 key 与旧裸键 `opencode.global.dat:server` 的 localStorage 残留**：实例键隔离后旧数据成孤儿（无害但累积）。
   - 目前**不自动清理**：裸键可能含用户原生 opencode web（非 myworktree 实例）的本地数据，误删有损。
   - 可选未来方案：提供手动清理入口（如 debug 命令），或仅当确认裸键为旧注入脚本格式时迁移/删除。
+- 🕐 **`opencode.global.dat:layout` 的 `home.selection.directory` 旧值**：休眠向量（projects 列表被自愈后不再驱动显示，`OPENCODE-WORKDIR-DEBUG-2026-08-14.md` §4 场景 C 实证），暂不清理；若未来再次观察到由它激活的错选，再在注入脚本做同款安全清理（仅改这一个字段，try/catch 包裹）。
 
 ## 四、已知限制（记录，不计划做）
 

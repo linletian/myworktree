@@ -193,7 +193,10 @@ func fixProxyHTML(resp *http.Response, proxyPrefix, baseTag, worktree string) (c
 	// Inject a single inline script (right after <head>) that adapts the SPA
 	// to the proxy and enforces the single-worktree view (WORKTREE-ISOLATION.md
 	// §4.6): strip the proxy prefix from the URL, set defaultServerUrl, collapse
-	// the localStorage server list to a single server, DISABLE cross-worktree
+	// the localStorage server list to a single server (self-healing the project
+	// preseed / lastProject / displayName to the instance worktree on every
+	// load — a stale instance-scoped store from a previous worktree otherwise
+	// pins the UI to a deleted directory), DISABLE cross-worktree
 	// switch entries (visible but non-interactive, so opencode keeps its
 	// cross-directory capability while the UI discourages accidental switches),
 	// and intercept fetch/EventSource/XHR as defense-in-depth.
@@ -255,6 +258,14 @@ func injectAfterHead(body []byte, payload string) []byte {
 // cross-directory capability (agent cd, session history across worktrees) is
 // untouched — the proxy only observes the request directory and surfaces
 // out-of-scope state via the ScopeTracker.
+//
+// The server-list / project preseed is SELF-HEALING: list[0], projects[local]
+// and lastProject[local] are rewritten to the current worktree whenever they
+// differ from it. opencode persists those fields itself when the user opens
+// sessions/projects in other directories, and the store is instance-scoped
+// per origin (localStorage), so a browser that once loaded this instance in
+// an earlier worktree would otherwise keep showing the stale (deleted) path
+// indefinitely — the fill-if-empty preseed never repaired non-empty data.
 func buildInjectScript(proxyPrefix, worktreeB64, worktree string) string {
 	// jsQuote produces a JS string literal that is also safe to splice into
 	// an HTML <script> tag: strconv.Quote escapes quotes/backslashes/control
@@ -298,13 +309,26 @@ try{
   var sr=localStorage.getItem(sk);
   var sd=sr?JSON.parse(sr):{};
   var ch=false;
-  if(!Array.isArray(sd.list)){sd.list=[];ch=true;}
   var origin0={type:"http",http:{url:location.origin},displayName:dn};
+  // Self-heal, not just fill-if-empty: the instance-scoped store is the
+  // SPA's single source of truth for the home page's project list
+  // (projects[scope]), the autoselected project (lastProject[scope]) and the
+  // server displayName. opencode itself mutates these keys whenever the user
+  // navigates to another directory (projects.open/touch on session open,
+  // project pick, …), and an instance restarted/moved across worktrees leaves
+  // the old-era values in place. Preseeding only when empty therefore pins
+  // the UI to a stale (possibly deleted) worktree forever — the SPA shows the
+  // old path on every load. Rewrite the three fields to the current worktree
+  // whenever they differ, so any pollution is repaired on the next load
+  // (compare-then-write keeps the key untouched when already correct).
   var cur=Array.isArray(sd.list)&&sd.list[0];
-  var ok=cur&&cur.http&&cur.http.url===location.origin;
+  var ok=cur&&cur.http&&cur.http.url===location.origin&&cur.displayName===dn;
   if(!ok){sd.list=[origin0];ch=true;}
-  if(!sd.projects||typeof sd.projects!=='object'){sd.projects={};ch=true;}
-  if(!Array.isArray(sd.projects['local'])||sd.projects['local'].length===0){sd.projects['local']=[{worktree:wtp,expanded:true}];ch=true;}
+  if(!sd.projects||typeof sd.projects!=='object'||Array.isArray(sd.projects)){sd.projects={};ch=true;}
+  var prj=Array.isArray(sd.projects['local'])?sd.projects['local']:null;
+  if(!prj||prj.length!==1||prj[0].worktree!==wtp||prj[0].expanded!==true){sd.projects['local']=[{worktree:wtp,expanded:true}];ch=true;}
+  if(!sd.lastProject||typeof sd.lastProject!=='object'||Array.isArray(sd.lastProject)){sd.lastProject={};ch=true;}
+  if(sd.lastProject['local']!==wtp){sd.lastProject['local']=wtp;ch=true;}
   if(ch)localStorage.setItem(sk,JSON.stringify(sd));
 }catch(_){}
 var o=location.origin,pl=o.length;
