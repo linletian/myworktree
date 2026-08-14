@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"path/filepath"
 	"regexp"
 	"strings"
 
@@ -186,8 +187,10 @@ func fixProxyHTML(resp *http.Response, proxyPrefix, baseTag, worktree string) (c
 	// Inject a single inline script (right after <head>) that adapts the SPA
 	// to the proxy and enforces the single-worktree view (WORKTREE-ISOLATION.md
 	// §4.6): strip the proxy prefix from the URL, set defaultServerUrl, collapse
-	// the localStorage server list to a single server, hide cross-worktree switch
-	// entries, and intercept fetch/EventSource/XHR as defense-in-depth.
+	// the localStorage server list to a single server, DISABLE cross-worktree
+	// switch entries (visible but non-interactive, so opencode keeps its
+	// cross-directory capability while the UI discourages accidental switches),
+	// and intercept fetch/EventSource/XHR as defense-in-depth.
 	worktreeB64 := base64.RawURLEncoding.EncodeToString([]byte(worktree))
 	inject := buildInjectScript(proxyPrefix, worktreeB64, worktree)
 	injectScript := "<script>" + inject + "</script>"
@@ -221,9 +224,18 @@ func fixProxyHTML(resp *http.Response, proxyPrefix, baseTag, worktree string) (c
 // proxyPrefix is the mount path (e.g. /__opencode/<id>); worktreeB64 is the
 // base64url-encoded worktree path, used to match opencode's data-project
 // attribute (opencode's base64Encode == Go base64.RawURLEncoding).
+//
+// Cross-worktree switch entries (project list, Open project button,
+// project-switch menu) are DISABLED rather than hidden: they stay visible so
+// the user can see opencode's other projects, but pointer events are blocked
+// and the entries are greyed out (aria-disabled). opencode's own
+// cross-directory capability (agent cd, session history across worktrees) is
+// untouched — the proxy only observes the request directory and surfaces
+// out-of-scope state via the ScopeTracker.
 func buildInjectScript(proxyPrefix, worktreeB64, worktree string) string {
+	dn, _ := json.Marshal(filepath.Base(worktree)) // JS string literal for server displayName
 	return fmt.Sprintf(`(function(){
-var p=%q,wt=%q,wtp=%q;
+var p=%q,wt=%q,wtp=%q,dn=%s;
 var a=location.pathname.slice(p.length);
 if(a)history.replaceState(null,'',a);
 var pu=location.origin+p;
@@ -233,7 +245,11 @@ try{
   var sr=localStorage.getItem(sk);
   var sd=sr?JSON.parse(sr):{};
   var ch=false;
-  if(!Array.isArray(sd.list)||sd.list.length===0||sd.list[0]!==pu){sd.list=[pu];ch=true;}
+  if(!Array.isArray(sd.list)){sd.list=[];ch=true;}
+  var pu0={type:"http",http:{url:pu},displayName:dn};
+  var cur=Array.isArray(sd.list)&&sd.list[0];
+  var ok=cur&&cur.http&&cur.http.url===pu;
+  if(!ok){sd.list=[pu0];ch=true;}
   if(!sd.projects||typeof sd.projects!=='object'){sd.projects={};ch=true;}
   if(!Array.isArray(sd.projects[pu])||sd.projects[pu].length===0){sd.projects[pu]=[{worktree:wtp,expanded:true}];ch=true;}
   if(ch)localStorage.setItem(sk,JSON.stringify(sd));
@@ -246,15 +262,15 @@ var OE=EventSource;window.EventSource=function(u,opts){return new OE(r(u),opts)}
 var hp=Object.prototype.hasOwnProperty;for(var k in OE){if(hp.call(OE,k))try{window.EventSource[k]=OE[k]}catch(_){}}
 var xo=XMLHttpRequest.prototype.open;XMLHttpRequest.prototype.open=function(m,u){return xo.call(this,m,r(u))};
 var OW=Worker;window.Worker=function(u,opts){return new OW(r(u),opts)};window.Worker.prototype=OW.prototype;
-function hide(el){if(!el)return;try{el.style.setProperty('display','none','important');el.setAttribute('aria-hidden','true');}catch(_){}}
+function disable(el){if(!el)return;try{el.style.setProperty('pointer-events','none','important');el.style.setProperty('opacity','0.45','important');el.setAttribute('aria-disabled','true');}catch(_){}}
 function foreign(el){var d=el.getAttribute?el.getAttribute('data-project'):null;return !!d&&d!==wt;}
 function filter(root){
   if(!wt||!root||!root.querySelectorAll)return;
   var i,els;
-  els=root.querySelectorAll('[data-project]');for(i=0;i<els.length;i++){if(foreign(els[i]))hide(els[i]);}
-  els=root.querySelectorAll('button[aria-label="Open project"]');for(i=0;i<els.length;i++)hide(els[i]);
+  els=root.querySelectorAll('[data-project]');for(i=0;i<els.length;i++){if(foreign(els[i]))disable(els[i]);}
+  els=root.querySelectorAll('button[aria-label="Open project"]');for(i=0;i<els.length;i++)disable(els[i]);
 }
-var st=document.createElement('style');st.textContent='aside:has([data-slot="home-projects-scroll"]){display:none!important}[data-action="project-switch"]:not([data-project="'+wt+'"]){display:none!important}';(document.head||document.documentElement).appendChild(st);
+var st=document.createElement('style');st.textContent='aside:has([data-slot="home-projects-scroll"]){pointer-events:none!important;opacity:.45!important}[data-action="project-switch"]:not([data-project="'+wt+'"]){pointer-events:none!important;opacity:.45!important}';(document.head||document.documentElement).appendChild(st);
 function run(){filter(document);}
 if(document.readyState==='loading'){document.addEventListener('DOMContentLoaded',run);}else{run();}
 var mo=new MutationObserver(function(muts){
@@ -263,7 +279,7 @@ var mo=new MutationObserver(function(muts){
     for(var j=0;j<ns.length;j++){
       var n=ns[j];
       if(n&&n.nodeType===1){
-        if(n.getAttribute&&n.getAttribute('data-project')&&foreign(n))hide(n);
+        if(n.getAttribute&&n.getAttribute('data-project')&&foreign(n))disable(n);
         if(n.querySelectorAll)filter(n);
       }
     }
@@ -280,18 +296,18 @@ var l2=setInterval(function(){
   if(checks>=maxChecks){clearInterval(l2);report('structure-changed','no sidebar anchor after 10s');}
 },500);
 function runL3(){
-  var foreignVisible=0,currentHidden=false,els=document.querySelectorAll('[data-project]');
+  var foreignEnabled=0,currentDisabled=false,els=document.querySelectorAll('[data-project]');
   for(var i=0;i<els.length;i++){
     var el=els[i],d=el.getAttribute('data-project');
     if(!d)continue;
-    var vis=el.style.getPropertyValue('display')!=='none';
-    if(d!==wt&&vis)foreignVisible++;
-    if(d===wt&&!vis)currentHidden=true;
+    var disabled=el.getAttribute('aria-disabled')==='true';
+    if(d!==wt&&!disabled)foreignEnabled++;
+    if(d===wt&&disabled)currentDisabled=true;
   }
-  if(foreignVisible>0||currentHidden){report('hide-failed',JSON.stringify({foreignVisible:foreignVisible,currentHidden:currentHidden}));}
+  if(foreignEnabled>0||currentDisabled){report('disable-failed',JSON.stringify({foreignEnabled:foreignEnabled,currentDisabled:currentDisabled}));}
   else{report('ok','');}
 }
-})();`, proxyPrefix, worktreeB64, worktree)
+})();`, proxyPrefix, worktreeB64, worktree, dn)
 }
 
 // rewriteTagRe/rewriteAttrRe match a root-relative URL inside an HTML tag

@@ -3,6 +3,8 @@ package opencode_web
 import (
 	"io"
 	"net/http"
+	"os"
+	"os/exec"
 	"strings"
 	"testing"
 )
@@ -102,11 +104,11 @@ func TestBuildInjectScript(t *testing.T) {
 		"history.replaceState",
 		"opencode.settings.dat:defaultServerUrl",
 		"opencode.global.dat:server", // server-list normalization
-		"data-project",               // hide foreign projects
-		"home-add-project",           // hide add-project entry
+		"data-project",               // disable foreign projects (visible but inert)
+		"home-add-project",           // L2 structural anchor (add-project entry)
 		"MutationObserver",
 		"d3Q", // the worktree base64url is embedded
-		"mw-oc/hidden-report", // L2/L3 hide-effectiveness report
+		"mw-oc/hidden-report", // L2/L3 disable-effectiveness report
 		"sidebar-rail",        // L2 structural anchor (session page)
 		"home-session-search", // L2 structural anchor (home page, full-page embed lands here)
 		// URL rewriting must also cover root-relative paths and URL objects,
@@ -121,18 +123,47 @@ func TestBuildInjectScript(t *testing.T) {
 		"worktree:wtp",         // project list preseed
 		"expanded:true",        // project list preseed
 		"/tmp/wt",              // raw worktree path is embedded
-		"sd.list=[pu]",         // server list pinned to the proxy URL (not emptied)
+		`dn="wt"`,              // server displayName literal = worktree basename
+		"http:{url:pu}",        // server entry carries the proxy URL
+		"displayName:dn",       // …and a display name (no raw-URL search placeholder)
 		"var OW=Worker",        // rewrite Worker() script URLs (markdown highlight worker)
-		"home-projects-scroll", // hide the home page project list (project/dir switcher)
-		"project-switch",       // hide session-page project switcher
-		// The project-switch button must hide only NON-current worktree entries:
-		// the current entry doubles as the sidebar expand/collapse toggle and
-		// must stay visible (WORKTREE-ISOLATION.md §2.4 entry 2: keep current).
+		"home-projects-scroll", // disable the home page project list (visible but inert)
+		"project-switch",       // disable session-page project switcher
+		"pointer-events:none",  // disable = block pointer events (keep visible)
+		"aria-disabled",        // disable = mark aria-disabled
+		"disable-failed",       // L3 reports when a foreign entry is still enabled
+		// The project-switch rule must disable only NON-current worktree
+		// entries: the current entry doubles as the sidebar expand/collapse
+		// toggle and must stay interactive (WORKTREE-ISOLATION.md §2.4 entry
+		// 2: keep current).
 		`[data-action="project-switch"]:not([data-project="`,
 	} {
 		if !strings.Contains(s, want) {
 			t.Fatalf("buildInjectScript missing %q", want)
 		}
+	}
+}
+
+// TestBuildInjectScriptSyntax verifies the injected inline script parses as
+// valid JavaScript (it is spliced into a CSP-hashed <script> tag — a syntax
+// error would white-screen the embedded opencode UI). Requires node on PATH;
+// skipped otherwise so the suite still runs in node-less environments.
+func TestBuildInjectScriptSyntax(t *testing.T) {
+	s := buildInjectScript("/__opencode/abc123", "d3Q", "/tmp/wt")
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not available; skipping inject-script syntax check")
+	}
+	tmp, err := os.CreateTemp(t.TempDir(), "inject-*.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tmp.Close()
+	if _, err := tmp.WriteString(s); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command(node, "--check", tmp.Name()).CombinedOutput(); err != nil {
+		t.Fatalf("inject script has a syntax error: %v\n%s\n--- script ---\n%s", err, out, s)
 	}
 }
 
