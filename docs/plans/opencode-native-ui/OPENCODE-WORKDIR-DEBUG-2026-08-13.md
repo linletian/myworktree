@@ -482,3 +482,42 @@ v1.18.18(用户实际版本)与本地源码 v1.18.16 逐项比对:defaultDirecto
 - 验证:JS 语法 `node --check` 通过;`go test ./...` 全绿。
 - 待办:提交(Reasonix 沙箱对 git 元数据只读,commit 需用户在真实终端执行)。
 
+
+### E.7.5 单 server 模式实施(2026-08-14,方案 A 落地)
+
+**背景**:E.7.4 观察期发现,myworktree 实例 home 页左侧**多出两个带 chevron 的 server 行**(`100.86.87.23:41143` 与 `opencode-native-ui`),而原生 `opencode web` 只显示项目列表。根因(附录 E.2 机制的延伸):
+- 注入脚本写入的 server URL = `location.origin + /__opencode/<id>`(带路径,为 SDK baseUrl 直达 proxy 前缀);
+- `entry.tsx` 的 canonical server(`servers={[server]}`)= `location.origin`(纯 origin);
+- `resolveServerList` 按 URL 去重 → 两个不同 key → `servers().length > 1` → home 页走多 server 模式(`HomeProjectsView` 的 `when={props.servers().length > 1}` 分支),每 server 一行 `HomeServerRow`(chevron + `displayName ?? host`)。双行即:props server(显示 host)与注入 server(显示 displayName=`opencode-native-ui`)。
+
+**决策**:采纳方案 A——preseed 统一用 bare origin,贴近原生单 server 启动状态。
+
+**改动(`internal/instance/opencode_web/proxy.go` buildInjectScript)**:
+1. server 条目 `http.url`: `location.origin+p`(pu)→ **`location.origin`**,与 canonical server 同 key → resolveServerList 合并为 1 个;
+2. `opencode.settings.dat:defaultServerUrl`: `pu` → **`location.origin`**(否则 `state.active` 指向合并列表之外的 key,scope 推导不到 canonical `"local"`,preseed 项目读不到);
+3. 项目 preseed key: `sd.projects[pu]` → **`sd.projects['local']`**(canonical scope;`ServerScope.fromServerKey(key=origin, canonical=origin)` → `"local"`);
+4. `ok` 判断同步改为 `cur.http.url === location.origin`(旧 localStorage 的带路径 server 自动被覆盖迁移);
+5. SDK baseUrl 退回 bare origin,请求前缀改由注入脚本 `r()` 重写补回(`u.startsWith(o+'/')` 与 URL 对象分支均已覆盖);displayName 保留(现象 4 修复不回归)。
+
+**测试**:
+- `TestBuildInjectScript` 断言更新(`http:{url:location.origin}`、`defaultServerUrl',location.origin`、`projects['local']`);
+- 新增 `TestBuildInjectScriptSingleServer`:在 node VM 中 mock 浏览器环境(localStorage/location/document/EventSource/MutationObserver…)执行注入脚本,断言 preseed 结果,并**复刻 opencode 前端 `resolveServerList` 合并逻辑**验证 canonical+stored 合并为 1 个 server 且 displayName 保留(`SINGLE_SERVER_SIM_OK`);
+- `go test ./...` 全绿;注入脚本 `node --check` 语法校验通过。
+
+**待验证(重启实例后)**:home 页左侧回到单 server 模式(仅项目列表,无多余 server 行);新会话仍在正确 worktree;搜索栏 placeholder 仍显示项目名。
+
+**评审修复(2026-08-14,跨实例 localStorage 冲突)**:
+- **问题**:单 server preseed 把 key 收敛为裸 origin + `projects['local']`,但所有 opencode-web 实例 iframe 共享同一 origin(仅 `/__opencode/<id>` 路径区分)→ 共享同一 localStorage。实例 B 后加载时 `ok` 判断通过、写入被跳过,`projects['local']` 仍是实例 A 的值 → B 的 home 显示 A 的项目且被 data-project 规则置灰,新建会话可能开进 A 的 worktree(与加载顺序相关)。旧代码用 `origin+p` 作 key 天然按实例隔离,本次改动引入回归。
+- **修复**:注入脚本把共享键 `opencode.global.dat:server` **按实例重定向**到唯一键 `opencode.global.dat:server/__opencode/<id>`(劫持该键的 getItem/setItem/removeItem,其余键不受影响)。每个实例的 list/projects/lastProject 完全独立,同时保持单 server 呈现(bare origin 与 canonical 合并)与 displayName。defaultServerUrl 各实例同写 origin(值相同,无需隔离)。
+- **验证**:`TestBuildInjectScriptSingleServer` 升级为双实例模拟——先加载 A 再加载 B(同一 mock localStorage),断言:共享键从未被写入、A/B 各自 preseed 自己的 worktree、B 不覆盖 A、各自 resolveServerList 合并后均为单 server。`go test ./...` 全绿。
+
+**评审问题 2/3 回应(2026-08-14)**:
+- **问题 2(裸 origin 后请求依赖 r() 重写,覆盖面无行为级验证)**:
+  - 缺口确认与补齐:注入脚本新增 `navigator.sendBeacon` 劫持(遥测/埋点)与 `WebSocket` 劫持(SDK 现用 SSE,防御未来);`r()` 新增 `ws://`/`wss://` 同源分支(host 后插入实例前缀)。
+  - 动态 `<img>/<script>/<link>`:核查 `getProjectAvatarSource` 只返回完整 URL/undefined(无根相对路径),前端无 `createElement('img')` 动态创建;markdown 用户贴图根相对路径属用户内容,记录为已知限制(与原生子路径部署行为一致),不为此引入属性 setter 劫持。
+  - **行为级验证**:新增 `TestInjectURLRewriteBehavior`——node VM 实际执行注入脚本后驱动 fetch(字符串 + URL 对象)、XHR、EventSource、sendBeacon、WebSocket,断言同源/根相对 URL 全部被加前缀、远程 URL 原样通过(`REWRITE_BEHAVIOR_OK`)。
+- **问题 3(次要)**:
+  - 旧数据遗留:`projects[origin+p]`(旧注入格式)与旧裸键残留在 localStorage——**不自动清理**(裸键可能含用户原生 opencode web 的数据,误删有损);孤儿数据无害,文档记录。
+  - `dn` 统一改用 `jsQuote`(与 p/wt/wtp 同一转义路径),不再混用 json.Marshal。
+  - `pu0` 改名 `origin0`(名实相符);顺带修复改名遗漏(`sd.list=[pu0]` 残留引用导致 preseed 抛错被 try 吞——被双实例模拟测试捕获)。
+  - U+2028/U+2029:strconv.Quote 不转义,ES2019+ JS 字符串字面量合法,现代浏览器无碍,接受。
