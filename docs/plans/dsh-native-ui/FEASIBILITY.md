@@ -30,6 +30,8 @@
 
 就绪信号：boot 完成后打印 `dsh web: http://127.0.0.1:<port>`（`packages/bundle/web-app/src/index.ts` `printUrl`）——与 opencode 的 `opencode server listening on http://...` 完全同构，`driver.go` 里抓 stdout 解析端口的模式（`listeningAddrRe`）可直接复用，**`--port 0` + 解析 URL 行 = 零端口冲突**。
 
+**端口冲突语义（用户实证 2026-08-15）**：不带 `--port` 时每个实例都取默认 `3080`（`web-app/cordis.patch.yml`：`port: !!js ctx.webStartup.port ?? 3080`）；webserver **没有"端口被占就换一个"的回退逻辑**——`server.listen(port)` 失败即 service 初始化被拒、boot fiber 失败、fail-loud 退出（`webserver/src/index.ts:53-56` 注释原文 "A listen failure rejects initialization, and the boot process reports the failed fiber"，`:218-224` 无 retry/fallback）。而 `--port 0` 是官方语义（"zero requests an OS-assigned port"），`listenedPort` 返回 OS 实分配端口，启动行打印的即真实端口。**结论：dsh-web kind 的 Spawn 必须始终带 `--port 0`**——myworktree 实例间零冲突，与用户手动起的 dsh（默认 3080）也不撞。
+
 ### 1.3 认证与信任栅栏（`packages/client/connection/src/api-request-trust.ts`）
 
 - **没有认证层**（文档明言 "this fence is not an auth layer"）。`/api` 的信任栅栏规则：
@@ -223,6 +225,7 @@ dsh-web Spawn 预检 LookPath("dsh")
 - web profile 组合（rows、禁用的 host 平面行、agent presets）：`packages/bundle/web-app/cordis.patch.yml`
 - base 层（沙箱默认、审批策略、fs cwd、agent-loop 空表）：`packages/bundle/base/cordis.patch.yml`
 - SPA dist 托管 + index tap：`packages/host/frontend-static/src/index.ts`
+- webserver 监听/端口语义（EADDRINUSE fail-loud、`--port 0`）：`packages/host/webserver/src/index.ts`
 - `/api` 信任栅栏：`packages/client/connection/src/api-request-trust.ts`
 - API 路径常量（`/api`、WS 事件路径）：`packages/client/connection/src/api-path.ts`
 - `session.create` 契约与 schema（workspaceId/cwd）：`packages/host/apiproxy/src/api/sessions.ts`、`sessions.schema.ts`
