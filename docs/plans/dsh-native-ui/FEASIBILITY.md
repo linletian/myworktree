@@ -79,7 +79,7 @@
 | --- | --- | --- |
 | "Add workspace…" + 项目选择菜单（UI 上唯一"收养任意目录"的入口） | ✅ `--patch` overlay 禁用 `directory-picker` 行 → directory-flow hole 空置 → 入口整体不渲染（`slots.ts` 契约原文："an unoccupied hole leaves the surface with no add affordance at all"；`WorkspaceBrowser.tsx:1053` `directoryFlowAvailable &&` 门控） | 微型 client plugin 占据 `sidebar.workspaces.directoryFlow` / `conversation.hero.workspace.directoryFlow` 两个 hole，渲染禁用态占位（tooltip「工作区切换由 myworktree 管理」）。client plugin 是 dsh 一等公民机制（`dsh.client` rows + `dsh plugin --profile web add <pkg>`），非 fork |
 | 侧栏工作区行（点击即切换/新建其他 worktree 的会话） | ❌ 无行级 slot | 三选一：①opencode 式 DOM 注入（`buildInjectScript` 同款，先例已验证、升级脆弱）；②禁用 `ui-workspace` + 自写简化侧栏 client plugin（原生但改动大）；③**不置灰**——行保持可见可点，越界点击由监测警告条兜底（最贴合"只提醒不干预"，建议默认） |
-| 会话列表（其他 worktree 的历史会话） | 保持原样 | 共享 DSH_HOME 语义下**刻意保留**（与 opencode"可读当前项目全部历史"一致；范围外条目也是提醒的素材来源） |
+| 会话列表（其他 worktree 的历史会话） | 保持原样 | §2.3 数据面隔离后**其他 worktree 的会话根本不在**（sessions 按 worktree 重定向）；同 worktree 历史会话互通（含用同 overlay 启动的 myworktree 终端实例） |
 
 监测（只提醒，零干预）：
 
@@ -93,10 +93,28 @@
 - 沙箱继续兜底：越界会话的文件写入被 OS 级限制在那个目录内——"限制工作区"的硬部分由 dsh 沙箱承担，myworktree 只做"防误操作 + 提醒"。
 - devtools 直调 API 同样不拦：越界创建照常成功，仅被监测记录并触发警告（与 opencode D3"只警告不干预"对齐）。
 
-### 2.3 DSH_HOME 策略（对应 opencode 的"数据目录隔离"教训）
+### 2.3 数据面隔离策略（用户需求 2026-08-15：进程间工作区不互通、同工作区会话互通）
 
-- **共享 `$DSH_HOME`**（推荐）：凭据、会话历史、工作区注册表跨 worktree 可见——等价于 opencode 共享 `opencode.db` 的语义（"读/切当前项目全部历史 session 天然成立"，`WORKTREE-ISOLATION.md §2.1`），但引入侧栏串台，需 §2.2 的 UI 裁剪（禁用/置灰入口）+ 监测提醒收口。
-- **每实例 `DSH_HOME`**：完全隔离，但**丢历史 + 凭据要重配/软链**——正是 reasonix issue #56 踩过又回退的坑（`WORKTREE-ISOLATION.md §1.2`），不推荐作默认。
+**用户需求**：①不同位置启动的实例，启动即是自己的对应工作区；②不同 worktree 的进程之间工作区/会话**不互通**；③同一 worktree 启动的不同进程之间会话**互通**。
+
+**推荐方案（纯 overlay，零 dsh 源码改动）**：共享 `DSH_HOME`（凭据 `~/.dsh/.credentials.yaml`、设置 `settings-file`、profiles 全部共享，免重配），仅把**数据面两行**按 worktree 重定向：
+
+| 数据 | 默认位置 | 隔离手段 |
+| --- | --- | --- |
+| 工作区注册表（+ 反馈 + 投影缓存） | `$DSH_HOME/storages`（web-app patch 的 `storage-json` 行 `root`） | overlay 重述 `storage-json.root` → `<myworktree-data>/dsh/<worktree-hash>/storages` |
+| 会话日志 | `$DSH_HOME/sessions`（base 的 `session-persistence-jsonl` 行 `root`） | overlay 重述 `session-persistence-jsonl.root` → `<myworktree-data>/dsh/<worktree-hash>/sessions` |
+
+- driver 每次 Spawn 前在实例状态目录生成 restrict overlay（两行 id 重述，路径带 worktree hash），随 `dsh web --patch <overlay> --port 0` 传入——同 worktree 的实例路径一致 → **会话互通**；不同 worktree 路径不同 → **注册表与会话双隔离（数据层，非 UI 隐藏）**。
+- 配合 §3「工作区自举」（就绪后 `workspace.create` 注入）→ 侧栏**只有**当前 worktree 的工作区，"启动就是对应工作区"严格成立。越界 UI 入口天然死绝（别的 worktree 数据根本不在），§2.2 的监测只剩 devtools 直调 API 的兜底价值，照旧保留。
+- **边界（必须告知用户）**：裸终端手动跑的 `dsh`（默认 `~/.dsh/sessions`）的会话不会出现在 web 实例中。如需互通，myworktree 的 PTY 终端实例启动 `dsh` 时用同一份 overlay/env——TUI/headless 与 web 共用 base 行 id，同一 overlay 直接适用。
+
+**备选对比**：
+
+| 方案 | 隔离强度 | 代价 |
+| --- | --- | --- |
+| 每 worktree 一份完整 `DSH_HOME`（`DSH_HOME` env） | 数据层彻底隔离 | 每份 home 要初始化 profile、凭据/设置需 symlink（reasonix issue #56 教训），不推荐 |
+| 共享全部 + client plugin 过滤侧栏 | 仅 UI 层"看不见"，数据仍互通 | 与 opencode 式"只提醒"一致，但**不满足**本节的"不互通"需求 |
+| 共享全部、不做过滤（早期设计） | 无 | 侧栏串台，已废弃 |
 
 ---
 
@@ -107,7 +125,8 @@ myworktree 的 `framework.Kind` 接口（`internal/framework/kind.go`）已被 o
 | 环节 | 设计 | 依据/先例 |
 | --- | --- | --- |
 | Kind | `internal/instance/dsh_web/driver.go`，注册名 `dsh-web`，`Interactive: false` | 复制 opencode-web 骨架（`driver.go` 全篇） |
-| Spawn | `dsh web --host 127.0.0.1 --port 0`，`cmd.Dir = WorktreePath`，env 继承 + `DSH_HOME` 策略、可选 `DSH_PERMISSION_MODE` 钉死 | `startup.ts` 参数面；沙箱策略 env seam |
+| Spawn | `dsh web --host 127.0.0.1 --port 0 --patch <restrict overlay>`，`cmd.Dir = WorktreePath`；env 继承（共享 DSH_HOME 免重配），可选 `DSH_PERMISSION_MODE` 钉死 | `startup.ts` 参数面；沙箱策略 env seam |
+| 数据隔离 overlay | Spawn 前在实例状态目录生成 restrict.yml，重述 `storage-json.root` / `session-persistence-jsonl.root` 到 `<myworktree-data>/dsh/<worktree-hash>/{storages,sessions}`；同 worktree 路径一致 → 会话互通，跨 worktree 双隔离 | §2.3；两行 id 见 base/web-app patch |
 | 就绪 | 抓 stdout `dsh web: http://127.0.0.1:(\d+)` → 解析端口 → 写 blob、`ReadySignal.Close()` | 与 `listeningAddrRe` 同构 |
 | 健康 | 定时 `GET /`（SPA index 200）即可（无独立 health 端点） | `frontend-static` 兜底路由保证 `/` 恒 200 |
 | 工作区自举 | 就绪后直连上游 loopback 打 `POST /api/workspace.create`（RPC 信封 `{type:'client-request', rpcId, method, payload:{path:<worktree>}}`），幂等 adopt，侧栏立即出现该 worktree 及其同 cwd 历史会话；可选 `session.create {cwd}` 预建空白会话直接落到会话页；失败仅告警不阻塞 | workspace registry `create(path)`（realpath 幂等、新建 prepend）；信封格式 `fetch/client.ts callUnary`；§2.1 注册时机 |
@@ -187,7 +206,7 @@ dsh-web Spawn 预检 LookPath("dsh")
 | 端口 | `--port 0` + 抓 listening 行 | 同 ✅ |
 | 认证 | Basic auth（密码注入 env） | 无认证，信任栅栏（loopback） |
 | 工作区限制 | **只警告不拦截**：DOM 注入隐藏入口 + 代理层监测 + 常驻警告条 + 版本门 | **沙箱 OS 级硬强制（dsh 自带，非 myworktree 添加）** + patch/插件裁剪 UI 入口 + 观察式监测只提醒（同 opencode 语义） |
-| 跨 worktree 会话可见性 | 共享 db，天然可读全项目历史 | 共享 `$DSH_HOME` 同语义；隔离 DSH_HOME 则丢历史 |
+| 跨 worktree 会话可见性 | 共享 db，天然可读全项目历史 | 按 worktree 重定向 sessions/storages（§2.3）：同 worktree 跨进程互通、跨 worktree 数据层隔离；裸终端手动 dsh 的会话除外 |
 | 定制途径 | 无组合机制 → 只能 fork 源码或 DOM 注入 hack（升级脆弱，需 L1/L2/L3 三层检测兜底） | **cordis patch overlay 是官方机制**，裁剪走配置不走 hack，升级跟随性更好 |
 | 嵌入成本 | 重：URL 重写、CSP hash、localStorage 自愈、锚点检测 | 轻：独立 origin 反代，零改写 |
 | 反代注意点 | SSE | WebSocket（Upgrade）+ fetch RPC |
@@ -210,7 +229,7 @@ dsh-web Spawn 预检 LookPath("dsh")
 ## 7. 结论
 
 - **可行，且集成成本低于 opencode-web 当年**：上游形态同构（serve+内嵌 UI、`--port 0`、stdout 就绪行、优雅关停），myworktree 的 `Kind` 框架已有两个 HTTP-backed 先例，`dsh-web` kind 基本是 opencode-web driver 的裁剪复制 + 独立 origin 反代。
-- **工作区限制在 harness 里是"过强"而非"缺失"**：OS 级沙箱按会话 cwd 硬限制文件效果（dsh 自带，myworktree 零介入）；myworktree 按用户决策只做 opencode 式外围工作——**禁用/置灰多工作区 UI 入口**（patch/插件裁剪）+ **观察式监测只提醒**（不拦截）+ 共享 DSH_HOME 下处理侧栏串台。
+- **工作区限制在 harness 里是"过强"而非"缺失"**：OS 级沙箱按会话 cwd 硬限制文件效果（dsh 自带，myworktree 零介入）；myworktree 按用户决策做两层外围工作——**数据面按 worktree 重定向**（§2.3：进程间工作区/会话不互通、同 worktree 会话互通）+ opencode 式**禁用入口 / 观察式监测只提醒**（不拦截，§2.2）。
 - 唯一需要投入少量新代码的点：①代理层对 `session.create`/`workspace.create` body 的**观察式**监测（只 Record 越界，不拦截）；②iframe 外常驻警告条（三态）与版本门/锚点检测的 UX 平移；③restrict overlay + 微型 client plugin 的维护（随 dsh 升级核对行 id / slot 名）；④缺依赖的交互流程（§4：LookPath 预检 + npx/安装选择对话框 + `npm prefix -g` 绝对路径启动，均免重启）。
 
 如果后续要推进，建议的第一步是：在 worktree 里手动 `DSH_HOME=<临时目录> dsh web --port 0` 验证就绪行抓取与 `GET /` 健康探针，再跑一次带 Origin 剥离的反代冒烟，即可锁定全部风险点。
