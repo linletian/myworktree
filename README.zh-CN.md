@@ -1,6 +1,6 @@
 # myworktree
 
-> **一个类似 ORCA 的轻量级 agents team 编排工具** —— 让多个 AI coding CLI 在同一仓库里并行工作，每个 CLI 拥有独立的 git worktree 工作区与可重连的长连接终端，统一的最小可用 Web UI 让你随时查看、回放输出并继续交互。
+> **一个类似 ORCA 的轻量级 git worktree + AI agent 运行管理工具** —— 让多个 AI coding CLI 在同一仓库里并行工作，每个 CLI 拥有独立的 git worktree 工作区与可重连的长连接终端，统一的最小可用 Web UI 让你随时查看、回放输出并继续交互。
 
 - English: [README.md](./README.md)
 - 文档： [PRD](./docs/PRD.md) · [架构](./docs/ARCHITECTURE.md) · [API](./docs/API.md)
@@ -37,12 +37,12 @@ curl -fsSL https://raw.githubusercontent.com/linletian/myworktree/main/scripts/i
 - **分支 divergence 徽标** —— 一眼看清分支相对上游 ahead / behind 状态，支持定时刷新。
 
 ## 背景与痛点
-当你在同一个项目里并行多个需求/修复（尤其需要多个 AI coding CLI 工具并行协作与互相审核）时，常见问题是：
+当你在同一个项目里并行多个需求/修复（尤其需要多个 AI coding CLI 工具并行处理不同任务）时，常见问题是：
 - 一个工作目录被“半成品改动 + 依赖安装 + 临时脚本”污染，切换任务成本高
 - 终端窗口越开越多：跑测试/构建/搜索/Review，不知道哪个还在跑、输出去哪了
 - 关闭/刷新页面后，长时间运行的 CLI 进程容易中断，或无法找回之前输出
 
-一个典型工作流可能是：GPT/GLM 起草文档，Claude/MiniMax 负责 coding 落地，Qwen 负责 review；要让这种分工高效运转，往往需要“按角色隔离工作区 + 长连接可重连的终端进程”。
+一个典型工作流可能是：GPT/GLM 起草文档，Claude/MiniMax 负责 coding 落地，Qwen 负责 review；每个工具跑在各自的 worktree 里、各自的长连接可重连终端上，你在 Web UI 里来回切换。（myworktree 不做 agent 之间的编排——只负责隔离和运行，调度由你掌握。）
 
 ## myworktree 的做法
 myworktree 只做管理，不碰项目具体内容：

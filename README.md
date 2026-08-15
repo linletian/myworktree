@@ -1,6 +1,6 @@
 # myworktree
 
-> **An ORCA-like lightweight agents team orchestrator** — spin up multiple AI coding CLIs side-by-side, each in its own isolated git worktree with a persistent re-attachable terminal, and steer them all from a minimal Web UI.
+> **An ORCA-like lightweight git worktree + AI agent run manager** — spin up multiple AI coding CLIs side-by-side, each in its own isolated git worktree with a persistent re-attachable terminal, and steer them all from a minimal Web UI.
 
 - 中文说明: [README.zh-CN.md](./README.zh-CN.md)
 - Docs: [PRD](./docs/PRD.md) · [Architecture](./docs/ARCHITECTURE.md) · [API](./docs/API.md)
@@ -37,12 +37,12 @@ macOS and Linux · `~/.local/bin` · no `sudo` · see [Install (full reference)]
 - **Branch divergence badge** — see at a glance when a branch is ahead of or behind its upstream, with scheduled refresh.
 
 ## Background & pain points
-When you’re juggling multiple coding tasks in the same repo (often with multiple AI coding CLIs collaborating/reviewing each other), it’s easy to end up with:
+When you’re juggling multiple coding tasks in the same repo (often with multiple AI coding CLIs working in parallel on different tasks), it’s easy to end up with:
 - One working directory polluted by half-finished changes, dependency installs, and temporary scripts
 - Too many terminals to track (build/test/search/review), with no single place to see what’s still running
 - Long-running CLI processes that die when you close a window, or that you can’t easily reattach to later
 
-A common workflow looks like: GPT/GLM drafts docs, Claude/MiniMax implements changes, and Qwen does review — which works best when each “role” has an isolated workspace and a persistent, re-attachable terminal.
+A common workflow looks like: GPT/GLM drafts docs, Claude/MiniMax implements changes, and Qwen does review — each tool runs in its own worktree with its own persistent, re-attachable terminal; you switch between them from the Web UI. (myworktree does not orchestrate the agents — it isolates and runs them; you stay in the driver’s seat.)
 
 ## What myworktree does
 myworktree is a thin management layer that:
