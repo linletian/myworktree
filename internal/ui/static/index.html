@@ -704,6 +704,23 @@
         #reasonix-frames { flex: 1; min-height: 0; display: flex; flex-direction: column; }
         .reasonix-frame { width: 100%; flex: 1; min-height: 0; border: 0; }
         .reasonix-frame[hidden] { display: none !important; }
+        /* dsh web frame — DeepSeek Harness UI on a per-instance dedicated
+           origin (kinds/dsh_web.js). Same panel/loading/warning pattern as
+           opencode-web, dsh-prefixed ids. */
+        #dsh-panel { width: 100%; height: 100%; display: flex; flex-direction: column; }
+        #dsh-panel[hidden] { display: none !important; }
+        #dsh-frames { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+        #dsh-loading { flex: 1; min-height: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; color: var(--text-secondary, #586069); font-size: 13px; padding: 12px; box-sizing: border-box; }
+        #dsh-loading[hidden] { display: none !important; }
+        .dsh-loading-spinner { width: 26px; height: 26px; border: 3px solid rgba(9,105,218,0.2); border-top-color: #0969da; border-radius: 50%; animation: opencode-loading-spin 0.8s linear infinite; }
+        .dsh-loading-title { font-size: 14px; font-weight: 600; }
+        .dsh-loading-info { font-family: monospace; font-size: 12px; line-height: 1.6; white-space: pre-wrap; word-break: break-all; background: rgba(0,0,0,0.04); border: 1px solid var(--border-color, #e1e4e8); border-radius: 6px; padding: 8px 12px; max-width: 92%; }
+        .dsh-frame { width: 100%; flex: 1; min-height: 0; border: 0; }
+        .dsh-frame[hidden] { display: none !important; }
+        #dsh-scope-warning { flex: 0 0 auto; width: 100%; box-sizing: border-box; padding: 6px 12px; font-size: 12px; line-height: 1.4; color: #7c2d12; background: #ffedd5; border-bottom: 1px solid #fdba74; word-break: break-all; }
+        #dsh-scope-warning[hidden] { display: none !important; }
+        #dsh-scope-warning.dsh-warning-danger { color: #991b1b; background: #fee2e2; border-color: #fca5a5; }
+        .badge-dsh { background: #0969da; color: #fff; border-radius: 4px; padding: 1px 5px; font-size: 10px; margin-right: 4px; vertical-align: middle; font-family: monospace; letter-spacing: 0.5px; }
 
         .status-running {
             background: var(--status-running);
@@ -1314,6 +1331,10 @@
                     <div id="opencode-scope-warning" hidden></div>
                     <div id="opencode-frames"></div>
                 </div>
+                <div id="dsh-panel" hidden>
+                    <div id="dsh-scope-warning" hidden></div>
+                    <div id="dsh-frames"></div>
+                </div>
                 <div id="reasonix-panel" hidden>
                     <div id="reasonix-frames"></div>
                 </div>
@@ -1459,6 +1480,7 @@
             <button type="button" class="modal-tab active" data-tab="terminal" role="tab" aria-selected="true" onclick="switchStartInstanceTab('terminal')">Terminal</button>
             <button type="button" class="modal-tab" data-tab="opencode-web" role="tab" aria-selected="false" onclick="switchStartInstanceTab('opencode-web')">Opencode-Web</button>
             <button type="button" class="modal-tab" data-tab="reasonix" role="tab" aria-selected="false" onclick="switchStartInstanceTab('reasonix')">Reasonix</button>
+            <button type="button" class="modal-tab" data-tab="dsh-web" role="tab" aria-selected="false" onclick="switchStartInstanceTab('dsh-web')">Dsh-Web</button>
         </div>
         <div class="modal-body">
             <div id="modal-tab-terminal" class="modal-tab-panel">
@@ -1495,6 +1517,16 @@
                     <input id="instNameRx" placeholder="e.g. reasonix" />
                 </div>
             </div>
+            <div id="modal-tab-dsh-web" class="modal-tab-panel" hidden>
+                <div class="form-info">
+                    <strong>在浏览器里使用 DeepSeek Harness 官方 web UI。</strong>
+                    在所选 worktree 里启动 <code>dsh web</code>（无头 HTTP server + 内嵌 SPA），并在实例页签中内嵌其界面。工作区注册表按 worktree 隔离、会话池与终端运行的 dsh 共享、越界只提醒。未安装 dsh 时启动会弹窗引导（npx 启动 / 立即安装）。
+                </div>
+                <div class="form-group">
+                    <label>Name (Optional)</label>
+                    <input id="instNameDsh" placeholder="e.g. dsh-web" />
+                </div>
+            </div>
             <div class="form-actions">
                 <button onclick="closeModal('modal-start-instance')">Cancel</button>
                 <button class="primary" onclick="doStartInstance()">Start</button>
@@ -1519,6 +1551,33 @@
             <div class="form-actions">
                 <button onclick="closeModal('modal-budget-error')">Close</button>
             </div>
+        </div>
+    </dialog>
+
+    <!-- Modal: dsh not installed (missing-dependency dialog, PLAN.md §缺失依赖).
+         Shown by kinds/dsh_web.js when a dsh-web instance is failed with a
+         structured missing_dsh state. Three options: npx launch (pinned
+         version, process-group cleanup handled by the driver) / install now
+         (npm install -g + absolute-bin spawn) / cancel. -->
+    <dialog id="modal-dsh-missing">
+        <div class="modal-titlebar">
+            <span class="modal-title" id="dsh-missing-title">dsh 未安装</span>
+            <button class="modal-close-btn" onclick="dshWebCloseMissingDialog()" title="Close">
+                <svg width="10" height="10" viewBox="0 0 10 10" fill="none" xmlns="http://www.w3.org/2000/svg">
+                    <line x1="1" y1="1" x2="9" y2="9" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                    <line x1="9" y1="1" x2="1" y2="9" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                </svg>
+            </button>
+        </div>
+        <div class="modal-body">
+            <p id="dsh-missing-body" style="margin-bottom: 12px; line-height: 1.5;"></p>
+            <div class="form-actions" style="flex-wrap: wrap; justify-content: flex-start; gap: 8px;">
+                <button class="primary" id="dsh-missing-npx" onclick="dshWebChooseMissingAction('npx')">用 npx 启动（推荐）</button>
+                <button id="dsh-missing-install" onclick="dshWebChooseMissingAction('install')">立即安装 (npm install -g)</button>
+                <button onclick="dshWebCloseMissingDialog()">取消</button>
+            </div>
+            <p id="dsh-missing-progress" style="margin-top: 10px; color: var(--text-secondary); font-size: 13px; white-space: pre-wrap;" hidden></p>
+            <p id="dsh-missing-error" style="margin-top: 10px; color: #991b1b; font-size: 13px; white-space: pre-wrap;" hidden></p>
         </div>
     </dialog>
 
@@ -1585,12 +1644,17 @@
     <script src="/static/kinds/pty.js"></script>
     <script src="/static/kinds/opencode_web.js"></script>
     <script src="/static/kinds/reasonix.js"></script>
+    <script src="/static/kinds/dsh_web.js"></script>
     <script>
         const token = new URLSearchParams(location.search).get("token") || "";
         const headers = token ? { Authorization: `Bearer ${token}` } : {};
         const SERVER_REV_HEADER = "x-myworktree-server-rev";
         const SERVER_UPGRADED_FLAG = "myworktree-server-upgraded";
         const MAIN_WT_ID = "__main__";
+        // Every kind with an embedded web UI (iframe renderer). New web-ui
+        // kinds must be appended here — the shared panels/badges/cleanup
+        // loops iterate this list.
+        const WEB_UI_KINDS = ['opencode-web', 'reasonix', 'dsh-web'];
         let knownServerRev = "";
         let serverRevReloading = false;
 
@@ -2323,6 +2387,7 @@
               <span class="tab-status ${statusClass}"></span>
               ${i.kind === 'opencode-web' ? '<span class="badge-oc">OC</span>' : ''}
               ${i.kind === "reasonix" ? '<span class="rx-badge" title="Reasonix web UI">rx</span>' : ""}
+              ${i.kind === 'dsh-web' ? '<span class="badge-dsh" title="DeepSeek Harness web UI">DS</span>' : ''}
                ${displayName}
             </div>
           `;
@@ -2494,6 +2559,8 @@
                 const inst = state.instances.find(i => i.id === state.activeInst);
                 const isOC = inst && inst.kind === 'opencode-web';
                 const isRX = inst && inst.kind === 'reasonix';
+                const isDSH = inst && inst.kind === 'dsh-web';
+                const isWeb = !!(isOC || isRX || isDSH);
                 empty.style.display = "none";
                 // The refresh / scroll-to-bottom shortcuts overlay the
                 // terminal's top-right corner; they are meaningless for the
@@ -2503,13 +2570,13 @@
                 // element's default layout. toggle(name, flag) in both
                 // branches — keep the forms identical so future edge
                 // conditions (e.g. hide while loading) can't mis-match.
-                if (controls) controls.classList.toggle("oc-hidden", !!(isOC || isRX));
-                // For opencode-web / reasonix instances the kind renderers
-                // own the visibility of their panels and the terminal
-                // container. renderWorkspace must NOT overwrite them, or the
-                // 8-second refresh cycle will fight the renderer and hide
-                // the iframe.
-                if (!isOC && !isRX) {
+                if (controls) controls.classList.toggle("oc-hidden", isWeb);
+                // For opencode-web / reasonix / dsh-web instances the kind
+                // renderers own the visibility of their panels and the
+                // terminal container. renderWorkspace must NOT overwrite
+                // them, or the 8-second refresh cycle will fight the
+                // renderer and hide the iframe.
+                if (!isWeb) {
                     termContainer.style.display = "block";
                     if (ocPanel) ocPanel.hidden = true;
                     if (rxPanel) rxPanel.hidden = true;
@@ -2517,12 +2584,12 @@
                 actions.classList.add("visible");
 
                 // Styling for stopped instance (terminal kind only)
-                if (!isOC && !isRX && inst && inst.status !== 'running') {
+                if (!isWeb && inst && inst.status !== 'running') {
                     termContainer.style.opacity = "0.6";
                     termContainer.style.filter = "grayscale(100%)";
                     const session = getActiveTerminalSession();
                     if (session && session.term) session.term.options.cursorBlink = false;
-                } else if (!isOC && !isRX) {
+                } else if (!isWeb) {
                     termContainer.style.opacity = "1";
                     termContainer.style.filter = "none";
                     const session = getActiveTerminalSession();
@@ -2555,10 +2622,10 @@
             // Update Tags select
             const ts = document.getElementById("tagSelect");
             if (state.tags) {
-                // Terminal tab: filter out opencode-web (it's only
-                // available via the Opencode-Web tab — complete
+                // Terminal tab: filter out the web-ui kinds (opencode-web /
+                // dsh-web are only available via their own tabs — complete
                 // isolation per the product principle).
-                const ptyTags = state.tags.filter(t => t.id !== 'opencode-web');
+                const ptyTags = state.tags.filter(t => t.id !== 'opencode-web' && t.id !== 'dsh-web');
                 const opts = '<option value="">-- select --</option>' +
                     ptyTags.map(t => {
                         let details = [];
@@ -2624,14 +2691,16 @@
             const kind = (inst && inst.kind) || 'pty';
             const renderer = (window.KindRenderers || {})[kind];
             const session = { id: id, instance: inst };
-            // Web-ui panels are mutually exclusive: hide both before
+            // Web-ui panels are mutually exclusive: hide them all before
             // dispatching so the activated renderer's panel is the only
             // visible one (prevents the stacked half/half layout when
-            // switching between opencode-web and reasonix).
+            // switching between web-ui kinds).
             const ocPanel = document.getElementById('opencode-panel');
             const rxPanel = document.getElementById('reasonix-panel');
+            const dshPanel = document.getElementById('dsh-panel');
             if (ocPanel) ocPanel.hidden = true;
             if (rxPanel) rxPanel.hidden = true;
+            if (dshPanel) dshPanel.hidden = true;
             // Deactivate the previously-active renderer first so it
             // can release any listeners / hide its panel cleanly.
             if (previousID) {
@@ -2649,6 +2718,9 @@
                 }
                 if (kind === 'reasonix') {
                     updateStatus(inst && inst.status === 'running' ? 'reasonix web' : 'stopped');
+                }
+                if (kind === 'dsh-web') {
+                    updateStatus(inst && inst.status === 'running' ? 'dsh web ui' : 'stopped');
                 }
                 maybeDestroyInactiveStoppedSession(previousID);
                 return;
@@ -2758,6 +2830,7 @@
             document.getElementById("instName").value = "";
             document.getElementById("instNameOc").value = "";
             document.getElementById("instNameRx").value = "";
+            document.getElementById("instNameDsh").value = "";
             document.getElementById("tagSelect").value = "";
             openModal("modal-start-instance");
         }
@@ -2863,6 +2936,14 @@
                         name: document.getElementById("instNameRx").value || 'reasonix',
                         kind: 'reasonix',
                     };
+                } else if (tabName === 'dsh-web') {
+                    body = {
+                        worktree_id: state.activeWT,
+                        tag_id: 'dsh-web',
+                        command: '',
+                        name: document.getElementById("instNameDsh").value || 'dsh-web',
+                        kind: 'dsh-web',
+                    };
                 } else {
                     const tagId = document.getElementById("tagSelect").value;
                     body = {
@@ -2914,7 +2995,7 @@
                 // Release a stopped web-ui instance's cached iframe
                 // immediately (its backend is gone); otherwise it lingers in
                 // the DOM until the next tab switch.
-                if (stoppedInst && (stoppedInst.kind === 'opencode-web' || stoppedInst.kind === 'reasonix')) {
+                if (stoppedInst && WEB_UI_KINDS.includes(stoppedInst.kind)) {
                     const renderer = (window.KindRenderers || {})[stoppedInst.kind];
                     if (renderer && typeof renderer.destroyFrame === 'function') renderer.destroyFrame(stoppedId);
                 }
@@ -2941,7 +3022,7 @@
                 await api("/api/instances/delete", { method: "POST", body: JSON.stringify({ id: deletedId }) });
                 // Release the deleted web-ui instance's cached iframe so it
                 // doesn't linger in the DOM / keep the page loaded.
-                for (const kind of ['opencode-web', 'reasonix']) {
+                for (const kind of WEB_UI_KINDS) {
                     const renderer = (window.KindRenderers || {})[kind];
                     if (renderer && typeof renderer.destroyFrame === 'function') renderer.destroyFrame(deletedId);
                 }
