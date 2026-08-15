@@ -102,7 +102,66 @@ myworktree 的 `framework.Kind` 接口（`internal/framework/kind.go`）已被 o
 
 ---
 
-## 4. 与 opencode-web 方案对比
+## 4. 缺失依赖处理：npx 与安装的交互选择（已确认）
+
+**用户决策**：未检测到 `dsh` 时，由用户在「npx 启动 / 直接安装 / 取消」之间交互选择，不做静默决策。
+
+### 4.1 事实基础：PATH 快照语义（是否需要重启 myworktree）
+
+- 三个既有 kind 都是**每次 Start 现读环境**：opencode-web 的 `buildEnv()` 每次 Spawn 现读 `os.Environ()`（`driver.go:315`），reasonix 的 `exec.LookPath` 在每次 `Start()` 现查（`driver.go:201`），pty 每次 `cmd.Env = os.Environ()`（`driver.go:94`）。不存在启动时缓存的二进制列表。
+- 因此"安装后要不要重启"完全取决于安装落点是否已在 myworktree 继承的 PATH 里：
+
+  | 安装落点 | 是否需重启 myworktree |
+  | --- | --- |
+  | 已在 myworktree 继承 PATH 中的目录（`~/.local/bin`、`/usr/local/bin`、已在 PATH 的 npm global bin） | **否**，下一次 Start 即找到 |
+  | 新目录，且安装器把 PATH 写进 shell rc，而 myworktree 从 GUI/旧 shell 启动（进程 env 不会更新） | **是**；或走 §4.3 绝对路径启动绕过 |
+
+- npm 全局安装的常见坑正是第二种：`npm i -g` 的 prefix 未必在 GUI 进程的 PATH 里。
+
+### 4.2 npx 方式（免安装、免重启）
+
+命令形态：`npx --yes @deepseek-ai/dsh@<pin> web --port 0`
+
+- 就绪行透传：npx 以 stdio inherit 运行 dsh，`dsh web: http://127.0.0.1:<port>` 正常出现在 stdout，现有监听行正则照抓。
+- `--yes` 跳过 npx 自身的安装确认；`@<pin>` 固定版本使缓存命中后不查 registry（避免离线失败/启动变慢）。
+- **进程树清理（关键坑）**：npx 是 dsh 的父进程，只杀 npx 的 PID 会留下孤儿 dsh 占用端口。dsh-web 必须 `Setpgid: true` + 杀 `-pid` 进程组（先例：`reasonix/driver.go:274`、`pty/driver.go:216`；opencode-web 目前只杀单 PID，不可照抄）。
+- 前提：npm 在 myworktree 的 PATH 中（与 node 同目录）。
+
+### 4.3 直接安装方式（安装后同样免重启）
+
+- myworktree 代跑 `npm install -g @deepseek-ai/dsh`（后台 job；`npm install` 作为 tag preStart 已是文档示例，语义延伸即可）。
+- 安装完成后**不依赖重启**：用 `npm prefix -g` 动态求出全局 bin 目录（prefix 不在 PATH 也能求），以**绝对路径**直接 Spawn——绕开 §4.1 的 PATH 快照问题。
+- 兜底：候选目录探测列表（`npm prefix -g`/bin、`~/.local/bin`、`~/.npm-global/bin`）依次 LookPath；全失败才提示用户重启 myworktree 或手动配置。
+- 注：npm 安装的包自带前端 dist（`apps/web/package.json files: ["dist"]`），安装即完整可用；源码 checkout 场景才需要 `pnpm build`（见 §6 风险 1）。
+
+### 4.4 交互流程设计
+
+```
+dsh-web Spawn 预检 LookPath("dsh")
+  ├─ 找到 → 正常启动（后续可选版本门）
+  └─ 未找到 → 返回专用错误 ErrDshNotFound{npmAvailable, suggestedPin}
+        → markFailed + last_error
+        → 前端 kinds/dsh_web.js 识别该错误 → 弹对话框：
+            〔用 npx 启动〕→ 以 npx 命令重试（命令形态 §4.2；也可预置为 tag 默认值，经现有 /api/tags 自行切换）
+            〔立即安装〕  → 代跑 npm i -g + npm prefix -g 求绝对路径 → 重试（§4.3）
+            〔取消〕      → 保持 failed，展示原始提示
+```
+
+- 预检错误必须带可读安装提示（对齐 reasonix 的 LookPath 提示风格，`reasonix/driver.go:198-205`），而不是 opencode-web 的原始 exec 错误（`opencode start: exec: "opencode": executable file not found in $PATH`）。
+- 版本门：dsh 迭代快，建议沿用 reasonix 的硬版本门（`checkVersion`，issue #45 先例），具体在 PLAN 阶段定。
+
+### 4.5 与既有 kind 的缺失依赖处理对比
+
+| 环节 | opencode-web | reasonix | dsh-web（本设计） |
+| --- | --- | --- | --- |
+| 二进制缺失预检 | ❌ 原始 exec 错误 | ✅ LookPath + 安装提示 + ReasonixBin | ✅ LookPath + 专用错误 + 交互选择 |
+| 安装/替代引导 | ❌ 无 | 仅文字提示 | ✅ UI 对话框（npx / 安装 / 取消） |
+| 版本门 | advisory 警告条 | 硬门 fail-fast | 待定（PLAN 阶段，倾向硬门） |
+| 进程树清理 | 单 PID | 进程组 | 进程组（npx 形态必须） |
+
+---
+
+## 5. 与 opencode-web 方案对比
 
 | 维度 | opencode-web（现状） | dsh-web（本方案） |
 | --- | --- | --- |
@@ -119,7 +178,7 @@ myworktree 的 `framework.Kind` 接口（`internal/framework/kind.go`）已被 o
 
 ---
 
-## 5. 风险与注意事项
+## 6. 风险与注意事项
 
 1. **前端 dist 必须构建**：`resolveDistIndex` 找不到 `@deepseek-ai/dsh-web-frontend/dist/index.html` 会启动即失败并提示 `pnpm run build`（`packages/bundle/web-app/src/index.ts`）。用 npm 安装的 `dsh` 没问题；若要从源码 checkout 跑，需纳入实例 preStart 或预构建。dist 体积未实测（vendor chunk 含 katex/shiki/markdown，预计数 MB）。
 2. **无认证面**：代理把 `settings`/`credentials`（含凭据描述能力）暴露给代理入口——portal 必须叠自己的 token；且代理需严格删 Origin、只回填 loopback Host。
@@ -130,11 +189,11 @@ myworktree 的 `framework.Kind` 接口（`internal/framework/kind.go`）已被 o
 
 ---
 
-## 6. 结论
+## 7. 结论
 
 - **可行，且集成成本低于 opencode-web 当年**：上游形态同构（serve+内嵌 UI、`--port 0`、stdout 就绪行、优雅关停），myworktree 的 `Kind` 框架已有两个 HTTP-backed 先例，`dsh-web` kind 基本是 opencode-web driver 的裁剪复制 + 独立 origin 反代。
 - **工作区限制在 harness 里是"过强"而非"缺失"**：OS 级沙箱按会话 cwd 硬限制文件效果，比 opencode 的警告式监测严格一个量级；需要做的是反向收紧它的**多工作区 UI 入口**（patch 裁剪）和**会话创建面**（代理拦截 cwd），并在 DSH_HOME 共享策略下处理侧栏串台。
-- 唯一需要投入少量新代码的点：①代理层对 `session.create`/`workspace.create` 的 body 拦截（硬钉子）；②（可选）越界监测 + 警告条的 UX 平移；③restrict overlay 的维护（随 dsh 升级核对行 id）。
+- 唯一需要投入少量新代码的点：①代理层对 `session.create`/`workspace.create` 的 body 拦截（硬钉子）；②（可选）越界监测 + 警告条的 UX 平移；③restrict overlay 的维护（随 dsh 升级核对行 id）；④缺依赖的交互流程（§4：LookPath 预检 + npx/安装选择对话框 + `npm prefix -g` 绝对路径启动，均免重启）。
 
 如果后续要推进，建议的第一步是：在 worktree 里手动 `DSH_HOME=<临时目录> dsh web --port 0` 验证就绪行抓取与 `GET /` 健康探针，再跑一次带 Origin 剥离的反代冒烟，即可锁定全部风险点。
 
