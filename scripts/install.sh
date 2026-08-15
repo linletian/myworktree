@@ -137,13 +137,30 @@ extracted_dir=$(find "${tmp_dir}" -maxdepth 1 -mindepth 1 -type d \
 # --- existing-binary conflict detection ---------------------------------
 # Refuse to overwrite if the destination exists and is NOT a myworktree binary.
 # (mw is a 2-letter name; Debian/Ubuntu's `mw` package is a real clash.)
+# Detection ladder, in order:
+#   1) `<path> --version` output mentions the string "myworktree"  (cheap, fast)
+#   2) `<path> --version` output looks like the myworktree version line
+#      (`<prog> vX.Y.Z (<commit>) built <date>`) — the prog name may be
+#      "mw" (symlink), "myworktree", or anything else the user renamed,
+#      so the text alone doesn't include "myworktree"
+#   3) `strings <path>` contains "myworktree" — catches cases where the
+#      binary is a valid myworktree build but --version is broken (rare)
 check_existing() {
   local path="$1" label="$2"
   [ ! -e "$path" ] && return 0
   local out
   out=$("$path" --version 2>/dev/null || echo "")
   if echo "$out" | grep -qi "$APP"; then
-    info "Existing ${label} is an older myworktree; will upgrade in place"
+    info "Existing ${label} is an older myworktree (matched 'myworktree' in --version); will upgrade in place"
+    return 0
+  fi
+  if [ -n "$out" ] && echo "$out" | grep -Eq '^[^ ]+ +v[0-9]+\.[0-9]+\.[0-9]+( \([^)]+\))?( built [^ ]+)?$'; then
+    # matches "<prog> vX.Y.Z [(commit)] [built <date>]" — the myworktree format
+    info "Existing ${label} looks like a myworktree build (--version: ${out}); will upgrade in place"
+    return 0
+  fi
+  if command -v strings >/dev/null 2>&1 && strings "$path" 2>/dev/null | grep -q "$APP"; then
+    info "Existing ${label} is a myworktree build (matched 'myworktree' via strings); will upgrade in place"
     return 0
   fi
   die "${path} exists and is NOT myworktree (got: ${out:-non-myworktree binary}).
@@ -248,3 +265,22 @@ echo "  ${APP} --version"
   && echo "  ${INSTALL_ALIAS} --version"
 echo ""
 echo -e "${MUTED}If 'command not found', open a new shell (PATH was added to your rc).${NC}"
+
+# --- running-daemon warning --------------------------------------------
+# The new binary is on disk; an already-running daemon is still on the OLD binary
+# (in-memory code page is unaffected by the file replacement — the kernel keeps
+# the old inode until the process exits). Restart the daemon to pick up the new
+# binary. We do NOT auto-stop: that could hard-kill long-running PTY / opencode
+# / reasonix sessions and discard the in-memory ring buffer + WebSocket state.
+if command -v pgrep >/dev/null 2>&1 && pgrep -x myworktree >/dev/null 2>&1; then
+  echo ""
+  echo -e "${RED}Heads up:${NC} a myworktree daemon is currently running."
+  echo "The installed binary (${version}) will not take effect until you restart it."
+  echo ""
+  echo "Recommended (in a worktree, after stopping work in the UI):"
+  echo "  ${APP} stop   # asks the daemon to stop its instances and exit"
+  echo "  ${APP} start  # spawns a new daemon on the new binary"
+  echo ""
+  echo "Force-kill fallback (only if 'stop' hangs; loses in-memory state):"
+  echo "  pkill -x myworktree"
+fi
