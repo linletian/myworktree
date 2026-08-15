@@ -295,20 +295,38 @@ fi
 echo -e "${MUTED}If 'command not found', open a new shell (PATH was added to your rc).${NC}"
 
 # --- running-daemon warning --------------------------------------------
-# The new binary is on disk; an already-running daemon is still on the OLD binary
-# (in-memory code page is unaffected by the file replacement — the kernel keeps
-# the old inode until the process exits). Restart the daemon to pick up the new
-# binary. We do NOT auto-stop: that could hard-kill long-running PTY / opencode
-# / reasonix sessions and discard the in-memory ring buffer + WebSocket state.
+# The new binary is on disk; an already-running daemon is still on the OLD
+# binary (in-memory code page is unaffected by the file replacement — the
+# kernel keeps the old inode until the process exits). Restart the daemon
+# to pick up the new binary. We do NOT auto-stop: that could hard-kill
+# long-running PTY / opencode / reasonix sessions and discard the
+# in-memory ring buffer + WebSocket state.
 if command -v pgrep >/dev/null 2>&1 && pgrep -x myworktree >/dev/null 2>&1; then
+  pids=$(pgrep -x myworktree | tr '\n' ' ')
   echo ""
-  echo -e "${RED}Heads up:${NC} a myworktree daemon is currently running."
-  echo "The installed binary (${version}) will not take effect until you restart it."
+  echo -e "${RED}Heads up:${NC} a myworktree daemon is currently running (PID(s): ${pids})."
+  echo "The installed binary (${version}) is on disk but the running daemon"
+  echo "is still using the OLD binary. To pick up the new one, save your"
+  echo "work and restart the daemon (steps below)."
   echo ""
-  echo "Recommended (in a worktree, after stopping work in the UI):"
-  echo "  ${APP} stop   # asks the daemon to stop its instances and exit"
-  echo "  ${APP} start  # spawns a new daemon on the new binary"
+  echo -e "${MUTED}Before you restart:${NC}"
+  echo "  - Save anything in the Web UI you haven't sent yet (reasonix chat"
+  echo "    drafts, new-session prompts, in-page text). Restarting closes"
+  echo "    the WebSocket; the in-memory ring buffer for PTY sessions is"
+  echo "    also discarded."
+  echo "  - Decide whether long-running instances can keep going. '${APP} stop'"
+  echo "    asks each running kind to wind down gracefully (PTY/exec sessions"
+  echo "    receive a stop signal; reasonix / opencode serve get a clean"
+  echo "    shutdown). 'pkill -x myworktree' does NOT — it kills the daemon"
+  echo "    immediately and any subprocess the kind had spawned (e.g. an"
+  echo "    opencode serve) is orphaned until you kill it by hand."
   echo ""
-  echo "Force-kill fallback (only if 'stop' hangs; loses in-memory state):"
-  echo "  pkill -x myworktree"
+  echo -e "${MUTED}Restart:${NC}"
+  echo "  ${APP} stop         # graceful: stops instances, then exits"
+  echo "  ${APP} start        # spawns a new daemon on the new binary"
+  echo "  (in any worktree — the daemon does not need to be inside the repo)"
+  echo ""
+  echo -e "${MUTED}Force fallback (only if '${APP} stop' hangs):${NC}"
+  echo "  pkill -x myworktree           # then: kill any orphaned children"
+  echo "  pkill -x opencode             #   e.g. opencode serve, if any"
 fi
