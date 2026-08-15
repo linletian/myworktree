@@ -55,7 +55,7 @@ jobs:
           ldflags="-s -X myworktree/internal/version.Version=${VERSION} -X myworktree/internal/version.Commit=${COMMIT} -X myworktree/internal/version.BuildDate=${build_date}"
           CGO_ENABLED=0 GOOS="${GOOS}" GOARCH="${GOARCH}" go build -trimpath -ldflags "${ldflags}" -o "${dist_dir}/myworktree" ./cmd/myworktree
           CGO_ENABLED=0 GOOS="${GOOS}" GOARCH="${GOARCH}" go build -trimpath -ldflags "${ldflags}" -o "${dist_dir}/mw" ./cmd/mw
-          cp README.md LICENSE CHANGELOG.md "${dist_dir}/"
+          cp README.md README.zh-CN.md LICENSE CHANGELOG.md "${dist_dir}/"
           tar -C dist -czf "dist/${target}.tar.gz" "${target}"
 
       - name: Upload archive
