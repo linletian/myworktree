@@ -104,9 +104,18 @@
 | 工作区注册表（+ 反馈 + 投影缓存） | `$DSH_HOME/storages`（web-app patch 的 `storage-json` 行 `root`） | overlay 重述 `storage-json.root` → `<myworktree-data>/dsh/<worktree-hash>/storages` |
 | 会话日志 | `$DSH_HOME/sessions`（base 的 `session-persistence-jsonl` 行 `root`） | overlay 重述 `session-persistence-jsonl.root` → `<myworktree-data>/dsh/<worktree-hash>/sessions` |
 
-- driver 每次 Spawn 前在实例状态目录生成 restrict overlay（两行 id 重述，路径带 worktree hash），随 `dsh web --patch <overlay> --port 0` 传入——同 worktree 的实例路径一致 → **会话互通**；不同 worktree 路径不同 → **注册表与会话双隔离（数据层，非 UI 隐藏）**。
+**会话面的取舍（用户问题 2026-08-15：实例退出后，终端同位置启动的 dsh 能否拿到该工作区的会话）**：
+
+| 方案 | sessions 根 | 终端同位置拿会话 | 跨 worktree 会话在 web 实例侧栏 |
+| --- | --- | --- | --- |
+| A. sessions 也按 worktree 重定向（当前表内默认） | `<myworktree-data>/dsh/<worktree-hash>/sessions` | ❌ 拿不到（终端读默认 `~/.dsh/sessions`，与进程退出无关，纯目录不同） | 完全不可见（数据不在） |
+| B. **sessions 共享、仅 storages 隔离（建议）** | 默认 `~/.dsh/sessions`（不重定向） | ✅ 同一池，天然互通 | ⚠️ 以「未分组」组可见——`sessions.list` 全量返回、无工作区过滤（`api-proxy.ts` `listVisibleSessionSummaries`）；`groupByWorkspace` 把未被本注册表认领的会话全部放进 Ungrouped 组（`ui-workspace/src/client/tree.ts` stray 逻辑） |
+
+- 方案 B 同时满足：①工作区列表不互通（注册表隔离）；②同工作区会话跨进程互通（共享池）；③终端裸跑 dsh 互通。跨 worktree 会话"可见不可点"（无对应工作区行），与 opencode 式"防误操作、只提醒"哲学一致；若要连 Ungrouped 也藏掉，需 client plugin 在 UI 层过滤（数据仍共享）。
+- 方案 A 的唯一优势是跨 worktree 会话严格不可见，代价是裸终端 dsh 与 web 实例会话面分家（myworktree 的 PTY 终端实例若带同一 overlay 仍可互通）。
+- **待用户决策**：默认按 B 记录（终端互通优先）；如需严格会话隔离再退回 A。
 - 配合 §3「工作区自举」（就绪后 `workspace.create` 注入）→ 侧栏**只有**当前 worktree 的工作区，"启动就是对应工作区"严格成立。越界 UI 入口天然死绝（别的 worktree 数据根本不在），§2.2 的监测只剩 devtools 直调 API 的兜底价值，照旧保留。
-- **边界（必须告知用户）**：裸终端手动跑的 `dsh`（默认 `~/.dsh/sessions`）的会话不会出现在 web 实例中。如需互通，myworktree 的 PTY 终端实例启动 `dsh` 时用同一份 overlay/env——TUI/headless 与 web 共用 base 行 id，同一 overlay 直接适用。
+- **边界（随方案而定）**：方案 A 下裸终端 `dsh` 的会话与 web 实例互不相见（myworktree 的 PTY 终端实例带同一 overlay 可互通）；方案 B 下会话面天然互通，无此边界。
 
 **备选对比**：
 
