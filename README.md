@@ -73,22 +73,53 @@ myworktree is a thin management layer that:
 
 ## Quick start
 
+### One-line install (macOS / Linux)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/linletian/myworktree/main/scripts/install.sh | bash
+```
+
+Installs `myworktree` (and an `mw` alias) to `~/.local/bin` — no `sudo` required.
+PATH is auto-appended to `~/.zshrc` / `~/.bashrc` (open a new shell to pick it up).
+Pin a version, change the install location, or skip PATH modification:
+
+```bash
+curl -fsSL .../install.sh | bash -s -- -v v0.4.2         # pin a version
+INSTALL_ALIAS=mwt bash install.sh                          # avoid the Debian/Ubuntu `mw` clash
+INSTALL_DIR=~/bin bash install.sh                          # install elsewhere
+curl -fsSL .../install.sh | bash -s -- --no-modify-path    # do not touch rc files
+```
+
+The script verifies the SHA256 of the downloaded archive against
+`checksums.txt` from the GitHub release. See
+[`scripts/install.sh`](scripts/install.sh) for the full implementation.
+
 ### Release binaries
 
 If you just want to use `myworktree`, download the latest release assets from GitHub Releases:
 
-- Apple Silicon Macs: `myworktree_vX.Y.Z_darwin_arm64.tar.gz`
-- Intel Macs: `myworktree_vX.Y.Z_darwin_amd64.tar.gz`
+- **macOS** (Apple Silicon): `myworktree_vX.Y.Z_macOS_arm64.tar.gz`
+- **macOS** (Intel): `myworktree_vX.Y.Z_macOS_amd64.tar.gz`
+- **Linux** (amd64): `myworktree_vX.Y.Z_Linux_amd64.tar.gz`
+- **Linux** (arm64, e.g. Raspberry Pi 4/5, AWS Graviton): `myworktree_vX.Y.Z_Linux_arm64.tar.gz`
 - Integrity file: `checksums.txt`
 
 Example:
 
 ```bash
-# Pick the archive that matches your Mac, then verify and unpack it.
-curl -LO https://github.com/linletian/myworktree/releases/download/v0.4.2/myworktree_v0.4.2_darwin_arm64.tar.gz
+# Pick the archive that matches your platform, then verify and unpack it.
+# macOS Apple Silicon:
+curl -LO https://github.com/linletian/myworktree/releases/download/v0.4.2/myworktree_v0.4.2_macOS_arm64.tar.gz
+# macOS Intel (replace arch in the filename):
+#   curl -LO .../myworktree_v0.4.2_macOS_amd64.tar.gz
+# Linux amd64:
+#   curl -LO .../myworktree_v0.4.2_Linux_amd64.tar.gz
+# Linux arm64:
+#   curl -LO .../myworktree_v0.4.2_Linux_arm64.tar.gz
+
 curl -LO https://github.com/linletian/myworktree/releases/download/v0.4.2/checksums.txt
 shasum -a 256 -c checksums.txt --ignore-missing
-tar -xzf myworktree_v0.4.2_darwin_arm64.tar.gz
+tar -xzf myworktree_v0.4.2_macOS_arm64.tar.gz
 
 # Optional: install into PATH
 sudo install -m 755 ./mw /usr/local/bin/mw
@@ -98,16 +129,19 @@ sudo install -m 755 ./myworktree /usr/local/bin/myworktree
 mw --version
 ```
 
+> **macOS Gatekeeper troubleshooting (Apple Silicon & Intel):** macOS may quarantine
+> downloaded binaries and silently prevent execution. If the binary does not respond
+> or shows "cannot be opened":
+> ```bash
+> xattr -d com.apple.quarantine ./mw ./myworktree
+> ```
+> Or open **System Settings → Privacy & Security** and click "Allow Anyway" for the
+> blocked binaries.
+
 Start from `v0.4.2` or newer for public release binaries. The earlier `v0.1.0` GitHub Release assets were withdrawn after post-release validation uncovered severe terminal interaction issues, and `v0.4.2` is the current recommended public release.
 
 Each release archive contains `mw`, `myworktree`, `README.md`, `LICENSE`, and `CHANGELOG.md`.
-If there is no prerelease/release asset yet, or you need a platform we do not publish, follow the source build steps below.
-
-**Apple Silicon troubleshooting:** macOS may quarantine downloaded binaries and silently prevent execution (Gatekeeper). If the binary does not respond or shows "cannot be opened":
-```bash
-xattr -d com.apple.quarantine ./mw ./myworktree
-```
-Or open **System Settings → Privacy & Security** and click "Allow Anyway" for the blocked binaries.
+If you need a platform we do not publish, follow the source build steps below.
 
 ### Build & install
 

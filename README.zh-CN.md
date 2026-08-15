@@ -74,22 +74,52 @@ myworktree 只做管理，不碰项目具体内容：
 
 ## 快速开始
 
+### 一行安装（macOS / Linux）
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/linletian/myworktree/main/scripts/install.sh | bash
+```
+
+把 `myworktree`（及 `mw` 别名）装到 `~/.local/bin`，**不需要 sudo**。
+脚本会自动把 PATH 追加到 `~/.zshrc` / `~/.bashrc`（新开终端生效）。
+可指定版本、改安装路径、跳过 PATH 修改：
+
+```bash
+curl -fsSL .../install.sh | bash -s -- -v v0.4.2         # 指定版本
+INSTALL_ALIAS=mwt bash install.sh                          # 避开 Debian/Ubuntu 的 `mw` 占用
+INSTALL_DIR=~/bin bash install.sh                          # 装到自定义目录
+curl -fsSL .../install.sh | bash -s -- --no-modify-path    # 不改 rc 文件
+```
+
+脚本会用 GitHub Release 的 `checksums.txt` 校验下载文件的 SHA256。
+完整实现见 [`scripts/install.sh`](scripts/install.sh)。
+
 ### 发布版使用
 
 如果你只是想直接使用 `myworktree`，推荐从 GitHub Releases 下载已打包的发布版：
 
-- Apple Silicon Mac：`myworktree_vX.Y.Z_darwin_arm64.tar.gz`
-- Intel Mac：`myworktree_vX.Y.Z_darwin_amd64.tar.gz`
+- **macOS**（Apple Silicon）：`myworktree_vX.Y.Z_macOS_arm64.tar.gz`
+- **macOS**（Intel）：`myworktree_vX.Y.Z_macOS_amd64.tar.gz`
+- **Linux**（amd64）：`myworktree_vX.Y.Z_Linux_amd64.tar.gz`
+- **Linux**（arm64，例如树莓派 4/5、AWS Graviton）：`myworktree_vX.Y.Z_Linux_arm64.tar.gz`
 - 校验文件：`checksums.txt`
 
 示例：
 
 ```bash
-# 根据你的 Mac 机型选择对应压缩包，然后校验并解压
-curl -LO https://github.com/linletian/myworktree/releases/download/v0.4.2/myworktree_v0.4.2_darwin_arm64.tar.gz
+# 根据你的平台选择对应压缩包，然后校验并解压
+# macOS Apple Silicon：
+curl -LO https://github.com/linletian/myworktree/releases/download/v0.4.2/myworktree_v0.4.2_macOS_arm64.tar.gz
+# macOS Intel（替换文件名中的架构字段）：
+#   curl -LO .../myworktree_v0.4.2_macOS_amd64.tar.gz
+# Linux amd64：
+#   curl -LO .../myworktree_v0.4.2_Linux_amd64.tar.gz
+# Linux arm64：
+#   curl -LO .../myworktree_v0.4.2_Linux_arm64.tar.gz
+
 curl -LO https://github.com/linletian/myworktree/releases/download/v0.4.2/checksums.txt
 shasum -a 256 -c checksums.txt --ignore-missing
-tar -xzf myworktree_v0.4.2_darwin_arm64.tar.gz
+tar -xzf myworktree_v0.4.2_macOS_arm64.tar.gz
 
 # 可选：安装到 PATH
 sudo install -m 755 ./mw /usr/local/bin/mw
@@ -99,16 +129,17 @@ sudo install -m 755 ./myworktree /usr/local/bin/myworktree
 mw --version
 ```
 
+> **macOS Gatekeeper 排障提示（Apple Silicon 与 Intel 均适用）：** macOS 会对从网络下载的
+> 二进制文件施加隔离属性，可能导致二进制无响应或提示"无法验证开发者"。可运行：
+> ```bash
+> xattr -d com.apple.quarantine ./mw ./myworktree
+> ```
+> 或在 **系统设置 → 隐私与安全性** 中为被阻止的二进制文件点击"仍要打开"。
+
 建议从 `v0.4.2` 或更新版本开始使用公开发布版二进制。更早的 `v0.1.0` GitHub Release 资产在补充实测中发现严重终端交互问题后已撤回，而 `v0.4.2` 是当前推荐的公开发布版本。
 
 每个发布压缩包内都包含 `mw`、`myworktree`、`README.md`、`LICENSE` 和 `CHANGELOG.md`。
-如果当前还没有预发布/正式发布压缩包，或者你的平台暂无对应产物，就直接使用下面的源码编译步骤。
-
-**Apple Silicon 排障提示：** macOS 会对从网络下载的二进制文件施加隔离属性（Gatekeeper），可能导致二进制无响应或提示"无法验证开发者"。可运行：
-```bash
-xattr -d com.apple.quarantine ./mw ./myworktree
-```
-或在 **系统设置 → 隐私与安全性** 中为被阻止的二进制文件点击"仍要打开"。
+如果你的平台暂无对应产物，就直接使用下面的源码编译步骤。
 
 ### Build & install
 
