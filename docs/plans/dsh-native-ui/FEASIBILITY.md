@@ -6,7 +6,7 @@
 >
 > 调研时间：2026-08（分支 `feature/dsh-native-ui`，基线 `develop@5b3bf54`）。
 >
-> 结论一句话：**可行**。`dsh web` 本身就是一个「无头 HTTP server + 嵌入式 SPA」，形态与 `opencode serve` 高度同构，完全可以按 opencode-web 的既有模式做成 myworktree 的 `dsh-web` 实例 kind；且 harness 的**工作区限制（沙箱策略）是 OS 级硬强制，比 opencode 的"防误操作监测"更强**，但 UI 层可跨目录新建会话的入口需要组合裁剪 + 代理层拦截来收紧。
+> 结论一句话：**可行**。`dsh web` 本身就是一个「无头 HTTP server + 嵌入式 SPA」，形态与 `opencode serve` 高度同构，完全可以按 opencode-web 的既有模式做成 myworktree 的 `dsh-web` 实例 kind；且 harness 的**工作区限制（沙箱策略）是 OS 级硬强制（dsh 自带）**；myworktree 侧按用户决策采用 opencode 式做法——禁用/置灰跨 worktree 入口 + 观察式监测只提醒（不拦截）。
 
 ---
 
@@ -65,20 +65,33 @@
 
 **含义**：myworktree 把 `dsh web` 以 `cwd=<worktree>` 拉起后，**该 worktree 内的每个会话天然被 OS 级沙箱钉死在自己的 cwd 上写文件**。这是 opencode-web 方案完全没有的硬保证（opencode 只能"防误操作 + 警告"，见 `docs/plans/opencode-native-ui/WORKTREE-ISOLATION.md §0.3`）。
 
-### 2.2 但沙箱不是"进程级工作区钉子"——有四个洞要补
+### 2.2 确认方案（用户决策 2026-08-15）：opencode 式——禁用入口、不拦截、只提醒
 
-| # | 洞 | 事实依据 | 收紧手段 |
-| --- | --- | --- | --- |
-| 1 | **UI 可给会话挑任意 cwd** | `session.create` 接受裸 `cwd`，无白名单；WorkspaceBrowser + 两种 directory picker 都是内置行 | 组合裁剪：`--patch` overlay 禁用 `directory-picker` 行、裁剪 `ui-workspace`；**无需 fork 源码**（cordis patch 是 harness 原生机制，base 层大量 `disabled: true` 即此用法） |
-| 2 | **`workspace.create` 可收养任意目录** | `workspace.create { path }` 无校验 | 同上的 patch；或代理层拦截 |
-| 3 | **共享 `$DSH_HOME` 时，侧栏能看到其他 worktree 的会话** | 会话/工作区持久化都在 `$DSH_HOME` 下，registry 全局 | 选择 DSH_HOME 策略（见 §2.3） |
-| 4 | **绕 UI 直调 API**（devtools 拼 JSON） | 栅栏只防 DNS-rebinding/跨站，不防"已通过栅栏的同源调用" | **代理层硬拦截**：唯一入口（`dsh web` 不绑 0.0.0.0）在 myworktree 反代上，可解析 `session.create`/`workspace.create` 的 JSON body，cwd/path 与实例 worktree 严格相等才放行——把 opencode 分支"只记录越界"的 scope 监测升级为"拒绝越界创建" |
+**决策**：遵循 opencode 分支的定位（防误操作、非禁止）：disable 掉跨 worktree 的入口（尽量"置灰可见"而非删除），**不干涉 dsh 自身的运行规律（不拦截任何请求、不改写任何响应、不拒绝会话/工作区创建）**，越界行为只监测 + 常驻提醒。沙箱自身的 OS 级写限制照旧生效（那是 dsh 自己的规则，不是 myworktree 加的）。
 
-其中第 1/2 条还有一层兜底：即使 UI 没裁干净、用户真的建出了 `cwd=<其他worktree>` 的会话，**该会话的工作区根就是那个目录**，沙箱仍然硬限制其文件写入范围；真正要防的是"会话数据串台 + 误操作成本趋近于零"，这正是 opencode 分支 D4 的同一问题域。
+可行性核实（dsh 组合机制原生支持，比 opencode 当年靠 DOM 注入干净得多）：
+
+| 入口 | dsh 原生控制面 | "置灰可见"的途径 |
+| --- | --- | --- |
+| "Add workspace…" + 项目选择菜单（UI 上唯一"收养任意目录"的入口） | ✅ `--patch` overlay 禁用 `directory-picker` 行 → directory-flow hole 空置 → 入口整体不渲染（`slots.ts` 契约原文："an unoccupied hole leaves the surface with no add affordance at all"；`WorkspaceBrowser.tsx:1053` `directoryFlowAvailable &&` 门控） | 微型 client plugin 占据 `sidebar.workspaces.directoryFlow` / `conversation.hero.workspace.directoryFlow` 两个 hole，渲染禁用态占位（tooltip「工作区切换由 myworktree 管理」）。client plugin 是 dsh 一等公民机制（`dsh.client` rows + `dsh plugin --profile web add <pkg>`），非 fork |
+| 侧栏工作区行（点击即切换/新建其他 worktree 的会话） | ❌ 无行级 slot | 三选一：①opencode 式 DOM 注入（`buildInjectScript` 同款，先例已验证、升级脆弱）；②禁用 `ui-workspace` + 自写简化侧栏 client plugin（原生但改动大）；③**不置灰**——行保持可见可点，越界点击由监测警告条兜底（最贴合"只提醒不干预"，建议默认） |
+| 会话列表（其他 worktree 的历史会话） | 保持原样 | 共享 DSH_HOME 语义下**刻意保留**（与 opencode"可读当前项目全部历史"一致；范围外条目也是提醒的素材来源） |
+
+监测（只提醒，零干预）：
+
+- proxy 层解析请求体中的工作区信号——`session.create {workspaceId|cwd}`、`workspace.create {path}`（schema 已核实）——与实例 worktree 归一化比较，**只 Record 越界状态，不拦截、不改写、不降级**；结构照抄 opencode `scope.go` 的 `normalizeDir` / `classify` / `ScopeTracker`。
+- 与 opencode 的覆盖面差异：dsh 没有 `x-opencode-directory` 这种"每个请求都带目录"的机制，可观测信号集中在创建类 RPC 的 body；但"任何跨 worktree 切换必然触发一次 session.create / 连接重建"的论证同样成立（opencode `WORKTREE-ISOLATION.md §4.3` 同款），对"只提醒"足够。
+- 前端 iframe 外常驻警告条（myworktree 自己的 DOM，不进入 dsh 页面），三态：正常 / 越界（`⚠ dsh 已离开 worktree 范围: <dir>`）/ 裁剪失效（版本门 L1 + DOM 锚点检测 L2/L3 平移，见 opencode `WORKTREE-ISOLATION.md §4.7`，防 dsh 升级后入口重新出现而静默失效）。
+
+后果语义（与 opencode 完全一致）：
+
+- 用户主动点别的 workspace 开会话 → 请求照常放行（不干涉 dsh 运行规律），新会话的沙箱根 = 那个目录（dsh 自己的规则），警告条常驻直到切回 worktree。
+- 沙箱继续兜底：越界会话的文件写入被 OS 级限制在那个目录内——"限制工作区"的硬部分由 dsh 沙箱承担，myworktree 只做"防误操作 + 提醒"。
+- devtools 直调 API 同样不拦：越界创建照常成功，仅被监测记录并触发警告（与 opencode D3"只警告不干预"对齐）。
 
 ### 2.3 DSH_HOME 策略（对应 opencode 的"数据目录隔离"教训）
 
-- **共享 `$DSH_HOME`**（推荐）：凭据、会话历史、工作区注册表跨 worktree 可见——等价于 opencode 共享 `opencode.db` 的语义（"读/切当前项目全部历史 session 天然成立"，`WORKTREE-ISOLATION.md §2.1`），但引入洞 #3（侧栏串台），需 §2.2 的 UI 裁剪 + 代理拦截收口。
+- **共享 `$DSH_HOME`**（推荐）：凭据、会话历史、工作区注册表跨 worktree 可见——等价于 opencode 共享 `opencode.db` 的语义（"读/切当前项目全部历史 session 天然成立"，`WORKTREE-ISOLATION.md §2.1`），但引入侧栏串台，需 §2.2 的 UI 裁剪（禁用/置灰入口）+ 监测提醒收口。
 - **每实例 `DSH_HOME`**：完全隔离，但**丢历史 + 凭据要重配/软链**——正是 reasonix issue #56 踩过又回退的坑（`WORKTREE-ISOLATION.md §1.2`），不推荐作默认。
 
 ---
@@ -96,7 +109,7 @@ myworktree 的 `framework.Kind` 接口（`internal/framework/kind.go`）已被 o
 | 停止 | SIGTERM → 5s → SIGKILL（dsh 自身 5s 宽限，myworktree 默认 `stopGrace` 兼容） | `process-shutdown.ts` |
 | **嵌入形态** | **每个实例一个独立 loopback 端口**：myworktree 在 `127.0.0.1:<free>` 开监听，反代到上游（Host=上游 loopback、删 Origin、透传 Upgrade），iframe src=`http://127.0.0.1:<proxyPort>/` | reasonix 分支 issue #44 的 loopback 模式先例 |
 | 远程访问 | portal 现有反代叠 token，再转发到上述 loopback 监听 | `internal/portal/portal.go` 已有 AuthToken/CSRF 框架 |
-| 工作区限制 | ①profile overlay 禁用 `directory-picker` + 裁剪 workspace 入口；②代理层 body 拦截越界 `session.create`/`workspace.create`；③（可选）scope 监测 + iframe 外常驻警告条，与 opencode-web UX 对齐 | §2.2 表；opencode 分支 `scope.go`/`proxy.go` 模式 |
+| 工作区限制 | opencode 式、只提醒不拦截：①profile overlay 禁用 `directory-picker` 行（"Add workspace…"入口随之消失；置灰可见用微型 client plugin 占位）；②代理层**观察式**监测 `session.create`/`workspace.create` body 的越界目录，只 Record 不拦截；③iframe 外常驻警告条（三态：正常/越界/裁剪失效）；④版本门 + 锚点检测兜底 | §2.2；opencode 分支 `scope.go`/`proxy.go`/`WORKTREE-ISOLATION.md` 模式平移 |
 
 **嵌入形态必须选独立 origin**（而不是 opencode 的 `/__opencode/<id>/` 同源挂载）：harness 客户端把 API base 硬编码为 `location.origin + '/api'`（`packages/client/connection/src/api-path.ts` + fetch client 的 `INTERNAL_BASE = location.origin`），dist 资产也是根绝对路径——同源子路径挂载会与 myworktree 自己的 `/api` 冲突且无法区分实例；独立 origin 则**零改写、零注入**，比 opencode 分支的 HTML 重写 + CSP hash + DOM 隐藏脚本那套（`WORKTREE-ISOLATION.md §4`）干净得多。
 
@@ -168,7 +181,7 @@ dsh-web Spawn 预检 LookPath("dsh")
 | 上游形态 | `opencode serve` 无头 server + 内嵌 UI | `dsh web` 无头 server + 内嵌 UI ✅ 同构 |
 | 端口 | `--port 0` + 抓 listening 行 | 同 ✅ |
 | 认证 | Basic auth（密码注入 env） | 无认证，信任栅栏（loopback） |
-| 工作区限制 | **只警告不拦截**：DOM 注入隐藏入口 + 代理层监测 + 常驻警告条 + 版本门 | **OS 级硬强制**（沙箱按会话 cwd 限制写入）+ patch 裁剪 UI + 代理层可升级为硬拦截 |
+| 工作区限制 | **只警告不拦截**：DOM 注入隐藏入口 + 代理层监测 + 常驻警告条 + 版本门 | **沙箱 OS 级硬强制（dsh 自带，非 myworktree 添加）** + patch/插件裁剪 UI 入口 + 观察式监测只提醒（同 opencode 语义） |
 | 跨 worktree 会话可见性 | 共享 db，天然可读全项目历史 | 共享 `$DSH_HOME` 同语义；隔离 DSH_HOME 则丢历史 |
 | 定制途径 | 无组合机制 → 只能 fork 源码或 DOM 注入 hack（升级脆弱，需 L1/L2/L3 三层检测兜底） | **cordis patch overlay 是官方机制**，裁剪走配置不走 hack，升级跟随性更好 |
 | 嵌入成本 | 重：URL 重写、CSP hash、localStorage 自愈、锚点检测 | 轻：独立 origin 反代，零改写 |
@@ -182,7 +195,7 @@ dsh-web Spawn 预检 LookPath("dsh")
 
 1. **前端 dist 必须构建**：`resolveDistIndex` 找不到 `@deepseek-ai/dsh-web-frontend/dist/index.html` 会启动即失败并提示 `pnpm run build`（`packages/bundle/web-app/src/index.ts`）。用 npm 安装的 `dsh` 没问题；若要从源码 checkout 跑，需纳入实例 preStart 或预构建。dist 体积未实测（vendor chunk 含 katex/shiki/markdown，预计数 MB）。
 2. **无认证面**：代理把 `settings`/`credentials`（含凭据描述能力）暴露给代理入口——portal 必须叠自己的 token；且代理需严格删 Origin、只回填 loopback Host。
-3. **工作区钉子的边界语义**：沙箱限制的是"会话 cwd 内的文件效果"，不是进程级；越界会话一旦建成，其沙箱根就是越界目录（不会自动缩回）。硬保证依赖代理层拦截 `session.create` 的 cwd——这是唯一需要 myworktree 侧多写一点的环节（JSON body 解析 + 严格相等判定，可复用 `scope.go` 的归一化）。
+3. **工作区钉子的边界语义**：沙箱限制的是"会话 cwd 内的文件效果"，不是进程级；越界会话一旦建成，其沙箱根就是越界目录（不会自动缩回）。按"只提醒不拦截"的决策，这不需要硬保证——越界创建照常成功，靠监测警告条即时暴露（JSON body 解析 + 严格相等判定，复用 `scope.go` 的归一化）；硬写限制由 dsh 沙箱按新会话的 cwd 自行生效。
 4. **版本跟随**：dsh 迭代快（profile/行 id 变化），裁剪 overlay 引用的行 id（`directory-picker`、`ui-workspace` 等）可能随上游调整——建议保留 opencode 分支的"版本门 + 锚点检测"思路做兜底警告（`WORKTREE-ISOLATION.md §4.7` 模式可平移）。
 5. **WebSocket 反代**：事件通道是 WS，反代必须支持 Upgrade；Go 标准 `ReverseProxy` 可用，但 portal 远程链路（若有中间层）也要保证 WS 透传。
 6. **HMR 行**：`client-hmr` 在生产嵌入下可留在 profile 中无害（仅在有 dev:web watcher 时活动），也可用 overlay 禁用。
@@ -192,8 +205,8 @@ dsh-web Spawn 预检 LookPath("dsh")
 ## 7. 结论
 
 - **可行，且集成成本低于 opencode-web 当年**：上游形态同构（serve+内嵌 UI、`--port 0`、stdout 就绪行、优雅关停），myworktree 的 `Kind` 框架已有两个 HTTP-backed 先例，`dsh-web` kind 基本是 opencode-web driver 的裁剪复制 + 独立 origin 反代。
-- **工作区限制在 harness 里是"过强"而非"缺失"**：OS 级沙箱按会话 cwd 硬限制文件效果，比 opencode 的警告式监测严格一个量级；需要做的是反向收紧它的**多工作区 UI 入口**（patch 裁剪）和**会话创建面**（代理拦截 cwd），并在 DSH_HOME 共享策略下处理侧栏串台。
-- 唯一需要投入少量新代码的点：①代理层对 `session.create`/`workspace.create` 的 body 拦截（硬钉子）；②（可选）越界监测 + 警告条的 UX 平移；③restrict overlay 的维护（随 dsh 升级核对行 id）；④缺依赖的交互流程（§4：LookPath 预检 + npx/安装选择对话框 + `npm prefix -g` 绝对路径启动，均免重启）。
+- **工作区限制在 harness 里是"过强"而非"缺失"**：OS 级沙箱按会话 cwd 硬限制文件效果（dsh 自带，myworktree 零介入）；myworktree 按用户决策只做 opencode 式外围工作——**禁用/置灰多工作区 UI 入口**（patch/插件裁剪）+ **观察式监测只提醒**（不拦截）+ 共享 DSH_HOME 下处理侧栏串台。
+- 唯一需要投入少量新代码的点：①代理层对 `session.create`/`workspace.create` body 的**观察式**监测（只 Record 越界，不拦截）；②iframe 外常驻警告条（三态）与版本门/锚点检测的 UX 平移；③restrict overlay + 微型 client plugin 的维护（随 dsh 升级核对行 id / slot 名）；④缺依赖的交互流程（§4：LookPath 预检 + npx/安装选择对话框 + `npm prefix -g` 绝对路径启动，均免重启）。
 
 如果后续要推进，建议的第一步是：在 worktree 里手动 `DSH_HOME=<临时目录> dsh web --port 0` 验证就绪行抓取与 `GET /` 健康探针，再跑一次带 Origin 剥离的反代冒烟，即可锁定全部风险点。
 
