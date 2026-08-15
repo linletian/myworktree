@@ -41,6 +41,7 @@ const (
 	KindPTY         = "pty"
 	KindReasonix    = "reasonix"
 	KindOpenCodeWeb = "opencode-web"
+	KindDsh         = "dsh-web"
 )
 
 // CanonicalKind maps persisted kind names to their current canonical
