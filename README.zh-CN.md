@@ -9,13 +9,13 @@
 
 ![](docs/webui.png)
 
-## 立即开始
+## 快速开始
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/linletian/myworktree/main/scripts/install.sh | bash
 ```
 
-支持 macOS 与 Linux · 默认装到 `~/.local/bin` · 无需 `sudo` · 完整选项见 [快速开始](#快速开始)。
+支持 macOS 与 Linux · 默认装到 `~/.local/bin` · 无需 `sudo` · 完整选项见 [完整安装说明](#完整安装说明)。
 
 ## 核心能力
 
@@ -80,7 +80,7 @@ myworktree 只做管理，不碰项目具体内容：
 - `script`（用于托管可交互 shell）
 - Go 工具链（构建用；Go 模块在编译时静态链接到二进制文件中，运行时无外部依赖）
 
-## 快速开始
+## 完整安装说明
 
 ### 一行安装（macOS / Linux）
 

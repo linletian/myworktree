@@ -9,13 +9,13 @@
 
 ![](docs/webui.png)
 
-## Get started
+## Quick start
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/linletian/myworktree/main/scripts/install.sh | bash
 ```
 
-macOS and Linux · `~/.local/bin` · no `sudo` · see [Quick start](#quick-start) for the full options.
+macOS and Linux · `~/.local/bin` · no `sudo` · see [Install (full reference)](#install-full-reference) for the full options.
 
 ## Features
 
@@ -79,7 +79,7 @@ myworktree is a thin management layer that:
 - `script` (used to host managed interactive shells)
 - Go toolchain to build (Go modules are statically linked at compile time; zero runtime dependencies)
 
-## Quick start
+## Install (full reference)
 
 ### One-line install (macOS / Linux)
 
