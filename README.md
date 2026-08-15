@@ -19,7 +19,7 @@ macOS and Linux · `~/.local/bin` · no `sudo` · see [Install (full reference)]
 
 ## Features
 
-- **One worktree per task, kept apart by git** — every agent lives in its own isolated worktree (typically its own branch), so half-finished changes, dependency installs, and experiments never collide.
+- **Isolated workspaces, kept apart by git** — every worktree is its own git checkout (typically one per branch or working context), so half-finished changes, dependency installs, and experiments never collide. A worktree can run multiple managed instances side-by-side (PTY + opencode-web + reasonix); you decide the granularity.
 - **Persistent, re-attachable terminals** — every agent runs in a managed instance that survives page reloads and browser closes; reopen anytime, scroll back the full output, and keep going.
 - **Output replay without disk writes** — every keystroke lands in a bounded in-memory ring buffer, so you can scrub back through what an agent did while you were away.
 - **Bring your own agents** — OpenCode and Reasonix run out of the box (Reasonix even with its native web chat UI embedded in the sidebar); for everything else, drop a Tag template (`command/env/preStart/cwd`) and bring up Claude Code, Codex, GLM, Qwen, or any other CLI.
@@ -46,8 +46,8 @@ A common workflow looks like: GPT/GLM drafts docs, Claude/MiniMax implements cha
 
 ## What myworktree does
 myworktree is a thin management layer that:
-- Uses **git worktrees** to give each task an isolated directory (and typically a dedicated branch)
-- Runs multiple managed **instances** per worktree and keeps them alive on the backend
+- Uses **git worktrees** to give you an isolated working directory (typically one per branch or work context, so half-finished changes, dependency installs, and temporary experiments never collide)
+- Runs multiple managed **instances** per worktree (PTY / opencode-web / reasonix can run side-by-side) and keeps them alive on the backend
 - Provides a minimal Web UI to list worktrees/instances and **replay/follow output**
 - Supports **Tag** templates (`command/env/preStart/cwd`) to start instances with the right setup, without baking project-specific logic into the manager
 

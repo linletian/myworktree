@@ -1,6 +1,6 @@
 # myworktree
 
-> **一个类似 ORCA 的轻量级 git worktree + AI agent 运行管理工具** —— 让多个 AI coding CLI 在同一仓库里并行工作，每个 CLI 拥有独立的 git worktree 工作区与可重连的长连接终端，统一的最小可用 Web UI 让你随时查看、回放输出并继续交互。
+> **一个类似 ORCA 的轻量级 git worktree + AI agent 运行管理工具** —— 让多个 AI coding CLI 在同一仓库的不同 git worktree 中并行工作（每个 worktree 拥有可重连的长连接终端），通过统一的最小可用 Web UI 随时查看、回放输出并继续交互。
 
 - English: [README.md](./README.md)
 - 文档： [PRD](./docs/PRD.md) · [架构](./docs/ARCHITECTURE.md) · [API](./docs/API.md)
@@ -19,7 +19,7 @@ curl -fsSL https://raw.githubusercontent.com/linletian/myworktree/main/scripts/i
 
 ## 核心能力
 
-- **一个 worktree 一个任务，git 帮你隔开** —— 每个 agent 独占一个隔离的 git worktree（通常对应独立分支），半成品改动、依赖安装、临时实验互不污染。
+- **隔离的工作区，git 帮你隔开** —— 每个 worktree 都是一个独立的 git checkout（通常一个分支/工作场景对应一个），半成品改动、依赖安装、临时实验互不污染。一个 worktree 可以同时跑多个受管 instance（PTY + opencode-web + reasonix），粒度由你决定。
 - **持久化、可重连的终端** —— 每个 agent 跑在一个受管 instance 里，页面刷新、浏览器关闭都不影响；随时重连、完整回滚输出、继续交互。
 - **输出回放，告别磁盘写放大** —— 每个按键都进有界内存环形缓冲（不写盘），随时回放 agent 之前做了什么。
 - **自带工具，按模板接入** —— OpenCode 和 Reasonix 开箱即跑（Reasonix 还把原生 Web 聊天界面内嵌到侧栏）；其它 Claude Code、Codex、GLM、Qwen 等任意 CLI 用 Tag 模板（`command/env/preStart/cwd`）一键拉起。
@@ -46,8 +46,8 @@ curl -fsSL https://raw.githubusercontent.com/linletian/myworktree/main/scripts/i
 
 ## myworktree 的做法
 myworktree 只做管理，不碰项目具体内容：
-- 每个任务用 **git worktree** 给你一个隔离目录（通常对应独立分支）
-- 在每个 worktree 下托管多个 **instance**，后端持续运行，可随时重连
+- 用 **git worktree** 给你一个隔离目录（通常一个 worktree 对应一个分支/工作场景，半成品改动、依赖安装、临时实验互不污染）
+- 在每个 worktree 下托管多个 **instance**（PTY / opencode-web / reasonix 可共存），后端持续运行，可随时重连
 - 提供最小 Web UI：统一查看、停止、以及**输出回放**
 - 通过 **Tag** 模板（`command/env/preStart/cwd`）启动 instance，方便为不同类型工具准备环境
 
