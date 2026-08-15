@@ -9,6 +9,14 @@
 
 ![](docs/webui.png)
 
+## Get started
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/linletian/myworktree/main/scripts/install.sh | bash
+```
+
+macOS and Linux · `~/.local/bin` · no `sudo` · see [Quick start](#quick-start) for the full options.
+
 ## Features
 
 - **One worktree per task, kept apart by git** — every agent lives in its own isolated worktree (typically its own branch), so half-finished changes, dependency installs, and experiments never collide.
@@ -65,7 +73,7 @@ myworktree is a thin management layer that:
 - **Daemon resource monitoring** — the resource stats API now includes the mw daemon process itself in global totals, shown as a dedicated row in the UI.
 
 ## Requirements
-- macOS 12+ (other platforms are not validated yet)
+- macOS 12+ or Linux (amd64 / arm64; arm64 covers Raspberry Pi 4/5, AWS Graviton, Apple Silicon under Rosetta 2)
 - `git`
 - `zsh`
 - `script` (used to host managed interactive shells)

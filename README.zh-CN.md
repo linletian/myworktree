@@ -9,6 +9,14 @@
 
 ![](docs/webui.png)
 
+## 立即开始
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/linletian/myworktree/main/scripts/install.sh | bash
+```
+
+支持 macOS 与 Linux · 默认装到 `~/.local/bin` · 无需 `sudo` · 完整选项见 [快速开始](#快速开始)。
+
 ## 核心能力
 
 - **一个 worktree 一个任务，git 帮你隔开** —— 每个 agent 独占一个隔离的 git worktree（通常对应独立分支），半成品改动、依赖安装、临时实验互不污染。
@@ -66,7 +74,7 @@ myworktree 只做管理，不碰项目具体内容：
 - **daemon 资源监控** — 资源统计 API 现在把 mw daemon 进程本身计入全局合计，UI 中以独立行展示。
 
 ## 运行环境
-- macOS 12+ 其他平台未验证
+- macOS 12+ 或 Linux（amd64 / arm64；arm64 覆盖树莓派 4/5、AWS Graviton，以及 Rosetta 2 下的 Apple Silicon）
 - `git`
 - `zsh`
 - `script`（用于托管可交互 shell）
