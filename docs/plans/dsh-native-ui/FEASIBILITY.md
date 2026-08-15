@@ -62,6 +62,8 @@
 - **OS 级强制**：Linux bwrap/Landlock、macOS Seatbelt、Windows ACL（`packages/sandbox/sandbox-local`），bash/fs/terminal 三类后端读同一份策略；denial 以 `[sandbox: file access denied under workspace-write mode]` 标记进入模型上下文，带严格加宽的升级阶梯（`workspace-write → danger-full-access` 需审批）。
 - 部署默认：base 层 `sandbox-policy` 行 `mode: DSH_PERMISSION_MODE ?? 'workspace-write'`、`workspaceRoot: process.cwd()`；审批策略默认 `ask`（danger-full-access 下 `never`）。**每条 session 还有运行时开关**（`sandbox/mode` 事件 + UI 权限 presets），存活于会话日志，重启重放即恢复。
 - 活证据：dsh 会话的系统提示即为此机制产物——"Current DSH file policy: workspace-write … under the session workspace: <cwd>"。
+- **工作区注册时机**（用户实证 2026-08-15）：首次运行 dsh web 时工作区列表为空——注册表只在两类时机建记录：①该 DSH_HOME **首次初始化**时从已有 session 头按 cwd 分组 bootstrap（`packages/workspace/workspace/src/index.ts:426`，`state.initialized` 置位后不再跑）；②`workspace.create` RPC（`api-proxy.ts:1712-1714`）。**进程 cwd 不会自动注册**，`session.create {cwd}` 也不注册工作区（只决定会话目录，`api-proxy.ts:2170-2176`）；多进程"工作区互通"是共享 DSH_HOME durable registry 的设计行为。
+- **启动注入没有 flag，但有幂等的驱动层自举**：`dsh web` 的 flag 面只有 `--host/--port/--trusted-host`（`startup.ts`），无 `--workspace`；但 `workspace.create {path}` 是幂等 adopt 语义（realpath 归一、目录须存在、已存在原样返回、新建的 prepend 到列表最前）。dsh-web driver 在就绪后直连上游 loopback 打一次 `POST /api/workspace.create`（RPC 信封 `{type:'client-request', rpcId, method, payload:{path:<worktree>}}`，Go http client 无 Origin、Host=loopback，天然过信任栅栏）即可把 worktree 注册进侧栏，同 cwd 历史会话自动归组；可选再打 `session.create {cwd}` 预建空白会话直接落到会话页。失败只告警不阻塞（见 §3 集成表）。
 
 **含义**：myworktree 把 `dsh web` 以 `cwd=<worktree>` 拉起后，**该 worktree 内的每个会话天然被 OS 级沙箱钉死在自己的 cwd 上写文件**。这是 opencode-web 方案完全没有的硬保证（opencode 只能"防误操作 + 警告"，见 `docs/plans/opencode-native-ui/WORKTREE-ISOLATION.md §0.3`）。
 
@@ -106,6 +108,7 @@ myworktree 的 `framework.Kind` 接口（`internal/framework/kind.go`）已被 o
 | Spawn | `dsh web --host 127.0.0.1 --port 0`，`cmd.Dir = WorktreePath`，env 继承 + `DSH_HOME` 策略、可选 `DSH_PERMISSION_MODE` 钉死 | `startup.ts` 参数面；沙箱策略 env seam |
 | 就绪 | 抓 stdout `dsh web: http://127.0.0.1:(\d+)` → 解析端口 → 写 blob、`ReadySignal.Close()` | 与 `listeningAddrRe` 同构 |
 | 健康 | 定时 `GET /`（SPA index 200）即可（无独立 health 端点） | `frontend-static` 兜底路由保证 `/` 恒 200 |
+| 工作区自举 | 就绪后直连上游 loopback 打 `POST /api/workspace.create`（RPC 信封 `{type:'client-request', rpcId, method, payload:{path:<worktree>}}`），幂等 adopt，侧栏立即出现该 worktree 及其同 cwd 历史会话；可选 `session.create {cwd}` 预建空白会话直接落到会话页；失败仅告警不阻塞 | workspace registry `create(path)`（realpath 幂等、新建 prepend）；信封格式 `fetch/client.ts callUnary`；§2.1 注册时机 |
 | 停止 | SIGTERM → 5s → SIGKILL（dsh 自身 5s 宽限，myworktree 默认 `stopGrace` 兼容） | `process-shutdown.ts` |
 | **嵌入形态** | **每个实例一个独立 loopback 端口**：myworktree 在 `127.0.0.1:<free>` 开监听，反代到上游（Host=上游 loopback、删 Origin、透传 Upgrade），iframe src=`http://127.0.0.1:<proxyPort>/` | reasonix 分支 issue #44 的 loopback 模式先例 |
 | 远程访问 | portal 现有反代叠 token，再转发到上述 loopback 监听 | `internal/portal/portal.go` 已有 AuthToken/CSRF 框架 |
@@ -225,6 +228,8 @@ dsh-web Spawn 预检 LookPath("dsh")
 - `session.create` 契约与 schema（workspaceId/cwd）：`packages/host/apiproxy/src/api/sessions.ts`、`sessions.schema.ts`
 - `workspace.create` 契约与 schema（任意 path）：`packages/host/apiproxy/src/api/workspace.ts`、`workspace.schema.ts`
 - 工作区实体注册表：`packages/workspace/workspace/src/index.ts`
+- `workspace.create`/`session.create` 处理器实现（adopt/attach 语义）：`packages/host/apiproxy/src/api-proxy.ts`
+- RPC 信封与 unary 协议（驱动层自举注入用）：`packages/host/apiproxy/src/fetch/client.ts`、`packages/host/apiproxy/src/api/rpc.schema.ts`
 - 沙箱模式/工作区根/审批：`packages/sandbox/sandbox/src/index.ts`、`packages/sandbox/sandbox-policy/src/index.ts`
 - 优雅关停：`apps/cli/src/process-shutdown.ts`
 - boot manifest 注入：`packages/client/modules/src/index.ts`（`window.__DSH_BOOT__`）
