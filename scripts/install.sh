@@ -24,7 +24,16 @@ NC='\033[0m'
 
 # Defaults; users can override via env or flags.
 INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/bin}"
-: "${INSTALL_ALIAS:=mw}"
+# INSTALL_ALIAS: default "mw" when the user did NOT set the env var at all;
+# honour any explicit value (including the empty string, which means "skip
+# the alias"). The ${VAR+set} form distinguishes "unset" from "set to empty".
+DEFAULT_ALIAS=mw
+if [ -z "${INSTALL_ALIAS+set}" ]; then
+  INSTALL_ALIAS="$DEFAULT_ALIAS"
+  INSTALL_ALIAS_SET=0
+else
+  INSTALL_ALIAS_SET=1
+fi
 requested_version="${MYWORKTREE_VERSION:-}"
 no_modify_path="${NO_MODIFY_PATH:-false}"
 binary_path=""
@@ -252,18 +261,37 @@ If 'myworktree' does not respond or shows 'cannot be opened':
 fi
 
 # --- final message -------------------------------------------------------
+HAS_ALIAS=false
+if [ -n "$INSTALL_ALIAS" ] && [ "$INSTALL_ALIAS" != "$APP" ] && [ -L "${INSTALL_DIR}/${INSTALL_ALIAS}" ]; then
+  HAS_ALIAS=true
+fi
+
 echo ""
 echo -e "${MUTED}myworktree ${version} installed:${NC}"
 echo "  ${APP}     → ${INSTALL_DIR}/${APP}"
-if [ -n "$INSTALL_ALIAS" ] && [ "$INSTALL_ALIAS" != "$APP" ]; then
-  echo "  ${INSTALL_ALIAS} → ${INSTALL_DIR}/${INSTALL_ALIAS} (symlink → ${APP})"
+$HAS_ALIAS && echo "  ${INSTALL_ALIAS} → ${INSTALL_DIR}/${INSTALL_ALIAS} (symlink → ${APP})"
+echo ""
+echo -e "${MUTED}Next steps:${NC}"
+echo "  cd <your-git-repo>            # any git worktree you want to drive"
+if $HAS_ALIAS; then
+  echo "  ${APP}                # start the daemon (or use '${INSTALL_ALIAS}')"
+else
+  echo "  ${APP}                # start the daemon"
 fi
+echo "  ${APP} --version        # verify install"
 echo ""
-echo -e "${MUTED}Try:${NC}"
-echo "  ${APP} --version"
-[ -n "$INSTALL_ALIAS" ] && [ "$INSTALL_ALIAS" != "$APP" ] \
-  && echo "  ${INSTALL_ALIAS} --version"
-echo ""
+if $HAS_ALIAS; then
+  echo -e "${MUTED}Both '${APP}' and '${INSTALL_ALIAS}' work — pick whichever you type faster.${NC}"
+fi
+
+# Explain the alias-skip case so the user isn't left guessing.
+if [ "$INSTALL_ALIAS_SET" = "1" ] && [ -z "$INSTALL_ALIAS" ]; then
+  echo -e "${MUTED}Note:${NC} the '${DEFAULT_ALIAS}' alias was NOT installed (you set INSTALL_ALIAS=)."
+  echo "Only '${APP}' is installed. To get an alias under a different name:"
+  echo "  INSTALL_ALIAS=mwt bash install.sh"
+  echo ""
+fi
+
 echo -e "${MUTED}If 'command not found', open a new shell (PATH was added to your rc).${NC}"
 
 # --- running-daemon warning --------------------------------------------
