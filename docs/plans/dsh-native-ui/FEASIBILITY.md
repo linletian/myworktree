@@ -4,6 +4,8 @@
 > 调研对象：`/home/linletian/GithubRepo/deepseek-harness/`（web UI 相关：`apps/web`、`packages/client/*`、`packages/bundle/web-app`、`apps/cli`、`packages/workspace`、`packages/sandbox`）。
 > 调研时间：2026-08-15；分支 `feature/dsh-native-ui`（基线 `main@8247a4f`）。
 >
+> **实施修订（2026-08-15 真机验证，见 PLAN.md §实施踩坑补充）**：① §2.3「restrict overlay 禁用 directory-picker 行」在本版 dsh（0.1.0-rc.6）不成立——该行是自动组合器，api-gateway 硬依赖其 host 后端的 `directoryPicker` 服务，直接禁用会整树加载失败；已改为「停组合器 + `insert` 裸挂 `-browse` host 后端行（服务保留、client 表面不挂）」。② §2.1 Spawn 命令的 flag 顺序须为 `dsh web --patch <overlay> --host 127.0.0.1 --port 0`（launcher 选项前置，否则 `--patch` 被透传给 app 层报 unknown option）。③ §2.2 的 `POST /api/workspace.create` wire 表述正确（endpoint 从 URL 解析，body `method` 须一致）。④ **跨进程会话边界（dsh 上游问题）**：§2.2 的"会话跨进程互通"需限定为"可见、可打开、可读快照"——dsh 会话实时事件只在写入者进程内广播（无跨进程同步），且第二个进程打开活跃会话会因 `session/end-seed` 无锁追加撞 seq 而损坏日志（实测：`corrupt session log: seq gap in committed region`）；完整分析见 `CROSS-PROCESS-SESSION.md`。
+>
 > **结论一句话**：可行。`dsh web` = 无头 HTTP server + 内嵌 SPA，形态与 `opencode serve` 同构；dsh 自带 OS 级工作区沙箱（比 opencode 的"只提醒"更强）；myworktree 侧按 opencode 式哲学做外围——数据面按 worktree 切分注册表 + 禁用跨 worktree 入口 + 观察式监测只提醒，全部经 dsh 官方 patch / 插件机制实现，**零 dsh 源码改动**。
 
 ---
@@ -54,8 +56,8 @@
 - **sessions 不重定向**（保持默认 `~/.dsh/sessions` 共享）。
 - 效果：
   - 工作区列表 = 本 worktree（注册表隔离）+ 启动自举注入 → **"启动就是对应工作区"** 严格成立；
-  - 同 worktree 会话跨进程互通（共享 sessions 池 + 按 cwd 归组）；
-  - **终端裸跑 dsh（同位置）与 web 实例会话互通**；
+  - 同 worktree 会话跨进程**可见、可打开（快照）**（共享 sessions 池 + 按 cwd 归组；实时刷新仅限写入者进程，跨进程打开活跃会话会损坏日志——dsh 上游问题，见 `CROSS-PROCESS-SESSION.md`）；
+  - **终端裸跑 dsh（同位置）与 web 实例会话互通（快照级）**；
   - 跨 worktree 会话以「未分组」组可见（无对应工作区行）——可见不可点，与"防误操作、只提醒"哲学一致。
 - **工作区自举**：就绪后直连上游 loopback 打一次 `POST /api/workspace.create`（RPC 信封 `{type:'client-request', rpcId, method, payload:{path:<worktree>}}`；幂等 adopt 语义、新建的 prepend 到列表最前）；可选再打 `session.create {cwd}` 预建空白会话直接落到会话页；失败仅告警不阻塞。
 - 明确不采用（曾评估后否决）：
