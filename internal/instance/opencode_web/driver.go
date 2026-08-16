@@ -59,7 +59,7 @@ type Driver struct{}
 func (Driver) Manifest() framework.KindInfo {
 	return framework.KindInfo{
 		Name:        "opencode-web",
-		Label:       "Opencode-Web",
+		Label:       "OpenCode-Web",
 		Description: "Opencode AI agent with embedded web UI. Managed by myworktree; command and port are fixed.",
 		Interactive: false,
 	}
@@ -117,6 +117,11 @@ type Handle struct {
 
 // Spawn launches opencode serve and parses its stdout for the
 // listening address.
+// NeedsOutputBuffer reports that this kind never captures PTY-style
+// output into the framework ring buffer, so Start skips the 16–256 MB
+// pre-allocation (framework.BufferConsumer).
+func (d Driver) NeedsOutputBuffer() bool { return false }
+
 func (d Driver) Spawn(ctx context.Context, params framework.SpawnParams) (framework.Handle, *framework.ReadySignal, error) {
 	cmd := exec.Command("opencode", "serve", "--hostname", "127.0.0.1", "--port", "0")
 	cmd.Dir = params.WorktreePath

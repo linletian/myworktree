@@ -655,6 +655,77 @@ Response (200):
 
 `scope` is `in-scope` / `out-of-scope` / `cross-project`; `csp_anchor_missing` marks structural drift (the homepage CSP lost the `'wasm-unsafe-eval'` anchor the injected script's hash is appended after), which the frontend surfaces as the "hiding not effective" warning.
 
+### 5.14 dsh-web info (instance proxy metadata)
+
+`GET /api/instances/dsh?id=<id>`
+
+Returns the iframe source URL and metadata for a dsh-web instance. Only valid for instances with `kind: "dsh-web"`; returns `404` for other kinds or non-existent instances.
+
+Response (200):
+```json
+{
+  "iframe_src": "http://127.0.0.1:35422/",
+  "proxy_host": "127.0.0.1",
+  "proxy_port": 35422,
+  "host": "127.0.0.1",
+  "port": 35421,
+  "worktree_path": "/abs/path/to/worktree",
+  "version": "0.1.0-rc.6",
+  "version_supported": true,
+  "overlay_verified": true,
+  "missing_dsh": {"npm_available": true, "suggested_pin": "0.1.0-rc.6"}
+}
+```
+
+- `host`/`port` are the upstream `dsh web` server's bound address; `proxy_host`/`proxy_port` are the per-instance myworktree reverse-proxy listener (a **dedicated loopback origin** — the dsh SPA hardcodes its API base to `location.origin + '/api'`, so same-origin subpath mounting is not possible). `iframe_src` is what the iframe loads (plain `http://127.0.0.1:<proxyPort>/` locally).
+- **Remote access**: when the main listener is non-loopback or TLS, the proxy binds the main listener's host with a **mandatory token gate** — `?token=` or the `mw_token` cookie, validated on every **non-loopback client** request including WebSocket upgrades (loopback clients bypass the gate, the same trust model as the main UI). The embed is a dedicated origin, so the main-origin HttpOnly `mw_token` cookie cannot travel to it — **the server appends `?token=` to `iframe_src` itself** (page JS can never read the HttpOnly cookie, and portal/login flows carry no address-bar token); the frontend only falls back to an address-bar token for a src that somehow lacks one. The proxy validates the first navigation, sets the HttpOnly `mw_token` cookie on the proxy origin, and 302-redirects to the token-free URL so the embedded document never retains the token in its own `location.search`. The token is stripped (`authq.StripToken`) before anything is forwarded upstream (see `docs/ARCHITECTURE.md` §9).
+- `version` is the installed `dsh --version` probed at spawn; `version_supported` is `false` when it is outside the `[0.1.0, 0.2.0)` range the restrict overlay targets (advisory — the instance still starts; the hard gate below `0.1.0` blocks startup). `overlay_verified` (L2 check) is `false` when a spawn-time `dsh web --dump-config --patch <restrict.yml>` run did not confirm the four overlay rows (`storage-json` root redirect, `directory-picker` composer disabled, `directory-picker-browse` host backend inserted and not disabled, `client-hmr` disabled) — the frontend then shows the "裁剪失效" (restriction not effective) warning. `missing_dsh` is present only when the `dsh` executable was not found at spawn (instance `failed`); `npm_available` tells the frontend whether the install option is offered, `suggested_pin` is the pinned npx version.
+- Design: `docs/plans/dsh-native-ui/FEASIBILITY.md`; threat model: `docs/ARCHITECTURE.md` §9.
+
+### 5.15 dsh-web scope (out-of-scope state)
+
+`GET /api/instances/dsh/scope?id=<id>`
+
+Returns the last observed out-of-scope state for a dsh-web instance, recorded in-memory by the per-instance reverse proxy from **RPC request bodies** (`session.create {cwd|workspaceId}` / `workspace.create {path}`). The frontend polls it (~1.5s) to render the persistent warning bar.
+
+Response (200):
+```json
+{
+  "scope": "out-of-scope",
+  "directory": "/abs/path/to/other/worktree",
+  "at": 1753500000,
+  "foreign_active_sessions": ["session-6f1a…"]
+}
+```
+
+`scope` is `in-scope` / `out-of-scope`. Observation is record-only — the request is forwarded unchanged; out-of-scope sessions still succeed (their sandbox root is the out-of-scope directory; OS-level write limits still apply) and the warning stays until the user navigates back to the worktree.
+
+`foreign_active_sessions` (omitempty) lists the sessions in the shared `$DSH_HOME/sessions` pool that the daemon's session watch classified as **actively written by another dsh process** (mtime within 90s, excluding sessions this daemon itself drives — own traffic is attributed from `session.prompt`-family RPC bodies through the proxy, `session.create` responses, and the workspace-bootstrap preseed). dsh is a single-writer-per-process system: opening such a session from the embed appends an unguarded `session/end-seed` and can permanently corrupt the log, so the frontend renders a warning bar telling the user to wait until the session is idle (record-only — nothing is blocked; see `docs/plans/dsh-native-ui/CROSS-PROCESS-SESSION.md`).
+
+### 5.16 dsh-web launch mode
+
+`POST /api/instances/dsh/launch`
+
+Selects how a dsh-web instance resolves the `dsh` executable. Persisted **per worktree** at `<DataDir>/dsh/<worktreeHash>/launch.json` (survives myworktree restarts; keyed by worktree — not instance — because every Start/Restart allocates a fresh instance id and wipes the old per-instance state dir, which would lose the choice exactly when the user needs it: failed instance → choose npx → restart). Body:
+
+```json
+{ "id": "<instance-id>", "mode": "npx" }
+```
+
+`mode` is one of:
+
+- `"path"` (default) — resolve `dsh` via `exec.LookPath` at every Start
+- `"npx"` — spawn `npx --yes @deepseek-ai/dsh@<pin> web --port 0 ...` (pinned version, no interactive prompt; the process is started with `Setpgid` and stopped by killing the whole process group — npx is the parent of dsh, killing only the npx PID would orphan the server)
+- `"install"` — run `npm install -g @deepseek-ai/dsh` (see §5.17), then resolve the global bin via `npm prefix -g` and spawn that **absolute path**
+
+Returns `404` for unknown / non-dsh-web instances; `400` for an invalid mode. Used by the missing-dependency dialog (three options: npx launch / install now / cancel) when an instance is `failed` with `missing_dsh` reported by §5.14.
+
+### 5.17 dsh-web install (npm install -g)
+
+`POST /api/instances/dsh/install`
+
+Runs `npm install -g @deepseek-ai/dsh` on behalf of the user (bounded timeout, serialized server-side — concurrent requests queue behind one install). Body: `{ "id": "<instance-id>" }`. On success the driver resolves the global bin directory via `npm prefix -g` and records the absolute executable path in the worktree's `launch.json` (`mode: "install"`), so the next Start spawns it directly — **no daemon restart needed** (kinds re-read `os.Environ()` at every Start; no PATH cache). Response includes the resolved bin path. Returns `404` for unknown / non-dsh-web instances, `502` when `npm` is not available or the install fails (failure output is redacted and truncated). The frontend requires a two-step confirm before calling it (the install rewrites the global npm prefix).
+
 ## 6) MCP
 ### Tool names
 `GET /api/mcp/tools`

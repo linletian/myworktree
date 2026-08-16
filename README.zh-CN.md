@@ -19,7 +19,7 @@ curl -fsSL https://raw.githubusercontent.com/linletian/myworktree/main/scripts/i
 
 ## 核心能力
 
-- **隔离的工作区，git 帮你隔开** —— 每个 worktree 都是一个独立的 git checkout（通常一个分支/工作场景对应一个），半成品改动、依赖安装、临时实验互不污染。一个 worktree 可以同时跑多个受管 instance（PTY + opencode-web + reasonix），粒度由你决定。
+- **隔离的工作区，git 帮你隔开** —— 每个 worktree 都是一个独立的 git checkout（通常一个分支/工作场景对应一个），半成品改动、依赖安装、临时实验互不污染。一个 worktree 可以同时跑多个受管 instance（PTY + opencode-web + reasonix + dsh-web），粒度由你决定。
 - **持久化、可重连的终端** —— 每个 agent 跑在一个受管 instance 里，页面刷新、浏览器关闭都不影响；随时重连、完整回滚输出、继续交互。
 - **输出回放，告别磁盘写放大** —— 每个按键都进有界内存环形缓冲（不写盘），随时回放 agent 之前做了什么。
 - **自带工具，按模板接入** —— OpenCode 和 Reasonix 开箱即跑（Reasonix 还把原生 Web 聊天界面内嵌到侧栏）；其它 Claude Code、Codex、GLM、Qwen 等任意 CLI 用 Tag 模板（`command/env/preStart/cwd`）一键拉起。
@@ -34,6 +34,7 @@ curl -fsSL https://raw.githubusercontent.com/linletian/myworktree/main/scripts/i
 - **配置热加载** —— `mw config regen` 重新生成 token / 重新载入配置，无需重启 daemon。
 - **Changes 面板里的文件预览 & 差异** —— 点击任意已变更或未跟踪文件即可看带行号的预览和 diff。
 - **Reasonix Web 聊天实例** —— 勾选一下就能在 worktree 里跑 `reasonix serve`，其 Web 聊天界面内嵌在同一个侧栏。
+- **dsh Web 实例** —— 把 DeepSeek Harness 浏览器 UI 作为受管实例内嵌（工作区注册表按 worktree 隔离、会话池共享、越界只提醒；见 `docs/plans/dsh-native-ui/`）。
 - **分支 divergence 徽标** —— 一眼看清分支相对上游 ahead / behind 状态，支持定时刷新。
 
 ## 背景与痛点
@@ -351,6 +352,12 @@ Reasonix 实例运行 `reasonix serve` 时**不设置** `REASONIX_HOME`，嵌入
 需要留意的后果：如果你的 shell 导出了自定义 `REASONIX_HOME`（例如 `~/.custom-reasonix`），终端里运行的 reasonix 会使用该自定义 home，而 myworktree 实例使用默认 `~/.reasonix`——两者将**看不到彼此的**历史会话。这是刻意行为。如需让某个实例指向自定义 home，可在实例 tag 的 `env` 中设置 `REASONIX_HOME`（在剥离之后追加，后值生效）。
 
 实例生命周期不会触碰共享会话池：Start / Stop / Restart / Delete 只管理 `serve` 子进程及其管理文件（实例状态目录下的 `token`/`port`/`pid`/`serve.log`）。会话存放在 `~/.reasonix/projects/<cwd-slug>/sessions`，因此重启实例会打开一个**全新会话**（无 `--resume`），而你的历史会话仍可在侧边栏切换。
+
+### dsh-web 会话跨进程只有快照（dsh 上游问题）
+
+dsh-web 实例与终端直接运行的 `dsh` 共享真实的 `~/.dsh/sessions` 会话池，所以终端里的会话在嵌入 UI 中**可见、可打开**——但只是**打开那一刻的快照**。实时更新只广播给正在写该会话的进程（跑 agent 的那个终端 dsh），嵌入 UI 永远不会刷新它：dsh 没有跨进程同步机制（无文件监听、无轮询）。这是 dsh 的"单进程写者"会话模型，不是 myworktree 的缺陷。
+
+更严重的是：**第二个 dsh 进程打开一个正在被活跃写入的会话，会损坏它的日志**（dsh 上游 bug，即使没有 myworktree 也会发生）：会话构造器会追加一个无保护的 `session/end-seed` 事件（seq = 日志长度），与写入者的下一个事件撞 seq，永久破坏日志，之后所有其他进程读取都会报 `corrupt session log: seq gap in committed region`。**请避免打开另一个 dsh 进程正在活跃工作的会话**。完整源码证据、磁盘级取证与复现步骤见 `docs/plans/dsh-native-ui/CROSS-PROCESS-SESSION.md`。
 
 ## License
 MIT 协议，详见 [LICENSE](./LICENSE)。

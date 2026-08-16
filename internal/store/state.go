@@ -35,6 +35,7 @@ type ManagedWorktree struct {
 const (
 	KindPTY      = "pty"
 	KindReasonix = "reasonix"
+	KindDsh      = "dsh-web"
 )
 
 // ManagedInstance is the persisted record for one running (or

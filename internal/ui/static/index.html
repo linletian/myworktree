@@ -36,6 +36,8 @@
             --primary-button-hover-bg: #2c974b;
             --danger-text: #cb2431;
             --danger-hover-bg: #ffeef0;
+            --danger-bg: #ffeef0;
+            --danger-border: #f1b0b6;
             --status-running: #28a745;
             --status-stopped: #999;
             --status-exited: #6a737d;
@@ -51,12 +53,15 @@
             --modal-titlebar-bg: #f6f8fa;
             --modal-border: #d0d7da;
             --modal-backdrop: rgba(0,0,0,0.4);
+            --frame-mask-bg: rgba(88, 96, 105, 0.35);
             --table-header-bg: #f6f8fa;
             --table-border: #e1e4e8;
             --table-cell-border: #f0f0f0;
             --group-header-bg: #faf8ff;
             --badge-bg: #21262d;
             --badge-text: #adbac7;
+            --badge-dsh-bg: #0969da;
+            --badge-dsh-text: #ffffff;
             --conn-sse: #e36209;
             --conn-none: #999;
 
@@ -95,6 +100,8 @@
                 --primary-button-hover-bg: #2ea043;
                 --danger-text: #f85149;
                 --danger-hover-bg: #f851491a;
+                --danger-bg: #f851491a;
+                --danger-border: #f8514966;
                 --status-running: #3fb950;
                 --status-stopped: #8b949e;
                 --status-exited: #6e7681;
@@ -110,12 +117,15 @@
                 --modal-titlebar-bg: #161b22;
                 --modal-border: #30363d;
                 --modal-backdrop: rgba(0,0,0,0.6);
+                --frame-mask-bg: rgba(0, 0, 0, 0.55);
                 --table-header-bg: #161b22;
                 --table-border: #30363d;
                 --table-cell-border: #21262d;
                 --group-header-bg: #1a1525;
                 --badge-bg: #30363d;
                 --badge-text: #c9d1d9;
+                --badge-dsh-bg: #1f6feb;
+                --badge-dsh-text: #ffffff;
                 --conn-sse: #e36209;
                 --conn-none: #8b949e;
 
@@ -650,28 +660,22 @@
             display: inline-block;
         }
 
-        .badge-oc {
-            background: var(--accent-color);
-            color: #fff;
-            padding: 0 4px;
-            border-radius: 3px;
-            font-size: 0.65em;
-            margin-right: 3px;
-            font-weight: 600;
-        }
-
-        .rx-badge {
+        /* Unified kind badge (issue #70): one base style shared by the
+           OC / RX / DS labels on instance tabs; per-kind rules only
+           override the colors (all via CSS variables for theme switching). */
+        .kind-badge {
+            display: inline-block;
             font-size: 9px;
             line-height: 1;
-            background: var(--badge-bg, rgba(128,128,128,0.25));
-            color: var(--badge-text, inherit);
+            font-weight: 600;
             padding: 2px 4px;
             border-radius: 4px;
             margin-right: 4px;
             vertical-align: middle;
-            font-family: monospace;
-            letter-spacing: 0.5px;
         }
+        .kind-badge-oc { background: var(--accent-color); color: #fff; }
+        .kind-badge-rx { background: var(--badge-bg, rgba(128,128,128,0.25)); color: var(--badge-text, inherit); }
+        .kind-badge-dsh { background: var(--badge-dsh-bg, #0969da); color: var(--badge-dsh-text, #fff); }
 
         #opencode-panel { width: 100%; height: 100%; display: flex; flex-direction: column; }
         #opencode-panel[hidden] { display: none !important; }
@@ -704,6 +708,41 @@
         #reasonix-frames { flex: 1; min-height: 0; display: flex; flex-direction: column; }
         .reasonix-frame { width: 100%; flex: 1; min-height: 0; border: 0; }
         .reasonix-frame[hidden] { display: none !important; }
+        /* dsh web frame — DeepSeek Harness UI on a per-instance dedicated
+           origin (kinds/dsh_web.js). Same panel/loading/warning pattern as
+           opencode-web, dsh-prefixed ids. */
+        #dsh-panel { width: 100%; height: 100%; display: flex; flex-direction: column; }
+        #dsh-panel[hidden] { display: none !important; }
+        #dsh-frames { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; }
+        #dsh-remote-mask {
+            position: absolute; inset: 0; z-index: 10;
+            background: var(--frame-mask-bg);
+            display: flex; align-items: center; justify-content: center;
+            padding: 24px; box-sizing: border-box;
+        }
+        #dsh-remote-mask[hidden] { display: none !important; }
+        .dsh-remote-mask-card {
+            max-width: 460px;
+            background: var(--main-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 16px 20px;
+            font-size: 13px;
+            line-height: 1.6;
+            color: var(--danger-text);
+            text-align: center;
+            box-shadow: var(--dialog-shadow);
+        }
+        #dsh-loading { flex: 1; min-height: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; color: var(--text-secondary, #586069); font-size: 13px; padding: 12px; box-sizing: border-box; }
+        #dsh-loading[hidden] { display: none !important; }
+        .dsh-loading-spinner { width: 26px; height: 26px; border: 3px solid rgba(9,105,218,0.2); border-top-color: #0969da; border-radius: 50%; animation: opencode-loading-spin 0.8s linear infinite; }
+        .dsh-loading-title { font-size: 14px; font-weight: 600; }
+        .dsh-loading-info { font-family: monospace; font-size: 12px; line-height: 1.6; white-space: pre-wrap; word-break: break-all; background: rgba(0,0,0,0.04); border: 1px solid var(--border-color, #e1e4e8); border-radius: 6px; padding: 8px 12px; max-width: 92%; }
+        .dsh-frame { width: 100%; flex: 1; min-height: 0; border: 0; }
+        .dsh-frame[hidden] { display: none !important; }
+        #dsh-scope-warning { flex: 0 0 auto; width: 100%; box-sizing: border-box; padding: 6px 12px; font-size: 12px; line-height: 1.4; color: #7c2d12; background: #ffedd5; border-bottom: 1px solid #fdba74; word-break: break-all; }
+        #dsh-scope-warning[hidden] { display: none !important; }
+        #dsh-scope-warning.dsh-warning-danger { color: var(--danger-text); background: var(--danger-bg); border-color: var(--danger-border); }
 
         .status-running {
             background: var(--status-running);
@@ -952,6 +991,17 @@
             width: 400px;
         }
 
+        /* Start Instance modal width follows its content (issue #68):
+           the four tabs must fit on one line, so the dialog sizes
+           itself to the tab bar instead of scrolling it. min-width
+           keeps it at least as wide as the other dialogs; max-width
+           caps it so long form-info paragraphs cannot blow it up. */
+        #modal-start-instance {
+            width: max-content;
+            min-width: 400px;
+            max-width: min(90vw, 640px);
+        }
+
             dialog::backdrop {
                 background: var(--modal-backdrop);
             }
@@ -993,6 +1043,23 @@
                 border-radius: 3px;
             }
 
+        .form-warning {
+            background: var(--danger-bg);
+            border: 1px solid var(--danger-border);
+            border-radius: 6px;
+            padding: 10px 12px;
+            margin-bottom: 12px;
+            font-size: 12px;
+            line-height: 1.5;
+            color: var(--danger-text);
+        }
+        .form-warning[hidden] { display: none !important; }
+
+        .form-actions button:disabled {
+            opacity: 0.55;
+            cursor: not-allowed;
+        }
+
         .form-actions {
             margin-top: 16px;
             display: flex;
@@ -1019,12 +1086,14 @@
 
         .modal-tabs {
             display: flex;
+            flex-wrap: nowrap;
             gap: 0;
             padding: 0 12px;
             border-bottom: 1px solid var(--border-color);
             background: var(--hover-bg);
         }
         .modal-tab {
+            flex: 0 0 auto;
             padding: 8px 14px;
             cursor: pointer;
             border: 1px solid transparent;
@@ -1036,6 +1105,7 @@
             font-weight: 500;
             margin-bottom: -1px;
             user-select: none;
+            white-space: nowrap;
             transition: color 0.15s, border-color 0.15s, background 0.15s;
         }
         .modal-tab:hover {
@@ -1314,6 +1384,10 @@
                     <div id="opencode-scope-warning" hidden></div>
                     <div id="opencode-frames"></div>
                 </div>
+                <div id="dsh-panel" hidden>
+                    <div id="dsh-scope-warning" hidden></div>
+                    <div id="dsh-frames"></div>
+                </div>
                 <div id="reasonix-panel" hidden>
                     <div id="reasonix-frames"></div>
                 </div>
@@ -1457,11 +1531,16 @@
         </div>
         <div class="modal-tabs" role="tablist">
             <button type="button" class="modal-tab active" data-tab="terminal" role="tab" aria-selected="true" onclick="switchStartInstanceTab('terminal')">Terminal</button>
-            <button type="button" class="modal-tab" data-tab="opencode-web" role="tab" aria-selected="false" onclick="switchStartInstanceTab('opencode-web')">Opencode-Web</button>
-            <button type="button" class="modal-tab" data-tab="reasonix" role="tab" aria-selected="false" onclick="switchStartInstanceTab('reasonix')">Reasonix</button>
+            <button type="button" class="modal-tab" data-tab="opencode-web" role="tab" aria-selected="false" onclick="switchStartInstanceTab('opencode-web')">OpenCode-Web</button>
+            <button type="button" class="modal-tab" data-tab="reasonix" role="tab" aria-selected="false" onclick="switchStartInstanceTab('reasonix')">Reasonix-Web</button>
+            <button type="button" class="modal-tab" data-tab="dsh-web" role="tab" aria-selected="false" onclick="switchStartInstanceTab('dsh-web')">DSH-Web</button>
         </div>
         <div class="modal-body">
             <div id="modal-tab-terminal" class="modal-tab-panel">
+                <div class="form-info">
+                    <strong>Open a PTY terminal in the selected worktree.</strong>
+                    Starts a shell (default zsh) in the worktree root — this tab starts no web service and embeds no iframe, so it behaves like opening a new shell directly in the worktree. Template and Custom Command still apply and control the shell's command, environment, and pre-start steps; the session ends when the instance is stopped.
+                </div>
                 <div class="form-group">
                     <label>Template <span id="template-edit-btn" class="wt-action-btn" style="display:inline-flex;vertical-align:middle;opacity:0.6" title="Edit templates" onclick="openTagsDir(event)"><svg viewBox="0 0 24 24" width="12" height="12" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path></svg></span></label>
                     <select id="tagSelect" onchange="onTagChange()"></select>
@@ -1477,8 +1556,8 @@
             </div>
             <div id="modal-tab-opencode-web" class="modal-tab-panel" hidden>
                 <div class="form-info">
-                    <strong>在浏览器里使用 opencode 原生 web UI。</strong>
-                    无需填写命令、端口或密码，myworktree 会自动启动并登录，打开即可在网页中对话与编写代码。
+                    <strong>Use the opencode native web UI in your browser.</strong>
+                    No need to fill in command, port, or password — myworktree launches and signs in automatically; open the tab and start chatting and coding.
                 </div>
                 <div class="form-group">
                     <label>Name (Optional)</label>
@@ -1487,17 +1566,28 @@
             </div>
             <div id="modal-tab-reasonix" class="modal-tab-panel" hidden>
                 <div class="form-info">
-                    <strong>在浏览器里使用 Reasonix 网页聊天界面。</strong>
-                    在所选 worktree 里启动 reasonix serve，并在实例页签中内嵌其 web chat UI。启动命令固定为 reasonix serve（会话历史与终端运行的 reasonix 共享 ~/.reasonix 会话池）。
+                    <strong>Use the Reasonix web chat UI in your browser.</strong>
+                    Starts <code>reasonix serve</code> in the selected worktree and embeds its web chat UI in the instance tab. The launch command is fixed at <code>reasonix serve</code> — session history is shared with the terminal-launched reasonix via the <code>~/.reasonix</code> session pool.
                 </div>
                 <div class="form-group">
                     <label>Name (Optional)</label>
                     <input id="instNameRx" placeholder="e.g. reasonix" />
                 </div>
             </div>
+            <div id="modal-tab-dsh-web" class="modal-tab-panel" hidden>
+                <div class="form-info">
+                    <strong>Use the DeepSeek Harness official web UI in your browser.</strong>
+                    Starts <code>dsh web</code> (a headless HTTP server with an embedded SPA) in the selected worktree and embeds its UI in the instance tab. Workspace registry is isolated per worktree, session pool is shared with the terminal-launched dsh, and out-of-scope actions only warn. If <code>dsh</code> is not installed, startup will show a prompt to install via npx or to launch with npx.
+                </div>
+                <div id="dsh-remote-warning" class="form-warning" hidden>Remote access is not available for dsh-web instances (session and workspace sync cannot work over remote networks); please use it from the local 127.0.0.1 environment.</div>
+                <div class="form-group">
+                    <label>Name (Optional)</label>
+                    <input id="instNameDsh" placeholder="e.g. dsh-web" />
+                </div>
+            </div>
             <div class="form-actions">
                 <button onclick="closeModal('modal-start-instance')">Cancel</button>
-                <button class="primary" onclick="doStartInstance()">Start</button>
+                <button class="primary" id="start-instance-btn" onclick="doStartInstance()">Start</button>
             </div>
         </div>
     </dialog>
@@ -1519,6 +1609,34 @@
             <div class="form-actions">
                 <button onclick="closeModal('modal-budget-error')">Close</button>
             </div>
+        </div>
+    </dialog>
+
+    <!-- Modal: dsh not installed (missing-dependency dialog, PLAN.md
+         "missing dependency" section).
+         Shown by kinds/dsh_web.js when a dsh-web instance is failed with a
+         structured missing_dsh state. Three options: npx launch (pinned
+         version, process-group cleanup handled by the driver) / install now
+         (npm install -g + absolute-bin spawn) / cancel. -->
+    <dialog id="modal-dsh-missing">
+        <div class="modal-titlebar">
+            <span class="modal-title" id="dsh-missing-title">dsh is not installed</span>
+            <button class="modal-close-btn" onclick="dshWebCloseMissingDialog()" title="Close">
+                <svg width="10" height="10" viewBox="0 0 10 10" fill="none" xmlns="http://www.w3.org/2000/svg">
+                    <line x1="1" y1="1" x2="9" y2="9" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                    <line x1="9" y1="1" x2="1" y2="9" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                </svg>
+            </button>
+        </div>
+        <div class="modal-body">
+            <p id="dsh-missing-body" style="margin-bottom: 12px; line-height: 1.5;"></p>
+            <div class="form-actions" style="flex-wrap: wrap; justify-content: flex-start; gap: 8px;">
+                <button class="primary" id="dsh-missing-npx" onclick="dshWebChooseMissingAction('npx')">Launch with npx (recommended)</button>
+                <button id="dsh-missing-install" onclick="dshWebChooseMissingAction('install')">Install now (npm install -g)</button>
+                <button onclick="dshWebCloseMissingDialog()">Cancel</button>
+            </div>
+            <p id="dsh-missing-progress" style="margin-top: 10px; color: var(--text-secondary); font-size: 13px; white-space: pre-wrap;" hidden></p>
+            <p id="dsh-missing-error" style="margin-top: 10px; color: #991b1b; font-size: 13px; white-space: pre-wrap;" hidden></p>
         </div>
     </dialog>
 
@@ -1585,12 +1703,17 @@
     <script src="/static/kinds/pty.js"></script>
     <script src="/static/kinds/opencode_web.js"></script>
     <script src="/static/kinds/reasonix.js"></script>
+    <script src="/static/kinds/dsh_web.js"></script>
     <script>
         const token = new URLSearchParams(location.search).get("token") || "";
         const headers = token ? { Authorization: `Bearer ${token}` } : {};
         const SERVER_REV_HEADER = "x-myworktree-server-rev";
         const SERVER_UPGRADED_FLAG = "myworktree-server-upgraded";
         const MAIN_WT_ID = "__main__";
+        // Every kind with an embedded web UI (iframe renderer). New web-ui
+        // kinds must be appended here — the shared panels/badges/cleanup
+        // loops iterate this list.
+        const WEB_UI_KINDS = ['opencode-web', 'reasonix', 'dsh-web'];
         let knownServerRev = "";
         let serverRevReloading = false;
 
@@ -1796,8 +1919,7 @@
                 alert("Backend upgraded. Frontend has been refreshed automatically.");
             }
             // Show remote badge when not on loopback
-            const hostname = window.location.hostname;
-            if (hostname !== "localhost" && hostname !== "127.0.0.1") {
+            if (isRemoteAccess()) {
                 const badge = document.getElementById("remote-badge");
                 if (badge) badge.classList.remove("hidden");
             }
@@ -2090,10 +2212,10 @@
             for (const branch of branchKeys) {
                 const info = data[branch];
                 if (info.error) {
-                    badges += `<span class="wt-diverge-badge-err" title="Error checking ${branch}: ${info.error}">err\u2191</span>`;
+                    badges += `<span class="wt-diverge-badge-err" title="Error checking ${escapeHtml(branch)}: ${escapeHtml(info.error)}">err\u2191</span>`;
                 } else if (info.diverged && info.ahead > 0) {
                     const label = branch === 'mainBranch' ? 'm' : (branch === 'develop' ? 'd' : branch.substring(0, 1));
-                    badges += `<span class="wt-diverge-badge" title="Behind ${branch} by ${info.ahead} commit${info.ahead > 1 ? 's' : ''}">${label}\u2191${info.ahead}</span>`;
+                    badges += `<span class="wt-diverge-badge" title="Behind ${escapeHtml(branch)} by ${info.ahead} commit${info.ahead > 1 ? 's' : ''}">${label}\u2191${info.ahead}</span>`;
                 }
             }
             return badges ? `<span class="wt-diverge-badges">${badges}</span>` : '';
@@ -2102,7 +2224,7 @@
         function renderSidebar() {
             const list = document.getElementById("wt-list");
             let html = "";
-            const isLocal = window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1";
+            const isLocal = !isRemoteAccess();
 
             const shortcuts = (id) => {
                 if (!isLocal) return '';
@@ -2295,12 +2417,13 @@
                 const isRenaming = state.renamingInst === i.id;
 
                 const renameValue = isRenaming && state.renamingInstValue ? state.renamingInstValue : displayName;
+                const renameValueEsc = escapeHtml(renameValue);
                 if (isRenaming) {
                     return `
             <div class="tab ${isActive ? 'active' : ''}" onclick="selectInstance('${i.id}')">
               <span class="tab-status ${statusClass}"></span>
               <input id="rename-input-${i.id}" class="tab-rename-input"
-                value="${renameValue}"
+                value="${renameValueEsc}"
                 onkeydown="handleRenameKeydown('${i.id}', event)"
                 onblur="commitRename('${i.id}', event)"
               />
@@ -2321,9 +2444,10 @@
                  ondrop="handleDrop('${i.id}', event)"
                  title="Drag to reorder; double-click to rename">
               <span class="tab-status ${statusClass}"></span>
-              ${i.kind === 'opencode-web' ? '<span class="badge-oc">OC</span>' : ''}
-              ${i.kind === "reasonix" ? '<span class="rx-badge" title="Reasonix web UI">rx</span>' : ""}
-               ${displayName}
+              ${i.kind === 'opencode-web' ? '<span class="kind-badge kind-badge-oc">OC</span>' : ''}
+              ${i.kind === "reasonix" ? '<span class="kind-badge kind-badge-rx" title="Reasonix web UI">RX</span>' : ""}
+              ${i.kind === 'dsh-web' ? '<span class="kind-badge kind-badge-dsh" title="DeepSeek Harness web UI">DS</span>' : ''}
+               ${escapeHtml(displayName)}
             </div>
           `;
             }).join("");
@@ -2494,6 +2618,8 @@
                 const inst = state.instances.find(i => i.id === state.activeInst);
                 const isOC = inst && inst.kind === 'opencode-web';
                 const isRX = inst && inst.kind === 'reasonix';
+                const isDSH = inst && inst.kind === 'dsh-web';
+                const isWeb = !!(isOC || isRX || isDSH);
                 empty.style.display = "none";
                 // The refresh / scroll-to-bottom shortcuts overlay the
                 // terminal's top-right corner; they are meaningless for the
@@ -2503,13 +2629,13 @@
                 // element's default layout. toggle(name, flag) in both
                 // branches — keep the forms identical so future edge
                 // conditions (e.g. hide while loading) can't mis-match.
-                if (controls) controls.classList.toggle("oc-hidden", !!(isOC || isRX));
-                // For opencode-web / reasonix instances the kind renderers
-                // own the visibility of their panels and the terminal
-                // container. renderWorkspace must NOT overwrite them, or the
-                // 8-second refresh cycle will fight the renderer and hide
-                // the iframe.
-                if (!isOC && !isRX) {
+                if (controls) controls.classList.toggle("oc-hidden", isWeb);
+                // For opencode-web / reasonix / dsh-web instances the kind
+                // renderers own the visibility of their panels and the
+                // terminal container. renderWorkspace must NOT overwrite
+                // them, or the 8-second refresh cycle will fight the
+                // renderer and hide the iframe.
+                if (!isWeb) {
                     termContainer.style.display = "block";
                     if (ocPanel) ocPanel.hidden = true;
                     if (rxPanel) rxPanel.hidden = true;
@@ -2517,12 +2643,12 @@
                 actions.classList.add("visible");
 
                 // Styling for stopped instance (terminal kind only)
-                if (!isOC && !isRX && inst && inst.status !== 'running') {
+                if (!isWeb && inst && inst.status !== 'running') {
                     termContainer.style.opacity = "0.6";
                     termContainer.style.filter = "grayscale(100%)";
                     const session = getActiveTerminalSession();
                     if (session && session.term) session.term.options.cursorBlink = false;
-                } else if (!isOC && !isRX) {
+                } else if (!isWeb) {
                     termContainer.style.opacity = "1";
                     termContainer.style.filter = "none";
                     const session = getActiveTerminalSession();
@@ -2547,7 +2673,7 @@
             if (state.branches && state.branches.branches) {
                 const items = state.branches.branches;
                 const def = state.branches.default;
-                const opts = items.map(b => `<option value="${b.name}">${b.name}${b.name === def ? ' (default)' : ''}</option>`).join("");
+                const opts = items.map(b => `<option value="${escapeHtml(b.name)}">${escapeHtml(b.name)}${b.name === def ? ' (default)' : ''}</option>`).join("");
                 if (s.innerHTML === "" || s.options.length <= 1) { // simple dirty check
                     s.innerHTML = opts + '<option value="__custom__">custom…</option>';
                 }
@@ -2555,22 +2681,22 @@
             // Update Tags select
             const ts = document.getElementById("tagSelect");
             if (state.tags) {
-                // Terminal tab: filter out opencode-web (it's only
-                // available via the Opencode-Web tab — complete
+                // Terminal tab: filter out the web-ui kinds (opencode-web /
+                // dsh-web are only available via their own tabs — complete
                 // isolation per the product principle).
-                const ptyTags = state.tags.filter(t => t.id !== 'opencode-web');
+                const ptyTags = state.tags.filter(t => t.id !== 'opencode-web' && t.id !== 'dsh-web');
                 const opts = '<option value="">-- select --</option>' +
                     ptyTags.map(t => {
                         let details = [];
-                        if (t.cwd) details.push(`cwd: ${t.cwd}`);
-                        if (t.preStart) details.push(`pre: ${t.preStart}`);
-                        if (t.env && Object.keys(t.env).length > 0) details.push(`env: ${Object.keys(t.env).join(",")}`);
+                        if (t.cwd) details.push(`cwd: ${escapeHtml(t.cwd)}`);
+                        if (t.preStart) details.push(`pre: ${escapeHtml(t.preStart)}`);
+                        if (t.env && Object.keys(t.env).length > 0) details.push(`env: ${Object.keys(t.env).map(escapeHtml).join(",")}`);
                         const title = details.length ? ` (${details.join("; ")})` : "";
-                        return `<option value="${t.id}" title="${t.command}${title}">${t.id} — ${t.command}</option>`;
+                        return `<option value="${escapeHtml(t.id)}" title="${escapeHtml(t.command)}${title}">${escapeHtml(t.id)} — ${escapeHtml(t.command)}</option>`;
                     }).join("");
                 if (ts.innerHTML !== opts) ts.innerHTML = opts;
             }
-            const isLocal = window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1";
+            const isLocal = !isRemoteAccess();
             const editBtn = document.getElementById("template-edit-btn");
             if (editBtn) editBtn.style.display = isLocal ? "inline-flex" : "none";
         }
@@ -2624,14 +2750,16 @@
             const kind = (inst && inst.kind) || 'pty';
             const renderer = (window.KindRenderers || {})[kind];
             const session = { id: id, instance: inst };
-            // Web-ui panels are mutually exclusive: hide both before
+            // Web-ui panels are mutually exclusive: hide them all before
             // dispatching so the activated renderer's panel is the only
             // visible one (prevents the stacked half/half layout when
-            // switching between opencode-web and reasonix).
+            // switching between web-ui kinds).
             const ocPanel = document.getElementById('opencode-panel');
             const rxPanel = document.getElementById('reasonix-panel');
+            const dshPanel = document.getElementById('dsh-panel');
             if (ocPanel) ocPanel.hidden = true;
             if (rxPanel) rxPanel.hidden = true;
+            if (dshPanel) dshPanel.hidden = true;
             // Deactivate the previously-active renderer first so it
             // can release any listeners / hide its panel cleanly.
             if (previousID) {
@@ -2649,6 +2777,9 @@
                 }
                 if (kind === 'reasonix') {
                     updateStatus(inst && inst.status === 'running' ? 'reasonix web' : 'stopped');
+                }
+                if (kind === 'dsh-web') {
+                    updateStatus(inst && inst.status === 'running' ? 'dsh web ui' : 'stopped');
                 }
                 maybeDestroyInactiveStoppedSession(previousID);
                 return;
@@ -2758,6 +2889,7 @@
             document.getElementById("instName").value = "";
             document.getElementById("instNameOc").value = "";
             document.getElementById("instNameRx").value = "";
+            document.getElementById("instNameDsh").value = "";
             document.getElementById("tagSelect").value = "";
             openModal("modal-start-instance");
         }
@@ -2786,6 +2918,23 @@
             panels.forEach(p => {
                 p.hidden = p.id !== 'modal-tab-' + tabName;
             });
+            updateDshStartAvailability();
+        }
+
+        // dsh-web is not usable over remote access: its SPA syncs the
+        // session/workspace lists over WebSocket, which fails on remote
+        // networks (issue #72). Disable Start and show the red warning
+        // only while the dsh-web tab is active AND the page is remote.
+        // Remote detection: isRemoteAccess() (framework.js, single
+        // source of truth).
+        function updateDshStartAvailability() {
+            const activeTab = document.querySelector('#modal-start-instance .modal-tab.active');
+            const onDsh = activeTab && activeTab.dataset.tab === 'dsh-web';
+            const remote = isRemoteAccess();
+            const btn = document.getElementById('start-instance-btn');
+            const warn = document.getElementById('dsh-remote-warning');
+            if (btn) btn.disabled = onDsh && remote;
+            if (warn) warn.hidden = !(onDsh && remote);
         }
 
         // API Calls
@@ -2838,12 +2987,19 @@
             try {
                 // Determine which tab is active and what kind to send.
                 // The Terminal tab always sends kind="" (backend
-                // normalises to "pty"); the Opencode-Web / Reasonix tabs
+                // normalises to "pty"); the OpenCode-Web / Reasonix-Web tabs
                 // always send their kind regardless of any tag selection
                 // (the kind is a UI decision, not a tag selection —
                 // that's the whole point of the tab split).
                 const activeTab = document.querySelector('#modal-start-instance .modal-tab.active');
                 const tabName = activeTab ? activeTab.dataset.tab : 'terminal';
+                // Defense in depth (the Start button is already disabled on
+                // the dsh-web tab under remote access): dsh-web cannot sync
+                // its session/workspace lists over remote networks (issue #72).
+                if (tabName === 'dsh-web' && isRemoteAccess()) {
+                    alert("dsh-web instances are not available over remote access; please use the local 127.0.0.1 environment.");
+                    return;
+                }
                 let body;
                 if (tabName === 'opencode-web') {
                     body = {
@@ -2862,6 +3018,14 @@
                         command: '',
                         name: document.getElementById("instNameRx").value || 'reasonix',
                         kind: 'reasonix',
+                    };
+                } else if (tabName === 'dsh-web') {
+                    body = {
+                        worktree_id: state.activeWT,
+                        tag_id: 'dsh-web',
+                        command: '',
+                        name: document.getElementById("instNameDsh").value || 'dsh-web',
+                        kind: 'dsh-web',
                     };
                 } else {
                     const tagId = document.getElementById("tagSelect").value;
@@ -2914,7 +3078,7 @@
                 // Release a stopped web-ui instance's cached iframe
                 // immediately (its backend is gone); otherwise it lingers in
                 // the DOM until the next tab switch.
-                if (stoppedInst && (stoppedInst.kind === 'opencode-web' || stoppedInst.kind === 'reasonix')) {
+                if (stoppedInst && WEB_UI_KINDS.includes(stoppedInst.kind)) {
                     const renderer = (window.KindRenderers || {})[stoppedInst.kind];
                     if (renderer && typeof renderer.destroyFrame === 'function') renderer.destroyFrame(stoppedId);
                 }
@@ -2941,7 +3105,7 @@
                 await api("/api/instances/delete", { method: "POST", body: JSON.stringify({ id: deletedId }) });
                 // Release the deleted web-ui instance's cached iframe so it
                 // doesn't linger in the DOM / keep the page loaded.
-                for (const kind of ['opencode-web', 'reasonix']) {
+                for (const kind of WEB_UI_KINDS) {
                     const renderer = (window.KindRenderers || {})[kind];
                     if (renderer && typeof renderer.destroyFrame === 'function') renderer.destroyFrame(deletedId);
                 }
@@ -4020,8 +4184,7 @@
         function updateLLMSettingsButtonVisibility(isSecure) {
             const btn = document.getElementById("btnLLMSettings");
             if (!btn) return;
-            const hostname = window.location.hostname;
-            const isLocalhost = hostname === "localhost" || hostname === "127.0.0.1";
+            const isLocalhost = !isRemoteAccess();
             btn.style.display = (isLocalhost || isSecure) ? "inline-block" : "none";
         }
 

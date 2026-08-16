@@ -34,6 +34,10 @@ var defaultTags = []Tag{
 	// for the instance, and Env remains empty so users can layer non-secret
 	// env via tags.json without overwriting the forced auth token.
 	{ID: "opencode-web"},
+	// dsh-web: same contract — the invocation (`dsh web --host 127.0.0.1
+	// --port 0 --patch <restrict.yml>`) is hardcoded by the dsh_web
+	// driver; the tag is a label / env / preStart source only.
+	{ID: "dsh-web"},
 }
 
 func (m Manager) ensureDefaults() error {

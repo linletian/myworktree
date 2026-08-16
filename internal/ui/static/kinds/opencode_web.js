@@ -82,7 +82,7 @@ class OpencodeWebRenderer {
             this._resetScopeState();
             this._currentFrame = null;
             this._showLoading(ocPanel, {
-                title: 'opencode 实例已停止',
+                title: 'opencode instance stopped',
                 lines: ['instance:  ' + session.id],
             });
             return;
@@ -142,7 +142,7 @@ class OpencodeWebRenderer {
         // survives — keep-alive is a visibility toggle, not a teardown).
         // Without this, switching worktrees/instances left the old
         // instance's page visible on an empty panel (cross-instance
-        // “串台” while the new instance is still starting).
+        // "cross-talk" while the new instance is still starting).
         if (this._currentFrame) this._currentFrame.hidden = true;
         this._currentFrame = null;
         // Hide the panel itself: web-ui panels are mutually exclusive,
@@ -199,7 +199,7 @@ class OpencodeWebRenderer {
             el.id = 'opencode-loading';
             el.innerHTML =
                 '<div class="opencode-loading-spinner"></div>' +
-                '<div class="opencode-loading-title">正在启动 opencode server…</div>' +
+                '<div class="opencode-loading-title">Starting opencode server…</div>' +
                 '<div class="opencode-loading-info"></div>';
             const frames = ocPanel.querySelector('#opencode-frames');
             if (frames) ocPanel.insertBefore(el, frames);
@@ -301,7 +301,7 @@ class OpencodeWebRenderer {
                 const status = inst ? inst.status : 'unknown';
                 const lastError = inst ? (inst.last_error || '') : '';
                 this._showLoading(ocPanel, {
-                    title: '启动超时 (60s)',
+                    title: 'Startup timed out (60s)',
                     lines: ['instance:  ' + id, 'status:    ' + status + (lastError ? ' — ' + lastError : '')],
                 });
                 return;
@@ -410,14 +410,14 @@ class OpencodeWebRenderer {
         if (this._versionUnsupported || this._cspAnchorMissing || (this._hiddenStatus && this._hiddenStatus !== 'ok')) {
             ocWarning.hidden = false;
             ocWarning.classList.add('opencode-warning-danger');
-            ocWarning.textContent = '⚠ opencode web UI 版本过新或结构变化,切换入口禁用未生效,请升级 myworktree 或使用受支持版本(1.18.x)';
+            ocWarning.textContent = '⚠ opencode web UI version is too new or its structure changed — the switch-entry hiding may not be effective. Upgrade myworktree or use a supported version (1.18.x)';
             return;
         }
         // 2. Out of scope (proxy observed a directory != worktree).
         if (this._scope === 'out-of-scope' || this._scope === 'cross-project') {
             ocWarning.hidden = false;
             ocWarning.classList.remove('opencode-warning-danger');
-            ocWarning.textContent = '⚠ opencode 已离开 worktree 范围' + (this._scopeDir ? ': ' + this._scopeDir : '');
+            ocWarning.textContent = '⚠ opencode has left the worktree scope' + (this._scopeDir ? ': ' + this._scopeDir : '');
             return;
         }
         // 3. Normal.

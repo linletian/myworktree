@@ -66,7 +66,7 @@ type Handle struct {
 func (k *Kind) Manifest() framework.KindInfo {
 	return framework.KindInfo{
 		Name:        KindName,
-		Label:       "Reasonix",
+		Label:       "Reasonix-Web",
 		Description: "Reasonix agent running in this worktree with its web chat UI.",
 		Interactive: false,
 	}
@@ -75,6 +75,11 @@ func (k *Kind) Manifest() framework.KindInfo {
 // Spawn starts the serve subprocess via the driver and waits until it
 // is listening. Tag preStart runs inside the driver's Start via the
 // PreStart callback so it sees the exact same environment as serve.
+// NeedsOutputBuffer reports that this kind never captures PTY-style
+// output into the framework ring buffer, so Start skips the 16–256 MB
+// pre-allocation (framework.BufferConsumer).
+func (k *Kind) NeedsOutputBuffer() bool { return false }
+
 func (k *Kind) Spawn(ctx context.Context, params framework.SpawnParams) (framework.Handle, *framework.ReadySignal, error) {
 	if k.drv == nil {
 		return framework.Handle{}, nil, errors.New("reasonix driver is not configured")
