@@ -3,11 +3,13 @@ package app
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"myworktree/internal/framework"
@@ -132,6 +134,61 @@ func TestHandleInstanceDshInfoRemoteHostMapping(t *testing.T) {
 	}
 	if resp["iframe_src"] != "http://192.168.1.5:40002/" {
 		t.Errorf("remote iframe_src = %v", resp["iframe_src"])
+	}
+}
+
+func TestHandleInstanceDshInfoTokenizesRemoteSrc(t *testing.T) {
+	// Remote mode (token gate on): the handler must append ?token= to
+	// iframe_src ITSELF. The mw_token cookie is HttpOnly — page JS can
+	// never read it — and portal/login flows carry no ?token= in the
+	// address bar, so the frontend has no way to tokenize the
+	// cross-origin iframe URL (the embed would 401). The server owns
+	// both facts (gate on + token value) and this handler sits behind
+	// withAuth, so only authenticated clients receive it.
+	wt := t.TempDir()
+	raw, _ := json.Marshal(dsh_web.Blob{
+		ProxyHost: "0.0.0.0", ProxyPort: "40002",
+		IframeURL: "http://0.0.0.0:40002/",
+	})
+	srv, _ := newIsolatedTestServerWithDsh(t, store.State{
+		Worktrees: []store.ManagedWorktree{{ID: "wt1", Name: "wt1", Path: wt}},
+		Instances: []store.ManagedInstance{managedTestInstance("inst-dsh", store.KindDsh, wt, "running", raw)},
+	})
+	// The handler must read the PROXY's own token (that is what
+	// checkToken validates against). Give cfg a DIFFERENT value so the
+	// assertion pins the source: if the handler ever falls back to
+	// cfg.AuthToken, this test fails.
+	srv.dshDrv.Proxy = dsh_web.ProxyConfig{RequireToken: true, AuthToken: "sekret-proxy"}
+	srv.cfg = Config{ListenAddr: "0.0.0.0:0", AuthToken: "sekret-cfg"}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/instances/dsh?id=inst-dsh", nil)
+	req.Host = "192.168.1.5:50099"
+	w := httptest.NewRecorder()
+	srv.handleInstanceDshInfo(w, req)
+	var resp map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	want := "http://192.168.1.5:40002/?token=sekret-proxy"
+	if resp["iframe_src"] != want {
+		t.Errorf("iframe_src = %v, want %q", resp["iframe_src"], want)
+	}
+	if strings.Contains(fmt.Sprint(resp["iframe_src"]), "sekret-cfg") {
+		t.Error("iframe_src carries cfg.AuthToken; the handler must use Proxy.AuthToken")
+	}
+
+	// Gate off (local loopback bind): the iframe must stay token-free
+	// (src rebuilt from the caller's host, still without a token).
+	srv.dshDrv.Proxy = dsh_web.ProxyConfig{RequireToken: false}
+	req = httptest.NewRequest(http.MethodGet, "/api/instances/dsh?id=inst-dsh", nil)
+	req.Host = "127.0.0.1:50099"
+	w = httptest.NewRecorder()
+	srv.handleInstanceDshInfo(w, req)
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if src, _ := resp["iframe_src"].(string); src != "http://127.0.0.1:40002/" || strings.Contains(src, "token=") {
+		t.Errorf("local iframe_src = %q, want token-free", src)
 	}
 }
 

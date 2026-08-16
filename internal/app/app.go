@@ -1843,7 +1843,27 @@ func (s *Server) handleInstanceDshInfo(w http.ResponseWriter, r *http.Request) {
 			if s.isSecure {
 				scheme = "https"
 			}
-			resp["iframe_src"] = scheme + "://" + net.JoinHostPort(proxyHost, b.ProxyPort) + "/"
+			src := scheme + "://" + net.JoinHostPort(proxyHost, b.ProxyPort) + "/"
+			// Remote mode: the per-instance proxy's token gate requires
+			// the FIRST iframe navigation to carry ?token= (the embed is
+			// a dedicated origin — the main-origin HttpOnly mw_token
+			// cookie cannot travel to it, and JS can never read that
+			// cookie to append the token itself). The server owns both
+			// facts — the gate is on (RequireToken) and the token value —
+			// so it appends the token here. The token read is the PROXY's
+			// own AuthToken (Proxy.AuthToken), not cfg.AuthToken: that is
+			// exactly the credential checkToken validates against, so the
+			// URL stays correct even if the main token and the proxy
+			// token are ever split. This handler sits behind withAuth
+			// (loopback bypass included), so only authenticated clients
+			// receive it; the proxy then validates, syncs its own HttpOnly
+			// cookie, and 302-redirects to the token-free URL, so the
+			// embedded document never retains the token in its
+			// location.search (ARCHITECTURE §9 checklist).
+			if s.dshDrv != nil && s.dshDrv.Proxy.RequireToken && strings.TrimSpace(s.dshDrv.Proxy.AuthToken) != "" {
+				src += "?token=" + url.QueryEscape(s.dshDrv.Proxy.AuthToken)
+			}
+			resp["iframe_src"] = src
 			resp["proxy_host"] = proxyHost
 		} else {
 			// The blob's IframeURL still names the unroutable bind

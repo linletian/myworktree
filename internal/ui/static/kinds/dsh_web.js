@@ -27,14 +27,18 @@
 //   - Missing-dependency dialog: when the instance is failed and the
 //     info endpoint reports missing_dsh, a dialog offers three options:
 //     npx launch / install now / cancel (PLAN.md §缺失依赖).
-//   - Remote mode: when this page is served remotely (non-loopback
-//     host) the iframe src gets ?token= appended (read via the same
-//     cookie → address-bar pattern as framework.js window.api) so the
-//     proxy's mandatory token gate authenticates the first navigation;
-//     the proxy then syncs the HttpOnly cookie on its own origin and
-//     302-redirects to a token-free URL, so the embedded document never
-//     keeps the token in its location.search. Locally the iframe is
-//     never token-bearing (loopback clients bypass the gate).
+//   - Remote mode: the mw_token cookie is HttpOnly (page JS can never
+//     read it) and portal/login flows carry no ?token= in the address
+//     bar, so the SERVER appends ?token= to iframe_src itself when the
+//     proxy's token gate is on (handleInstanceDshInfo) — the embed is a
+//     dedicated origin and its first navigation must carry the token.
+//     The proxy validates it, syncs the HttpOnly cookie on its own
+//     origin, and 302-redirects to a token-free URL, so the embedded
+//     document never keeps the token in its location.search. The
+//     renderer only detects a server-tokenized src (no double-append),
+//     falls back to an address-bar token, and warns when a remote page
+//     ends up with a token-less src. Locally the iframe is never
+//     token-bearing (loopback clients bypass the gate).
 
 class DshWebRenderer {
     constructor() {
@@ -279,35 +283,39 @@ class DshWebRenderer {
         tick();
     }
 
-    // _tokenizeIframeSrc appends ?token= only when THIS page is served
-    // remotely (non-loopback): the proxy's token gate is mandatory
-    // there, and the token is read with the same cookie → address-bar
-    // fallback as framework.js window.api. The proxy validates the
-    // first navigation, syncs the HttpOnly cookie, and 302-redirects
-    // to a token-free URL, so the embedded document never KEEPS the
-    // credential in its location.search. Locally the iframe stays
-    // token-free (loopback clients bypass the gate).
+    // _tokenizeIframeSrc: iframe URL token handling for remote mode.
+    // The mw_token cookie is HttpOnly — JavaScript can never read it,
+    // and portal/login flows have no ?token= in the address bar, so the
+    // SERVER appends ?token= to iframe_src itself when the proxy's
+    // token gate is on (handleInstanceDshInfo). Here we only:
+    //   - accept a server-tokenized src (no warning, no double-append);
+    //   - fall back to the address-bar token for a src that somehow
+    //     lacks one (belt and braces);
+    //   - warn when a remote page ends up with a token-less src (the
+    //     embed will 401).
+    // Locally the iframe stays token-free (loopback clients bypass the
+    // gate). The proxy validates the first navigation, syncs the
+    // HttpOnly cookie on its own origin, and 302-redirects to a
+    // token-free URL, so the embedded document never KEEPS the
+    // credential in its location.search.
     _tokenizeIframeSrc(src) {
         const host = window.location.hostname;
         if (!(host === 'localhost' || host === '127.0.0.1' || host === '::1')) {
-            let token = '';
-            if (document.cookie) {
-                const m = document.cookie.match(/(?:^|;\s*)mw_token=([^;]*)/);
-                if (m) token = m[1];
+            if (src.indexOf('token=') !== -1) {
+                this._remoteAuthMissing = false;
+                return src;
             }
-            if (!token) {
-                const p = new URLSearchParams(window.location.search);
-                token = p.get('token') || '';
-            }
+            const p = new URLSearchParams(window.location.search);
+            const token = p.get('token') || '';
             if (token) {
                 this._remoteAuthMissing = false;
                 const sep = src.indexOf('?') === -1 ? '?' : '&';
                 return src + sep + 'token=' + encodeURIComponent(token);
             }
-            // Remote page with NO credential anywhere (no cookie, no
-            // address-bar token): the proxy's mandatory token gate will
-            // 401 the first iframe navigation. Keep the frame hidden
-            // behind the loading placeholder and surface a hint
+            // Remote page with a token-less src and no address-bar
+            // token: the proxy's mandatory token gate will 401 the
+            // first iframe navigation. Keep the frame hidden behind
+            // the loading placeholder and surface a hint
             // (REVIEW-2026-08-15.md #13).
             this._remoteAuthMissing = true;
             return src;

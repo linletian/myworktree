@@ -28,9 +28,12 @@ trap cleanup EXIT
 say()  { echo "[PR5] $*"; }
 fail() { echo "[PR5] FAIL: $*"; tail -30 "$LOG" 2>/dev/null; exit 1; }
 
-# --- 0. build ---------------------------------------------------------
+# --- 0. build + JS unit tests -------------------------------------------
 cd "$ROOT" && go build -o "$TDIR/mw" ./cmd/myworktree || fail "build"
 say "binary built"
+node --test "$ROOT/docs/plans/dsh-native-ui/dsh_web.test.mjs" >/dev/null 2>&1 \
+  || fail "dsh_web.js unit tests (dsh_web.test.mjs)"
+say "dsh_web.js unit tests passed"
 
 # --- 1. isolated repo --------------------------------------------------
 mkdir -p "$TDIR/repo" && cd "$TDIR/repo" && git init -q . || fail "git init"
@@ -121,6 +124,25 @@ say "LAN cookie-only -> HTTP $C4"
 C5=$(curl -sk -o /dev/null -w '%{http_code}' "https://127.0.0.1:$PP/")
 say "loopback no-token -> HTTP $C5 (bypass expected)"
 [ "$C5" = "200" ] || fail "expected 200 for loopback bypass, got $C5"
+
+# Server-side tokenization: the info endpoint must hand out a
+# token-bearing iframe_src to an authenticated remote client (the
+# mw_token cookie is HttpOnly — JS cannot read it, and portal/login
+# flows carry no address-bar token, so the server owns this).
+SRC=$(curl -sk "https://$LANIP:$PORT/api/instances/dsh?id=$INST&token=$TOKEN" | jq -r '.iframe_src // empty')
+say "server iframe_src (remote): $SRC"
+# Strict check: parse the URL and assert the `token` query field equals
+# the expected value EXACTLY (a substring grep would also pass for
+# `?token=…&other=…` or `?token=` prefixes).
+echo "$SRC" | python3 -c '
+import sys
+from urllib.parse import urlparse, parse_qs
+q = parse_qs(urlparse(sys.stdin.read().strip()).query)
+sys.exit(0 if q.get("token") == [sys.argv[1]] else 1)
+' "$TOKEN" || fail "server did not tokenize iframe_src (token field mismatch): $SRC"
+C6=$(curl -skL -c "$TDIR/jar2" -o /dev/null -w '%{http_code}' "$SRC")
+say "server-tokenized src follow (-L) -> HTTP $C6"
+[ "$C6" = "200" ] || fail "expected 200 loading the server-tokenized src, got $C6"
 
 # --- 7. WS upgrade through the remote token gate ----------------------------
 # Browsers speak WS over HTTP/1.1 (Upgrade is invalid over h2 — the
