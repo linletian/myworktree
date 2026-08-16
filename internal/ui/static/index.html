@@ -36,6 +36,8 @@
             --primary-button-hover-bg: #2c974b;
             --danger-text: #cb2431;
             --danger-hover-bg: #ffeef0;
+            --danger-bg: #ffeef0;
+            --danger-border: #f1b0b6;
             --status-running: #28a745;
             --status-stopped: #999;
             --status-exited: #6a737d;
@@ -51,6 +53,7 @@
             --modal-titlebar-bg: #f6f8fa;
             --modal-border: #d0d7da;
             --modal-backdrop: rgba(0,0,0,0.4);
+            --frame-mask-bg: rgba(88, 96, 105, 0.35);
             --table-header-bg: #f6f8fa;
             --table-border: #e1e4e8;
             --table-cell-border: #f0f0f0;
@@ -95,6 +98,8 @@
                 --primary-button-hover-bg: #2ea043;
                 --danger-text: #f85149;
                 --danger-hover-bg: #f851491a;
+                --danger-bg: #f851491a;
+                --danger-border: #f8514966;
                 --status-running: #3fb950;
                 --status-stopped: #8b949e;
                 --status-exited: #6e7681;
@@ -110,6 +115,7 @@
                 --modal-titlebar-bg: #161b22;
                 --modal-border: #30363d;
                 --modal-backdrop: rgba(0,0,0,0.6);
+                --frame-mask-bg: rgba(0, 0, 0, 0.55);
                 --table-header-bg: #161b22;
                 --table-border: #30363d;
                 --table-cell-border: #21262d;
@@ -709,7 +715,26 @@
            opencode-web, dsh-prefixed ids. */
         #dsh-panel { width: 100%; height: 100%; display: flex; flex-direction: column; }
         #dsh-panel[hidden] { display: none !important; }
-        #dsh-frames { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+        #dsh-frames { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; }
+        #dsh-remote-mask {
+            position: absolute; inset: 0; z-index: 10;
+            background: var(--frame-mask-bg);
+            display: flex; align-items: center; justify-content: center;
+            padding: 24px; box-sizing: border-box;
+        }
+        #dsh-remote-mask[hidden] { display: none !important; }
+        .dsh-remote-mask-card {
+            max-width: 460px;
+            background: var(--main-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 16px 20px;
+            font-size: 13px;
+            line-height: 1.6;
+            color: var(--danger-text);
+            text-align: center;
+            box-shadow: var(--dialog-shadow);
+        }
         #dsh-loading { flex: 1; min-height: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; color: var(--text-secondary, #586069); font-size: 13px; padding: 12px; box-sizing: border-box; }
         #dsh-loading[hidden] { display: none !important; }
         .dsh-loading-spinner { width: 26px; height: 26px; border: 3px solid rgba(9,105,218,0.2); border-top-color: #0969da; border-radius: 50%; animation: opencode-loading-spin 0.8s linear infinite; }
@@ -719,7 +744,7 @@
         .dsh-frame[hidden] { display: none !important; }
         #dsh-scope-warning { flex: 0 0 auto; width: 100%; box-sizing: border-box; padding: 6px 12px; font-size: 12px; line-height: 1.4; color: #7c2d12; background: #ffedd5; border-bottom: 1px solid #fdba74; word-break: break-all; }
         #dsh-scope-warning[hidden] { display: none !important; }
-        #dsh-scope-warning.dsh-warning-danger { color: #991b1b; background: #fee2e2; border-color: #fca5a5; }
+        #dsh-scope-warning.dsh-warning-danger { color: var(--danger-text); background: var(--danger-bg); border-color: var(--danger-border); }
         .badge-dsh { background: #0969da; color: #fff; border-radius: 4px; padding: 1px 5px; font-size: 10px; margin-right: 4px; vertical-align: middle; font-family: monospace; letter-spacing: 0.5px; }
 
         .status-running {
@@ -1009,6 +1034,23 @@
                 background: var(--main-bg);
                 border-radius: 3px;
             }
+
+        .form-warning {
+            background: var(--danger-bg);
+            border: 1px solid var(--danger-border);
+            border-radius: 6px;
+            padding: 10px 12px;
+            margin-bottom: 12px;
+            font-size: 12px;
+            line-height: 1.5;
+            color: var(--danger-text);
+        }
+        .form-warning[hidden] { display: none !important; }
+
+        .form-actions button:disabled {
+            opacity: 0.55;
+            cursor: not-allowed;
+        }
 
         .form-actions {
             margin-top: 16px;
@@ -1522,6 +1564,7 @@
                     <strong>在浏览器里使用 DeepSeek Harness 官方 web UI。</strong>
                     在所选 worktree 里启动 <code>dsh web</code>（无头 HTTP server + 内嵌 SPA），并在实例页签中内嵌其界面。工作区注册表按 worktree 隔离、会话池与终端运行的 dsh 共享、越界只提醒。未安装 dsh 时启动会弹窗引导（npx 启动 / 立即安装）。
                 </div>
+                <div id="dsh-remote-warning" class="form-warning" hidden>Remote access is not available for dsh-web instances (session and workspace sync cannot work over remote networks); please use it from the local 127.0.0.1 environment.</div>
                 <div class="form-group">
                     <label>Name (Optional)</label>
                     <input id="instNameDsh" placeholder="e.g. dsh-web" />
@@ -1529,7 +1572,7 @@
             </div>
             <div class="form-actions">
                 <button onclick="closeModal('modal-start-instance')">Cancel</button>
-                <button class="primary" onclick="doStartInstance()">Start</button>
+                <button class="primary" id="start-instance-btn" onclick="doStartInstance()">Start</button>
             </div>
         </div>
     </dialog>
@@ -1860,8 +1903,7 @@
                 alert("Backend upgraded. Frontend has been refreshed automatically.");
             }
             // Show remote badge when not on loopback
-            const hostname = window.location.hostname;
-            if (hostname !== "localhost" && hostname !== "127.0.0.1") {
+            if (isRemoteAccess()) {
                 const badge = document.getElementById("remote-badge");
                 if (badge) badge.classList.remove("hidden");
             }
@@ -2166,7 +2208,7 @@
         function renderSidebar() {
             const list = document.getElementById("wt-list");
             let html = "";
-            const isLocal = window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1";
+            const isLocal = !isRemoteAccess();
 
             const shortcuts = (id) => {
                 if (!isLocal) return '';
@@ -2637,7 +2679,7 @@
                     }).join("");
                 if (ts.innerHTML !== opts) ts.innerHTML = opts;
             }
-            const isLocal = window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1";
+            const isLocal = !isRemoteAccess();
             const editBtn = document.getElementById("template-edit-btn");
             if (editBtn) editBtn.style.display = isLocal ? "inline-flex" : "none";
         }
@@ -2859,6 +2901,23 @@
             panels.forEach(p => {
                 p.hidden = p.id !== 'modal-tab-' + tabName;
             });
+            updateDshStartAvailability();
+        }
+
+        // dsh-web is not usable over remote access: its SPA syncs the
+        // session/workspace lists over WebSocket, which fails on remote
+        // networks (issue #72). Disable Start and show the red warning
+        // only while the dsh-web tab is active AND the page is remote.
+        // Remote detection: isRemoteAccess() (framework.js, single
+        // source of truth).
+        function updateDshStartAvailability() {
+            const activeTab = document.querySelector('#modal-start-instance .modal-tab.active');
+            const onDsh = activeTab && activeTab.dataset.tab === 'dsh-web';
+            const remote = isRemoteAccess();
+            const btn = document.getElementById('start-instance-btn');
+            const warn = document.getElementById('dsh-remote-warning');
+            if (btn) btn.disabled = onDsh && remote;
+            if (warn) warn.hidden = !(onDsh && remote);
         }
 
         // API Calls
@@ -2917,6 +2976,13 @@
                 // that's the whole point of the tab split).
                 const activeTab = document.querySelector('#modal-start-instance .modal-tab.active');
                 const tabName = activeTab ? activeTab.dataset.tab : 'terminal';
+                // Defense in depth (the Start button is already disabled on
+                // the dsh-web tab under remote access): dsh-web cannot sync
+                // its session/workspace lists over remote networks (issue #72).
+                if (tabName === 'dsh-web' && isRemoteAccess()) {
+                    alert("dsh-web instances are not available over remote access; please use the local 127.0.0.1 environment.");
+                    return;
+                }
                 let body;
                 if (tabName === 'opencode-web') {
                     body = {
@@ -4101,8 +4167,7 @@
         function updateLLMSettingsButtonVisibility(isSecure) {
             const btn = document.getElementById("btnLLMSettings");
             if (!btn) return;
-            const hostname = window.location.hostname;
-            const isLocalhost = hostname === "localhost" || hostname === "127.0.0.1";
+            const isLocalhost = !isRemoteAccess();
             btn.style.display = (isLocalhost || isSecure) ? "inline-block" : "none";
         }
 

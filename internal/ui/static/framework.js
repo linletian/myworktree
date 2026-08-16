@@ -38,6 +38,19 @@ window.state = {
     version: 0,
 };
 
+// ---- shared helpers ---------------------------------------------------
+
+// Single source of truth for remote-access detection (issue #72).
+// Loopback hostnames (IPv4/IPv6 literals included) are local; anything
+// else counts as remote. window.location.hostname keeps the brackets
+// for IPv6 literals, so both "::1" and "[::1]" are accepted. Used by
+// index.html (Remote badge, local-only shortcuts, LLM settings, the
+// dsh-web Start gate) and kinds/dsh_web.js (iframe tokenization).
+window.isRemoteAccess = function () {
+    const h = window.location.hostname;
+    return !(h === "localhost" || h === "127.0.0.1" || h === "::1" || h === "[::1]");
+};
+
 // ---- API helper ------------------------------------------------------
 
 window.api = async function (path, opts = {}) {

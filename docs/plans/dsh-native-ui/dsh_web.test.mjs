@@ -13,11 +13,17 @@ const source = readFileSync(SRC_PATH, 'utf8');
 // Load the renderer script with a stubbed window; capture the
 // registered renderer singleton. The file is a plain script (no
 // exports) — eval runs it in its own scope, which is fine because the
-// only thing we need back is the registered renderer.
+// only thing we need back is the registered renderer. The stub also
+// provides isRemoteAccess, mirroring the framework.js helper contract
+// (loopback = localhost / 127.0.0.1 / ::1 / [::1]).
 function loadRenderer(location) {
   let renderer = null;
   globalThis.window = {
     location,
+    isRemoteAccess() {
+      const h = location.hostname;
+      return !(h === 'localhost' || h === '127.0.0.1' || h === '::1' || h === '[::1]');
+    },
     registerRenderer(kind, r) {
       if (kind === 'dsh-web') renderer = r;
     },
