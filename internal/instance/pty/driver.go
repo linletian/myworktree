@@ -272,6 +272,10 @@ func (d Driver) SubscribeOutput(id string) (<-chan string, func(), error) {
 
 func (h *Handle) pumpLogs() {
 	defer h.wg.Done()
+	// Release the master fd once the read loop exits (the slave side
+	// dies with the child): without this every PTY start/stop leaked a
+	// fd until exhaustion (REVIEW-2026-08-16 HIGH-1).
+	defer h.ptmx.Close()
 	readBuf := make([]byte, 1024)
 	for {
 		n, err := h.ptmx.Read(readBuf)

@@ -248,7 +248,14 @@ func (m *Manager) Start(ctx context.Context, in StartParams) (store.ManagedInsta
 	// AllocateBuffer already adds capBytes to totalBufBytes; the
 	// explicit m.totalBufBytes.Add below was the old (pre-AllocateBuffer)
 	// bookkeeping and would double-count if left in place.
-	buf := m.AllocateBuffer(id, capBytes)
+	// Web-UI kinds (reasonix / opencode-web / dsh-web) never capture
+	// output: skip the 16–256 MB pre-allocation for them (BufferConsumer).
+	var buf *RingBuffer
+	if bc, ok := k.(BufferConsumer); ok && !bc.NeedsOutputBuffer() {
+		buf = nil
+	} else {
+		buf = m.AllocateBuffer(id, capBytes)
+	}
 
 	params := SpawnParams{
 		WorktreeID:   in.WorktreeID,

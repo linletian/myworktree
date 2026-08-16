@@ -195,6 +195,32 @@ func (p *proxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// it is a credential leak to the dsh subprocess. authq is the
 		// single shared stripping path for every proxy.
 		req.URL.RawQuery = authq.StripToken(req.URL.RawQuery)
+		// Same for the mw_token cookie: checkToken syncs it onto the
+		// PROXY origin so same-origin SPA requests authenticate, but the
+		// dsh subprocess has no auth layer and may log it — strip just
+		// that cookie, keep any others the SPA itself set (other cookies
+		// ride the same header and must survive).
+		if cookieHdrs := req.Header.Values("Cookie"); len(cookieHdrs) > 0 {
+			kept := make([]string, 0, len(cookieHdrs))
+			for _, hdr := range cookieHdrs {
+				filtered := make([]string, 0, 4)
+				for _, part := range strings.Split(hdr, ";") {
+					name, _, _ := strings.Cut(strings.TrimSpace(part), "=")
+					if strings.EqualFold(name, "mw_token") {
+						continue
+					}
+					filtered = append(filtered, part)
+				}
+				if len(filtered) > 0 {
+					kept = append(kept, strings.Join(filtered, "; "))
+				}
+			}
+			if len(kept) > 0 {
+				req.Header.Set("Cookie", strings.Join(kept, "; "))
+			} else {
+				req.Header.Del("Cookie")
+			}
+		}
 		// The fence rejects an Origin that differs from the (rewritten)
 		// Host; the browser's Origin names the PROXY origin, so it must
 		// go. Absent Origin is fine.

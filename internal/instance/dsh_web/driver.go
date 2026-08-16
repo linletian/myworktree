@@ -196,6 +196,11 @@ func (d *Driver) Manifest() framework.KindInfo {
 }
 
 // Spawn launches `dsh web` and parses its stdout for the ready line.
+// NeedsOutputBuffer reports that this kind never captures PTY-style
+// output into the framework ring buffer, so Start skips the 16–256 MB
+// pre-allocation (framework.BufferConsumer).
+func (d *Driver) NeedsOutputBuffer() bool { return false }
+
 func (d *Driver) Spawn(ctx context.Context, params framework.SpawnParams) (framework.Handle, *framework.ReadySignal, error) {
 	// Per-instance state dir (restrict overlay + launch.json).
 	stateDir := filepath.Join(d.DataDir, "dsh", params.InstanceID)
@@ -594,7 +599,16 @@ func (d *Driver) pumpAndWatch(ctx context.Context, h *Handle, r io.Reader) {
 				h.proxyHost, h.proxyPort = ph, pp
 				h.proxyClose = func() { closeFn() }
 				h.blob.ProxyHost, h.blob.ProxyPort = ph, pp
-				h.blob.IframeURL = "http://" + ph + ":" + pp + "/"
+				// Mirror the main listener's TLS in the persisted
+				// iframe URL: handleInstanceDshInfo rebuilds the src
+				// with the caller-visible host, but blob consumers
+				// (tests, markProxyDead) must not see http:// for a
+				// TLS deployment (REVIEW-2026-08-16 #1).
+				scheme := "http"
+				if d.Proxy.TLSCert != "" {
+					scheme = "https"
+				}
+				h.blob.IframeURL = scheme + "://" + ph + ":" + pp + "/"
 			}
 		}
 		blob, err := json.Marshal(h.blob)

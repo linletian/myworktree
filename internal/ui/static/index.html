@@ -2212,10 +2212,10 @@
             for (const branch of branchKeys) {
                 const info = data[branch];
                 if (info.error) {
-                    badges += `<span class="wt-diverge-badge-err" title="Error checking ${branch}: ${info.error}">err\u2191</span>`;
+                    badges += `<span class="wt-diverge-badge-err" title="Error checking ${escapeHtml(branch)}: ${escapeHtml(info.error)}">err\u2191</span>`;
                 } else if (info.diverged && info.ahead > 0) {
                     const label = branch === 'mainBranch' ? 'm' : (branch === 'develop' ? 'd' : branch.substring(0, 1));
-                    badges += `<span class="wt-diverge-badge" title="Behind ${branch} by ${info.ahead} commit${info.ahead > 1 ? 's' : ''}">${label}\u2191${info.ahead}</span>`;
+                    badges += `<span class="wt-diverge-badge" title="Behind ${escapeHtml(branch)} by ${info.ahead} commit${info.ahead > 1 ? 's' : ''}">${label}\u2191${info.ahead}</span>`;
                 }
             }
             return badges ? `<span class="wt-diverge-badges">${badges}</span>` : '';
@@ -2417,12 +2417,13 @@
                 const isRenaming = state.renamingInst === i.id;
 
                 const renameValue = isRenaming && state.renamingInstValue ? state.renamingInstValue : displayName;
+                const renameValueEsc = escapeHtml(renameValue);
                 if (isRenaming) {
                     return `
             <div class="tab ${isActive ? 'active' : ''}" onclick="selectInstance('${i.id}')">
               <span class="tab-status ${statusClass}"></span>
               <input id="rename-input-${i.id}" class="tab-rename-input"
-                value="${renameValue}"
+                value="${renameValueEsc}"
                 onkeydown="handleRenameKeydown('${i.id}', event)"
                 onblur="commitRename('${i.id}', event)"
               />
@@ -2446,7 +2447,7 @@
               ${i.kind === 'opencode-web' ? '<span class="kind-badge kind-badge-oc">OC</span>' : ''}
               ${i.kind === "reasonix" ? '<span class="kind-badge kind-badge-rx" title="Reasonix web UI">RX</span>' : ""}
               ${i.kind === 'dsh-web' ? '<span class="kind-badge kind-badge-dsh" title="DeepSeek Harness web UI">DS</span>' : ''}
-               ${displayName}
+               ${escapeHtml(displayName)}
             </div>
           `;
             }).join("");
@@ -2672,7 +2673,7 @@
             if (state.branches && state.branches.branches) {
                 const items = state.branches.branches;
                 const def = state.branches.default;
-                const opts = items.map(b => `<option value="${b.name}">${b.name}${b.name === def ? ' (default)' : ''}</option>`).join("");
+                const opts = items.map(b => `<option value="${escapeHtml(b.name)}">${escapeHtml(b.name)}${b.name === def ? ' (default)' : ''}</option>`).join("");
                 if (s.innerHTML === "" || s.options.length <= 1) { // simple dirty check
                     s.innerHTML = opts + '<option value="__custom__">custom…</option>';
                 }
@@ -2687,11 +2688,11 @@
                 const opts = '<option value="">-- select --</option>' +
                     ptyTags.map(t => {
                         let details = [];
-                        if (t.cwd) details.push(`cwd: ${t.cwd}`);
-                        if (t.preStart) details.push(`pre: ${t.preStart}`);
-                        if (t.env && Object.keys(t.env).length > 0) details.push(`env: ${Object.keys(t.env).join(",")}`);
+                        if (t.cwd) details.push(`cwd: ${escapeHtml(t.cwd)}`);
+                        if (t.preStart) details.push(`pre: ${escapeHtml(t.preStart)}`);
+                        if (t.env && Object.keys(t.env).length > 0) details.push(`env: ${Object.keys(t.env).map(escapeHtml).join(",")}`);
                         const title = details.length ? ` (${details.join("; ")})` : "";
-                        return `<option value="${t.id}" title="${t.command}${title}">${t.id} — ${t.command}</option>`;
+                        return `<option value="${escapeHtml(t.id)}" title="${escapeHtml(t.command)}${title}">${escapeHtml(t.id)} — ${escapeHtml(t.command)}</option>`;
                     }).join("");
                 if (ts.innerHTML !== opts) ts.innerHTML = opts;
             }

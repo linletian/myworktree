@@ -32,6 +32,7 @@ func newProxyFixture(t *testing.T, cfg ProxyConfig, worktree string) (*proxyHand
 			"query":  r.URL.RawQuery,
 			"path":   r.URL.Path,
 			"token":  r.URL.Query().Get("token"),
+			"cookie": r.Header.Get("Cookie"),
 		}
 		if r.Method == http.MethodPost {
 			b, _ := io.ReadAll(r.Body)
@@ -161,6 +162,51 @@ func TestProxyTokenGate(t *testing.T) {
 	ph.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status for loopback client = %d, want 200 (gate bypass)", rec.Code)
+	}
+}
+
+// TestProxyStripsMwTokenCookieUpstream pins the credential-leak fix:
+// checkToken syncs mw_token onto the PROXY origin, and the Director
+// must strip that cookie before forwarding so the unauthenticated dsh
+// subprocess never sees the main token — while other cookies (set by
+// the SPA itself) still ride through.
+func TestProxyStripsMwTokenCookieUpstream(t *testing.T) {
+	cfg := ProxyConfig{BindHost: "127.0.0.1", RequireToken: true, AuthToken: "sekret"}
+	ph, _, _, _ := newProxyFixture(t, cfg, "/wt")
+
+	// Loopback client + mixed cookies: mw_token must not reach the
+	// upstream; a foreign cookie (e.g. the dsh SPA's own) must.
+	req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:39999/", nil)
+	req.RemoteAddr = "127.0.0.1:53123"
+	req.AddCookie(&http.Cookie{Name: "mw_token", Value: "sekret"})
+	req.AddCookie(&http.Cookie{Name: "spa_pref", Value: "dark"})
+	rec := httptest.NewRecorder()
+	ph.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	var echo map[string]any
+	_ = json.NewDecoder(rec.Body).Decode(&echo)
+	upstreamCookie, _ := echo["cookie"].(string)
+	if strings.Contains(upstreamCookie, "mw_token") {
+		t.Errorf("mw_token leaked upstream in Cookie header %q", upstreamCookie)
+	}
+	if !strings.Contains(upstreamCookie, "spa_pref=dark") {
+		t.Errorf("non-auth cookie dropped upstream: %q", upstreamCookie)
+	}
+
+	// mw_token alone → no Cookie header at all upstream.
+	req = httptest.NewRequest(http.MethodGet, "http://127.0.0.1:39999/", nil)
+	req.RemoteAddr = "127.0.0.1:53123"
+	req.AddCookie(&http.Cookie{Name: "mw_token", Value: "sekret"})
+	rec = httptest.NewRecorder()
+	ph.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	_ = json.NewDecoder(rec.Body).Decode(&echo)
+	if c, _ := echo["cookie"].(string); c != "" {
+		t.Errorf("Cookie header %q still forwarded upstream, want empty", c)
 	}
 }
 
