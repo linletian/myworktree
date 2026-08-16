@@ -1,6 +1,6 @@
 // DshWebRenderer — manages the iframes + ready-wait polling for
 // dsh-web instances (the DeepSeek Harness web UI, embedded via a
-// per-instance dedicated origin — PLAN.md §嵌入形态).
+// per-instance dedicated origin — PLAN.md "embed form" section).
 //
 // Behaviour (mirrors OpencodeWebRenderer):
 //   - activate() shows #dsh-panel and hides the PTY terminal container.
@@ -13,7 +13,8 @@
 //   - Scope monitoring: polls /api/instances/dsh/scope?id=... every
 //     ~1.5s and renders a persistent warning bar ABOVE the iframe when
 //     the instance has navigated away from its worktree (record-only —
-//     the request is never blocked, PLAN.md §工作区限制). The same
+//     the request is never blocked, PLAN.md "workspace restriction"
+//     section). The same
 //     response carries foreign_active_sessions (shared-pool sessions
 //     actively written by another dsh process — opening them can
 //     corrupt their log, dsh single-writer boundary) and the bar warns
@@ -28,10 +29,11 @@
 //   - Advisory warnings: version_supported=false (dsh outside the
 //     supported range) or overlay_verified=false (the restrict overlay
 //     rows were not confirmed by the spawn-time --dump-config check)
-//     surface the "隔离可能未生效" danger bar.
+//     surface the "isolation may not be effective" danger bar.
 //   - Missing-dependency dialog: when the instance is failed and the
 //     info endpoint reports missing_dsh, a dialog offers three options:
-//     npx launch / install now / cancel (PLAN.md §缺失依赖).
+//     npx launch / install now / cancel (PLAN.md "missing dependency"
+//     section).
 //   - Remote mode: the mw_token cookie is HttpOnly (page JS can never
 //     read it) and portal/login flows carry no ?token= in the address
 //     bar, so the SERVER appends ?token= to iframe_src itself when the
@@ -72,7 +74,7 @@ class DshWebRenderer {
             this._stopMonitoring();
             this._currentFrame = null;
             this._showLoading(dshPanel, {
-                title: 'dsh 实例已停止',
+                title: 'dsh instance stopped',
                 lines: ['instance:  ' + session.id],
             });
             return;
@@ -143,7 +145,7 @@ class DshWebRenderer {
             el.id = 'dsh-loading';
             el.innerHTML =
                 '<div class="dsh-loading-spinner"></div>' +
-                '<div class="dsh-loading-title">正在启动 dsh server…</div>' +
+                '<div class="dsh-loading-title">Starting dsh server…</div>' +
                 '<div class="dsh-loading-info"></div>';
             const frames = dshPanel.querySelector('#dsh-frames');
             if (frames) dshPanel.insertBefore(el, frames);
@@ -232,7 +234,7 @@ class DshWebRenderer {
                 const status = inst ? inst.status : 'unknown';
                 const lastError = inst ? (inst.last_error || '') : '';
                 this._showLoading(dshPanel, {
-                    title: '启动超时 (60s)',
+                    title: 'Startup timed out (60s)',
                     lines: ['instance:  ' + id, 'status:    ' + status + (lastError ? ' — ' + lastError : '')],
                 });
                 return;
@@ -418,14 +420,14 @@ class DshWebRenderer {
         if (this._remoteAuthMissing) {
             dshWarning.hidden = false;
             dshWarning.classList.add('dsh-warning-danger');
-            dshWarning.textContent = '⚠ 远程访问需要认证：当前页面没有可用的 token，dsh 面板将无法加载。请通过带 ?token= 的地址打开（或先在主页面登录），再刷新本页';
+            dshWarning.textContent = '⚠ Remote access requires authentication: this page has no usable token, so the dsh panel cannot load. Open it via a ?token= URL (or log in on the main page first), then refresh this page';
             return;
         }
         // 2. Restriction effectiveness (version / overlay).
         if (this._versionUnsupported || this._overlayIneffective) {
             dshWarning.hidden = false;
             dshWarning.classList.add('dsh-warning-danger');
-            dshWarning.textContent = '⚠ dsh 版本过新或 restrict overlay 未生效，跨 worktree 入口可能未被禁用，请升级 myworktree 或使用受支持版本 (0.1.x)';
+            dshWarning.textContent = '⚠ dsh version is too new or the restrict overlay is not effective — cross-worktree entries may not be disabled. Upgrade myworktree or use a supported version (0.1.x)';
             return;
         }
         // 3. Foreign-process active sessions (dsh upstream single-writer
@@ -433,8 +435,8 @@ class DshWebRenderer {
         if (this._foreignSessions && this._foreignSessions.length > 0) {
             dshWarning.hidden = false;
             dshWarning.classList.remove('dsh-warning-danger');
-            dshWarning.textContent = '⚠ 检测到 ' + this._foreignSessions.length +
-                ' 个正被其他进程活跃写入的 dsh 会话，在嵌入 UI 中打开这些会话可能损坏日志（dsh 上游限制）。建议等会话空闲后再打开';
+            dshWarning.textContent = '⚠ Detected ' + this._foreignSessions.length +
+                ' dsh session(s) being actively written by other processes; opening them in the embedded UI may corrupt their logs (dsh upstream limitation). Wait until the sessions are idle before opening them';
             return;
         }
         // 4. Out of scope (the proxy observed a workspace/session RPC
@@ -442,7 +444,7 @@ class DshWebRenderer {
         if (this._scope === 'out-of-scope') {
             dshWarning.hidden = false;
             dshWarning.classList.remove('dsh-warning-danger');
-            dshWarning.textContent = '⚠ dsh 已离开 worktree 范围' + (this._scopeDir ? ': ' + this._scopeDir : '');
+            dshWarning.textContent = '⚠ dsh has left the worktree scope' + (this._scopeDir ? ': ' + this._scopeDir : '');
             return;
         }
         // 5. Normal.
@@ -459,14 +461,14 @@ class DshWebRenderer {
         this._installConfirmFor = null;
         const dlg = document.getElementById('modal-dsh-missing');
         if (!dlg) return;
-        document.getElementById('dsh-missing-title').textContent = 'dsh 未安装';
+        document.getElementById('dsh-missing-title').textContent = 'dsh is not installed';
         document.getElementById('dsh-missing-body').textContent =
-            '未在 PATH 中找到 dsh 可执行文件。可选用以下方式启动此实例（建议 pin: ' +
-            (missing.suggested_pin || '') + '）：';
+            'No dsh executable found in PATH. Choose how to start this instance (suggested pin: ' +
+            (missing.suggested_pin || '') + '):';
         const btnInstall = document.getElementById('dsh-missing-install');
         if (btnInstall) {
             btnInstall.style.display = missing.npm_available ? '' : 'none';
-            btnInstall.textContent = '立即安装 (npm install -g)';
+            btnInstall.textContent = 'Install now (npm install -g)';
         }
         document.getElementById('dsh-missing-progress').hidden = true;
         document.getElementById('dsh-missing-error').hidden = true;
@@ -506,18 +508,18 @@ class DshWebRenderer {
                 if (this._installConfirmFor !== id) {
                     this._installConfirmFor = id;
                     const btn = document.getElementById('dsh-missing-install');
-                    if (btn) btn.textContent = '确认安装？将执行 npm install -g，修改全局 npm prefix（需写权限，约 30s）';
+                    if (btn) btn.textContent = 'Confirm install? This runs npm install -g and modifies the global npm prefix (needs write permission, ~30s)';
                     return;
                 }
                 this._installConfirmFor = null;
                 this._dismissedMissingFor = null;
-                setBusy(true, '正在执行 npm install -g @deepseek-ai/dsh …');
+                setBusy(true, 'Running npm install -g @deepseek-ai/dsh …');
                 const res = await api('/api/instances/dsh/install', {
                     method: 'POST',
                     body: JSON.stringify({ id }),
                 });
                 if (res && res.resolved_bin) {
-                    setBusy(true, '已安装: ' + res.resolved_bin + ' — 正在重启实例…');
+                    setBusy(true, 'Installed: ' + res.resolved_bin + ' — restarting the instance…');
                 }
             } else {
                 // Cancel: keep the instance failed (per the dialog
@@ -539,7 +541,7 @@ class DshWebRenderer {
             setBusy(false);
             if (errorEl) {
                 errorEl.hidden = false;
-                errorEl.textContent = (e && (e.message || e)) || '操作失败';
+                errorEl.textContent = (e && (e.message || e)) || 'Operation failed';
             }
         }
     }

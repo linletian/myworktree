@@ -60,6 +60,8 @@
             --group-header-bg: #faf8ff;
             --badge-bg: #21262d;
             --badge-text: #adbac7;
+            --badge-dsh-bg: #0969da;
+            --badge-dsh-text: #ffffff;
             --conn-sse: #e36209;
             --conn-none: #999;
 
@@ -122,6 +124,8 @@
                 --group-header-bg: #1a1525;
                 --badge-bg: #30363d;
                 --badge-text: #c9d1d9;
+                --badge-dsh-bg: #1f6feb;
+                --badge-dsh-text: #ffffff;
                 --conn-sse: #e36209;
                 --conn-none: #8b949e;
 
@@ -656,28 +660,22 @@
             display: inline-block;
         }
 
-        .badge-oc {
-            background: var(--accent-color);
-            color: #fff;
-            padding: 0 4px;
-            border-radius: 3px;
-            font-size: 0.65em;
-            margin-right: 3px;
-            font-weight: 600;
-        }
-
-        .rx-badge {
-            font-size: 9px;
+        /* Unified kind badge (issue #70): one base style shared by the
+           OC / rx / DS labels on instance tabs; per-kind rules only
+           override the colors (all via CSS variables for theme switching). */
+        .kind-badge {
+            display: inline-block;
+            font-size: 10px;
             line-height: 1;
-            background: var(--badge-bg, rgba(128,128,128,0.25));
-            color: var(--badge-text, inherit);
+            font-weight: 600;
             padding: 2px 4px;
             border-radius: 4px;
             margin-right: 4px;
             vertical-align: middle;
-            font-family: monospace;
-            letter-spacing: 0.5px;
         }
+        .kind-badge-oc { background: var(--accent-color); color: #fff; }
+        .kind-badge-rx { background: var(--badge-bg, rgba(128,128,128,0.25)); color: var(--badge-text, inherit); }
+        .kind-badge-dsh { background: var(--badge-dsh-bg, #0969da); color: var(--badge-dsh-text, #fff); }
 
         #opencode-panel { width: 100%; height: 100%; display: flex; flex-direction: column; }
         #opencode-panel[hidden] { display: none !important; }
@@ -745,7 +743,6 @@
         #dsh-scope-warning { flex: 0 0 auto; width: 100%; box-sizing: border-box; padding: 6px 12px; font-size: 12px; line-height: 1.4; color: #7c2d12; background: #ffedd5; border-bottom: 1px solid #fdba74; word-break: break-all; }
         #dsh-scope-warning[hidden] { display: none !important; }
         #dsh-scope-warning.dsh-warning-danger { color: var(--danger-text); background: var(--danger-bg); border-color: var(--danger-border); }
-        .badge-dsh { background: #0969da; color: #fff; border-radius: 4px; padding: 1px 5px; font-size: 10px; margin-right: 4px; vertical-align: middle; font-family: monospace; letter-spacing: 0.5px; }
 
         .status-running {
             background: var(--status-running);
@@ -1078,12 +1075,16 @@
 
         .modal-tabs {
             display: flex;
+            flex-wrap: nowrap;
             gap: 0;
             padding: 0 12px;
             border-bottom: 1px solid var(--border-color);
             background: var(--hover-bg);
+            overflow-x: auto;
+            scrollbar-width: thin;
         }
         .modal-tab {
+            flex: 0 0 auto;
             padding: 8px 14px;
             cursor: pointer;
             border: 1px solid transparent;
@@ -1095,6 +1096,7 @@
             font-weight: 500;
             margin-bottom: -1px;
             user-select: none;
+            white-space: nowrap;
             transition: color 0.15s, border-color 0.15s, background 0.15s;
         }
         .modal-tab:hover {
@@ -1520,12 +1522,16 @@
         </div>
         <div class="modal-tabs" role="tablist">
             <button type="button" class="modal-tab active" data-tab="terminal" role="tab" aria-selected="true" onclick="switchStartInstanceTab('terminal')">Terminal</button>
-            <button type="button" class="modal-tab" data-tab="opencode-web" role="tab" aria-selected="false" onclick="switchStartInstanceTab('opencode-web')">Opencode-Web</button>
-            <button type="button" class="modal-tab" data-tab="reasonix" role="tab" aria-selected="false" onclick="switchStartInstanceTab('reasonix')">Reasonix</button>
-            <button type="button" class="modal-tab" data-tab="dsh-web" role="tab" aria-selected="false" onclick="switchStartInstanceTab('dsh-web')">Dsh-Web</button>
+            <button type="button" class="modal-tab" data-tab="opencode-web" role="tab" aria-selected="false" onclick="switchStartInstanceTab('opencode-web')">OpenCode-Web</button>
+            <button type="button" class="modal-tab" data-tab="reasonix" role="tab" aria-selected="false" onclick="switchStartInstanceTab('reasonix')">Reasonix-Web</button>
+            <button type="button" class="modal-tab" data-tab="dsh-web" role="tab" aria-selected="false" onclick="switchStartInstanceTab('dsh-web')">DSH-Web</button>
         </div>
         <div class="modal-body">
             <div id="modal-tab-terminal" class="modal-tab-panel">
+                <div class="form-info">
+                    <strong>Open a PTY terminal in the selected worktree.</strong>
+                    Starts a shell (default zsh) in the worktree root — this tab starts no web service and embeds no iframe, so it behaves like opening a new shell directly in the worktree. Template and Custom Command still apply and control the shell's command, environment, and pre-start steps; the session ends when the instance is stopped.
+                </div>
                 <div class="form-group">
                     <label>Template <span id="template-edit-btn" class="wt-action-btn" style="display:inline-flex;vertical-align:middle;opacity:0.6" title="Edit templates" onclick="openTagsDir(event)"><svg viewBox="0 0 24 24" width="12" height="12" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path></svg></span></label>
                     <select id="tagSelect" onchange="onTagChange()"></select>
@@ -1541,8 +1547,8 @@
             </div>
             <div id="modal-tab-opencode-web" class="modal-tab-panel" hidden>
                 <div class="form-info">
-                    <strong>在浏览器里使用 opencode 原生 web UI。</strong>
-                    无需填写命令、端口或密码，myworktree 会自动启动并登录，打开即可在网页中对话与编写代码。
+                    <strong>Use the opencode native web UI in your browser.</strong>
+                    No need to fill in command, port, or password — myworktree launches and signs in automatically; open the tab and start chatting and coding.
                 </div>
                 <div class="form-group">
                     <label>Name (Optional)</label>
@@ -1551,8 +1557,8 @@
             </div>
             <div id="modal-tab-reasonix" class="modal-tab-panel" hidden>
                 <div class="form-info">
-                    <strong>在浏览器里使用 Reasonix 网页聊天界面。</strong>
-                    在所选 worktree 里启动 reasonix serve，并在实例页签中内嵌其 web chat UI。启动命令固定为 reasonix serve（会话历史与终端运行的 reasonix 共享 ~/.reasonix 会话池）。
+                    <strong>Use the Reasonix web chat UI in your browser.</strong>
+                    Starts <code>reasonix serve</code> in the selected worktree and embeds its web chat UI in the instance tab. The launch command is fixed at <code>reasonix serve</code> — session history is shared with the terminal-launched reasonix via the <code>~/.reasonix</code> session pool.
                 </div>
                 <div class="form-group">
                     <label>Name (Optional)</label>
@@ -1561,8 +1567,8 @@
             </div>
             <div id="modal-tab-dsh-web" class="modal-tab-panel" hidden>
                 <div class="form-info">
-                    <strong>在浏览器里使用 DeepSeek Harness 官方 web UI。</strong>
-                    在所选 worktree 里启动 <code>dsh web</code>（无头 HTTP server + 内嵌 SPA），并在实例页签中内嵌其界面。工作区注册表按 worktree 隔离、会话池与终端运行的 dsh 共享、越界只提醒。未安装 dsh 时启动会弹窗引导（npx 启动 / 立即安装）。
+                    <strong>Use the DeepSeek Harness official web UI in your browser.</strong>
+                    Starts <code>dsh web</code> (a headless HTTP server with an embedded SPA) in the selected worktree and embeds its UI in the instance tab. Workspace registry is isolated per worktree, session pool is shared with the terminal-launched dsh, and out-of-scope actions only warn. If <code>dsh</code> is not installed, startup will show a prompt to install via npx or to launch with npx.
                 </div>
                 <div id="dsh-remote-warning" class="form-warning" hidden>Remote access is not available for dsh-web instances (session and workspace sync cannot work over remote networks); please use it from the local 127.0.0.1 environment.</div>
                 <div class="form-group">
@@ -1597,14 +1603,15 @@
         </div>
     </dialog>
 
-    <!-- Modal: dsh not installed (missing-dependency dialog, PLAN.md §缺失依赖).
+    <!-- Modal: dsh not installed (missing-dependency dialog, PLAN.md
+         "missing dependency" section).
          Shown by kinds/dsh_web.js when a dsh-web instance is failed with a
          structured missing_dsh state. Three options: npx launch (pinned
          version, process-group cleanup handled by the driver) / install now
          (npm install -g + absolute-bin spawn) / cancel. -->
     <dialog id="modal-dsh-missing">
         <div class="modal-titlebar">
-            <span class="modal-title" id="dsh-missing-title">dsh 未安装</span>
+            <span class="modal-title" id="dsh-missing-title">dsh is not installed</span>
             <button class="modal-close-btn" onclick="dshWebCloseMissingDialog()" title="Close">
                 <svg width="10" height="10" viewBox="0 0 10 10" fill="none" xmlns="http://www.w3.org/2000/svg">
                     <line x1="1" y1="1" x2="9" y2="9" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
@@ -1615,9 +1622,9 @@
         <div class="modal-body">
             <p id="dsh-missing-body" style="margin-bottom: 12px; line-height: 1.5;"></p>
             <div class="form-actions" style="flex-wrap: wrap; justify-content: flex-start; gap: 8px;">
-                <button class="primary" id="dsh-missing-npx" onclick="dshWebChooseMissingAction('npx')">用 npx 启动（推荐）</button>
-                <button id="dsh-missing-install" onclick="dshWebChooseMissingAction('install')">立即安装 (npm install -g)</button>
-                <button onclick="dshWebCloseMissingDialog()">取消</button>
+                <button class="primary" id="dsh-missing-npx" onclick="dshWebChooseMissingAction('npx')">Launch with npx (recommended)</button>
+                <button id="dsh-missing-install" onclick="dshWebChooseMissingAction('install')">Install now (npm install -g)</button>
+                <button onclick="dshWebCloseMissingDialog()">Cancel</button>
             </div>
             <p id="dsh-missing-progress" style="margin-top: 10px; color: var(--text-secondary); font-size: 13px; white-space: pre-wrap;" hidden></p>
             <p id="dsh-missing-error" style="margin-top: 10px; color: #991b1b; font-size: 13px; white-space: pre-wrap;" hidden></p>
@@ -2427,9 +2434,9 @@
                  ondrop="handleDrop('${i.id}', event)"
                  title="Drag to reorder; double-click to rename">
               <span class="tab-status ${statusClass}"></span>
-              ${i.kind === 'opencode-web' ? '<span class="badge-oc">OC</span>' : ''}
-              ${i.kind === "reasonix" ? '<span class="rx-badge" title="Reasonix web UI">rx</span>' : ""}
-              ${i.kind === 'dsh-web' ? '<span class="badge-dsh" title="DeepSeek Harness web UI">DS</span>' : ''}
+              ${i.kind === 'opencode-web' ? '<span class="kind-badge kind-badge-oc">OC</span>' : ''}
+              ${i.kind === "reasonix" ? '<span class="kind-badge kind-badge-rx" title="Reasonix web UI">rx</span>' : ""}
+              ${i.kind === 'dsh-web' ? '<span class="kind-badge kind-badge-dsh" title="DeepSeek Harness web UI">DS</span>' : ''}
                ${displayName}
             </div>
           `;
@@ -2970,7 +2977,7 @@
             try {
                 // Determine which tab is active and what kind to send.
                 // The Terminal tab always sends kind="" (backend
-                // normalises to "pty"); the Opencode-Web / Reasonix tabs
+                // normalises to "pty"); the OpenCode-Web / Reasonix-Web tabs
                 // always send their kind regardless of any tag selection
                 // (the kind is a UI decision, not a tag selection —
                 // that's the whole point of the tab split).

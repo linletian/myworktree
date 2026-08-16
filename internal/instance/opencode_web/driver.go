@@ -63,7 +63,7 @@ type Driver struct{}
 func (Driver) Manifest() framework.KindInfo {
 	return framework.KindInfo{
 		Name:        "opencode-web",
-		Label:       "Opencode-Web",
+		Label:       "OpenCode-Web",
 		Description: "Opencode AI agent with embedded web UI. Managed by myworktree; command and port are fixed.",
 		Interactive: false,
 	}

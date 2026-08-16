@@ -73,7 +73,7 @@ type Handle struct {
 func (k *Kind) Manifest() framework.KindInfo {
 	return framework.KindInfo{
 		Name:        KindName,
-		Label:       "Reasonix",
+		Label:       "Reasonix-Web",
 		Description: "Reasonix agent running in this worktree with its web chat UI.",
 		Interactive: false,
 	}

@@ -1,8 +1,8 @@
 # dsh-native-ui — Implementation Tasks
 
-> **Status**: PR1–PR4 已完成 · PR5 远程实测待完成 · [FEASIBILITY.md](./FEASIBILITY.md)（决策文档）· [PLAN.md](./PLAN.md)（实施计划）
+> **Status**: PR1–PR4 已完成 · PR5 远程实测待完成 · PR6（issues #68–#73）已完成待审查 · [FEASIBILITY.md](./FEASIBILITY.md)（决策文档）· [PLAN.md](./PLAN.md)（实施计划）
 >
-> 5 PRs in dependency order, **docs-first** (PR 1 solidifies spec before code).
+> PR 1–5 in dependency order, **docs-first** (PR 1 solidifies spec before code); PR 6 = follow-up issue batch #68–#73.
 
 ---
 
@@ -71,6 +71,22 @@ files:
 - [x] Docs final sync (CHANGELOG full entry, PLAN/TASK status markers)
 
 **Verify**: remote browser e2e passes; `go test ./...`, `gofmt -l .` clean.
+
+---
+
+## PR 6: 后续 issue 批次 #68–#73（Start Instance 弹窗统一 + 文案英文化，2026-08-16）
+
+> 未提交（待审查）；完整记录见 `REVIEW-2026-08-16.md`。issue #72 采用远程访问禁用兜底（commit `ec88389` 已合入），本批次仅回复并关闭，无代码改动。
+
+- [x] **#68** tab 换行 — `.modal-tabs` `flex-wrap: nowrap` + `overflow-x: auto`；`.modal-tab` `white-space: nowrap` + `flex: 0 0 auto`（窄窗口横向滚动降级，不撑高）
+- [x] **#69** tab 命名统一（方案 A/C）— `Terminal / OpenCode-Web / Reasonix-Web / DSH-Web`；`data-tab` 与后端 kind 映射不变；后端 `Manifest().Label` 同步（opencode_web / dsh_web / reasonix）；README/PRD/API/ARCH 无硬编码 tab 文字，历史 CHANGELOG 不回溯
+- [x] **#70** kind 圆角标签统一 — `.kind-badge` 基类 + per-kind 颜色类；新增 `--badge-dsh-bg` / `--badge-dsh-text` 主题变量（浅 `#0969da` / 深 `#1f6feb`）；旧类名移除
+- [x] **#71** Terminal tab 新增 `.form-info`（PTY 说明：不开 web 服务、不嵌 iframe；Template/Custom Command 仍生效）
+- [x] **#73** 文案英文化 — 4 个 tab 的 form-info 全英文（含 #71 新增的 Terminal）；顺带英文化 dsh 缺失依赖对话框 + `dsh_web.js` / `opencode_web.js` 全部用户可见字符串与残留中文注释 → 整站 UI 源码零 CJK
+- [x] 测试钉死 — `TestStartInstanceModalTabLabelsAndWrap` / `TestStartInstanceModalFormInfosAreEnglish` / `TestKindBadgesUnified` / `TestUICopyIsEnglishOnly`（`/` + 三个 renderer + framework.js 零 CJK + 关键英文串正向断言）
+- [x] 文档同步 — `REVIEW-2026-08-16.md`（本批次记录 + 评审回应）、`TASK.md`（本条目）、`CHANGELOG.md`（Unreleased 两条目 + 修正 #62–#67 条目残留的 "(uncommitted, pending review)" 旧标注）
+
+**Verify**: `go build ./...`; `go test ./...`（全绿）; `node --test docs/plans/dsh-native-ui/dsh_web.test.mjs`（4/4）; 真实浏览器视觉回归（badge 对齐、窄窗口 tab 滚动、英文观感）为合入后手测项。
 
 ---
 

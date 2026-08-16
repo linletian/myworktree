@@ -189,7 +189,7 @@ func (h *Handle) markOwnSession(sessionID string) {
 func (d *Driver) Manifest() framework.KindInfo {
 	return framework.KindInfo{
 		Name:        kindName,
-		Label:       "Dsh-Web",
+		Label:       "DSH-Web",
 		Description: "DeepSeek Harness agent with embedded web UI. Managed by myworktree; command and port are fixed.",
 		Interactive: false,
 	}
