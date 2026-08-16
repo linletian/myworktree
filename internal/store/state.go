@@ -29,32 +29,14 @@ type ManagedWorktree struct {
 
 // Instance kinds. An empty Kind in persisted state (pre-refactor and
 // pre-reasonix state files) means the PTY kind ("pty"), so old stores
-// need no migration. "tty" was the v0.4.0 internal dispatch name for
-// the PTY kind; no released version ever persisted it (v0.4.0's PTY
-// records omit the Kind field entirely, and only the reasonix record
-// carried an explicit kind), but CanonicalKind still accepts it as an
-// alias so hand-edited or develop-built stores cannot brick an
-// instance. The framework kind registry is the source of truth for
-// kind names; these constants cover the kinds the app layer needs to
-// match on.
+// need no migration. The framework kind registry is the source of
+// truth for kind names; these constants cover the kinds the app layer
+// needs to match on.
 const (
-	KindPTY         = "pty"
-	KindReasonix    = "reasonix"
-	KindOpenCodeWeb = "opencode-web"
-	KindDsh         = "dsh-web"
+	KindPTY      = "pty"
+	KindReasonix = "reasonix"
+	KindDsh      = "dsh-web"
 )
-
-// CanonicalKind maps persisted kind names to their current canonical
-// form: "" (legacy stores) and "tty" (the v0.4.0 internal name) both
-// mean the PTY kind; every other value passes through unchanged.
-func CanonicalKind(kind string) string {
-	switch kind {
-	case "", "tty":
-		return KindPTY
-	default:
-		return kind
-	}
-}
 
 // ManagedInstance is the persisted record for one running (or
 // recently-exited) instance. Fields tagged omitempty are written only

@@ -1,6 +1,6 @@
 # myworktree
 
-> **一个类似 ORCA 的轻量级 git worktree + AI agent 运行管理工具** —— 让多个 AI coding CLI 在同一仓库的不同 git worktree 中并行工作（每个 worktree 拥有可重连的长连接终端），通过统一的最小可用 Web UI 随时查看、回放输出并继续交互。
+> **一个类似 ORCA 的轻量级 agents team 编排工具** —— 让多个 AI coding CLI 在同一仓库里并行工作，每个 CLI 拥有独立的 git worktree 工作区与可重连的长连接终端，统一的最小可用 Web UI 让你随时查看、回放输出并继续交互。
 
 - English: [README.md](./README.md)
 - 文档： [PRD](./docs/PRD.md) · [架构](./docs/ARCHITECTURE.md) · [API](./docs/API.md)

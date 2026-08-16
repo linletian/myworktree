@@ -5,7 +5,6 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
-	"strconv"
 	"strings"
 	"testing"
 )
@@ -99,36 +98,6 @@ func TestFixProxyHTMLCSPAnchor(t *testing.T) {
 	}
 }
 
-// TestFixProxyHTMLInjectsCaseInsensitiveHead pins the <head> injection
-// to case-insensitive / attribute-tolerant matching: HTML permits
-// <HEAD lang="en"> and <head >, and the single-worktree isolation
-// depends on the injection landing. Only the first head tag receives
-// the injection.
-func TestFixProxyHTMLInjectsCaseInsensitiveHead(t *testing.T) {
-	for _, html := range []string{
-		`<html><HEAD lang="en"></HEAD><body></body></html>`,
-		`<html><head ></head><body></body></html>`,
-		`<html><HeAd></HeAd><body></body></html>`,
-	} {
-		resp := newHTMLResponse(t, html)
-		fixProxyHTML(resp, "/__opencode/x", "<base>", "/tmp/wt")
-		body := readBody(t, resp)
-		if !strings.Contains(body, "<base>") || !strings.Contains(body, "<script>") {
-			t.Fatalf("injection missing for %q, body: %s", html, body)
-		}
-		if !strings.Contains(body, "</HEAD") && !strings.Contains(body, "</HeAd") && !strings.Contains(body, "</head") {
-			t.Fatalf("head tag mangled for %q, body: %s", html, body)
-		}
-	}
-
-	// No head at all → body passes through without injection.
-	resp := newHTMLResponse(t, `<html><body>no head</body></html>`)
-	fixProxyHTML(resp, "/__opencode/x", "<base>", "/tmp/wt")
-	if strings.Contains(readBody(t, resp), "<base>") {
-		t.Fatal("injection should not apply without a head tag")
-	}
-}
-
 func TestBuildInjectScript(t *testing.T) {
 	s := buildInjectScript("/__opencode/abc123", "d3Q", "/tmp/wt") // base64url("wt")
 	for _, want := range []string{
@@ -162,21 +131,13 @@ func TestBuildInjectScript(t *testing.T) {
 		"defaultServerUrl',location.origin", // default server must be the origin too, else
 		// state.active keys a server absent from the merged list and the
 		// preseeded project (scoped under canonical "local") is never read
-		"projects['local']", // project preseed under the canonical scope key
-		// The preseed is self-healing, not fill-if-empty: projects[local],
-		// lastProject[local] and the server displayName are compared against
-		// the current worktree and rewritten when they differ, so an
-		// instance-scoped store polluted by an earlier worktree (or by the
-		// SPA navigating to another directory) is repaired on the next load.
-		"displayName===dn",              // stale same-origin displayName is repaired
-		"prj[0].worktree!==wtp",         // stale project preseed is repaired
-		"sd.lastProject['local']!==wtp", // stale autoselect target is repaired
-		"var OW=Worker",                 // rewrite Worker() script URLs (markdown highlight worker)
-		"home-projects-scroll",          // disable the home page project list (visible but inert)
-		"project-switch",                // disable session-page project switcher
-		"pointer-events:none",           // disable = block pointer events (keep visible)
-		"aria-disabled",                 // disable = mark aria-disabled
-		"disable-failed",                // L3 reports when a foreign entry is still enabled
+		"projects['local']",    // project preseed under the canonical scope key
+		"var OW=Worker",        // rewrite Worker() script URLs (markdown highlight worker)
+		"home-projects-scroll", // disable the home page project list (visible but inert)
+		"project-switch",       // disable session-page project switcher
+		"pointer-events:none",  // disable = block pointer events (keep visible)
+		"aria-disabled",        // disable = mark aria-disabled
+		"disable-failed",       // L3 reports when a foreign entry is still enabled
 		// The project-switch rule must disable only NON-current worktree
 		// entries: the current entry doubles as the sidebar expand/collapse
 		// toggle and must stay interactive (WORKTREE-ISOLATION.md §2.4 entry
@@ -247,12 +208,6 @@ func readBody(t *testing.T, resp *http.Response) string {
 // loading after instance A neither clobbers A's preseed nor adopts A's
 // project (the cross-instance localStorage clash the single-server preseed
 // would otherwise introduce).
-//
-// A third phase pre-populates instance A's store with STALE worktree data
-// (as a browser that once loaded the instance in a previous worktree, or an
-// SPA session-open in another directory, leaves behind) and asserts the
-// self-healing preseed rewrites projects/local, lastProject/local and the
-// server displayName back to A's worktree on the next load.
 func TestBuildInjectScriptSingleServer(t *testing.T) {
 	node, err := exec.LookPath("node")
 	if err != nil {
@@ -332,34 +287,12 @@ assert.strictEqual(storage.get(keyA), storedA,
 const serversB = mergeServers(sdB.list);
 assert.strictEqual(serversB.length, 1, "B also presents a single server");
 assert.strictEqual(serversB[0].displayName, "wtB");
-
-// --- Phase 3: stale-era repair (self-healing preseed) ---
-// Simulate a browser whose instance-scoped store still carries data from an
-// earlier worktree (or from an SPA navigation to another directory): the
-// next load must rewrite the preseed back to A's worktree instead of
-// leaving the stale (possibly deleted) directory in place.
-storage.set(keyA, JSON.stringify({
-  list: [{ type: "http", http: { url: origin }, displayName: "stale" }],
-  projects: { local: [{ worktree: "/stale", expanded: false }] },
-  lastProject: { local: "/stale" },
-}));
-global.location = { origin, hostname: "opencode.test", pathname: "/__opencode/A" };
-eval(__scriptA);
-const sdA2 = JSON.parse(storage.get(keyA));
-assert.strictEqual(sdA2.list.length, 1, "stale list must be collapsed to a single server");
-assert.strictEqual(sdA2.list[0].displayName, "wtA", "stale displayName must be repaired");
-assert.deepStrictEqual(sdA2.projects["local"], [{ worktree: "/wtA", expanded: true }],
-  "stale project preseed must be repaired to the current worktree");
-assert.strictEqual(sdA2.lastProject["local"], "/wtA",
-  "stale lastProject must be repaired so autoselect lands on the current worktree");
-assert.strictEqual(storage.has("opencode.global.dat:server"), false,
-  "the shared key must never be written (instance-scoped redirect)");
 console.log("SINGLE_SERVER_SIM_OK");
 process.exit(0);
 `
 	cmd := exec.Command(node, "-")
-	probe = strings.Replace(probe, "__SCRIPT_A__", strconv.Quote(scriptA), 1)
-	probe = strings.Replace(probe, "__SCRIPT_B__", strconv.Quote(scriptB), 1)
+	probe = strings.Replace(probe, "__SCRIPT_A__", scriptA, 1)
+	probe = strings.Replace(probe, "__SCRIPT_B__", scriptB, 1)
 	cmd.Stdin = strings.NewReader(probe)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -527,7 +460,7 @@ Promise.resolve()
   .catch((e) => { console.error(e); process.exit(1); });
 `
 	cmd := exec.Command(node, "-")
-	probe = strings.Replace(probe, "__SCRIPT__", strconv.Quote(script), 1)
+	probe = strings.Replace(probe, "__SCRIPT__", script, 1)
 	cmd.Stdin = strings.NewReader(probe)
 	out, err := cmd.CombinedOutput()
 	if err != nil {

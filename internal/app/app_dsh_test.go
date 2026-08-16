@@ -74,7 +74,7 @@ func TestHandleInstanceDshInfo(t *testing.T) {
 		Worktrees: []store.ManagedWorktree{{ID: "wt1", Name: "wt1", Path: wt}},
 		Instances: []store.ManagedInstance{
 			managedTestInstance("inst-dsh", store.KindDsh, wt, "running", raw),
-			{ID: "inst-oc", WorktreeID: "wt1", Name: "oc", Kind: store.KindOpenCodeWeb, Cwd: wt, Status: "running"},
+			{ID: "inst-oc", WorktreeID: "wt1", Name: "oc", Kind: "opencode-web", Cwd: wt, Status: "running"},
 		},
 	})
 
@@ -339,7 +339,7 @@ func TestHandleInstanceDshInstallKindGuard(t *testing.T) {
 	srv, _ := newIsolatedTestServerWithDsh(t, store.State{
 		Worktrees: []store.ManagedWorktree{{ID: "wt1", Name: "wt1", Path: wt}},
 		Instances: []store.ManagedInstance{
-			{ID: "inst-oc", WorktreeID: "wt1", Name: "oc", Kind: store.KindOpenCodeWeb, Cwd: wt, Status: "running"},
+			{ID: "inst-oc", WorktreeID: "wt1", Name: "oc", Kind: "opencode-web", Cwd: wt, Status: "running"},
 		},
 	})
 	// The install handler must 404 before touching npm for non-dsh

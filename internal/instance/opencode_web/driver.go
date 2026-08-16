@@ -49,10 +49,6 @@ const (
 	scanMaxLineBytes    = 1 << 20 // 1 MiB
 	stopGrace           = 5 * time.Second
 	readyTimeout        = 60 * time.Second
-	// preStartTimeout bounds tag preStart execution (see Spawn). Long
-	// enough for the documented `npm install` example, short enough that
-	// a hanging template cannot stall a Start request indefinitely.
-	preStartTimeout = 2 * time.Minute
 )
 
 // Driver is the opencode-web kind implementation. Registered with
@@ -127,26 +123,13 @@ func (d Driver) Spawn(ctx context.Context, params framework.SpawnParams) (framew
 	cmd.Env = buildEnv(params.ExtraEnv, params.AuthToken)
 
 	// Tag preStart runs with the same environment the serve process
-	// will get (buildEnv output incl. the forced auth token). Its
-	// failure output is surfaced to the API caller, so it must be
-	// redacted first: a debug preStart (`env`, `printenv`) would
-	// otherwise echo OPENCODE_SERVER_PASSWORD — the myworktree main
-	// auth token — into the error. Bounded by preStartTimeout: Spawn
-	// has not returned yet, so the framework's ready-timeout has not
-	// started either, and a hanging template would stall Start forever.
+	// will get (buildEnv output incl. the forced auth token).
 	if strings.TrimSpace(params.PreStart) != "" {
-		preCtx, cancel := context.WithTimeout(context.Background(), preStartTimeout)
-		pre := exec.CommandContext(preCtx, "zsh", "-lc", params.PreStart)
+		pre := exec.Command("zsh", "-lc", params.PreStart)
 		pre.Dir = cmd.Dir
 		pre.Env = cmd.Env
-		out, err := pre.CombinedOutput()
-		cancel()
-		if preCtx.Err() == context.DeadlineExceeded {
-			return framework.Handle{}, nil, fmt.Errorf("preStart timed out after %s", preStartTimeout)
-		}
-		if err != nil {
-			sanitized := strings.TrimSpace(redact.Secret(redact.Text(string(out)), params.AuthToken))
-			return framework.Handle{}, nil, fmt.Errorf("preStart failed: %w: %s", err, sanitized)
+		if out, err := pre.CombinedOutput(); err != nil {
+			return framework.Handle{}, nil, fmt.Errorf("preStart failed: %w: %s", err, strings.TrimSpace(string(out)))
 		}
 	}
 

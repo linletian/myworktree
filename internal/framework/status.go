@@ -1,5 +1,5 @@
 // Package framework provides the worktree-aware instance lifecycle
-// management that all instance kinds share. It contains the status
+// orchestration that all instance kinds share. It contains the status
 // enum, the kind registry, the manager that drives lifecycle, and the
 // shared utilities (ring buffer, memory sampler) that kinds consume.
 //

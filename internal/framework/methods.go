@@ -252,7 +252,10 @@ func (m *Manager) ReconcileRunningOnStartup() (int, error) {
 			st.Instances[i].Status != StatusStarting.String() {
 			continue
 		}
-		kindName := store.CanonicalKind(st.Instances[i].Kind)
+		kindName := st.Instances[i].Kind
+		if kindName == "" {
+			kindName = "pty"
+		}
 		if k, kerr := m.Registry.Get(kindName); kerr == nil {
 			if rs, ok := k.(RestartSurvivor); ok {
 				handle, ready, rerr := rs.Reattach(context.Background(), st.Instances[i].ID)
