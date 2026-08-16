@@ -309,12 +309,75 @@ func buildEnv(tagEnv map[string]string, authToken string) []string {
 	}
 	seen["OPENCODE_SERVER_PASSWORD"] = authToken
 	seen["OPENCODE_CLIENT"] = "myworktree"
+	withLoopbackNoProxy(seen)
 
 	out := make([]string, 0, len(seen))
 	for k, v := range seen {
 		out = append(out, k+"="+v)
 	}
 	return out
+}
+
+// loopbackNoProxyHosts are the loopback entries myworktree guarantees
+// in NO_PROXY/no_proxy for the opencode child process, spelled out
+// literally.
+//
+// Why: opencode embeds the Bun runtime, whose fetch honors
+// HTTP(S)_PROXY but does NOT match CIDR ranges in no_proxy (the
+// widespread "127.0.0.0/8" entry is ignored). With a LAN proxy
+// configured, the in-process plugin SDK calls to the loopback server
+// (http://127.0.0.1:<port>) are then routed through the proxy and
+// fail (HTTP 502), which surfaces in plugins as hard crashes such as
+// "messages.map is not a function" (myworktree issue #75). Explicit
+// host entries make every no_proxy matcher bypass loopback.
+var loopbackNoProxyHosts = []string{"localhost", "127.0.0.1", "::1"}
+
+// proxyConfigured reports whether any outbound proxy env var is set
+// (either letter case), i.e. whether no_proxy matters at all.
+func proxyConfigured(seen map[string]string) bool {
+	for _, k := range []string{"HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"} {
+		if seen[k] != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// withLoopbackNoProxy rewrites the NO_PROXY/no_proxy pair in seen so
+// loopback hosts are always listed explicitly. It is a no-op when no
+// proxy is configured (nothing to bypass) or when a "*" wildcard
+// already covers everything. Existing entries — including CIDR ranges
+// such as 127.0.0.0/8 — are preserved; the literal loopback hosts are
+// appended alongside them because Bun's matcher ignores CIDR.
+func withLoopbackNoProxy(seen map[string]string) {
+	if !proxyConfigured(seen) {
+		return
+	}
+	var entries []string
+	present := make(map[string]bool)
+	collect := func(v string) {
+		for _, e := range strings.Split(v, ",") {
+			e = strings.TrimSpace(e)
+			if e == "" || present[e] {
+				continue
+			}
+			present[e] = true
+			entries = append(entries, e)
+		}
+	}
+	collect(seen["NO_PROXY"])
+	collect(seen["no_proxy"])
+	if present["*"] {
+		return
+	}
+	for _, h := range loopbackNoProxyHosts {
+		if !present[h] {
+			entries = append(entries, h)
+		}
+	}
+	merged := strings.Join(entries, ",")
+	seen["NO_PROXY"] = merged
+	seen["no_proxy"] = merged
 }
 
 var listeningAddrRe = regexp.MustCompile(`opencode server listening on http://([^:\s]+):(\d+)`)
