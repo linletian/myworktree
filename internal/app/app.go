@@ -1924,6 +1924,9 @@ func (s *Server) handleInstanceDshLaunch(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	if !s.dshWriteOriginGuard(w, r) {
+		return
+	}
 	var req struct {
 		ID   string `json:"id"`
 		Mode string `json:"mode"`
@@ -1956,6 +1959,9 @@ func (s *Server) handleInstanceDshLaunch(w http.ResponseWriter, r *http.Request)
 func (s *Server) handleInstanceDshInstall(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !s.dshWriteOriginGuard(w, r) {
 		return
 	}
 	var req struct {
@@ -2005,6 +2011,22 @@ func (s *Server) handleInstanceDshInstall(w http.ResponseWriter, r *http.Request
 		"status":       "ok",
 		"resolved_bin": bin,
 	})
+}
+
+// dshWriteOriginGuard blocks cross-origin writes to the dsh install /
+// launch endpoints. withAuth skips Origin checks for loopback clients
+// (local trust), but a hostile webpage can drive a loopback fetch
+// (no-cors simple POST) — browser requests always carry Origin, while
+// non-browser clients (curl, the CLI) omit it and stay allowed
+// (REVIEW-2026-08-16 MED-6: CSRF → arbitrary `npm install -g`).
+func (s *Server) dshWriteOriginGuard(w http.ResponseWriter, r *http.Request) bool {
+	if isLoopbackRequest(r) {
+		if origin := r.Header.Get("Origin"); origin != "" && !sameOriginHost(r) {
+			http.Error(w, "forbidden origin", http.StatusForbidden)
+			return false
+		}
+	}
+	return true
 }
 
 // requireDshInstance loads an instance and verifies its kind.

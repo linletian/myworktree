@@ -3,6 +3,7 @@ package dsh_web
 import (
 	"bytes"
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -107,7 +108,12 @@ func startProxyListener(h *Handle, cfg ProxyConfig, upstreamHost, upstreamPort s
 		tracker:      tracker,
 		h:            h,
 	}
-	srv := &http.Server{Handler: ph}
+	srv := &http.Server{
+		Handler:           ph,
+		ReadHeaderTimeout: 10 * time.Second, // slowloris guard (REVIEW-2026-08-16 MED-8)
+		ReadTimeout:       60 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
 	go func() {
 		var serveErr error
 		if cfg.TLSCert != "" && cfg.TLSKey != "" {
@@ -337,7 +343,7 @@ func (p *proxyHandler) checkToken(w http.ResponseWriter, r *http.Request) bool {
 			token = c.Value
 		}
 	}
-	if token == "" || token != p.cfg.AuthToken {
+	if token == "" || subtle.ConstantTimeCompare([]byte(token), []byte(p.cfg.AuthToken)) != 1 {
 		return false
 	}
 	if r.URL.Query().Get("token") != "" {

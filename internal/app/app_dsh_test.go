@@ -334,6 +334,46 @@ func TestHandleInstanceDshLaunch(t *testing.T) {
 	}
 }
 
+// TestDshWriteOriginGuard pins the CSRF guard (REVIEW-2026-08-16
+// MED-6): withAuth skips Origin checks for loopback clients, so the
+// install/launch handlers must reject cross-origin browser writes
+// themselves — a hostile webpage can otherwise drive a no-cors
+// loopback fetch. Requests WITHOUT Origin (curl/CLI) stay allowed.
+// The body always names a NON-EXISTENT instance so guard-passing
+// requests stop at requireDshInstance (404) and never reach npm.
+func TestDshWriteOriginGuard(t *testing.T) {
+	wt := t.TempDir()
+	srv, _ := newIsolatedTestServerWithDsh(t, store.State{
+		Worktrees: []store.ManagedWorktree{{ID: "wt1", Name: "wt1", Path: wt}},
+	})
+
+	post := func(origin string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/api/instances/dsh/install", bytes.NewReader([]byte(`{"id":"inst-nonexistent"}`)))
+		req.RemoteAddr = "127.0.0.1:53123" // loopback trust zone
+		req.Host = "127.0.0.1:39999"       // same-origin host the browser would use
+		if origin != "" {
+			req.Header.Set("Origin", origin)
+		}
+		w := httptest.NewRecorder()
+		srv.handleInstanceDshInstall(w, req)
+		return w
+	}
+
+	// Cross-origin browser request → 403 before any instance/npm work.
+	if w := post("https://evil.example"); w.Code != http.StatusForbidden {
+		t.Fatalf("cross-origin status = %d, want 403", w.Code)
+	}
+	// Same-origin browser request → guard passes, then 404 (unknown
+	// instance; proves the guard did not block it).
+	if w := post("http://127.0.0.1:39999"); w.Code != http.StatusNotFound {
+		t.Fatalf("same-origin status = %d, want 404 (guard passed)", w.Code)
+	}
+	// No Origin (curl) → guard passes, then 404.
+	if w := post(""); w.Code != http.StatusNotFound {
+		t.Fatalf("origin-less status = %d, want 404 (guard passed)", w.Code)
+	}
+}
+
 func TestHandleInstanceDshInstallKindGuard(t *testing.T) {
 	wt := t.TempDir()
 	srv, _ := newIsolatedTestServerWithDsh(t, store.State{
