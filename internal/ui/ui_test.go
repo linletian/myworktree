@@ -335,8 +335,10 @@ func TestReasonixTabIsFixedCommandNoTemplate(t *testing.T) {
 // TestStartInstanceModalTabLabelsAndWrap pins issues #68 and #69: the four
 // Start Instance tabs follow one naming scheme (Title Case + consistent
 // -Web suffix for the web kinds) while the data-tab values (the backend
-// kind mapping) stay unchanged, and the tab bar never wraps — tabs keep
-// their natural width and the bar scrolls horizontally when narrow.
+// kind mapping) stay unchanged, and the tab bar never wraps — the dialog
+// width follows its content (max-content) so all four tabs fit on one
+// line, with min/max caps so it neither shrinks below the other dialogs
+// nor blows up on long form-info text.
 func TestStartInstanceModalTabLabelsAndWrap(t *testing.T) {
 	bodyText := fetchIndexHTML(t)
 	checks := []string{
@@ -350,14 +352,23 @@ func TestStartInstanceModalTabLabelsAndWrap(t *testing.T) {
 			t.Fatalf("GET / should include modal tab %q (issue #69 naming scheme)", check)
 		}
 	}
+	// Issue #68: no scrollbar band-aid — the dialog resizes itself to fit
+	// the tab bar; tabs keep their natural width and never wrap. The
+	// .modal-tabs block must match exactly (no overflow-x inside).
+	tabsBlock := "        .modal-tabs {\n            display: flex;\n            flex-wrap: nowrap;\n            gap: 0;\n            padding: 0 12px;\n            border-bottom: 1px solid var(--border-color);\n            background: var(--hover-bg);\n        }"
 	for _, check := range []string{
 		"flex-wrap: nowrap",
-		"overflow-x: auto",
 		"white-space: nowrap",
+		"width: max-content",
+		"min-width: 400px",
+		"max-width: min(90vw, 640px)",
 	} {
 		if !strings.Contains(bodyText, check) {
 			t.Fatalf("GET / should include modal-tabs no-wrap guard %q (issue #68)", check)
 		}
+	}
+	if !strings.Contains(bodyText, tabsBlock) {
+		t.Fatalf("GET / should include the scrollbar-free .modal-tabs block (issue #68)")
 	}
 	// data-tab semantics preserved for every web kind.
 	for _, check := range []string{
@@ -400,7 +411,7 @@ func TestStartInstanceModalFormInfosAreEnglish(t *testing.T) {
 	}
 }
 
-// TestKindBadgesUnified pins issue #70: the OC / rx / DS instance-tab
+// TestKindBadgesUnified pins issue #70: the OC / RX / DS instance-tab
 // badges share one .kind-badge base style, per-kind rules only set colors
 // (through CSS variables), and the old divergent classes are gone.
 func TestKindBadgesUnified(t *testing.T) {

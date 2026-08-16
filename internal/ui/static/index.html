@@ -661,11 +661,11 @@
         }
 
         /* Unified kind badge (issue #70): one base style shared by the
-           OC / rx / DS labels on instance tabs; per-kind rules only
+           OC / RX / DS labels on instance tabs; per-kind rules only
            override the colors (all via CSS variables for theme switching). */
         .kind-badge {
             display: inline-block;
-            font-size: 10px;
+            font-size: 9px;
             line-height: 1;
             font-weight: 600;
             padding: 2px 4px;
@@ -991,6 +991,17 @@
             width: 400px;
         }
 
+        /* Start Instance modal width follows its content (issue #68):
+           the four tabs must fit on one line, so the dialog sizes
+           itself to the tab bar instead of scrolling it. min-width
+           keeps it at least as wide as the other dialogs; max-width
+           caps it so long form-info paragraphs cannot blow it up. */
+        #modal-start-instance {
+            width: max-content;
+            min-width: 400px;
+            max-width: min(90vw, 640px);
+        }
+
             dialog::backdrop {
                 background: var(--modal-backdrop);
             }
@@ -1080,8 +1091,6 @@
             padding: 0 12px;
             border-bottom: 1px solid var(--border-color);
             background: var(--hover-bg);
-            overflow-x: auto;
-            scrollbar-width: thin;
         }
         .modal-tab {
             flex: 0 0 auto;
@@ -2435,7 +2444,7 @@
                  title="Drag to reorder; double-click to rename">
               <span class="tab-status ${statusClass}"></span>
               ${i.kind === 'opencode-web' ? '<span class="kind-badge kind-badge-oc">OC</span>' : ''}
-              ${i.kind === "reasonix" ? '<span class="kind-badge kind-badge-rx" title="Reasonix web UI">rx</span>' : ""}
+              ${i.kind === "reasonix" ? '<span class="kind-badge kind-badge-rx" title="Reasonix web UI">RX</span>' : ""}
               ${i.kind === 'dsh-web' ? '<span class="kind-badge kind-badge-dsh" title="DeepSeek Harness web UI">DS</span>' : ''}
                ${displayName}
             </div>
