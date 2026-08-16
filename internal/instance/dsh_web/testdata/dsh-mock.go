@@ -165,7 +165,7 @@ func handleRPC(w http.ResponseWriter, r *http.Request) {
 			"created": true,
 		}
 	case "session.create":
-		value = map[string]any{"session": map[string]any{"id": "mock-session"}}
+		value = map[string]any{"sessionId": "mock-session"}
 	default:
 		writeRPCError(w, env.RPCID, "method-not-found", "unknown method "+env.Method)
 		return

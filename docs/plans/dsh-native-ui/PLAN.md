@@ -41,6 +41,7 @@
 
 - restrict overlay 对目录选择器的处理（**实施修正，见 §踩坑 12**）：`directory-picker` 行是「自动组合器」——同时挂载 host 后端（提供 `directoryPicker` 服务，api-gateway 硬依赖）与 client 表面（「Add workspace…」入口）。**直接禁用该行会导致整棵插件树加载失败**（实测 dsh 0.1.0-rc.6：「1 entry did not activate … waiting for service: directoryPicker」）。正确姿势：`directory-picker.disabled: true`（停组合器）+ `insert: @deepseek-ai/dsh-host-directory-picker-browse`（裸挂 host 后端行，服务保留、无 client 表面 → 入口不渲染、可无头/远程运行）+ `client-hmr.disabled: true`（hygiene）。
 - **监测（只提醒、零干预）**：代理观察 POST `/api` body 的 RPC 信封：`workspace.create {path}`、`session.create {cwd|workspaceId}`，与实例 worktree 归一化比对（`normalizeDir`/`classify` 平移自 opencode `scope.go`）；`workspaceId` 与 blob 中自举记录的 worktree workspaceId 精确比对。只 Record，不拦截、不改写、不降级。
+- **会话活跃性监测（dsh 单写者边界，见 `CROSS-PROCESS-SESSION.md`）**：daemon 级 `SessionWatch`（`sessionwatch.go`）每 3s 扫描共享 sessions 池，90s 内有 mtime 更新的 `session.jsonl.zstd` 计为活跃；写驱动 RPC（`session.prompt` 族请求体 + `session.create` 响应 + 自举 preseed）归属为"本实例自己写"（只读方法如 `session.history` 故意不归属——打开会话不写日志，归属了反而会漏报），其余活跃会话经 scope 端点 `foreign_active_sessions` 上报，前端常驻警告条提醒"等会话空闲再打开"。只提醒、不拦截、不触碰 iframe 内 DOM（与 out-of-scope 决策一致）。
 - iframe 外常驻警告条（myworktree 自己的 DOM）三态：正常 / 越界 / 版本或裁剪失效。
 - **裁剪有效性兜底（L1 + L2，平移 opencode §4.7 模式）**：L1 = 版本门 advisory 区间（行 id 随 dsh 升级漂移时前端常驻警告）；L2 = Spawn 预检跑 `dsh web --dump-config --patch <restrict.yml>`（launcher 打印合成树后退出，含 --patch overlay），校验四行存在且值正确 → blob `overlay_verified`，false 时前端按「裁剪失效」警告。L3（DOM 锚点检测）随置灰占位 client plugin 推迟（见 out of scope）。
 
@@ -197,7 +198,7 @@ mkdir -p /tmp/dsh-test && cd /tmp/dsh-test && git init
 | 6 | npx 模式 Stop | `ps` 无孤儿（dsh 与 npx 均退出），端口释放 |
 | 7 | `dsh --version` 为 0.0.9（mock） | Start fail-fast，错误信息可读 |
 | 8 | Stop/删除实例、杀 myworktree 重启 | 无孤儿进程；实例记录状态正确 |
-| 9 | 远程浏览器（LAN + TLS）打开实例 | iframe 正常、WS 事件通道正常、无 token 泄漏上游 |
+| 9 | 远程浏览器（LAN + TLS）打开实例 | iframe 正常、WS 事件通道正常、无 token 泄漏上游（**半自动实测已过**：`pr5-remote-e2e.sh`——401/302+cookie/200/loopback 直通/WS 101 全矩阵；真实浏览器人工点击见 TASK PR5） |
 | 10 | 普通 PTY / opencode-web / reasonix 实例 | 零回归 |
 
 ### 验收标准

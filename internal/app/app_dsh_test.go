@@ -56,18 +56,6 @@ func newIsolatedTestServerWithDsh(t *testing.T, st store.State) (*Server, store.
 	}, fs
 }
 
-func dshTestInstance(id, worktreePath, status string, blob []byte) store.ManagedInstance {
-	return store.ManagedInstance{
-		ID:         id,
-		WorktreeID: "wt1",
-		Name:       id,
-		Kind:       store.KindDsh,
-		Cwd:        worktreePath,
-		Status:     status,
-		KindBlob:   blob,
-	}
-}
-
 func TestHandleInstanceDshInfo(t *testing.T) {
 	wt := t.TempDir()
 	blob := dsh_web.Blob{
@@ -83,7 +71,7 @@ func TestHandleInstanceDshInfo(t *testing.T) {
 	srv, _ := newIsolatedTestServerWithDsh(t, store.State{
 		Worktrees: []store.ManagedWorktree{{ID: "wt1", Name: "wt1", Path: wt}},
 		Instances: []store.ManagedInstance{
-			dshTestInstance("inst-dsh", wt, "running", raw),
+			managedTestInstance("inst-dsh", store.KindDsh, wt, "running", raw),
 			{ID: "inst-oc", WorktreeID: "wt1", Name: "oc", Kind: store.KindOpenCodeWeb, Cwd: wt, Status: "running"},
 		},
 	})
@@ -132,7 +120,7 @@ func TestHandleInstanceDshInfoRemoteHostMapping(t *testing.T) {
 	})
 	srv, _ := newIsolatedTestServerWithDsh(t, store.State{
 		Worktrees: []store.ManagedWorktree{{ID: "wt1", Name: "wt1", Path: wt}},
-		Instances: []store.ManagedInstance{dshTestInstance("inst-dsh", wt, "running", raw)},
+		Instances: []store.ManagedInstance{managedTestInstance("inst-dsh", store.KindDsh, wt, "running", raw)},
 	})
 	req := httptest.NewRequest(http.MethodGet, "/api/instances/dsh?id=inst-dsh", nil)
 	req.Host = "192.168.1.5:50099"
@@ -147,11 +135,53 @@ func TestHandleInstanceDshInfoRemoteHostMapping(t *testing.T) {
 	}
 }
 
+func TestHandleInstanceDshInfoHostValidation(t *testing.T) {
+	// The r.Host-derived iframe host is client-controlled: anything
+	// that is not a plain DNS name / IP must yield no iframe_src
+	// (REVIEW-2026-08-15.md #5).
+	wt := t.TempDir()
+	raw, _ := json.Marshal(dsh_web.Blob{
+		ProxyHost: "0.0.0.0", ProxyPort: "40002",
+		IframeURL: "http://0.0.0.0:40002/",
+	})
+	srv, _ := newIsolatedTestServerWithDsh(t, store.State{
+		Worktrees: []store.ManagedWorktree{{ID: "wt1", Name: "wt1", Path: wt}},
+		Instances: []store.ManagedInstance{managedTestInstance("inst-dsh", store.KindDsh, wt, "running", raw)},
+	})
+
+	cases := []struct {
+		name    string
+		host    string
+		wantSrc string
+	}{
+		{"plain hostname without port", "myhost.local", "http://myhost.local:40002/"},
+		{"IPv4 with port", "10.0.0.7:50099", "http://10.0.0.7:40002/"},
+		{"path smuggling rejected", "evil.com/path", ""},
+		{"scheme smuggling rejected", "https://evil.com", ""},
+		{"userinfo rejected", "user@evil.com", ""},
+		{"empty rejected", "", ""},
+	}
+	for _, c := range cases {
+		req := httptest.NewRequest(http.MethodGet, "/api/instances/dsh?id=inst-dsh", nil)
+		req.Host = c.host
+		w := httptest.NewRecorder()
+		srv.handleInstanceDshInfo(w, req)
+		var resp map[string]any
+		if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("%s: invalid JSON: %v", c.name, err)
+		}
+		src, _ := resp["iframe_src"].(string)
+		if src != c.wantSrc {
+			t.Errorf("%s: iframe_src = %q, want %q", c.name, src, c.wantSrc)
+		}
+	}
+}
+
 func TestHandleInstanceDshScope(t *testing.T) {
 	wt := t.TempDir()
 	srv, _ := newIsolatedTestServerWithDsh(t, store.State{
 		Worktrees: []store.ManagedWorktree{{ID: "wt1", Name: "wt1", Path: wt}},
-		Instances: []store.ManagedInstance{dshTestInstance("inst-dsh", wt, "running", nil)},
+		Instances: []store.ManagedInstance{managedTestInstance("inst-dsh", store.KindDsh, wt, "running", nil)},
 	})
 	srv.dshScope.Record("inst-dsh", dsh_web.ScopeState{
 		Scope: dsh_web.ScopeOutOfScope, Directory: "/other",
@@ -170,6 +200,9 @@ func TestHandleInstanceDshScope(t *testing.T) {
 	if resp.Scope != dsh_web.ScopeOutOfScope || resp.Directory != "/other" {
 		t.Errorf("scope = %+v", resp)
 	}
+	if len(resp.ForeignActiveSessions) != 0 {
+		t.Errorf("foreign_active_sessions = %v, want empty without a watch", resp.ForeignActiveSessions)
+	}
 
 	// Unknown instance → default in-scope.
 	req = httptest.NewRequest(http.MethodGet, "/api/instances/dsh/scope?id=inst-other", nil)
@@ -180,11 +213,49 @@ func TestHandleInstanceDshScope(t *testing.T) {
 	}
 }
 
+func TestHandleInstanceDshScopeForeignActiveSessions(t *testing.T) {
+	wt := t.TempDir()
+	srv, _ := newIsolatedTestServerWithDsh(t, store.State{
+		Worktrees: []store.ManagedWorktree{{ID: "wt1", Name: "wt1", Path: wt}},
+		Instances: []store.ManagedInstance{managedTestInstance("inst-dsh", store.KindDsh, wt, "running", nil)},
+	})
+
+	// A watch with a freshly-written session log (foreign: no own
+	// attribution) must surface in the scope response.
+	sessRoot := t.TempDir()
+	dir := filepath.Join(sessRoot, "--wt--", "session-x")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "session.jsonl.zstd"), []byte("fake"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	watch := dsh_web.NewSessionWatch(sessRoot, nil)
+	if err := watch.ScanNow(); err != nil {
+		t.Fatal(err)
+	}
+	srv.dshWatch = watch
+
+	req := httptest.NewRequest(http.MethodGet, "/api/instances/dsh/scope?id=inst-dsh", nil)
+	w := httptest.NewRecorder()
+	srv.handleInstanceDshScope(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d", w.Code)
+	}
+	var resp dsh_web.ScopeState
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.ForeignActiveSessions) != 1 || resp.ForeignActiveSessions[0] != "session-x" {
+		t.Errorf("foreign_active_sessions = %v, want [session-x]", resp.ForeignActiveSessions)
+	}
+}
+
 func TestHandleInstanceDshLaunch(t *testing.T) {
 	wt := t.TempDir()
 	srv, _ := newIsolatedTestServerWithDsh(t, store.State{
 		Worktrees: []store.ManagedWorktree{{ID: "wt1", Name: "wt1", Path: wt}},
-		Instances: []store.ManagedInstance{dshTestInstance("inst-dsh", wt, "failed", nil)},
+		Instances: []store.ManagedInstance{managedTestInstance("inst-dsh", store.KindDsh, wt, "failed", nil)},
 	})
 
 	post := func(body string) *httptest.ResponseRecorder {

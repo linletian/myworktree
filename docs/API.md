@@ -693,11 +693,14 @@ Response (200):
 {
   "scope": "out-of-scope",
   "directory": "/abs/path/to/other/worktree",
-  "at": 1753500000
+  "at": 1753500000,
+  "foreign_active_sessions": ["session-6f1a…"]
 }
 ```
 
 `scope` is `in-scope` / `out-of-scope`. Observation is record-only — the request is forwarded unchanged; out-of-scope sessions still succeed (their sandbox root is the out-of-scope directory; OS-level write limits still apply) and the warning stays until the user navigates back to the worktree.
+
+`foreign_active_sessions` (omitempty) lists the sessions in the shared `$DSH_HOME/sessions` pool that the daemon's session watch classified as **actively written by another dsh process** (mtime within 90s, excluding sessions this daemon itself drives — own traffic is attributed from `session.prompt`-family RPC bodies through the proxy, `session.create` responses, and the workspace-bootstrap preseed). dsh is a single-writer-per-process system: opening such a session from the embed appends an unguarded `session/end-seed` and can permanently corrupt the log, so the frontend renders a warning bar telling the user to wait until the session is idle (record-only — nothing is blocked; see `docs/plans/dsh-native-ui/CROSS-PROCESS-SESSION.md`).
 
 ### 5.16 dsh-web launch mode
 

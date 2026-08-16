@@ -410,6 +410,123 @@ func TestProxyListenerDeathFailsLoud(t *testing.T) {
 	}
 }
 
+// TestProxyUpstreamMidBodyFailureAbortsConnection pins the fail-loud
+// behavior when the upstream dies AFTER response headers were written
+// (REVIEW-2026-08-15.md #4): a 502 is impossible at that point, so the
+// proxy must abort the connection — the client sees an error, not a
+// truncated response that looks like a success.
+func TestProxyUpstreamMidBodyFailureAbortsConnection(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Declare 5 bytes, write 2, then return: the stdlib server
+		// closes the connection mid-body.
+		w.Header().Set("Content-Length", "5")
+		_, _ = w.Write([]byte("ab"))
+	}))
+	t.Cleanup(upstream.Close)
+	u, _, _ := net.SplitHostPort(strings.TrimPrefix(upstream.URL, "http://"))
+
+	h := &Handle{instanceID: "inst-1", cwd: "/wt"}
+	host, port, closeFn, err := startProxyListener(h, ProxyConfig{BindHost: "127.0.0.1"}, u, portOf(t, upstream.URL), NewScopeTracker(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeFn()
+
+	resp, err := http.Get("http://" + net.JoinHostPort(host, port) + "/")
+	if err != nil {
+		t.Fatalf("GET via proxy: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (the failure is in the body stream)", resp.StatusCode)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err == nil {
+		t.Fatalf("mid-body upstream failure produced a clean body %q; want connection abort", body)
+	}
+	if strings.Contains(string(body), "dsh server unreachable") {
+		t.Errorf("body contains the 502 JSON, but headers were already sent: %q", body)
+	}
+}
+
+// TestProxySessionOwnMarking pins the write-driving RPC attribution:
+// a session.prompt (mutating the log) marks its sessionId as owned by
+// this instance in the session watch, while a read-only session.history
+// must NOT (opening a session is not writing — marking it would
+// suppress the foreign-activity warning exactly when it matters).
+func TestProxySessionOwnMarking(t *testing.T) {
+	ph, _, _, _ := newProxyFixture(t, ProxyConfig{BindHost: "127.0.0.1"}, "/wt")
+	watch := NewSessionWatch(t.TempDir(), nil)
+	ph.h.watch = watch
+
+	envelope := func(method, payload string) []byte {
+		return []byte(`{"type":"client-request","rpcId":"r1","method":"` + method + `","payload":` + payload + `}`)
+	}
+	ownCount := func() int {
+		watch.mu.Lock()
+		defer watch.mu.Unlock()
+		return len(watch.own)
+	}
+
+	doProxy(t, ph, http.MethodPost, "/api", envelope("session.prompt", `{"sessionId":"s-1"}`), "")
+	if ownCount() != 1 {
+		t.Fatalf("own sessions = %d, want 1 after session.prompt", ownCount())
+	}
+	doProxy(t, ph, http.MethodPost, "/api", envelope("subagent.prompt", `{"parentSessionId":"s-p","childSessionId":"s-c"}`), "")
+	if ownCount() != 3 {
+		t.Fatalf("own sessions = %d, want 3 after subagent.prompt", ownCount())
+	}
+	doProxy(t, ph, http.MethodPost, "/api", envelope("session.history", `{"sessionId":"s-readonly"}`), "")
+	if ownCount() != 3 {
+		t.Fatalf("own sessions = %d, want 3 (session.history is read-only)", ownCount())
+	}
+	doProxy(t, ph, http.MethodPost, "/api", envelope("session.cancel", `{"sessionId":"s-1"}`), "")
+	if ownCount() != 3 {
+		t.Fatalf("own sessions = %d, want 3 (s-1 already marked)", ownCount())
+	}
+}
+
+// TestProxySessionCreateResponseMarking pins the response tee: the
+// session id of a session.create lives in the response VALUE
+// ({sessionId}), not the request — the proxy must parse the streamed
+// envelope and mark it owned.
+func TestProxySessionCreateResponseMarking(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"type":"server-response","rpcId":"r1","result":{"ok":true,"value":{"sessionId":"s-created"}}}`))
+	}))
+	t.Cleanup(upstream.Close)
+	u, _, _ := net.SplitHostPort(strings.TrimPrefix(upstream.URL, "http://"))
+
+	h := &Handle{instanceID: "inst-1", cwd: "/wt"}
+	watch := NewSessionWatch(t.TempDir(), nil)
+	h.watch = watch
+	ph := &proxyHandler{
+		upstreamHost: u,
+		upstreamPort: portOf(t, upstream.URL),
+		worktree:     "/wt",
+		instanceID:   "inst-1",
+		cfg:          ProxyConfig{BindHost: "127.0.0.1"},
+		h:            h,
+	}
+
+	body := []byte(`{"type":"client-request","rpcId":"r1","method":"session.create","payload":{"cwd":"/wt"}}`)
+	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:39999/api/session.create", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	ph.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+
+	watch.mu.Lock()
+	_, marked := watch.own["s-created"]
+	watch.mu.Unlock()
+	if !marked {
+		t.Error("session.create response id not marked as owned")
+	}
+}
+
 // TestStartProxyListenerLifecycle starts the listener and verifies
 // closeFn releases the port.
 func TestStartProxyListenerLifecycle(t *testing.T) {

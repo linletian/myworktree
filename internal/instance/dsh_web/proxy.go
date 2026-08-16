@@ -13,6 +13,7 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"myworktree/internal/authq"
@@ -200,13 +201,101 @@ func (p *proxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		req.Header.Del("Origin")
 	}
 
+	// session.create carries the new session id in its response VALUE
+	// ({sessionId, agentPreset?} — upstream sessionCreateValueSchema),
+	// not the request body. Tee the (tiny) response so the id lands in
+	// the session watch's own-attribution (sessionwatch.go).
+	if r.Method == http.MethodPost && r.URL.Path == "/api/session.create" {
+		proxy.ModifyResponse = func(resp *http.Response) error {
+			resp.Body = &sessionCreateBody{
+				ReadCloser: resp.Body,
+				mark:       p.h.markOwnSession,
+			}
+			return nil
+		}
+	}
+
 	proxy.ErrorHandler = func(w http.ResponseWriter, req *http.Request, err error) {
+		// httputil.ReverseProxy only calls ErrorHandler before headers
+		// were written for non-streaming copies; for streaming copies
+		// (SSE / event-stream Accept) the stdlib already aborts the
+		// connection (shouldPanicOnCopyError → http.ErrAbortHandler).
+		// The remaining trap: a non-streaming copy that dies mid-body —
+		// headers are on the wire, so a 502 is impossible. Abort the
+		// connection instead so the browser fails loud rather than
+		// hanging on a truncated response.
+		if tr, ok := w.(*headerTrackRW); ok && tr.wroteHeader {
+			panic(http.ErrAbortHandler)
+		}
 		writeJSON(w, http.StatusBadGateway, map[string]string{
 			"error": "dsh server unreachable",
 		})
 	}
 
-	proxy.ServeHTTP(w, r)
+	proxy.ServeHTTP(&headerTrackRW{ResponseWriter: w}, r)
+}
+
+// headerTrackRW records whether the response headers have been written
+// (WriteHeader, or an implicit 200 from the first Write). Used by the
+// ErrorHandler above to distinguish "upstream unreachable" (502 is
+// possible) from "upstream died mid-body" (abort the connection).
+// Unwrap keeps http.ResponseController's Hijack / Flush paths working
+// (the WebSocket upgrade needs the raw conn).
+type headerTrackRW struct {
+	http.ResponseWriter
+	wroteHeader bool
+}
+
+func (w *headerTrackRW) WriteHeader(code int) {
+	if !w.wroteHeader {
+		w.wroteHeader = true
+	}
+	w.ResponseWriter.WriteHeader(code)
+}
+
+func (w *headerTrackRW) Write(b []byte) (int, error) {
+	w.wroteHeader = true // implicit 200
+	return w.ResponseWriter.Write(b)
+}
+
+func (w *headerTrackRW) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
+// sessionCreateBody tees the session.create response stream and parses
+// the RPC envelope once the stream ends, marking the created session id
+// as owned by this instance (sessionwatch.go). The body is tiny (an
+// envelope carrying a session id), so buffering is harmless and the
+// tee is transparent to the client.
+type sessionCreateBody struct {
+	io.ReadCloser
+	buf  bytes.Buffer
+	once sync.Once
+	mark func(sessionID string)
+}
+
+func (b *sessionCreateBody) Read(p []byte) (int, error) {
+	n, err := b.ReadCloser.Read(p)
+	if n > 0 {
+		b.buf.Write(p[:n])
+	}
+	if err != nil {
+		b.finish()
+	}
+	return n, err
+}
+
+func (b *sessionCreateBody) finish() {
+	b.once.Do(func() {
+		var env struct {
+			Result struct {
+				Value struct {
+					SessionID string `json:"sessionId"`
+				} `json:"value"`
+			} `json:"result"`
+		}
+		if json.Unmarshal(b.buf.Bytes(), &env) == nil && env.Result.Value.SessionID != "" {
+			b.mark(env.Result.Value.SessionID)
+		}
+	})
 }
 
 // checkToken validates the myworktree token: ?token= query or the
@@ -252,11 +341,13 @@ func loopbackClient(r *http.Request) bool {
 }
 
 // observeBody reads the RPC body, classifies it against the worktree,
-// and records the scope state. The body is always restored for
-// forwarding (the stream was consumed). A body that cannot be read or
-// exceeds the cap is NOT observed and the request is passed through
-// unchanged as far as possible (a read failure means the request
-// stream is broken; the upstream will see a short body and error).
+// records the scope state, and marks write-driving session ids as
+// "ours" in the shared session watch (they are excluded from the
+// foreign-active advisory). The body is always restored for forwarding
+// (the stream was consumed). A body that cannot be read or exceeds the
+// cap is NOT observed and the request is passed through unchanged as
+// far as possible (a read failure means the request stream is broken;
+// the upstream will see a short body and error).
 func (p *proxyHandler) observeBody(r *http.Request) {
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxScopeBodyBytes+1))
 	if err != nil {
@@ -270,6 +361,17 @@ func (p *proxyHandler) observeBody(r *http.Request) {
 		return
 	}
 	r.Body = io.NopCloser(bytes.NewReader(body))
+
+	// Foreign-activity attribution (sessionwatch.go): only methods
+	// that DRIVE the session (mutate its log) count as our own writes.
+	// Read-only methods (session.history/models/list/search) are
+	// deliberately excluded — opening a session does not write, and
+	// marking it would wrongly suppress the warning for a session a
+	// terminal dsh is actively writing.
+	for _, id := range ownSessionIDsInBody(body) {
+		p.h.markOwnSession(id)
+	}
+
 	st, ok := classifyRPCBody(body, p.worktree, p.worktreeWorkspaceID())
 	if !ok {
 		return
@@ -277,6 +379,51 @@ func (p *proxyHandler) observeBody(r *http.Request) {
 	if p.tracker != nil {
 		p.tracker.Record(p.instanceID, st)
 	}
+}
+
+// ownSessionWriteMethods are the session.* RPCs that mutate the
+// session log (dsh single-writer model): traffic on these means THIS
+// instance is the writer. session.create is handled via its response
+// (sessionCreateBody below) because the id lives in the value.
+var ownSessionWriteMethods = map[string]bool{
+	"session.prompt":      true,
+	"session.cancel":      true,
+	"session.fork":        true,
+	"session.rename":      true,
+	"session.selectModel": true,
+	"session.attachment":  true,
+	"session.updateQueue": true,
+	"subagent.prompt":     true, // payload carries parentSessionId + childSessionId
+}
+
+// ownSessionIDsInBody extracts the session ids of a write-driving RPC
+// envelope: payload.sessionId for session.* methods, and both
+// parentSessionId / childSessionId for subagent.prompt.
+func ownSessionIDsInBody(body []byte) []string {
+	var env rpcEnvelope
+	if err := json.Unmarshal(body, &env); err != nil {
+		return nil
+	}
+	if env.Type != "client-request" || !ownSessionWriteMethods[env.Method] {
+		return nil
+	}
+	if env.Method == "subagent.prompt" {
+		var payload struct {
+			ParentSessionID string `json:"parentSessionId"`
+			ChildSessionID  string `json:"childSessionId"`
+		}
+		if json.Unmarshal(env.Payload, &payload) != nil {
+			return nil
+		}
+		return []string{payload.ParentSessionID, payload.ChildSessionID}
+	}
+	var payload struct {
+		SessionID string `json:"sessionId"`
+	}
+	if json.Unmarshal(env.Payload, &payload) != nil {
+		return nil
+	}
+	return []string{payload.SessionID}
 }
 
 // worktreeWorkspaceID reads the worktree's own workspace id learned by

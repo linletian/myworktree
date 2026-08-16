@@ -116,6 +116,13 @@ type Driver struct {
 	// app.New; nil disables recording.
 	Tracker *ScopeTracker
 
+	// SessionWatch observes the shared dsh sessions pool for sessions
+	// actively written by OTHER processes (sessionwatch.go). The proxy
+	// and the workspace bootstrap feed it the session ids this daemon
+	// itself drives (MarkOwn). Filled by app.New; nil disables the
+	// foreign-activity advisory.
+	SessionWatch *SessionWatch
+
 	// ProxyStarter is the proxy.go seam: called once the upstream
 	// listening address is known (after the ready line is parsed). It
 	// starts the per-instance reverse-proxy listener and returns its
@@ -162,9 +169,20 @@ type Handle struct {
 	// carries the failure for wait() to persist alongside the exit.
 	proxyDead   bool
 	deathReason string
-	blob        Blob
-	failCount   atomic.Int32
-	publisher   atomic.Pointer[framework.Publisher]
+	// watch is the driver-level SessionWatch (foreign-activity
+	// advisory); the proxy and bootstrap report own-traffic to it.
+	watch     *SessionWatch
+	blob      Blob
+	failCount atomic.Int32
+	publisher atomic.Pointer[framework.Publisher]
+}
+
+// markOwnSession reports a session id driven by THIS instance to the
+// shared session watch (nil-safe).
+func (h *Handle) markOwnSession(sessionID string) {
+	if h.watch != nil {
+		h.watch.MarkOwn(sessionID)
+	}
 }
 
 // Manifest returns the static KindInfo for the dsh-web kind.
@@ -287,6 +305,7 @@ func (d *Driver) Spawn(ctx context.Context, params framework.SpawnParams) (frame
 		instanceID: params.InstanceID,
 		stateDir:   stateDir,
 		killGroup:  killGroup,
+		watch:      d.SessionWatch,
 		ready:      ready,
 		cancel:     cancel,
 		wg:         wg,

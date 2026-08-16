@@ -67,7 +67,7 @@ files:
 
 ## PR 5: 远程访问验证 + 收尾
 
-- [ ] Remote e2e (LAN + TLS): non-loopback bind + token gate + WS passthrough + cross-origin iframe auth (**manual** — code paths covered by unit tests; needs a LAN browser to verify end-to-end)
+- [ ] Remote e2e (LAN + TLS): non-loopback bind + token gate + WS passthrough + cross-origin iframe auth — **半自动实测已通过**（`docs/plans/dsh-native-ui/pr5-remote-e2e.sh`，2026-08-15：真实 myworktree daemon `0.0.0.0` + 自签 TLS + token 门 + 真实 dsh 0.1.0-rc.6 + 隔离 DSH_HOME/仓库，LAN IP 直连模拟远端客户端：无 token → 401 / 首次导航 `?token=` → 302 Location=/ + Set-Cookie / 跟随 → 200 / 仅 cookie → 200 / loopback 直通 → 200 / WS `Upgrade` → **101 Switching Protocols** / 会话 watch 归属（自举 preseed 排除、伪造外来会话上报警告、删除后清除）/ Shutdown 无孤儿进程）。剩余人工步骤：真实浏览器点击（SPA 渲染 + 交互式 WS 帧）与 portal 面板链接
 - [x] Docs final sync (CHANGELOG full entry, PLAN/TASK status markers)
 
 **Verify**: remote browser e2e passes; `go test ./...`, `gofmt -l .` clean.

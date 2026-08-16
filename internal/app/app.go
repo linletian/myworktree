@@ -89,6 +89,7 @@ type Server struct {
 	instanceMgr *framework.Manager
 	ocScope     *opencode_web.ScopeTracker
 	dshScope    *dsh_web.ScopeTracker
+	dshWatch    *dsh_web.SessionWatch
 	dshDrv      *dsh_web.Driver
 	// dshInstallMu serializes the dsh-web "install now" flow
 	// (handleInstanceDshInstall): two tabs clicking at once must not
@@ -146,6 +147,47 @@ func truncateText(s string, n int) string {
 		return s
 	}
 	return s[:n] + "…"
+}
+
+// validPublicHost reports whether host is safe to embed in a
+// client-derived iframe URL: a plain DNS name, an IPv4 literal, or a
+// bracketed IPv6 literal — nothing else (no scheme, userinfo, port,
+// path, query or CR/LF). Used by handleInstanceDshInfo before it
+// builds an iframe_src from the request Host header.
+func validPublicHost(host string) bool {
+	if host == "" || len(host) > 253 {
+		return false
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return true
+	}
+	if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") {
+		return net.ParseIP(host[1:len(host)-1]) != nil
+	}
+	for i := 0; i < len(host); i++ {
+		c := host[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9', c == '-', c == '.':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// numericPort reports whether p is a non-empty all-digit port string
+// (used to decide whether a Host header really is host:port before the
+// host part is trusted).
+func numericPort(p string) bool {
+	if p == "" {
+		return false
+	}
+	for i := 0; i < len(p); i++ {
+		if p[i] < '0' || p[i] > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // dshProxyConfig derives the dsh-web reverse-proxy settings from the
@@ -228,6 +270,13 @@ func New(cfg Config, logger *log.Logger) (*Server, error) {
 	dshDrv.Tracker = dshScope
 	dshDrv.Proxy = dshProxyConfig(cfg, isSecure)
 	dshDrv.ProxyStarter = dshDrv.ProxyStarterFn()
+	// Foreign-activity advisory over the shared sessions pool (dsh
+	// single-writer boundary, see
+	// docs/plans/dsh-native-ui/CROSS-PROCESS-SESSION.md): started for
+	// the daemon's lifetime; the proxy / bootstrap feed it own-traffic.
+	dshWatch := dsh_web.NewSessionWatch(dsh_web.DshSessionsDir(), logger)
+	dshWatch.Start()
+	dshDrv.SessionWatch = dshWatch
 	reg.Register(dshDrv)
 
 	instanceMgr := framework.NewManager(reg, st, logger)
@@ -260,6 +309,7 @@ func New(cfg Config, logger *log.Logger) (*Server, error) {
 		instanceMgr: instanceMgr,
 		ocScope:     opencode_web.NewScopeTracker(),
 		dshScope:    dshScope,
+		dshWatch:    dshWatch,
 		dshDrv:      dshDrv,
 		rxDriver:    rxDriver,
 		mcpAdapter: mcp.Adapter{
@@ -608,6 +658,9 @@ func (s *Server) Shutdown() {
 		s.instanceMgr.StopAllKind(store.KindReasonix)
 		s.instanceMgr.StopAllKind(store.KindOpenCodeWeb)
 		s.instanceMgr.StopAllKind(store.KindDsh)
+	}
+	if s.dshWatch != nil {
+		s.dshWatch.Stop()
 	}
 	if s.rxSrv != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -1765,21 +1818,40 @@ func (s *Server) handleInstanceDshInfo(w http.ResponseWriter, r *http.Request) {
 	// binds 0.0.0.0 / the LAN host — never a URL a browser can use
 	// verbatim), scheme mirrors the main listener's TLS. The frontend
 	// appends ?token= when the token gate is on.
+	//
+	// The 0.0.0.0 / :: case must derive the host from the request
+	// (r.Host): those bind addresses are not routable, and r.Host is
+	// exactly what the caller used to reach this listener. Because
+	// that value is client-controlled, it is validated before being
+	// embedded in the iframe URL — anything that is not a plain DNS
+	// name or IP (schemes, userinfo, paths, CR/LF) yields no
+	// iframe_src (the frontend stays on the "starting" placeholder).
 	if b.ProxyHost != "" && b.ProxyPort != "" {
 		proxyHost := b.ProxyHost
 		if proxyHost == "0.0.0.0" || proxyHost == "::" {
-			if h, _, herr := net.SplitHostPort(r.Host); herr == nil {
+			// Only trust a host:port split whose port is numeric;
+			// anything else (path, userinfo, scheme junk) falls through
+			// to whole-string validation and is rejected.
+			if h, p, herr := net.SplitHostPort(r.Host); herr == nil && numericPort(p) {
 				proxyHost = h
 			} else {
 				proxyHost = r.Host
 			}
 		}
-		scheme := "http"
-		if s.isSecure {
-			scheme = "https"
+		if validPublicHost(proxyHost) {
+			scheme := "http"
+			if s.isSecure {
+				scheme = "https"
+			}
+			resp["iframe_src"] = scheme + "://" + net.JoinHostPort(proxyHost, b.ProxyPort) + "/"
+			resp["proxy_host"] = proxyHost
+		} else {
+			// The blob's IframeURL still names the unroutable bind
+			// address; withhold it so the frontend stays on the
+			// "starting" placeholder instead of a dead URL.
+			s.logger.Printf("dsh-web instance %s: derived proxy host %q failed validation; iframe_src withheld", id, proxyHost)
+			resp["iframe_src"] = ""
 		}
-		resp["iframe_src"] = scheme + "://" + net.JoinHostPort(proxyHost, b.ProxyPort) + "/"
-		resp["proxy_host"] = proxyHost
 	}
 
 	// Missing-dsh state (recomputed on the fly): the instance failed at
@@ -1827,6 +1899,15 @@ func (s *Server) handleInstanceDshScope(w http.ResponseWriter, r *http.Request) 
 	state, ok := s.dshScope.Get(id)
 	if !ok {
 		state = dsh_web.ScopeState{Scope: dsh_web.ScopeInScope}
+	}
+	// Foreign-activity advisory (dsh single-writer boundary): sessions
+	// in the shared pool actively written by another dsh process —
+	// opening them from the embed can corrupt their log. Record-only;
+	// the frontend renders the warning bar.
+	if s.dshWatch != nil {
+		if n, ids := s.dshWatch.ForeignActive(); n > 0 {
+			state.ForeignActiveSessions = ids
+		}
 	}
 	writeJSON(w, http.StatusOK, state)
 }

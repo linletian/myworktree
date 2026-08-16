@@ -36,6 +36,12 @@ type ScopeState struct {
 	Scope     Scope  `json:"scope"`
 	Directory string `json:"directory,omitempty"` // cwd path or workspaceId
 	At        int64  `json:"at,omitempty"`        // unix seconds, for observability
+
+	// ForeignActiveSessions lists sessions in the shared pool that the
+	// session watch classified as actively written by ANOTHER dsh
+	// process (sessionwatch.go). Filled by the API handler from the
+	// watch — not part of the per-instance scope record itself.
+	ForeignActiveSessions []string `json:"foreign_active_sessions,omitempty"`
 }
 
 // ScopeTracker is the in-memory, per-instance scope state store. The

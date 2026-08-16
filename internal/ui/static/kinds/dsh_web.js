@@ -13,7 +13,13 @@
 //   - Scope monitoring: polls /api/instances/dsh/scope?id=... every
 //     ~1.5s and renders a persistent warning bar ABOVE the iframe when
 //     the instance has navigated away from its worktree (record-only —
-//     the request is never blocked, PLAN.md §工作区限制).
+//     the request is never blocked, PLAN.md §工作区限制). The same
+//     response carries foreign_active_sessions (shared-pool sessions
+//     actively written by another dsh process — opening them can
+//     corrupt their log, dsh single-writer boundary) and the bar warns
+//     about those too. Priority: remote-auth-missing > restriction
+//     effectiveness (version/overlay) > foreign active sessions >
+//     out-of-scope.
 //   - Advisory warnings: version_supported=false (dsh outside the
 //     supported range) or overlay_verified=false (the restrict overlay
 //     rows were not confirmed by the spawn-time --dump-config check)
@@ -232,14 +238,14 @@ class DshWebRenderer {
                         // dialog if it is still open.
                         this._dismissedMissingFor = null;
                         this._closeMissingDialog();
-                        this._versionUnsupported = !!(data.version && !data.version_supported);
-                        // overlay_verified is only meaningful once the
-                        // blob carried a version (pre-ready polls return
-                        // the zero value).
-                        this._overlayIneffective = !!(data.version && data.overlay_verified === false);
-                        this._refreshWarning(document.getElementById('dsh-scope-warning'));
                         if (frame) {
                             const src = this._tokenizeIframeSrc(data.iframe_src);
+                            this._versionUnsupported = !!(data.version && !data.version_supported);
+                            // overlay_verified is only meaningful once the
+                            // blob carried a version (pre-ready polls return
+                            // the zero value).
+                            this._overlayIneffective = !!(data.version && data.overlay_verified === false);
+                            this._refreshWarning(document.getElementById('dsh-scope-warning'));
                             if (frame.dataset.instance !== id || frame.dataset.src !== src) {
                                 frame.dataset.instance = id;
                                 frame.dataset.src = src;
@@ -294,10 +300,19 @@ class DshWebRenderer {
                 token = p.get('token') || '';
             }
             if (token) {
+                this._remoteAuthMissing = false;
                 const sep = src.indexOf('?') === -1 ? '?' : '&';
                 return src + sep + 'token=' + encodeURIComponent(token);
             }
+            // Remote page with NO credential anywhere (no cookie, no
+            // address-bar token): the proxy's mandatory token gate will
+            // 401 the first iframe navigation. Keep the frame hidden
+            // behind the loading placeholder and surface a hint
+            // (REVIEW-2026-08-15.md #13).
+            this._remoteAuthMissing = true;
+            return src;
         }
+        this._remoteAuthMissing = false;
         return src;
     }
 
@@ -316,6 +331,7 @@ class DshWebRenderer {
                     const data = await resp.json();
                     this._scope = data.scope || 'in-scope';
                     this._scopeDir = data.directory || '';
+                    this._foreignSessions = data.foreign_active_sessions || [];
                     this._refreshWarning(dshWarning);
                 }
             } catch (e) {
@@ -333,18 +349,37 @@ class DshWebRenderer {
         this._overlayIneffective = false;
         this._scope = 'in-scope';
         this._scopeDir = '';
+        this._remoteAuthMissing = false;
+        this._foreignSessions = [];
     }
 
     _refreshWarning(dshWarning) {
         if (!dshWarning) return;
-        // 1. Restriction effectiveness (version / overlay) — highest priority.
+        // 1. Remote auth missing — the iframe cannot load at all
+        //    (highest priority; the page will never render).
+        if (this._remoteAuthMissing) {
+            dshWarning.hidden = false;
+            dshWarning.classList.add('dsh-warning-danger');
+            dshWarning.textContent = '⚠ 远程访问需要认证：当前页面没有可用的 token，dsh 面板将无法加载。请通过带 ?token= 的地址打开（或先在主页面登录），再刷新本页';
+            return;
+        }
+        // 2. Restriction effectiveness (version / overlay).
         if (this._versionUnsupported || this._overlayIneffective) {
             dshWarning.hidden = false;
             dshWarning.classList.add('dsh-warning-danger');
             dshWarning.textContent = '⚠ dsh 版本过新或 restrict overlay 未生效，跨 worktree 入口可能未被禁用，请升级 myworktree 或使用受支持版本 (0.1.x)';
             return;
         }
-        // 2. Out of scope (the proxy observed a workspace/session RPC
+        // 3. Foreign-process active sessions (dsh upstream single-writer
+        //    boundary): opening them in the embed can corrupt the log.
+        if (this._foreignSessions && this._foreignSessions.length > 0) {
+            dshWarning.hidden = false;
+            dshWarning.classList.remove('dsh-warning-danger');
+            dshWarning.textContent = '⚠ 检测到 ' + this._foreignSessions.length +
+                ' 个正被其他进程活跃写入的 dsh 会话，在嵌入 UI 中打开这些会话可能损坏日志（dsh 上游限制）。建议等会话空闲后再打开';
+            return;
+        }
+        // 4. Out of scope (the proxy observed a workspace/session RPC
         // targeting a directory != worktree).
         if (this._scope === 'out-of-scope') {
             dshWarning.hidden = false;
@@ -352,7 +387,7 @@ class DshWebRenderer {
             dshWarning.textContent = '⚠ dsh 已离开 worktree 范围' + (this._scopeDir ? ': ' + this._scopeDir : '');
             return;
         }
-        // 3. Normal.
+        // 5. Normal.
         dshWarning.hidden = true;
         dshWarning.textContent = '';
     }

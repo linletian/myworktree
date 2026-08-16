@@ -94,11 +94,22 @@ func (d *Driver) createWorkspace(ctx context.Context, base, worktree string) (st
 }
 
 // createSession preseeds a blank session for the worktree so the UI
-// lands on a session page immediately (optional, warn-only).
+// lands on a session page immediately (optional, warn-only). The
+// created session id is marked as owned by this instance in the shared
+// session watch (value shape {sessionId} — upstream
+// sessionCreateValueSchema), so the preseed never trips the
+// foreign-activity advisory.
 func (d *Driver) createSession(ctx context.Context, base, worktree string) {
 	payload := map[string]string{"cwd": worktree}
-	if err := d.callRPC(ctx, base, "session.create", payload, nil); err != nil {
+	var value struct {
+		SessionID string `json:"sessionId"`
+	}
+	if err := d.callRPC(ctx, base, "session.create", payload, &value); err != nil {
 		d.logf("dsh: session preseed failed (warn-only): %v", err)
+		return
+	}
+	if d.SessionWatch != nil && value.SessionID != "" {
+		d.SessionWatch.MarkOwn(value.SessionID)
 	}
 }
 
