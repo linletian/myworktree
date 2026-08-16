@@ -9,9 +9,17 @@
 
 ![](docs/webui.png)
 
+## Quick start
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/linletian/myworktree/main/scripts/install.sh | bash
+```
+
+macOS and Linux · `~/.local/bin` · no `sudo` · see [Install (full reference)](#install-full-reference) for the full options.
+
 ## Features
 
-- **One worktree per task, kept apart by git** — every agent lives in its own isolated worktree (typically its own branch), so half-finished changes, dependency installs, and experiments never collide.
+- **Isolated workspaces, kept apart by git** — every worktree is its own git checkout (typically one per branch or working context), so half-finished changes, dependency installs, and experiments never collide. A worktree can run multiple managed instances side-by-side (PTY + opencode-web + reasonix); you decide the granularity.
 - **Persistent, re-attachable terminals** — every agent runs in a managed instance that survives page reloads and browser closes; reopen anytime, scroll back the full output, and keep going.
 - **Output replay without disk writes** — every keystroke lands in a bounded in-memory ring buffer, so you can scrub back through what an agent did while you were away.
 - **Bring your own agents** — OpenCode and Reasonix run out of the box (Reasonix even with its native web chat UI embedded in the sidebar); for everything else, drop a Tag template (`command/env/preStart/cwd`) and bring up Claude Code, Codex, GLM, Qwen, or any other CLI.
@@ -29,17 +37,17 @@
 - **Branch divergence badge** — see at a glance when a branch is ahead of or behind its upstream, with scheduled refresh.
 
 ## Background & pain points
-When you’re juggling multiple coding tasks in the same repo (often with multiple AI coding CLIs collaborating/reviewing each other), it’s easy to end up with:
+When you’re juggling multiple coding tasks in the same repo (often with multiple AI coding CLIs working in parallel on different tasks), it’s easy to end up with:
 - One working directory polluted by half-finished changes, dependency installs, and temporary scripts
 - Too many terminals to track (build/test/search/review), with no single place to see what’s still running
 - Long-running CLI processes that die when you close a window, or that you can’t easily reattach to later
 
-A common workflow looks like: GPT/GLM drafts docs, Claude/MiniMax implements changes, and Qwen does review — which works best when each “role” has an isolated workspace and a persistent, re-attachable terminal.
+A common workflow looks like: GPT/GLM drafts docs, Claude/MiniMax implements changes, and Qwen does review — each tool runs in its own worktree with its own persistent, re-attachable terminal; you switch between them from the Web UI. (myworktree does not orchestrate the agents — it isolates and runs them; you stay in the driver’s seat.)
 
 ## What myworktree does
 myworktree is a thin management layer that:
-- Uses **git worktrees** to give each task an isolated directory (and typically a dedicated branch)
-- Runs multiple managed **instances** per worktree and keeps them alive on the backend
+- Uses **git worktrees** to give you an isolated working directory (typically one per branch or work context, so half-finished changes, dependency installs, and temporary experiments never collide)
+- Runs multiple managed **instances** per worktree (PTY / opencode-web / reasonix can run side-by-side) and keeps them alive on the backend
 - Provides a minimal Web UI to list worktrees/instances and **replay/follow output**
 - Supports **Tag** templates (`command/env/preStart/cwd`) to start instances with the right setup, without baking project-specific logic into the manager
 
@@ -65,30 +73,61 @@ myworktree is a thin management layer that:
 - **Daemon resource monitoring** — the resource stats API now includes the mw daemon process itself in global totals, shown as a dedicated row in the UI.
 
 ## Requirements
-- macOS 12+ (other platforms are not validated yet)
+- macOS 12+ or Linux (amd64 / arm64; arm64 covers Raspberry Pi 4/5, AWS Graviton, Apple Silicon under Rosetta 2)
 - `git`
 - `zsh`
 - `script` (used to host managed interactive shells)
 - Go toolchain to build (Go modules are statically linked at compile time; zero runtime dependencies)
 
-## Quick start
+## Install (full reference)
+
+### One-line install (macOS / Linux)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/linletian/myworktree/main/scripts/install.sh | bash
+```
+
+Installs `myworktree` (and an `mw` alias) to `~/.local/bin` — no `sudo` required.
+PATH is auto-appended to `~/.zshrc` / `~/.bashrc` (open a new shell to pick it up).
+Pin a version, change the install location, or skip PATH modification:
+
+```bash
+curl -fsSL .../install.sh | bash -s -- -v v0.4.2         # pin a version
+INSTALL_ALIAS=mwt bash install.sh                          # avoid the Debian/Ubuntu `mw` clash
+INSTALL_DIR=~/bin bash install.sh                          # install elsewhere
+curl -fsSL .../install.sh | bash -s -- --no-modify-path    # do not touch rc files
+```
+
+The script verifies the SHA256 of the downloaded archive against
+`checksums.txt` from the GitHub release. See
+[`scripts/install.sh`](scripts/install.sh) for the full implementation.
 
 ### Release binaries
 
 If you just want to use `myworktree`, download the latest release assets from GitHub Releases:
 
-- Apple Silicon Macs: `myworktree_vX.Y.Z_darwin_arm64.tar.gz`
-- Intel Macs: `myworktree_vX.Y.Z_darwin_amd64.tar.gz`
+- **macOS** (Apple Silicon): `myworktree_vX.Y.Z_macOS_arm64.tar.gz`
+- **macOS** (Intel): `myworktree_vX.Y.Z_macOS_amd64.tar.gz`
+- **Linux** (amd64): `myworktree_vX.Y.Z_Linux_amd64.tar.gz`
+- **Linux** (arm64, e.g. Raspberry Pi 4/5, AWS Graviton): `myworktree_vX.Y.Z_Linux_arm64.tar.gz`
 - Integrity file: `checksums.txt`
 
 Example:
 
 ```bash
-# Pick the archive that matches your Mac, then verify and unpack it.
-curl -LO https://github.com/linletian/myworktree/releases/download/v0.4.0/myworktree_v0.4.0_darwin_arm64.tar.gz
-curl -LO https://github.com/linletian/myworktree/releases/download/v0.4.0/checksums.txt
+# Pick the archive that matches your platform, then verify and unpack it.
+# macOS Apple Silicon:
+curl -LO https://github.com/linletian/myworktree/releases/download/v0.4.2/myworktree_v0.4.2_macOS_arm64.tar.gz
+# macOS Intel (replace arch in the filename):
+#   curl -LO .../myworktree_v0.4.2_macOS_amd64.tar.gz
+# Linux amd64:
+#   curl -LO .../myworktree_v0.4.2_Linux_amd64.tar.gz
+# Linux arm64:
+#   curl -LO .../myworktree_v0.4.2_Linux_arm64.tar.gz
+
+curl -LO https://github.com/linletian/myworktree/releases/download/v0.4.2/checksums.txt
 shasum -a 256 -c checksums.txt --ignore-missing
-tar -xzf myworktree_v0.4.0_darwin_arm64.tar.gz
+tar -xzf myworktree_v0.4.2_macOS_arm64.tar.gz
 
 # Optional: install into PATH
 sudo install -m 755 ./mw /usr/local/bin/mw
@@ -98,16 +137,19 @@ sudo install -m 755 ./myworktree /usr/local/bin/myworktree
 mw --version
 ```
 
-Start from `v0.4.0` or newer for public release binaries. The earlier `v0.1.0` GitHub Release assets were withdrawn after post-release validation uncovered severe terminal interaction issues, and `v0.4.0` is the current recommended public release.
+> **macOS Gatekeeper troubleshooting (Apple Silicon & Intel):** macOS may quarantine
+> downloaded binaries and silently prevent execution. If the binary does not respond
+> or shows "cannot be opened":
+> ```bash
+> xattr -d com.apple.quarantine ./mw ./myworktree
+> ```
+> Or open **System Settings → Privacy & Security** and click "Allow Anyway" for the
+> blocked binaries.
+
+Start from `v0.4.2` or newer for public release binaries. The earlier `v0.1.0` GitHub Release assets were withdrawn after post-release validation uncovered severe terminal interaction issues, and `v0.4.2` is the current recommended public release.
 
 Each release archive contains `mw`, `myworktree`, `README.md`, `LICENSE`, and `CHANGELOG.md`.
-If there is no prerelease/release asset yet, or you need a platform we do not publish, follow the source build steps below.
-
-**Apple Silicon troubleshooting:** macOS may quarantine downloaded binaries and silently prevent execution (Gatekeeper). If the binary does not respond or shows "cannot be opened":
-```bash
-xattr -d com.apple.quarantine ./mw ./myworktree
-```
-Or open **System Settings → Privacy & Security** and click "Allow Anyway" for the blocked binaries.
+If you need a platform we do not publish, follow the source build steps below.
 
 ### Build & install
 

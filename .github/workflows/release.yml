@@ -9,14 +9,24 @@ permissions:
   contents: write
 
 jobs:
-  build-darwin:
+  build-platforms:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        goarch:
-          - amd64
-          - arm64
+        include:
+          - goos: darwin
+            platform: macOS
+            goarch: amd64
+          - goos: darwin
+            platform: macOS
+            goarch: arm64
+          - goos: linux
+            platform: Linux
+            goarch: amd64
+          - goos: linux
+            platform: Linux
+            goarch: arm64
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -27,16 +37,17 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Build darwin archive
+      - name: Build ${{ matrix.platform }} ${{ matrix.goarch }} archive
         env:
-          GOOS: darwin
+          GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
+          PLATFORM: ${{ matrix.platform }}
           VERSION: ${{ github.ref_name }}
           COMMIT: ${{ github.sha }}
         run: |
           set -euo pipefail
           build_date="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          target="myworktree_${VERSION}_darwin_${GOARCH}"
+          target="myworktree_${VERSION}_${PLATFORM}_${GOARCH}"
           dist_dir="dist/${target}"
           mkdir -p "${dist_dir}"
           # Only strip debug symbols (-s), keep symbol table (-w removed)
@@ -44,19 +55,19 @@ jobs:
           ldflags="-s -X myworktree/internal/version.Version=${VERSION} -X myworktree/internal/version.Commit=${COMMIT} -X myworktree/internal/version.BuildDate=${build_date}"
           CGO_ENABLED=0 GOOS="${GOOS}" GOARCH="${GOARCH}" go build -trimpath -ldflags "${ldflags}" -o "${dist_dir}/myworktree" ./cmd/myworktree
           CGO_ENABLED=0 GOOS="${GOOS}" GOARCH="${GOARCH}" go build -trimpath -ldflags "${ldflags}" -o "${dist_dir}/mw" ./cmd/mw
-          cp README.md LICENSE CHANGELOG.md "${dist_dir}/"
+          cp README.md README.zh-CN.md LICENSE CHANGELOG.md "${dist_dir}/"
           tar -C dist -czf "dist/${target}.tar.gz" "${target}"
 
       - name: Upload archive
         uses: actions/upload-artifact@v4
         with:
-          name: release-darwin-${{ matrix.goarch }}
+          name: release-${{ matrix.platform }}-${{ matrix.goarch }}
           path: dist/*.tar.gz
           if-no-files-found: error
 
   codesign-notarize:
     runs-on: macos-latest
-    needs: build-darwin
+    needs: build-platforms
     if: ${{ vars.APPLE_ENABLE_CODESIGN == 'true' }}
     strategy:
       fail-fast: false
@@ -68,7 +79,7 @@ jobs:
       - name: Download archive
         uses: actions/download-artifact@v4
         with:
-          name: release-darwin-${{ matrix.goarch }}
+          name: release-macOS-${{ matrix.goarch }}
           path: dist
 
       - name: Extract and codesign
@@ -122,21 +133,21 @@ jobs:
       - name: Upload signed archive
         uses: actions/upload-artifact@v4
         with:
-          name: release-darwin-${{ matrix.goarch }}
+          name: release-macOS-${{ matrix.goarch }}
           path: dist/*.tar.gz
           if-no-files-found: error
           overwrite: true
 
   publish:
     runs-on: ubuntu-latest
-    needs: [build-darwin, codesign-notarize]
+    needs: [build-platforms, codesign-notarize]
     if: ${{ !failure() }}
     steps:
       - name: Download archives
         uses: actions/download-artifact@v4
         with:
           path: dist
-          pattern: release-darwin-*
+          pattern: release-*
           merge-multiple: true
 
       - name: Generate checksums

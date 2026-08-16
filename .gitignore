@@ -15,3 +15,4 @@ myworktree_netgo
 # This is runtime state, not source — keep it out of the repo.
 .reasonix/
 .playwright-mcp/
+.gocache/
