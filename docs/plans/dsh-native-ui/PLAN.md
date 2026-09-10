@@ -247,5 +247,6 @@ FEASIBILITY §3 的 10 条之外，真机联调又踩到 4 个（均已修复并
 
 - 不 fork / 不改 dsh 源码；不做 sessions 按 worktree 重定向（丢终端互通）；不做整份 DSH_HOME 隔离（丢历史 + symlink 教训）
 - 不做 iframe 内 DOM 注入/隐藏（dsh 的跨 worktree 入口由 overlay 官方机制处理——停组合器 + 不挂 client 表面，无需 DOM 手术；置灰占位 client plugin 为可选增强，推迟）
+  - ⚠️ **已被推翻（2026-09-10，经用户批准）**：iframe 内注入成为远程支持的核心特性——shim 只是向上游 index.html 注入一个确定的 `<script>` 标签（非正则改写 dsh JS），WS↔SSE 桥是远程支持（LAN/Tailnet）的唯一路径。详见 `.omo/plans/dsh-remote-support.md` 与 `REMOTE-WS-BREAKAGE.md` §10（分支 feature/dsh-remote-support）。
 - 不引入新 Go 第三方依赖
 - 旧布局/旧版本 dsh（< 0.1.0）不支持（硬门）
