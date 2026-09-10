@@ -1579,7 +1579,7 @@
                     <strong>Use the DeepSeek Harness official web UI in your browser.</strong>
                     Starts <code>dsh web</code> (a headless HTTP server with an embedded SPA) in the selected worktree and embeds its UI in the instance tab. Workspace registry is isolated per worktree, session pool is shared with the terminal-launched dsh, and out-of-scope actions only warn. If <code>dsh</code> is not installed, startup will show a prompt to install via npx or to launch with npx.
                 </div>
-                <div id="dsh-remote-warning" class="form-warning" hidden>Remote access is not available for dsh-web instances (session and workspace sync cannot work over remote networks); please use it from the local 127.0.0.1 environment.</div>
+                <div id="dsh-remote-warning" class="form-warning" hidden>Checking dsh version for remote access…</div>
                 <div class="form-group">
                     <label>Name (Optional)</label>
                     <input id="instNameDsh" placeholder="e.g. dsh-web" />
@@ -2921,20 +2921,85 @@
             updateDshStartAvailability();
         }
 
-        // dsh-web is not usable over remote access: its SPA syncs the
-        // session/workspace lists over WebSocket, which fails on remote
-        // networks (issue #72). Disable Start and show the red warning
-        // only while the dsh-web tab is active AND the page is remote.
-        // Remote detection: isRemoteAccess() (framework.js, single
+        // dsh capability probe for the remote gate: GET /api/dsh/capability
+        // reports whether the host's dsh build satisfies the minimum version
+        // for remote access (issue #72: session/workspace sync over remote
+        // networks requires dsh >= min_remote_version). Cached 30s, keyed by
+        // worktree id, so switching worktrees re-fetches. A network failure
+        // fails CLOSED ({remote_capable:false, _error:true}) — a failed
+        // check is untrusted input, so remote Start stays disabled. (The
+        // intentional asymmetry: an unparseable local `dsh --version` is a
+        // trusted dev build and counts as capable server-side; a failed
+        // capability fetch is not. Do not "harmonize" the two.)
+        let dshCapCache = { key: '', at: 0, data: null };
+        async function fetchDshCapability(force) {
+            const key = state.activeWT || '';
+            const now = Date.now();
+            if (!force && dshCapCache.data && dshCapCache.key === key && now - dshCapCache.at < 30000) {
+                return dshCapCache.data;
+            }
+            try {
+                const data = await api('/api/dsh/capability?worktree=' + encodeURIComponent(key));
+                dshCapCache = { key: key, at: now, data: data };
+                return data;
+            } catch (e) {
+                const fallback = { remote_capable: false, _error: true };
+                dshCapCache = { key: key, at: now, data: fallback };
+                return fallback;
+            }
+        }
+
+        // dsh-web needs dsh >= the server-reported minimum to work over
+        // remote access (its SPA syncs session/workspace lists over
+        // WebSocket — issue #72). While the dsh-web tab is active AND the
+        // page is remote, gate Start on the capability probe: disable it
+        // immediately, show a "checking" notice, then resolve from the
+        // result. Remote detection: isRemoteAccess() (framework.js, single
         // source of truth).
-        function updateDshStartAvailability() {
+        async function updateDshStartAvailability() {
             const activeTab = document.querySelector('#modal-start-instance .modal-tab.active');
             const onDsh = activeTab && activeTab.dataset.tab === 'dsh-web';
             const remote = isRemoteAccess();
             const btn = document.getElementById('start-instance-btn');
             const warn = document.getElementById('dsh-remote-warning');
-            if (btn) btn.disabled = onDsh && remote;
-            if (warn) warn.hidden = !(onDsh && remote);
+            if (!(onDsh && remote)) {
+                if (btn) btn.disabled = false;
+                if (warn) warn.hidden = true;
+                return;
+            }
+            if (btn) btn.disabled = true;
+            if (warn) {
+                warn.textContent = 'Checking dsh version for remote access…';
+                warn.hidden = false;
+            }
+            const cap = await fetchDshCapability();
+            // The user may have switched tabs (or closed the dialog) while
+            // the probe was in flight — re-verify the active tab is still
+            // dsh-web before touching the DOM.
+            const nowTab = document.querySelector('#modal-start-instance .modal-tab.active');
+            if (!nowTab || nowTab.dataset.tab !== 'dsh-web') return;
+            if (!btn || !warn) return;
+            const min = cap.min_remote_version || '0.1.5';
+            if (cap._error) {
+                warn.textContent = 'Could not check the dsh version for remote access (request failed); remote Start stays disabled. Retry, or use dsh from the local 127.0.0.1 environment.';
+                warn.hidden = false;
+                btn.disabled = true;
+                return;
+            }
+            if (cap.missing) {
+                warn.textContent = 'dsh is not installed; remote access requires dsh ≥ ' + min + '. Install dsh, or use it from the local 127.0.0.1 environment.';
+                warn.hidden = false;
+                btn.disabled = true;
+                return;
+            }
+            if (!cap.remote_capable) {
+                warn.textContent = 'dsh-web remote access requires dsh ≥ ' + min + ' (found ' + (cap.version || 'unknown') + '). Please upgrade dsh, or use it from the local 127.0.0.1 environment.';
+                warn.hidden = false;
+                btn.disabled = true;
+                return;
+            }
+            btn.disabled = false;
+            warn.hidden = true;
         }
 
         // API Calls
@@ -2993,12 +3058,15 @@
                 // that's the whole point of the tab split).
                 const activeTab = document.querySelector('#modal-start-instance .modal-tab.active');
                 const tabName = activeTab ? activeTab.dataset.tab : 'terminal';
-                // Defense in depth (the Start button is already disabled on
-                // the dsh-web tab under remote access): dsh-web cannot sync
-                // its session/workspace lists over remote networks (issue #72).
+                // Defense in depth (the Start button is already gated on
+                // the dsh-web tab under remote access): dsh-web needs
+                // dsh >= min_remote_version for remote networks (issue #72).
                 if (tabName === 'dsh-web' && isRemoteAccess()) {
-                    alert("dsh-web instances are not available over remote access; please use the local 127.0.0.1 environment.");
-                    return;
+                    const cap = await fetchDshCapability();
+                    if (!cap.remote_capable) {
+                        alert('dsh-web remote access requires dsh ≥ ' + (cap.min_remote_version || '0.1.5') + (cap.version ? ' (found ' + cap.version + ')' : '') + '. Please upgrade dsh, or use it from the local 127.0.0.1 environment.');
+                        return;
+                    }
                 }
                 let body;
                 if (tabName === 'opencode-web') {
