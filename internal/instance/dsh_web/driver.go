@@ -83,6 +83,11 @@ type Blob struct {
 	Version          string `json:"version,omitempty"`
 	VersionSupported bool   `json:"version_supported,omitempty"`
 
+	// RemoteCapable reports whether the dsh core version satisfies the
+	// remote-access floor (isRemoteCapable). Drives the frontend's
+	// remote-mode affordances.
+	RemoteCapable bool `json:"remote_capable"`
+
 	// OverlayVerified is the L2 check result: the spawn-time
 	// --dump-config run confirmed the restrict overlay rows are
 	// composed with the expected values. false → frontend shows the
@@ -160,6 +165,7 @@ type Handle struct {
 	mu         sync.Mutex
 	host       string
 	port       string
+	token      string // upstream browser-auth token; CREDENTIAL — never serialized into Blob, never logged
 	proxyHost  string
 	proxyPort  string
 	proxyClose func() // idempotent (proxyOnce)
@@ -175,6 +181,15 @@ type Handle struct {
 	blob      Blob
 	failCount atomic.Int32
 	publisher atomic.Pointer[framework.Publisher]
+}
+
+// upstreamAuthToken returns the browser-auth token captured from the
+// ready line ("" on legacy dsh). The token is a credential: callers
+// must never log it or persist it into the Blob.
+func (h *Handle) upstreamAuthToken() string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.token
 }
 
 // markOwnSession reports a session id driven by THIS instance to the
@@ -225,9 +240,11 @@ func (d *Driver) Spawn(ctx context.Context, params framework.SpawnParams) (frame
 	// and fail fast below 0.1.0.
 	var version string
 	versionSupported := true
+	remoteCapable := false
 	if killGroup {
 		version = NpxPin
 		versionSupported = isSupportedVersion(NpxPin)
+		remoteCapable = isRemoteCapable(NpxPin)
 	} else {
 		got, gerr := d.probeAndGate(exe)
 		if gerr != nil {
@@ -235,6 +252,7 @@ func (d *Driver) Spawn(ctx context.Context, params framework.SpawnParams) (frame
 		}
 		version = got
 		versionSupported = isSupportedVersion(got)
+		remoteCapable = isRemoteCapable(got)
 	}
 
 	// Restrict overlay: per-worktree storages root (registry isolation)
@@ -319,6 +337,7 @@ func (d *Driver) Spawn(ctx context.Context, params framework.SpawnParams) (frame
 			WorktreeAbs:      params.WorktreePath,
 			Version:          version,
 			VersionSupported: versionSupported,
+			RemoteCapable:    remoteCapable,
 			OverlayVerified:  overlayVerified,
 		},
 	}
@@ -535,15 +554,20 @@ func (h *Handle) closeProxy() {
 	})
 }
 
-var listeningAddrRe = regexp.MustCompile(`dsh web: http://([^:\s]+):(\d+)`)
+var listeningAddrRe = regexp.MustCompile(`dsh web: http://([^:\s]+):(\d+)(?:/\?token=([^\s]+))?`)
 
-func extractListeningAddress(line string) (host, port string, ok bool) {
+// extractListeningAddress parses the ready line. dsh >=0.1.2 appends
+// a per-session browser-auth token to the loopback URL
+// (`dsh web: http://127.0.0.1:PORT/?token=<base64url>`, optionally
+// followed by a ` (LAN: <url>)` suffix the unanchored match ignores);
+// legacy dsh prints the bare URL and token is "".
+func extractListeningAddress(line string) (host, port, token string, ok bool) {
 	clean := stripANSI(line)
 	m := listeningAddrRe.FindStringSubmatch(clean)
-	if len(m) != 3 {
-		return "", "", false
+	if len(m) != 4 {
+		return "", "", "", false
 	}
-	return m[1], m[2], true
+	return m[1], m[2], m[3], true
 }
 
 var ansiRe = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
@@ -583,13 +607,13 @@ func (d *Driver) pumpAndWatch(ctx context.Context, h *Handle, r io.Reader) {
 		}
 		line := redact.Text(sc.Text())
 
-		host, port, ok := extractListeningAddress(line)
+		host, port, token, ok := extractListeningAddress(line)
 		if !ok {
 			continue
 		}
 
 		h.mu.Lock()
-		h.host, h.port = host, port
+		h.host, h.port, h.token = host, port, token
 		h.blob.Host, h.blob.Port = host, port
 		if d.ProxyStarter != nil {
 			ph, pp, closeFn, perr := d.ProxyStarter(h, host, port)
@@ -719,8 +743,9 @@ func (h *Handle) markProxyDead(reason string) {
 	}
 }
 
-// probeHealth checks the SPA index: GET / always answers 200 when the
-// server is up (the /api trust fence does not gate static assets).
+// probeHealth checks the SPA index: GET / answers 200 on legacy dsh
+// and 401 on dsh >=0.1.2 (browser auth gates even the index) — both
+// mean the server is up.
 func probeHealth(ctx context.Context, host, port string) bool {
 	addr := "http://" + host + ":" + port + "/"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, addr, nil)
@@ -733,7 +758,7 @@ func probeHealth(ctx context.Context, host, port string) bool {
 		return false
 	}
 	defer resp.Body.Close()
-	return resp.StatusCode < 400
+	return resp.StatusCode < 400 || resp.StatusCode == http.StatusUnauthorized
 }
 
 func mustHandle(h framework.Handle) *Handle {

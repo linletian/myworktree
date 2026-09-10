@@ -7,25 +7,31 @@ import (
 
 func TestExtractListeningAddress(t *testing.T) {
 	cases := []struct {
-		in   string
-		host string
-		port string
-		ok   bool
+		in    string
+		host  string
+		port  string
+		token string
+		ok    bool
 	}{
-		{"dsh web: http://127.0.0.1:4096", "127.0.0.1", "4096", true},
-		{"dsh web: http://127.0.0.1:4096\r\n", "127.0.0.1", "4096", true},
-		{"dsh web: http://127.0.0.1:4096   ", "127.0.0.1", "4096", true},
-		{"dsh web: http://127.0.0.1:4096 (LAN: http://192.168.1.5:4096)", "127.0.0.1", "4096", true},
-		{"\x1b[32mdsh web: http://127.0.0.1:4096\x1b[0m", "127.0.0.1", "4096", true}, // ANSI
-		{"dsh web: http://localhost:4096", "localhost", "4096", true},
-		{"some other log line", "", "", false},
-		{"", "", "", false},
+		{"dsh web: http://127.0.0.1:4096", "127.0.0.1", "4096", "", true},
+		{"dsh web: http://127.0.0.1:4096\r\n", "127.0.0.1", "4096", "", true},
+		{"dsh web: http://127.0.0.1:4096   ", "127.0.0.1", "4096", "", true},
+		{"dsh web: http://127.0.0.1:4096 (LAN: http://192.168.1.5:4096)", "127.0.0.1", "4096", "", true},
+		{"\x1b[32mdsh web: http://127.0.0.1:4096\x1b[0m", "127.0.0.1", "4096", "", true}, // ANSI
+		{"dsh web: http://localhost:4096", "localhost", "4096", "", true},
+		// dsh >=0.1.2 ready lines carry the browser-auth token.
+		{"dsh web: http://127.0.0.1:41143/?token=abc-DEF_123", "127.0.0.1", "41143", "abc-DEF_123", true},
+		{"dsh web: http://127.0.0.1:41143/?token=abc-DEF_123 (LAN: http://100.86.87.23:41143/?token=zzz)", "127.0.0.1", "41143", "abc-DEF_123", true},
+		{"\x1b[32mdsh web: http://127.0.0.1:41143/?token=abc-DEF_123\x1b[0m (LAN: http://100.86.87.23:41143/?token=zzz)", "127.0.0.1", "41143", "abc-DEF_123", true}, // ANSI + LAN
+		{"some other log line", "", "", "", false},
+		{"", "", "", "", false},
+		{"dsh web: not a url", "", "", "", false},
 	}
 	for _, c := range cases {
-		host, port, ok := extractListeningAddress(c.in)
-		if host != c.host || port != c.port || ok != c.ok {
-			t.Errorf("extractListeningAddress(%q) = (%q, %q, %v), want (%q, %q, %v)",
-				c.in, host, port, ok, c.host, c.port, c.ok)
+		host, port, token, ok := extractListeningAddress(c.in)
+		if host != c.host || port != c.port || token != c.token || ok != c.ok {
+			t.Errorf("extractListeningAddress(%q) = (%q, %q, %q, %v), want (%q, %q, %q, %v)",
+				c.in, host, port, token, ok, c.host, c.port, c.token, c.ok)
 		}
 	}
 }
