@@ -37,11 +37,6 @@ import (
 // across instances (per-instance state lives inside Handle).
 type Driver struct{}
 
-// preStartTimeout bounds tag preStart execution (see Spawn). Long
-// enough for the documented `npm install` example, short enough that a
-// hanging template cannot stall a Start request indefinitely.
-const preStartTimeout = 2 * time.Minute
-
 // Manifest returns the static KindInfo for the PTY kind.
 func (Driver) Manifest() framework.KindInfo {
 	return framework.KindInfo{
@@ -97,24 +92,12 @@ func (d Driver) Spawn(ctx context.Context, params framework.SpawnParams) (framew
 	}
 
 	// Tag preStart runs with the same environment the shell will get.
-	// Bounded: a hanging template (e.g. `sleep 9999`) must not stall the
-	// Start request forever — Spawn has not returned, so the framework's
-	// ready-timeout has not started either. 2 minutes covers the
-	// documented `npm install` preStart example (README tag sample).
-	// Failure output is redacted before being surfaced to the caller
-	// (a debug preStart may echo tag env values).
 	if strings.TrimSpace(params.PreStart) != "" {
-		preCtx, cancel := context.WithTimeout(context.Background(), preStartTimeout)
-		pre := exec.CommandContext(preCtx, "zsh", "-lc", params.PreStart)
+		pre := exec.Command("zsh", "-lc", params.PreStart)
 		pre.Dir = cmd.Dir
 		pre.Env = cmd.Env
-		out, err := pre.CombinedOutput()
-		cancel()
-		if preCtx.Err() == context.DeadlineExceeded {
-			return framework.Handle{}, nil, fmt.Errorf("preStart timed out after %s", preStartTimeout)
-		}
-		if err != nil {
-			return framework.Handle{}, nil, fmt.Errorf("preStart failed: %w: %s", err, strings.TrimSpace(redact.Text(string(out))))
+		if out, err := pre.CombinedOutput(); err != nil {
+			return framework.Handle{}, nil, fmt.Errorf("preStart failed: %w: %s", err, strings.TrimSpace(string(out)))
 		}
 	}
 
@@ -289,6 +272,10 @@ func (d Driver) SubscribeOutput(id string) (<-chan string, func(), error) {
 
 func (h *Handle) pumpLogs() {
 	defer h.wg.Done()
+	// Release the master fd once the read loop exits (the slave side
+	// dies with the child): without this every PTY start/stop leaked a
+	// fd until exhaustion (REVIEW-2026-08-16 HIGH-1).
+	defer h.ptmx.Close()
 	readBuf := make([]byte, 1024)
 	for {
 		n, err := h.ptmx.Read(readBuf)

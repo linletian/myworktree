@@ -34,21 +34,14 @@ import (
 	"os"
 	"os/exec"
 	"strings"
-	"time"
 
 	"myworktree/internal/framework"
-	"myworktree/internal/redact"
 )
 
 // KindName is the framework registry name for the reasonix kind. Kept
 // in sync with store.KindReasonix (a store-level constant; asserted by
 // TestKindNameMatchesStoreConstant).
 const KindName = "reasonix"
-
-// preStartTimeout bounds tag preStart execution (see Spawn). Long
-// enough for the documented `npm install` example, short enough that a
-// hanging template cannot stall a Start request indefinitely.
-const preStartTimeout = 2 * time.Minute
 
 // Kind implements framework.Kind for reasonix serve instances.
 type Kind struct {
@@ -73,7 +66,7 @@ type Handle struct {
 func (k *Kind) Manifest() framework.KindInfo {
 	return framework.KindInfo{
 		Name:        KindName,
-		Label:       "Reasonix",
+		Label:       "Reasonix-Web",
 		Description: "Reasonix agent running in this worktree with its web chat UI.",
 		Interactive: false,
 	}
@@ -82,6 +75,11 @@ func (k *Kind) Manifest() framework.KindInfo {
 // Spawn starts the serve subprocess via the driver and waits until it
 // is listening. Tag preStart runs inside the driver's Start via the
 // PreStart callback so it sees the exact same environment as serve.
+// NeedsOutputBuffer reports that this kind never captures PTY-style
+// output into the framework ring buffer, so Start skips the 16–256 MB
+// pre-allocation (framework.BufferConsumer).
+func (k *Kind) NeedsOutputBuffer() bool { return false }
+
 func (k *Kind) Spawn(ctx context.Context, params framework.SpawnParams) (framework.Handle, *framework.ReadySignal, error) {
 	if k.drv == nil {
 		return framework.Handle{}, nil, errors.New("reasonix driver is not configured")
@@ -102,21 +100,11 @@ func (k *Kind) Spawn(ctx context.Context, params framework.SpawnParams) (framewo
 			if strings.TrimSpace(params.PreStart) == "" {
 				return nil
 			}
-			// Bounded: a hanging template must not stall Start forever
-			// (Spawn has not returned, so the framework's ready-timeout has
-			// not started either). Output is redacted before it is surfaced
-			// to the caller (a debug preStart may echo tag env values).
-			preCtx, cancel := context.WithTimeout(context.Background(), preStartTimeout)
-			pre := exec.CommandContext(preCtx, "zsh", "-lc", params.PreStart)
+			pre := exec.Command("zsh", "-lc", params.PreStart)
 			pre.Dir = params.WorktreePath
 			pre.Env = env
-			out, err := pre.CombinedOutput()
-			cancel()
-			if preCtx.Err() == context.DeadlineExceeded {
-				return fmt.Errorf("preStart timed out after %s", preStartTimeout)
-			}
-			if err != nil {
-				return fmt.Errorf("preStart failed: %w: %s", err, strings.TrimSpace(redact.Text(string(out))))
+			if out, err := pre.CombinedOutput(); err != nil {
+				return fmt.Errorf("preStart failed: %w: %s", err, strings.TrimSpace(string(out)))
 			}
 			return nil
 		},

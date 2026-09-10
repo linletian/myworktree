@@ -1,6 +1,6 @@
 # myworktree
 
-> **An ORCA-like lightweight git worktree + AI agent run manager** — spin up multiple AI coding CLIs side-by-side, each in its own isolated git worktree with a persistent re-attachable terminal, and steer them all from a minimal Web UI.
+> **An ORCA-like lightweight agents team orchestrator** — spin up multiple AI coding CLIs side-by-side, each in its own isolated git worktree with a persistent re-attachable terminal, and steer them all from a minimal Web UI.
 
 - 中文说明: [README.zh-CN.md](./README.zh-CN.md)
 - Docs: [PRD](./docs/PRD.md) · [Architecture](./docs/ARCHITECTURE.md) · [API](./docs/API.md)
@@ -19,7 +19,7 @@ macOS and Linux · `~/.local/bin` · no `sudo` · see [Install (full reference)]
 
 ## Features
 
-- **Isolated workspaces, kept apart by git** — every worktree is its own git checkout (typically one per branch or working context), so half-finished changes, dependency installs, and experiments never collide. A worktree can run multiple managed instances side-by-side (PTY + opencode-web + reasonix); you decide the granularity.
+- **Isolated workspaces, kept apart by git** — every worktree is its own git checkout (typically one per branch or working context), so half-finished changes, dependency installs, and experiments never collide. A worktree can run multiple managed instances side-by-side (PTY + opencode-web + reasonix + dsh-web); you decide the granularity.
 - **Persistent, re-attachable terminals** — every agent runs in a managed instance that survives page reloads and browser closes; reopen anytime, scroll back the full output, and keep going.
 - **Output replay without disk writes** — every keystroke lands in a bounded in-memory ring buffer, so you can scrub back through what an agent did while you were away.
 - **Bring your own agents** — OpenCode and Reasonix run out of the box (Reasonix even with its native web chat UI embedded in the sidebar); for everything else, drop a Tag template (`command/env/preStart/cwd`) and bring up Claude Code, Codex, GLM, Qwen, or any other CLI.
@@ -34,6 +34,7 @@ macOS and Linux · `~/.local/bin` · no `sudo` · see [Install (full reference)]
 - **Hot config reload** — `mw config regen` rotates the auth token and reapplies settings without restarting the daemon.
 - **File preview & diff in the Changes panel** — click any changed or untracked file for a line-numbered, diff-aware preview.
 - **Reasonix web-chat instances** — tick one box to run `reasonix serve` in a worktree, with its web chat UI embedded in the same sidebar.
+- **dsh web instances** — embed the DeepSeek Harness browser UI as a managed instance (per-worktree workspace registry, shared session pool, out-of-scope warning; see `docs/plans/dsh-native-ui/`).
 - **Branch divergence badge** — see at a glance when a branch is ahead of or behind its upstream, with scheduled refresh.
 
 ## Background & pain points
@@ -92,7 +93,7 @@ PATH is auto-appended to `~/.zshrc` / `~/.bashrc` (open a new shell to pick it u
 Pin a version, change the install location, or skip PATH modification:
 
 ```bash
-curl -fsSL .../install.sh | bash -s -- -v v0.4.2         # pin a version
+curl -fsSL .../install.sh | bash -s -- -v v0.4.3         # pin a version
 INSTALL_ALIAS=mwt bash install.sh                          # avoid the Debian/Ubuntu `mw` clash
 INSTALL_DIR=~/bin bash install.sh                          # install elsewhere
 curl -fsSL .../install.sh | bash -s -- --no-modify-path    # do not touch rc files
@@ -117,17 +118,17 @@ Example:
 ```bash
 # Pick the archive that matches your platform, then verify and unpack it.
 # macOS Apple Silicon:
-curl -LO https://github.com/linletian/myworktree/releases/download/v0.4.2/myworktree_v0.4.2_macOS_arm64.tar.gz
+curl -LO https://github.com/linletian/myworktree/releases/download/v0.4.3/myworktree_v0.4.3_macOS_arm64.tar.gz
 # macOS Intel (replace arch in the filename):
-#   curl -LO .../myworktree_v0.4.2_macOS_amd64.tar.gz
+#   curl -LO .../myworktree_v0.4.3_macOS_amd64.tar.gz
 # Linux amd64:
-#   curl -LO .../myworktree_v0.4.2_Linux_amd64.tar.gz
+#   curl -LO .../myworktree_v0.4.3_Linux_amd64.tar.gz
 # Linux arm64:
-#   curl -LO .../myworktree_v0.4.2_Linux_arm64.tar.gz
+#   curl -LO .../myworktree_v0.4.3_Linux_arm64.tar.gz
 
-curl -LO https://github.com/linletian/myworktree/releases/download/v0.4.2/checksums.txt
+curl -LO https://github.com/linletian/myworktree/releases/download/v0.4.3/checksums.txt
 shasum -a 256 -c checksums.txt --ignore-missing
-tar -xzf myworktree_v0.4.2_macOS_arm64.tar.gz
+tar -xzf myworktree_v0.4.3_macOS_arm64.tar.gz
 
 # Optional: install into PATH
 sudo install -m 755 ./mw /usr/local/bin/mw
@@ -146,7 +147,7 @@ mw --version
 > Or open **System Settings → Privacy & Security** and click "Allow Anyway" for the
 > blocked binaries.
 
-Start from `v0.4.2` or newer for public release binaries. The earlier `v0.1.0` GitHub Release assets were withdrawn after post-release validation uncovered severe terminal interaction issues, and `v0.4.2` is the current recommended public release.
+Start from `v0.4.3` or newer for public release binaries. The earlier `v0.1.0` GitHub Release assets were withdrawn after post-release validation uncovered severe terminal interaction issues, and `v0.4.3` is the current recommended public release.
 
 Each release archive contains `mw`, `myworktree`, `README.md`, `LICENSE`, and `CHANGELOG.md`.
 If you need a platform we do not publish, follow the source build steps below.
@@ -355,6 +356,12 @@ Reasonix instances run `reasonix serve` **without** a `REASONIX_HOME` override, 
 Consequence to be aware of: if your shell exports a custom `REASONIX_HOME` (e.g. `~/.custom-reasonix`), a terminal-run `reasonix` uses that custom home while myworktree instances use the default `~/.reasonix` — the two will **not** see each other's history. This is deliberate. To point an instance at a custom home, set `REASONIX_HOME` via the instance tag's `env` (applied after stripping).
 
 Instance lifecycle never touches the shared session pool: Start / Stop / Restart / Delete only manage the `serve` subprocess and its management files (`token`/`port`/`pid`/`serve.log` in the instance state dir). Sessions live in `~/.reasonix/projects/<cwd-slug>/sessions`, so restarting an instance opens a **fresh** session (no `--resume`) while your history stays available in the sidebar.
+
+### dsh-web sessions are snapshot-only across processes (upstream dsh issue)
+
+dsh-web instances share the real `~/.dsh/sessions` pool with terminal-run `dsh` processes, so sessions from your terminal **are visible and openable** in the embedded UI — but only as a **snapshot at open time**. Live updates are broadcast only inside the process that is writing the session (the terminal `dsh` running the agent); the embedded UI never refreshes it, because dsh has no cross-process sync (no file watching, no polling). This is dsh's single-writer session model, not a myworktree bug.
+
+Worse, **opening an actively-written session from a second dsh process corrupts its log** (upstream dsh bug, present without myworktree too): the session constructor appends an unguarded `session/end-seed` event with `seq = log length`, which collides with the writer's next append and permanently breaks the log for every other reader (`corrupt session log: seq gap in committed region`). Avoid opening a session that another dsh process is actively working on. Full source evidence, disk-level proof, and reproduction steps: `docs/plans/dsh-native-ui/CROSS-PROCESS-SESSION.md`.
 
 ## License
 MIT. See [LICENSE](./LICENSE).

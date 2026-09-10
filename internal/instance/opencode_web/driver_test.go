@@ -73,6 +73,118 @@ func TestBuildEnv_ForcesAuthToken(t *testing.T) {
 	}
 }
 
+func TestWithLoopbackNoProxy(t *testing.T) {
+	t.Run("no proxy configured → untouched", func(t *testing.T) {
+		env := map[string]string{"PATH": "/usr/bin"}
+		withLoopbackNoProxy(env)
+		if _, ok := env["NO_PROXY"]; ok {
+			t.Fatalf("NO_PROXY added without a proxy configured: %q", env["NO_PROXY"])
+		}
+		if _, ok := env["no_proxy"]; ok {
+			t.Fatalf("no_proxy added without a proxy configured: %q", env["no_proxy"])
+		}
+	})
+
+	t.Run("proxy set, no no_proxy → created with loopback entries", func(t *testing.T) {
+		env := map[string]string{"HTTP_PROXY": "http://192.168.1.254:6268"}
+		withLoopbackNoProxy(env)
+		want := "localhost,127.0.0.1,::1"
+		if env["NO_PROXY"] != want || env["no_proxy"] != want {
+			t.Fatalf("NO_PROXY=%q no_proxy=%q, want both %q", env["NO_PROXY"], env["no_proxy"], want)
+		}
+	})
+
+	t.Run("CIDR entry preserved and literal hosts appended", func(t *testing.T) {
+		// The exact host setup from issue #75: a LAN proxy plus the
+		// CIDR form that Bun's no_proxy matcher does not understand.
+		env := map[string]string{
+			"https_proxy": "http://192.168.1.254:6268",
+			"NO_PROXY":    "localhost,127.0.0.0/8,::1",
+			"no_proxy":    "localhost,127.0.0.0/8,::1",
+		}
+		withLoopbackNoProxy(env)
+		want := "localhost,127.0.0.0/8,::1,127.0.0.1"
+		if env["NO_PROXY"] != want || env["no_proxy"] != want {
+			t.Fatalf("NO_PROXY=%q no_proxy=%q, want both %q", env["NO_PROXY"], env["no_proxy"], want)
+		}
+	})
+
+	t.Run("both cases merged, duplicates removed", func(t *testing.T) {
+		env := map[string]string{
+			"ALL_PROXY": "socks://proxy:1080",
+			"NO_PROXY":  "example.com, localhost",
+			"no_proxy":  "10.0.0.0/8,localhost",
+		}
+		withLoopbackNoProxy(env)
+		want := "example.com,localhost,10.0.0.0/8,127.0.0.1,::1"
+		if env["NO_PROXY"] != want || env["no_proxy"] != want {
+			t.Fatalf("NO_PROXY=%q no_proxy=%q, want both %q", env["NO_PROXY"], env["no_proxy"], want)
+		}
+	})
+
+	t.Run("wildcard already covers loopback → untouched", func(t *testing.T) {
+		env := map[string]string{
+			"HTTP_PROXY": "http://proxy:8080",
+			"NO_PROXY":   "*",
+		}
+		withLoopbackNoProxy(env)
+		if env["NO_PROXY"] != "*" {
+			t.Fatalf("NO_PROXY = %q, want unchanged *", env["NO_PROXY"])
+		}
+		if _, ok := env["no_proxy"]; ok {
+			t.Fatalf("no_proxy = %q, want absent", env["no_proxy"])
+		}
+	})
+
+	t.Run("explicit loopback already present → no duplicates", func(t *testing.T) {
+		env := map[string]string{
+			"HTTP_PROXY": "http://proxy:8080",
+			"NO_PROXY":   "localhost,127.0.0.1,::1",
+		}
+		withLoopbackNoProxy(env)
+		want := "localhost,127.0.0.1,::1"
+		if env["NO_PROXY"] != want || env["no_proxy"] != want {
+			t.Fatalf("NO_PROXY=%q no_proxy=%q, want both %q", env["NO_PROXY"], env["no_proxy"], want)
+		}
+	})
+}
+
+func TestBuildEnv_LoopbackNoProxy(t *testing.T) {
+	// End-to-end through buildEnv: with a LAN proxy inherited from the
+	// parent process and a CIDR-only no_proxy, the child env must gain
+	// the literal loopback entries (issue #75).
+	t.Setenv("HTTP_PROXY", "http://192.168.1.254:6268")
+	t.Setenv("HTTPS_PROXY", "http://192.168.1.254:6268")
+	t.Setenv("NO_PROXY", "localhost,127.0.0.0/8,::1")
+	t.Setenv("no_proxy", "localhost,127.0.0.0/8,::1")
+	out := buildEnv(nil, "token")
+	m := map[string]string{}
+	for _, kv := range out {
+		k, v, _ := strings.Cut(kv, "=")
+		m[k] = v
+	}
+	for _, k := range []string{"NO_PROXY", "no_proxy"} {
+		v := m[k]
+		for _, host := range []string{"localhost", "127.0.0.1", "::1"} {
+			found := false
+			for _, e := range strings.Split(v, ",") {
+				if e == host {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Fatalf("%s=%q missing explicit loopback entry %q", k, v, host)
+			}
+		}
+	}
+	// Proxies themselves must stay intact: remote LLM providers still
+	// go through the proxy (only loopback is bypassed).
+	if m["HTTP_PROXY"] != "http://192.168.1.254:6268" {
+		t.Fatalf("HTTP_PROXY = %q, want preserved", m["HTTP_PROXY"])
+	}
+}
+
 func TestExtractListeningAddress(t *testing.T) {
 	tests := []struct {
 		name, line, wantH, wantP string

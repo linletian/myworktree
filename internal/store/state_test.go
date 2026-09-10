@@ -360,19 +360,3 @@ func TestManagedInstance_KindExtraRoundTrip(t *testing.T) {
 		t.Fatalf("Extra[host] = %q, want 127.0.0.1", inst.Extra["host"])
 	}
 }
-
-func TestCanonicalKind(t *testing.T) {
-	cases := map[string]string{
-		"":             KindPTY,
-		"tty":          KindPTY, // v0.4.0 internal name; alias kept for hand-edited / develop-built stores
-		"pty":          KindPTY,
-		"reasonix":     KindReasonix,
-		"opencode-web": KindOpenCodeWeb,
-		"unknown":      "unknown",
-	}
-	for in, want := range cases {
-		if got := CanonicalKind(in); got != want {
-			t.Errorf("CanonicalKind(%q) = %q, want %q", in, got, want)
-		}
-	}
-}

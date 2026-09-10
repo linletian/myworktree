@@ -29,6 +29,7 @@ import (
 	"myworktree/internal/config"
 	"myworktree/internal/framework"
 	"myworktree/internal/gitx"
+	"myworktree/internal/instance/dsh_web"
 	"myworktree/internal/instance/opencode_web"
 	"myworktree/internal/instance/pty"
 	"myworktree/internal/instance/reasonix"
@@ -36,6 +37,7 @@ import (
 	"myworktree/internal/mcp"
 	"myworktree/internal/monitor"
 	"myworktree/internal/portal"
+	"myworktree/internal/redact"
 	"myworktree/internal/store"
 	"myworktree/internal/tag"
 	"myworktree/internal/ui"
@@ -86,14 +88,21 @@ type Server struct {
 	worktreeMgr worktree.Manager
 	instanceMgr *framework.Manager
 	ocScope     *opencode_web.ScopeTracker
-	mcpAdapter  mcp.Adapter
-	monitor     monitor.Collector
-	authMu      sync.Mutex
-	authFails   map[string]authFail
-	ttyMu       sync.Mutex
-	ttyClients  map[string]map[string]*ttyClientState
-	ttyApplied  map[string]ttySize
-	ttyNextID   uint64
+	dshScope    *dsh_web.ScopeTracker
+	dshWatch    *dsh_web.SessionWatch
+	dshDrv      *dsh_web.Driver
+	// dshInstallMu serializes the dsh-web "install now" flow
+	// (handleInstanceDshInstall): two tabs clicking at once must not
+	// run two concurrent `npm install -g`.
+	dshInstallMu sync.Mutex
+	mcpAdapter   mcp.Adapter
+	monitor      monitor.Collector
+	authMu       sync.Mutex
+	authFails    map[string]authFail
+	ttyMu        sync.Mutex
+	ttyClients   map[string]map[string]*ttyClientState
+	ttyApplied   map[string]ttySize
+	ttyNextID    uint64
 
 	gitRunner func(timeout time.Duration, gitRoot string, args ...string) ([]byte, error)
 }
@@ -126,6 +135,92 @@ type ttyClientHandle struct {
 var errInvalidRepoListenPort = errors.New("invalid persisted listen_port")
 var errWorktreeNotFound = errors.New("worktree not found")
 
+// dshInstallTimeout bounds the `npm install -g` run in
+// handleInstanceDshInstall (a slow network can take minutes; the
+// frontend shows progress while awaiting the response).
+const dshInstallTimeout = 5 * time.Minute
+
+// truncateText caps a diagnostic string for API error responses (npm
+// output can be megabytes; redact.Text only strips secrets).
+func truncateText(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "…"
+}
+
+// validPublicHost reports whether host is safe to embed in a
+// client-derived iframe URL: a plain DNS name, an IPv4 literal, or a
+// bracketed IPv6 literal — nothing else (no scheme, userinfo, port,
+// path, query or CR/LF). Used by handleInstanceDshInfo before it
+// builds an iframe_src from the request Host header.
+func validPublicHost(host string) bool {
+	if host == "" || len(host) > 253 {
+		return false
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return true
+	}
+	if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") {
+		return net.ParseIP(host[1:len(host)-1]) != nil
+	}
+	for i := 0; i < len(host); i++ {
+		c := host[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9', c == '-', c == '.':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// numericPort reports whether p is a non-empty all-digit port string
+// (used to decide whether a Host header really is host:port before the
+// host part is trusted).
+func numericPort(p string) bool {
+	if p == "" {
+		return false
+	}
+	for i := 0; i < len(p); i++ {
+		if p[i] < '0' || p[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// dshProxyConfig derives the dsh-web reverse-proxy settings from the
+// main listener: loopback bind + no token locally; the main listener's
+// host + a mandatory token gate when non-loopback or TLS (the dsh
+// upstream has no authentication layer — the proxy is the only
+// boundary). TLS mirrors the main certificate so an https page never
+// embeds a mixed-content iframe.
+func dshProxyConfig(cfg Config, isSecure bool) dsh_web.ProxyConfig {
+	pc := dsh_web.ProxyConfig{
+		BindHost: "127.0.0.1",
+		TLSCert:  cfg.TLSCert,
+		TLSKey:   cfg.TLSKey,
+	}
+	host, _, err := net.SplitHostPort(cfg.ListenAddr)
+	if err != nil || !isLoopbackHost(host) {
+		// "" (":port") or an explicit LAN address: the proxy must be
+		// reachable wherever the main UI is.
+		pc.BindHost = host
+		if pc.BindHost == "" {
+			pc.BindHost = "0.0.0.0"
+		}
+		pc.RequireToken = true
+	}
+	if isSecure {
+		pc.RequireToken = true
+	}
+	if pc.RequireToken {
+		pc.AuthToken = cfg.AuthToken
+	}
+	return pc
+}
+
 func New(cfg Config, logger *log.Logger) (*Server, error) {
 	if logger == nil {
 		return nil, errors.New("logger is required")
@@ -146,6 +241,7 @@ func New(cfg Config, logger *log.Logger) (*Server, error) {
 		Store:        st,
 	}
 	globalCfg, _ := config.Load()
+	isSecure := cfg.TLSCert != "" && cfg.TLSKey != ""
 	// Dedicated kind registry per server: registering into framework.Default
 	// would panic on the second New() in the same process (tests). The kinds
 	// are explicitly registered here instead of relying on init().
@@ -159,6 +255,29 @@ func New(cfg Config, logger *log.Logger) (*Server, error) {
 		Logger:  logger,
 	}
 	reg.Register(reasonix.NewKind(rxDriver))
+
+	// The dsh web driver and its framework kind. The per-instance
+	// reverse proxy binds 127.0.0.1 locally (loopback trust model, no
+	// token); when the main listener is non-loopback or TLS it binds
+	// the main listener's host with a MANDATORY token gate — dsh has
+	// no authentication layer, so the proxy is the only boundary
+	// between the LAN and the unauthenticated upstream.
+	dshDrv := &dsh_web.Driver{
+		DataDir: dataDir,
+		Logger:  logger,
+	}
+	dshScope := dsh_web.NewScopeTracker()
+	dshDrv.Tracker = dshScope
+	dshDrv.Proxy = dshProxyConfig(cfg, isSecure)
+	dshDrv.ProxyStarter = dshDrv.ProxyStarterFn()
+	// Foreign-activity advisory over the shared sessions pool (dsh
+	// single-writer boundary, see
+	// docs/plans/dsh-native-ui/CROSS-PROCESS-SESSION.md): started for
+	// the daemon's lifetime; the proxy / bootstrap feed it own-traffic.
+	dshWatch := dsh_web.NewSessionWatch(dsh_web.DshSessionsDir(), logger)
+	dshWatch.Start()
+	dshDrv.SessionWatch = dshWatch
+	reg.Register(dshDrv)
 
 	instanceMgr := framework.NewManager(reg, st, logger)
 	instanceMgr.DataDir = dataDir
@@ -178,7 +297,6 @@ func New(cfg Config, logger *log.Logger) (*Server, error) {
 	// before any kind tries to register routes).
 
 	mux := http.NewServeMux()
-	isSecure := cfg.TLSCert != "" && cfg.TLSKey != ""
 	s := &Server{
 		cfg:         cfg,
 		logger:      logger,
@@ -190,6 +308,9 @@ func New(cfg Config, logger *log.Logger) (*Server, error) {
 		worktreeMgr: worktreeMgr,
 		instanceMgr: instanceMgr,
 		ocScope:     opencode_web.NewScopeTracker(),
+		dshScope:    dshScope,
+		dshWatch:    dshWatch,
+		dshDrv:      dshDrv,
 		rxDriver:    rxDriver,
 		mcpAdapter: mcp.Adapter{
 			Worktrees: worktreeMgr,
@@ -520,22 +641,17 @@ func (s *Server) Shutdown() {
 	if s.portal != nil {
 		s.portal.Stop()
 	}
-	// Stop managed subprocesses that would otherwise outlive myworktree:
-	// - reasonix serve: stopped first (behavior parity with tty
-	//   instances, which die when their PTY hangs up); their SSE
-	//   connections then close, so the HTTP servers below shut down
-	//   promptly. State dirs (token/port/pid/serve.log) are kept;
-	//   sessions live in the shared ~/.reasonix pool and are unaffected
-	//   by instance lifecycle.
-	// - opencode serve: unlike reasonix, the opencode-web kind does NOT
-	//   implement RestartSurvivor (no Reattach), so a surviving process
-	//   would be orphaned — the next startup marks its record "stopped"
-	//   while the unmanaged serve keeps running and holding its port.
-	//   Stop it explicitly so the kind contract (Stop exactly once after
-	//   a successful Spawn, framework/kind.go) holds for every instance.
+	// Stop reasonix serve processes first (behavior parity with tty
+	// instances, which die when their PTY hangs up): their SSE connections
+	// then close, so the HTTP servers below shut down promptly. State dirs
+	// (token/port/pid/serve.log) are kept; sessions live in the shared
+	// ~/.reasonix pool and are unaffected by instance lifecycle.
 	if s.instanceMgr != nil {
 		s.instanceMgr.StopAllKind(store.KindReasonix)
-		s.instanceMgr.StopAllKind(store.KindOpenCodeWeb)
+		s.instanceMgr.StopAllKind(store.KindDsh)
+	}
+	if s.dshWatch != nil {
+		s.dshWatch.Stop()
 	}
 	if s.rxSrv != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -645,6 +761,10 @@ func (s *Server) registerAPIs(mux *http.ServeMux) {
 	mux.HandleFunc("/api/instances/stats", s.handleInstanceStats)
 	mux.HandleFunc("/api/instances/opencode", s.handleInstanceOpencodeInfo)
 	mux.HandleFunc("/api/instances/opencode/scope", s.handleInstanceOpencodeScope)
+	mux.HandleFunc("/api/instances/dsh", s.handleInstanceDshInfo)
+	mux.HandleFunc("/api/instances/dsh/scope", s.handleInstanceDshScope)
+	mux.HandleFunc("/api/instances/dsh/launch", s.handleInstanceDshLaunch)
+	mux.HandleFunc("/api/instances/dsh/install", s.handleInstanceDshInstall)
 	mux.Handle("/rx/", &reasonixProxy{manager: s.instanceMgr, driver: s.rxDriver})
 	mux.HandleFunc("/api/tags", s.handleTags)
 	mux.HandleFunc("/api/tags/open-dir", s.handleTagsOpenDir)
@@ -798,13 +918,6 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		if nextURL == "" || !isValidRedirectPath(nextURL) {
 			nextURL = "/"
 		}
-		// SameSite=Lax, not Strict, deliberately: Lax already blocks the
-		// cross-site POST/form cases that matter for CSRF (every mutating
-		// endpoint is POST), while still letting a top-level GET navigation
-		// from an external link (e.g. a Tailscale/remote bookmark shared
-		// out-of-band) arrive already authenticated. Strict would force a
-		// re-auth on every cross-site entry for no real gain, since the
-		// embedded iframes are same-origin either way.
 		cookie := &http.Cookie{
 			Name:     "mw_token",
 			Value:    token,
@@ -1547,7 +1660,7 @@ func (s *Server) handleInstanceOpencodeInfo(w http.ResponseWriter, r *http.Reque
 		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
-	if inst.Kind != store.KindOpenCodeWeb {
+	if inst.Kind != "opencode-web" {
 		writeErr(w, http.StatusNotFound, errors.New("not an opencode-web instance"))
 		return
 	}
@@ -1622,7 +1735,7 @@ func (s *Server) handleInstanceOpencodeScope(w http.ResponseWriter, r *http.Requ
 		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
-	if inst.Kind != store.KindOpenCodeWeb {
+	if inst.Kind != "opencode-web" {
 		writeErr(w, http.StatusNotFound, errors.New("not an opencode-web instance"))
 		return
 	}
@@ -1631,6 +1744,305 @@ func (s *Server) handleInstanceOpencodeScope(w http.ResponseWriter, r *http.Requ
 		state = opencode_web.ScopeState{Scope: opencode_web.ScopeInScope}
 	}
 	writeJSON(w, http.StatusOK, state)
+}
+
+// handleInstanceDshInfo returns iframe src and metadata for a dsh-web
+// instance. The iframe loads the per-instance reverse-proxy listener
+// (a dedicated origin — the dsh SPA hardcodes its API base to
+// location.origin + '/api'); in remote mode the listener binds a
+// non-loopback host with a mandatory token gate, so the returned
+// iframe_src uses the caller-visible host and the frontend appends the
+// token (PLAN.md §嵌入形态).
+func (s *Server) handleInstanceDshInfo(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	id := strings.TrimSpace(r.URL.Query().Get("id"))
+	if id == "" {
+		writeErr(w, http.StatusBadRequest, errors.New("id is required"))
+		return
+	}
+	inst, err := s.instanceMgr.Get(id)
+	if err != nil {
+		if errors.Is(err, framework.ErrInstanceNotFound) {
+			writeErr(w, http.StatusNotFound, err)
+			return
+		}
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	if inst.Kind != store.KindDsh {
+		writeErr(w, http.StatusNotFound, errors.New("not a dsh-web instance"))
+		return
+	}
+
+	var b dsh_web.Blob
+	if len(inst.KindBlob) > 0 {
+		_ = json.Unmarshal(inst.KindBlob, &b)
+	}
+	worktreeAbs := b.WorktreeAbs
+	if worktreeAbs == "" {
+		worktreeAbs = inst.Cwd
+	}
+
+	resp := map[string]any{
+		"iframe_src":        b.IframeURL,
+		"proxy_host":        b.ProxyHost,
+		"proxy_port":        b.ProxyPort,
+		"host":              b.Host,
+		"port":              b.Port,
+		"worktree_path":     worktreeAbs,
+		"version":           b.Version,
+		"version_supported": b.VersionSupported,
+		"overlay_verified":  b.OverlayVerified,
+	}
+
+	// Remote-mode iframe src: the caller-visible host (the listener
+	// binds 0.0.0.0 / the LAN host — never a URL a browser can use
+	// verbatim), scheme mirrors the main listener's TLS. The frontend
+	// appends ?token= when the token gate is on.
+	//
+	// The 0.0.0.0 / :: case must derive the host from the request
+	// (r.Host): those bind addresses are not routable, and r.Host is
+	// exactly what the caller used to reach this listener. Because
+	// that value is client-controlled, it is validated before being
+	// embedded in the iframe URL — anything that is not a plain DNS
+	// name or IP (schemes, userinfo, paths, CR/LF) yields no
+	// iframe_src (the frontend stays on the "starting" placeholder).
+	if b.ProxyHost != "" && b.ProxyPort != "" {
+		proxyHost := b.ProxyHost
+		if proxyHost == "0.0.0.0" || proxyHost == "::" {
+			// Only trust a host:port split whose port is numeric;
+			// anything else (path, userinfo, scheme junk) falls through
+			// to whole-string validation and is rejected.
+			if h, p, herr := net.SplitHostPort(r.Host); herr == nil && numericPort(p) {
+				proxyHost = h
+			} else {
+				proxyHost = r.Host
+			}
+		}
+		if validPublicHost(proxyHost) {
+			scheme := "http"
+			if s.isSecure {
+				scheme = "https"
+			}
+			src := scheme + "://" + net.JoinHostPort(proxyHost, b.ProxyPort) + "/"
+			// Remote mode: the per-instance proxy's token gate requires
+			// the FIRST iframe navigation to carry ?token= (the embed is
+			// a dedicated origin — the main-origin HttpOnly mw_token
+			// cookie cannot travel to it, and JS can never read that
+			// cookie to append the token itself). The server owns both
+			// facts — the gate is on (RequireToken) and the token value —
+			// so it appends the token here. The token read is the PROXY's
+			// own AuthToken (Proxy.AuthToken), not cfg.AuthToken: that is
+			// exactly the credential checkToken validates against, so the
+			// URL stays correct even if the main token and the proxy
+			// token are ever split. This handler sits behind withAuth
+			// (loopback bypass included), so only authenticated clients
+			// receive it; the proxy then validates, syncs its own HttpOnly
+			// cookie, and 302-redirects to the token-free URL, so the
+			// embedded document never retains the token in its
+			// location.search (ARCHITECTURE §9 checklist).
+			if s.dshDrv != nil && s.dshDrv.Proxy.RequireToken && strings.TrimSpace(s.dshDrv.Proxy.AuthToken) != "" {
+				src += "?token=" + url.QueryEscape(s.dshDrv.Proxy.AuthToken)
+			}
+			resp["iframe_src"] = src
+			resp["proxy_host"] = proxyHost
+		} else {
+			// The blob's IframeURL still names the unroutable bind
+			// address; withhold it so the frontend stays on the
+			// "starting" placeholder instead of a dead URL.
+			s.logger.Printf("dsh-web instance %s: derived proxy host %q failed validation; iframe_src withheld", id, proxyHost)
+			resp["iframe_src"] = ""
+		}
+	}
+
+	// Missing-dsh state (recomputed on the fly): the instance failed at
+	// spawn because no dsh executable could be resolved; the frontend
+	// dialog needs structured facts, and a recheck also clears the
+	// dialog once the user installs dsh.
+	if inst.Status == "failed" {
+		if _, lerr := exec.LookPath("dsh"); lerr != nil {
+			resp["missing_dsh"] = map[string]any{
+				"npm_available": dsh_web.NpmAvailable(),
+				"suggested_pin": dsh_web.NpxPin,
+			}
+		}
+	}
+
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// handleInstanceDshScope returns the current out-of-scope state for a
+// dsh-web instance, recorded in-memory by the per-instance reverse
+// proxy from RPC request bodies (session.create / workspace.create).
+func (s *Server) handleInstanceDshScope(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	id := strings.TrimSpace(r.URL.Query().Get("id"))
+	if id == "" {
+		writeErr(w, http.StatusBadRequest, errors.New("id is required"))
+		return
+	}
+	inst, err := s.instanceMgr.Get(id)
+	if err != nil {
+		if errors.Is(err, framework.ErrInstanceNotFound) {
+			writeErr(w, http.StatusNotFound, err)
+			return
+		}
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	if inst.Kind != store.KindDsh {
+		writeErr(w, http.StatusNotFound, errors.New("not a dsh-web instance"))
+		return
+	}
+	state, ok := s.dshScope.Get(id)
+	if !ok {
+		state = dsh_web.ScopeState{Scope: dsh_web.ScopeInScope}
+	}
+	// Foreign-activity advisory (dsh single-writer boundary): sessions
+	// in the shared pool actively written by another dsh process —
+	// opening them from the embed can corrupt their log. Record-only;
+	// the frontend renders the warning bar.
+	if s.dshWatch != nil {
+		if n, ids := s.dshWatch.ForeignActive(); n > 0 {
+			state.ForeignActiveSessions = ids
+		}
+	}
+	writeJSON(w, http.StatusOK, state)
+}
+
+// handleInstanceDshLaunch persists the launch mode (path / npx /
+// install) for a dsh-web instance's worktree — the missing-dependency
+// dialog's choice, applied at the next Start (PLAN.md §缺失依赖).
+func (s *Server) handleInstanceDshLaunch(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !s.dshWriteOriginGuard(w, r) {
+		return
+	}
+	var req struct {
+		ID   string `json:"id"`
+		Mode string `json:"mode"`
+	}
+	if err := readJSON(r.Body, &req); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	inst, err := s.requireDshInstance(req.ID)
+	if err != nil {
+		writeErr(w, http.StatusNotFound, err)
+		return
+	}
+	if s.dshDrv == nil {
+		writeErr(w, http.StatusInternalServerError, errors.New("dsh driver not configured"))
+		return
+	}
+	if err := s.dshDrv.SetLaunchMode(inst.Cwd, req.Mode); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "mode": req.Mode})
+}
+
+// handleInstanceDshInstall runs `npm install -g @deepseek-ai/dsh` on
+// behalf of the user, then records the resolved global bin path
+// (npm prefix -g) so the next Start spawns it directly — no daemon
+// restart needed. Bounded by a generous timeout; the frontend shows
+// progress while awaiting the response.
+func (s *Server) handleInstanceDshInstall(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !s.dshWriteOriginGuard(w, r) {
+		return
+	}
+	var req struct {
+		ID string `json:"id"`
+	}
+	if err := readJSON(r.Body, &req); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	inst, err := s.requireDshInstance(req.ID)
+	if err != nil {
+		writeErr(w, http.StatusNotFound, err)
+		return
+	}
+	if s.dshDrv == nil {
+		writeErr(w, http.StatusInternalServerError, errors.New("dsh driver not configured"))
+		return
+	}
+
+	// Serialize installs: the endpoint rewrites the global npm prefix,
+	// and two tabs clicking "install now" at once must not race each
+	// other (or the recorded bin path).
+	s.dshInstallMu.Lock()
+	defer s.dshInstallMu.Unlock()
+
+	installCtx, cancel := context.WithTimeout(r.Context(), dshInstallTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(installCtx, "npm", "install", "-g", "@deepseek-ai/dsh").CombinedOutput()
+	if err != nil {
+		// npm failure output can be huge (private-registry URLs, lock
+		// dumps); cap it before it reaches the frontend. redact.Text
+		// strips secrets first.
+		writeErr(w, http.StatusBadGateway, fmt.Errorf("npm install failed: %w: %s", err, truncateText(strings.TrimSpace(redact.Text(string(out))), 300)))
+		return
+	}
+	prefixOut, err := exec.CommandContext(installCtx, "npm", "prefix", "-g").Output()
+	if err != nil {
+		writeErr(w, http.StatusBadGateway, fmt.Errorf("npm prefix -g failed: %w", err))
+		return
+	}
+	bin := filepath.Join(strings.TrimSpace(string(prefixOut)), "bin", "dsh")
+	if err := s.dshDrv.SetInstallBin(inst.Cwd, bin); err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":       "ok",
+		"resolved_bin": bin,
+	})
+}
+
+// dshWriteOriginGuard blocks cross-origin writes to the dsh install /
+// launch endpoints. withAuth skips Origin checks for loopback clients
+// (local trust), but a hostile webpage can drive a loopback fetch
+// (no-cors simple POST) — browser requests always carry Origin, while
+// non-browser clients (curl, the CLI) omit it and stay allowed
+// (REVIEW-2026-08-16 MED-6: CSRF → arbitrary `npm install -g`).
+func (s *Server) dshWriteOriginGuard(w http.ResponseWriter, r *http.Request) bool {
+	if isLoopbackRequest(r) {
+		if origin := r.Header.Get("Origin"); origin != "" && !sameOriginHost(r) {
+			http.Error(w, "forbidden origin", http.StatusForbidden)
+			return false
+		}
+	}
+	return true
+}
+
+// requireDshInstance loads an instance and verifies its kind.
+func (s *Server) requireDshInstance(id string) (store.ManagedInstance, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return store.ManagedInstance{}, errors.New("id is required")
+	}
+	inst, err := s.instanceMgr.Get(id)
+	if err != nil {
+		return store.ManagedInstance{}, err
+	}
+	if inst.Kind != store.KindDsh {
+		return store.ManagedInstance{}, errors.New("not a dsh-web instance")
+	}
+	return inst, nil
 }
 
 func (s *Server) handleInstanceStop(w http.ResponseWriter, r *http.Request) {

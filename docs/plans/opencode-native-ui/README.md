@@ -11,14 +11,6 @@
 | **`TASK.md`** *(实施启动后)* | 拆到 PR-ready 的子任务清单，每条都有人能独立 review | 实施 / 拆分任务时 |
 | **`FOLLOWUPS.md`** | 评审/调试识别的后续优化项、已知限制、待验证清单 | 想找「还有什么没做/待观察」时 |
 
-## 排障记录（按时间）
-
-| 文档 | 内容 |
-| --- | --- |
-| **`DEBUG.md`** | 早期集成期 post-mortem（10 个问题，前 8 个已修） |
-| **`OPENCODE-WORKDIR-DEBUG-2026-08-13.md`** | 工作目录/会话显示问题：DB 陈旧 `worktree` 字段 → `x-opencode-directory` header 传播链；数据修复 + 注入脚本最终形态（含附录速查表） |
-| **`OPENCODE-WORKDIR-DEBUG-2026-08-14.md`** | worktree 删除后 UI 仍显示旧路径、远程/本地/隐私窗口三态不一致：per-origin localStorage 污染 + preseed 仅空时写入；headless Chromium 四场景复现；preseed 自愈修复 |
-
 ## 摘要（30 秒读完）
 
 - **现状**：myworktree 对 opencode 的支持是 PTY + xterm.js 跑 opencode TUI，存在 OSC/DA 回声、TUI 重绘 CPU 高、键鼠跨 PTY 往返脆弱等结构性问题（详见 `docs/TERMINAL_FILTER_REVIEW.md`、`docs/GHOSTTY_WEB_RESEARCH.md`、`memory/project_mw_disk_write_issue.md`）

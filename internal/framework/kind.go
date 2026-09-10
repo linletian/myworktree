@@ -135,8 +135,7 @@ func (r *ReadySignal) Channel() <-chan struct{} {
 // The framework calls Stop exactly once after a successful Spawn.
 // After Stop returns, the framework will not invoke any further
 // methods on the kind for that handle.
-type Kind interface {
-	// Manifest returns static metadata. Called once at registration
+type Kind interface { // Manifest returns static metadata. Called once at registration
 	// time; the result is cached by the framework.
 	Manifest() KindInfo
 
@@ -212,6 +211,16 @@ type Kind interface {
 	// Each kind owns its blob schema; the framework treats it as
 	// opaque bytes.
 	KindBlob(handle Handle) (json.RawMessage, error)
+}
+
+// BufferConsumer is an optional interface kinds may implement to tell
+// the framework whether they capture output into the per-instance ring
+// buffer. Kinds that do not implement it default to allocating a
+// buffer (the historical behaviour); web-UI kinds (reasonix /
+// opencode-web / dsh-web) implement it returning false so Start skips
+// the 16–256 MB pre-allocation for instances that never write output.
+type BufferConsumer interface {
+	NeedsOutputBuffer() bool
 }
 
 // ErrUnknownKind is returned by Registry methods when the requested

@@ -495,3 +495,80 @@ Every review that touches authentication, proxy, token handling, opencode-web, o
 - `internal/app/app.go` — API endpoints `GET /api/instances/<id>/opencode` and `GET /api/instances/opencode/scope`
 - `internal/ui/static/index.html` + `internal/ui/static/kinds/opencode_web.js` — iframe panel, warning bar, scope polling + hidden-report listener
 - `docs/plans/opencode-native-ui/WORKTREE-ISOLATION.md` — full design + decision record
+
+## 9. dsh-web integration
+
+myworktree can host `dsh web` (DeepSeek Harness's headless HTTP server + embedded SPA) as managed instances, embedding the official browser UI via a **per-instance dedicated loopback origin** — unlike opencode-web (`/__opencode/<id>/` same-origin mount), dsh's SPA hardcodes its API base to `location.origin + '/api'` with no override, so a same-origin subpath mount would collide with myworktree's own `/api`. Decision record: `docs/plans/dsh-native-ui/FEASIBILITY.md`; implementation plan: `docs/plans/dsh-native-ui/PLAN.md`.
+
+```
+Browser (myworktree UI, main origin)
+  └─ iframe src = http://127.0.0.1:<proxyPort>/          ← dedicated loopback origin (local mode)
+       │   (remote mode: the SERVER appends ?token= to iframe_src — the proxy
+       │    validates, sets the HttpOnly cookie on its origin, and 302-redirects
+       │    token-free; loopback clients bypass the gate like the main UI)
+       ▼
+myworktree dsh_web.LoopbackProxy (per-instance net.Listen 127.0.0.1:<free>)
+  │ Director: Host = upstream loopback, delete Origin, authq.StripToken
+  │ WS Upgrade passthrough (/api/events.mux, /api/events.host), FlushInterval=-1
+  │ POST /api body → parse RPC envelope → scope Record + session own-attribution
+  │   (record-only, never blocks/rewrites); mid-body failure → abort connection
+  ▼
+dsh web --patch <restrict.yml> --host 127.0.0.1 --port 0   (launcher flags first — see PLAN.md §踩坑 11; cmd.Dir = worktree, env inherited)
+  │ restrict.yml: storage-json.root → <dataDir>/dsh/<worktreeHash>/storages
+  │               directory-picker disabled + insert directory-picker-browse
+  │               (host backend only: keeps the directoryPicker service the
+  │               api-gateway depends on; no client surface → no "Add workspace…")
+  │               client-hmr disabled
+  ▼
+dsh SPA (rendered in iframe — workspace registry isolated per worktree;
+  cross-worktree sessions appear as 未分组: visible, not clickable)
+```
+
+### Design constraints
+
+- **One process per instance**: each `dsh-web` instance = one independent `dsh web` subprocess (`--port 0` — dsh fails loud on port conflict, no fallback). Multiple instances per worktree supported; each has its own upstream port and its own proxy listener.
+- **Command locked**: the command, `--host 127.0.0.1`, and `--port 0` are hardcoded in Go; `--host 0.0.0.0` is rejected by dsh itself. Users cannot override via `tags.json`.
+- **Shared DSH_HOME, worktree-scoped registry**: env is inherited (`DSH_HOME` shared — credentials/settings/profiles need no re-configuration); the restrict overlay re-states only `storage-json.root` to `<dataDir>/dsh/<gitx.HashPath(worktreePath)>/storages`, so the **workspace registry is isolated per worktree**. Sessions stay shared (`~/.dsh/sessions`) — a terminal-run `dsh` in the same directory sees the same sessions as the web instance; cross-worktree sessions show up in the sidebar's 未分组 group (visible, not clickable). **Cross-process session boundary (upstream dsh issue, see `docs/plans/dsh-native-ui/CROSS-PROCESS-SESSION.md`)**: live session updates are broadcast only inside the WRITER process (no fs.watch / polling), so another process sees a snapshot at open time and never refreshes; and opening an actively-written session from a second process appends a `session/end-seed` marker with `seq = log length` (no lock, no write-before check), which collides with the writer's next append and permanently corrupts the log (`corrupt session log: seq gap in committed region`). This holds with or without myworktree — the embed only inherits the boundary.
+- **Workspace bootstrap**: after ready, myworktree directly POSTs the RPC envelope `{type:'client-request', rpcId, method:'workspace.create', payload:{path:<worktree>}}` to the upstream loopback (idempotent adopt; optional `session.create {cwd}` preseed). Failure is warn-only.
+- **防误操作, not a hard boundary**: the `directory-picker` auto-composer row is disabled AND a bare host-backend row is inserted (`@deepseek-ai/dsh-host-directory-picker-browse`) — simply disabling the row would leave the api-gateway pending on the `directoryPicker` service and the whole plugin tree fails to load (verified on dsh 0.1.0-rc.6; see `docs/plans/dsh-native-ui/PLAN.md` §实施踩坑补充 12). The inserted backend provides the service with NO client surface, so the "Add workspace…" entry never renders; the proxy observes `session.create {cwd|workspaceId}` / `workspace.create {path}` bodies and records out-of-scope drift in an in-memory `ScopeTracker` (request forwarded unchanged — the user can still create out-of-scope sessions; their sandbox root is the out-of-scope directory and OS-level write limits still apply). A persistent warning bar (myworktree's own DOM, outside the iframe) shows until the user navigates back.
+- **Foreign-session activity advisory (single-writer boundary)**: dsh is a single-writer-per-process system — opening an actively-written session from a second process appends an unguarded `session/end-seed` that collides with the writer's next seq and permanently corrupts the log (see `docs/plans/dsh-native-ui/CROSS-PROCESS-SESSION.md`). A daemon-level `SessionWatch` scans `$DSH_HOME/sessions` every 3s; a `session.jsonl.zstd` modified within 90s counts as active, and sessions this daemon itself drives (attributed from write-driving `session.*` RPC bodies through the proxy, `session.create` response tees, and the workspace-bootstrap preseed; read-only methods like `session.history` deliberately excluded) are subtracted. While foreign-active sessions exist, `/api/instances/dsh/scope` returns `foreign_active_sessions` and the frontend shows a warning bar telling the user to wait before opening them — record-only, nothing is blocked.
+- **No auth on upstream, gate at the proxy**: dsh has no authentication layer; after proxying, loopback-gated endpoints (`settings`/`credentials`) are reachable through the proxy. Locally this matches the main UI's loopback trust model; **remotely (non-loopback bind or TLS) the proxy enforces a mandatory token gate** — every **non-loopback client** request (including WS upgrades) must carry `?token=` or the `mw_token` cookie, while loopback clients bypass the gate exactly like the main UI's loopback auth bypass (a local browser keeps working even when the proxy binds `0.0.0.0`, the default main listener). The embed is a dedicated origin, so the main-origin HttpOnly `mw_token` cookie cannot travel to it — **the server appends `?token=` to `iframe_src` itself** (`handleInstanceDshInfo`, which sits behind `withAuth`; page JS can never read the HttpOnly cookie and portal/login flows carry no address-bar token). On a valid query token the proxy sets the HttpOnly `mw_token` cookie on its own origin and 302-redirects to the token-free URL, so the embedded document never retains the token in its own `location.search`; the token is always stripped before forwarding upstream. The gate is hardcoded and cannot be disabled. The proxy mirrors the main listener's TLS scheme with the same certificate (avoids mixed content).
+- **Version gate**: hard gate at spawn (`dsh --version` core < `0.1.0` → fail-fast, reasonix precedent); advisory supported range `[0.1.0, 0.2.0)` covers restrict-overlay row-id / WS-path / ready-line drift, surfaced as a persistent UI warning (`version_supported: false`).
+- **Restriction-effectiveness check (L2)**: at spawn the driver runs `dsh web --dump-config --patch <restrict.yml>` (the launcher prints the composed tree including `--patch` overlays, then exits) and verifies the four overlay rows are present with the expected values → `overlay_verified` in the blob. `false` (or a failed dump) is surfaced as the "裁剪失效" (restriction not effective) warning — the config-level equivalent of opencode's DOM-anchor checks; the DOM-anchor L3 stays deferred with the placeholder client plugin.
+- **Missing dependency flow**: spawn preflight `exec.LookPath("dsh")`; when missing, the instance fails with a structured error and the frontend offers a three-way dialog: npx launch (`npx --yes @deepseek-ai/dsh@<pin> web …`, `Setpgid` + process-group kill — npx is the dsh parent process), install now (`npm install -g`, then spawn the absolute bin resolved via `npm prefix -g`; two-step confirm in the dialog + a server-side mutex), or cancel (the poll keeps watching and the dialog stays dismissed until the next outcome). Launch mode persists **per worktree** in `<DataDir>/dsh/<worktreeHash>/launch.json` (not per instance — every Start/Restart allocates a fresh instance id).
+- **Coexists with PTY / opencode-web / reasonix**: the frontend branches on `instance.kind`; existing kinds unchanged.
+- **No new dependencies**: proxy implemented with `net/http/httputil.ReverseProxy` (stdlib); restrict overlay and version parsing are hand-written (no yaml/semver packages).
+
+### Threat model & trust boundary
+
+- **Loopback isolation (local)**: every `dsh web` binds `127.0.0.1:<port>`; the per-instance proxy binds `127.0.0.1:<free>`. Neither is reachable from the network. The proxy is unauthenticated **only because** it is loopback-only — the same trust model as the main UI's loopback bypass.
+- **Token gate (remote)**: when the main listener is non-loopback or TLS, the dsh proxy binds the main listener's host and **requires** the myworktree token from every non-loopback client. A missing/invalid token from a LAN client → `401` before any byte is forwarded; loopback clients bypass the gate (main-UI trust model). This is the single boundary that keeps unauthenticated dsh (incl. `settings`/`credentials`, which become reachable once Host is rewritten to loopback) off the LAN.
+- **Credential hygiene**: `?token=` is stripped (`authq.StripToken`) before forwarding upstream; the dsh subprocess never sees the myworktree token (dsh needs no password at all — nothing is injected into its env).
+- **Cross-worktree drift is user-visible, not exploitable**: out-of-scope sessions are recorded and warned about, never blocked — matching the reasonix/opencode philosophy. The dsh sandbox (OS-level) is the real boundary for writes.
+- **Unprivileged remote attackers** gain no new surface locally (loopback only) and face the token gate remotely. The main residual risk is a future code path that exposes a dsh upstream port or disables the token gate — see checklist items below.
+
+### Review checklist (dsh-specific)
+
+Every review that touches dsh-web, the loopback proxy, or remote access must verify:
+
+1. **Token gate cannot be disabled**: the non-loopback branch *requires* token validation (no config, no env escape hatch); a test pins "non-loopback client + no token → 401" and "loopback client bypasses the gate".
+2. **Token scrubbing**: every proxied query passes `authq.StripToken`; the token never reaches the dsh subprocess (no env injection, no query forwarding, no header forwarding).
+3. **Origin deletion**: the Director must delete the browser `Origin` header before forwarding (dsh's `/api` fence requires `Origin.host === Host.host`; an absent Origin is fine). Regression risk if the Director is refactored.
+4. **WS upgrade passthrough**: `/api/events.mux` / `/api/events.host` must pass through with the `Upgrade` handshake intact, both locally and through the remote token gate.
+5. **Process-tree cleanup**: npx-mode spawns must `Setpgid` and Stop must kill the process group (`kill(-pid)`) — killing only the npx PID orphans the dsh server holding the port.
+6. **Row-id drift**: restrict overlay row ids (`storage-json` / `directory-picker` / `directory-picker-browse` / `client-hmr`) are version-sensitive, and the disabled/insert combo rides on the api-gateway ↔ directoryPicker service contract; the advisory version range + `overlay_verified` (L2 `--dump-config` check) are the safety net. Verify the dsh patch loader's behavior for unknown row ids at implementation time.
+7. **Bootstrap scope leak**: the workspace-bootstrap RPC must target the instance's own worktree path only; never forward a client-supplied path.
+8. **Body parsing must never block or corrupt**: RPC-envelope inspection failures fall back to plain forwarding (record-only semantics).
+9. **Global checklist §8 items 1–9 apply**: auth file `0o600`, no token in logs/errors/tests, cookie `Secure`/`Domain`/`Path` tightened for the deployment, and iframe documents never receive the token in their own `location.search` — the remote iframe's first navigation carries `?token=` **appended by the server** (`handleInstanceDshInfo`: the main-origin HttpOnly cookie cannot travel to the proxy origin and page JS cannot read it), the proxy validates it, sets the HttpOnly `mw_token` cookie on the proxy origin, and 302-redirects to the token-free URL. Also: proxy-listener death must fail loud (`MarkFailed` + cleared `iframe_url`), not leave a "running" instance against a dead port.
+
+### Related files
+
+- `internal/instance/dsh_web/driver.go` — Kind implementation (`dsh web` spawn, ready-line scan, health probe `GET /`, version gate, launch modes, npx process-group handling)
+- `internal/instance/dsh_web/overlay.go` — restrict overlay generation (`storage-json` root redirect, `directory-picker` disabled + `directory-picker-browse` insert, `client-hmr` disabled)
+- `internal/instance/dsh_web/proxy.go` — per-instance loopback reverse proxy (Origin deletion, Host rewrite, WS passthrough, token gate + token-free redirect, mid-body failure connection abort, RPC-body scope recording + session own-attribution, `ScopeTracker`)
+- `internal/instance/dsh_web/sessionwatch.go` — shared-pool foreign-session activity watch (mtime-based, own-traffic attribution)
+- `internal/instance/dsh_web/bootstrap.go` — workspace bootstrap RPC client
+- `internal/instance/dsh_web/version.go` + `launch.go` — version gate + launch-mode persistence
+- `internal/app/app.go` — API endpoints `GET /api/instances/dsh`, `GET /api/instances/dsh/scope`, `POST /api/instances/dsh/launch`, `POST /api/instances/dsh/install`; shutdown `StopAllKind("dsh-web")`
+- `internal/ui/static/index.html` + `internal/ui/static/kinds/dsh_web.js` — iframe panel, missing-dependency dialog, warning bar, scope polling
+- `docs/plans/dsh-native-ui/FEASIBILITY.md` — decision record; `docs/plans/dsh-native-ui/PLAN.md` / `TASK.md` — implementation plan

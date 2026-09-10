@@ -49,10 +49,6 @@ const (
 	scanMaxLineBytes    = 1 << 20 // 1 MiB
 	stopGrace           = 5 * time.Second
 	readyTimeout        = 60 * time.Second
-	// preStartTimeout bounds tag preStart execution (see Spawn). Long
-	// enough for the documented `npm install` example, short enough that
-	// a hanging template cannot stall a Start request indefinitely.
-	preStartTimeout = 2 * time.Minute
 )
 
 // Driver is the opencode-web kind implementation. Registered with
@@ -63,7 +59,7 @@ type Driver struct{}
 func (Driver) Manifest() framework.KindInfo {
 	return framework.KindInfo{
 		Name:        "opencode-web",
-		Label:       "Opencode-Web",
+		Label:       "OpenCode-Web",
 		Description: "Opencode AI agent with embedded web UI. Managed by myworktree; command and port are fixed.",
 		Interactive: false,
 	}
@@ -121,32 +117,24 @@ type Handle struct {
 
 // Spawn launches opencode serve and parses its stdout for the
 // listening address.
+// NeedsOutputBuffer reports that this kind never captures PTY-style
+// output into the framework ring buffer, so Start skips the 16–256 MB
+// pre-allocation (framework.BufferConsumer).
+func (d Driver) NeedsOutputBuffer() bool { return false }
+
 func (d Driver) Spawn(ctx context.Context, params framework.SpawnParams) (framework.Handle, *framework.ReadySignal, error) {
 	cmd := exec.Command("opencode", "serve", "--hostname", "127.0.0.1", "--port", "0")
 	cmd.Dir = params.WorktreePath
 	cmd.Env = buildEnv(params.ExtraEnv, params.AuthToken)
 
 	// Tag preStart runs with the same environment the serve process
-	// will get (buildEnv output incl. the forced auth token). Its
-	// failure output is surfaced to the API caller, so it must be
-	// redacted first: a debug preStart (`env`, `printenv`) would
-	// otherwise echo OPENCODE_SERVER_PASSWORD — the myworktree main
-	// auth token — into the error. Bounded by preStartTimeout: Spawn
-	// has not returned yet, so the framework's ready-timeout has not
-	// started either, and a hanging template would stall Start forever.
+	// will get (buildEnv output incl. the forced auth token).
 	if strings.TrimSpace(params.PreStart) != "" {
-		preCtx, cancel := context.WithTimeout(context.Background(), preStartTimeout)
-		pre := exec.CommandContext(preCtx, "zsh", "-lc", params.PreStart)
+		pre := exec.Command("zsh", "-lc", params.PreStart)
 		pre.Dir = cmd.Dir
 		pre.Env = cmd.Env
-		out, err := pre.CombinedOutput()
-		cancel()
-		if preCtx.Err() == context.DeadlineExceeded {
-			return framework.Handle{}, nil, fmt.Errorf("preStart timed out after %s", preStartTimeout)
-		}
-		if err != nil {
-			sanitized := strings.TrimSpace(redact.Secret(redact.Text(string(out)), params.AuthToken))
-			return framework.Handle{}, nil, fmt.Errorf("preStart failed: %w: %s", err, sanitized)
+		if out, err := pre.CombinedOutput(); err != nil {
+			return framework.Handle{}, nil, fmt.Errorf("preStart failed: %w: %s", err, strings.TrimSpace(string(out)))
 		}
 	}
 
@@ -321,12 +309,75 @@ func buildEnv(tagEnv map[string]string, authToken string) []string {
 	}
 	seen["OPENCODE_SERVER_PASSWORD"] = authToken
 	seen["OPENCODE_CLIENT"] = "myworktree"
+	withLoopbackNoProxy(seen)
 
 	out := make([]string, 0, len(seen))
 	for k, v := range seen {
 		out = append(out, k+"="+v)
 	}
 	return out
+}
+
+// loopbackNoProxyHosts are the loopback entries myworktree guarantees
+// in NO_PROXY/no_proxy for the opencode child process, spelled out
+// literally.
+//
+// Why: opencode embeds the Bun runtime, whose fetch honors
+// HTTP(S)_PROXY but does NOT match CIDR ranges in no_proxy (the
+// widespread "127.0.0.0/8" entry is ignored). With a LAN proxy
+// configured, the in-process plugin SDK calls to the loopback server
+// (http://127.0.0.1:<port>) are then routed through the proxy and
+// fail (HTTP 502), which surfaces in plugins as hard crashes such as
+// "messages.map is not a function" (myworktree issue #75). Explicit
+// host entries make every no_proxy matcher bypass loopback.
+var loopbackNoProxyHosts = []string{"localhost", "127.0.0.1", "::1"}
+
+// proxyConfigured reports whether any outbound proxy env var is set
+// (either letter case), i.e. whether no_proxy matters at all.
+func proxyConfigured(seen map[string]string) bool {
+	for _, k := range []string{"HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"} {
+		if seen[k] != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// withLoopbackNoProxy rewrites the NO_PROXY/no_proxy pair in seen so
+// loopback hosts are always listed explicitly. It is a no-op when no
+// proxy is configured (nothing to bypass) or when a "*" wildcard
+// already covers everything. Existing entries — including CIDR ranges
+// such as 127.0.0.0/8 — are preserved; the literal loopback hosts are
+// appended alongside them because Bun's matcher ignores CIDR.
+func withLoopbackNoProxy(seen map[string]string) {
+	if !proxyConfigured(seen) {
+		return
+	}
+	var entries []string
+	present := make(map[string]bool)
+	collect := func(v string) {
+		for _, e := range strings.Split(v, ",") {
+			e = strings.TrimSpace(e)
+			if e == "" || present[e] {
+				continue
+			}
+			present[e] = true
+			entries = append(entries, e)
+		}
+	}
+	collect(seen["NO_PROXY"])
+	collect(seen["no_proxy"])
+	if present["*"] {
+		return
+	}
+	for _, h := range loopbackNoProxyHosts {
+		if !present[h] {
+			entries = append(entries, h)
+		}
+	}
+	merged := strings.Join(entries, ",")
+	seen["NO_PROXY"] = merged
+	seen["no_proxy"] = merged
 }
 
 var listeningAddrRe = regexp.MustCompile(`opencode server listening on http://([^:\s]+):(\d+)`)
