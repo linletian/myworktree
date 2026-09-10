@@ -325,9 +325,10 @@ func (p *proxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// THE response chain — always installed, steps run in order and
-	// each no-ops when its precondition does not hold (modifyResponse).
-	// New response-side behavior composes by appending a guarded step
-	// there (a later todo adds HTML injection to this chain).
+	// each no-ops when its precondition does not hold (modifyResponse):
+	// 401 invalidation, upstream Set-Cookie stripping, session.create
+	// tee, and HTML shim injection. New response-side behavior composes
+	// by appending a guarded step there.
 	proxy.ModifyResponse = p.modifyResponse
 
 	proxy.ErrorHandler = func(w http.ResponseWriter, req *http.Request, err error) {

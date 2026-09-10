@@ -2,6 +2,8 @@ package dsh_web
 
 import (
 	"context"
+	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -273,5 +275,37 @@ func TestUpstreamAuthPrime(t *testing.T) {
 	})
 	if err := newUpstreamAuth("wrong", authorityOf(bad)).Prime(context.Background()); err == nil {
 		t.Fatal("Prime: expected exchange error for logging, got nil")
+	}
+}
+
+// Given an exchange upstream pointing at a closed port (dial refused),
+// When Cookie fails, Then the error names the transport cause WITHOUT
+// the launch token — the raw *url.Error embeds ?token= in its URL text
+// and every caller logs this error (proxy Prime/Director, bridge dial,
+// bootstrap callRPC).
+func TestUpstreamAuthExchangeErrorNeverLeaksToken(t *testing.T) {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	authority := l.Addr().String()
+	_ = l.Close() // guaranteed-closed port: the exchange dial is refused
+
+	const token = "launchtoken-6f2b9c1d-leak-check"
+	auth := newUpstreamAuth(token, authority)
+
+	_, err = auth.Cookie(context.Background())
+	if err == nil {
+		t.Fatal("Cookie: expected transport error on closed port, got nil")
+	}
+	if strings.Contains(err.Error(), token) {
+		t.Fatalf("Cookie error leaks the launch token: %q", err.Error())
+	}
+	if !strings.Contains(err.Error(), "token exchange") {
+		t.Fatalf("Cookie error lost its context: %q", err.Error())
+	}
+	var opErr *net.OpError
+	if !errors.As(err, &opErr) {
+		t.Fatalf("Cookie error must still classify the cause (*net.OpError), got %T: %v", err, err)
 	}
 }

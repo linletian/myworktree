@@ -95,6 +95,7 @@
         this.native.send(data);
         return;
       }
+      if (this.readyState === MWWebSocket.CLOSED) return;
       this.queue = this.queue.then(() => this.opened).then(async () => {
         let body = data;
         let binary = false;
@@ -128,6 +129,10 @@
     finishClose(code, reason) {
       if (this.readyState === MWWebSocket.CLOSED) return;
       this.readyState = MWWebSocket.CLOSED;
+      // Settle the open gate: sends already queued on this.opened drain
+      // and fail closed (their POST hits a dead bridge) instead of
+      // hanging for the shim's lifetime.
+      if (this.resolveOpen) this.resolveOpen();
       if (this.eventSource) this.eventSource.close();
       this.dispatch("close", new CloseEvent("close", { code, reason }));
     }

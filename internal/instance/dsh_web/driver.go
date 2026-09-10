@@ -193,15 +193,6 @@ type Handle struct {
 	publisher atomic.Pointer[framework.Publisher]
 }
 
-// upstreamAuthToken returns the browser-auth token captured from the
-// ready line ("" on legacy dsh). The token is a credential: callers
-// must never log it or persist it into the Blob.
-func (h *Handle) upstreamAuthToken() string {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	return h.token
-}
-
 // upstreamAuthRelay returns the shared upstream auth relay built by
 // pumpAndWatch from the ready-line token (auth.go). Never nil for a
 // Spawn-ed instance once the ready line was parsed; nil only on Handles

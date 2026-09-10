@@ -2,6 +2,7 @@ package dsh_web
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -126,11 +127,11 @@ func (a *upstreamAuth) mintLocked(ctx context.Context) (string, error) {
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, exchange.String(), nil)
 	if err != nil {
-		return "", fmt.Errorf("dsh upstream auth: build exchange request: %w", err)
+		return "", fmt.Errorf("dsh upstream auth: build exchange request: %w", sanitizeExchangeError(err))
 	}
 	res, err := a.client.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("dsh upstream auth: token exchange: %w", err)
+		return "", fmt.Errorf("dsh upstream auth: token exchange: %w", sanitizeExchangeError(err))
 	}
 	defer func() {
 		_, _ = io.Copy(io.Discard, res.Body) // keep-alive reuse
@@ -151,4 +152,19 @@ func (a *upstreamAuth) mintLocked(ctx context.Context) (string, error) {
 		return pair, nil
 	}
 	return "", fmt.Errorf("dsh upstream auth: token exchange: 303 without a dsh-auth- cookie")
+}
+
+// sanitizeExchangeError strips the *url.Error wrapper a failed exchange
+// carries: url.Error.Error() embeds the FULL request URL including the
+// ?token=<launch-token> query, and every caller logs the returned
+// error — the token (a live credential) must never reach a log string.
+// Unwrap to the transport cause so errors.As/Is still classify it
+// (e.g. *net.OpError, context.DeadlineExceeded); non-url errors pass
+// through unchanged.
+func sanitizeExchangeError(err error) error {
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) && urlErr.Err != nil {
+		return urlErr.Err
+	}
+	return err
 }

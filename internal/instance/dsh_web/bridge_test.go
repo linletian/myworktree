@@ -92,6 +92,64 @@ func TestBridge_relays_text_multiline_ping_and_close(t *testing.T) {
 	awaitSignal(t, closeSeen, "upstream close")
 }
 
+// Given a live bridge conn, When a bin=1 uplink carries malformed
+// base64, Then the answer is a request-scoped 400 and the conn stays
+// open — a subsequent VALID uplink still relays upstream and echoes.
+func TestBridge_malformed_base64_is_request_scoped(t *testing.T) {
+	upstream, _, _ := newBridgeUpstream(t)
+	bridge := newMuxBridge(authorityOf(upstream), nil, nil)
+	server := httptest.NewServer(bridge)
+	t.Cleanup(server.Close)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, server.URL+"/api/remote.mux?mwbridge=1&conn=base64bad1234567", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := server.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = resp.Body.Close() })
+	reader := bufio.NewReader(resp.Body)
+	if got := readSSEEvent(t, reader); got != "retry: 300000\n\n" {
+		t.Fatalf("first SSE bytes = %q", got)
+	}
+	if got := readSSEEvent(t, reader); got != "event: open\ndata: {}\n\n" {
+		t.Fatalf("open event = %q", got)
+	}
+	if got := readSSEEvent(t, reader); got != "data: upstream\n\n" {
+		t.Fatalf("upstream event = %q", got)
+	}
+
+	bad, err := http.Post(server.URL+"/api/remote.mux?mwbridge=1&conn=base64bad1234567&bin=1", "text/plain", strings.NewReader("%%%not-base64%%%"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(bad.Body)
+	_ = bad.Body.Close()
+	if bad.StatusCode != http.StatusBadRequest {
+		t.Fatalf("malformed base64 status = %d, want 400", bad.StatusCode)
+	}
+	if !strings.Contains(string(body), "invalid base64") {
+		t.Fatalf("malformed base64 body = %q, want invalid base64 error", body)
+	}
+
+	// Conn still alive: a valid binary uplink relays and echoes back.
+	good, err := http.Post(server.URL+"/api/remote.mux?mwbridge=1&conn=base64bad1234567&bin=1", "text/plain", strings.NewReader("aGk="))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = good.Body.Close()
+	if good.StatusCode != http.StatusAccepted {
+		t.Fatalf("valid uplink after 400 status = %d, want 202 (conn must stay open)", good.StatusCode)
+	}
+	if got := readSSEEvent(t, reader); got != "event: bin\ndata: aGk=\n\n" {
+		t.Fatalf("bin echo = %q, want base64 of \"hi\"", got)
+	}
+}
+
 func TestBridge_client_disconnect_closes_upstream(t *testing.T) {
 	upstream, _, closeSeen := newBridgeUpstream(t)
 	bridge := newMuxBridge(authorityOf(upstream), nil, nil)

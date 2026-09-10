@@ -184,9 +184,13 @@ func (b *muxBridge) serveUplink(w http.ResponseWriter, r *http.Request, connID s
 	}
 	if r.URL.Query().Get("bin") == "1" {
 		body, err = base64.StdEncoding.DecodeString(string(body))
-		if err == nil {
-			err = conn.upstream.WriteBinary(body)
+		if err != nil {
+			// A garbage body is the request's fault, not the conn's:
+			// answer 400 and leave the bridge conn open for retries.
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid base64"})
+			return
 		}
+		err = conn.upstream.WriteBinary(body)
 	} else {
 		err = conn.upstream.WriteText(body)
 	}
