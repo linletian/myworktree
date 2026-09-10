@@ -94,7 +94,7 @@ curl -fsSL https://raw.githubusercontent.com/linletian/myworktree/main/scripts/i
 可指定版本、改安装路径、跳过 PATH 修改：
 
 ```bash
-curl -fsSL .../install.sh | bash -s -- -v v0.4.2         # 指定版本
+curl -fsSL .../install.sh | bash -s -- -v v0.4.3         # 指定版本
 INSTALL_ALIAS=mwt bash install.sh                          # 避开 Debian/Ubuntu 的 `mw` 占用
 INSTALL_DIR=~/bin bash install.sh                          # 装到自定义目录
 curl -fsSL .../install.sh | bash -s -- --no-modify-path    # 不改 rc 文件
@@ -118,17 +118,17 @@ curl -fsSL .../install.sh | bash -s -- --no-modify-path    # 不改 rc 文件
 ```bash
 # 根据你的平台选择对应压缩包，然后校验并解压
 # macOS Apple Silicon：
-curl -LO https://github.com/linletian/myworktree/releases/download/v0.4.2/myworktree_v0.4.2_macOS_arm64.tar.gz
+curl -LO https://github.com/linletian/myworktree/releases/download/v0.4.3/myworktree_v0.4.3_macOS_arm64.tar.gz
 # macOS Intel（替换文件名中的架构字段）：
-#   curl -LO .../myworktree_v0.4.2_macOS_amd64.tar.gz
+#   curl -LO .../myworktree_v0.4.3_macOS_amd64.tar.gz
 # Linux amd64：
-#   curl -LO .../myworktree_v0.4.2_Linux_amd64.tar.gz
+#   curl -LO .../myworktree_v0.4.3_Linux_amd64.tar.gz
 # Linux arm64：
-#   curl -LO .../myworktree_v0.4.2_Linux_arm64.tar.gz
+#   curl -LO .../myworktree_v0.4.3_Linux_arm64.tar.gz
 
-curl -LO https://github.com/linletian/myworktree/releases/download/v0.4.2/checksums.txt
+curl -LO https://github.com/linletian/myworktree/releases/download/v0.4.3/checksums.txt
 shasum -a 256 -c checksums.txt --ignore-missing
-tar -xzf myworktree_v0.4.2_macOS_arm64.tar.gz
+tar -xzf myworktree_v0.4.3_macOS_arm64.tar.gz
 
 # 可选：安装到 PATH
 sudo install -m 755 ./mw /usr/local/bin/mw
@@ -145,7 +145,7 @@ mw --version
 > ```
 > 或在 **系统设置 → 隐私与安全性** 中为被阻止的二进制文件点击"仍要打开"。
 
-建议从 `v0.4.2` 或更新版本开始使用公开发布版二进制。更早的 `v0.1.0` GitHub Release 资产在补充实测中发现严重终端交互问题后已撤回，而 `v0.4.2` 是当前推荐的公开发布版本。
+建议从 `v0.4.3` 或更新版本开始使用公开发布版二进制。更早的 `v0.1.0` GitHub Release 资产在补充实测中发现严重终端交互问题后已撤回，而 `v0.4.3` 是当前推荐的公开发布版本。
 
 每个发布压缩包内都包含 `mw`、`myworktree`、`README.md`、`LICENSE` 和 `CHANGELOG.md`。
 如果你的平台暂无对应产物，就直接使用下面的源码编译步骤。

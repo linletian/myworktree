@@ -3,7 +3,7 @@
 #
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/linletian/myworktree/main/scripts/install.sh | bash
-#   curl -fsSL .../install.sh | bash -s -- -v v0.4.2
+#   curl -fsSL .../install.sh | bash -s -- -v v0.4.3
 #   curl -fsSL .../install.sh | bash -s -- --no-modify-path
 #   INSTALL_ALIAS=mwt bash install.sh        # avoid `mw` name clash
 #
@@ -46,7 +46,7 @@ Usage: install.sh [options]
 
 Options:
   -h, --help              show this help
-  -v, --version <ver>     install a specific version (e.g., v0.4.2 or 0.4.2)
+  -v, --version <ver>     install a specific version (e.g., v0.4.3 or 0.4.2)
       --no-modify-path    do not modify shell rc files
 
 Env vars:
@@ -57,7 +57,7 @@ Env vars:
 
 Examples:
   curl -fsSL https://raw.githubusercontent.com/${REPO}/main/scripts/install.sh | bash
-  curl -fsSL .../install.sh | bash -s -- -v v0.4.2
+  curl -fsSL .../install.sh | bash -s -- -v v0.4.3
   INSTALL_ALIAS=mwt bash install.sh     # avoid conflict with the Debian/Ubuntu 'mw' package
   INSTALL_DIR=~/bin bash install.sh     # install into a custom dir
 EOF
