@@ -17,16 +17,24 @@ import (
 //     `client-hmr`), the WS event paths and the ready-line format are
 //     verified against this range; outside it the frontend shows a
 //     persistent warning via Blob.VersionSupported=false.
+//   - Remote floor: a dsh whose core version is below minRemoteVersion
+//     predates the remote-access bridge. The WS<->SSE bridge and the
+//     auth relay exist only for dsh >= minRemoteVersion; an older dsh
+//     keeps its loopback-only behavior (no remote transport, no
+//     browser-session auth exchange), so the API layer must not offer
+//     remote mode for it. isRemoteCapable encodes this floor; it is
+//     independent of the advisory supported range above.
 //   - NpxPin is the exact npm version pinned for npx-mode launches and
 //     surfaced as the suggested pin in the missing-dependency dialog.
 //     It is the version the whole integration was verified against
-//     (0.1.0-rc.6 — the launcher flag order, the directory-picker
-//     composer behavior and the RPC wire were all tested on it; a
-//     different pin could drift on any of them).
+//     (0.1.5-rc.1 — the unified /api/remote.mux endpoint, the
+//     browser-session auth exchange and the restrict overlay rows were
+//     all tested on it; a different pin could drift on any of them).
 const (
 	minVersion          = "0.1.0"
 	supportedMaxVersion = "0.2.0" // exclusive
-	NpxPin              = "0.1.0-rc.6"
+	minRemoteVersion    = "0.1.5"
+	NpxPin              = "0.1.5-rc.1"
 )
 
 var versionRe = regexp.MustCompile(`(\d+)\.(\d+)\.(\d+)`)
@@ -88,4 +96,26 @@ func isSupportedVersion(v string) bool {
 // unknown = tolerated, matching the reasonix gate's dev-build policy).
 func hardVersionOK(v string) bool {
 	return v == "" || !versionLess(v, minVersion)
+}
+
+// isRemoteCapable reports whether core v supports the remote-access
+// bridge (WS<->SSE + auth relay). Empty is tolerated for the same
+// dev-build reason as isSupportedVersion. Both "0.1.5" and
+// "0.1.5-rc.1" parse to the core "0.1.5", which meets the floor. An
+// unparseable version is tolerated (cannot be classified). This is a
+// floor only; the supported range is a separate advisory.
+func isRemoteCapable(v string) bool {
+	if v == "" {
+		return true
+	}
+	core, ok := parseVersion(v)
+	if !ok {
+		return true
+	}
+	return !versionLess(core, minRemoteVersion)
+}
+
+// RemoteMinVersion exposes the remote floor for the API layer.
+func RemoteMinVersion() string {
+	return minRemoteVersion
 }

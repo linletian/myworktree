@@ -61,6 +61,35 @@ func TestHardVersionOK(t *testing.T) {
 	}
 }
 
+func TestIsRemoteCapable(t *testing.T) {
+	cases := []struct {
+		v    string
+		want bool
+	}{
+		{"0.1.0", false},
+		{"0.1.4", false},
+		{"0.1.5", true},
+		{"0.1.5-rc.1", true},
+		{"0.1.10", true},
+		{"0.2.0", true}, // floor only; supported range is a separate advisory
+		{"", true},      // unknown tolerated
+		{"x.y", true},   // unparseable tolerated
+		{"1", true},     // unparseable tolerated
+		{"0.1.5-", true},
+	}
+	for _, c := range cases {
+		if got := isRemoteCapable(c.v); got != c.want {
+			t.Errorf("isRemoteCapable(%q) = %v, want %v", c.v, got, c.want)
+		}
+	}
+}
+
+func TestRemoteMinVersion(t *testing.T) {
+	if got := RemoteMinVersion(); got != "0.1.5" {
+		t.Errorf("RemoteMinVersion() = %q, want %q", got, "0.1.5")
+	}
+}
+
 func TestIsSupportedVersion(t *testing.T) {
 	cases := []struct {
 		v    string
