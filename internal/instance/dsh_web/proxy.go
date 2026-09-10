@@ -127,6 +127,12 @@ func startProxyListener(h *Handle, cfg ProxyConfig, upstreamHost, upstreamPort s
 		auth:   h.upstreamAuthRelay(),
 		logger: logger,
 	}
+	h.mu.Lock()
+	remoteCapable := h.blob.RemoteCapable
+	h.mu.Unlock()
+	if cfg.RequireToken && remoteCapable {
+		ph.bridge = newMuxBridge(net.JoinHostPort(upstreamHost, upstreamPort), ph.auth, logger)
+	}
 	// Best-effort pre-mint so the first proxied request does not pay
 	// the token-exchange latency. Warn-only: a failed Prime leaves the
 	// cache empty and the Director retries per request.
@@ -184,6 +190,7 @@ type proxyHandler struct {
 	// every use is nil-guarded and Enabled()-gated.
 	auth   *upstreamAuth
 	logger *log.Logger // nil-safe via logf (tests pass none)
+	bridge *muxBridge
 }
 
 // logf is the nil-safe proxy logger (tests construct proxyHandler
@@ -218,6 +225,21 @@ func (p *proxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, u.RequestURI(), http.StatusFound)
 		return
 	}
+	if p.bridge != nil && r.Method == http.MethodGet && r.URL.Path == "/__mw/dsh-bridge.js" {
+		body, err := bridgeAssets.ReadFile("static/dsh-bridge.js")
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "bridge shim unavailable"})
+			return
+		}
+		w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-cache")
+		_, _ = w.Write(body)
+		return
+	}
+	if p.bridge != nil && r.URL.Path == "/api/remote.mux" && r.URL.Query().Get("mwbridge") == "1" {
+		p.bridge.ServeHTTP(w, r)
+		return
+	}
 
 	// Scope observation (record-only): the SPA's RPC calls are
 	// application/json POSTs under /api; anything else (assets, WS
@@ -239,6 +261,9 @@ func (p *proxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// The /api trust fence keys on Host: it must name the upstream
 		// loopback authority, or the fence 403s.
 		req.Host = target.Host
+		if p.bridge != nil && req.Method == http.MethodGet && (req.URL.Path == "/" || req.URL.Path == "/index.html") {
+			req.Header.Set("Accept-Encoding", "identity")
+		}
 		// Never forward myworktree's auth query (?token=...) upstream:
 		// it is a credential leak to the dsh subprocess. authq is the
 		// single shared stripping path for every proxy.
@@ -351,6 +376,34 @@ func (p *proxyHandler) modifyResponse(resp *http.Response) error {
 			mark:       p.h.markOwnSession,
 		}
 	}
+	if p.bridge == nil || resp.StatusCode != http.StatusOK || resp.Request == nil ||
+		resp.Request.Method != http.MethodGet ||
+		(resp.Request.URL.Path != "/" && resp.Request.URL.Path != "/index.html") ||
+		!strings.Contains(strings.ToLower(resp.Header.Get("Content-Type")), "text/html") {
+		return nil
+	}
+	if encoding := resp.Header.Get("Content-Encoding"); encoding != "" && !strings.EqualFold(encoding, "identity") {
+		p.logf("dsh-web instance %s: refusing bridge shim injection into encoded HTML response (%s)", p.instanceID, encoding)
+		return nil
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, (2<<20)+1))
+	if err != nil {
+		return fmt.Errorf("read HTML for bridge injection: %w", err)
+	}
+	_ = resp.Body.Close()
+	if len(body) > 2<<20 {
+		return fmt.Errorf("HTML for bridge injection exceeds 2 MiB")
+	}
+	const script = `<script src="/__mw/dsh-bridge.js"></script>`
+	lower := strings.ToLower(string(body))
+	if index := strings.Index(lower, "</head>"); index >= 0 {
+		body = append(append(append([]byte{}, body[:index]...), script...), body[index:]...)
+	} else {
+		body = append([]byte(script), body...)
+	}
+	resp.Header.Del("Content-Length")
+	resp.ContentLength = -1
+	resp.Body = io.NopCloser(bytes.NewReader(body))
 	return nil
 }
 
