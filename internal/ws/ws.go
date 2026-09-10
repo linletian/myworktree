@@ -2,6 +2,8 @@ package ws
 
 import (
 	"bufio"
+	"context"
+	"crypto/rand"
 	"crypto/sha1"
 	"encoding/base64"
 	"encoding/binary"
@@ -12,6 +14,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 )
 
 const (
@@ -24,8 +27,9 @@ const (
 
 type Conn struct {
 	net.Conn
-	rw *bufio.ReadWriter
-	mu sync.Mutex
+	rw     *bufio.ReadWriter
+	mu     sync.Mutex
+	client bool
 }
 
 func Upgrade(w http.ResponseWriter, r *http.Request) (*Conn, error) {
@@ -65,6 +69,75 @@ func Upgrade(w http.ResponseWriter, r *http.Request) (*Conn, error) {
 	return &Conn{Conn: conn, rw: rw}, nil
 }
 
+// ErrUpgradeRejected is the Unwrap target of *DialError, so callers can match
+// a rejected upgrade with errors.Is and extract the status with errors.As.
+var ErrUpgradeRejected = errors.New("websocket upgrade rejected")
+
+// DialError reports a non-101 reply to a Dial handshake. Status carries the
+// HTTP status code so callers can distinguish e.g. a 401 auth-gate rejection.
+type DialError struct {
+	Status int
+}
+
+func (e *DialError) Error() string {
+	return fmt.Sprintf("websocket dial: unexpected status %d %s", e.Status, http.StatusText(e.Status))
+}
+
+func (e *DialError) Unwrap() error { return ErrUpgradeRejected }
+
+// Dial opens a client WebSocket connection to addr (host:port) and performs
+// the RFC 6455 opening handshake for path, sending any extra hdr lines (e.g.
+// Cookie). A ctx deadline also bounds the handshake reply wait.
+func Dial(ctx context.Context, addr, path string, hdr http.Header) (*Conn, error) {
+	var d net.Dialer
+	conn, err := d.DialContext(ctx, "tcp", addr)
+	if err != nil {
+		return nil, err
+	}
+	if dl, ok := ctx.Deadline(); ok {
+		_ = conn.SetDeadline(dl)
+	}
+	fail := func(err error) (*Conn, error) {
+		_ = conn.Close()
+		return nil, err
+	}
+
+	key := make([]byte, 16)
+	if _, err := rand.Read(key); err != nil {
+		return fail(err)
+	}
+	var sb strings.Builder
+	sb.WriteString("GET " + path + " HTTP/1.1\r\n")
+	sb.WriteString("Host: " + addr + "\r\n")
+	sb.WriteString("Upgrade: websocket\r\n")
+	sb.WriteString("Connection: Upgrade\r\n")
+	sb.WriteString("Sec-WebSocket-Key: " + base64.StdEncoding.EncodeToString(key) + "\r\n")
+	sb.WriteString("Sec-WebSocket-Version: 13\r\n")
+	for k, vs := range hdr {
+		for _, v := range vs {
+			sb.WriteString(k + ": " + v + "\r\n")
+		}
+	}
+	sb.WriteString("\r\n")
+
+	rw := bufio.NewReadWriter(bufio.NewReader(conn), bufio.NewWriter(conn))
+	if _, err := rw.WriteString(sb.String()); err != nil {
+		return fail(err)
+	}
+	if err := rw.Flush(); err != nil {
+		return fail(err)
+	}
+	resp, err := http.ReadResponse(rw.Reader, &http.Request{Method: "GET"})
+	if err != nil {
+		return fail(err)
+	}
+	if resp.StatusCode != http.StatusSwitchingProtocols {
+		return fail(&DialError{Status: resp.StatusCode})
+	}
+	_ = conn.SetDeadline(time.Time{})
+	return &Conn{Conn: conn, rw: rw, client: true}, nil
+}
+
 func (c *Conn) ReadMessage() (opcode byte, payload []byte, err error) {
 	h := make([]byte, 2)
 	if _, err = io.ReadFull(c.rw, h); err != nil {
@@ -91,19 +164,23 @@ func (c *Conn) ReadMessage() (opcode byte, payload []byte, err error) {
 		}
 		length = int64(u)
 	}
-	if !masked {
+	var mask []byte
+	if masked {
+		mask = make([]byte, 4)
+		if _, err = io.ReadFull(c.rw, mask); err != nil {
+			return 0, nil, err
+		}
+	} else if !c.client {
 		return 0, nil, errors.New("client websocket frame must be masked")
-	}
-	mask := make([]byte, 4)
-	if _, err = io.ReadFull(c.rw, mask); err != nil {
-		return 0, nil, err
 	}
 	payload = make([]byte, length)
 	if _, err = io.ReadFull(c.rw, payload); err != nil {
 		return 0, nil, err
 	}
-	for i := range payload {
-		payload[i] ^= mask[i%4]
+	if masked {
+		for i := range payload {
+			payload[i] ^= mask[i%4]
+		}
 	}
 	if !fin {
 		return 0, nil, errors.New("fragmented websocket frames are not supported")
@@ -121,18 +198,39 @@ func (c *Conn) writeFrame(op byte, p []byte) error {
 	defer c.mu.Unlock()
 	h := []byte{0x80 | op}
 	n := len(p)
+	var maskBit byte
+	if c.client {
+		maskBit = 0x80
+	}
 	switch {
 	case n <= 125:
-		h = append(h, byte(n))
+		h = append(h, maskBit|byte(n))
 	case n <= 65535:
-		h = append(h, 126, byte(n>>8), byte(n))
+		h = append(h, maskBit|126, byte(n>>8), byte(n))
 	default:
-		h = append(h, 127, 0, 0, 0, 0, byte(n>>24), byte(n>>16), byte(n>>8), byte(n))
+		h = append(h, maskBit|127, 0, 0, 0, 0, byte(n>>24), byte(n>>16), byte(n>>8), byte(n))
 	}
 	if _, err := c.rw.Write(h); err != nil {
 		return err
 	}
-	if _, err := c.rw.Write(p); err != nil {
+	if !c.client {
+		if _, err := c.rw.Write(p); err != nil {
+			return err
+		}
+		return c.rw.Flush()
+	}
+	mask := make([]byte, 4)
+	if _, err := rand.Read(mask); err != nil {
+		return err
+	}
+	if _, err := c.rw.Write(mask); err != nil {
+		return err
+	}
+	mp := make([]byte, n)
+	for i, b := range p {
+		mp[i] = b ^ mask[i%4]
+	}
+	if _, err := c.rw.Write(mp); err != nil {
 		return err
 	}
 	return c.rw.Flush()
