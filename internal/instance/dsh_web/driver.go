@@ -34,6 +34,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -162,10 +163,19 @@ type Handle struct {
 	// state for this instance.
 	exited chan struct{}
 
-	mu         sync.Mutex
-	host       string
-	port       string
-	token      string // upstream browser-auth token; CREDENTIAL — never serialized into Blob, never logged
+	mu    sync.Mutex
+	host  string
+	port  string
+	token string // upstream browser-auth token; CREDENTIAL — never serialized into Blob, never logged
+	// auth is the SINGLE upstream auth relay (auth.go) shared with the
+	// reverse proxy (proxy.go). Write-once: pumpAndWatch assigns it in
+	// the same critical section as host/port/token, BEFORE
+	// h.ready.Close(), and never mutates it afterwards. Readers go
+	// through upstreamAuthRelay() — callers gated on
+	// <-h.ready.Channel() (bootstrap.go) are ordered after the write by
+	// the ready close (write-once, read-after-ready); the lock makes
+	// the discipline race-free for every other call timing.
+	auth       *upstreamAuth
 	proxyHost  string
 	proxyPort  string
 	proxyClose func() // idempotent (proxyOnce)
@@ -190,6 +200,17 @@ func (h *Handle) upstreamAuthToken() string {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return h.token
+}
+
+// upstreamAuthRelay returns the shared upstream auth relay built by
+// pumpAndWatch from the ready-line token (auth.go). Never nil for a
+// Spawn-ed instance once the ready line was parsed; nil only on Handles
+// constructed outside Spawn (tests). The relay itself is safe for
+// concurrent use; the lock here guards the write-once assignment.
+func (h *Handle) upstreamAuthRelay() *upstreamAuth {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.auth
 }
 
 // markOwnSession reports a session id driven by THIS instance to the
@@ -614,9 +635,23 @@ func (d *Driver) pumpAndWatch(ctx context.Context, h *Handle, r io.Reader) {
 
 		h.mu.Lock()
 		h.host, h.port, h.token = host, port, token
+		// The shared upstream auth relay (auth.go) — write-once here,
+		// in the same critical section as host/port/token, BEFORE
+		// h.ready.Close(); never mutated afterwards. See the auth field
+		// doc for the read discipline.
+		h.auth = newUpstreamAuth(token, net.JoinHostPort(host, port))
 		h.blob.Host, h.blob.Port = host, port
-		if d.ProxyStarter != nil {
-			ph, pp, closeFn, perr := d.ProxyStarter(h, host, port)
+		starter := d.ProxyStarter
+		h.mu.Unlock()
+
+		// The starter runs OUTSIDE h.mu: startProxyListener reads the
+		// relay back via h.upstreamAuthRelay(), which takes the lock —
+		// invoking it under the held mutex would self-deadlock. The
+		// results are written back under h.mu, keeping the same
+		// lock discipline for proxyHost/proxyPort/proxyClose/blob.
+		if starter != nil {
+			ph, pp, closeFn, perr := starter(h, host, port)
+			h.mu.Lock()
 			if perr != nil {
 				d.logf("instance %s: start reverse proxy: %v (instance runs proxy-less)", h.instanceID, perr)
 			} else {
@@ -634,7 +669,9 @@ func (d *Driver) pumpAndWatch(ctx context.Context, h *Handle, r io.Reader) {
 				}
 				h.blob.IframeURL = scheme + "://" + ph + ":" + pp + "/"
 			}
+			h.mu.Unlock()
 		}
+		h.mu.Lock()
 		blob, err := json.Marshal(h.blob)
 		h.mu.Unlock()
 		if err == nil {
