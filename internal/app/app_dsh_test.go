@@ -18,6 +18,7 @@ import (
 	"myworktree/internal/instance/pty"
 	"myworktree/internal/instance/reasonix"
 	"myworktree/internal/store"
+	"myworktree/internal/worktree"
 )
 
 // newIsolatedTestServerWithDsh is newIsolatedTestServer plus the
@@ -67,6 +68,7 @@ func TestHandleInstanceDshInfo(t *testing.T) {
 		WorktreeAbs:      wt,
 		Version:          "0.1.0",
 		VersionSupported: true,
+		RemoteCapable:    true,
 		OverlayVerified:  true,
 	}
 	raw, _ := json.Marshal(blob)
@@ -106,6 +108,9 @@ func TestHandleInstanceDshInfo(t *testing.T) {
 	}
 	if resp["version"] != "0.1.0" || resp["version_supported"] != true || resp["overlay_verified"] != true {
 		t.Errorf("advisory fields = %v %v %v", resp["version"], resp["version_supported"], resp["overlay_verified"])
+	}
+	if resp["remote_capable"] != true || resp["min_remote_version"] != dsh_web.RemoteMinVersion() {
+		t.Errorf("remote fields = %v %v, want true %s", resp["remote_capable"], resp["min_remote_version"], dsh_web.RemoteMinVersion())
 	}
 	if _, has := resp["missing_dsh"]; has {
 		t.Error("missing_dsh present for a running instance")
@@ -390,5 +395,106 @@ func TestHandleInstanceDshInstallKindGuard(t *testing.T) {
 	srv.handleInstanceDshInstall(w, req)
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404", w.Code)
+	}
+}
+
+// writeFakeDshBin writes an executable dsh stub whose `--version`
+// output is versionOut (the capability endpoint probes it exactly like
+// the spawn-time gate does).
+func writeFakeDshBin(t *testing.T, versionOut string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "dsh")
+	if err := os.WriteFile(path, []byte("#!/bin/sh\necho '"+versionOut+"'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestDshCapability(t *testing.T) {
+	newSrv := func(t *testing.T) *Server {
+		t.Helper()
+		wt := t.TempDir()
+		srv, fs := newIsolatedTestServerWithDsh(t, store.State{
+			Worktrees: []store.ManagedWorktree{{ID: "wt1", Name: "wt1", Path: wt}},
+		})
+		srv.worktreeMgr = worktree.Manager{Store: fs}
+		return srv
+	}
+	get := func(srv *Server, target string) (*httptest.ResponseRecorder, map[string]any) {
+		req := httptest.NewRequest(http.MethodGet, target, nil)
+		w := httptest.NewRecorder()
+		srv.handleDshCapability(w, req)
+		var resp map[string]any
+		if w.Code == http.StatusOK {
+			if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+				t.Fatalf("invalid JSON: %v", err)
+			}
+		}
+		return w, resp
+	}
+
+	// Path mode, dsh at the remote floor (0.1.5-rc.1 parses to core
+	// 0.1.5): remote_capable, version reported as the parsed core.
+	srv := newSrv(t)
+	srv.dshDrv.DshBin = writeFakeDshBin(t, "0.1.5-rc.1")
+	w, resp := get(srv, "/api/dsh/capability?worktree=wt1")
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", w.Code, w.Body.String())
+	}
+	if resp["mode"] != "path" || resp["version"] != "0.1.5" {
+		t.Errorf("mode/version = %v %v, want path 0.1.5", resp["mode"], resp["version"])
+	}
+	if resp["remote_capable"] != true {
+		t.Errorf("remote_capable = %v, want true", resp["remote_capable"])
+	}
+	if resp["min_remote_version"] != dsh_web.RemoteMinVersion() {
+		t.Errorf("min_remote_version = %v, want %s", resp["min_remote_version"], dsh_web.RemoteMinVersion())
+	}
+	if resp["missing"] != false {
+		t.Errorf("missing = %v, want false", resp["missing"])
+	}
+
+	// Below the remote floor (but above the hard gate): not capable.
+	srv = newSrv(t)
+	srv.dshDrv.DshBin = writeFakeDshBin(t, "0.1.0")
+	w, resp = get(srv, "/api/dsh/capability?worktree=wt1")
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", w.Code, w.Body.String())
+	}
+	if resp["version"] != "0.1.0" || resp["remote_capable"] != false {
+		t.Errorf("version/remote_capable = %v %v, want 0.1.0 false", resp["version"], resp["remote_capable"])
+	}
+
+	// DshBin points nowhere: structured missing report, still 200 —
+	// the frontend needs npm_available + suggested_pin for the dialog.
+	srv = newSrv(t)
+	srv.dshDrv.DshBin = filepath.Join(t.TempDir(), "no-such-dsh")
+	w, resp = get(srv, "/api/dsh/capability?worktree=wt1")
+	if w.Code != http.StatusOK {
+		t.Fatalf("missing-dsh status = %d, want 200: %s", w.Code, w.Body.String())
+	}
+	if resp["missing"] != true {
+		t.Errorf("missing = %v, want true", resp["missing"])
+	}
+	if _, has := resp["npm_available"]; !has {
+		t.Error("npm_available absent from the missing report")
+	}
+	if resp["suggested_pin"] != dsh_web.NpxPin {
+		t.Errorf("suggested_pin = %v, want %s", resp["suggested_pin"], dsh_web.NpxPin)
+	}
+
+	// Unknown / adversarial worktree ids → 404, never a resolved path.
+	srv = newSrv(t)
+	for _, id := range []string{"nope", "../../etc", "..%2f..%2fetc", `wt1\..\..`} {
+		w, _ = get(srv, "/api/dsh/capability?worktree="+id)
+		if w.Code != http.StatusNotFound {
+			t.Errorf("worktree=%q status = %d, want 404", id, w.Code)
+		}
+	}
+
+	// Missing query → 400.
+	w, _ = get(srv, "/api/dsh/capability")
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("missing query status = %d, want 400", w.Code)
 	}
 }

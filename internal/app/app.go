@@ -765,6 +765,7 @@ func (s *Server) registerAPIs(mux *http.ServeMux) {
 	mux.HandleFunc("/api/instances/dsh/scope", s.handleInstanceDshScope)
 	mux.HandleFunc("/api/instances/dsh/launch", s.handleInstanceDshLaunch)
 	mux.HandleFunc("/api/instances/dsh/install", s.handleInstanceDshInstall)
+	mux.HandleFunc("/api/dsh/capability", s.handleDshCapability)
 	mux.Handle("/rx/", &reasonixProxy{manager: s.instanceMgr, driver: s.rxDriver})
 	mux.HandleFunc("/api/tags", s.handleTags)
 	mux.HandleFunc("/api/tags/open-dir", s.handleTagsOpenDir)
@@ -1787,15 +1788,17 @@ func (s *Server) handleInstanceDshInfo(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resp := map[string]any{
-		"iframe_src":        b.IframeURL,
-		"proxy_host":        b.ProxyHost,
-		"proxy_port":        b.ProxyPort,
-		"host":              b.Host,
-		"port":              b.Port,
-		"worktree_path":     worktreeAbs,
-		"version":           b.Version,
-		"version_supported": b.VersionSupported,
-		"overlay_verified":  b.OverlayVerified,
+		"iframe_src":         b.IframeURL,
+		"proxy_host":         b.ProxyHost,
+		"proxy_port":         b.ProxyPort,
+		"host":               b.Host,
+		"port":               b.Port,
+		"worktree_path":      worktreeAbs,
+		"version":            b.Version,
+		"version_supported":  b.VersionSupported,
+		"remote_capable":     b.RemoteCapable,
+		"min_remote_version": dsh_web.RemoteMinVersion(),
+		"overlay_verified":   b.OverlayVerified,
 	}
 
 	// Remote-mode iframe src: the caller-visible host (the listener
@@ -2010,6 +2013,45 @@ func (s *Server) handleInstanceDshInstall(w http.ResponseWriter, r *http.Request
 	writeJSON(w, http.StatusOK, map[string]any{
 		"status":       "ok",
 		"resolved_bin": bin,
+	})
+}
+
+// handleDshCapability reports the dsh toolchain capability for a
+// worktree (?worktree=<id>) without spawning an instance — the
+// frontend consults it to decide whether remote mode can be offered.
+// Resolution is store-backed (resolveWorktreePath): only registered
+// worktree ids (or the main-worktree sentinel) resolve, so an
+// arbitrary / traversal id can never reach the filesystem. A missing
+// dsh is a structured 200 (missing + npm_available + suggested_pin),
+// not an error — the frontend drives the install dialog off it.
+func (s *Server) handleDshCapability(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	id := strings.TrimSpace(r.URL.Query().Get("worktree"))
+	if id == "" {
+		writeErr(w, http.StatusBadRequest, errors.New("worktree is required"))
+		return
+	}
+	path, err := s.resolveWorktreePath(id)
+	if err != nil {
+		writeErr(w, http.StatusNotFound, err)
+		return
+	}
+	if s.dshDrv == nil {
+		writeErr(w, http.StatusInternalServerError, errors.New("dsh driver not configured"))
+		return
+	}
+	capab := s.dshDrv.ProbeCapability(path)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"mode":               capab.Mode,
+		"version":            capab.Version,
+		"remote_capable":     capab.RemoteCapable,
+		"min_remote_version": capab.MinRemoteVersion,
+		"missing":            capab.Missing,
+		"npm_available":      capab.NpmAvailable,
+		"suggested_pin":      capab.SuggestedPin,
 	})
 }
 

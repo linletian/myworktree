@@ -544,6 +544,65 @@ func (d *Driver) probeAndGate(bin string) (string, error) {
 	return got, nil
 }
 
+// Capability is the dsh toolchain report for a worktree: what the
+// /api/dsh/capability endpoint serves so the frontend knows whether
+// remote mode can be offered BEFORE any instance is spawned.
+type Capability struct {
+	Mode             string // persisted launch mode: path | npx | install
+	Version          string // probed core version ("" = unparseable dev build)
+	RemoteCapable    bool   // Version satisfies the remote-access floor
+	MinRemoteVersion string // the floor itself (RemoteMinVersion)
+	Missing          bool   // no launchable dsh (resolution or probe failed)
+	NpmAvailable     bool   // npm CLI on PATH (the install-now affordance)
+	SuggestedPin     string // npx pin to suggest when dsh is missing
+}
+
+// ProbeCapability resolves the worktree's persisted launch mode and
+// reports the dsh capability without spawning anything. Path/install
+// modes reuse the memoized spawn-time probe (a binary the gate already
+// passed costs nothing); npx mode needs no probe — the pin is exact.
+func (d *Driver) ProbeCapability(worktreePath string) Capability {
+	cfg, err := readLaunch(d.DataDir, worktreePath)
+	if err != nil {
+		d.logf("dsh: capability probe: %v; assuming default launch mode", err)
+		cfg = launchConfig{Mode: launchPath}
+	}
+	capab := Capability{
+		Mode:             string(cfg.Mode),
+		MinRemoteVersion: RemoteMinVersion(),
+	}
+	// Every Missing report carries the dialog facts (npm availability +
+	// suggested pin) uniformly: an unlaunchable dsh — unresolved OR
+	// failing its version probe — drives the same three-way dialog.
+	missing := func() Capability {
+		capab.Missing = true
+		capab.NpmAvailable = NpmAvailable()
+		capab.SuggestedPin = NpxPin
+		return capab
+	}
+	exe, _, _, err := resolveLaunch(d.DshBin, cfg)
+	if err != nil {
+		var nf *ErrDshNotFound
+		if !errors.As(err, &nf) {
+			d.logf("dsh: capability probe: resolve launch: %v", err)
+		}
+		return missing()
+	}
+	if cfg.Mode == launchNpx {
+		capab.Version = NpxPin
+		capab.RemoteCapable = isRemoteCapable(NpxPin)
+		return capab
+	}
+	got, err := d.probeAndGate(exe)
+	if err != nil {
+		d.logf("dsh: capability probe: %v", err)
+		return missing()
+	}
+	capab.Version = got
+	capab.RemoteCapable = isRemoteCapable(got)
+	return capab
+}
+
 // verifyOverlay runs the boot-free config dump with our overlay and
 // checks the composed tree for the expected rows (L2, PLAN.md
 // §裁剪有效性兜底). prefix carries the npx preamble in npx mode.
