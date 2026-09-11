@@ -2801,7 +2801,10 @@
                         focusTerminalIfPossible();
                     } else {
                         resetTerminalForSwitch(session);
-                        session.logCursor = 0;
+                        // Keep session.logCursor here: loadLog overwrites it from the
+                        // X-Log-Offset header, and the previous cursor is a strictly safer
+                        // fallback than 0 (which replays the oldest 64KB) if that header
+                        // is lost or the fetch fails.
                         loadLog(session).finally(() => {
                             connectTTY(session);
                             focusTerminalIfPossible();
@@ -3623,7 +3626,12 @@
                 let text = await res.text();
                 const rawOffset = res.headers.get("X-Log-Offset");
                 const next = rawOffset === null ? NaN : parseInt(rawOffset, 10);
-                session.logCursor = Number.isFinite(next) && next >= 0 ? next : 0;
+                // Only advance the cursor from a valid header. Falling back to 0 would
+                // make startSSE connect with since=0 and replay the oldest 64KB on top
+                // of the tail just written; the previous cursor is strictly safer.
+                if (Number.isFinite(next) && next >= 0) {
+                    session.logCursor = next;
+                }
                 if (session.term) {
                     const inst = state.instances.find(i => i.id === session.id);
                     const isRunning = inst && inst.status === 'running';
