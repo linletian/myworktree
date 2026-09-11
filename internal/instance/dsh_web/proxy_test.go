@@ -11,6 +11,8 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -27,12 +29,13 @@ func newProxyFixture(t *testing.T, cfg ProxyConfig, worktree string) (*proxyHand
 
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		echo := map[string]any{
-			"host":   r.Host,
-			"origin": r.Header.Get("Origin"),
-			"query":  r.URL.RawQuery,
-			"path":   r.URL.Path,
-			"token":  r.URL.Query().Get("token"),
-			"cookie": r.Header.Get("Cookie"),
+			"host":    r.Host,
+			"origin":  r.Header.Get("Origin"),
+			"referer": r.Header.Get("Referer"),
+			"query":   r.URL.RawQuery,
+			"path":    r.URL.Path,
+			"token":   r.URL.Query().Get("token"),
+			"cookie":  r.Header.Get("Cookie"),
 		}
 		if r.Method == http.MethodPost {
 			b, _ := io.ReadAll(r.Body)
@@ -210,6 +213,29 @@ func TestProxyStripsMwTokenCookieUpstream(t *testing.T) {
 	}
 }
 
+// TestProxyStripsRefererUpstream pins the Referer credential-leak fix:
+// after the token-strip 302, same-origin follow-ups carry
+// `Referer: http://<proxy>/?token=<mw_token>` — the Director must
+// delete the header so the dsh subprocess never sees the mw token.
+func TestProxyStripsRefererUpstream(t *testing.T) {
+	cfg := ProxyConfig{BindHost: "127.0.0.1", RequireToken: true, AuthToken: "sekret"}
+	ph, _, _, _ := newProxyFixture(t, cfg, "/wt")
+
+	req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:39999/api/some/path", nil)
+	req.RemoteAddr = "127.0.0.1:53123" // loopback: gate bypassed, request forwarded
+	req.Header.Set("Referer", "http://127.0.0.1:39999/?token=sekret")
+	rec := httptest.NewRecorder()
+	ph.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	var echo map[string]any
+	_ = json.NewDecoder(rec.Body).Decode(&echo)
+	if ref, _ := echo["referer"].(string); ref != "" {
+		t.Errorf("Referer leaked upstream: %q", ref)
+	}
+}
+
 func TestProxyScopeRecording(t *testing.T) {
 	ph, _, tracker, _ := newProxyFixture(t, ProxyConfig{BindHost: "127.0.0.1"}, "/wt")
 
@@ -289,6 +315,74 @@ func TestClassifyRPCBody(t *testing.T) {
 				t.Errorf("%s: state = %+v, want scope=%s dir=%s", c.name, st, c.want, c.dir)
 			}
 		}
+	}
+}
+
+// TestProxyBridgeGatedOnRemoteCapable pins the remote bridge gate:
+// with cfg.RequireToken=true but blob.RemoteCapable=false (a dsh
+// 0.1.2-0.1.4 shape — token-bearing but below the remote floor),
+// startProxyListener must NOT construct the bridge. The shim URL, the
+// bridge endpoint and HTML injection all belong to the bridge, so each
+// falls through to the upstream untouched.
+func TestProxyBridgeGatedOnRemoteCapable(t *testing.T) {
+	var mu sync.Mutex
+	seen := map[string]int{}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		seen[r.URL.Path]++
+		mu.Unlock()
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, "<html><head><title>x</title></head></html>")
+	}))
+	t.Cleanup(upstream.Close)
+	u, _, _ := net.SplitHostPort(strings.TrimPrefix(upstream.URL, "http://"))
+
+	// RequireToken=true but RemoteCapable zero-value false: no bridge.
+	h := &Handle{instanceID: "inst-1", cwd: "/wt"}
+	host, port, closeFn, err := startProxyListener(h, ProxyConfig{
+		BindHost:     "127.0.0.1",
+		RequireToken: true,
+		AuthToken:    "sekret",
+	}, u, portOf(t, upstream.URL), NewScopeTracker(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeFn()
+	base := "http://" + net.JoinHostPort(host, port)
+
+	// Loopback client: the token gate bypasses, so every request is
+	// forwarded — what matters is WHO answers.
+	resp, err := http.Get(base + "/__mw/dsh-bridge.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if strings.Contains(string(body), "MWWebSocket") {
+		t.Error("bridge shim served by mw despite RemoteCapable=false")
+	}
+	resp, err = http.Get(base + "/api/remote.mux?mwbridge=1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	resp, err = http.Get(base + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if strings.Contains(string(body), `<script src="/__mw/dsh-bridge.js"></script>`) {
+		t.Error("shim injected into HTML despite RemoteCapable=false")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if seen["/__mw/dsh-bridge.js"] != 1 {
+		t.Errorf("upstream saw /__mw/dsh-bridge.js %d times, want 1 (fell through)", seen["/__mw/dsh-bridge.js"])
+	}
+	if seen["/api/remote.mux"] != 1 {
+		t.Errorf("upstream saw /api/remote.mux %d times, want 1 (fell through)", seen["/api/remote.mux"])
 	}
 }
 
@@ -612,4 +706,292 @@ func TestStartProxyListenerLifecycle(t *testing.T) {
 		time.Sleep(100 * time.Millisecond)
 	}
 	t.Error("proxy port still accepting after closeFn")
+}
+
+// --- upstream browser-auth relay (auth.go; proxy Director/ModifyResponse) ---
+
+// relayUpstream is a fake dsh >=0.1.2 server: the browser-auth token
+// exchange (GET /?token=tok → 303 + `Set-Cookie: dsh-auth-x=y;
+// HttpOnly`) and an /api surface gated on the minted cookie (401
+// without it). It records what the proxy actually forwarded so tests
+// assert on the wire truth, not on internals. (auth_test.go's
+// newAuthUpstream fakes the exchange alone; this one also gates /api.)
+type relayUpstream struct {
+	srv *httptest.Server
+
+	exchangeHits atomic.Int32 // token-exchange invocations
+	slowExchange atomic.Bool  // exchange hangs until the caller's deadline fires
+	plantCookie  atomic.Bool  // plant Set-Cookie: dsh-auth-planted=zzz on every response
+
+	mu         sync.Mutex
+	lastCookie string // last Cookie header seen on /api/*
+}
+
+func newRelayUpstream(t *testing.T) *relayUpstream {
+	t.Helper()
+	up := &relayUpstream{}
+	up.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/" && r.URL.Query().Get("token") != "" {
+			up.exchangeHits.Add(1)
+			if up.slowExchange.Load() {
+				// A wedged upstream: hang until the caller's own
+				// deadline (the Director's 3 s cap) kills the request,
+				// then return fast so httptest cleanup never waits.
+				<-r.Context().Done()
+				return
+			}
+			if r.URL.Query().Get("token") != "tok" {
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			w.Header().Add("Set-Cookie", "dsh-auth-x=y; Path=/; HttpOnly")
+			w.WriteHeader(http.StatusSeeOther)
+			return
+		}
+		if strings.HasPrefix(r.URL.Path, "/api") {
+			if up.plantCookie.Load() {
+				// The response-side fence probe: the browser-facing
+				// answer carries an upstream credential cookie that
+				// must be stripped, plus a benign one that must survive.
+				w.Header().Add("Set-Cookie", "dsh-auth-planted=zzz; Path=/; HttpOnly")
+				w.Header().Add("Set-Cookie", "theme=light; Path=/")
+			}
+			up.mu.Lock()
+			up.lastCookie = r.Header.Get("Cookie")
+			up.mu.Unlock()
+			if r.URL.Path == "/api/expire" {
+				// Simulates upstream secret rotation: the relayed
+				// cookie is suddenly rejected — the proxy must
+				// invalidate and the NEXT request must re-mint.
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			if !strings.Contains(r.Header.Get("Cookie"), "dsh-auth-x=y") {
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	t.Cleanup(up.srv.Close)
+	return up
+}
+
+func (up *relayUpstream) lastAPICookie() string {
+	up.mu.Lock()
+	defer up.mu.Unlock()
+	return up.lastCookie
+}
+
+// newAuthProxyFixture wires a proxyHandler whose Handle carries the
+// SINGLE shared relay — built exactly like pumpAndWatch builds it — and
+// the handler reads it back through the locking accessor, the same path
+// startProxyListener uses.
+func newAuthProxyFixture(t *testing.T, up *relayUpstream) (*proxyHandler, *Handle) {
+	t.Helper()
+	host, port, err := net.SplitHostPort(authorityOf(up.srv))
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := &Handle{instanceID: "inst-1", cwd: "/wt"}
+	h.auth = newUpstreamAuth("tok", authorityOf(up.srv))
+	ph := &proxyHandler{
+		upstreamHost: host,
+		upstreamPort: port,
+		worktree:     "/wt",
+		instanceID:   "inst-1",
+		cfg:          ProxyConfig{BindHost: "127.0.0.1"},
+		h:            h,
+		auth:         h.upstreamAuthRelay(),
+	}
+	return ph, h
+}
+
+// getViaProxy drives a browser-style GET through the handler; each
+// cookieHdrs entry becomes its own Cookie header line (browsers send
+// one, but the filter must cope with several).
+func getViaProxy(t *testing.T, ph *proxyHandler, path string, cookieHdrs ...string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:39999"+path, nil)
+	for _, c := range cookieHdrs {
+		req.Header.Add("Cookie", c)
+	}
+	rec := httptest.NewRecorder()
+	ph.ServeHTTP(rec, req)
+	return rec
+}
+
+// TestProxyAuthRelayInjectsCookie pins the happy path: a browser-style
+// request carrying NO cookies gets the relay-minted dsh-auth-* pair
+// injected (the upstream gate passes), and the mint is cached — the
+// exchange stays off the per-request hot path.
+func TestProxyAuthRelayInjectsCookie(t *testing.T) {
+	up := newRelayUpstream(t)
+	ph, _ := newAuthProxyFixture(t, up)
+
+	rec := getViaProxy(t, ph, "/api/whoami")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (relay cookie must satisfy the upstream gate)", rec.Code)
+	}
+	if got := up.lastAPICookie(); got != "dsh-auth-x=y" {
+		t.Errorf("upstream Cookie = %q, want exactly the relay pair %q", got, "dsh-auth-x=y")
+	}
+	if n := up.exchangeHits.Load(); n != 1 {
+		t.Fatalf("exchange hits = %d, want 1 (first mint)", n)
+	}
+
+	// Cached: a second request must not re-mint.
+	if rec := getViaProxy(t, ph, "/api/whoami"); rec.Code != http.StatusOK {
+		t.Fatalf("second status = %d, want 200", rec.Code)
+	}
+	if n := up.exchangeHits.Load(); n != 1 {
+		t.Errorf("exchange hits = %d after second request, want 1 (cached)", n)
+	}
+}
+
+// TestProxyAuthRelayDropsBrowserForgedCookies pins the credential
+// fence: browser-sent dsh-auth-* cookies (forged or stale) must NEVER
+// reach the upstream — upstream credentials come only from the relay.
+// Probes malformed/edge placements: forged cookie alone in its own
+// header line, forged name mid-header with weird spacing, mw_token
+// riding along, and a lookalike dsh-auth- VALUE under a benign name
+// (only names are stripped).
+func TestProxyAuthRelayDropsBrowserForgedCookies(t *testing.T) {
+	up := newRelayUpstream(t)
+	ph, _ := newAuthProxyFixture(t, up)
+
+	rec := getViaProxy(t, ph, "/api/whoami",
+		"dsh-auth-fake=1",
+		"spa_pref=dark; dsh-auth-mid=2 ; mw_token=zzz",
+		"pref=dsh-auth-just-a-value",
+	)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	want := "spa_pref=dark; pref=dsh-auth-just-a-value; dsh-auth-x=y"
+	if got := up.lastAPICookie(); got != want {
+		t.Errorf("upstream Cookie = %q, want %q (forged dsh-auth-* and mw_token stripped, relay pair appended)", got, want)
+	}
+}
+
+// TestProxyAuthRelayInvalidatesOnUpstream401 pins the rotation
+// recovery: a 401 means the relayed cookie died (secret rotation,
+// restart, expiry) — ModifyResponse must drop the cached cookie so the
+// NEXT request re-mints.
+func TestProxyAuthRelayInvalidatesOnUpstream401(t *testing.T) {
+	up := newRelayUpstream(t)
+	ph, _ := newAuthProxyFixture(t, up)
+
+	if rec := getViaProxy(t, ph, "/api/ok"); rec.Code != http.StatusOK {
+		t.Fatalf("first status = %d, want 200", rec.Code)
+	}
+	if n := up.exchangeHits.Load(); n != 1 {
+		t.Fatalf("exchange hits = %d, want 1 (first mint)", n)
+	}
+	if rec := getViaProxy(t, ph, "/api/expire"); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("rotation status = %d, want 401", rec.Code)
+	}
+	if rec := getViaProxy(t, ph, "/api/ok"); rec.Code != http.StatusOK {
+		t.Fatalf("post-rotation status = %d, want 200 (re-mint must recover)", rec.Code)
+	}
+	if n := up.exchangeHits.Load(); n != 2 {
+		t.Errorf("exchange hits = %d after rotation + retry, want 2 (invalidate forced a re-mint)", n)
+	}
+}
+
+// TestProxyAuthRelayLegacyPassthrough pins the legacy contract: dsh
+// <0.1.2 has no browser auth, so the relay is nil (Handle built outside
+// Spawn) or disabled (empty token). Requests must pass with NO Cookie
+// header added, and an upstream 401 must not produce invalidate side
+// effects — no exchange is ever attempted.
+func TestProxyAuthRelayLegacyPassthrough(t *testing.T) {
+	up := newRelayUpstream(t)
+	host, port, err := net.SplitHostPort(authorityOf(up.srv))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for name, auth := range map[string]*upstreamAuth{
+		"nil relay":      nil,
+		"disabled relay": newUpstreamAuth("", authorityOf(up.srv)),
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := &Handle{instanceID: "inst-1", cwd: "/wt", auth: auth}
+			ph := &proxyHandler{
+				upstreamHost: host,
+				upstreamPort: port,
+				worktree:     "/wt",
+				instanceID:   "inst-1",
+				cfg:          ProxyConfig{BindHost: "127.0.0.1"},
+				h:            h,
+				auth:         auth,
+			}
+			rec := getViaProxy(t, ph, "/api/ok")
+			if rec.Code != http.StatusUnauthorized {
+				t.Fatalf("status = %d, want 401 (no relay cookie minted for legacy)", rec.Code)
+			}
+			if got := up.lastAPICookie(); got != "" {
+				t.Errorf("upstream Cookie = %q, want empty (no header added)", got)
+			}
+			// The 401 invalidated nothing — a legacy relay never mints.
+			if n := up.exchangeHits.Load(); n != 0 {
+				t.Errorf("exchange hits = %d, want 0 (legacy relay never mints)", n)
+			}
+		})
+	}
+}
+
+// TestProxyAuthRelayStripsUpstreamSetCookie pins the response-side
+// fence: an upstream-planted dsh-auth-* Set-Cookie must never reach the
+// browser — the proxy is the credential holder. Benign cookies survive.
+func TestProxyAuthRelayStripsUpstreamSetCookie(t *testing.T) {
+	up := newRelayUpstream(t)
+	up.plantCookie.Store(true)
+	ph, _ := newAuthProxyFixture(t, up)
+
+	rec := getViaProxy(t, ph, "/api/ok")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	got := rec.Result().Header.Values("Set-Cookie")
+	for _, v := range got {
+		name, _, _ := strings.Cut(v, "=")
+		if strings.HasPrefix(name, "dsh-auth-") {
+			t.Errorf("upstream credential cookie reached the browser: %q", v)
+		}
+	}
+	if len(got) != 1 || !strings.HasPrefix(got[0], "theme=light") {
+		t.Errorf("Set-Cookie = %v, want only the benign cookie to survive", got)
+	}
+}
+
+// TestProxyAuthRelaySlowExchange pins the hung-upstream bound: a wedged
+// token exchange must not wedge the proxied request — the Director mint
+// is capped and the request proceeds WITHOUT the cookie (the upstream
+// 401 + SPA retry recovers). Healing the upstream must restore 200s.
+func TestProxyAuthRelaySlowExchange(t *testing.T) {
+	up := newRelayUpstream(t)
+	up.slowExchange.Store(true)
+	ph, _ := newAuthProxyFixture(t, up)
+
+	start := time.Now()
+	rec := getViaProxy(t, ph, "/api/ok")
+	elapsed := time.Since(start)
+	if elapsed > 8*time.Second {
+		t.Fatalf("request took %s — the mint timeout failed to bound a wedged exchange", elapsed)
+	}
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401 (forwarded without cookie)", rec.Code)
+	}
+	if got := up.lastAPICookie(); got != "" {
+		t.Errorf("upstream Cookie = %q, want empty after mint timeout", got)
+	}
+
+	up.slowExchange.Store(false)
+	if rec := getViaProxy(t, ph, "/api/ok"); rec.Code != http.StatusOK {
+		t.Fatalf("post-heal status = %d, want 200 (retry recovers)", rec.Code)
+	}
 }

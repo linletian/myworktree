@@ -34,11 +34,17 @@ import (
 //     upgrades included). Loopback clients bypass the gate — a local
 //     browser must keep working even when the proxy binds 0.0.0.0
 //     (the default main listener), exactly like the main UI's loopback
-//     auth bypass. dsh has no authentication layer, so the proxy is
-//     the only boundary between the LAN and the unauthenticated
-//     upstream (settings/credentials become reachable once Host is
-//     rewritten to loopback). The gate is hardcoded and cannot be
-//     disabled.
+//     auth bypass. The proxy is also the credential holder for the
+//     upstream's own browser auth: dsh >=0.1.2 gates its SPA/API behind
+//     a launch-token exchange (auth.go), and the proxy performs that
+//     exchange itself — injecting the minted dsh-auth-* cookie into
+//     every forwarded request, stripping any browser-sent dsh-auth-*,
+//     and never letting an upstream dsh-auth-* Set-Cookie reach the
+//     browser. On legacy dsh (<0.1.2, no browser auth) the proxy
+//     remains the only boundary between the LAN and the
+//     unauthenticated upstream (settings/credentials become reachable
+//     once Host is rewritten to loopback). The gate is hardcoded and
+//     cannot be disabled.
 //   - Token hygiene (remote mode): the FIRST navigation carries
 //     ?token= — the main-origin mw_token cookie cannot travel to the
 //     proxy origin. On a valid query token the proxy sets the
@@ -80,6 +86,13 @@ type ProxyConfig struct {
 // workspace/session call worth observing and is forwarded untouched.
 const maxScopeBodyBytes = 16 << 20 // 16 MiB
 
+// upstreamRelayCookieTimeout caps the relay mint on the proxied-request
+// hot path (Director). The exchange has its own client timeout
+// (auth.go); this tighter cap keeps a wedged upstream from stalling a
+// browser request — on timeout the request proceeds WITHOUT the relay
+// cookie and the upstream 401 + SPA retry recovers.
+const upstreamRelayCookieTimeout = 3 * time.Second
+
 // ProxyStarterFn returns the ProxyStarter implementation for this
 // driver: it starts the per-instance listener (bound per Driver.Proxy)
 // once the upstream listening address is known (called by
@@ -107,6 +120,28 @@ func startProxyListener(h *Handle, cfg ProxyConfig, upstreamHost, upstreamPort s
 		cfg:          cfg,
 		tracker:      tracker,
 		h:            h,
+		// The SINGLE shared relay, built by pumpAndWatch from the
+		// ready-line token (driver.go) — never construct a second one
+		// here, or the 12 h mint cache would split and the exchange
+		// would hit the per-request hot path twice.
+		auth:   h.upstreamAuthRelay(),
+		logger: logger,
+	}
+	h.mu.Lock()
+	remoteCapable := h.blob.RemoteCapable
+	h.mu.Unlock()
+	if cfg.RequireToken && remoteCapable {
+		ph.bridge = newMuxBridge(net.JoinHostPort(upstreamHost, upstreamPort), ph.auth, logger)
+	}
+	// Best-effort pre-mint so the first proxied request does not pay
+	// the token-exchange latency. Warn-only: a failed Prime leaves the
+	// cache empty and the Director retries per request.
+	if ph.auth != nil && ph.auth.Enabled() {
+		go func() {
+			if err := ph.auth.Prime(context.Background()); err != nil && logger != nil {
+				logger.Printf("dsh-web instance %s: upstream auth prime: %v (proxied requests will retry the exchange)", h.instanceID, err)
+			}
+		}()
 	}
 	srv := &http.Server{
 		Handler:           ph,
@@ -150,6 +185,20 @@ type proxyHandler struct {
 	cfg          ProxyConfig
 	tracker      *ScopeTracker
 	h            *Handle
+	// auth is the shared upstream auth relay owned by the Handle
+	// (driver.go). nil on legacy upstreams built outside Spawn (tests);
+	// every use is nil-guarded and Enabled()-gated.
+	auth   *upstreamAuth
+	logger *log.Logger // nil-safe via logf (tests pass none)
+	bridge *muxBridge
+}
+
+// logf is the nil-safe proxy logger (tests construct proxyHandler
+// without one).
+func (p *proxyHandler) logf(format string, args ...any) {
+	if p.logger != nil {
+		p.logger.Printf(format, args...)
+	}
 }
 
 func (p *proxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -176,6 +225,21 @@ func (p *proxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, u.RequestURI(), http.StatusFound)
 		return
 	}
+	if p.bridge != nil && r.Method == http.MethodGet && r.URL.Path == "/__mw/dsh-bridge.js" {
+		body, err := bridgeAssets.ReadFile("static/dsh-bridge.js")
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "bridge shim unavailable"})
+			return
+		}
+		w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-cache")
+		_, _ = w.Write(body)
+		return
+	}
+	if p.bridge != nil && r.URL.Path == "/api/remote.mux" && r.URL.Query().Get("mwbridge") == "1" {
+		p.bridge.ServeHTTP(w, r)
+		return
+	}
 
 	// Scope observation (record-only): the SPA's RPC calls are
 	// application/json POSTs under /api; anything else (assets, WS
@@ -197,55 +261,81 @@ func (p *proxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// The /api trust fence keys on Host: it must name the upstream
 		// loopback authority, or the fence 403s.
 		req.Host = target.Host
+		if p.bridge != nil && req.Method == http.MethodGet && (req.URL.Path == "/" || req.URL.Path == "/index.html") {
+			req.Header.Set("Accept-Encoding", "identity")
+		}
 		// Never forward myworktree's auth query (?token=...) upstream:
 		// it is a credential leak to the dsh subprocess. authq is the
 		// single shared stripping path for every proxy.
 		req.URL.RawQuery = authq.StripToken(req.URL.RawQuery)
-		// Same for the mw_token cookie: checkToken syncs it onto the
-		// PROXY origin so same-origin SPA requests authenticate, but the
-		// dsh subprocess has no auth layer and may log it — strip just
-		// that cookie, keep any others the SPA itself set (other cookies
-		// ride the same header and must survive).
+		// Same for cookies: mw_token is synced onto the PROXY origin by
+		// checkToken so same-origin SPA requests authenticate, but the
+		// dsh subprocess must never see it — strip it, keep any others
+		// the SPA itself set (other cookies ride the same header and
+		// must survive). Additionally strip any browser-sent dsh-auth-*:
+		// upstream credentials come ONLY from the relay below — a
+		// browser-carried one is stale at best, forged at worst.
+		filtered := ""
 		if cookieHdrs := req.Header.Values("Cookie"); len(cookieHdrs) > 0 {
 			kept := make([]string, 0, len(cookieHdrs))
 			for _, hdr := range cookieHdrs {
-				filtered := make([]string, 0, 4)
+				parts := make([]string, 0, 4)
 				for _, part := range strings.Split(hdr, ";") {
 					name, _, _ := strings.Cut(strings.TrimSpace(part), "=")
-					if strings.EqualFold(name, "mw_token") {
+					if strings.EqualFold(name, "mw_token") || strings.HasPrefix(name, "dsh-auth-") {
 						continue
 					}
-					filtered = append(filtered, part)
+					parts = append(parts, part)
 				}
-				if len(filtered) > 0 {
-					kept = append(kept, strings.Join(filtered, "; "))
+				if len(parts) > 0 {
+					kept = append(kept, strings.Join(parts, "; "))
 				}
 			}
-			if len(kept) > 0 {
-				req.Header.Set("Cookie", strings.Join(kept, "; "))
-			} else {
-				req.Header.Del("Cookie")
+			filtered = strings.Join(kept, "; ")
+		}
+		// Upstream browser-auth relay (auth.go): the proxy is the
+		// credential holder — mint/cache the dsh-auth-* pair and append
+		// it after whatever browser cookies survived the filter. A mint
+		// failure is NOT fatal: forward without the cookie and let the
+		// upstream 401 + SPA retry recover (the 12 h cache keeps the
+		// exchange off the hot path).
+		if p.auth != nil && p.auth.Enabled() {
+			mintCtx, cancel := context.WithTimeout(r.Context(), upstreamRelayCookieTimeout)
+			pair, terr := p.auth.Cookie(mintCtx)
+			cancel()
+			if terr != nil {
+				p.logf("dsh-web instance %s: upstream auth relay: %v (forwarding without cookie; upstream 401 + SPA retry recovers)", p.instanceID, terr)
+			} else if pair != "" {
+				if filtered == "" {
+					filtered = pair
+				} else {
+					filtered += "; " + pair
+				}
 			}
+		}
+		if filtered == "" {
+			req.Header.Del("Cookie")
+		} else {
+			req.Header.Set("Cookie", filtered)
 		}
 		// The fence rejects an Origin that differs from the (rewritten)
 		// Host; the browser's Origin names the PROXY origin, so it must
 		// go. Absent Origin is fine.
 		req.Header.Del("Origin")
+		// Referer likewise: after the token-strip 302 the browser's
+		// same-origin follow-ups carry
+		// `Referer: http://<proxy>/?token=<mw_token>` — the full URL of
+		// the first navigation, credential included. The dsh subprocess
+		// must never see it (same leak class as ?token= and mw_token).
+		req.Header.Del("Referer")
 	}
 
-	// session.create carries the new session id in its response VALUE
-	// ({sessionId, agentPreset?} — upstream sessionCreateValueSchema),
-	// not the request body. Tee the (tiny) response so the id lands in
-	// the session watch's own-attribution (sessionwatch.go).
-	if r.Method == http.MethodPost && r.URL.Path == "/api/session.create" {
-		proxy.ModifyResponse = func(resp *http.Response) error {
-			resp.Body = &sessionCreateBody{
-				ReadCloser: resp.Body,
-				mark:       p.h.markOwnSession,
-			}
-			return nil
-		}
-	}
+	// THE response chain — always installed, steps run in order and
+	// each no-ops when its precondition does not hold (modifyResponse):
+	// 401 invalidation, upstream Set-Cookie stripping, session.create
+	// tee, and HTML shim injection. New response-side behavior composes
+	// by appending a guarded step there.
+	proxy.ModifyResponse = p.modifyResponse
 
 	proxy.ErrorHandler = func(w http.ResponseWriter, req *http.Request, err error) {
 		// httputil.ReverseProxy only calls ErrorHandler before headers
@@ -265,6 +355,87 @@ func (p *proxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	proxy.ServeHTTP(&headerTrackRW{ResponseWriter: w}, r)
+}
+
+// modifyResponse is the reverse proxy's single ordered response chain.
+// Every step is guarded and no-ops when its precondition does not hold,
+// so new steps compose by appending here.
+func (p *proxyHandler) modifyResponse(resp *http.Response) error {
+	// (1) The upstream rejected the relayed cookie (secret rotation,
+	// restart, expiry): drop the cached dsh-auth-* so the NEXT request
+	// re-mints. Nil-safe; Invalidate no-ops on a disabled (legacy)
+	// relay.
+	if resp.StatusCode == http.StatusUnauthorized && p.auth != nil {
+		p.auth.Invalidate()
+	}
+	// (2) The browser must never carry upstream credentials: strip any
+	// upstream-planted dsh-auth-* Set-Cookie (defense in depth — the
+	// token exchange answer itself is never proxied).
+	stripUpstreamAuthSetCookies(resp.Header)
+	// (3) session.create carries the new session id in its response
+	// VALUE ({sessionId, agentPreset?} — upstream
+	// sessionCreateValueSchema), not the request body. Tee the (tiny)
+	// response so the id lands in the session watch's own-attribution
+	// (sessionwatch.go).
+	if req := resp.Request; req != nil && req.Method == http.MethodPost && req.URL.Path == "/api/session.create" {
+		resp.Body = &sessionCreateBody{
+			ReadCloser: resp.Body,
+			mark:       p.h.markOwnSession,
+		}
+	}
+	if p.bridge == nil || resp.StatusCode != http.StatusOK || resp.Request == nil ||
+		resp.Request.Method != http.MethodGet ||
+		(resp.Request.URL.Path != "/" && resp.Request.URL.Path != "/index.html") ||
+		!strings.Contains(strings.ToLower(resp.Header.Get("Content-Type")), "text/html") {
+		return nil
+	}
+	if encoding := resp.Header.Get("Content-Encoding"); encoding != "" && !strings.EqualFold(encoding, "identity") {
+		p.logf("dsh-web instance %s: refusing bridge shim injection into encoded HTML response (%s)", p.instanceID, encoding)
+		return nil
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, (2<<20)+1))
+	if err != nil {
+		return fmt.Errorf("read HTML for bridge injection: %w", err)
+	}
+	_ = resp.Body.Close()
+	if len(body) > 2<<20 {
+		return fmt.Errorf("HTML for bridge injection exceeds 2 MiB")
+	}
+	const script = `<script src="/__mw/dsh-bridge.js"></script>`
+	lower := strings.ToLower(string(body))
+	if index := strings.Index(lower, "</head>"); index >= 0 {
+		body = append(append(append([]byte{}, body[:index]...), script...), body[index:]...)
+	} else {
+		body = append([]byte(script), body...)
+	}
+	resp.Header.Del("Content-Length")
+	resp.ContentLength = -1
+	resp.Body = io.NopCloser(bytes.NewReader(body))
+	return nil
+}
+
+// stripUpstreamAuthSetCookies drops Set-Cookie headers whose cookie
+// name carries the upstream browser-auth prefix (auth.go); other
+// Set-Cookie headers pass through untouched.
+func stripUpstreamAuthSetCookies(hdr http.Header) {
+	vals := hdr.Values("Set-Cookie")
+	if len(vals) == 0 {
+		return
+	}
+	kept := make([]string, 0, len(vals))
+	for _, v := range vals {
+		pair, _, _ := strings.Cut(v, ";")
+		name, _, _ := strings.Cut(strings.TrimSpace(pair), "=")
+		if strings.HasPrefix(name, "dsh-auth-") {
+			continue
+		}
+		kept = append(kept, v)
+	}
+	if len(kept) == 0 {
+		hdr.Del("Set-Cookie")
+		return
+	}
+	hdr["Set-Cookie"] = kept
 }
 
 // headerTrackRW records whether the response headers have been written

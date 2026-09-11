@@ -18,14 +18,18 @@
 //     response carries foreign_active_sessions (shared-pool sessions
 //     actively written by another dsh process — opening them can
 //     corrupt their log, dsh single-writer boundary) and the bar warns
-//     about those too. Priority: remote-unavailable > remote-auth-missing
+//     about those too. Priority: remote-incapable > remote-auth-missing
 //     > restriction effectiveness (version/overlay) > foreign active
 //     sessions > out-of-scope.
 //   - Remote access (issue #72): the SPA syncs its session/workspace
-//     lists over WebSocket, which fails on remote networks, so a remote
-//     page gets an English warning bar ABOVE the iframe and the whole
-//     frame area is masked (gray overlay, _updateRemoteMask) — the embed
-//     is unusable remotely and the mask makes that explicit.
+//     lists over WebSocket, which fails on remote networks for dsh
+//     without the remote bridge. Instances whose dsh reports
+//     remote_capable (>= min_remote_version) carry the bridge, so
+//     issue #72 is solved for them and they render unmasked remotely.
+//     Only a remote-incapable dsh (remote_capable === false) gets the
+//     English warning bar ABOVE the iframe and the whole frame area
+//     masked (gray overlay, _updateRemoteMask) — the embed is unusable
+//     remotely and the mask makes that explicit.
 //   - Advisory warnings: version_supported=false (dsh outside the
 //     supported range) or overlay_verified=false (the restrict overlay
 //     rows were not confirmed by the spawn-time --dump-config check)
@@ -253,11 +257,20 @@ class DshWebRenderer {
                         if (frame) {
                             const src = this._tokenizeIframeSrc(data.iframe_src);
                             this._versionUnsupported = !!(data.version && !data.version_supported);
+                            // Remote-capability is also only meaningful
+                            // once the blob carried a version (pre-ready
+                            // polls return the zero value). Re-recorded
+                            // every tick, so a dsh upgraded mid-session
+                            // flips this on the next poll.
+                            this._remoteIncapable = !!(data.version && data.remote_capable === false);
+                            this._remoteMinVersion = data.min_remote_version || '0.1.5';
+                            this._dshVersion = data.version || '';
                             // overlay_verified is only meaningful once the
                             // blob carried a version (pre-ready polls return
                             // the zero value).
                             this._overlayIneffective = !!(data.version && data.overlay_verified === false);
                             this._refreshWarning(document.getElementById('dsh-scope-warning'));
+                            this._updateRemoteMask(dshPanel);
                             if (frame.dataset.instance !== id || frame.dataset.src !== src) {
                                 frame.dataset.instance = id;
                                 frame.dataset.src = src;
@@ -335,27 +348,31 @@ class DshWebRenderer {
 
     // ---- remote-access mask ----
 
-    _remoteUnavailableMessage() {
-        return 'Remote access is not available for dsh-web instances: ' +
-            'session and workspace sync cannot work over remote networks. ' +
-            'Please use it from the local 127.0.0.1 environment.';
+    _remoteIncapableMessage() {
+        const min = this._remoteMinVersion || '0.1.5';
+        const version = this._dshVersion || 'an older dsh';
+        return 'Remote access requires dsh ≥ ' + min + ': this instance runs dsh ' +
+            version + '. Restart it with an upgraded dsh, or open the local ' +
+            '127.0.0.1 page instead.';
     }
 
-    // Issue #72: remote pages cannot sync the SPA's session/workspace
-    // lists (its WebSocket connection fails on remote networks), so the
-    // whole frame area is covered with a gray mask that also blocks
-    // interaction. Local pages never see the mask.
+    // Issue #72: dsh without the remote bridge cannot sync the SPA's
+    // session/workspace lists (its WebSocket connection fails on remote
+    // networks), so for those instances the whole frame area is covered
+    // with a gray mask that also blocks interaction. Remote-capable
+    // instances carry the bridge and render unmasked remotely; local
+    // pages never see the mask.
     _updateRemoteMask(dshPanel) {
         const frames = dshPanel && dshPanel.querySelector('#dsh-frames');
         if (!frames) return;
         let mask = frames.querySelector('#dsh-remote-mask');
-        if (window.isRemoteAccess()) {
+        if (window.isRemoteAccess() && this._remoteIncapable) {
             if (!mask) {
                 mask = document.createElement('div');
                 mask.id = 'dsh-remote-mask';
                 const card = document.createElement('div');
                 card.className = 'dsh-remote-mask-card';
-                card.textContent = '⚠ ' + this._remoteUnavailableMessage();
+                card.textContent = '⚠ ' + this._remoteIncapableMessage();
                 mask.appendChild(card);
                 frames.appendChild(mask);
             }
@@ -396,6 +413,7 @@ class DshWebRenderer {
         this._scopeAbort = null;
         this._versionUnsupported = false;
         this._overlayIneffective = false;
+        this._remoteIncapable = false;
         this._scope = 'in-scope';
         this._scopeDir = '';
         this._remoteAuthMissing = false;
@@ -404,15 +422,17 @@ class DshWebRenderer {
 
     _refreshWarning(dshWarning) {
         if (!dshWarning) return;
-        // 0. Remote access (issue #72) — the SPA cannot sync its
-        //    session/workspace lists over remote networks (WebSocket
-        //    upgrade dies), so the embed is unusable; the frame area is
-        //    masked (see _updateRemoteMask). Highest priority: every
-        //    other warning is moot while this one applies.
-        if (window.isRemoteAccess()) {
+        // 0. Remote access (issue #72) — dsh without the remote bridge
+        //    cannot sync the SPA's session/workspace lists over remote
+        //    networks (WebSocket upgrade dies), so the embed is unusable
+        //    for those instances; the frame area is masked (see
+        //    _updateRemoteMask). Remote-capable instances carry the
+        //    bridge and are fine. Highest priority: every other warning
+        //    is moot while this one applies.
+        if (window.isRemoteAccess() && this._remoteIncapable) {
             dshWarning.hidden = false;
             dshWarning.classList.add('dsh-warning-danger');
-            dshWarning.textContent = '⚠ ' + this._remoteUnavailableMessage();
+            dshWarning.textContent = '⚠ ' + this._remoteIncapableMessage();
             return;
         }
         // 1. Remote auth missing — the iframe cannot load at all

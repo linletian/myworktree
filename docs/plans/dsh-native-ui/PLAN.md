@@ -57,7 +57,7 @@
 
 - **硬门**（reasonix 先例，issue #45）：预检 `dsh --version`，解析 x.y.z 核心（容忍 `-rc.x` 后缀），核心 < `0.1.0` → fail-fast 可读错误；解析失败（dev 构建）→ 记日志放行。
 - **advisory** 支持区间 `[0.1.0, 0.2.0)`（核心）：覆盖 restrict overlay 行 id / WS 路径 / 就绪行格式漂移风险 → blob `version_supported` 供前端常驻警告。
-- npx pin 常量 `0.1.0-rc.6`（与真机验证版本一致，见 §实施踩坑补充；`dsh --version` 输出原始版本串）。
+- npx pin 常量 `0.1.5-rc.1`（与真机验证版本一致，见 §实施踩坑补充；`dsh --version` 输出原始版本串）。
 
 ---
 
@@ -247,5 +247,6 @@ FEASIBILITY §3 的 10 条之外，真机联调又踩到 4 个（均已修复并
 
 - 不 fork / 不改 dsh 源码；不做 sessions 按 worktree 重定向（丢终端互通）；不做整份 DSH_HOME 隔离（丢历史 + symlink 教训）
 - 不做 iframe 内 DOM 注入/隐藏（dsh 的跨 worktree 入口由 overlay 官方机制处理——停组合器 + 不挂 client 表面，无需 DOM 手术；置灰占位 client plugin 为可选增强，推迟）
+  - ⚠️ **已被推翻（2026-09-10，经用户批准）**：iframe 内注入成为远程支持的核心特性——shim 只是向上游 index.html 注入一个确定的 `<script>` 标签（非正则改写 dsh JS），WS↔SSE 桥是远程支持（LAN/Tailnet）的唯一路径。详见 `.omo/plans/dsh-remote-support.md` 与 `REMOTE-WS-BREAKAGE.md` §10（分支 feature/dsh-remote-support）。
 - 不引入新 Go 第三方依赖
 - 旧布局/旧版本 dsh（< 0.1.0）不支持（硬门）
