@@ -117,3 +117,8 @@ ssh -L 41143:127.0.0.1:41143 -L <PROXY_PORT>:127.0.0.1:<PROXY_PORT> 服务器
 | 2026-08-16 | 方案 B：实例卡片显示代理端口与 ssh 隧道命令 | ⏳ 待决策 |
 | 2026-08-16 | 方案 C：网络侧排查（超出 mw 范围，仅记录） | ⏳ 待决策（不阻塞 mw 侧） |
 | 2026-08-16 | 未决问题 1：定位触发拦截的具体网络环节 | ⏳ 待用户侧在 iframe 上下文复测 |
+| 2026-09-10 | 方案 A 采纳并实现：代理侧统一 `/api/remote.mux` WS↔SSE 桥（SSE 下行 + POST 上行，帧级透传）+ shim 注入（native WS 优先，1000 ms 超时后透明回退桥；仅替换 mux 路径的 `window.WebSocket`） | ✅ 已实现（分支 feature/dsh-remote-support） |
+| 2026-09-10 | 「前端拦截」被版本门取代：Start Instance 对话框探测 `GET /api/dsh/capability`，dsh 版本不足（< 0.1.5）时禁用远程 Start 并显示英文"版本过低"提示；实例视图的远程遮罩仅在 `remote_capable === false` 时显示 | ✅ 已实现（supersede 2026-08-16 前端拦截） |
+| 2026-09-10 | 兼容驱动确认：上游 dsh ≥ 0.1.2 的浏览器会话认证（launch token → 代理注入 `dsh-auth-*` cookie）由每实例反代中转，浏览器不可见 dsh 凭据 | ✅ 已确认 |
+| 2026-09-10 | PLAN「dsh 不做 iframe 内注入」决策被推翻（经用户批准：注入为一个确定的 `<script>` 标签，非正则改写 dsh JS；桥是远程支持的唯一路径） | ✅ 已推翻，见 `.omo/plans/dsh-remote-support.md` |
+| 2026-09-10 | 版本下限落地：远程需 dsh ≥ 0.1.5（`minRemoteVersion`），npx pin 升至 0.1.5-rc.1；loopback 对所有 0.1.x 继续可用 | ✅ 已落地 |

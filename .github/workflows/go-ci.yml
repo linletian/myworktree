@@ -46,6 +46,12 @@ jobs:
       - name: Run tests
         run: go test ./...
 
+      # Race detector scoped to this PR's concurrent code (WS mux + dsh-web
+      # bridge/proxy); the wider suite is intentionally not race-enabled —
+      # pre-existing unrelated races would turn CI red.
+      - name: Run tests with race detector (ws + dsh_web)
+        run: go test -race -count=1 ./internal/ws/ ./internal/instance/dsh_web/
+
       # Reasonix upstream contract check (opt-in, see
       # internal/instance/reasonix/contract_test.go): runners without a
       # reasonix binary skip it (green); once a binary is installed on the

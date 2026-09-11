@@ -60,7 +60,7 @@ func (d *Driver) bootstrap(ctx context.Context, h *Handle) {
 	}
 	base := "http://" + net.JoinHostPort(host, port)
 
-	if wsID, ok := d.createWorkspace(ctx, base, h.cwd); ok {
+	if wsID, ok := d.createWorkspace(ctx, h, base, h.cwd); ok {
 		h.mu.Lock()
 		changed := h.blob.WorkspaceID != wsID
 		h.blob.WorkspaceID = wsID
@@ -73,20 +73,20 @@ func (d *Driver) bootstrap(ctx context.Context, h *Handle) {
 		}
 	}
 	if bootstrapCreateSession {
-		d.createSession(ctx, base, h.cwd)
+		d.createSession(ctx, h, base, h.cwd)
 	}
 }
 
 // createWorkspace adopts the worktree path and returns the workspace
 // id from the response value ({workspace: {workspaceId, …}, created}).
-func (d *Driver) createWorkspace(ctx context.Context, base, worktree string) (string, bool) {
+func (d *Driver) createWorkspace(ctx context.Context, h *Handle, base, worktree string) (string, bool) {
 	payload := map[string]string{"path": worktree}
 	var value struct {
 		Workspace struct {
 			WorkspaceID string `json:"workspaceId"`
 		} `json:"workspace"`
 	}
-	if err := d.callRPC(ctx, base, "workspace.create", payload, &value); err != nil {
+	if err := d.callRPC(ctx, h, base, "workspace.create", payload, &value); err != nil {
 		d.logf("dsh: workspace bootstrap failed (warn-only): %v", err)
 		return "", false
 	}
@@ -99,12 +99,12 @@ func (d *Driver) createWorkspace(ctx context.Context, base, worktree string) (st
 // session watch (value shape {sessionId} — upstream
 // sessionCreateValueSchema), so the preseed never trips the
 // foreign-activity advisory.
-func (d *Driver) createSession(ctx context.Context, base, worktree string) {
+func (d *Driver) createSession(ctx context.Context, h *Handle, base, worktree string) {
 	payload := map[string]string{"cwd": worktree}
 	var value struct {
 		SessionID string `json:"sessionId"`
 	}
-	if err := d.callRPC(ctx, base, "session.create", payload, &value); err != nil {
+	if err := d.callRPC(ctx, h, base, "session.create", payload, &value); err != nil {
 		d.logf("dsh: session preseed failed (warn-only): %v", err)
 		return
 	}
@@ -121,7 +121,7 @@ func (d *Driver) createSession(ctx context.Context, base, worktree string) {
 // `method` field must equal the endpoint (rpcFetchHandler: "method …
 // does not match endpoint"); posting the envelope to bare /api returns
 // 404 "not found". Content-Type must be application/json.
-func (d *Driver) callRPC(ctx context.Context, base, method string, payload any, value any) error {
+func (d *Driver) callRPC(ctx context.Context, h *Handle, base, method string, payload any, value any) error {
 	env, err := json.Marshal(map[string]any{
 		"type":    "client-request",
 		"rpcId":   "mw-" + method,
@@ -131,6 +131,13 @@ func (d *Driver) callRPC(ctx context.Context, base, method string, payload any, 
 	if err != nil {
 		return err
 	}
+
+	// The SHARED upstream browser-auth relay from the Handle — the same
+	// instance the reverse proxy uses (driver.go write-once discipline
+	// orders this read after the ready line). Never construct a fresh
+	// one here: mints and 401 invalidations must be shared with the
+	// proxy. nil on Handles built outside Spawn (tests) → legacy path.
+	auth := h.upstreamAuthRelay()
 
 	var lastErr error
 	for attempt := 0; attempt < bootstrapAttempts; attempt++ {
@@ -148,6 +155,18 @@ func (d *Driver) callRPC(ctx context.Context, base, method string, payload any, 
 			return err
 		}
 		req.Header.Set("Content-Type", "application/json")
+		// Relay the minted dsh-auth-* cookie when the upstream gates
+		// browser auth. A mint failure is NOT fatal: send without the
+		// cookie and let the upstream 401 path exercise (Invalidate →
+		// the retry loop re-mints).
+		if auth != nil && auth.Enabled() {
+			pair, terr := auth.Cookie(reqCtx)
+			if terr != nil {
+				d.logf("dsh: %s upstream auth relay: %v (retrying without cookie; upstream 401 re-mints)", method, terr)
+			} else if pair != "" {
+				req.Header.Set("Cookie", pair)
+			}
+		}
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
 			cancel()
@@ -160,6 +179,12 @@ func (d *Driver) callRPC(ctx context.Context, base, method string, payload any, 
 		if readErr != nil {
 			lastErr = readErr
 			continue
+		}
+		// The upstream rejected the relayed cookie (secret rotation,
+		// restart, expiry): drop the shared relay's cache so the NEXT
+		// attempt re-mints. Invalidate no-ops on a disabled relay.
+		if resp.StatusCode == http.StatusUnauthorized && auth != nil {
+			auth.Invalidate()
 		}
 		if resp.StatusCode != http.StatusOK {
 			lastErr = fmt.Errorf("dsh: %s returned %d: %s", method, resp.StatusCode, truncate(string(body), 300))

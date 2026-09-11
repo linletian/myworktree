@@ -34,6 +34,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -82,6 +83,11 @@ type Blob struct {
 	// against. Advisory — the instance still starts either way.
 	Version          string `json:"version,omitempty"`
 	VersionSupported bool   `json:"version_supported,omitempty"`
+
+	// RemoteCapable reports whether the dsh core version satisfies the
+	// remote-access floor (isRemoteCapable). Drives the frontend's
+	// remote-mode affordances.
+	RemoteCapable bool `json:"remote_capable"`
 
 	// OverlayVerified is the L2 check result: the spawn-time
 	// --dump-config run confirmed the restrict overlay rows are
@@ -157,9 +163,19 @@ type Handle struct {
 	// state for this instance.
 	exited chan struct{}
 
-	mu         sync.Mutex
-	host       string
-	port       string
+	mu    sync.Mutex
+	host  string
+	port  string
+	token string // upstream browser-auth token; CREDENTIAL — never serialized into Blob, never logged
+	// auth is the SINGLE upstream auth relay (auth.go) shared with the
+	// reverse proxy (proxy.go). Write-once: pumpAndWatch assigns it in
+	// the same critical section as host/port/token, BEFORE
+	// h.ready.Close(), and never mutates it afterwards. Readers go
+	// through upstreamAuthRelay() — callers gated on
+	// <-h.ready.Channel() (bootstrap.go) are ordered after the write by
+	// the ready close (write-once, read-after-ready); the lock makes
+	// the discipline race-free for every other call timing.
+	auth       *upstreamAuth
 	proxyHost  string
 	proxyPort  string
 	proxyClose func() // idempotent (proxyOnce)
@@ -175,6 +191,17 @@ type Handle struct {
 	blob      Blob
 	failCount atomic.Int32
 	publisher atomic.Pointer[framework.Publisher]
+}
+
+// upstreamAuthRelay returns the shared upstream auth relay built by
+// pumpAndWatch from the ready-line token (auth.go). Never nil for a
+// Spawn-ed instance once the ready line was parsed; nil only on Handles
+// constructed outside Spawn (tests). The relay itself is safe for
+// concurrent use; the lock here guards the write-once assignment.
+func (h *Handle) upstreamAuthRelay() *upstreamAuth {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.auth
 }
 
 // markOwnSession reports a session id driven by THIS instance to the
@@ -225,9 +252,11 @@ func (d *Driver) Spawn(ctx context.Context, params framework.SpawnParams) (frame
 	// and fail fast below 0.1.0.
 	var version string
 	versionSupported := true
+	remoteCapable := false
 	if killGroup {
 		version = NpxPin
 		versionSupported = isSupportedVersion(NpxPin)
+		remoteCapable = isRemoteCapable(NpxPin)
 	} else {
 		got, gerr := d.probeAndGate(exe)
 		if gerr != nil {
@@ -235,6 +264,7 @@ func (d *Driver) Spawn(ctx context.Context, params framework.SpawnParams) (frame
 		}
 		version = got
 		versionSupported = isSupportedVersion(got)
+		remoteCapable = isRemoteCapable(got)
 	}
 
 	// Restrict overlay: per-worktree storages root (registry isolation)
@@ -319,6 +349,7 @@ func (d *Driver) Spawn(ctx context.Context, params framework.SpawnParams) (frame
 			WorktreeAbs:      params.WorktreePath,
 			Version:          version,
 			VersionSupported: versionSupported,
+			RemoteCapable:    remoteCapable,
 			OverlayVerified:  overlayVerified,
 		},
 	}
@@ -468,19 +499,12 @@ func buildEnv(tagEnv map[string]string) []string {
 	return out
 }
 
-// probeAndGate runs `bin --version`, applies the hard gate, and
-// returns the parsed core version ("" for unparseable output — a dev
-// build is logged and tolerated, matching the reasonix gate). Passes
-// are memoized per binary path so repeated instance starts do not
-// re-probe; failures re-probe every time.
-func (d *Driver) probeAndGate(bin string) (string, error) {
-	d.verMu.Lock()
-	if v, ok := d.verMemo[bin]; ok {
-		d.verMu.Unlock()
-		return v, nil
-	}
-	d.verMu.Unlock()
-
+// probeVersion runs `bin --version` and returns the parsed core
+// version ("" for unparseable output — a dev build is logged and
+// tolerated, matching the reasonix gate). FRESH every call: nothing is
+// memoized here, so a binary upgraded in place (the install flow) is
+// seen immediately.
+func (d *Driver) probeVersion(bin string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), versionProbeTimeout)
 	defer cancel()
 	out, err := exec.CommandContext(ctx, bin, "--version").Output()
@@ -492,6 +516,36 @@ func (d *Driver) probeAndGate(bin string) (string, error) {
 		d.logf("could not parse dsh version from %q; continuing without version gate", strings.TrimSpace(string(out)))
 		return "", nil
 	}
+	return got, nil
+}
+
+// probeAndGate is the spawn-time gate: a fresh probe plus the hard
+// floor, memoized per binary path so repeated instance starts do not
+// re-probe; failures re-probe every time. The memo goes STALE when the
+// binary is upgraded in place (install flow) until daemon restart —
+// fine for the spawn gate, wrong for the UI-facing capability report
+// (ProbeCapability uses probeVersion directly for that reason).
+//
+// Known memo tradeoff: an in-place DOWNGRADE below the hard floor after
+// a successful probe would bypass this gate on instance restart until
+// daemon restart, because the memoized version still passes. Accepted
+// pre-existing behavior; ProbeCapability deliberately bypasses the memo.
+
+func (d *Driver) probeAndGate(bin string) (string, error) {
+	d.verMu.Lock()
+	if v, ok := d.verMemo[bin]; ok {
+		d.verMu.Unlock()
+		return v, nil
+	}
+	d.verMu.Unlock()
+
+	got, err := d.probeVersion(bin)
+	if err != nil {
+		return "", err
+	}
+	if got == "" {
+		return "", nil // dev build: tolerated, and NOT memoized — re-probe each start
+	}
 	if !hardVersionOK(got) {
 		return "", fmt.Errorf("dsh: version %s installed, but dsh >= %s required (the embedded web UI relies on --port 0, --patch and the web profile rows); upgrade @deepseek-ai/dsh or use the pinned npx launch (%s)", got, minVersion, NpxPin)
 	}
@@ -502,6 +556,73 @@ func (d *Driver) probeAndGate(bin string) (string, error) {
 	d.verMemo[bin] = got
 	d.verMu.Unlock()
 	return got, nil
+}
+
+// Capability is the dsh toolchain report for a worktree: what the
+// /api/dsh/capability endpoint serves so the frontend knows whether
+// remote mode can be offered BEFORE any instance is spawned.
+type Capability struct {
+	Mode             string // persisted launch mode: path | npx | install
+	Version          string // probed core version ("" = unparseable dev build)
+	RemoteCapable    bool   // Version satisfies the remote-access floor
+	MinRemoteVersion string // the floor itself (RemoteMinVersion)
+	Missing          bool   // no launchable dsh (resolution or probe failed)
+	NpmAvailable     bool   // npm CLI on PATH (the install-now affordance)
+	SuggestedPin     string // npx pin to suggest when dsh is missing
+}
+
+// ProbeCapability resolves the worktree's persisted launch mode and
+// reports the dsh capability without spawning anything. Path/install
+// modes get a FRESH probe (probeVersion, bypassing verMemo): this is a
+// UI-driven, infrequent call, and the spawn gate's memo would otherwise
+// keep reporting the pre-upgrade version until daemon restart after an
+// install-flow upgrade. The report is advisory — the hard gate stays
+// OUT of this path, so a dsh below minVersion reports its Version with
+// RemoteCapable=false (Missing is reserved for resolution/exec
+// failures, which drive the three-way dialog); the UI decides. npx mode
+// needs no probe — the pin is exact.
+func (d *Driver) ProbeCapability(worktreePath string) Capability {
+	cfg, err := readLaunch(d.DataDir, worktreePath)
+	if err != nil {
+		d.logf("dsh: capability probe: %v; assuming default launch mode", err)
+		cfg = launchConfig{Mode: launchPath}
+	}
+	capab := Capability{
+		Mode:             string(cfg.Mode),
+		MinRemoteVersion: RemoteMinVersion(),
+	}
+	// Every Missing report carries the dialog facts (npm availability +
+	// suggested pin) uniformly: an unlaunchable dsh — unresolved OR
+	// failing to execute its version probe — drives the same three-way
+	// dialog. A dsh that probes fine but sits below a floor is NOT
+	// missing: its Version is reported and the floors are advisory.
+	missing := func() Capability {
+		capab.Missing = true
+		capab.NpmAvailable = NpmAvailable()
+		capab.SuggestedPin = NpxPin
+		return capab
+	}
+	exe, _, _, err := resolveLaunch(d.DshBin, cfg)
+	if err != nil {
+		var nf *ErrDshNotFound
+		if !errors.As(err, &nf) {
+			d.logf("dsh: capability probe: resolve launch: %v", err)
+		}
+		return missing()
+	}
+	if cfg.Mode == launchNpx {
+		capab.Version = NpxPin
+		capab.RemoteCapable = isRemoteCapable(NpxPin)
+		return capab
+	}
+	got, err := d.probeVersion(exe)
+	if err != nil {
+		d.logf("dsh: capability probe: %v", err)
+		return missing()
+	}
+	capab.Version = got
+	capab.RemoteCapable = isRemoteCapable(got)
+	return capab
 }
 
 // verifyOverlay runs the boot-free config dump with our overlay and
@@ -535,15 +656,20 @@ func (h *Handle) closeProxy() {
 	})
 }
 
-var listeningAddrRe = regexp.MustCompile(`dsh web: http://([^:\s]+):(\d+)`)
+var listeningAddrRe = regexp.MustCompile(`dsh web: http://([^:\s]+):(\d+)(?:/\?token=([^\s]+))?`)
 
-func extractListeningAddress(line string) (host, port string, ok bool) {
+// extractListeningAddress parses the ready line. dsh >=0.1.2 appends
+// a per-session browser-auth token to the loopback URL
+// (`dsh web: http://127.0.0.1:PORT/?token=<base64url>`, optionally
+// followed by a ` (LAN: <url>)` suffix the unanchored match ignores);
+// legacy dsh prints the bare URL and token is "".
+func extractListeningAddress(line string) (host, port, token string, ok bool) {
 	clean := stripANSI(line)
 	m := listeningAddrRe.FindStringSubmatch(clean)
-	if len(m) != 3 {
-		return "", "", false
+	if len(m) != 4 {
+		return "", "", "", false
 	}
-	return m[1], m[2], true
+	return m[1], m[2], m[3], true
 }
 
 var ansiRe = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
@@ -581,18 +707,39 @@ func (d *Driver) pumpAndWatch(ctx context.Context, h *Handle, r io.Reader) {
 		if ctx.Err() != nil {
 			return
 		}
-		line := redact.Text(sc.Text())
+		// Parse the RAW line, never a redacted one: redact.Text rewrites
+		// `\bsk-[A-Za-z0-9_-]{16,}\b` to sk-REDACTED, and a launch token
+		// starting with literal "sk-" (base64url can produce it) matches
+		// that pattern after "token=" — redacting first would
+		// permanently corrupt the mint for this instance. The line is
+		// NOT logged anywhere in this loop, so no redacted form is
+		// needed here at all.
+		line := sc.Text()
 
-		host, port, ok := extractListeningAddress(line)
+		host, port, token, ok := extractListeningAddress(line)
 		if !ok {
 			continue
 		}
 
 		h.mu.Lock()
-		h.host, h.port = host, port
+		h.host, h.port, h.token = host, port, token
+		// The shared upstream auth relay (auth.go) — write-once here,
+		// in the same critical section as host/port/token, BEFORE
+		// h.ready.Close(); never mutated afterwards. See the auth field
+		// doc for the read discipline.
+		h.auth = newUpstreamAuth(token, net.JoinHostPort(host, port))
 		h.blob.Host, h.blob.Port = host, port
-		if d.ProxyStarter != nil {
-			ph, pp, closeFn, perr := d.ProxyStarter(h, host, port)
+		starter := d.ProxyStarter
+		h.mu.Unlock()
+
+		// The starter runs OUTSIDE h.mu: startProxyListener reads the
+		// relay back via h.upstreamAuthRelay(), which takes the lock —
+		// invoking it under the held mutex would self-deadlock. The
+		// results are written back under h.mu, keeping the same
+		// lock discipline for proxyHost/proxyPort/proxyClose/blob.
+		if starter != nil {
+			ph, pp, closeFn, perr := starter(h, host, port)
+			h.mu.Lock()
 			if perr != nil {
 				d.logf("instance %s: start reverse proxy: %v (instance runs proxy-less)", h.instanceID, perr)
 			} else {
@@ -610,7 +757,9 @@ func (d *Driver) pumpAndWatch(ctx context.Context, h *Handle, r io.Reader) {
 				}
 				h.blob.IframeURL = scheme + "://" + ph + ":" + pp + "/"
 			}
+			h.mu.Unlock()
 		}
+		h.mu.Lock()
 		blob, err := json.Marshal(h.blob)
 		h.mu.Unlock()
 		if err == nil {
@@ -719,8 +868,9 @@ func (h *Handle) markProxyDead(reason string) {
 	}
 }
 
-// probeHealth checks the SPA index: GET / always answers 200 when the
-// server is up (the /api trust fence does not gate static assets).
+// probeHealth checks the SPA index: GET / answers 200 on legacy dsh
+// and 401 on dsh >=0.1.2 (browser auth gates even the index) — both
+// mean the server is up.
 func probeHealth(ctx context.Context, host, port string) bool {
 	addr := "http://" + host + ":" + port + "/"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, addr, nil)
@@ -733,7 +883,7 @@ func probeHealth(ctx context.Context, host, port string) bool {
 		return false
 	}
 	defer resp.Body.Close()
-	return resp.StatusCode < 400
+	return resp.StatusCode < 400 || resp.StatusCode == http.StatusUnauthorized
 }
 
 func mustHandle(h framework.Handle) *Handle {

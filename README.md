@@ -34,7 +34,7 @@ macOS and Linux · `~/.local/bin` · no `sudo` · see [Install (full reference)]
 - **Hot config reload** — `mw config regen` rotates the auth token and reapplies settings without restarting the daemon.
 - **File preview & diff in the Changes panel** — click any changed or untracked file for a line-numbered, diff-aware preview.
 - **Reasonix web-chat instances** — tick one box to run `reasonix serve` in a worktree, with its web chat UI embedded in the same sidebar.
-- **dsh web instances** — embed the DeepSeek Harness browser UI as a managed instance (per-worktree workspace registry, shared session pool, out-of-scope warning; see `docs/plans/dsh-native-ui/`).
+- **dsh web instances** — embed the DeepSeek Harness browser UI as a managed instance (per-worktree workspace registry, shared session pool, out-of-scope warning; see `docs/plans/dsh-native-ui/`). Remote access (LAN/Tailnet) is supported for dsh ≥ 0.1.5 via a WS↔SSE bridge on the per-instance proxy (`/api/remote.mux`) plus an injected connection shim; loopback access works for all 0.1.x.
 - **Branch divergence badge** — see at a glance when a branch is ahead of or behind its upstream, with scheduled refresh.
 
 ## Background & pain points
@@ -93,7 +93,7 @@ PATH is auto-appended to `~/.zshrc` / `~/.bashrc` (open a new shell to pick it u
 Pin a version, change the install location, or skip PATH modification:
 
 ```bash
-curl -fsSL .../install.sh | bash -s -- -v v0.4.3         # pin a version
+curl -fsSL .../install.sh | bash -s -- -v v0.5.0         # pin a version
 INSTALL_ALIAS=mwt bash install.sh                          # avoid the Debian/Ubuntu `mw` clash
 INSTALL_DIR=~/bin bash install.sh                          # install elsewhere
 curl -fsSL .../install.sh | bash -s -- --no-modify-path    # do not touch rc files
@@ -118,17 +118,17 @@ Example:
 ```bash
 # Pick the archive that matches your platform, then verify and unpack it.
 # macOS Apple Silicon:
-curl -LO https://github.com/linletian/myworktree/releases/download/v0.4.3/myworktree_v0.4.3_macOS_arm64.tar.gz
+curl -LO https://github.com/linletian/myworktree/releases/download/v0.5.0/myworktree_v0.5.0_macOS_arm64.tar.gz
 # macOS Intel (replace arch in the filename):
-#   curl -LO .../myworktree_v0.4.3_macOS_amd64.tar.gz
+#   curl -LO .../myworktree_v0.5.0_macOS_amd64.tar.gz
 # Linux amd64:
-#   curl -LO .../myworktree_v0.4.3_Linux_amd64.tar.gz
+#   curl -LO .../myworktree_v0.5.0_Linux_amd64.tar.gz
 # Linux arm64:
-#   curl -LO .../myworktree_v0.4.3_Linux_arm64.tar.gz
+#   curl -LO .../myworktree_v0.5.0_Linux_arm64.tar.gz
 
-curl -LO https://github.com/linletian/myworktree/releases/download/v0.4.3/checksums.txt
+curl -LO https://github.com/linletian/myworktree/releases/download/v0.5.0/checksums.txt
 shasum -a 256 -c checksums.txt --ignore-missing
-tar -xzf myworktree_v0.4.3_macOS_arm64.tar.gz
+tar -xzf myworktree_v0.5.0_macOS_arm64.tar.gz
 
 # Optional: install into PATH
 sudo install -m 755 ./mw /usr/local/bin/mw
@@ -147,7 +147,7 @@ mw --version
 > Or open **System Settings → Privacy & Security** and click "Allow Anyway" for the
 > blocked binaries.
 
-Start from `v0.4.3` or newer for public release binaries. The earlier `v0.1.0` GitHub Release assets were withdrawn after post-release validation uncovered severe terminal interaction issues, and `v0.4.3` is the current recommended public release.
+Start from `v0.5.0` or newer for public release binaries. The earlier `v0.1.0` GitHub Release assets were withdrawn after post-release validation uncovered severe terminal interaction issues, and `v0.5.0` is the current recommended public release.
 
 Each release archive contains `mw`, `myworktree`, `README.md`, `LICENSE`, and `CHANGELOG.md`.
 If you need a platform we do not publish, follow the source build steps below.
@@ -356,6 +356,10 @@ Reasonix instances run `reasonix serve` **without** a `REASONIX_HOME` override, 
 Consequence to be aware of: if your shell exports a custom `REASONIX_HOME` (e.g. `~/.custom-reasonix`), a terminal-run `reasonix` uses that custom home while myworktree instances use the default `~/.reasonix` — the two will **not** see each other's history. This is deliberate. To point an instance at a custom home, set `REASONIX_HOME` via the instance tag's `env` (applied after stripping).
 
 Instance lifecycle never touches the shared session pool: Start / Stop / Restart / Delete only manage the `serve` subprocess and its management files (`token`/`port`/`pid`/`serve.log` in the instance state dir). Sessions live in `~/.reasonix/projects/<cwd-slug>/sessions`, so restarting an instance opens a **fresh** session (no `--resume`) while your history stays available in the sidebar.
+
+### dsh-web remote access (dsh ≥ 0.1.5)
+
+Remote (LAN/Tailnet) access to dsh-web instances is no longer blocked for remote-capable dsh: the per-instance reverse proxy serves a WS↔SSE bridge at `/api/remote.mux` (SSE downlink + POST uplink, frame-level), and a small shim (one `<script>` tag injected into the upstream `index.html` when remote mode + remote-capable) replaces `window.WebSocket` for the mux URLs only — native WebSocket first, transparent fallback to the bridge after a 1000 ms probe timeout. On network paths that silently drop WebSocket upgrades this probe adds up to ~1 s to the initial connection before the bridge takes over. The Start Instance dialog probes `GET /api/dsh/capability` and disables remote Start with a version-too-low message when dsh is below 0.1.5 (`minRemoteVersion`); loopback access keeps working for all 0.1.x. Separately, dsh ≥ 0.1.2's browser-session auth (launch token → `dsh-auth-*` cookie) is relayed by the per-instance proxy, so the browser never sees dsh credentials.
 
 ### dsh-web sessions are snapshot-only across processes (upstream dsh issue)
 
