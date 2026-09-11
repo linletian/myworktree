@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -129,6 +130,64 @@ func TestProbeCapabilityBelowHardFloorIsAdvisory(t *testing.T) {
 	}
 	if c.Version != "0.0.9" || c.RemoteCapable {
 		t.Errorf("Version/RemoteCapable = %q/%v, want 0.0.9/false", c.Version, c.RemoteCapable)
+	}
+}
+
+// Given a dsh binary that EXISTS but whose `--version` exec fails (exits
+// 1), When ProbeCapability runs, Then the report is Missing=true — the
+// resolution/probe failure path, NOT a version: an unexecutable dsh
+// drives the same three-way dialog as an absent one.
+func TestProbeCapabilityVersionExecFailureIsMissing(t *testing.T) {
+	dir := t.TempDir()
+	wt := t.TempDir()
+	bin := filepath.Join(t.TempDir(), "dsh")
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	d := &Driver{DataDir: dir, DshBin: bin}
+	c := d.ProbeCapability(wt)
+	if !c.Missing {
+		t.Fatalf("Missing = false, want true (the --version probe failed); capability = %+v", c)
+	}
+	if c.Version != "" {
+		t.Errorf("Version = %q, want empty on a probe failure", c.Version)
+	}
+	if c.RemoteCapable {
+		t.Error("RemoteCapable = true, want false when missing")
+	}
+	if c.SuggestedPin != NpxPin {
+		t.Errorf("SuggestedPin = %q, want %s", c.SuggestedPin, NpxPin)
+	}
+}
+
+// Given a worktree whose persisted launch mode is npx and NO dsh binary
+// present, When ProbeCapability runs, Then the report is the exact pin:
+// Version == NpxPin and RemoteCapable == true — npx mode needs no probe
+// because the pin is exact.
+func TestProbeCapabilityNpxModeReportsPin(t *testing.T) {
+	if _, err := exec.LookPath("npx"); err != nil {
+		t.Skip("npx not on PATH")
+	}
+	dir := t.TempDir()
+	wt := t.TempDir()
+	if err := writeLaunch(dir, wt, launchConfig{Mode: launchNpx}); err != nil {
+		t.Fatal(err)
+	}
+
+	d := &Driver{DataDir: dir, DshBin: filepath.Join(t.TempDir(), "no-such-dsh")}
+	c := d.ProbeCapability(wt)
+	if c.Missing {
+		t.Fatalf("Missing = true, want false for npx mode (no probe needed); capability = %+v", c)
+	}
+	if c.Mode != "npx" {
+		t.Errorf("Mode = %q, want npx", c.Mode)
+	}
+	if c.Version != NpxPin {
+		t.Errorf("Version = %q, want the exact pin %s", c.Version, NpxPin)
+	}
+	if !c.RemoteCapable {
+		t.Error("RemoteCapable = false, want true (the pin satisfies the remote floor)")
 	}
 }
 

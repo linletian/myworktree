@@ -213,7 +213,7 @@ func TestDshWebRemoteEndToEnd(t *testing.T) {
 	}
 
 	// The WS<->SSE bridge through the proxy: GET opens the SSE downlink
-	// (retry line first, then the open event once the upstream WS is
+	// (the open event is the FIRST frame, sent once the upstream WS is
 	// dialed), POST uplinks a frame, the echo comes back as SSE data.
 	// Everything is bounded by ONE context deadline — never a sleep.
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -233,7 +233,6 @@ func TestDshWebRemoteEndToEnd(t *testing.T) {
 	}
 	reader := bufio.NewReader(sseResp.Body)
 	var seen []string
-	awaitSSELine(t, reader, &seen, "retry: 300000")
 	awaitSSELine(t, reader, &seen, "event: open")
 
 	upReq, _ := http.NewRequestWithContext(ctx, http.MethodPost, bridgeURL, strings.NewReader("hello"))

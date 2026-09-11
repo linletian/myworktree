@@ -172,6 +172,39 @@ test("rejected POST does not wedge the send queue", async () => {
   assert.deepEqual(fetchCalls.map((c) => c.init.body), ["one", "two"]);
 });
 
+// Given an open bridge whose previous send's POST rejected (the send
+// chain's anti-wedge catch kept the queue resolved), When close() runs,
+// Then the close POST is still issued and the close event dispatches
+// exactly once — a wedged queue must not swallow the terminal teardown.
+test("close() after a rejected send still POSTs close, dispatches close exactly once", async () => {
+  let failNext = true;
+  const { MW, fetchCalls } = loadShim({
+    timeoutMs: 20,
+    fetchImpl: () => (failNext ? ((failNext = false), Promise.reject(new Error("boom"))) : okFetch()),
+  });
+  const ws = new MW(MUX);
+  const closes = [];
+  ws.addEventListener("close", (e) => closes.push(e));
+  await sleep(60);
+  const es = StubEventSource.instances[0];
+  es.fire("open", new StubMessageEvent("open", { data: "{}" }));
+  ws.send("one"); // its POST rejects; the queue must not stay wedged
+  ws.close(1000, "bye");
+  await ws.queue;
+  assert.equal(fetchCalls.length, 2);
+  assert.equal(fetchCalls[0].init.body, "one");
+  assert.equal(fetchCalls[1].url, `/api/remote.mux?mwbridge=1&conn=${CONN}&close=1`);
+  assert.equal(fetchCalls[1].init.method, "POST");
+  assert.equal(closes.length, 1);
+  assert.equal(closes[0].code, 1000);
+  assert.equal(closes[0].reason, "bye");
+  assert.equal(ws.readyState, 3);
+  assert.equal(es.closed, true);
+  ws.close(); // already CLOSED: no second close POST, no second event
+  assert.equal(fetchCalls.length, 2);
+  assert.equal(closes.length, 1);
+});
+
 // Given an open bridge, When the EventSource fires an error, Then the shim
 // closes with code 1006 exactly once and closes the EventSource (no
 // in-place SSE reconnect; dsh's ConnectionController redials instead).

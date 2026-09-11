@@ -87,7 +87,12 @@ func (b *muxBridge) serveDownlink(w http.ResponseWriter, r *http.Request, connID
 	if err != nil {
 		return
 	}
-	if _, err = rw.WriteString("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\n\r\nretry: 300000\n\n"); err != nil {
+	// No `retry:` preamble: the shim's terminal-teardown semantics (any
+	// EventSource error -> close -> es.close()) mean the browser retry
+	// interval never fires, so the line would be dead weight that
+	// contradicts those semantics. The first frame is `event: open`,
+	// written after the upstream WS is dialed and the conn registered.
+	if _, err = rw.WriteString("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\n\r\n"); err != nil {
 		_ = downstream.Close()
 		return
 	}

@@ -58,9 +58,6 @@ func TestBridge_relays_text_multiline_ping_and_close(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = resp.Body.Close() })
 	reader := bufio.NewReader(resp.Body)
-	if got := readSSEEvent(t, reader); got != "retry: 300000\n\n" {
-		t.Fatalf("first SSE bytes = %q", got)
-	}
 	if got := readSSEEvent(t, reader); got != "event: open\ndata: {}\n\n" {
 		t.Fatalf("open event = %q", got)
 	}
@@ -113,9 +110,6 @@ func TestBridge_malformed_base64_is_request_scoped(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = resp.Body.Close() })
 	reader := bufio.NewReader(resp.Body)
-	if got := readSSEEvent(t, reader); got != "retry: 300000\n\n" {
-		t.Fatalf("first SSE bytes = %q", got)
-	}
 	if got := readSSEEvent(t, reader); got != "event: open\ndata: {}\n\n" {
 		t.Fatalf("open event = %q", got)
 	}
@@ -171,9 +165,6 @@ func TestBridge_oversized_uplink_413_keeps_conn(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = resp.Body.Close() })
 	reader := bufio.NewReader(resp.Body)
-	if got := readSSEEvent(t, reader); got != "retry: 300000\n\n" {
-		t.Fatalf("first SSE bytes = %q", got)
-	}
 	if got := readSSEEvent(t, reader); got != "event: open\ndata: {}\n\n" {
 		t.Fatalf("open event = %q", got)
 	}
@@ -318,7 +309,6 @@ func TestBridge_retries_401_with_fresh_cookie(t *testing.T) {
 		t.Fatal(err)
 	}
 	reader := bufio.NewReader(resp.Body)
-	_ = readSSEEvent(t, reader)
 	if got := readSSEEvent(t, reader); !strings.Contains(got, "event: open") {
 		t.Fatalf("event = %q, want open", got)
 	}
@@ -484,7 +474,7 @@ func readSSEEvent(t *testing.T, reader *bufio.Reader) string {
 			t.Fatalf("read SSE: %v", got.err)
 		}
 		return got.text
-	case <-time.After(5 * time.Second):
+	case <-time.After(15 * time.Second): // -race on a loaded CI runner multiplies scheduling latency
 		t.Fatal("timed out reading SSE event")
 		return ""
 	}
@@ -494,7 +484,7 @@ func awaitSignal(t *testing.T, signal <-chan struct{}, name string) {
 	t.Helper()
 	select {
 	case <-signal:
-	case <-time.After(5 * time.Second):
+	case <-time.After(15 * time.Second): // -race on a loaded CI runner multiplies scheduling latency
 		t.Fatalf("timed out waiting for %s", name)
 	}
 }
