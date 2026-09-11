@@ -525,6 +525,12 @@ func (d *Driver) probeVersion(bin string) (string, error) {
 // binary is upgraded in place (install flow) until daemon restart —
 // fine for the spawn gate, wrong for the UI-facing capability report
 // (ProbeCapability uses probeVersion directly for that reason).
+//
+// Known memo tradeoff: an in-place DOWNGRADE below the hard floor after
+// a successful probe would bypass this gate on instance restart until
+// daemon restart, because the memoized version still passes. Accepted
+// pre-existing behavior; ProbeCapability deliberately bypasses the memo.
+
 func (d *Driver) probeAndGate(bin string) (string, error) {
 	d.verMu.Lock()
 	if v, ok := d.verMemo[bin]; ok {

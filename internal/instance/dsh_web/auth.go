@@ -44,6 +44,12 @@ const invalidateThrottle = 5 * time.Second
 // Nothing is persisted to disk, and neither the token nor the minted
 // cookie value is ever logged — exchange failures surface only as
 // wrapped errors for the caller to report.
+//
+// Loopback trust premise: the exchange puts the launch token in a URL
+// query on the loopback interface. A local process that squats the
+// upstream port after a dsh crash could theoretically receive it; that
+// is accepted under the loopback trust model (same-host processes are
+// already trusted), not defended against here.
 type upstreamAuth struct {
 	token     string
 	authority string

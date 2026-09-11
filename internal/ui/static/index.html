@@ -3064,6 +3064,13 @@
                 // dsh >= min_remote_version for remote networks (issue #72).
                 if (tabName === 'dsh-web' && isRemoteAccess()) {
                     const cap = await fetchDshCapability();
+                    // Probe failure first: a failed request carries no
+                    // version, so the version-too-low alert below would
+                    // wrongly tell the user to upgrade dsh.
+                    if (cap._error) {
+                        alert('Could not check the dsh version for remote access (request failed); remote Start is disabled. Retry, or use dsh from the local 127.0.0.1 environment.');
+                        return;
+                    }
                     if (!cap.remote_capable) {
                         alert('dsh-web remote access requires dsh ≥ ' + (cap.min_remote_version || '0.1.5') + (cap.version ? ' (found ' + cap.version + ')' : '') + '. Please upgrade dsh, or use it from the local 127.0.0.1 environment.');
                         return;

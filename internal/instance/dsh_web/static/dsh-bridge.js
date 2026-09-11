@@ -15,6 +15,10 @@
       this.url = target;
       this.protocol = "";
       this.extensions = "";
+      // binaryType is never propagated to the inner native socket, and
+      // the bridge path always delivers Uint8Array regardless. Harmless
+      // today because dsh's mux is JSON-text-only (verified upstream);
+      // revisit if dsh ever enables binary frames.
       this.binaryType = "blob";
       this.bufferedAmount = 0;
       this.readyState = MWWebSocket.CONNECTING;
