@@ -322,6 +322,12 @@ func (p *proxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// Host; the browser's Origin names the PROXY origin, so it must
 		// go. Absent Origin is fine.
 		req.Header.Del("Origin")
+		// Referer likewise: after the token-strip 302 the browser's
+		// same-origin follow-ups carry
+		// `Referer: http://<proxy>/?token=<mw_token>` — the full URL of
+		// the first navigation, credential included. The dsh subprocess
+		// must never see it (same leak class as ?token= and mw_token).
+		req.Header.Del("Referer")
 	}
 
 	// THE response chain — always installed, steps run in order and

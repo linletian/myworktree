@@ -24,6 +24,13 @@ const upstreamCookieFreshFor = 12 * time.Hour
 // upstream from wedging proxied requests.
 const upstreamAuthTimeout = 5 * time.Second
 
+// invalidateThrottle bounds how often Invalidate actually drops the
+// cached cookie: a client repeatedly eliciting upstream 401s would
+// otherwise force mutex-serialized re-mints on the proxied-request hot
+// path. Tradeoff: a genuine rotation WITHIN the window is not honored
+// immediately — recovery happens on the next 401 after the window.
+const invalidateThrottle = 5 * time.Second
+
 // upstreamAuth relays dsh's browser-session token exchange
 // (packages/client/connection/src/browser-auth.ts authorizeIndex) for
 // the reverse proxy: GET http://<authority>/?token=<token> answers 303
@@ -44,6 +51,9 @@ type upstreamAuth struct {
 	mu       sync.Mutex
 	cookie   string
 	mintedAt time.Time
+	// lastInvalidate backs the Invalidate throttle (see
+	// invalidateThrottle); zero means "never invalidated".
+	lastInvalidate time.Time
 
 	client *http.Client
 }
@@ -88,13 +98,19 @@ func (a *upstreamAuth) Cookie(ctx context.Context) (string, error) {
 
 // Invalidate drops the cached cookie; the next Cookie re-mints. Called
 // when the upstream answers 401 to a relayed cookie (secret rotation,
-// restart, expiry).
+// restart, expiry). Throttled: a drop less than invalidateThrottle
+// after the previous one is a no-op, so a client that keeps eliciting
+// 401s cannot force a re-mint per request.
 func (a *upstreamAuth) Invalidate() {
 	if !a.Enabled() {
 		return
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if time.Since(a.lastInvalidate) < invalidateThrottle {
+		return
+	}
+	a.lastInvalidate = time.Now()
 	a.cookie = ""
 	a.mintedAt = time.Time{}
 }

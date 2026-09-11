@@ -102,6 +102,34 @@ func TestUpstreamAuthInvalidateRemints(t *testing.T) {
 	}
 }
 
+// Given a minted cookie, When two 401-driven Invalidates arrive within
+// the throttle window, Then only ONE cache drop happens — the second
+// Cookie after the throttled Invalidate serves the cache instead of
+// re-minting, so a client spraying 401s cannot force a re-mint per
+// request.
+func TestUpstreamAuthInvalidateThrottled(t *testing.T) {
+	srv, requests := newAuthUpstream(t, mintHandler("secret", "dsh-auth-x=v1.a.b; Path=/"))
+	auth := newUpstreamAuth("secret", authorityOf(srv))
+
+	if _, err := auth.Cookie(context.Background()); err != nil {
+		t.Fatalf("Cookie: %v", err)
+	}
+	auth.Invalidate() // first drop: honored
+	if _, err := auth.Cookie(context.Background()); err != nil {
+		t.Fatalf("Cookie after first Invalidate: %v", err)
+	}
+	if n := requests.Load(); n != 2 {
+		t.Fatalf("upstream requests = %d, want 2 (re-mint after the honored drop)", n)
+	}
+	auth.Invalidate() // inside the window: throttled no-op
+	if _, err := auth.Cookie(context.Background()); err != nil {
+		t.Fatalf("Cookie after throttled Invalidate: %v", err)
+	}
+	if n := requests.Load(); n != 2 {
+		t.Fatalf("upstream requests = %d, want 2 (throttled Invalidate left the cache intact)", n)
+	}
+}
+
 // Given a legacy upstream (no launch token), When any method runs,
 // Then everything no-ops and the upstream is never contacted.
 func TestUpstreamAuthLegacyDisabled(t *testing.T) {

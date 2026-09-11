@@ -70,6 +70,8 @@ func TestIsRemoteCapable(t *testing.T) {
 		{"0.1.4", false},
 		{"0.1.5", true},
 		{"0.1.5-rc.1", true},
+		// deliberate: core-only floor, any 0.1.5-rc.N passes
+		{"0.1.5-rc.0", true},
 		{"0.1.10", true},
 		{"0.2.0", true}, // floor only; supported range is a separate advisory
 		{"", true},      // unknown tolerated

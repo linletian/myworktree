@@ -30,6 +30,13 @@ type Conn struct {
 	rw     *bufio.ReadWriter
 	mu     sync.Mutex
 	client bool
+	// Client-side continuation reassembly state (RFC 6455 §5.4): a
+	// fin=0 data frame opens a message whose payload accumulates in
+	// fragBuf until the fin=1 continuation; fragOp preserves the FIRST
+	// frame's opcode for the assembled message. Server conns (the tty
+	// path) never fragment and keep the strict rejection instead.
+	fragOp  byte
+	fragBuf []byte
 }
 
 func Upgrade(w http.ResponseWriter, r *http.Request) (*Conn, error) {
@@ -73,13 +80,19 @@ func Upgrade(w http.ResponseWriter, r *http.Request) (*Conn, error) {
 // a rejected upgrade with errors.Is and extract the status with errors.As.
 var ErrUpgradeRejected = errors.New("websocket upgrade rejected")
 
-// DialError reports a non-101 reply to a Dial handshake. Status carries the
-// HTTP status code so callers can distinguish e.g. a 401 auth-gate rejection.
+// DialError reports a failed Dial handshake. Status carries the HTTP
+// status code so callers can distinguish e.g. a 401 auth-gate
+// rejection. Detail is set when the failure is not the status itself
+// (a 101 reply with a bogus Sec-WebSocket-Accept).
 type DialError struct {
 	Status int
+	Detail string
 }
 
 func (e *DialError) Error() string {
+	if e.Detail != "" {
+		return fmt.Sprintf("websocket dial: %s (status %d)", e.Detail, e.Status)
+	}
 	return fmt.Sprintf("websocket dial: unexpected status %d %s", e.Status, http.StatusText(e.Status))
 }
 
@@ -106,12 +119,13 @@ func Dial(ctx context.Context, addr, path string, hdr http.Header) (*Conn, error
 	if _, err := rand.Read(key); err != nil {
 		return fail(err)
 	}
+	keyB64 := base64.StdEncoding.EncodeToString(key)
 	var sb strings.Builder
 	sb.WriteString("GET " + path + " HTTP/1.1\r\n")
 	sb.WriteString("Host: " + addr + "\r\n")
 	sb.WriteString("Upgrade: websocket\r\n")
 	sb.WriteString("Connection: Upgrade\r\n")
-	sb.WriteString("Sec-WebSocket-Key: " + base64.StdEncoding.EncodeToString(key) + "\r\n")
+	sb.WriteString("Sec-WebSocket-Key: " + keyB64 + "\r\n")
 	sb.WriteString("Sec-WebSocket-Version: 13\r\n")
 	for k, vs := range hdr {
 		for _, v := range vs {
@@ -134,33 +148,87 @@ func Dial(ctx context.Context, addr, path string, hdr http.Header) (*Conn, error
 	if resp.StatusCode != http.StatusSwitchingProtocols {
 		return fail(&DialError{Status: resp.StatusCode})
 	}
+	// RFC 6455 §4.2.2: the accept must be the keyed hash of OUR
+	// challenge — a 101 without it is not a WebSocket endpoint (a
+	// misbehaving intermediary can produce exactly that).
+	if got, want := resp.Header.Get("Sec-WebSocket-Accept"), wsAccept(keyB64); got != want {
+		return fail(&DialError{Status: resp.StatusCode, Detail: "bad Sec-WebSocket-Accept"})
+	}
 	_ = conn.SetDeadline(time.Time{})
 	return &Conn{Conn: conn, rw: rw, client: true}, nil
 }
 
+const maxMessageBytes = 10 * 1024 * 1024
+
 func (c *Conn) ReadMessage() (opcode byte, payload []byte, err error) {
+	for {
+		fin, op, pl, err := c.readFrame()
+		if err != nil {
+			return 0, nil, err
+		}
+		if !c.client {
+			// Server conns (the tty path) never fragment: keep the
+			// strict rejection.
+			if !fin {
+				return 0, nil, errors.New("fragmented websocket frames are not supported")
+			}
+			return op, pl, nil
+		}
+		// Control frames (ping/pong/close) may interleave inside a
+		// fragmented message (RFC 6455 §5.4) and are never fragmented
+		// themselves: return each as its own message immediately.
+		if op == opClose || op == opPing || op == opPong {
+			return op, pl, nil
+		}
+		if op == 0x0 { // continuation
+			if c.fragOp == 0 {
+				return 0, nil, errors.New("websocket continuation frame without an open message")
+			}
+			c.fragBuf = append(c.fragBuf, pl...)
+			if len(c.fragBuf) > maxMessageBytes {
+				return 0, nil, errors.New("websocket message too large")
+			}
+			if !fin {
+				continue
+			}
+			op, out := c.fragOp, c.fragBuf
+			c.fragOp, c.fragBuf = 0, nil
+			return op, out, nil
+		}
+		if c.fragOp != 0 {
+			return 0, nil, errors.New("websocket data frame before the final continuation")
+		}
+		if fin {
+			return op, pl, nil
+		}
+		c.fragOp = op
+		c.fragBuf = append(c.fragBuf, pl...)
+	}
+}
+
+func (c *Conn) readFrame() (fin bool, opcode byte, payload []byte, err error) {
 	h := make([]byte, 2)
 	if _, err = io.ReadFull(c.rw, h); err != nil {
-		return 0, nil, err
+		return false, 0, nil, err
 	}
-	fin := (h[0] & 0x80) != 0
+	fin = (h[0] & 0x80) != 0
 	opcode = h[0] & 0x0F
 	masked := (h[1] & 0x80) != 0
 	length := int64(h[1] & 0x7F)
 	if length == 126 {
 		ext := make([]byte, 2)
 		if _, err = io.ReadFull(c.rw, ext); err != nil {
-			return 0, nil, err
+			return false, 0, nil, err
 		}
 		length = int64(binary.BigEndian.Uint16(ext))
 	} else if length == 127 {
 		ext := make([]byte, 8)
 		if _, err = io.ReadFull(c.rw, ext); err != nil {
-			return 0, nil, err
+			return false, 0, nil, err
 		}
 		u := binary.BigEndian.Uint64(ext)
-		if u > 10*1024*1024 {
-			return 0, nil, errors.New("websocket frame too large")
+		if u > maxMessageBytes {
+			return false, 0, nil, errors.New("websocket frame too large")
 		}
 		length = int64(u)
 	}
@@ -168,24 +236,21 @@ func (c *Conn) ReadMessage() (opcode byte, payload []byte, err error) {
 	if masked {
 		mask = make([]byte, 4)
 		if _, err = io.ReadFull(c.rw, mask); err != nil {
-			return 0, nil, err
+			return false, 0, nil, err
 		}
 	} else if !c.client {
-		return 0, nil, errors.New("client websocket frame must be masked")
+		return false, 0, nil, errors.New("client websocket frame must be masked")
 	}
 	payload = make([]byte, length)
 	if _, err = io.ReadFull(c.rw, payload); err != nil {
-		return 0, nil, err
+		return false, 0, nil, err
 	}
 	if masked {
 		for i := range payload {
 			payload[i] ^= mask[i%4]
 		}
 	}
-	if !fin {
-		return 0, nil, errors.New("fragmented websocket frames are not supported")
-	}
-	return opcode, payload, nil
+	return fin, opcode, payload, nil
 }
 
 func (c *Conn) WriteText(p []byte) error   { return c.writeFrame(opText, p) }

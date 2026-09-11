@@ -29,12 +29,13 @@ func newProxyFixture(t *testing.T, cfg ProxyConfig, worktree string) (*proxyHand
 
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		echo := map[string]any{
-			"host":   r.Host,
-			"origin": r.Header.Get("Origin"),
-			"query":  r.URL.RawQuery,
-			"path":   r.URL.Path,
-			"token":  r.URL.Query().Get("token"),
-			"cookie": r.Header.Get("Cookie"),
+			"host":    r.Host,
+			"origin":  r.Header.Get("Origin"),
+			"referer": r.Header.Get("Referer"),
+			"query":   r.URL.RawQuery,
+			"path":    r.URL.Path,
+			"token":   r.URL.Query().Get("token"),
+			"cookie":  r.Header.Get("Cookie"),
 		}
 		if r.Method == http.MethodPost {
 			b, _ := io.ReadAll(r.Body)
@@ -212,6 +213,29 @@ func TestProxyStripsMwTokenCookieUpstream(t *testing.T) {
 	}
 }
 
+// TestProxyStripsRefererUpstream pins the Referer credential-leak fix:
+// after the token-strip 302, same-origin follow-ups carry
+// `Referer: http://<proxy>/?token=<mw_token>` — the Director must
+// delete the header so the dsh subprocess never sees the mw token.
+func TestProxyStripsRefererUpstream(t *testing.T) {
+	cfg := ProxyConfig{BindHost: "127.0.0.1", RequireToken: true, AuthToken: "sekret"}
+	ph, _, _, _ := newProxyFixture(t, cfg, "/wt")
+
+	req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:39999/api/some/path", nil)
+	req.RemoteAddr = "127.0.0.1:53123" // loopback: gate bypassed, request forwarded
+	req.Header.Set("Referer", "http://127.0.0.1:39999/?token=sekret")
+	rec := httptest.NewRecorder()
+	ph.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	var echo map[string]any
+	_ = json.NewDecoder(rec.Body).Decode(&echo)
+	if ref, _ := echo["referer"].(string); ref != "" {
+		t.Errorf("Referer leaked upstream: %q", ref)
+	}
+}
+
 func TestProxyScopeRecording(t *testing.T) {
 	ph, _, tracker, _ := newProxyFixture(t, ProxyConfig{BindHost: "127.0.0.1"}, "/wt")
 
@@ -291,6 +315,74 @@ func TestClassifyRPCBody(t *testing.T) {
 				t.Errorf("%s: state = %+v, want scope=%s dir=%s", c.name, st, c.want, c.dir)
 			}
 		}
+	}
+}
+
+// TestProxyBridgeGatedOnRemoteCapable pins the remote bridge gate:
+// with cfg.RequireToken=true but blob.RemoteCapable=false (a dsh
+// 0.1.2-0.1.4 shape — token-bearing but below the remote floor),
+// startProxyListener must NOT construct the bridge. The shim URL, the
+// bridge endpoint and HTML injection all belong to the bridge, so each
+// falls through to the upstream untouched.
+func TestProxyBridgeGatedOnRemoteCapable(t *testing.T) {
+	var mu sync.Mutex
+	seen := map[string]int{}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		seen[r.URL.Path]++
+		mu.Unlock()
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, "<html><head><title>x</title></head></html>")
+	}))
+	t.Cleanup(upstream.Close)
+	u, _, _ := net.SplitHostPort(strings.TrimPrefix(upstream.URL, "http://"))
+
+	// RequireToken=true but RemoteCapable zero-value false: no bridge.
+	h := &Handle{instanceID: "inst-1", cwd: "/wt"}
+	host, port, closeFn, err := startProxyListener(h, ProxyConfig{
+		BindHost:     "127.0.0.1",
+		RequireToken: true,
+		AuthToken:    "sekret",
+	}, u, portOf(t, upstream.URL), NewScopeTracker(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeFn()
+	base := "http://" + net.JoinHostPort(host, port)
+
+	// Loopback client: the token gate bypasses, so every request is
+	// forwarded — what matters is WHO answers.
+	resp, err := http.Get(base + "/__mw/dsh-bridge.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if strings.Contains(string(body), "MWWebSocket") {
+		t.Error("bridge shim served by mw despite RemoteCapable=false")
+	}
+	resp, err = http.Get(base + "/api/remote.mux?mwbridge=1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	resp, err = http.Get(base + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if strings.Contains(string(body), `<script src="/__mw/dsh-bridge.js"></script>`) {
+		t.Error("shim injected into HTML despite RemoteCapable=false")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if seen["/__mw/dsh-bridge.js"] != 1 {
+		t.Errorf("upstream saw /__mw/dsh-bridge.js %d times, want 1 (fell through)", seen["/__mw/dsh-bridge.js"])
+	}
+	if seen["/api/remote.mux"] != 1 {
+		t.Errorf("upstream saw /api/remote.mux %d times, want 1 (fell through)", seen["/api/remote.mux"])
 	}
 }
 

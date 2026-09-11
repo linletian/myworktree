@@ -18,12 +18,14 @@ import (
 //     verified against this range; outside it the frontend shows a
 //     persistent warning via Blob.VersionSupported=false.
 //   - Remote floor: a dsh whose core version is below minRemoteVersion
-//     predates the remote-access bridge. The WS<->SSE bridge and the
-//     auth relay exist only for dsh >= minRemoteVersion; an older dsh
-//     keeps its loopback-only behavior (no remote transport, no
-//     browser-session auth exchange), so the API layer must not offer
-//     remote mode for it. isRemoteCapable encodes this floor; it is
-//     independent of the advisory supported range above.
+//     predates the remote-access bridge. The floor gates ONLY the
+//     remote bridge/shim (the WS<->SSE bridge on the per-instance proxy
+//     plus the injected connection shim). The auth relay is separate:
+//     it is built for ANY token-bearing ready line (dsh >= 0.1.2) and
+//     serves loopback mode too, so an older dsh keeps its loopback-only
+//     behavior WITH browser-session auth relayed. isRemoteCapable
+//     encodes this floor; it is independent of the advisory supported
+//     range above.
 //   - NpxPin is the exact npm version pinned for npx-mode launches and
 //     surfaced as the suggested pin in the missing-dependency dialog.
 //     It is the version the whole integration was verified against
@@ -99,9 +101,10 @@ func hardVersionOK(v string) bool {
 }
 
 // isRemoteCapable reports whether core v supports the remote-access
-// bridge (WS<->SSE + auth relay). Empty is tolerated for the same
+// bridge (WS<->SSE + connection shim). Empty is tolerated for the same
 // dev-build reason as isSupportedVersion. Both "0.1.5" and
-// "0.1.5-rc.1" parse to the core "0.1.5", which meets the floor. An
+// "0.1.5-rc.N" parse to the core "0.1.5", which meets the floor —
+// deliberate: the floor is core-only, any 0.1.5-rc.N passes. An
 // unparseable version is tolerated (cannot be classified). This is a
 // floor only; the supported range is a separate advisory.
 func isRemoteCapable(v string) bool {

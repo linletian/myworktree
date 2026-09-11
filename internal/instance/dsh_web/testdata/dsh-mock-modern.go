@@ -149,7 +149,7 @@ func serve() {
 			return
 		}
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`<!doctype html><title>mock dsh (modern)</title>`))
+		_, _ = w.Write([]byte(`<!doctype html><html><head><title>mock dsh (modern)</title></head><body>mock</body></html>`))
 	})
 
 	sig := make(chan os.Signal, 1)

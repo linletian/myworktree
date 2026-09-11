@@ -465,6 +465,29 @@ func TestDshCapability(t *testing.T) {
 		t.Errorf("version/remote_capable = %v %v, want 0.1.0 false", resp["version"], resp["remote_capable"])
 	}
 
+	// Install-flow upgrade in place: the SAME binary path first reports
+	// 0.1.2, then 0.1.5-rc.1. The endpoint must answer the SECOND probe
+	// freshly — a memoized spawn-gate entry would keep reporting 0.1.2
+	// until daemon restart and the dialog would lie about the upgrade.
+	srv = newSrv(t)
+	bin := writeFakeDshBin(t, "0.1.2")
+	srv.dshDrv.DshBin = bin
+	w, resp = get(srv, "/api/dsh/capability?worktree=wt1")
+	if w.Code != http.StatusOK || resp["version"] != "0.1.2" || resp["remote_capable"] != false {
+		t.Fatalf("pre-upgrade = %d %v %v, want 200 0.1.2 false", w.Code, resp["version"], resp["remote_capable"])
+	}
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\necho '0.1.5-rc.1'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	w, resp = get(srv, "/api/dsh/capability?worktree=wt1")
+	if w.Code != http.StatusOK {
+		t.Fatalf("post-upgrade status = %d, want 200: %s", w.Code, w.Body.String())
+	}
+	if resp["version"] != "0.1.5" || resp["remote_capable"] != true {
+		t.Errorf("post-upgrade version/remote_capable = %v %v, want 0.1.5 true (fresh probe, not the memo)",
+			resp["version"], resp["remote_capable"])
+	}
+
 	// DshBin points nowhere: structured missing report, still 200 —
 	// the frontend needs npm_available + suggested_pin for the dialog.
 	srv = newSrv(t)

@@ -21,6 +21,11 @@ import (
 
 const maxBridgeBodyBytes = 4 << 20
 
+// bridgeWriteTimeout caps each SSE downlink write: a client that
+// stopped reading must not wedge pump/keepAlive on a blocking write
+// forever. A var (not const) so tests can shrink the 60 s default.
+var bridgeWriteTimeout = 60 * time.Second
+
 var bridgeConnPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{8,64}$`)
 
 //go:embed static/dsh-bridge.js
@@ -177,9 +182,17 @@ func (b *muxBridge) serveUplink(w http.ResponseWriter, r *http.Request, connID s
 		writeJSON(w, http.StatusAccepted, map[string]string{})
 		return
 	}
-	body, err := io.ReadAll(io.LimitReader(r.Body, maxBridgeBodyBytes))
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxBridgeBodyBytes+1))
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid bridge body"})
+		return
+	}
+	if len(body) > maxBridgeBodyBytes {
+		// Request-scoped rejection, like the malformed-base64 case: the
+		// conn stays open so smaller follow-ups still relay. Without the
+		// cap+1 read an oversized body would be silently truncated and
+		// forwarded as a corrupt WS frame.
+		writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "bridge body too large"})
 		return
 	}
 	if r.URL.Query().Get("bin") == "1" {
@@ -254,6 +267,10 @@ func (c *bridgeConn) keepAlive(done <-chan struct{}) {
 func (c *bridgeConn) writeSSE(event string) error {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
+	// Bounded writes: every caller (pump, keepAlive, serveDownlink)
+	// already flows a write error/timeout into conn.close(), so a dead
+	// or stalled reader tears the conn down instead of leaking it.
+	_ = c.downstream.SetWriteDeadline(time.Now().Add(bridgeWriteTimeout))
 	_, err := io.WriteString(c.downstream, event)
 	return err
 }

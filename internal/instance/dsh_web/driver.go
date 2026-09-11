@@ -499,19 +499,12 @@ func buildEnv(tagEnv map[string]string) []string {
 	return out
 }
 
-// probeAndGate runs `bin --version`, applies the hard gate, and
-// returns the parsed core version ("" for unparseable output — a dev
-// build is logged and tolerated, matching the reasonix gate). Passes
-// are memoized per binary path so repeated instance starts do not
-// re-probe; failures re-probe every time.
-func (d *Driver) probeAndGate(bin string) (string, error) {
-	d.verMu.Lock()
-	if v, ok := d.verMemo[bin]; ok {
-		d.verMu.Unlock()
-		return v, nil
-	}
-	d.verMu.Unlock()
-
+// probeVersion runs `bin --version` and returns the parsed core
+// version ("" for unparseable output — a dev build is logged and
+// tolerated, matching the reasonix gate). FRESH every call: nothing is
+// memoized here, so a binary upgraded in place (the install flow) is
+// seen immediately.
+func (d *Driver) probeVersion(bin string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), versionProbeTimeout)
 	defer cancel()
 	out, err := exec.CommandContext(ctx, bin, "--version").Output()
@@ -522,6 +515,30 @@ func (d *Driver) probeAndGate(bin string) (string, error) {
 	if !ok {
 		d.logf("could not parse dsh version from %q; continuing without version gate", strings.TrimSpace(string(out)))
 		return "", nil
+	}
+	return got, nil
+}
+
+// probeAndGate is the spawn-time gate: a fresh probe plus the hard
+// floor, memoized per binary path so repeated instance starts do not
+// re-probe; failures re-probe every time. The memo goes STALE when the
+// binary is upgraded in place (install flow) until daemon restart —
+// fine for the spawn gate, wrong for the UI-facing capability report
+// (ProbeCapability uses probeVersion directly for that reason).
+func (d *Driver) probeAndGate(bin string) (string, error) {
+	d.verMu.Lock()
+	if v, ok := d.verMemo[bin]; ok {
+		d.verMu.Unlock()
+		return v, nil
+	}
+	d.verMu.Unlock()
+
+	got, err := d.probeVersion(bin)
+	if err != nil {
+		return "", err
+	}
+	if got == "" {
+		return "", nil // dev build: tolerated, and NOT memoized — re-probe each start
 	}
 	if !hardVersionOK(got) {
 		return "", fmt.Errorf("dsh: version %s installed, but dsh >= %s required (the embedded web UI relies on --port 0, --patch and the web profile rows); upgrade @deepseek-ai/dsh or use the pinned npx launch (%s)", got, minVersion, NpxPin)
@@ -550,8 +567,14 @@ type Capability struct {
 
 // ProbeCapability resolves the worktree's persisted launch mode and
 // reports the dsh capability without spawning anything. Path/install
-// modes reuse the memoized spawn-time probe (a binary the gate already
-// passed costs nothing); npx mode needs no probe — the pin is exact.
+// modes get a FRESH probe (probeVersion, bypassing verMemo): this is a
+// UI-driven, infrequent call, and the spawn gate's memo would otherwise
+// keep reporting the pre-upgrade version until daemon restart after an
+// install-flow upgrade. The report is advisory — the hard gate stays
+// OUT of this path, so a dsh below minVersion reports its Version with
+// RemoteCapable=false (Missing is reserved for resolution/exec
+// failures, which drive the three-way dialog); the UI decides. npx mode
+// needs no probe — the pin is exact.
 func (d *Driver) ProbeCapability(worktreePath string) Capability {
 	cfg, err := readLaunch(d.DataDir, worktreePath)
 	if err != nil {
@@ -564,7 +587,9 @@ func (d *Driver) ProbeCapability(worktreePath string) Capability {
 	}
 	// Every Missing report carries the dialog facts (npm availability +
 	// suggested pin) uniformly: an unlaunchable dsh — unresolved OR
-	// failing its version probe — drives the same three-way dialog.
+	// failing to execute its version probe — drives the same three-way
+	// dialog. A dsh that probes fine but sits below a floor is NOT
+	// missing: its Version is reported and the floors are advisory.
 	missing := func() Capability {
 		capab.Missing = true
 		capab.NpmAvailable = NpmAvailable()
@@ -584,7 +609,7 @@ func (d *Driver) ProbeCapability(worktreePath string) Capability {
 		capab.RemoteCapable = isRemoteCapable(NpxPin)
 		return capab
 	}
-	got, err := d.probeAndGate(exe)
+	got, err := d.probeVersion(exe)
 	if err != nil {
 		d.logf("dsh: capability probe: %v", err)
 		return missing()
@@ -676,7 +701,14 @@ func (d *Driver) pumpAndWatch(ctx context.Context, h *Handle, r io.Reader) {
 		if ctx.Err() != nil {
 			return
 		}
-		line := redact.Text(sc.Text())
+		// Parse the RAW line, never a redacted one: redact.Text rewrites
+		// `\bsk-[A-Za-z0-9_-]{16,}\b` to sk-REDACTED, and a launch token
+		// starting with literal "sk-" (base64url can produce it) matches
+		// that pattern after "token=" — redacting first would
+		// permanently corrupt the mint for this instance. The line is
+		// NOT logged anywhere in this loop, so no redacted form is
+		// needed here at all.
+		line := sc.Text()
 
 		host, port, token, ok := extractListeningAddress(line)
 		if !ok {

@@ -150,6 +150,87 @@ func TestBridge_malformed_base64_is_request_scoped(t *testing.T) {
 	}
 }
 
+// Given a live bridge conn, When an uplink body exceeds
+// maxBridgeBodyBytes, Then the answer is 413 and nothing is forwarded —
+// and the conn stays open: a subsequent valid uplink still echoes.
+func TestBridge_oversized_uplink_413_keeps_conn(t *testing.T) {
+	upstream, _, _ := newBridgeUpstream(t)
+	bridge := newMuxBridge(authorityOf(upstream), nil, nil)
+	server := httptest.NewServer(bridge)
+	t.Cleanup(server.Close)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, server.URL+"/api/remote.mux?mwbridge=1&conn=oversize12345678", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := server.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = resp.Body.Close() })
+	reader := bufio.NewReader(resp.Body)
+	if got := readSSEEvent(t, reader); got != "retry: 300000\n\n" {
+		t.Fatalf("first SSE bytes = %q", got)
+	}
+	if got := readSSEEvent(t, reader); got != "event: open\ndata: {}\n\n" {
+		t.Fatalf("open event = %q", got)
+	}
+	if got := readSSEEvent(t, reader); got != "data: upstream\n\n" {
+		t.Fatalf("upstream event = %q", got)
+	}
+
+	big, err := http.Post(server.URL+"/api/remote.mux?mwbridge=1&conn=oversize12345678",
+		"text/plain", strings.NewReader(strings.Repeat("x", maxBridgeBodyBytes+1)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(big.Body)
+	_ = big.Body.Close()
+	if big.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversized uplink status = %d, want 413", big.StatusCode)
+	}
+	if !strings.Contains(string(body), "bridge body too large") {
+		t.Fatalf("oversized uplink body = %q, want bridge body too large", body)
+	}
+
+	// Conn still alive: a valid uplink relays and echoes back.
+	ok, err := http.Post(server.URL+"/api/remote.mux?mwbridge=1&conn=oversize12345678", "text/plain", strings.NewReader("ping"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = ok.Body.Close()
+	if ok.StatusCode != http.StatusAccepted {
+		t.Fatalf("uplink after 413 status = %d, want 202 (conn must stay open)", ok.StatusCode)
+	}
+	if got := readSSEEvent(t, reader); got != "data: ping\n\n" {
+		t.Fatalf("echo after 413 = %q, want the valid frame relayed", got)
+	}
+}
+
+// Given a downstream that never reads (net.Pipe with no reader), When
+// writeSSE runs with a shrunken bridgeWriteTimeout, Then it returns a
+// timeout error instead of blocking forever.
+func TestBridge_writeSSE_deadline(t *testing.T) {
+	prev := bridgeWriteTimeout
+	bridgeWriteTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { bridgeWriteTimeout = prev })
+
+	a, b := net.Pipe()
+	t.Cleanup(func() { _ = a.Close(); _ = b.Close() })
+	conn := &bridgeConn{id: "deadline-test-conn", downstream: a}
+
+	start := time.Now()
+	err := conn.writeSSE(": ka\n\n")
+	if err == nil {
+		t.Fatal("writeSSE on an unread downstream returned nil error, want timeout")
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("writeSSE blocked for %s; the write deadline did not win", elapsed)
+	}
+}
+
 func TestBridge_client_disconnect_closes_upstream(t *testing.T) {
 	upstream, _, closeSeen := newBridgeUpstream(t)
 	bridge := newMuxBridge(authorityOf(upstream), nil, nil)

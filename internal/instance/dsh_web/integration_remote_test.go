@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -164,14 +165,22 @@ func TestDshWebRemoteEndToEnd(t *testing.T) {
 	}
 
 	// The iframe document via the proxy: the Director mints + injects
-	// the relay cookie, so the gated upstream answers 200.
+	// the relay cookie, so the gated upstream answers 200 — and the
+	// remote-capable bridge injects the connection shim into the HTML.
 	resp, err = http.Get(blob.IframeURL)
 	if err != nil {
 		t.Fatalf("GET / via proxy: %v", err)
 	}
+	index, err := io.ReadAll(resp.Body)
 	resp.Body.Close()
+	if err != nil {
+		t.Fatalf("read proxy GET / body: %v", err)
+	}
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("proxy GET / status = %d, want 200 (relay cookie)", resp.StatusCode)
+	}
+	if !strings.Contains(string(index), `<script src="/__mw/dsh-bridge.js"></script>`) {
+		t.Fatalf("proxy GET / body lacks the bridge shim injection: %q", index)
 	}
 
 	// An RPC through the proxy rides the relay cookie -> 200, and the
