@@ -176,6 +176,10 @@ type Kind interface { // Manifest returns static metadata. Called once at regist
 	// starting at byte offset since. Returns the bytes, the new
 	// cursor (== since when no new data is available), and any error.
 	//
+	// A negative since requests tail semantics: return the newest
+	// maxBytes of captured output, with the cursor set to the current
+	// end offset (so callers can follow with ReadLogs(cursor, ...)).
+	//
 	// The framework uses this to drive the `/api/instances/<id>/log`
 	// and `/api/instances/<id>/log/stream` endpoints; kinds MUST
 	// implement log capture themselves (the framework does not
