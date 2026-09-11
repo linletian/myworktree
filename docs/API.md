@@ -505,9 +505,9 @@ Deletes a stopped (non-running) instance record. The instance's in-memory log bu
 ### Log replay (tail / incremental)
 `GET /api/instances/log?id=<instanceId>[&since=<byteOffset>]`
 
-- Without `since`: returns recent tail as `text/plain`.
+- Without `since`: returns the recent tail (newest bytes) as `text/plain`; the response also includes `X-Log-Offset: <endOffset>` — the cursor at the end of the tail, usable as `since` on a follow-up incremental read.
 - With `since`: returns incremental content from byte offset and includes response header `X-Log-Offset: <nextByteOffset>`.
-- Logs live in an in-memory ring buffer attached to the **running** instance (see `docs/ARCHITECTURE.md` §4.1 *Instance log buffer*). After the instance stops, exits, or fails — or after the daemon restarts — the buffer is released and this endpoint returns an empty body. Unknown / never-started instance IDs also return empty.
+- Logs live in an in-memory ring buffer attached to the **running** instance (see `docs/ARCHITECTURE.md` §4.1 *Instance log buffer*). After the instance stops, exits, or fails — or after the daemon restarts — the buffer is released and this endpoint returns `200 OK` with an empty body (tail reads carry `X-Log-Offset: 0`; incremental reads echo the requested `since`). Unknown / never-started instance IDs behave the same.
 - The `byteOffset` cursor is the running total of bytes the instance has produced (monotonic; never decreases). When `since` points to data that has already been evicted from the ring (oldest-byte > since), the response silently clamps to the oldest live byte and `X-Log-Offset` advances accordingly.
 
 Response: `text/plain`
@@ -520,8 +520,9 @@ Response: `text/plain`
 ```json
 {"chunk":"...","next":12345}
 ```
-- Same in-memory backing as the tail endpoint above. The cursor `next` is the same monotonic byte counter; clients should echo it as `since` on the next request to receive only new chunks.
+- Same in-memory backing as the tail endpoint above. Without `since` (or with a negative `since`), the stream starts from the tail (newest bytes), same as the log endpoint. The cursor `next` is the same monotonic byte counter; clients should echo it as `since` on the next request to receive only new chunks.
 - Polling cadence: 1 s. When no new data is available, the server emits an SSE comment line (`: ping`) as a keep-alive — no `log` event, no cursor update. Clients should treat the absence of a `log` event as "no progress" and keep using the last `next` they saw.
+- Stopped / unknown / never-started instance IDs return `200 OK` and emit one empty `log` event (`{"chunk":"","next":0}`) followed by `: ping` keep-alives — the stream stays open; clients decide when to give up.
 
 ### Instance resource stats
 `GET /api/instances/stats`

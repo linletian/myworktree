@@ -3614,15 +3614,16 @@
             session.loadLogController = controller;
 
             try {
-                const res = await fetch(`/api/instances/log?id=${session.id}&since=0`, { 
+                const res = await fetch(`/api/instances/log?id=${session.id}`, { 
                     headers, 
                     signal: controller.signal 
                 });
                 rememberServerRevision(res);
                 if (!res.ok) throw new Error(await res.text());
                 let text = await res.text();
-                const next = parseInt(res.headers.get("X-Log-Offset") || "0", 10);
-                session.logCursor = next || text.length;
+                const rawOffset = res.headers.get("X-Log-Offset");
+                const next = rawOffset === null ? NaN : parseInt(rawOffset, 10);
+                session.logCursor = Number.isFinite(next) && next >= 0 ? next : 0;
                 if (session.term) {
                     const inst = state.instances.find(i => i.id === session.id);
                     const isRunning = inst && inst.status === 'running';
@@ -3642,19 +3643,6 @@
                     session.loadLogController = null;
                 }
             }
-        }
-
-        async function loadLogSince(session) {
-            if (!session) return;
-            try {
-                const res = await fetch(`/api/instances/log?id=${session.id}&since=${session.logCursor}`, { headers });
-                rememberServerRevision(res);
-                if (!res.ok) throw new Error();
-                let text = await res.text();
-                const next = parseInt(res.headers.get("X-Log-Offset") || "0", 10);
-                writeSanitizedTerminalOutput(session, text);
-                if (next) session.logCursor = next;
-            } catch (e) { }
         }
 
         function disconnectTTY(session) {
@@ -4294,7 +4282,6 @@
         // functions are fully migrated to pty.js, the exports here
         // become unnecessary and can be removed.
         window.loadLog = loadLog;
-        window.loadLogSince = loadLogSince;
         window.disconnectTTY = disconnectTTY;
         window.connectTTY = connectTTY;
         window.hasLiveTTYConnection = hasLiveTTYConnection;

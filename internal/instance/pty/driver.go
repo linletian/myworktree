@@ -219,11 +219,16 @@ func (d Driver) Status(handle framework.Handle) (framework.Status, string) {
 	return framework.StatusRunning, ""
 }
 
-// ReadLogs returns captured PTY output.
+// ReadLogs returns captured PTY output. A negative since returns the
+// newest maxBytes held in the ring buffer (tail semantics).
 func (d Driver) ReadLogs(handle framework.Handle, since int64, maxBytes int64) (string, int64, error) {
 	h := mustHandle(handle)
 	if h.buf == nil {
 		return "", since, nil
+	}
+	if since < 0 {
+		body, off := h.buf.Tail(maxBytes)
+		return body, off, nil
 	}
 	return h.buf.ReadSince(since, maxBytes)
 }
