@@ -2,10 +2,15 @@
 
 ## Unreleased
 
+## v0.5.0 (2026-09-11)
+
+Release focused on dsh-web remote access: a WS↔SSE bridge plus a WebSocket shim make LAN/Tailnet access work for dsh ≥ 0.1.5, dsh ≥ 0.1.2 browser-session auth is relayed through the per-instance proxy, and remote Start is version-gated via a new capability probe (issue #72).
+
 - **feat(dsh-web): remote access via WS↔SSE bridge (issue #72)** — remote (LAN/Tailnet) access to dsh-web instances works for dsh ≥ 0.1.5. The per-instance reverse proxy terminates a frame-level bridge at `/api/remote.mux` (SSE downlink + POST uplink, keyed by a per-connection id, close/error propagation), and when remote mode + remote-capable, the proxy injects a single deterministic `<script>` tag into the upstream `index.html`: the shim replaces `window.WebSocket` for the mux URLs only, tries the native WebSocket first with a 1000 ms timeout, and falls back transparently to the bridge on network paths that silently drop WS upgrades. Supersedes the 2026-08-16 UX-only remote mitigation; the old PLAN decision "dsh 不做 iframe 内注入" was overturned on 2026-09-10 with user approval (injection is one deterministic script tag, not regex patching of dsh JS; see `docs/plans/dsh-native-ui/PLAN.md` and `docs/plans/dsh-native-ui/REMOTE-WS-BREAKAGE.md` §10, plan in `.omo/plans/dsh-remote-support.md`).
 - **feat(dsh-web): relay dsh ≥0.1.2 browser-session auth through the per-instance proxy** — dsh ≥ 0.1.2's launch-token → `dsh-auth-*` cookie browser-session auth is relayed by the per-instance reverse proxy: the proxy forwards the launch token and injects the minted `dsh-auth-*` cookie into forwarded requests, so the browser never sees dsh credentials.
 - **feat(dsh-web): version-gated remote Start** — the Start Instance dialog probes `GET /api/dsh/capability` and, when the dsh version is below `minRemoteVersion` (0.1.5), disables remote Start with an English version-too-low message (with `suggested_pin`); the instance-view remote mask now shows only when `remote_capable === false` instead of blanket-blocking all remote pages. Loopback access keeps working for all 0.1.x.
 - **chore(dsh-web): npx pin bumped to 0.1.5-rc.1** — the pinned npx launch version moves to `0.1.5-rc.1` (unified `/api/remote.mux` endpoint upstream); `minRemoteVersion = 0.1.5` is the remote floor while loopback remains open to all 0.1.x.
+- **docs: add RELEASING.md release runbook** — the develop/main release model, prep-commit sweep, squash-merge + annotated-tag rules, release verification, and back-merge procedure are now written down in `RELEASING.md`, matching how `v0.4.2` / `v0.4.3` were shipped.
 
 ## v0.4.3 (2026-09-10)
 
