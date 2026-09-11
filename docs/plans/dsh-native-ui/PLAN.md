@@ -57,7 +57,7 @@
 
 - **硬门**（reasonix 先例，issue #45）：预检 `dsh --version`，解析 x.y.z 核心（容忍 `-rc.x` 后缀），核心 < `0.1.0` → fail-fast 可读错误；解析失败（dev 构建）→ 记日志放行。
 - **advisory** 支持区间 `[0.1.0, 0.2.0)`（核心）：覆盖 restrict overlay 行 id / WS 路径 / 就绪行格式漂移风险 → blob `version_supported` 供前端常驻警告。
-- npx pin 常量 `0.1.0-rc.6`（与真机验证版本一致，见 §实施踩坑补充；`dsh --version` 输出原始版本串）。
+- npx pin 常量 `0.1.5-rc.1`（与真机验证版本一致，见 §实施踩坑补充；`dsh --version` 输出原始版本串）。
 
 ---
 

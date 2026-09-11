@@ -26,7 +26,12 @@
       const native = new Native(url, protocols);
       this.native = native;
       let settled = false;
-      const timer = setTimeout(() => fallback(), 1000);
+      // Test seam (static/dsh-bridge.test.mjs): how long to wait for the
+      // native WebSocket before falling back to the bridge. Production
+      // behavior is unchanged when the global is absent (1000 ms).
+      const timeoutMs = typeof window.__MW_BRIDGE_NATIVE_TIMEOUT_MS === "number"
+        ? window.__MW_BRIDGE_NATIVE_TIMEOUT_MS : 1000;
+      const timer = setTimeout(() => fallback(), timeoutMs);
       const fallback = () => {
         if (settled) return;
         settled = true;
@@ -68,25 +73,47 @@
       sourceURL.search = `?mwbridge=1&conn=${this.connId}`;
       const es = new EventSource(sourceURL);
       this.eventSource = es;
-      es.addEventListener("open", () => {
+      es.addEventListener("open", (event) => {
+        // The connection-level "open" is a plain Event (no `data`) fired
+        // as soon as the SSE headers arrive — BEFORE the bridge has dialed
+        // upstream and registered this conn. Only the server-sent
+        // `event: open` frame (a MessageEvent with `data`, sent after
+        // registration) may open this socket, otherwise send() could POST
+        // into the pre-registration window and hit a 409.
+        if (!("data" in event)) return;
+        if (this.readyState !== MWWebSocket.CONNECTING) return;
         this.readyState = MWWebSocket.OPEN;
         this.resolveOpen();
         this.dispatch("open", new Event("open"));
-      }, { once: true });
+      });
       es.onmessage = (event) => this.dispatch("message", new MessageEvent("message", { data: event.data }));
       es.addEventListener("bin", (event) => {
         const raw = atob(event.data);
         const data = Uint8Array.from(raw, (char) => char.charCodeAt(0));
         this.dispatch("message", new MessageEvent("message", { data }));
       });
-      es.addEventListener("close", () => this.finishClose(1006, "bridge"));
+      es.addEventListener("close", (event) => {
+        // The bridge's `event: close` frame carries the upstream WS close
+        // code as {"code":<n>} so dsh can tell normal from abnormal closes.
+        let code = 1000;
+        try { code = JSON.parse(event.data).code || 1000; } catch (_) {}
+        this.finishClose(code, "bridge");
+      });
       es.addEventListener("bridgeerror", (event) => {
         let reason = "bridge";
         try { reason = JSON.parse(event.data).reason || reason; } catch (_) {}
         this.finishClose(1006, reason);
       });
       es.addEventListener("error", () => {
-        if (es.readyState === EventSource.CLOSED) this.finishClose(1006, "bridge");
+        // ANY EventSource error is terminal for this shim socket. dsh's
+        // connection layer (ConnectionController) owns retry/backoff and
+        // will construct a NEW WebSocket (new conn id, fresh upstream WS,
+        // streams re-opened). An in-place SSE auto-reconnect would
+        // re-attach with the same conn id while dsh's per-carrier stream
+        // state is already gone, and a silent TCP drop would leave the mux
+        // hung for the bridge's retry window — so never let EventSource
+        // reconnect in place; close with 1006 and let dsh redial.
+        this.finishClose(1006, "bridge");
       });
     }
 
@@ -108,7 +135,11 @@
           binary = true;
         }
         await fetch(`/api/remote.mux?mwbridge=1&conn=${this.connId}${binary ? "&bin=1" : ""}`, { method: "POST", body });
-      });
+      })
+      // A rejected uplink POST must not wedge the queue: the send already
+      // fails closed (its POST hits a dead bridge and gets a 409), so the
+      // stored queue promise is kept resolved and later sends still run.
+      .catch(() => {});
     }
 
     close(code = 1000, reason = "") {
@@ -123,7 +154,10 @@
         .finally(() => {
           if (this.eventSource) this.eventSource.close();
           this.finishClose(code, reason);
-        });
+        })
+        // Same anti-wedging catch as send(): the close POST may fail on a
+        // dead bridge, but the queue promise must stay resolved.
+        .catch(() => {});
     }
 
     finishClose(code, reason) {

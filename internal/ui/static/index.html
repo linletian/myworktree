@@ -2924,18 +2924,21 @@
         // dsh capability probe for the remote gate: GET /api/dsh/capability
         // reports whether the host's dsh build satisfies the minimum version
         // for remote access (issue #72: session/workspace sync over remote
-        // networks requires dsh >= min_remote_version). Cached 30s, keyed by
-        // worktree id, so switching worktrees re-fetches. A network failure
-        // fails CLOSED ({remote_capable:false, _error:true}) — a failed
-        // check is untrusted input, so remote Start stays disabled. (The
-        // intentional asymmetry: an unparseable local `dsh --version` is a
-        // trusted dev build and counts as capable server-side; a failed
-        // capability fetch is not. Do not "harmonize" the two.)
+        // networks requires dsh >= min_remote_version). Real results are
+        // cached 30s, keyed by worktree id, so switching worktrees
+        // re-fetches; failures are NOT cached, so the next dialog open or
+        // tab switch genuinely retries (the error text's "Retry" is real).
+        // A network failure fails CLOSED ({remote_capable:false,
+        // _error:true}) — a failed check is untrusted input, so remote
+        // Start stays disabled. (The intentional asymmetry: an unparseable
+        // local `dsh --version` is a trusted dev build and counts as
+        // capable server-side; a failed capability fetch is not. Do not
+        // "harmonize" the two.)
         let dshCapCache = { key: '', at: 0, data: null };
-        async function fetchDshCapability(force) {
+        async function fetchDshCapability() {
             const key = state.activeWT || '';
             const now = Date.now();
-            if (!force && dshCapCache.data && dshCapCache.key === key && now - dshCapCache.at < 30000) {
+            if (dshCapCache.data && dshCapCache.key === key && now - dshCapCache.at < 30000) {
                 return dshCapCache.data;
             }
             try {
@@ -2943,9 +2946,7 @@
                 dshCapCache = { key: key, at: now, data: data };
                 return data;
             } catch (e) {
-                const fallback = { remote_capable: false, _error: true };
-                dshCapCache = { key: key, at: now, data: fallback };
-                return fallback;
+                return { remote_capable: false, _error: true };
             }
         }
 
@@ -2987,7 +2988,7 @@
                 return;
             }
             if (cap.missing) {
-                warn.textContent = 'dsh is not installed; remote access requires dsh ≥ ' + min + '. Install dsh, or use it from the local 127.0.0.1 environment.';
+                warn.textContent = 'dsh is not installed; remote access requires dsh ≥ ' + min + '. Install dsh, or use it from the local 127.0.0.1 environment.' + (cap.suggested_pin ? ' (suggested: ' + cap.suggested_pin + ')' : '');
                 warn.hidden = false;
                 btn.disabled = true;
                 return;
