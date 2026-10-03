@@ -35,7 +35,7 @@ jobs:
       # lost node would report green without ever running the JS layer. Pin
       # node explicitly rather than relying on the image default.
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 22
 
