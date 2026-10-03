@@ -181,23 +181,39 @@ The client MUST wait for this message before:
 
 ### 5.3 Instance Switch Protocol
 
-When switching between instances (worktree or instance tabs), the frontend distinguishes between stopped and running instances:
+The server's `status` (`internal/framework/status.go`) is a **seven-state** enum, so the frontend MUST NOT collapse it to a boolean "running vs stopped". `POST /api/instances` persists the record as `starting` and returns `201` immediately; the flip to `running` happens on the kind's `ReadySignal` in a separate goroutine (`Manager.runLifecycle`), so a freshly created instance is legitimately observed as `starting` for a short window — and for web-UI kinds for seconds. The frontend classifies each status into exactly one of three buckets (`isInstanceLiveStatus` / `isInstancePendingStatus` / `isInstanceTerminalStatus` in `index.html`, re-exported on `window` for `kinds/pty.js`):
+
+| Bucket | Statuses | Meaning for the terminal |
+|---|---|---|
+| **live** | `running`, `unhealthy` | The process is alive and accepts I/O. `unhealthy` means a health probe failed but the framework keeps the process alive and re-probes — the PTY still works, so it MUST stay connected. |
+| **pending** | `starting`, `stopping` | Transient. No **new** transport, no `[Process Stopped]` banner, no grayscale styling — the instance is between two states and the next poll decides. An existing transport is left alone (never disconnected by a pending tick); only its reconnect retry is skipped, because the promotion re-issues the connect as soon as the status settles. |
+| **terminal** | `stopped`, `failed`, `exited`, unknown/absent | The process is gone. Disconnect, replay the log once, show the banner. |
+
+Only the **terminal** bucket means "the process is gone". Treating a **pending** status as stopped strands the session: nothing re-runs the activation path (see below), so the terminal keeps no WS and no SSE, input silently degrades to the buffered HTTP fallback, and output never comes back (issue #80).
+
+When switching between instances (worktree or instance tabs):
 
 ```
-Stopped instance
+Terminal instance (stopped / failed / exited)
 ├── 1. Ensure terminal session exists for the instance
 ├── 2. Disconnect live transport for that stopped session
 ├── 3. Replay persisted log into that session
 └── 4. Show stopped styling/banner
 
-Running instance with healthy session
+Pending instance (starting / stopping)
+├── 1. Ensure terminal session exists for the instance
+├── 2. Do NOT disconnect and do NOT paint the stopped banner
+├── 3. Report "starting…"/"stopping…" in the status bar
+└── 4. Wait for reconcileTerminalSessions() to promote it (see below)
+
+Live instance (running / unhealthy) with healthy session
 ├── 1. Keep the existing per-instance xterm/WS session alive
 ├── 2. Hide previously active terminal containers
 ├── 3. Show the selected instance container
 ├── 4. Re-fit and resize the active terminal
 └── 5. Focus only after the session is READY
 
-Running instance without healthy session
+Live instance without healthy session
 ├── 1. Ensure terminal session exists for the instance
 ├── 2. Reset that instance's local terminal state
 ├── 3. Replay recent log once into that same instance session
@@ -207,10 +223,24 @@ Running instance without healthy session
 └── 7. Focus only after the session is READY
 ```
 
+**Re-activation is poll-driven, not selection-driven.** `selectInstance()` returns early when the tab is already selected and `renderTerminalSessions()` (the per-2s-poll render path) only toggles container visibility, so `activate()` runs exactly once per selection change. The liveness transition therefore has to be driven by `reconcileTerminalSessions()`, which runs on every `refresh()` **after** `state.instances` is replaced:
+
+- active session + **live** status + no transport → `connectTTY()` (**promote**). The WS handshake replays the tail itself, so the promotion deliberately does **not** also call `loadLog()` (which would duplicate the screen — see #87).
+- active session + **pending** status → no-op; the next poll promotes it. This is the self-heal for issue #80.
+- active session + **terminal** status → disconnect, and `loadLog()` (banner included) on the transition into that bucket, tracked per session via `lastKnownStatus`. A replay that *fails* is retried — `loadLog()` swallows its own errors, so it latches the outcome and the reconciler backs off 2^n seconds up to 60s (an unbounded 2s retry would append one error line to the terminal per tick forever). An explicit user action bypasses that backoff: `activate()`'s terminal branch calls `loadLog()` unconditionally, so re-selecting the tab paints the banner immediately.
+- inactive session + **terminal** status → destroy the session. A pending inactive session is kept.
+
+The promotion is gated by `hasTerminalTransportInFlight(session)` — a single function shared with the activation paths, so the two cannot drift apart — and requires a clean slate: no `loadLogController` (an activation is still inside `await loadLog()`), no `ttySocket` (connected, `CONNECTING`, or a `CLOSED` one the `onclose` handler has not dropped yet), no live SSE `logStream`, `ttyState === 'IDLE'`, and no pending reconnect timer. Without it the 2s poll tears down and re-opens the WebSocket forever, because `hasLiveTTYConnection()` is false while a socket is still `CONNECTING`; the second connect also replays the ring-buffer tail a second time (issue #87).
+
+The activation paths call the same guard with `{ ignoreQueuedRetry: true }`, and that asymmetry is deliberate. The **promotion** is a bystander: it must let a queued retry fire, or it would take over on every tick and flap the connection. The **user** is not — re-selecting a tab is an explicit request, and waiting out a 5s timer to honour it froze the tab on a pre-drop screen that the handshake replay then painted twice. Activation takes the handover and **cancels the pending timer at that moment**, before `loadLog()` starts. It cannot wait for `connectTTY()` → `disconnectTTY()` to do it: `connectTTY()` only runs once `loadLog()` settles, so a retry firing in that window would open one socket and replay the tail, and the connect that follows would open a second and replay it again. The other four conditions still block activation (an activation mid-`loadLog()` is never raced).
+
+When an activation does return early, it is never silent — `deactivate()` leaves the status bar on `idle`, so a bare `return` reads as a dead click. It reports `connecting...`, and says **nothing** when an SSE stream is live, since that session is not connecting and its own message is the accurate one. A queued retry cannot be the reason: the takeover cancels it first, so whatever stopped the activation is a connect already under way.
+
 **Critical Timing Rules:**
-1. Running instances MUST NOT be detached purely because another instance becomes active.
-2. Each running instance owns its own frontend terminal session; TUI modes are isolated by session rather than cleared out of a shared xterm.
+1. Live instances MUST NOT be detached purely because another instance becomes active.
+2. Each live instance owns its own frontend terminal session; TUI modes are isolated by session rather than cleared out of a shared xterm.
 3. The terminal MUST NOT receive focus until that instance session is READY (after `ready` is received and resize is sent).
+4. A **pending** status MUST NOT be rendered or wired as terminal. The stopped banner, the grayscale styling, the input guard, and the connect guard are all terminal-bucket-only.
 
 ### 5.4 Focus Management Rules
 
@@ -224,13 +254,15 @@ function focusTerminalIfPossible() {
     if (!state.activeInst) return;        // No active instance
     if (ttyState !== 'READY') return;     // ⚠️ Connection not ready
     const inst = state.instances.find(i => i.id === state.activeInst);
-    if (inst && inst.status !== 'running') return; // Instance not running
-    
+    if (inst && !isInstanceLiveStatus(inst.status)) return; // Instance not live
+
     term.focus();
 }
 ```
 
 **The `ttyState` check is CRITICAL** - it prevents focus before the WebSocket is ready, which would cause xterm.js to send terminal query sequences (OSC 11, DA, DEC Private Mode queries) before the data path is established.
+
+**The status check uses the live bucket, not `status === 'running'`** - an `unhealthy` instance is still a live process whose PTY accepts focus (issue #80).
 
 ### 5.5 Terminal Query Sequence Prevention
 
@@ -252,8 +284,11 @@ If these responses arrive before the WebSocket is in READY state, they may be in
 | Scenario | Detection | Recovery Action |
 |----------|-----------|-----------------|
 | Handshake timeout | No `ready` in 5s | Close WS, fallback to SSE |
-| WebSocket close | onclose event | Retry after 1s delay |
-| Instance stopped | status !== 'running' | Disconnect WS, show log with banner |
+| WebSocket close | onclose event | Retry after 5s delay |
+| Instance stopped | status in the **terminal** bucket (`stopped` / `failed` / `exited`) | Disconnect WS, show log with banner |
+| Instance starting / stopping | status in the **pending** bucket | No banner, no disconnect; wait for the next poll, which promotes it once the status turns live |
+| Instance unhealthy | status `unhealthy` | Process is still alive — keep the transport and the input path open |
+| New instance still `starting` when its tab is selected | status in the **pending** bucket at `activate()` | Nothing is painted as stopped; `reconcileTerminalSessions()` promotes it within one poll interval (issue #80) |
 | Browser blur | blur event | Track windowHasFocus = false |
 | Dialog open | showModal intercept | Track openDialogs.add() |
 
@@ -281,9 +316,11 @@ When implementing or modifying terminal connection code, verify:
 - [ ] `focusTerminalIfPossible()` checks connection state before focusing
 - [ ] WebSocket handshake timeout (5s) is implemented
 - [ ] `ready` message triggers resize BEFORE focus
-- [ ] Running instance switch preserves inactive session attachments
+- [ ] Live instance switch preserves inactive session attachments
 - [ ] Dialog close delays focus until connection is ready
 - [ ] Window focus event respects connection state
+- [ ] No `status === 'running'` equality test gates terminal I/O — use the live/pending/terminal buckets (§5.3); `starting` must not paint a stopped terminal
+- [ ] A pending instance reaches a live transport without user action (`reconcileTerminalSessions()` promotion, §5.3)
 - [ ] `beforeunload` handler triggers browser confirmation on any page close/refresh/navigation
 
 ### 5.9 Terminal Query Response Filtering
