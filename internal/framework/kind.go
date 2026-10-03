@@ -180,8 +180,9 @@ type Kind interface { // Manifest returns static metadata. Called once at regist
 	// maxBytes of captured output, with the cursor set to the current
 	// end offset (so callers can follow with ReadLogs(cursor, ...)).
 	// Kinds without log capture (no ring buffer / no pipe to drain)
-	// MUST return ("", 0, nil) for a negative since; Manager.Tail
-	// clamps any non-conforming cursor back into range.
+	// return an empty body; echoing since back is fine, because
+	// Manager.Tail normalizes a non-conforming cursor before any
+	// caller observes it.
 	//
 	// The framework uses this to drive the `/api/instances/log?id=<id>`
 	// and `/api/instances/log/stream?id=<id>` endpoints; kinds MUST

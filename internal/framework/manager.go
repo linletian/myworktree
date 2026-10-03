@@ -434,9 +434,10 @@ func (m *Manager) Tail(id string, n int64) (string, int64, error) {
 		off = 0
 	}
 	if int64(len(body)) > off {
-		// The cursor must never end before the data we just handed out,
-		// otherwise the follow-up ReadSince(off) re-delivers the same
-		// bytes. Clamp rather than failing the read.
+		// Defense in depth: a kind that under-reports its tail cursor
+		// would make the follow-up ReadSince(off) re-deliver these
+		// bytes. In a zero-based offset space len(body) is the lower
+		// bound on the end offset. Clamp rather than fail the read.
 		off = int64(len(body))
 	}
 	return body, off, err

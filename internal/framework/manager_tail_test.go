@@ -110,3 +110,37 @@ func TestManager_ReadSinceClampsNegativeSince(t *testing.T) {
 		t.Fatalf("ReadLogs since = %d, want 0 (negative clamped; tail lives in Tail)", got)
 	}
 }
+
+// shortCursorLogsKind models a kind that under-reports its tail cursor:
+// it hands back 10 bytes but claims the stream only advanced to offset 4.
+type shortCursorLogsKind struct{ recordingLogsKind }
+
+func (k *shortCursorLogsKind) ReadLogs(h Handle, since, max int64) (string, int64, error) {
+	return "0123456789", 4, nil
+}
+
+// Guards the manager-side cursor lower bound: no kind may report a tail
+// cursor that ends before the bytes it just returned, or the follow-up
+// ReadSince(off) re-delivers them.
+func TestManager_TailClampsShortKindCursor(t *testing.T) {
+	t.Parallel()
+	k := &shortCursorLogsKind{}
+	reg := NewRegistry()
+	reg.Register(k)
+	mgr, _ := newTestManager(t, reg, t.TempDir())
+	instID := startRecordingInstance(t, mgr, &k.recordingLogsKind)
+
+	body, off, err := mgr.Tail(instID, 4096)
+	if err != nil {
+		t.Fatalf("Tail: %v", err)
+	}
+	if body != "0123456789" {
+		t.Fatalf("Tail body = %q, want the kind's body verbatim", body)
+	}
+	if off < int64(len(body)) {
+		t.Fatalf("Tail cursor = %d but returned %d bytes; the cursor must not end before the data", off, len(body))
+	}
+	if off != int64(len(body)) {
+		t.Fatalf("Tail cursor = %d, want %d (clamped to the end of the returned body)", off, len(body))
+	}
+}
