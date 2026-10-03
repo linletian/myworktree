@@ -543,10 +543,12 @@ func TestIndexHTMLCoversPerSessionConnectionManagement(t *testing.T) {
 // TestLogCursorBootstrapNeverRequestsOldestBytes pins the client half of
 // the issue #81 tail contract. The server treats an omitted `since` as a
 // tail request and `since=0` as "read from the oldest live byte", so the
-// browser must never emit `since=0`. Both cursor bootstraps (the legacy
-// fallback in index.html and the pty renderer) are asserted together —
-// neither one alone is the whole picture, and a change to either that
-// reintroduces since=0 silently reintroduces the stale replay.
+// browser must never emit `since=0`.
+//
+// This covers index.html only — the legacy no-renderer fallback. The pty
+// renderer's own bootstrap is pinned by TestPtyRendererResetsCursorAfter-
+// TerminalReset; the two together are the complete picture, and neither
+// test alone is.
 func TestLogCursorBootstrapNeverRequestsOldestBytes(t *testing.T) {
 	bodyText := fetchIndexHTML(t)
 	checks := []string{
@@ -574,6 +576,22 @@ func TestLogCursorBootstrapNeverRequestsOldestBytes(t *testing.T) {
 	if strings.Contains(bodyText, "/api/instances/log?id=${session.id}&since=0") {
 		t.Fatalf("GET / must not request since=0, which the server reads as the oldest live byte")
 	}
+
+	// A cleared terminal invalidates any previous cursor: retaining it would
+	// make startSSE request since=<oldOffset> and repaint only the post-offset
+	// delta onto an empty screen. Mirrors the ordering assertion the pty
+	// renderer test makes about the same two statements.
+	resetAt := strings.Index(bodyText, "resetTerminalForSwitch(session);")
+	cursorAt := strings.Index(bodyText, "session.logCursor = -1;")
+	if cursorAt < 0 {
+		t.Fatal("GET / should reset session.logCursor after clearing the terminal")
+	}
+	if resetAt < 0 {
+		t.Fatal("GET / fallback should clear the terminal before reloading the log")
+	}
+	if cursorAt < resetAt {
+		t.Fatal("GET / should reset session.logCursor after resetTerminalForSwitch, not before")
+	}
 }
 
 func TestPtyRendererResetsCursorAfterTerminalReset(t *testing.T) {
@@ -597,16 +615,18 @@ func TestPtyRendererResetsCursorAfterTerminalReset(t *testing.T) {
 
 	// The pty kind is the only one with a ring buffer, so it is the one
 	// where a cursor bug is user-visible. activate() clears the terminal
-	// and then zeroes the cursor: if loadLog fails afterwards, startSSE
-	// must fall back to a full tail rather than resume from a stale
-	// offset and repaint only a delta onto the cleared screen.
+	// and then resets the cursor to the unknown sentinel: if loadLog fails
+	// afterwards, startSSE must fall back to a full tail rather than resume
+	// from a stale offset and repaint only a delta onto the cleared screen.
+	// Companion to TestLogCursorBootstrapNeverRequestsOldestBytes, which pins
+	// the same rule in index.html's legacy fallback.
 	if !strings.Contains(js, "window.resetTerminalForSwitch(s);") {
 		t.Fatal("pty.js should clear the terminal before reloading the log")
 	}
 	resetAt := strings.Index(js, "window.resetTerminalForSwitch(s);")
-	cursorAt := strings.Index(js, "s.logCursor = 0;")
+	cursorAt := strings.Index(js, "s.logCursor = -1;")
 	if cursorAt < 0 {
-		t.Fatal("pty.js should reset s.logCursor after clearing the terminal")
+		t.Fatal("pty.js should reset s.logCursor to the unknown sentinel after clearing the terminal")
 	}
 	if cursorAt < resetAt {
 		t.Fatal("pty.js should reset s.logCursor after resetTerminalForSwitch, not before")

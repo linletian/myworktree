@@ -2801,14 +2801,17 @@
                         focusTerminalIfPossible();
                     } else {
                         resetTerminalForSwitch(session);
-                        // Keep session.logCursor here: loadLog overwrites it from the
-                        // X-Log-Offset header, and the previous cursor is a safer
-                        // fallback than 0 (which replays the oldest 64KB) if that
-                        // header is lost or the fetch fails. For a first visit the
-                        // previous cursor is -1 ("unknown"), which startSSE sends as
-                        // a tail request rather than an incremental read. (Legacy
-                        // no-renderer fallback only — see kinds/pty.js for the path
-                        // the pty kind actually takes.)
+                        // The screen was just cleared, so any previous cursor is
+                        // meaningless. If loadLog then fails, keeping it would make
+                        // startSSE request since=<oldOffset> and repaint only the
+                        // bytes produced since then onto an empty terminal. Reset to
+                        // the unknown sentinel instead: startSSE omits `since` for
+                        // any non-positive cursor, so the server's tail default
+                        // repaints the whole screen. Same convention as
+                        // kinds/pty.js — keep the two session factories in
+                        // agreement. Residual trade-off: if X-Log-Offset is
+                        // stripped, the tail renders twice (issue #86).
+                        session.logCursor = -1;
                         loadLog(session).finally(() => {
                             connectTTY(session);
                             focusTerminalIfPossible();
@@ -3261,8 +3264,7 @@
                 // ring buffer (the #81 symptom). NOTE: this is the legacy
                 // no-renderer fallback's session factory. Every kind that ships
                 // a renderer (all four today) builds its own session in
-                // kinds/*.js and bootstraps its own cursor — see the comment on
-                // `s.logCursor = 0` in kinds/pty.js.
+                // kinds/*.js — see the same convention in kinds/pty.js.
                 logCursor: -1,
                 ttySocket: null,
                 ttyReconnectTimer: null,

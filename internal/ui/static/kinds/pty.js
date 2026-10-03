@@ -72,16 +72,21 @@ class PtyRenderer {
         }
 
         if (window.resetTerminalForSwitch) window.resetTerminalForSwitch(s);
-        // Deliberately reset the cursor here. resetTerminalForSwitch just
-        // cleared the screen, so if loadLog then fails, a retained cursor
-        // would make startSSE resume with since=<oldOffset> and repaint only
-        // the bytes produced since then onto an empty terminal. Zero makes
-        // startSSE omit `since` entirely, so the server's tail default
-        // repaints the full current screen. Do NOT "fix" this to the
-        // unknown-cursor sentinel used by ensureTerminalSession in
-        // index.html — the two live in different session factories and the
-        // post-reset fallback here wants a full tail, not a delta.
-        s.logCursor = 0;
+        // The screen was just cleared, so any previous cursor is meaningless. If
+        // loadLog then fails, keeping it would make startSSE request
+        // since=<oldOffset> and repaint only the bytes produced since then onto
+        // an empty terminal. Reset to the unknown sentinel so startSSE omits
+        // `since` and the server's tail default repaints the whole screen.
+        //
+        // The specific value is not load-bearing — startSSE omits `since` for
+        // any non-positive cursor. What matters is that it is non-positive, and
+        // that it matches ensureTerminalSession in index.html so the two
+        // session factories cannot drift apart.
+        //
+        // Residual trade-off: if X-Log-Offset is stripped by a proxy, loadLog
+        // writes the tail without establishing a cursor and the stream then
+        // replays it, so the tail renders twice (issue #86).
+        s.logCursor = -1;
         if (window.loadLog) {
             window.loadLog(s).finally(() => {
                 if (window.connectTTY) window.connectTTY(s);
@@ -134,7 +139,9 @@ class PtyRenderer {
             fitAddon: null,
             termDataDisposable: null,
             resizeObserver: null,
-            logCursor: 0,
+            // Unknown until loadLog establishes one from X-Log-Offset;
+            // -1 is the same "unknown" sentinel index.html uses.
+            logCursor: -1,
             ttySocket: null,
             ttyState: 'IDLE',
             appliedTTYSize: null,
