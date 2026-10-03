@@ -282,6 +282,36 @@ test("entering a terminal status disconnects and replays the log exactly once", 
   assert.deepEqual(calls.disconnect, ["inst1", "inst1"], "disconnect is idempotent and cheap");
 });
 
+test("a failed terminal replay backs off instead of retrying every tick", () => {
+  // loadLog() reports its failures into the terminal, so an unbounded 2s
+  // retry would append one error line per tick forever.
+  const session = makeSession("inst1", { lastKnownStatus: "running" });
+  const instances = [{ id: "inst1", status: "running" }];
+  const { api, calls } = indexHarness({ activeInst: "inst1", instances, sessions: [session] });
+
+  instances[0].status = "stopped";
+  api.reconcileTerminalSessions();
+  assert.equal(calls.loadLog.length, 1);
+
+  session.lastLogLoadFailed = true;
+  session.lastLogLoadFailures = 3; // next retry is 8s away
+  session.lastLogLoadAttemptAt = Date.now();
+  api.reconcileTerminalSessions();
+  assert.equal(calls.loadLog.length, 1, "not yet due");
+
+  api.reconcileTerminalSessions();
+  api.reconcileTerminalSessions();
+  assert.equal(calls.loadLog.length, 1, "still not due, however many ticks pass");
+
+  session.lastLogLoadAttemptAt = Date.now() - 8001;
+  api.reconcileTerminalSessions();
+  assert.equal(calls.loadLog.length, 2, "due once the backoff elapsed");
+
+  session.lastLogLoadFailed = false;
+  api.reconcileTerminalSessions();
+  assert.equal(calls.loadLog.length, 2, "a success stops the retry loop for good");
+});
+
 test("a start that fails while pending still gets the stopped banner", () => {
   const session = makeSession("inst1", { lastKnownStatus: "starting" });
   const instances = [{ id: "inst1", status: "starting" }];
@@ -439,9 +469,15 @@ test("loadLog latches its own outcome so a failed replay can be retried", async 
   assert.equal(failed.errors.length, 1, "the failure is still reported to the user");
   assert.deepEqual(failed.writes, [], "and nothing was painted");
 
+  // loadLog owns the backoff inputs; the reconciler only reads them, so the
+  // counter and the timestamp have to be set here to mean anything.
+  assert.equal(failed.session.lastLogLoadFailures, 1, "one failure counted");
+  assert.ok(failed.session.lastLogLoadAttemptAt > 0, "the attempt is timestamped");
+
   const ok = loadLogHarness("stopped");
   await ok.api.loadLog(ok.session);
   assert.equal(ok.session.lastLogLoadFailed, false);
+  assert.equal(ok.session.lastLogLoadFailures, 0, "a success resets the backoff");
   assert.ok(ok.writes.length > 0);
 });
 
@@ -567,6 +603,20 @@ test("pty activate(): a running instance connects and records its status", () =>
   assert.deepEqual(calls.reset, ["inst1"]);
   assert.equal(session.lastKnownStatus, "running");
   assert.deepEqual(calls.disconnect, []);
+});
+
+test("pty activate(): the in-flight early return says something", () => {
+  // deactivate() leaves the status bar on "idle", so a silent return makes
+  // re-selecting a tab look inert for the whole reconnect window.
+  const queued = activateWith("running", { ttyReconnectTimer: 42 });
+  assert.equal(queued.calls.status.at(-1), "ws closed, retrying...");
+
+  const connecting = activateWith("running", { ttyState: "CONNECTING" });
+  assert.equal(connecting.calls.status.at(-1), "connecting...");
+
+  // An SSE session is live, not connecting: do not overwrite its message.
+  const streaming = activateWith("running", { logStream: {} });
+  assert.deepEqual(streaming.calls.status, [], "the live SSE message must survive the guard");
 });
 
 test("pty activate(): classifies without the window helpers published", () => {

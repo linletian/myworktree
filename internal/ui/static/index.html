@@ -2864,10 +2864,16 @@
                     if (hasLiveTTYConnection(id)) {
                         updateStatus("websocket live");
                         focusTerminalIfPossible();
-                    } else if (!hasTerminalTransportInFlight(session)) {
-                        // The in-flight case is skipped on purpose: a promotion
-                        // from the reconcile loop already owns this bring-up,
-                        // and racing it would replay the tail twice (#87).
+                    } else if (hasTerminalTransportInFlight(session)) {
+                        // A promotion from the reconcile loop already owns this
+                        // bring-up; racing it would replay the tail twice (#87).
+                        // Same status treatment as kinds/pty.js activate(): say
+                        // something rather than look inert, but never over a
+                        // transport that is already reporting itself.
+                        if (!session.logStream) {
+                            updateStatus(session.ttyReconnectTimer ? "ws closed, retrying..." : "connecting...");
+                        }
+                    } else {
                         resetTerminalForSwitch(session);
                         // The screen was just cleared, so any previous cursor is
                         // meaningless. If loadLog then fails, keeping it would make
@@ -3341,6 +3347,13 @@
                 // genuine terminal transition from a session that was already
                 // stopped (issue #80).
                 lastKnownStatus: null,
+                // Outcome of the last loadLog(), and how many have failed in a
+                // row — the reconciler retries a failed terminal replay with a
+                // backoff derived from it. Siblings of lastKnownStatus, so
+                // initialised the same way rather than left undefined.
+                lastLogLoadFailed: false,
+                lastLogLoadFailures: 0,
+                lastLogLoadAttemptAt: 0,
                 termInputBuffer: "",
                 termSendTimer: null,
                 ttyOutputDecoder: null,
@@ -3527,37 +3540,49 @@
             // The stopped banner is part of loadLog's output, so replay only on
             // entry to the terminal bucket — a crash (running → exited) and a
             // failed start (starting → failed) both need it, but a session that
-            // was already stopped must not refetch and repaint every 2s. A
-            // failed attempt is the one exception: it leaves no banner behind,
-            // so keep retrying until one lands.
-            if (prev === undefined || prev === null || !isInstanceTerminalStatus(prev) || session.lastLogLoadFailed) {
+            // was already stopped must not refetch and repaint every 2s.
+            //
+            // A failed attempt is the exception: it leaves no banner behind, so
+            // keep trying — but back off, because loadLog() reports its errors
+            // into the terminal and an unbounded 2s retry would append one
+            // line per tick forever. The ordinary stopped case cannot hit this
+            // at all: Manager.Tail answers ("", 0, nil) for an instance that
+            // is no longer running, so the replay succeeds.
+            const enteringTerminalBucket = prev === undefined || prev === null || !isInstanceTerminalStatus(prev);
+            const retryBackoffMs = Math.min(60, 2 ** Math.min(session.lastLogLoadFailures || 0, 6)) * 1000;
+            const retryDue = !!session.lastLogLoadFailed
+                && Date.now() - (session.lastLogLoadAttemptAt || 0) >= retryBackoffMs;
+            if (enteringTerminalBucket || retryDue) {
                 loadLog(session);
             }
         }
 
-        // True when something other than a fresh caller already owns this session's
-// bring-up: a poll-driven promotion, an activation still inside its
-// `await loadLog()`, an open or closing socket, a live SSE stream, or a queued
-// reconnect. Two owners means two connects, and the second one replays the
-// ring-buffer tail a second time (issue #87).
-//
-// Single-sourced so the activation paths (kinds/pty.js) and the poll-driven
-// promotion cannot disagree about what "already connecting" means.
-function hasTerminalTransportInFlight(session) {
-    if (!session) return false;
-    if (session.loadLogController) return true;
-    if (session.ttySocket) return true;
-    if (session.logStream) return true;
-    if (session.ttyState && session.ttyState !== 'IDLE') return true;
-    if (session.ttyReconnectTimer) return true;
-    return false;
-}
-
-// Connects a live instance's session when it has no transport at all.
-        // The "nothing in flight" guard is load-bearing: the guard used by
-        // hasLiveTTYConnection() is false while a socket is still CONNECTING,
-        // so without this the 2s poll would tear down and re-open the WebSocket
+                // True when something other than a fresh caller already owns this
+        // session's bring-up: a poll-driven promotion, an activation still
+        // inside its `await loadLog()`, an open or closing socket, a live SSE
+        // stream, or a queued reconnect. Two owners means two connects, and the
+        // second one replays the ring-buffer tail a second time (issue #87).
+        //
+        // The guard is load-bearing precisely because the cheaper
+        // hasLiveTTYConnection() is false while a socket is still CONNECTING:
+        // without this, the 2s poll tears down and re-opens the WebSocket
         // forever.
+        //
+        // Single-sourced so the activation paths (kinds/pty.js) and the
+        // poll-driven promotion cannot disagree about what "already
+        // connecting" means.
+        function hasTerminalTransportInFlight(session) {
+            if (!session) return false;
+            if (session.loadLogController) return true;
+            if (session.ttySocket) return true;
+            if (session.logStream) return true;
+            if (session.ttyState && session.ttyState !== 'IDLE') return true;
+            if (session.ttyReconnectTimer) return true;
+            return false;
+        }
+
+        // Connects a live instance's session when it has no transport at all,
+        // which after the guard above means it has nothing in flight either.
         //
         // Deliberately no loadLog() here: the WS handshake replays the ring
         // buffer tail itself, so replaying first would duplicate the screen
@@ -3776,6 +3801,7 @@ function hasTerminalTransportInFlight(session) {
             }
             const controller = new AbortController();
             session.loadLogController = controller;
+            session.lastLogLoadAttemptAt = Date.now();
 
             try {
                 const res = await fetch(`/api/instances/log?id=${session.id}`, { 
@@ -3808,13 +3834,15 @@ function hasTerminalTransportInFlight(session) {
                         session.term.write("\r\n\r\n\x1b[41;37m[Process Stopped]\x1b[0m\r\n");
                     }
                 }
+                session.lastLogLoadFailures = 0;
                 session.lastLogLoadFailed = false;
             } catch (e) {
                 if (e.name === 'AbortError') return; // Ignore cancelled requests
                 // Latched for reconcileTerminalSessions(): the terminal-bucket
                 // replay runs once per transition, so a failed fetch would
                 // otherwise leave the tab with neither log nor banner until the
-                // user hit Refresh by hand.
+                // user hit Refresh by hand. The failure count drives its backoff.
+                session.lastLogLoadFailures = (session.lastLogLoadFailures || 0) + 1;
                 session.lastLogLoadFailed = true;
                 reportSessionError(session, "load log error", e);
             } finally {

@@ -1,7 +1,10 @@
 package ui
 
 import (
+	"os"
 	"os/exec"
+	"regexp"
+	"strconv"
 	"testing"
 )
 
@@ -24,4 +27,34 @@ func TestTerminalStatusHandling(t *testing.T) {
 		t.Fatalf("node --test testdata/terminal_status.test.mjs: %v\n%s", err, out)
 	}
 	t.Logf("%s", out)
+}
+
+// TestTerminalStatusChangelogCount keeps the CHANGELOG's coverage claim honest.
+// The entry quotes the number of `node --test` cases, and that number drifted
+// wrong twice while the cases were still being added (17, then 22, then 26 for
+// a file holding 27) — a hand-maintained count in prose is a claim nobody
+// checks. Derive it here instead: count the cases, then require the entry to
+// say the same thing.
+func TestTerminalStatusChangelogCount(t *testing.T) {
+	src, err := os.ReadFile("testdata/terminal_status.test.mjs")
+	if err != nil {
+		t.Fatalf("read testdata/terminal_status.test.mjs: %v", err)
+	}
+	cases := len(regexp.MustCompile(`(?m)^test\(`).FindAll(src, -1))
+	if cases == 0 {
+		t.Fatal("no node --test cases found; the slice anchors probably moved")
+	}
+
+	changelog, err := os.ReadFile("../../CHANGELOG.md")
+	if err != nil {
+		t.Fatalf("read CHANGELOG.md: %v", err)
+	}
+	claimed := regexp.MustCompile(`Pinned by (\d+) ` + "`" + `node --test` + "`" + ` cases`).FindSubmatch(changelog)
+	if claimed == nil {
+		t.Fatal("CHANGELOG.md no longer says \"Pinned by N `node --test` cases\"")
+	}
+	if got, err := strconv.Atoi(string(claimed[1])); err != nil || got != cases {
+		t.Fatalf("CHANGELOG.md claims %s `node --test` cases but testdata/terminal_status.test.mjs has %d",
+			claimed[1], cases)
+	}
 }

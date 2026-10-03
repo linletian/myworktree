@@ -108,7 +108,18 @@ class PtyRenderer {
         // selecting the tab again would reset the screen and open a second
         // socket — replaying the ring-buffer tail twice (issue #87). The
         // guard is single-sourced in index.html so the two paths cannot drift.
-        if (window.hasTerminalTransportInFlight && window.hasTerminalTransportInFlight(s)) return;
+        if (window.hasTerminalTransportInFlight && window.hasTerminalTransportInFlight(s)) {
+            // Staying silent would read as "nothing happened": deactivate()
+            // leaves the status bar on "idle", so re-selecting a tab whose
+            // reconnect is still queued would look inert for the whole 5s.
+            // Speak up only when no other transport is reporting itself — an
+            // SSE session is live rather than connecting, and its own message
+            // is the accurate one.
+            if (window.updateStatus && !s.logStream) {
+                window.updateStatus(s.ttyReconnectTimer ? 'ws closed, retrying...' : 'connecting...');
+            }
+            return;
+        }
 
         if (window.resetTerminalForSwitch) window.resetTerminalForSwitch(s);
         // The screen was just cleared, so any previous cursor is meaningless. If
@@ -184,6 +195,11 @@ class PtyRenderer {
             // Status observed by the previous reconcileTerminalSessions()
             // tick; null until the first observation (issue #80).
             lastKnownStatus: null,
+            // Outcome of the last loadLog() and its consecutive-failure
+            // count, which the reconciler turns into a retry backoff.
+            lastLogLoadFailed: false,
+            lastLogLoadFailures: 0,
+            lastLogLoadAttemptAt: 0,
             ttySocket: null,
             ttyState: 'IDLE',
             appliedTTYSize: null,

@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -470,6 +471,27 @@ func TestKindBadgesUnified(t *testing.T) {
 // covered even when they live in JS. Key user-visible strings are also
 // asserted positively per file so a reword cannot silently hide a CJK
 // regression behind a full-file rewrite.
+// TestIndexHTMLInlineScriptIsIndented catches a function pasted into the
+// inline script at column 0. It is invisible in review, survives every
+// behavioural test (the sliced functions evaluate the same either way) and
+// leaves a comment block stranded on the wrong neighbour.
+func TestIndexHTMLInlineScriptIsIndented(t *testing.T) {
+	bodyText := fetchStaticAsset(t, "/")
+	start := strings.Index(bodyText, "<script>\n")
+	end := strings.LastIndex(bodyText, "\n    </script>")
+	if start < 0 || end < start {
+		t.Fatal("GET / no inline <script> block found")
+	}
+	script := bodyText[start+len("<script>\n") : end]
+
+	topLevel := regexp.MustCompile(`(?m)^(async function |function |const |let |var )`)
+	for i, line := range strings.Split(script, "\n") {
+		if topLevel.MatchString(line) {
+			t.Errorf("GET / inline script line %d starts a declaration at column 0: %s", i+1, line)
+		}
+	}
+}
+
 func TestUICopyIsEnglishOnly(t *testing.T) {
 	paths := map[string][]string{
 		"/": {
@@ -723,7 +745,11 @@ func TestTerminalStatusBucketsReplaceRunningEquality(t *testing.T) {
 		"if (isPending) {",
 		// Activation shares the promotion's in-flight guard; without it a tab
 		// switch during bring-up resets the screen and opens a second socket.
-		"if (window.hasTerminalTransportInFlight && window.hasTerminalTransportInFlight(s)) return;",
+		"if (window.hasTerminalTransportInFlight && window.hasTerminalTransportInFlight(s)) {",
+		// The early return is not silent: deactivate() leaves the status bar on
+		// "idle", so re-selecting a tab whose reconnect is still queued would
+		// look inert for the whole window.
+		"window.updateStatus(s.ttyReconnectTimer ? 'ws closed, retrying...' : 'connecting...');",
 	} {
 		if !strings.Contains(js, check) {
 			t.Fatalf("GET /static/kinds/pty.js should classify the status: missing %q", check)
@@ -735,7 +761,8 @@ func TestTerminalStatusBucketsReplaceRunningEquality(t *testing.T) {
 		"if (!inst) {\n                    // Nothing to drive; leave the session alone.",
 		"} else if (isInstancePendingStatus(inst.status)) {",
 		"} else if (isInstanceTerminalStatus(inst.status)) {",
-		"} else if (!hasTerminalTransportInFlight(session)) {",
+		"} else if (hasTerminalTransportInFlight(session)) {",
+		"updateStatus(session.ttyReconnectTimer ? \"ws closed, retrying...\" : \"connecting...\");",
 	} {
 		if !strings.Contains(bodyText, check) {
 			t.Fatalf("GET / legacy fallback should classify the status: missing %q", check)
@@ -756,6 +783,9 @@ func TestTerminalStatusBucketsReplaceRunningEquality(t *testing.T) {
 		"if (inst && inst.status !== 'running') {",
 		"const isRunning = inst && inst.status === 'running';",
 		"inst.status === 'running' ?",
+		// A strict substring of the line above, kept on purpose: it is the only
+		// one of the two that also catches the destructured form, where the
+		// status is a local rather than a property of `inst`.
 		"status === 'running' ?",
 	} {
 		if strings.Contains(bodyText, forbidden) {
@@ -782,10 +812,32 @@ func TestTerminalStatusBucketsReplaceRunningEquality(t *testing.T) {
 	for _, check := range []string{
 		"session.lastLogLoadFailed = true;",
 		"session.lastLogLoadFailed = false;",
-		"!isInstanceTerminalStatus(prev) || session.lastLogLoadFailed",
+		"session.lastLogLoadFailures = (session.lastLogLoadFailures || 0) + 1;",
+		"session.lastLogLoadAttemptAt = Date.now();",
+		// Unbounded 2s retries would append one error line per tick, since
+		// loadLog() reports its failures into the terminal.
+		"const retryBackoffMs = Math.min(60, 2 ** Math.min(session.lastLogLoadFailures || 0, 6)) * 1000;",
+		"const retryDue = !!session.lastLogLoadFailed",
+		"if (enteringTerminalBucket || retryDue) {",
 	} {
 		if !strings.Contains(bodyText, check) {
-			t.Fatalf("GET / should retry a failed terminal replay: missing %q", check)
+			t.Fatalf("GET / should retry a failed terminal replay with a backoff: missing %q", check)
+		}
+	}
+
+	// The legacy factory in index.html and the renderer's in kinds/pty.js both
+	// initialise the replay latches, next to the lastKnownStatus latch they
+	// now sit beside.
+	for _, check := range []string{
+		"lastLogLoadFailed: false,",
+		"lastLogLoadFailures: 0,",
+		"lastLogLoadAttemptAt: 0,",
+	} {
+		if !strings.Contains(bodyText, check) {
+			t.Fatalf("GET / legacy session factory should initialise %q", check)
+		}
+		if !strings.Contains(js, check) {
+			t.Fatalf("GET /static/kinds/pty.js session factory should initialise %q", check)
 		}
 	}
 
