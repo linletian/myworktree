@@ -463,6 +463,17 @@ func TestKindBadgesUnified(t *testing.T) {
 	}
 }
 
+// TestIndexHTMLInlineScriptIsIndented catches a block pasted into the inline
+// script at the wrong indentation. Both halves of that defect are invisible in
+// review and survive every behavioural test, since the sliced functions
+// evaluate the same either way:
+//
+//   - a declaration at column 0, or at any indent other than the script body's
+//     own 8 spaces;
+//   - a comment block whose lines disagree among themselves, which is how a
+//     moved block strands its first line behind and leaves an explanation
+//     sitting on the wrong neighbour.
+//
 // TestUICopyIsEnglishOnly pins the single-language English UI direction
 // (issue #73) across the whole served UI, not just index.html: the web-kind
 // renderer JS files (dsh_web.js / opencode_web.js / reasonix.js) and
@@ -471,10 +482,6 @@ func TestKindBadgesUnified(t *testing.T) {
 // covered even when they live in JS. Key user-visible strings are also
 // asserted positively per file so a reword cannot silently hide a CJK
 // regression behind a full-file rewrite.
-// TestIndexHTMLInlineScriptIsIndented catches a function pasted into the
-// inline script at column 0. It is invisible in review, survives every
-// behavioural test (the sliced functions evaluate the same either way) and
-// leaves a comment block stranded on the wrong neighbour.
 func TestIndexHTMLInlineScriptIsIndented(t *testing.T) {
 	bodyText := fetchStaticAsset(t, "/")
 	start := strings.Index(bodyText, "<script>\n")
@@ -484,12 +491,42 @@ func TestIndexHTMLInlineScriptIsIndented(t *testing.T) {
 	}
 	script := bodyText[start+len("<script>\n") : end]
 
-	topLevel := regexp.MustCompile(`(?m)^(async function |function |const |let |var )`)
+	// Declarations: only a column-0 hit is provably wrong here. Requiring exactly
+	// 8 spaces would flag every nested `const`, and deciding top level properly
+	// needs a parser. The comment check below is what covers the
+	// over-indented case, which is how a moved block actually shows up.
+	decl := regexp.MustCompile(`(?m)^( *)(async function |function |const |let |var )`)
 	for i, line := range strings.Split(script, "\n") {
-		if topLevel.MatchString(line) {
+		if m := decl.FindStringSubmatch(line); m != nil && len(m[1]) == 0 {
 			t.Errorf("GET / inline script line %d starts a declaration at column 0: %s", i+1, line)
 		}
 	}
+
+	// A comment run is a contiguous block of `//` lines and every line in it
+	// has to sit at the same depth. Single-line runs are exempt: a closing
+	// brace followed by one top-level comment legitimately changes depth.
+	comment := regexp.MustCompile(`^(\s*)//`)
+	var run []string
+	flush := func() {
+		if len(run) > 1 {
+			want := len(comment.FindStringSubmatch(run[0])[1])
+			for _, l := range run[1:] {
+				if got := len(comment.FindStringSubmatch(l)[1]); got != want {
+					t.Errorf("GET / inline script comment block mixes indents (%d and %d): %q", want, got, run[0])
+					break
+				}
+			}
+		}
+		run = nil
+	}
+	for _, line := range strings.Split(script, "\n") {
+		if comment.MatchString(line) && !strings.HasPrefix(strings.TrimSpace(line), "///") {
+			run = append(run, line)
+			continue
+		}
+		flush()
+	}
+	flush()
 }
 
 func TestUICopyIsEnglishOnly(t *testing.T) {
@@ -725,12 +762,14 @@ func TestTerminalStatusBucketsReplaceRunningEquality(t *testing.T) {
 		// The guard is one function so the poll-driven promotion and
 		// kinds/pty.js cannot drift apart; each entry below is one way a second
 		// owner of the bring-up shows up.
-		"function hasTerminalTransportInFlight(session)",
+		"function hasTerminalTransportInFlight(session, options)",
 		"if (session.loadLogController) return true;",
 		"if (session.ttySocket) return true;",
 		"if (session.logStream) return true;",
 		"if (session.ttyState && session.ttyState !== 'IDLE') return true;",
-		"if (session.ttyReconnectTimer) return true;",
+		// The promotion is the bystander: it lets a queued retry fire, so it
+		// passes no options and therefore respects the timer arm.
+		"if (session.ttyReconnectTimer && !(options && options.ignoreQueuedRetry)) return true;",
 	} {
 		if !strings.Contains(bodyText, check) {
 			t.Fatalf("GET / should include the reconcile promotion hook %q", check)
@@ -745,7 +784,7 @@ func TestTerminalStatusBucketsReplaceRunningEquality(t *testing.T) {
 		"if (isPending) {",
 		// Activation shares the promotion's in-flight guard; without it a tab
 		// switch during bring-up resets the screen and opens a second socket.
-		"if (window.hasTerminalTransportInFlight && window.hasTerminalTransportInFlight(s)) {",
+		"if (window.hasTerminalTransportInFlight\n            && window.hasTerminalTransportInFlight(s, { ignoreQueuedRetry: true })) {",
 		// The early return is not silent: deactivate() leaves the status bar on
 		// "idle", so re-selecting a tab whose reconnect is still queued would
 		// look inert for the whole window.
@@ -761,7 +800,7 @@ func TestTerminalStatusBucketsReplaceRunningEquality(t *testing.T) {
 		"if (!inst) {\n                    // Nothing to drive; leave the session alone.",
 		"} else if (isInstancePendingStatus(inst.status)) {",
 		"} else if (isInstanceTerminalStatus(inst.status)) {",
-		"} else if (hasTerminalTransportInFlight(session)) {",
+		"} else if (hasTerminalTransportInFlight(session, { ignoreQueuedRetry: true })) {",
 		"updateStatus(session.ttyReconnectTimer ? \"ws closed, retrying...\" : \"connecting...\");",
 	} {
 		if !strings.Contains(bodyText, check) {

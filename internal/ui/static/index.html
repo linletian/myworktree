@@ -2864,12 +2864,15 @@
                     if (hasLiveTTYConnection(id)) {
                         updateStatus("websocket live");
                         focusTerminalIfPossible();
-                    } else if (hasTerminalTransportInFlight(session)) {
-                        // A promotion from the reconcile loop already owns this
-                        // bring-up; racing it would replay the tail twice (#87).
-                        // Same status treatment as kinds/pty.js activate(): say
-                        // something rather than look inert, but never over a
-                        // transport that is already reporting itself.
+                    } else if (hasTerminalTransportInFlight(session, { ignoreQueuedRetry: true })) {
+                        // A poll-driven promotion or an earlier activation
+                        // already owns this bring-up; racing it would replay
+                        // the tail twice (#87). Same status treatment as
+                        // kinds/pty.js activate(): say something rather than
+                        // look inert, but never over a transport that is
+                        // already reporting itself. A queued retry does not
+                        // block here either: re-selection is an explicit
+                        // request and takes it over, as in pty.js.
                         if (!session.logStream) {
                             updateStatus(session.ttyReconnectTimer ? "ws closed, retrying..." : "connecting...");
                         }
@@ -3557,7 +3560,7 @@
             }
         }
 
-                // True when something other than a fresh caller already owns this
+        // True when something other than a fresh caller already owns this
         // session's bring-up: a poll-driven promotion, an activation still
         // inside its `await loadLog()`, an open or closing socket, a live SSE
         // stream, or a queued reconnect. Two owners means two connects, and the
@@ -3568,16 +3571,28 @@
         // without this, the 2s poll tears down and re-opens the WebSocket
         // forever.
         //
+        // `options.ignoreQueuedRetry` is the one caller-visible difference. A
+        // queued reconnect belongs to the poll-driven promotion, which must
+        // stand aside and let the timer fire — it is a bystander, and taking
+        // over from it on every tick would flap the connection. It does *not*
+        // belong to the user: re-selecting a tab is an explicit request, and
+        // waiting out a 5s timer to honour it left the tab frozen on a stale
+        // screen for the rest of the window. Activation passes the flag and
+        // takes over; connectTTY → disconnectTTY cancels the pending timer
+        // before anything is opened, so the handover cannot leave two sockets.
+        // The other four arms still apply there, so an activation that is
+        // itself mid-loadLog still cannot start a competing one.
+        //
         // Single-sourced so the activation paths (kinds/pty.js) and the
         // poll-driven promotion cannot disagree about what "already
         // connecting" means.
-        function hasTerminalTransportInFlight(session) {
+        function hasTerminalTransportInFlight(session, options) {
             if (!session) return false;
             if (session.loadLogController) return true;
             if (session.ttySocket) return true;
             if (session.logStream) return true;
             if (session.ttyState && session.ttyState !== 'IDLE') return true;
-            if (session.ttyReconnectTimer) return true;
+            if (session.ttyReconnectTimer && !(options && options.ignoreQueuedRetry)) return true;
             return false;
         }
 

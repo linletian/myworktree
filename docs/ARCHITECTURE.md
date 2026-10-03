@@ -227,10 +227,14 @@ Live instance without healthy session
 
 - active session + **live** status + no transport → `connectTTY()` (**promote**). The WS handshake replays the tail itself, so the promotion deliberately does **not** also call `loadLog()` (which would duplicate the screen — see #87).
 - active session + **pending** status → no-op; the next poll promotes it. This is the self-heal for issue #80.
-- active session + **terminal** status → disconnect, and `loadLog()` (banner included) on the transition into that bucket only, tracked per session via `lastKnownStatus`.
+- active session + **terminal** status → disconnect, and `loadLog()` (banner included) on the transition into that bucket, tracked per session via `lastKnownStatus`. A replay that *fails* is retried — `loadLog()` swallows its own errors, so it latches the outcome and the reconciler backs off 2^n seconds up to 60s (an unbounded 2s retry would append one error line to the terminal per tick forever). An explicit user action bypasses that backoff: `activate()`'s terminal branch calls `loadLog()` unconditionally, so re-selecting the tab paints the banner immediately.
 - inactive session + **terminal** status → destroy the session. A pending inactive session is kept.
 
 The promotion is gated by `hasTerminalTransportInFlight(session)` — a single function shared with the activation paths, so the two cannot drift apart — and requires a clean slate: no `loadLogController` (an activation is still inside `await loadLog()`), no `ttySocket` (connected, `CONNECTING`, or a `CLOSED` one the `onclose` handler has not dropped yet), no live SSE `logStream`, `ttyState === 'IDLE'`, and no pending reconnect timer. Without it the 2s poll tears down and re-opens the WebSocket forever, because `hasLiveTTYConnection()` is false while a socket is still `CONNECTING`; the second connect also replays the ring-buffer tail a second time (issue #87).
+
+The activation paths call the same guard with `{ ignoreQueuedRetry: true }`, and that asymmetry is deliberate. The **promotion** is a bystander: it must let a queued retry fire, or it would take over on every tick and flap the connection. The **user** is not — re-selecting a tab is an explicit request, and waiting out a 5s timer to honour it froze the tab on a pre-drop screen that the handshake replay then painted twice. Activation takes the handover; `connectTTY()` → `disconnectTTY()` cancels the pending timer before it opens anything, so the handover cannot leave two sockets, and the other four conditions still block it (an activation mid-`loadLog()` is never raced).
+
+When an activation does return early, it is never silent — `deactivate()` leaves the status bar on `idle`, so a bare `return` reads as a dead click. It reports `ws closed, retrying...` when a retry is queued and `connecting...` otherwise, and says **nothing** when an SSE stream is live, since that session is not connecting and its own message is the accurate one.
 
 **Critical Timing Rules:**
 1. Live instances MUST NOT be detached purely because another instance becomes active.

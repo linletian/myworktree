@@ -108,10 +108,17 @@ class PtyRenderer {
         // selecting the tab again would reset the screen and open a second
         // socket — replaying the ring-buffer tail twice (issue #87). The
         // guard is single-sourced in index.html so the two paths cannot drift.
-        if (window.hasTerminalTransportInFlight && window.hasTerminalTransportInFlight(s)) {
+        //
+        // ignoreQueuedRetry: re-selecting the tab is an explicit request, so
+        // it takes over from a pending reconnect rather than leaving the
+        // previous screen up until the timer fires — connectTTY →
+        // disconnectTTY cancels that timer. The other four conditions still
+        // block, so this cannot race an activation already mid-loadLog.
+        if (window.hasTerminalTransportInFlight
+            && window.hasTerminalTransportInFlight(s, { ignoreQueuedRetry: true })) {
             // Staying silent would read as "nothing happened": deactivate()
-            // leaves the status bar on "idle", so re-selecting a tab whose
-            // reconnect is still queued would look inert for the whole 5s.
+            // leaves the status bar on "idle", so re-selecting a tab mid
+            // bring-up would look inert until the connect finished.
             // Speak up only when no other transport is reporting itself — an
             // SSE session is live rather than connecting, and its own message
             // is the accurate one.

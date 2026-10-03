@@ -532,7 +532,9 @@ function ptyHarness({ doc } = {}) {
     resetTerminalForSwitch: s => calls.reset.push(s.id),
     disconnectTTY: s => calls.disconnect.push(s.id),
     loadLog: (s) => { calls.loadLog.push(s.id); return Promise.resolve(); },
-    connectTTY: s => calls.connect.push(s.id),
+    // Mirrors the real connectTTY, which begins by disconnecting and thereby
+    // cancelling a queued retry timer.
+    connectTTY: s => { calls.connect.push(s.id); s.ttyReconnectTimer = null; },
     focusTerminalIfPossible: () => calls.focus.push(true),
     updateStatus: text => calls.status.push(text),
   };
@@ -562,7 +564,9 @@ function activateWith(status, extra = {}) {
   const session = makeSession("inst1", extra);
   h.window.state.instances = [{ id: "inst1", kind: "pty", status }];
   h.window.state.activeInst = "inst1";
-  h.window.hasTerminalTransportInFlight = s => h.api.hasTerminalTransportInFlight(s);
+  // Both arguments must be forwarded: dropping `options` here would silently
+  // disable the ignoreQueuedRetry handover the activation path asks for.
+  h.window.hasTerminalTransportInFlight = (s, o) => h.api.hasTerminalTransportInFlight(s, o);
   h.renderer._sessions.set("inst1", session);
   h.renderer.activate(session, null);
   return { ...h, session };
@@ -607,16 +611,58 @@ test("pty activate(): a running instance connects and records its status", () =>
 
 test("pty activate(): the in-flight early return says something", () => {
   // deactivate() leaves the status bar on "idle", so a silent return makes
-  // re-selecting a tab look inert for the whole reconnect window.
-  const queued = activateWith("running", { ttyReconnectTimer: 42 });
-  assert.equal(queued.calls.status.at(-1), "ws closed, retrying...");
-
+  // re-selecting a tab look inert until the in-flight connect finishes.
   const connecting = activateWith("running", { ttyState: "CONNECTING" });
   assert.equal(connecting.calls.status.at(-1), "connecting...");
+
+  const replaying = activateWith("running", { loadLogController: {} });
+  assert.equal(replaying.calls.status.at(-1), "connecting...");
 
   // An SSE session is live, not connecting: do not overwrite its message.
   const streaming = activateWith("running", { logStream: {} });
   assert.deepEqual(streaming.calls.status, [], "the live SSE message must survive the guard");
+});
+
+test("pty activate(): a queued reconnect does not freeze an explicit re-selection", async () => {
+  // The user asked for this tab. Waiting out the 5s timer left it on the
+  // pre-drop screen, and the handshake replay then painted the last screenful
+  // a second time — so activation takes the handover, and connectTTY's own
+  // disconnect cancels the pending timer.
+  const { calls, session } = activateWith("running", { ttyReconnectTimer: 42 });
+  assert.deepEqual(calls.reset, ["inst1"], "the screen is cleared for the reconnect");
+  assert.deepEqual(calls.loadLog, ["inst1"]);
+
+  await new Promise(r => setTimeout(r, 0));
+  assert.deepEqual(calls.connect, ["inst1"], "and the handover connects");
+  assert.equal(session.ttyReconnectTimer, null, "the queued retry is cancelled, not left to fire");
+});
+
+test("pty activate(): the handover still yields to its own loadLog and its socket", () => {
+  // ignoreQueuedRetry is scoped to the timer arm alone: an activation already
+  // bootstrapping must not be raced by a second one.
+  for (const [label, extra] of [
+    ["an activation awaiting its log load", { loadLogController: {}, ttyReconnectTimer: 42 }],
+    ["a CONNECTING socket", { ttyState: "CONNECTING", ttySocket: {}, ttyReconnectTimer: 42 }],
+    ["a live SSE stream", { logStream: {}, ttyReconnectTimer: 42 }],
+  ]) {
+    const { calls } = activateWith("running", extra);
+    assert.deepEqual(calls.reset, [], `must not clear the screen with ${label}`);
+    assert.deepEqual(calls.connect, [], `must not connect on top of ${label}`);
+  }
+});
+
+test("the poll-driven promotion still stands aside for a queued retry", () => {
+  // The asymmetry is deliberate: the promotion is a bystander that would flap
+  // the connection on every tick, so it passes no options and waits.
+  const session = makeSession("inst1", { ttyReconnectTimer: 42 });
+  const instances = [{ id: "inst1", status: "running" }];
+  const { api, calls } = indexHarness({ activeInst: "inst1", instances, sessions: [session] });
+
+  assert.equal(api.ensureTerminalLiveTransport(session), false, "the timer owns this session");
+  assert.deepEqual(calls.connect, []);
+  assert.equal(api.hasTerminalTransportInFlight(session, { ignoreQueuedRetry: true }), false,
+    "activation is the caller that may take over");
+  assert.equal(api.hasTerminalTransportInFlight(session), true);
 });
 
 test("pty activate(): classifies without the window helpers published", () => {
@@ -645,7 +691,6 @@ test("pty activate(): a tab switch during bring-up does not start a second one",
   for (const [label, extra] of [
     ["a CONNECTING socket", { ttyState: "CONNECTING", ttySocket: {} }],
     ["an activation awaiting its log load", { loadLogController: {} }],
-    ["a queued reconnect", { ttyReconnectTimer: 42 }],
     ["a live SSE stream", { logStream: {} }],
   ]) {
     const { calls, session } = activateWith("running", extra);
