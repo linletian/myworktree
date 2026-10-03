@@ -2802,9 +2802,11 @@
                     } else {
                         resetTerminalForSwitch(session);
                         // Keep session.logCursor here: loadLog overwrites it from the
-                        // X-Log-Offset header, and the previous cursor is a strictly safer
-                        // fallback than 0 (which replays the oldest 64KB) if that header
-                        // is lost or the fetch fails.
+                        // X-Log-Offset header, and the previous cursor is a safer
+                        // fallback than 0 (which replays the oldest 64KB) if that
+                        // header is lost or the fetch fails. For a first visit the
+                        // previous cursor is -1 ("unknown"), which startSSE sends as
+                        // a tail request rather than an incremental read.
                         loadLog(session).finally(() => {
                             connectTTY(session);
                             focusTerminalIfPossible();
@@ -3251,7 +3253,11 @@
                 termDataDisposable: null,
                 fitAddon: null,
                 logStream: null,
-                logCursor: 0,
+                // -1 means "cursor unknown". The server treats a negative
+                // since as a tail request, so startSSE omits `since` entirely
+                // while the cursor is unknown — sending since=0 would replay the
+                // oldest 64KB of the ring buffer (the #81 symptom).
+                logCursor: -1,
                 ttySocket: null,
                 ttyReconnectTimer: null,
                 termInputBuffer: "",
@@ -3837,14 +3843,19 @@
         function startSSE(session) {
             if (!session) return;
             if (state.activeInst === session.id) updateStatus("sse live");
-            let url = `/api/instances/log/stream?id=${encodeURIComponent(session.id)}&since=${session.logCursor}`;
+            let url = `/api/instances/log/stream?id=${encodeURIComponent(session.id)}`;
+            // Only send `since` once a real byte cursor exists. An unknown
+            // cursor (-1, e.g. loadLog failed) must fall through to the
+            // server's default tail semantics; since=0 would replay the
+            // oldest 64KB of the ring buffer (issue #81).
+            if (session.logCursor > 0) url += `&since=${session.logCursor}`;
             if (token) url += `&token=${encodeURIComponent(token)}`;
             const es = new EventSource(url);
             const onLog = (ev) => {
                 try {
                     const msg = JSON.parse(ev.data);
                     if (msg.chunk && session.term) writeSanitizedTerminalOutput(session, msg.chunk);
-                    if (msg.next) session.logCursor = msg.next;
+                    if (Number.isFinite(msg.next) && msg.next >= 0) session.logCursor = msg.next;
                 } catch (e) { }
             };
             es.addEventListener("log", onLog);

@@ -242,3 +242,33 @@ func TestHandleInstanceLogStream_NonTailKindDoesNotReplay(t *testing.T) {
 		t.Fatalf("log events = %d, want 1 (no replay loop)", n)
 	}
 }
+
+func TestHandleMCPCallInstanceLogTail_ReturnsNewestBytes(t *testing.T) {
+	t.Parallel()
+	k := &logReplayKind{}
+	srv, m := newLogTestServer(t, k)
+	instID := startKindInstance(t, m, "log-replay")
+
+	req := httptest.NewRequest(http.MethodPost, "/api/mcp/call",
+		strings.NewReader(`{"tool":"instance_log_tail","args":{"id":"`+instID+`","n":65536}}`))
+	w := httptest.NewRecorder()
+	srv.handleMCPCall(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body %q)", w.Code, w.Body.String())
+	}
+	var out struct {
+		Result struct {
+			Text string `json:"text"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode response: %v (body %q)", err, w.Body.String())
+	}
+	if out.Result.Text != "newest-bytes" {
+		t.Fatalf("MCP tail text = %q, want newest-bytes", out.Result.Text)
+	}
+	if got := k.lastSince.Load(); got >= 0 {
+		t.Fatalf("ReadLogs since = %d, want negative (tail semantics)", got)
+	}
+}

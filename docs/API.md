@@ -522,7 +522,7 @@ Response: `text/plain`
 ```
 - Same in-memory backing as the tail endpoint above. Without `since` (or with a negative `since`), the stream starts from the tail (newest bytes), same as the log endpoint. The cursor `next` is the same monotonic byte counter; clients should echo it as `since` on the next request to receive only new chunks.
 - Polling cadence: 1 s. When no new data is available, the server emits an SSE comment line (`: ping`) as a keep-alive — no `log` event, no cursor update. Clients should treat the absence of a `log` event as "no progress" and keep using the last `next` they saw.
-- Stopped / unknown / never-started instance IDs return `200 OK` and emit one empty `log` event (`{"chunk":"","next":0}`) followed by `: ping` keep-alives — the stream stays open; clients decide when to give up.
+- Stopped / unknown / never-started instance IDs return `200 OK` and emit one empty `log` event followed by `: ping` keep-alives — the stream stays open; clients decide when to give up. The cursor in that first event is `0` for a tail read (omitted / negative `since`), and echoes the requested `since` for an incremental read.
 
 ### Instance resource stats
 `GET /api/instances/stats`
@@ -753,6 +753,11 @@ Supported tool names:
 - `worktree_list`, `worktree_create`, `worktree_delete`
 - `branch_list`, `tag_list`
 - `instance_list`, `instance_start`, `instance_stop`, `instance_input`, `instance_delete`, `instance_log_tail`
+
+### `instance_log_tail`
+Args: `{ "id": "<instanceId>", "n": 65536 }` — `n` is the max bytes to return (defaults to `4096` when absent or non-positive).
+
+Returns the **newest** `n` bytes of the instance's ring buffer (tail semantics, same bytes as `GET /api/instances/log` without `since`), not the oldest. Instances that are stopped, exited, or unknown return an empty string, since the buffer is released with the running instance. Instances whose kind does not capture logs (`reasonix`, `opencode-web`, `dsh-web`) also return an empty string.
 
 ## 7) Portal Dashboard
 

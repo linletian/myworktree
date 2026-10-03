@@ -430,7 +430,14 @@ func (m *Manager) Tail(id string, n int64) (string, int64, error) {
 	}
 	body, off, err := k.ReadLogs(ri.handle, -1, n)
 	if off < 0 {
+		// Kinds without log capture echo the -1 sentinel back.
 		off = 0
+	}
+	if int64(len(body)) > off {
+		// The cursor must never end before the data we just handed out,
+		// otherwise the follow-up ReadSince(off) re-delivers the same
+		// bytes. Clamp rather than failing the read.
+		off = int64(len(body))
 	}
 	return body, off, err
 }

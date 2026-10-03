@@ -237,14 +237,21 @@ func TestRestartCreatesNewID(t *testing.T) {
 	// Wait for inst2's starting→running persist and Stop it, joining the
 	// lifecycle goroutine before TempDir cleanup (same race class as
 	// the pre-Restart wait above).
+	running := false
 	for i := 0; i < 50; i++ {
 		got, _ := mgr.Get(inst2.ID)
 		if got.Status == StatusRunning.String() {
+			running = true
 			break
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	_ = mgr.Stop(inst2.ID)
+	if !running {
+		t.Fatalf("inst2 status did not reach running within 5s")
+	}
+	if err := mgr.Stop(inst2.ID); err != nil {
+		t.Errorf("Stop(inst2): %v", err)
+	}
 }
 
 func TestReconcileRunning(t *testing.T) {
