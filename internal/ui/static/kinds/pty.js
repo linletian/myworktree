@@ -72,6 +72,15 @@ class PtyRenderer {
         }
 
         if (window.resetTerminalForSwitch) window.resetTerminalForSwitch(s);
+        // Deliberately reset the cursor here. resetTerminalForSwitch just
+        // cleared the screen, so if loadLog then fails, a retained cursor
+        // would make startSSE resume with since=<oldOffset> and repaint only
+        // the bytes produced since then onto an empty terminal. Zero makes
+        // startSSE omit `since` entirely, so the server's tail default
+        // repaints the full current screen. Do NOT "fix" this to the
+        // unknown-cursor sentinel used by ensureTerminalSession in
+        // index.html — the two live in different session factories and the
+        // post-reset fallback here wants a full tail, not a delta.
         s.logCursor = 0;
         if (window.loadLog) {
             window.loadLog(s).finally(() => {

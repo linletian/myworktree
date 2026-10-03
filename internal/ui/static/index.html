@@ -2806,7 +2806,9 @@
                         // fallback than 0 (which replays the oldest 64KB) if that
                         // header is lost or the fetch fails. For a first visit the
                         // previous cursor is -1 ("unknown"), which startSSE sends as
-                        // a tail request rather than an incremental read.
+                        // a tail request rather than an incremental read. (Legacy
+                        // no-renderer fallback only — see kinds/pty.js for the path
+                        // the pty kind actually takes.)
                         loadLog(session).finally(() => {
                             connectTTY(session);
                             focusTerminalIfPossible();
@@ -3253,10 +3255,14 @@
                 termDataDisposable: null,
                 fitAddon: null,
                 logStream: null,
-                // -1 means "cursor unknown". The server treats a negative
-                // since as a tail request, so startSSE omits `since` entirely
-                // while the cursor is unknown — sending since=0 would replay the
-                // oldest 64KB of the ring buffer (the #81 symptom).
+                // -1 means "cursor unknown". startSSE omits `since` entirely for a
+                // non-positive cursor, so the server's tail default applies —
+                // sending since=0 would instead replay the oldest 64KB of the
+                // ring buffer (the #81 symptom). NOTE: this is the legacy
+                // no-renderer fallback's session factory. Every kind that ships
+                // a renderer (all four today) builds its own session in
+                // kinds/*.js and bootstraps its own cursor — see the comment on
+                // `s.logCursor = 0` in kinds/pty.js.
                 logCursor: -1,
                 ttySocket: null,
                 ttyReconnectTimer: null,

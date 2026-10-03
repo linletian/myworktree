@@ -540,6 +540,79 @@ func TestIndexHTMLCoversPerSessionConnectionManagement(t *testing.T) {
 	}
 }
 
+// TestLogCursorBootstrapNeverRequestsOldestBytes pins the client half of
+// the issue #81 tail contract. The server treats an omitted `since` as a
+// tail request and `since=0` as "read from the oldest live byte", so the
+// browser must never emit `since=0`. Both cursor bootstraps (the legacy
+// fallback in index.html and the pty renderer) are asserted together —
+// neither one alone is the whole picture, and a change to either that
+// reintroduces since=0 silently reintroduces the stale replay.
+func TestLogCursorBootstrapNeverRequestsOldestBytes(t *testing.T) {
+	bodyText := fetchIndexHTML(t)
+	checks := []string{
+		// The shared SSE connect helper omits `since` unless a real byte
+		// cursor exists; this is what protects every kind.
+		"if (session.logCursor > 0) url += `&since=${session.logCursor}`;",
+		// loadLog must not send an explicit offset, and must not fabricate
+		// one when the header is missing.
+		"const res = await fetch(`/api/instances/log?id=${session.id}`",
+		"if (Number.isFinite(next) && next >= 0) {",
+		// Same acceptance rule for cursor values arriving over the stream.
+		"if (Number.isFinite(msg.next) && msg.next >= 0) session.logCursor = msg.next;",
+		// Legacy no-renderer fallback bootstraps "unknown" as -1.
+		"logCursor: -1,",
+	}
+	for _, check := range checks {
+		if !strings.Contains(bodyText, check) {
+			t.Fatalf("GET / should include log cursor bootstrap hook %q", check)
+		}
+	}
+
+	if strings.Contains(bodyText, "/api/instances/log/stream?id=${encodeURIComponent(session.id)}&since=${session.logCursor}") {
+		t.Fatalf("GET / must not build an unconditional since= URL from session.logCursor")
+	}
+	if strings.Contains(bodyText, "/api/instances/log?id=${session.id}&since=0") {
+		t.Fatalf("GET / must not request since=0, which the server reads as the oldest live byte")
+	}
+}
+
+func TestPtyRendererResetsCursorAfterTerminalReset(t *testing.T) {
+	mux := http.NewServeMux()
+	if err := Register(mux, "myworktree", nil); err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/static/kinds/pty.js")
+	if err != nil {
+		t.Fatalf("GET /static/kinds/pty.js failed: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /static/kinds/pty.js status: %d", resp.StatusCode)
+	}
+	js := string(body)
+
+	// The pty kind is the only one with a ring buffer, so it is the one
+	// where a cursor bug is user-visible. activate() clears the terminal
+	// and then zeroes the cursor: if loadLog fails afterwards, startSSE
+	// must fall back to a full tail rather than resume from a stale
+	// offset and repaint only a delta onto the cleared screen.
+	if !strings.Contains(js, "window.resetTerminalForSwitch(s);") {
+		t.Fatal("pty.js should clear the terminal before reloading the log")
+	}
+	resetAt := strings.Index(js, "window.resetTerminalForSwitch(s);")
+	cursorAt := strings.Index(js, "s.logCursor = 0;")
+	if cursorAt < 0 {
+		t.Fatal("pty.js should reset s.logCursor after clearing the terminal")
+	}
+	if cursorAt < resetAt {
+		t.Fatal("pty.js should reset s.logCursor after resetTerminalForSwitch, not before")
+	}
+}
+
 func TestRegisterRemoteAccess(t *testing.T) {
 	mux := http.NewServeMux()
 	if err := Register(mux, "myworktree", func(r *http.Request) bool { return true }); err != nil {

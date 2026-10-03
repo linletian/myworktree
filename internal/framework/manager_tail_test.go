@@ -47,7 +47,7 @@ func (k *recordingLogsKind) RegisterHTTP(mux *http.ServeMux, instanceID string, 
 // the starting→running transition so runLifecycle's async state persist
 // finishes before the test returns (TempDir cleanup raced with it
 // otherwise); Stop joins the lifecycle goroutine.
-func startRecordingInstance(t *testing.T, mgr *Manager, k *recordingLogsKind) string {
+func startRecordingInstance(t *testing.T, mgr *Manager) string {
 	t.Helper()
 	inst, err := mgr.Start(context.Background(), StartParams{WorktreeID: "wt1", Kind: "recording", Name: "t1"})
 	if err != nil {
@@ -81,7 +81,7 @@ func TestManager_TailRequestsNewestBytes(t *testing.T) {
 	reg := NewRegistry()
 	reg.Register(k)
 	mgr, _ := newTestManager(t, reg, t.TempDir())
-	instID := startRecordingInstance(t, mgr, k)
+	instID := startRecordingInstance(t, mgr)
 
 	body, off, err := mgr.Tail(instID, 4096)
 	if err != nil {
@@ -101,7 +101,7 @@ func TestManager_ReadSinceClampsNegativeSince(t *testing.T) {
 	reg := NewRegistry()
 	reg.Register(k)
 	mgr, _ := newTestManager(t, reg, t.TempDir())
-	instID := startRecordingInstance(t, mgr, k)
+	instID := startRecordingInstance(t, mgr)
 
 	if _, _, err := mgr.ReadSince(instID, -5, 4096); err != nil {
 		t.Fatalf("ReadSince: %v", err)
@@ -128,7 +128,7 @@ func TestManager_TailClampsShortKindCursor(t *testing.T) {
 	reg := NewRegistry()
 	reg.Register(k)
 	mgr, _ := newTestManager(t, reg, t.TempDir())
-	instID := startRecordingInstance(t, mgr, &k.recordingLogsKind)
+	instID := startRecordingInstance(t, mgr)
 
 	body, off, err := mgr.Tail(instID, 4096)
 	if err != nil {
