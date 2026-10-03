@@ -34,7 +34,7 @@ curl -fsSL https://raw.githubusercontent.com/linletian/myworktree/main/scripts/i
 - **配置热加载** —— `mw config regen` 重新生成 token / 重新载入配置，无需重启 daemon。
 - **Changes 面板里的文件预览 & 差异** —— 点击任意已变更或未跟踪文件即可看带行号的预览和 diff。
 - **Reasonix Web 聊天实例** —— 勾选一下就能在 worktree 里跑 `reasonix serve`，其 Web 聊天界面内嵌在同一个侧栏。
-- **dsh Web 实例** —— 把 DeepSeek Harness 浏览器 UI 作为受管实例内嵌（工作区注册表按 worktree 隔离、会话池共享、越界只提醒；见 `docs/plans/dsh-native-ui/`）。dsh ≥ 0.1.5 支持远程访问（LAN/Tailnet）：每实例反代上的 WS↔SSE 桥（`/api/remote.mux`）+ 注入式连接 shim；loopback 访问对所有 0.1.x 均可用。
+- **dsh Web 实例** —— 把 DeepSeek Harness 浏览器 UI 作为受管实例内嵌（工作区注册表按 worktree 隔离、会话池共享、越界只提醒；见 `docs/plans/dsh-native-ui/`）。**需要 dsh 0.2.x**（`[0.2.0, 0.3.0)`；**不再支持 0.1.x**——0.2 起 RPC 方法名改为 `<namespace>/<method>` 斜线端点，参数嵌套在 `payload.args.request`）。支持远程访问（LAN/Tailnet）：每实例反代上的 WS↔SSE 桥（`/api/remote.mux`）+ 注入式连接 shim；loopback 访问在整个受支持的 0.2.x 区间均可用。
 - **分支 divergence 徽标** —— 一眼看清分支相对上游 ahead / behind 状态，支持定时刷新。
 
 ## 背景与痛点
@@ -353,9 +353,18 @@ Reasonix 实例运行 `reasonix serve` 时**不设置** `REASONIX_HOME`，嵌入
 
 实例生命周期不会触碰共享会话池：Start / Stop / Restart / Delete 只管理 `serve` 子进程及其管理文件（实例状态目录下的 `token`/`port`/`pid`/`serve.log`）。会话存放在 `~/.reasonix/projects/<cwd-slug>/sessions`，因此重启实例会打开一个**全新会话**（无 `--resume`），而你的历史会话仍可在侧边栏切换。
 
-### dsh-web 远程访问（dsh ≥ 0.1.5）
+### dsh-web 远程访问
 
-对具备远程能力的 dsh，dsh-web 实例的远程访问（LAN/Tailnet）已不再被阻断：每实例反代在 `/api/remote.mux` 提供 WS↔SSE 桥（SSE 下行 + POST 上行，帧级透传），并在远程模式 + 具备远程能力时向上游 `index.html` 注入一个 `<script>` 标签的 shim，仅对 mux 路径替换 `window.WebSocket`——优先走原生 WebSocket，1000 ms 探测超时后透明回退到桥。在静默丢弃 WebSocket 升级的网络路径上，这次探测会让首次连接最多多花约 1 秒，之后由桥接管。Start Instance 对话框会探测 `GET /api/dsh/capability`，dsh 低于 0.1.5（`minRemoteVersion`）时禁用远程 Start 并显示英文"版本过低"提示；loopback 访问对所有 0.1.x 继续可用。另外，dsh ≥ 0.1.2 的浏览器会话认证（launch token → `dsh-auth-*` cookie）由每实例代理中转，浏览器不会接触到 dsh 凭据。
+对具备远程能力的 dsh，dsh-web 实例的远程访问（LAN/Tailnet）已不再被阻断：每实例反代在 `/api/remote.mux` 提供 WS↔SSE 桥（SSE 下行 + POST 上行，帧级透传），并在远程模式 + 具备远程能力时向上游 `index.html` 注入一个 `<script>` 标签的 shim，仅对 mux 路径替换 `window.WebSocket`——优先走原生 WebSocket，1000 ms 探测超时后透明回退到桥。在静默丢弃 WebSocket 升级的网络路径上，这次探测会让首次连接最多多花约 1 秒，之后由桥接管。Start Instance 对话框会探测 `GET /api/dsh/capability`，dsh 低于 `minRemoteVersion`（0.2.0）时禁用远程 Start 并显示英文"版本过低"提示；loopback 访问在整个受支持的 0.2.x 区间继续可用。另外，dsh 的浏览器会话认证（launch token → `dsh-auth-*` cookie，≥ 0.1.2 引入，0.2.0 上不变——`GET /?token=` 仍返回 303 + `Set-Cookie`）由每实例代理中转，浏览器不会接触到 dsh 凭据。
+
+### dsh-web 需要 dsh 0.2.x
+
+内嵌集成**只面向 dsh 0.2.x**（`minVersion = 0.2.0`，advisory 区间 `[0.2.0, 0.3.0)`，npx pin `0.2.0-rc.2`）。dsh 0.2.0 对 RPC wire 做了两处破坏性改动，驱动只说新形态：
+
+- **endpoint 段是 `<namespace>/<method>`**——`POST /api/workspace/create`、`POST /api/session/create`、`POST /api/subagents/prompt`（注意 subagent 命名空间是**复数**）。信封的 `method` 字段仍须与 URL-path endpoint 一致；0.1.x 的点号名（`workspace.create`）现在一律 404。
+- **每个 verb 的唯一对象参数嵌套在 `payload.args.request`**——`{type:'client-request', rpcId, method:'workspace/create', payload:{args:{request:{path:…}}}}`。信封本身与 `{ok, value}` 应答形态不变。
+
+launcher 另外会传 **`--no-open`**（issue #84）：dsh 0.2.x 每次启动都会拉起宿主默认浏览器，而 SPA 是 iframe 内嵌的，于是每个实例 Start 都会多开一个游离标签页。它跟在 `--port 0` 之后、与其他 web-app 选项分在一组——launcher 选项（`--patch`）必须保持前置（见 `docs/plans/dsh-native-ui/PLAN.md` §踩坑 11）。
 
 ### dsh-web 会话跨进程只有快照（dsh 上游问题）
 

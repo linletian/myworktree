@@ -3076,7 +3076,7 @@
             const nowTab = document.querySelector('#modal-start-instance .modal-tab.active');
             if (!nowTab || nowTab.dataset.tab !== 'dsh-web') return;
             if (!btn || !warn) return;
-            const min = cap.min_remote_version || '0.1.5';
+            const min = cap.min_remote_version || '0.2.0';
             if (cap._error) {
                 warn.textContent = 'Could not check the dsh version for remote access (request failed); remote Start stays disabled. Retry, or use dsh from the local 127.0.0.1 environment.';
                 warn.hidden = false;
@@ -3084,13 +3084,13 @@
                 return;
             }
             if (cap.missing) {
-                warn.textContent = 'dsh is not installed; remote access requires dsh ≥ ' + min + '. Install dsh, or use it from the local 127.0.0.1 environment.' + (cap.suggested_pin ? ' (suggested: ' + cap.suggested_pin + ')' : '');
+                warn.textContent = 'dsh is not installed; remote access requires dsh ≥ ' + min + '. Install dsh.' + (cap.suggested_pin ? ' (suggested: ' + cap.suggested_pin + ')' : '');
                 warn.hidden = false;
                 btn.disabled = true;
                 return;
             }
             if (!cap.remote_capable) {
-                warn.textContent = 'dsh-web remote access requires dsh ≥ ' + min + ' (found ' + (cap.version || 'unknown') + '). Please upgrade dsh, or use it from the local 127.0.0.1 environment.';
+                warn.textContent = 'dsh-web managed instances require dsh ≥ ' + min + ' (found ' + (cap.version || 'unknown') + '): 0.1.x is no longer supported (0.2 replaced the dotted RPC method names with <namespace>/<method> endpoints and nests every verb argument at payload.args.request). Please upgrade dsh.';
                 warn.hidden = false;
                 btn.disabled = true;
                 return;
@@ -3168,7 +3168,7 @@
                         return;
                     }
                     if (!cap.remote_capable) {
-                        alert('dsh-web remote access requires dsh ≥ ' + (cap.min_remote_version || '0.1.5') + (cap.version ? ' (found ' + cap.version + ')' : '') + '. Please upgrade dsh, or use it from the local 127.0.0.1 environment.');
+                        alert('dsh-web managed instances require dsh ≥ ' + (cap.min_remote_version || '0.2.0') + (cap.version ? ' (found ' + cap.version + ')' : '') + ': 0.1.x is no longer supported (0.2 replaced the dotted RPC method names with <namespace>/<method> endpoints and nests every verb argument at payload.args.request). Please upgrade dsh.');
                         return;
                     }
                 }

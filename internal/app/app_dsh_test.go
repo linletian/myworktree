@@ -66,7 +66,7 @@ func TestHandleInstanceDshInfo(t *testing.T) {
 		ProxyHost: "127.0.0.1", ProxyPort: "40002",
 		IframeURL:        "http://127.0.0.1:40002/",
 		WorktreeAbs:      wt,
-		Version:          "0.1.0",
+		Version:          "0.2.0",
 		VersionSupported: true,
 		RemoteCapable:    true,
 		OverlayVerified:  true,
@@ -106,7 +106,7 @@ func TestHandleInstanceDshInfo(t *testing.T) {
 	if resp["proxy_host"] != "127.0.0.1" || resp["proxy_port"] != "40002" {
 		t.Errorf("proxy = %v:%v", resp["proxy_host"], resp["proxy_port"])
 	}
-	if resp["version"] != "0.1.0" || resp["version_supported"] != true || resp["overlay_verified"] != true {
+	if resp["version"] != "0.2.0" || resp["version_supported"] != true || resp["overlay_verified"] != true {
 		t.Errorf("advisory fields = %v %v %v", resp["version"], resp["version_supported"], resp["overlay_verified"])
 	}
 	if resp["remote_capable"] != true || resp["min_remote_version"] != dsh_web.RemoteMinVersion() {
@@ -433,16 +433,16 @@ func TestDshCapability(t *testing.T) {
 		return w, resp
 	}
 
-	// Path mode, dsh at the remote floor (0.1.5-rc.1 parses to core
-	// 0.1.5): remote_capable, version reported as the parsed core.
+	// Path mode, dsh at the remote floor (0.2.0-rc.2 parses to core
+	// 0.2.0): remote_capable, version reported as the parsed core.
 	srv := newSrv(t)
-	srv.dshDrv.DshBin = writeFakeDshBin(t, "0.1.5-rc.1")
+	srv.dshDrv.DshBin = writeFakeDshBin(t, "0.2.0-rc.2")
 	w, resp := get(srv, "/api/dsh/capability?worktree=wt1")
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200: %s", w.Code, w.Body.String())
 	}
-	if resp["mode"] != "path" || resp["version"] != "0.1.5" {
-		t.Errorf("mode/version = %v %v, want path 0.1.5", resp["mode"], resp["version"])
+	if resp["mode"] != "path" || resp["version"] != "0.2.0" {
+		t.Errorf("mode/version = %v %v, want path 0.2.0", resp["mode"], resp["version"])
 	}
 	if resp["remote_capable"] != true {
 		t.Errorf("remote_capable = %v, want true", resp["remote_capable"])
@@ -454,37 +454,40 @@ func TestDshCapability(t *testing.T) {
 		t.Errorf("missing = %v, want false", resp["missing"])
 	}
 
-	// Below the remote floor (but above the hard gate): not capable.
+	// A 0.1.x binary — below BOTH the remote floor and the hard gate
+	// since 0.1.x support was dropped. The capability report stays
+	// ADVISORY: the version is still reported (Spawn is what refuses).
 	srv = newSrv(t)
-	srv.dshDrv.DshBin = writeFakeDshBin(t, "0.1.0")
+	srv.dshDrv.DshBin = writeFakeDshBin(t, "0.1.9")
 	w, resp = get(srv, "/api/dsh/capability?worktree=wt1")
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200: %s", w.Code, w.Body.String())
 	}
-	if resp["version"] != "0.1.0" || resp["remote_capable"] != false {
-		t.Errorf("version/remote_capable = %v %v, want 0.1.0 false", resp["version"], resp["remote_capable"])
+	if resp["version"] != "0.1.9" || resp["remote_capable"] != false {
+		t.Errorf("version/remote_capable = %v %v, want 0.1.9 false", resp["version"], resp["remote_capable"])
 	}
 
 	// Install-flow upgrade in place: the SAME binary path first reports
-	// 0.1.2, then 0.1.5-rc.1. The endpoint must answer the SECOND probe
-	// freshly — a memoized spawn-gate entry would keep reporting 0.1.2
-	// until daemon restart and the dialog would lie about the upgrade.
+	// 0.1.9 (below the floor), then 0.2.0-rc.2. The endpoint must answer
+	// the SECOND probe freshly — a memoized spawn-gate entry would keep
+	// reporting 0.1.9 until daemon restart and the dialog would lie about
+	// the upgrade.
 	srv = newSrv(t)
-	bin := writeFakeDshBin(t, "0.1.2")
+	bin := writeFakeDshBin(t, "0.1.9")
 	srv.dshDrv.DshBin = bin
 	w, resp = get(srv, "/api/dsh/capability?worktree=wt1")
-	if w.Code != http.StatusOK || resp["version"] != "0.1.2" || resp["remote_capable"] != false {
-		t.Fatalf("pre-upgrade = %d %v %v, want 200 0.1.2 false", w.Code, resp["version"], resp["remote_capable"])
+	if w.Code != http.StatusOK || resp["version"] != "0.1.9" || resp["remote_capable"] != false {
+		t.Fatalf("pre-upgrade = %d %v %v, want 200 0.1.9 false", w.Code, resp["version"], resp["remote_capable"])
 	}
-	if err := os.WriteFile(bin, []byte("#!/bin/sh\necho '0.1.5-rc.1'\n"), 0o755); err != nil {
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\necho '0.2.0-rc.2'\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	w, resp = get(srv, "/api/dsh/capability?worktree=wt1")
 	if w.Code != http.StatusOK {
 		t.Fatalf("post-upgrade status = %d, want 200: %s", w.Code, w.Body.String())
 	}
-	if resp["version"] != "0.1.5" || resp["remote_capable"] != true {
-		t.Errorf("post-upgrade version/remote_capable = %v %v, want 0.1.5 true (fresh probe, not the memo)",
+	if resp["version"] != "0.2.0" || resp["remote_capable"] != true {
+		t.Errorf("post-upgrade version/remote_capable = %v %v, want 0.2.0 true (fresh probe, not the memo)",
 			resp["version"], resp["remote_capable"])
 	}
 

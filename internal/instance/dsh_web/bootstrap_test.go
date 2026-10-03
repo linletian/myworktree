@@ -14,27 +14,32 @@ import (
 )
 
 // rpcUpstream is a configurable RPC-envelope upstream for bootstrap
-// tests.
+// tests. It mirrors the real dsh 0.2.x contract: the endpoint comes from
+// the URL path, the envelope's method must equal it, and the verb's
+// single object argument is nested at payload.args.request.
 type rpcUpstream struct {
 	mu       sync.Mutex
 	calls    []string
 	paths    []string
-	cookies  []string // Cookie header seen on each request
-	fail     bool     // respond 500 (network-ish failure → retry)
-	okAfter  int      // number of failures before succeeding
+	payloads []json.RawMessage // payload seen per request
+	cookies  []string          // Cookie header seen on each request
+	fail     bool              // respond 500 (network-ish failure → retry)
+	okAfter  int               // number of failures before succeeding
 	failures int
 }
 
 func (u *rpcUpstream) handler(w http.ResponseWriter, r *http.Request) {
 	var env struct {
-		Type   string `json:"type"`
-		RPCID  string `json:"rpcId"`
-		Method string `json:"method"`
+		Type    string          `json:"type"`
+		RPCID   string          `json:"rpcId"`
+		Method  string          `json:"method"`
+		Payload json.RawMessage `json:"payload"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&env)
 	u.mu.Lock()
 	u.calls = append(u.calls, env.Method)
 	u.paths = append(u.paths, r.URL.Path)
+	u.payloads = append(u.payloads, env.Payload)
 	u.cookies = append(u.cookies, r.Header.Get("Cookie"))
 	fail := u.fail
 	if !fail && u.failures < u.okAfter {
@@ -50,13 +55,13 @@ func (u *rpcUpstream) handler(w http.ResponseWriter, r *http.Request) {
 
 	var value any
 	switch env.Method {
-	case "workspace.create":
+	case "workspace/create":
 		value = map[string]any{
 			"workspace": map[string]any{"workspaceId": "ws-1", "path": "/wt", "title": "/wt"},
 			"created":   true,
 		}
-	case "session.create":
-		value = map[string]any{"session": map[string]any{"id": "s-1"}}
+	case "session/create":
+		value = map[string]any{"sessionId": "s-1"}
 	default:
 		w.WriteHeader(http.StatusBadRequest)
 		return
@@ -118,15 +123,38 @@ func TestCreateWorkspaceRetriesTransientFailures(t *testing.T) {
 	up.mu.Lock()
 	calls := len(up.calls)
 	paths := append([]string{}, up.paths...)
+	payloads := append([]json.RawMessage{}, up.payloads...)
 	up.mu.Unlock()
 	if calls != 3 {
 		t.Errorf("attempts = %d, want 3 (2 failures + 1 success)", calls)
 	}
-	// Wire contract: the RPC goes to /api/<method> (the endpoint is
-	// derived from the URL path, not the body).
+	// Wire contract (dsh 0.2.x): the RPC goes to /api/<namespace>/<method>
+	// (the endpoint is derived from the URL path, not the body) and the
+	// verb's object argument is nested at payload.args.request — the real
+	// gateway rejects a flat payload ("Remote payload must contain exactly
+	// one plain-object args field", observed live on 0.2.0-rc.2).
 	for _, p := range paths {
-		if p != "/api/workspace.create" {
-			t.Errorf("request path = %q, want /api/workspace.create", p)
+		if p != "/api/workspace/create" {
+			t.Errorf("request path = %q, want /api/workspace/create", p)
+		}
+	}
+	if len(payloads) != 3 {
+		t.Fatalf("payloads = %d, want 3", len(payloads))
+	}
+	for i, raw := range payloads {
+		var wrap struct {
+			Args struct {
+				Request struct {
+					Path string `json:"path"`
+				} `json:"request"`
+			} `json:"args"`
+		}
+		if err := json.Unmarshal(raw, &wrap); err != nil {
+			t.Errorf("attempt %d payload not the {args:{request:{…}}} form: %v (%s)", i, err, raw)
+			continue
+		}
+		if wrap.Args.Request.Path != "/wt" {
+			t.Errorf("attempt %d args.request.path = %q, want /wt (%s)", i, wrap.Args.Request.Path, raw)
 		}
 	}
 }

@@ -3,6 +3,8 @@
 > **Status**: PR1–PR4 已完成 · PR5 远程实测待完成 · PR6（issues #68–#73）已完成待审查 · [FEASIBILITY.md](./FEASIBILITY.md)（决策文档）· [PLAN.md](./PLAN.md)（实施计划）
 >
 > PR 1–5 in dependency order, **docs-first** (PR 1 solidifies spec before code); PR 6 = follow-up issue batch #68–#73.
+>
+> ⚠️ **dsh 0.2.x 修订**：下文勾选清单里的 `workspace.create` / `session.create` 点号写法是 0.1.x 时代的原文，按历史保留。现行 wire 是 `<namespace>/<method>` 端点 + `payload.args.request` 嵌套参数，版本门上調至 `[0.2.0, 0.3.0)`——见 [PLAN.md](./PLAN.md) 顶部「⚠️ 修订（dsh 0.2.x）」一节。
 
 ---
 

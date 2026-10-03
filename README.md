@@ -34,7 +34,7 @@ macOS and Linux · `~/.local/bin` · no `sudo` · see [Install (full reference)]
 - **Hot config reload** — `mw config regen` rotates the auth token and reapplies settings without restarting the daemon.
 - **File preview & diff in the Changes panel** — click any changed or untracked file for a line-numbered, diff-aware preview.
 - **Reasonix web-chat instances** — tick one box to run `reasonix serve` in a worktree, with its web chat UI embedded in the same sidebar.
-- **dsh web instances** — embed the DeepSeek Harness browser UI as a managed instance (per-worktree workspace registry, shared session pool, out-of-scope warning; see `docs/plans/dsh-native-ui/`). Remote access (LAN/Tailnet) is supported for dsh ≥ 0.1.5 via a WS↔SSE bridge on the per-instance proxy (`/api/remote.mux`) plus an injected connection shim; loopback access works for all 0.1.x.
+- **dsh web instances** — embed the DeepSeek Harness browser UI as a managed instance (per-worktree workspace registry, shared session pool, out-of-scope warning; see `docs/plans/dsh-native-ui/`). Requires **dsh 0.2.x** (`[0.2.0, 0.3.0)`; 0.1.x is no longer supported — 0.2 replaced the dotted RPC method names with `<namespace>/<method>` endpoints and nested every verb's arguments at `payload.args.request`). Remote access (LAN/Tailnet) works via a WS↔SSE bridge on the per-instance proxy (`/api/remote.mux`) plus an injected connection shim; loopback access works across the supported 0.2.x range.
 - **Branch divergence badge** — see at a glance when a branch is ahead of or behind its upstream, with scheduled refresh.
 
 ## Background & pain points
@@ -357,9 +357,18 @@ Consequence to be aware of: if your shell exports a custom `REASONIX_HOME` (e.g.
 
 Instance lifecycle never touches the shared session pool: Start / Stop / Restart / Delete only manage the `serve` subprocess and its management files (`token`/`port`/`pid`/`serve.log` in the instance state dir). Sessions live in `~/.reasonix/projects/<cwd-slug>/sessions`, so restarting an instance opens a **fresh** session (no `--resume`) while your history stays available in the sidebar.
 
-### dsh-web remote access (dsh ≥ 0.1.5)
+### dsh-web remote access
 
-Remote (LAN/Tailnet) access to dsh-web instances is no longer blocked for remote-capable dsh: the per-instance reverse proxy serves a WS↔SSE bridge at `/api/remote.mux` (SSE downlink + POST uplink, frame-level), and a small shim (one `<script>` tag injected into the upstream `index.html` when remote mode + remote-capable) replaces `window.WebSocket` for the mux URLs only — native WebSocket first, transparent fallback to the bridge after a 1000 ms probe timeout. On network paths that silently drop WebSocket upgrades this probe adds up to ~1 s to the initial connection before the bridge takes over. The Start Instance dialog probes `GET /api/dsh/capability` and disables remote Start with a version-too-low message when dsh is below 0.1.5 (`minRemoteVersion`); loopback access keeps working for all 0.1.x. Separately, dsh ≥ 0.1.2's browser-session auth (launch token → `dsh-auth-*` cookie) is relayed by the per-instance proxy, so the browser never sees dsh credentials.
+Remote (LAN/Tailnet) access to dsh-web instances is no longer blocked for remote-capable dsh: the per-instance reverse proxy serves a WS↔SSE bridge at `/api/remote.mux` (SSE downlink + POST uplink, frame-level), and a small shim (one `<script>` tag injected into the upstream `index.html` when remote mode + remote-capable) replaces `window.WebSocket` for the mux URLs only — native WebSocket first, transparent fallback to the bridge after a 1000 ms probe timeout. On network paths that silently drop WebSocket upgrades this probe adds up to ~1 s to the initial connection before the bridge takes over. The Start Instance dialog probes `GET /api/dsh/capability` and disables remote Start with a version-too-low message when dsh is below `minRemoteVersion` (0.2.0); loopback access keeps working across the supported 0.2.x range. Separately, dsh's browser-session auth (launch token → `dsh-auth-*` cookie, ≥ 0.1.2 and unchanged on 0.2.0, where `GET /?token=` still answers 303 + `Set-Cookie`) is relayed by the per-instance proxy, so the browser never sees dsh credentials.
+
+### dsh-web requires dsh 0.2.x
+
+The embedded integration targets **dsh 0.2.x only** (`minVersion = 0.2.0`, advisory range `[0.2.0, 0.3.0)`, npx pin `0.2.0-rc.2`). dsh 0.2.0 changed the RPC wire in two breaking ways, and the driver speaks the new shape exclusively:
+
+- **Endpoint segments are `<namespace>/<method>`** — `POST /api/workspace/create`, `POST /api/session/create`, `POST /api/subagents/prompt` (note the plural namespace). The envelope's `method` field must still equal the URL-path endpoint; the 0.1.x dotted names (`workspace.create`) now 404.
+- **Every verb's single object argument nests at `payload.args.request`** — `{type:'client-request', rpcId, method:'workspace/create', payload:{args:{request:{path:…}}}}`. The envelope and the `{ok, value}` answer shape are unchanged.
+
+The launcher also passes **`--no-open`** (issue #84): dsh 0.2.x opens the host's default browser on every boot, which spawned a stray tab per instance Start because the SPA is embedded in an iframe. It rides after `--port 0`, grouped with the other web-app options — launcher flags (`--patch`) must stay first (see `docs/plans/dsh-native-ui/PLAN.md` §踩坑 11).
 
 ### dsh-web sessions are snapshot-only across processes (upstream dsh issue)
 

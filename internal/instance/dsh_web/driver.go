@@ -5,12 +5,13 @@
 // The package is intentionally standalone, modeled on opencode_web. It
 // owns:
 //
-//   - the hardcoded `dsh web --host 127.0.0.1 --port 0 --patch
-//     <restrict.yml>` invocation (plus the npx / install launch modes)
+//   - the hardcoded `dsh web --patch <restrict.yml> --host 127.0.0.1
+//     --port 0 --no-open` invocation, launcher flags first (launch.go;
+//     plus the npx / install launch modes)
 //   - the per-instance state dir (<DataDir>/dsh/<id>/: restrict.yml,
 //     launch.json)
-//   - the version gate (`dsh --version` hard-gated below 0.1.0) and
-//     the advisory supported range
+//   - the version gate (`dsh --version` hard-gated below 0.2.0) and
+//     the advisory supported range [0.2.0, 0.3.0)
 //   - the L2 overlay verification via `dsh web --dump-config`
 //   - stdout scanning for the `dsh web: http://127.0.0.1:<port>` ready
 //     line
@@ -96,7 +97,7 @@ type Blob struct {
 	OverlayVerified bool `json:"overlay_verified,omitempty"`
 
 	// WorkspaceID is the worktree's own workspace id learned from the
-	// bootstrap workspace.create response (bootstrap.go); scope
+	// bootstrap workspace/create response (bootstrap.go); scope
 	// classification by workspaceId compares against it.
 	WorkspaceID string `json:"workspace_id,omitempty"`
 }
@@ -249,7 +250,8 @@ func (d *Driver) Spawn(ctx context.Context, params framework.SpawnParams) (frame
 	// Version gate (PLAN.md §版本门). npx mode is pinned to an exact
 	// version — the gate is trivially satisfied and the pin is recorded
 	// as the probed version. path/install modes probe the resolved bin
-	// and fail fast below 0.1.0.
+	// and fail fast below 0.2.0 (the slash-style /api/<ns>/<method>
+	// RPC wire this driver speaks did not exist before it).
 	var version string
 	versionSupported := true
 	remoteCapable := false
@@ -481,7 +483,9 @@ func (d *Driver) logf(format string, args ...any) {
 }
 
 // buildEnv merges tag env over the inherited environment. dsh needs no
-// forced secrets (no upstream auth); the token gate lives at the
+// forced secrets; its browser-session credential is minted by the proxy
+// at runtime (auth.go) and is deliberately never injected into the
+// child's env or serialized into the blob — the token gate lives at the
 // reverse proxy (proxy.go).
 func buildEnv(tagEnv map[string]string) []string {
 	seen := make(map[string]string)
@@ -547,7 +551,7 @@ func (d *Driver) probeAndGate(bin string) (string, error) {
 		return "", nil // dev build: tolerated, and NOT memoized — re-probe each start
 	}
 	if !hardVersionOK(got) {
-		return "", fmt.Errorf("dsh: version %s installed, but dsh >= %s required (the embedded web UI relies on --port 0, --patch and the web profile rows); upgrade @deepseek-ai/dsh or use the pinned npx launch (%s)", got, minVersion, NpxPin)
+		return "", fmt.Errorf("dsh: version %s installed, but dsh >= %s required (the embedded web UI relies on the 0.2 slash-style /api/<namespace>/<method> RPC endpoints with {\"args\":{\"request\":…}} payloads, on --port 0, --no-open and on the web profile rows); upgrade @deepseek-ai/dsh or use the pinned npx launch (%s)", got, minVersion, NpxPin)
 	}
 	d.verMu.Lock()
 	if d.verMemo == nil {

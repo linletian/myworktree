@@ -190,17 +190,32 @@ func resolveLaunch(override string, cfg launchConfig) (exe string, prefix []stri
 // webArgs is the fixed web invocation every launch mode shares. The
 // flags are hardcoded (PLAN.md §安全姿态): --host 127.0.0.1 (dsh
 // rejects 0.0.0.0 itself), --port 0 (dsh fails loud on port conflict —
-// never pick a fixed port), --patch <restrict overlay>.
+// never pick a fixed port), --patch <restrict overlay> and --no-open
+// (issue #84).
+//
+// --no-open: dsh 0.2.x `dsh web` opens the host's default browser on
+// every boot — the ready output says so: "opening the default browser;
+// pass --no-open to disable". myworktree embeds the SPA in an iframe,
+// so without it every Start spawns a stray browser tab. The web-app
+// option maps to openBrowser:false (commander's `--no-open` ⇒
+// handoffBrowser=false); the `dsh web: http://…` ready line STILL
+// prints, because printUrl stays true, so pumpAndWatch's parse is
+// unaffected. Verified against the installed 0.2.0-rc.2
+// (`dsh web --help`: --host / --no-open / --port / --trusted-host).
 //
 // ORDER MATTERS (dsh launcher pitfall, PLAN.md §踩坑): the `web`
 // subcommand parses with allowUnknownOption + passThroughOptions — the
-// first option it does not know (the app-level --host/--port) switches
-// it into pass-through mode, so any launcher-level option AFTER it
-// (--patch) is forwarded to the web app, which rejects it with
-// "unknown option '--patch'" and the server never boots. Launcher
-// flags must therefore come FIRST: `web --patch … --host … --port …`.
+// first option the launcher does not know (the app-level --host /
+// --port / --no-open) switches it into pass-through mode, so any
+// launcher-level option AFTER it (--patch) is forwarded verbatim to the
+// web app, which rejects it with "unknown option '--patch'" and the
+// server never boots. Launcher flags must therefore come FIRST and the
+// web-app options stay grouped after them:
+// `web --patch … --host … --port … --no-open`. --no-open is a web-app
+// option, so it rides with --host/--port and must NEVER be moved in
+// front of --patch.
 func webArgs(overlayPath string) []string {
-	return []string{"web", "--patch", overlayPath, "--host", "127.0.0.1", "--port", "0"}
+	return []string{"web", "--patch", overlayPath, "--host", "127.0.0.1", "--port", "0", "--no-open"}
 }
 
 // dumpArgs is the boot-free config dump invocation used by the L2
