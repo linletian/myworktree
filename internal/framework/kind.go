@@ -176,8 +176,16 @@ type Kind interface { // Manifest returns static metadata. Called once at regist
 	// starting at byte offset since. Returns the bytes, the new
 	// cursor (== since when no new data is available), and any error.
 	//
-	// The framework uses this to drive the `/api/instances/<id>/log`
-	// and `/api/instances/<id>/log/stream` endpoints; kinds MUST
+	// A negative since requests tail semantics: return the newest
+	// maxBytes of captured output, with the cursor set to the current
+	// end offset (so callers can follow with ReadLogs(cursor, ...)).
+	// Kinds without log capture (no ring buffer / no pipe to drain)
+	// return an empty body; echoing since back is fine, because
+	// Manager.Tail normalizes a non-conforming cursor before any
+	// caller observes it.
+	//
+	// The framework uses this to drive the `/api/instances/log?id=<id>`
+	// and `/api/instances/log/stream?id=<id>` endpoints; kinds MUST
 	// implement log capture themselves (the framework does not
 	// understand how to read from a PTY or a pipe).
 	ReadLogs(handle Handle, since int64, maxBytes int64) (string, int64, error)

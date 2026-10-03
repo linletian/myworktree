@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **fix(terminal): log replay served the oldest buffered bytes instead of the newest (issue #81)** — re-selecting an idle terminal instance replayed the *oldest* 64 KB of the ring buffer, so the UI showed stale session-start output; only a window resize (SIGWINCH → TUI repaint) recovered the current screen. The kind refactor had rewired `Manager.Tail` to `ReadLogs(handle, 0, n)` — `ReadSince(0, n)` clamps to the oldest live byte — orphaning the correct `RingBuffer.Tail`. `Kind.ReadLogs` now defines a negative `since` as tail semantics (newest bytes, cursor at the end offset); the pty driver serves it from `RingBuffer.Tail`, `Manager.Tail` requests it and clamps non-conforming cursors, the log endpoints route an omitted/negative `since` to the tail, `GET /api/instances/log` returns the end offset in `X-Log-Offset`, and the browser cursor became a real byte offset. Follow-ups: #82 (broadcast drop / resync), #83 (weak WS liveness check), #86 (follow-from-live-end streaming), #87 (WS handshake replay duplication).
+
 ## v0.5.0 (2026-09-11)
 
 Release focused on dsh-web remote access: a WS↔SSE bridge plus a WebSocket shim make LAN/Tailnet access work for dsh ≥ 0.1.5, dsh ≥ 0.1.2 browser-session auth is relayed through the per-instance proxy, and remote Start is version-gated via a new capability probe (issue #72).

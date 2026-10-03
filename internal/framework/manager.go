@@ -412,27 +412,43 @@ func (m *Manager) List() ([]store.ManagedInstance, error) {
 	return st.Instances, nil
 }
 
-// Tail returns up to n bytes of captured log.
-func (m *Manager) Tail(id string, n int64) (string, error) {
+// Tail returns up to n bytes of the newest captured log and the
+// current end offset (usable as a follow-up ReadSince cursor).
+func (m *Manager) Tail(id string, n int64) (string, int64, error) {
 	m.mu.Lock()
 	ri, ok := m.running[id]
 	m.mu.Unlock()
 	if !ok {
-		return "", nil
+		return "", 0, nil
 	}
 	if n <= 0 {
 		n = 4096
 	}
 	k, err := m.Registry.Get(ri.handle.KindName)
 	if err != nil {
-		return "", err
+		return "", 0, err
 	}
-	body, _, err := k.ReadLogs(ri.handle, 0, n)
-	return body, err
+	body, off, err := k.ReadLogs(ri.handle, -1, n)
+	if off < 0 {
+		// Kinds without log capture echo the -1 sentinel back.
+		off = 0
+	}
+	if int64(len(body)) > off {
+		// Defense in depth: a kind that under-reports its tail cursor
+		// would make the follow-up ReadSince(off) re-deliver these
+		// bytes. In a zero-based offset space len(body) is the lower
+		// bound on the end offset. Clamp rather than fail the read.
+		off = int64(len(body))
+	}
+	return body, off, err
 }
 
-// ReadSince returns log content starting at byte offset since.
+// ReadSince returns log content starting at byte offset since. A
+// negative since is clamped to 0; tail reads go through Tail.
 func (m *Manager) ReadSince(id string, since int64, maxBytes int64) (string, int64, error) {
+	if since < 0 {
+		since = 0
+	}
 	m.mu.Lock()
 	ri, ok := m.running[id]
 	m.mu.Unlock()

@@ -2263,7 +2263,7 @@ func (s *Server) handleInstanceTTYWS(w http.ResponseWriter, r *http.Request) {
 	defer handshakeTimer.Stop()
 
 	completeHandshake := func() bool {
-		initial, err := s.instanceMgr.Tail(id, 64*1024)
+		initial, _, err := s.instanceMgr.Tail(id, 64*1024)
 		if err != nil {
 			_ = conn.WriteBinary([]byte(err.Error()))
 			return false
@@ -2384,11 +2384,12 @@ func (s *Server) handleInstanceLog(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.WriteString(w, body)
 		return
 	}
-	body, err := s.instanceMgr.Tail(id, 64*1024)
+	body, next, err := s.instanceMgr.Tail(id, 64*1024)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
+	w.Header().Set("X-Log-Offset", strconv.FormatInt(next, 10))
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	_, _ = io.WriteString(w, body)
 }
@@ -2399,9 +2400,16 @@ func (s *Server) handleInstanceLogStream(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	id := strings.TrimSpace(r.URL.Query().Get("id"))
-	since := parseInt64Default(r.URL.Query().Get("since"), 0)
+	since := parseInt64Default(r.URL.Query().Get("since"), -1)
 
-	initial, next, err := s.instanceMgr.ReadSince(id, since, 64*1024)
+	var initial string
+	var next int64
+	var err error
+	if since < 0 {
+		initial, next, err = s.instanceMgr.Tail(id, 64*1024)
+	} else {
+		initial, next, err = s.instanceMgr.ReadSince(id, since, 64*1024)
+	}
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err)
 		return
@@ -2658,7 +2666,7 @@ func (s *Server) handleMCPCall(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusBadRequest, err)
 			return
 		}
-		body, err := s.instanceMgr.Tail(args.ID, args.N)
+		body, _, err := s.instanceMgr.Tail(args.ID, args.N)
 		if err != nil {
 			writeErr(w, http.StatusBadRequest, err)
 			return

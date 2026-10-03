@@ -1,6 +1,7 @@
 package pty
 
 import (
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -57,6 +58,34 @@ func TestMustHandle_PanicsOnWrongType(t *testing.T) {
 		}
 	}()
 	mustHandle(framework.NewHandle("pty", "not a *Handle"))
+}
+
+// TestDriver_ReadLogs_TailReturnsNewestBytes guards the issue #81
+// regression: a negative since must return the newest bytes of the
+// ring buffer, not the oldest.
+func TestDriver_ReadLogs_TailReturnsNewestBytes(t *testing.T) {
+	var sb strings.Builder
+	for i := 0; i < 100; i++ {
+		fmt.Fprintf(&sb, "line-%03d\n", i)
+	}
+	all := sb.String()
+
+	buf := framework.NewRingBuffer(4096)
+	buf.WriteString(all)
+
+	d := Driver{}
+	h := framework.NewHandle("pty", &Handle{buf: buf})
+
+	body, off, err := d.ReadLogs(h, -1, 64)
+	if err != nil {
+		t.Fatalf("ReadLogs: %v", err)
+	}
+	if want := all[len(all)-64:]; body != want {
+		t.Fatalf("tail body = %q, want newest 64 bytes %q", body, want)
+	}
+	if off != int64(len(all)) {
+		t.Fatalf("cursor = %d, want end offset %d", off, len(all))
+	}
 }
 
 // TestSubscribeOutput_ScopedPerInstance guards against the

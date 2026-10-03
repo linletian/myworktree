@@ -2801,7 +2801,17 @@
                         focusTerminalIfPossible();
                     } else {
                         resetTerminalForSwitch(session);
-                        session.logCursor = 0;
+                        // The screen was just cleared, so any previous cursor is
+                        // meaningless. If loadLog then fails, keeping it would make
+                        // startSSE request since=<oldOffset> and repaint only the
+                        // bytes produced since then onto an empty terminal. Reset to
+                        // the unknown sentinel instead: startSSE omits `since` for
+                        // any non-positive cursor, so the server's tail default
+                        // repaints the whole screen. Same convention as
+                        // kinds/pty.js — keep the two session factories in
+                        // agreement. Residual trade-off: if X-Log-Offset is
+                        // stripped, the tail renders twice (issue #86).
+                        session.logCursor = -1;
                         loadLog(session).finally(() => {
                             connectTTY(session);
                             focusTerminalIfPossible();
@@ -3248,7 +3258,14 @@
                 termDataDisposable: null,
                 fitAddon: null,
                 logStream: null,
-                logCursor: 0,
+                // -1 means "cursor unknown". startSSE omits `since` entirely for a
+                // non-positive cursor, so the server's tail default applies —
+                // sending since=0 would instead replay the oldest 64KB of the
+                // ring buffer (the #81 symptom). NOTE: this is the legacy
+                // no-renderer fallback's session factory. Every kind that ships
+                // a renderer (all four today) builds its own session in
+                // kinds/*.js — see the same convention in kinds/pty.js.
+                logCursor: -1,
                 ttySocket: null,
                 ttyReconnectTimer: null,
                 termInputBuffer: "",
@@ -3614,15 +3631,21 @@
             session.loadLogController = controller;
 
             try {
-                const res = await fetch(`/api/instances/log?id=${session.id}&since=0`, { 
+                const res = await fetch(`/api/instances/log?id=${session.id}`, { 
                     headers, 
                     signal: controller.signal 
                 });
                 rememberServerRevision(res);
                 if (!res.ok) throw new Error(await res.text());
                 let text = await res.text();
-                const next = parseInt(res.headers.get("X-Log-Offset") || "0", 10);
-                session.logCursor = next || text.length;
+                const rawOffset = res.headers.get("X-Log-Offset");
+                const next = rawOffset === null ? NaN : parseInt(rawOffset, 10);
+                // Only advance the cursor from a valid header. Falling back to 0 would
+                // make startSSE connect with since=0 and replay the oldest 64KB on top
+                // of the tail just written; the previous cursor is strictly safer.
+                if (Number.isFinite(next) && next >= 0) {
+                    session.logCursor = next;
+                }
                 if (session.term) {
                     const inst = state.instances.find(i => i.id === session.id);
                     const isRunning = inst && inst.status === 'running';
@@ -3642,19 +3665,6 @@
                     session.loadLogController = null;
                 }
             }
-        }
-
-        async function loadLogSince(session) {
-            if (!session) return;
-            try {
-                const res = await fetch(`/api/instances/log?id=${session.id}&since=${session.logCursor}`, { headers });
-                rememberServerRevision(res);
-                if (!res.ok) throw new Error();
-                let text = await res.text();
-                const next = parseInt(res.headers.get("X-Log-Offset") || "0", 10);
-                writeSanitizedTerminalOutput(session, text);
-                if (next) session.logCursor = next;
-            } catch (e) { }
         }
 
         function disconnectTTY(session) {
@@ -3841,14 +3851,19 @@
         function startSSE(session) {
             if (!session) return;
             if (state.activeInst === session.id) updateStatus("sse live");
-            let url = `/api/instances/log/stream?id=${encodeURIComponent(session.id)}&since=${session.logCursor}`;
+            let url = `/api/instances/log/stream?id=${encodeURIComponent(session.id)}`;
+            // Only send `since` once a real byte cursor exists. An unknown
+            // cursor (-1, e.g. loadLog failed) must fall through to the
+            // server's default tail semantics; since=0 would replay the
+            // oldest 64KB of the ring buffer (issue #81).
+            if (session.logCursor > 0) url += `&since=${session.logCursor}`;
             if (token) url += `&token=${encodeURIComponent(token)}`;
             const es = new EventSource(url);
             const onLog = (ev) => {
                 try {
                     const msg = JSON.parse(ev.data);
                     if (msg.chunk && session.term) writeSanitizedTerminalOutput(session, msg.chunk);
-                    if (msg.next) session.logCursor = msg.next;
+                    if (Number.isFinite(msg.next) && msg.next >= 0) session.logCursor = msg.next;
                 } catch (e) { }
             };
             es.addEventListener("log", onLog);
@@ -4294,7 +4309,6 @@
         // functions are fully migrated to pty.js, the exports here
         // become unnecessary and can be removed.
         window.loadLog = loadLog;
-        window.loadLogSince = loadLogSince;
         window.disconnectTTY = disconnectTTY;
         window.connectTTY = connectTTY;
         window.hasLiveTTYConnection = hasLiveTTYConnection;
