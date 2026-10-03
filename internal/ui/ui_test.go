@@ -699,10 +699,16 @@ func TestTerminalStatusBucketsReplaceRunningEquality(t *testing.T) {
 		"function syncActiveTerminalStatus(session, inst)",
 		"if (isInstanceLiveStatus(inst.status)) {\n                ensureTerminalLiveTransport(session);",
 		"function ensureTerminalLiveTransport(session)",
-		"if (session.loadLogController) return false;",
-		"if (session.ttySocket || session.logStream) return false;",
-		"if (session.ttyState && session.ttyState !== 'IDLE') return false;",
-		"if (session.ttyReconnectTimer) return false;",
+		"if (hasTerminalTransportInFlight(session)) return false;",
+		// The guard is one function so the poll-driven promotion and
+		// kinds/pty.js cannot drift apart; each entry below is one way a second
+		// owner of the bring-up shows up.
+		"function hasTerminalTransportInFlight(session)",
+		"if (session.loadLogController) return true;",
+		"if (session.ttySocket) return true;",
+		"if (session.logStream) return true;",
+		"if (session.ttyState && session.ttyState !== 'IDLE') return true;",
+		"if (session.ttyReconnectTimer) return true;",
 	} {
 		if !strings.Contains(bodyText, check) {
 			t.Fatalf("GET / should include the reconcile promotion hook %q", check)
@@ -715,14 +721,21 @@ func TestTerminalStatusBucketsReplaceRunningEquality(t *testing.T) {
 	for _, check := range []string{
 		"const isPending = window.isInstancePendingStatus",
 		"if (isPending) {",
+		// Activation shares the promotion's in-flight guard; without it a tab
+		// switch during bring-up resets the screen and opens a second socket.
+		"if (window.hasTerminalTransportInFlight && window.hasTerminalTransportInFlight(s)) return;",
 	} {
 		if !strings.Contains(js, check) {
 			t.Fatalf("GET /static/kinds/pty.js should classify the status: missing %q", check)
 		}
 	}
 	for _, check := range []string{
-		"if (inst && isInstancePendingStatus(inst.status)) {",
-		"} else if (inst && isInstanceTerminalStatus(inst.status)) {",
+		// Anchored on the comment: index.html has a second `if (!inst) {` in
+		// reconcileTerminalSessions, so the bare line would match either.
+		"if (!inst) {\n                    // Nothing to drive; leave the session alone.",
+		"} else if (isInstancePendingStatus(inst.status)) {",
+		"} else if (isInstanceTerminalStatus(inst.status)) {",
+		"} else if (!hasTerminalTransportInFlight(session)) {",
 	} {
 		if !strings.Contains(bodyText, check) {
 			t.Fatalf("GET / legacy fallback should classify the status: missing %q", check)
@@ -734,15 +747,61 @@ func TestTerminalStatusBucketsReplaceRunningEquality(t *testing.T) {
 		t.Fatal("GET / should paint [Process Stopped] only for terminal-bucket statuses")
 	}
 
-	// And the equality tests this replaces must not come back.
+	// And the equality tests this replaces must not come back. The `===`
+	// forms matter as much as the `!==` ones: index.html shipped two
+	// `status === 'running'` status-bar labels that read "stopped" for a
+	// seconds-long `starting` window next to a live iframe.
 	for _, forbidden := range []string{
 		"if (inst && inst.status !== 'running') return;",
 		"if (inst && inst.status !== 'running') {",
 		"const isRunning = inst && inst.status === 'running';",
+		"inst.status === 'running' ?",
+		"status === 'running' ?",
 	} {
 		if strings.Contains(bodyText, forbidden) {
 			t.Fatalf("GET / must not gate terminal I/O on status equality: found %q", forbidden)
 		}
+	}
+
+	// The status-bar label for the renderer-owned kinds goes through the same
+	// buckets: kinds/reasonix.js keeps its iframe navigating while the
+	// instance is `starting`, so "stopped" was self-contradicting.
+	for _, check := range []string{
+		"function instanceStatusLabel(inst, liveLabel)",
+		"updateStatus(instanceStatusLabel(inst, 'reasonix web'))",
+		"updateStatus(instanceStatusLabel(inst, 'dsh web ui'))",
+	} {
+		if !strings.Contains(bodyText, check) {
+			t.Fatalf("GET / should label the web-UI kinds by bucket: missing %q", check)
+		}
+	}
+
+	// loadLog() swallows its own errors, so the once-per-transition terminal
+	// replay needs a separate success flag or a failed fetch strands the tab
+	// with neither log nor banner until someone presses Refresh.
+	for _, check := range []string{
+		"session.lastLogLoadFailed = true;",
+		"session.lastLogLoadFailed = false;",
+		"!isInstanceTerminalStatus(prev) || session.lastLogLoadFailed",
+	} {
+		if !strings.Contains(bodyText, check) {
+			t.Fatalf("GET / should retry a failed terminal replay: missing %q", check)
+		}
+	}
+
+	// connectTTY must refuse an id state.instances cannot resolve: the server
+	// accepts the socket and then closes it with 1013, which surfaces as a
+	// dropped connection rather than a bad request. The `!inst` half is easy to
+	// drop because only the status half changed in the first draft.
+	if !strings.Contains(bodyText, "if (!inst || !isInstanceLiveStatus(inst.status)) {") {
+		t.Fatal("GET / connectTTY should refuse both an unresolvable id and a non-live status")
+	}
+
+	// A CLOSED socket left on the session reads as "transport in flight" and
+	// would block the promotion until something else cleared it. Anchored on
+	// the assignment, not the comment above it.
+	if !strings.Contains(bodyText, "session.ttySocket = null;\n                        const latest = state.instances.find") {
+		t.Fatal("GET / should clear ttySocket when the socket closes")
 	}
 	for _, forbidden := range []string{
 		"if (inst.status !== 'running') {",

@@ -71,8 +71,10 @@ const indexFactory = new Function("deps", `
     "function isInstanceLiveStatus",
     "function isInstancePendingStatus",
     "function isInstanceTerminalStatus",
+    "function instanceStatusLabel",
     "function reconcileTerminalSessions",
     "function syncActiveTerminalStatus",
+    "function hasTerminalTransportInFlight",
     "function ensureTerminalLiveTransport",
     "function maybeDestroyInactiveStoppedSession",
   ].map(h => sliceBlock(inlineScript(indexSource), h)).join("\n\n")}
@@ -80,6 +82,8 @@ const indexFactory = new Function("deps", `
     isInstanceLiveStatus,
     isInstancePendingStatus,
     isInstanceTerminalStatus,
+    instanceStatusLabel,
+    hasTerminalTransportInFlight,
     reconcileTerminalSessions,
     syncActiveTerminalStatus,
     ensureTerminalLiveTransport,
@@ -113,7 +117,14 @@ function indexHarness({ instances = [], activeInst = null, sessions = [] } = {})
     window,
     disconnectTTY: s => calls.disconnect.push(s.id),
     loadLog: (s) => { calls.loadLog.push(s.id); return Promise.resolve(); },
-    connectTTY: s => calls.connect.push(s.id),
+    // Mirrors the real connectTTY's two synchronous writes (index.html sets
+    // ttyState before it constructs the socket). Without this the stub left
+    // the session pristine and the guard under test was never exercised.
+    connectTTY: s => {
+      calls.connect.push(s.id);
+      s.ttyState = "CONNECTING";
+      s.ttySocket = { readyState: 0 };
+    },
     hasLiveTTYConnection: id => !!sessions.find(s => s.id === id && s.live),
     destroyTerminalSession: (id) => {
       calls.destroy.push(id);
@@ -125,6 +136,19 @@ function indexHarness({ instances = [], activeInst = null, sessions = [] } = {})
 }
 
 // --- status classification --------------------------------------------------
+
+test("the status-bar label follows the buckets for the web-UI kinds", () => {
+  const { api } = indexHarness();
+  // reasonix / dsh-web renderers keep their iframe navigating while the
+  // instance is `starting`, so "stopped" next to a live page was a lie.
+  assert.equal(api.instanceStatusLabel({ status: "running" }, "reasonix web"), "reasonix web");
+  assert.equal(api.instanceStatusLabel({ status: "unhealthy" }, "reasonix web"), "reasonix web");
+  assert.equal(api.instanceStatusLabel({ status: "starting" }, "reasonix web"), "starting...");
+  assert.equal(api.instanceStatusLabel({ status: "stopping" }, "dsh web ui"), "stopping...");
+  assert.equal(api.instanceStatusLabel({ status: "stopped" }, "dsh web ui"), "stopped");
+  assert.equal(api.instanceStatusLabel({ status: "failed" }, "dsh web ui"), "stopped");
+  assert.equal(api.instanceStatusLabel(null, "dsh web ui"), "stopped");
+});
 
 test("every framework status lands in exactly one bucket", () => {
   const { api } = indexHarness();
@@ -215,7 +239,7 @@ test("the promotion does not flap an in-flight connection", () => {
   }
 });
 
-test("the promotion connects exactly once per session and skips live connections", () => {
+test("the promotion connects once and then leaves the session to its own bring-up", () => {
   const idle = makeSession("inst1");
   const live = makeSession("inst2", { live: true, ttySocket: {}, ttyState: "READY" });
   const instances = [{ id: "inst1", status: "running" }, { id: "inst2", status: "running" }];
@@ -225,10 +249,8 @@ test("the promotion connects exactly once per session and skips live connections
   api.ensureTerminalLiveTransport(live);
   api.ensureTerminalLiveTransport(idle); // caller asked twice
 
-  assert.deepEqual(calls.connect, ["inst1", "inst1"], "only the idle session connects, once per call");
-  // The stub does not mutate the session, so the second call is expected too;
-  // what matters is that the already-live session is never touched.
-  assert.ok(!calls.connect.includes("inst2"), "a READY session must not be reconnected");
+  assert.deepEqual(calls.connect, ["inst1"], "a second ask must not open a second socket");
+  assert.equal(idle.ttyState, "CONNECTING", "the session is handed to the connect that was started");
 });
 
 test("the promotion refuses sessions that are not the active tab", () => {
@@ -271,6 +293,30 @@ test("a start that fails while pending still gets the stopped banner", () => {
 
   assert.deepEqual(calls.disconnect, ["inst1"]);
   assert.deepEqual(calls.loadLog, ["inst1"]);
+});
+
+test("a failed terminal replay keeps being retried until one lands", () => {
+  // loadLog swallows its own errors, so the latch needs its own flag: without
+  // it the once-per-transition replay never runs again and the tab is left
+  // with neither log nor banner until someone hits Refresh by hand.
+  const session = makeSession("inst1", { lastKnownStatus: "running" });
+  const instances = [{ id: "inst1", status: "running" }];
+  const { api, calls } = indexHarness({ activeInst: "inst1", instances, sessions: [session] });
+
+  instances[0].status = "stopped";
+  api.reconcileTerminalSessions();
+  assert.equal(calls.loadLog.length, 1, "first attempt on entry to the terminal bucket");
+
+  api.reconcileTerminalSessions();
+  assert.equal(calls.loadLog.length, 1, "no retry while the last attempt succeeded");
+
+  session.lastLogLoadFailed = true; // the fetch rejected
+  api.reconcileTerminalSessions();
+  assert.equal(calls.loadLog.length, 2, "a failed attempt must be retried");
+
+  session.lastLogLoadFailed = false;
+  api.reconcileTerminalSessions();
+  assert.equal(calls.loadLog.length, 2, "and the retry stops once one succeeds");
 });
 
 test("an unhealthy instance keeps its transport instead of being torn down", () => {
@@ -351,7 +397,7 @@ const loadLogFactory = new Function("deps", `
   return { loadLog };
 `);
 
-function loadLogHarness(status, { offset = "42" } = {}) {
+function loadLogHarness(status, { offset = "42", fail = false } = {}) {
   const writes = [];
   const resets = { count: 0 };
   const session = makeSession("inst1", {
@@ -361,10 +407,12 @@ function loadLogHarness(status, { offset = "42" } = {}) {
     },
   });
   const requests = [];
+  const errors = [];
   const api = loadLogFactory({
     state: { instances: [{ id: "inst1", status }], activeInst: "inst1" },
     fetch: (url) => {
       requests.push(url);
+      if (fail) return Promise.reject(new Error("network down"));
       return Promise.resolve({
         ok: true,
         text: () => Promise.resolve("log bytes"),
@@ -374,11 +422,28 @@ function loadLogHarness(status, { offset = "42" } = {}) {
     headers: {},
     rememberServerRevision: () => {},
     AbortController,
-    reportSessionError: (s, what, err) => { throw new Error(`${what}: ${err}`); },
+    reportSessionError: (s, what, err) => errors.push(`${what}: ${err}`),
     writeSanitizedTerminalOutput: (s, text) => writes.push(text),
   });
-  return { api, session, writes, resets, requests };
+  return { api, session, writes, resets, requests, errors };
 }
+
+test("loadLog latches its own outcome so a failed replay can be retried", async () => {
+  // The reconciler replays the terminal bucket once per transition, and
+  // loadLog swallows its own errors — so without this latch a transient fetch
+  // failure would leave the tab with neither log nor banner, and nothing would
+  // ever ask again.
+  const failed = loadLogHarness("stopped", { fail: true });
+  await failed.api.loadLog(failed.session);
+  assert.equal(failed.session.lastLogLoadFailed, true);
+  assert.equal(failed.errors.length, 1, "the failure is still reported to the user");
+  assert.deepEqual(failed.writes, [], "and nothing was painted");
+
+  const ok = loadLogHarness("stopped");
+  await ok.api.loadLog(ok.session);
+  assert.equal(ok.session.lastLogLoadFailed, false);
+  assert.ok(ok.writes.length > 0);
+});
 
 test("loadLog paints [Process Stopped] only for a terminal status", async () => {
   const expected = {
@@ -441,14 +506,27 @@ function ptyHarness({ doc } = {}) {
     observe() {}
     disconnect() {}
   });
-  return { renderer: window.__ptyRenderer, window, calls };
+  // The in-flight guard is shared with index.html (one definition, both paths);
+  // these tests drive the sliced copy so the two cannot drift apart.
+  const api = indexFactory({
+    state: window.state,
+    terminalSessions: {},
+    window,
+    disconnectTTY: () => {},
+    loadLog: () => Promise.resolve(),
+    connectTTY: () => {},
+    hasLiveTTYConnection: () => false,
+    destroyTerminalSession: () => {},
+  });
+  return { renderer: window.__ptyRenderer, window, calls, api };
 }
 
-function activateWith(status) {
+function activateWith(status, extra = {}) {
   const h = ptyHarness();
-  const session = makeSession("inst1");
+  const session = makeSession("inst1", extra);
   h.window.state.instances = [{ id: "inst1", kind: "pty", status }];
   h.window.state.activeInst = "inst1";
+  h.window.hasTerminalTransportInFlight = s => h.api.hasTerminalTransportInFlight(s);
   h.renderer._sessions.set("inst1", session);
   h.renderer.activate(session, null);
   return { ...h, session };
@@ -489,6 +567,44 @@ test("pty activate(): a running instance connects and records its status", () =>
   assert.deepEqual(calls.reset, ["inst1"]);
   assert.equal(session.lastKnownStatus, "running");
   assert.deepEqual(calls.disconnect, []);
+});
+
+test("pty activate(): classifies without the window helpers published", () => {
+  // The inline fallbacks exist for a page that has not exported the bucket
+  // helpers. All three must be guarded the same way — an unguarded call here
+  // throws and takes the whole activation down.
+  for (const status of ["starting", "stopping", "running", "unhealthy", "stopped", "failed", "exited"]) {
+    const h = ptyHarness();
+    delete h.window.isInstanceLiveStatus;
+    delete h.window.isInstancePendingStatus;
+    delete h.window.isInstanceTerminalStatus;
+    delete h.window.hasTerminalTransportInFlight;
+    const session = makeSession("inst1");
+    h.window.state.instances = [{ id: "inst1", kind: "pty", status }];
+    h.window.state.activeInst = "inst1";
+    h.renderer._sessions.set("inst1", session);
+    assert.doesNotThrow(() => h.renderer.activate(session, null), `status ${status}`);
+  }
+});
+
+test("pty activate(): a tab switch during bring-up does not start a second one", () => {
+  // A promotion may be mid-connect when the user switches back to the tab.
+  // hasLiveTTYConnection() is false while the socket is CONNECTING, so
+  // without the in-flight guard activate() would clear the screen and open a
+  // competing socket — replaying the tail twice (issue #87).
+  for (const [label, extra] of [
+    ["a CONNECTING socket", { ttyState: "CONNECTING", ttySocket: {} }],
+    ["an activation awaiting its log load", { loadLogController: {} }],
+    ["a queued reconnect", { ttyReconnectTimer: 42 }],
+    ["a live SSE stream", { logStream: {} }],
+  ]) {
+    const { calls, session } = activateWith("running", extra);
+    assert.deepEqual(calls.reset, [], `must not clear the screen with ${label}`);
+    assert.deepEqual(calls.loadLog, [], `must not replay the log with ${label}`);
+    assert.deepEqual(calls.disconnect, [], `must not drop the transport with ${label}`);
+    // The status is recorded either way, so the reconciler keeps its say.
+    assert.equal(session.lastKnownStatus, "running");
+  }
 });
 
 // --- kinds/pty.js input path ------------------------------------------------

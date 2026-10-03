@@ -1858,6 +1858,18 @@
             return !isInstanceLiveStatus(status) && !isInstancePendingStatus(status);
         }
 
+        // Status-bar text for a kind whose renderer owns its panel: the live
+        // label, the transient status verbatim ("starting..."), or "stopped".
+        // Callers pass `inst` straight through, so a null instance (the id is
+        // not in state.instances) reports "stopped" like the terminal bucket
+        // does — the same default isInstanceTerminalStatus() gives.
+        function instanceStatusLabel(inst, liveLabel) {
+            if (!inst) return "stopped";
+            if (isInstanceLiveStatus(inst.status)) return liveLabel;
+            if (isInstancePendingStatus(inst.status)) return inst.status + "...";
+            return "stopped";
+        }
+
         async function refresh() {
             if (refreshInFlight) return refreshInFlight;
 
@@ -2810,10 +2822,15 @@
                     updateStatus('opencode web ui');
                 }
                 if (kind === 'reasonix') {
-                    updateStatus(inst && inst.status === 'running' ? 'reasonix web' : 'stopped');
+                    // Bucket, not `=== 'running'`: a freshly created reasonix
+                    // instance reads `starting` for seconds, and
+                    // kinds/reasonix.js already keeps its iframe navigating
+                    // through that window — a "stopped" label next to a live
+                    // page is self-contradicting (issue #80 review).
+                    updateStatus(instanceStatusLabel(inst, 'reasonix web'));
                 }
                 if (kind === 'dsh-web') {
-                    updateStatus(inst && inst.status === 'running' ? 'dsh web ui' : 'stopped');
+                    updateStatus(instanceStatusLabel(inst, 'dsh web ui'));
                 }
                 maybeDestroyInactiveStoppedSession(previousID);
                 return;
@@ -2826,11 +2843,16 @@
                 // branch, and `starting` / `stopping` get neither the stopped
                 // banner nor a permanent disconnect. reconcileTerminalSessions()
                 // promotes the session once the status turns live (issue #80).
-                if (inst && isInstancePendingStatus(inst.status)) {
+                // An id we cannot resolve gets no branch at all, exactly like
+                // the renderer's `if (!inst) return` — opening a transport
+                // against it can only end in a server-side close.
+                if (!inst) {
+                    // Nothing to drive; leave the session alone.
+                } else if (isInstancePendingStatus(inst.status)) {
                     const pendingSession = ensureTerminalSession(id);
                     pendingSession.lastKnownStatus = inst.status;
                     updateStatus(inst.status + "...");
-                } else if (inst && isInstanceTerminalStatus(inst.status)) {
+                } else if (isInstanceTerminalStatus(inst.status)) {
                     const session = ensureTerminalSession(id);
                     session.lastKnownStatus = inst.status;
                     disconnectTTY(session);
@@ -2838,11 +2860,14 @@
                     updateStatus("stopped");
                 } else {
                     const session = ensureTerminalSession(id);
-                    session.lastKnownStatus = inst ? inst.status : session.lastKnownStatus;
+                    session.lastKnownStatus = inst.status;
                     if (hasLiveTTYConnection(id)) {
                         updateStatus("websocket live");
                         focusTerminalIfPossible();
-                    } else {
+                    } else if (!hasTerminalTransportInFlight(session)) {
+                        // The in-flight case is skipped on purpose: a promotion
+                        // from the reconcile loop already owns this bring-up,
+                        // and racing it would replay the tail twice (#87).
                         resetTerminalForSwitch(session);
                         // The screen was just cleared, so any previous cursor is
                         // meaningless. If loadLog then fails, keeping it would make
@@ -3502,13 +3527,33 @@
             // The stopped banner is part of loadLog's output, so replay only on
             // entry to the terminal bucket — a crash (running → exited) and a
             // failed start (starting → failed) both need it, but a session that
-            // was already stopped must not refetch and repaint every 2s.
-            if (prev === undefined || prev === null || !isInstanceTerminalStatus(prev)) {
+            // was already stopped must not refetch and repaint every 2s. A
+            // failed attempt is the one exception: it leaves no banner behind,
+            // so keep retrying until one lands.
+            if (prev === undefined || prev === null || !isInstanceTerminalStatus(prev) || session.lastLogLoadFailed) {
                 loadLog(session);
             }
         }
 
-        // Connects a live instance's session when it has no transport at all.
+        // True when something other than a fresh caller already owns this session's
+// bring-up: a poll-driven promotion, an activation still inside its
+// `await loadLog()`, an open or closing socket, a live SSE stream, or a queued
+// reconnect. Two owners means two connects, and the second one replays the
+// ring-buffer tail a second time (issue #87).
+//
+// Single-sourced so the activation paths (kinds/pty.js) and the poll-driven
+// promotion cannot disagree about what "already connecting" means.
+function hasTerminalTransportInFlight(session) {
+    if (!session) return false;
+    if (session.loadLogController) return true;
+    if (session.ttySocket) return true;
+    if (session.logStream) return true;
+    if (session.ttyState && session.ttyState !== 'IDLE') return true;
+    if (session.ttyReconnectTimer) return true;
+    return false;
+}
+
+// Connects a live instance's session when it has no transport at all.
         // The "nothing in flight" guard is load-bearing: the guard used by
         // hasLiveTTYConnection() is false while a socket is still CONNECTING,
         // so without this the 2s poll would tear down and re-open the WebSocket
@@ -3521,13 +3566,7 @@
             if (!session || !session.term) return false;
             if (state.activeInst !== session.id) return false;
             if (hasLiveTTYConnection(session.id)) return true;
-            // An activation is already bootstrapping this session: activate()
-            // clears the screen, awaits loadLog(), and only then connects. A
-            // poll landing in that window must not open a competing socket.
-            if (session.loadLogController) return false;
-            if (session.ttySocket || session.logStream) return false;
-            if (session.ttyState && session.ttyState !== 'IDLE') return false;
-            if (session.ttyReconnectTimer) return false;
+            if (hasTerminalTransportInFlight(session)) return false;
             const inst = state.instances.find(i => i.id === session.id);
             if (!inst || !isInstanceLiveStatus(inst.status)) return false;
             connectTTY(session);
@@ -3769,8 +3808,14 @@
                         session.term.write("\r\n\r\n\x1b[41;37m[Process Stopped]\x1b[0m\r\n");
                     }
                 }
+                session.lastLogLoadFailed = false;
             } catch (e) {
                 if (e.name === 'AbortError') return; // Ignore cancelled requests
+                // Latched for reconcileTerminalSessions(): the terminal-bucket
+                // replay runs once per transition, so a failed fetch would
+                // otherwise leave the tab with neither log nor banner until the
+                // user hit Refresh by hand.
+                session.lastLogLoadFailed = true;
                 reportSessionError(session, "load log error", e);
             } finally {
                 if (session.loadLogController === controller) {
@@ -3852,10 +3897,13 @@
             // alive and its PTY still takes input and output. `starting` /
             // `stopping` are refused here on purpose — the caller
             // (reconcileTerminalSessions) retries once the status settles.
-            if (inst && !isInstanceLiveStatus(inst.status)) {
+            // An id we cannot resolve is refused too: the WebSocket would be
+            // accepted and then closed by the server (1013 unknown id), which
+            // reads as a dropped connection rather than a bad request.
+            if (!inst || !isInstanceLiveStatus(inst.status)) {
                 session.ttyState = 'IDLE';
                 if (state.activeInst === id) {
-                    updateStatus(isInstancePendingStatus(inst.status) ? inst.status + "..." : "stopped");
+                    updateStatus(inst && isInstancePendingStatus(inst.status) ? inst.status + "..." : "stopped");
                 }
                 return;
             }
@@ -3951,6 +3999,12 @@
                     if (handshakeTimeout) { clearTimeout(handshakeTimeout); handshakeTimeout = null; }
                     session.ttyState = 'IDLE';
                     if (session.ttySocket === ws) {
+                        // Drop the reference: a CLOSED socket lingering on the
+                        // session would read as "transport in flight" and block
+                        // the reconcile promotion until something else cleared
+                        // it. hasLiveTTYConnection() is unaffected — it already
+                        // filters on readyState.
+                        session.ttySocket = null;
                         const latest = state.instances.find(i => i.id === session.id);
                         // Retry on any live status; give up (and report) only
                         // when the process really is gone.
@@ -4437,6 +4491,7 @@
         window.disconnectTTY = disconnectTTY;
         window.connectTTY = connectTTY;
         window.hasLiveTTYConnection = hasLiveTTYConnection;
+        window.hasTerminalTransportInFlight = hasTerminalTransportInFlight;
         window.ensureTerminalSession = ensureTerminalSession;
         window.maybeDestroyInactiveStoppedSession = maybeDestroyInactiveStoppedSession;
         window.resetTerminalForSwitch = resetTerminalForSwitch;

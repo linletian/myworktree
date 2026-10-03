@@ -186,7 +186,7 @@ The server's `status` (`internal/framework/status.go`) is a **seven-state** enum
 | Bucket | Statuses | Meaning for the terminal |
 |---|---|---|
 | **live** | `running`, `unhealthy` | The process is alive and accepts I/O. `unhealthy` means a health probe failed but the framework keeps the process alive and re-probes — the PTY still works, so it MUST stay connected. |
-| **pending** | `starting`, `stopping` | Transient. No transport, no `[Process Stopped]` banner, no grayscale styling — the instance is between two states and the next poll decides. |
+| **pending** | `starting`, `stopping` | Transient. No **new** transport, no `[Process Stopped]` banner, no grayscale styling — the instance is between two states and the next poll decides. An existing transport is left alone (never disconnected by a pending tick); only its reconnect retry is skipped, because the promotion re-issues the connect as soon as the status settles. |
 | **terminal** | `stopped`, `failed`, `exited`, unknown/absent | The process is gone. Disconnect, replay the log once, show the banner. |
 
 Only the **terminal** bucket means "the process is gone". Treating a **pending** status as stopped strands the session: nothing re-runs the activation path (see below), so the terminal keeps no WS and no SSE, input silently degrades to the buffered HTTP fallback, and output never comes back (issue #80).
@@ -230,7 +230,7 @@ Live instance without healthy session
 - active session + **terminal** status → disconnect, and `loadLog()` (banner included) on the transition into that bucket only, tracked per session via `lastKnownStatus`.
 - inactive session + **terminal** status → destroy the session. A pending inactive session is kept.
 
-The promotion guard requires a clean slate (`ttySocket == null`, `ttyState === 'IDLE'`, no pending reconnect timer) so the 2s poll can never flap an in-flight connection.
+The promotion is gated by `hasTerminalTransportInFlight(session)` — a single function shared with the activation paths, so the two cannot drift apart — and requires a clean slate: no `loadLogController` (an activation is still inside `await loadLog()`), no `ttySocket` (connected, `CONNECTING`, or a `CLOSED` one the `onclose` handler has not dropped yet), no live SSE `logStream`, `ttyState === 'IDLE'`, and no pending reconnect timer. Without it the 2s poll tears down and re-opens the WebSocket forever, because `hasLiveTTYConnection()` is false while a socket is still `CONNECTING`; the second connect also replays the ring-buffer tail a second time (issue #87).
 
 **Critical Timing Rules:**
 1. Live instances MUST NOT be detached purely because another instance becomes active.
@@ -280,7 +280,7 @@ If these responses arrive before the WebSocket is in READY state, they may be in
 | Scenario | Detection | Recovery Action |
 |----------|-----------|-----------------|
 | Handshake timeout | No `ready` in 5s | Close WS, fallback to SSE |
-| WebSocket close | onclose event | Retry after 1s delay |
+| WebSocket close | onclose event | Retry after 5s delay |
 | Instance stopped | status in the **terminal** bucket (`stopped` / `failed` / `exited`) | Disconnect WS, show log with banner |
 | Instance starting / stopping | status in the **pending** bucket | No banner, no disconnect; wait for the next poll, which promotes it once the status turns live |
 | Instance unhealthy | status `unhealthy` | Process is still alive — keep the transport and the input path open |

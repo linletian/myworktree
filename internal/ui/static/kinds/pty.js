@@ -70,12 +70,17 @@ class PtyRenderer {
         //
         // The bucket helpers live in index.html and are re-exported on window;
         // the inline fallbacks keep this file unit-testable in isolation.
+        // All three are guarded the same way: an unguarded call here would
+        // throw when the page has not published it yet.
         const isPending = window.isInstancePendingStatus
             ? window.isInstancePendingStatus(inst.status)
             : (inst.status === 'starting' || inst.status === 'stopping');
+        const isLive = window.isInstanceLiveStatus
+            ? window.isInstanceLiveStatus(inst.status)
+            : (inst.status === 'running' || inst.status === 'unhealthy');
         const isTerminal = window.isInstanceTerminalStatus
             ? window.isInstanceTerminalStatus(inst.status)
-            : !window.isInstanceLiveStatus(inst.status) && !isPending;
+            : (!isLive && !isPending);
 
         if (isPending) {
             // Transient. No banner, no disconnect: reconcileTerminalSessions()
@@ -96,6 +101,14 @@ class PtyRenderer {
             if (window.focusTerminalIfPossible) window.focusTerminalIfPossible();
             return;
         }
+
+        // A poll-driven promotion (reconcileTerminalSessions) or an earlier
+        // activation already owns this bring-up. hasLiveTTYConnection() is
+        // false while that socket is still CONNECTING, so without this guard
+        // selecting the tab again would reset the screen and open a second
+        // socket — replaying the ring-buffer tail twice (issue #87). The
+        // guard is single-sourced in index.html so the two paths cannot drift.
+        if (window.hasTerminalTransportInFlight && window.hasTerminalTransportInFlight(s)) return;
 
         if (window.resetTerminalForSwitch) window.resetTerminalForSwitch(s);
         // The screen was just cleared, so any previous cursor is meaningless. If
