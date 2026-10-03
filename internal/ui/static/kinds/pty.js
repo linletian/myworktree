@@ -111,9 +111,8 @@ class PtyRenderer {
         //
         // ignoreQueuedRetry: re-selecting the tab is an explicit request, so
         // it takes over from a pending reconnect rather than leaving the
-        // previous screen up until the timer fires — connectTTY →
-        // disconnectTTY cancels that timer. The other four conditions still
-        // block, so this cannot race an activation already mid-loadLog.
+        // previous screen up until the timer fires. The other four conditions
+        // still block, so this cannot race an activation already mid-loadLog.
         if (window.hasTerminalTransportInFlight
             && window.hasTerminalTransportInFlight(s, { ignoreQueuedRetry: true })) {
             // Staying silent would read as "nothing happened": deactivate()
@@ -121,11 +120,23 @@ class PtyRenderer {
             // bring-up would look inert until the connect finished.
             // Speak up only when no other transport is reporting itself — an
             // SSE session is live rather than connecting, and its own message
-            // is the accurate one.
+            // is the accurate one. A queued retry cannot be the reason we got
+            // here: the takeover below clears it first, so whatever stopped us
+            // is a connect already under way.
             if (window.updateStatus && !s.logStream) {
-                window.updateStatus(s.ttyReconnectTimer ? 'ws closed, retrying...' : 'connecting...');
+                window.updateStatus('connecting...');
             }
             return;
+        }
+
+        // Take over from the queued retry, and cancel it here rather than
+        // leaving it to disconnectTTY: connectTTY only runs once loadLog
+        // settles, so a retry firing in between would open one socket and
+        // replay the tail, and the connect that follows would open a second
+        // and replay it again (issue #87).
+        if (s.ttyReconnectTimer) {
+            clearTimeout(s.ttyReconnectTimer);
+            s.ttyReconnectTimer = null;
         }
 
         if (window.resetTerminalForSwitch) window.resetTerminalForSwitch(s);

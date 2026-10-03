@@ -2874,9 +2874,18 @@
                         // block here either: re-selection is an explicit
                         // request and takes it over, as in pty.js.
                         if (!session.logStream) {
-                            updateStatus(session.ttyReconnectTimer ? "ws closed, retrying..." : "connecting...");
+                            updateStatus("connecting...");
                         }
                     } else {
+                        // Cancel the queued retry here rather than leaving it
+                        // to disconnectTTY: connectTTY only runs once loadLog
+                        // settles, so a retry firing in between would open one
+                        // socket and replay the tail, and the connect that
+                        // follows would open a second and replay it again.
+                        if (session.ttyReconnectTimer) {
+                            clearTimeout(session.ttyReconnectTimer);
+                            session.ttyReconnectTimer = null;
+                        }
                         resetTerminalForSwitch(session);
                         // The screen was just cleared, so any previous cursor is
                         // meaningless. If loadLog then fails, keeping it would make

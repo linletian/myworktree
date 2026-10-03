@@ -468,11 +468,11 @@ func TestKindBadgesUnified(t *testing.T) {
 // review and survive every behavioural test, since the sliced functions
 // evaluate the same either way:
 //
-//   - a declaration at column 0, or at any indent other than the script body's
-//     own 8 spaces;
+//   - a declaration at column 0 (an exact-8-spaces rule would flag every nested
+//     `const`, so the check stays one-sided);
 //   - a comment block whose lines disagree among themselves, which is how a
-//     moved block strands its first line behind and leaves an explanation
-//     sitting on the wrong neighbour.
+//     moved block strands one line behind and leaves an explanation sitting on
+//     the wrong neighbour.
 //
 // TestUICopyIsEnglishOnly pins the single-language English UI direction
 // (issue #73) across the whole served UI, not just index.html: the web-kind
@@ -509,8 +509,18 @@ func TestIndexHTMLInlineScriptIsIndented(t *testing.T) {
 	var run []string
 	flush := func() {
 		if len(run) > 1 {
-			want := len(comment.FindStringSubmatch(run[0])[1])
-			for _, l := range run[1:] {
+			// Compare against the run's minimum, not its first line: a block
+			// whose odd line happens to be line 1 and one whose odd line is in
+			// the middle are the same defect, and only the minimum catches
+			// both. Extra indentation inside a comment goes after the slashes
+			// in this file, which is why a stepped block is not the style here.
+			want := -1
+			for _, l := range run {
+				if d := len(comment.FindStringSubmatch(l)[1]); want < 0 || d < want {
+					want = d
+				}
+			}
+			for _, l := range run {
 				if got := len(comment.FindStringSubmatch(l)[1]); got != want {
 					t.Errorf("GET / inline script comment block mixes indents (%d and %d): %q", want, got, run[0])
 					break
@@ -786,9 +796,15 @@ func TestTerminalStatusBucketsReplaceRunningEquality(t *testing.T) {
 		// switch during bring-up resets the screen and opens a second socket.
 		"if (window.hasTerminalTransportInFlight\n            && window.hasTerminalTransportInFlight(s, { ignoreQueuedRetry: true })) {",
 		// The early return is not silent: deactivate() leaves the status bar on
-		// "idle", so re-selecting a tab whose reconnect is still queued would
-		// look inert for the whole window.
-		"window.updateStatus(s.ttyReconnectTimer ? 'ws closed, retrying...' : 'connecting...');",
+		// "idle", so re-selecting a tab mid bring-up would look inert until the
+		// connect finished. It says connecting... and stays quiet over a live
+		// SSE stream, whose own message is the accurate one.
+		"if (window.updateStatus && !s.logStream) {\n                window.updateStatus('connecting...');\n            }",
+		// ...and the takeover cancels the queued retry itself rather than
+		// leaving it to disconnectTTY, which activate() only reaches after
+		// loadLog() settles — a retry firing in between opens two sockets and
+		// replays the tail twice.
+		"if (s.ttyReconnectTimer) {\n            clearTimeout(s.ttyReconnectTimer);\n            s.ttyReconnectTimer = null;\n        }",
 	} {
 		if !strings.Contains(js, check) {
 			t.Fatalf("GET /static/kinds/pty.js should classify the status: missing %q", check)
@@ -801,7 +817,9 @@ func TestTerminalStatusBucketsReplaceRunningEquality(t *testing.T) {
 		"} else if (isInstancePendingStatus(inst.status)) {",
 		"} else if (isInstanceTerminalStatus(inst.status)) {",
 		"} else if (hasTerminalTransportInFlight(session, { ignoreQueuedRetry: true })) {",
-		"updateStatus(session.ttyReconnectTimer ? \"ws closed, retrying...\" : \"connecting...\");",
+		"updateStatus(\"connecting...\");",
+		// ...and the takeover cancels the queued retry itself, as in pty.js.
+		"if (session.ttyReconnectTimer) {\n                            clearTimeout(session.ttyReconnectTimer);\n                            session.ttyReconnectTimer = null;",
 	} {
 		if !strings.Contains(bodyText, check) {
 			t.Fatalf("GET / legacy fallback should classify the status: missing %q", check)

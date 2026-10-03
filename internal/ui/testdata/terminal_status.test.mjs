@@ -559,8 +559,18 @@ function ptyHarness({ doc } = {}) {
   return { renderer: window.__ptyRenderer, window, calls, api };
 }
 
-function activateWith(status, extra = {}) {
+function activateWith(status, extra = {}, { pendingLoad = false } = {}) {
   const h = ptyHarness();
+  if (pendingLoad) {
+    // Hold loadLog open: the window in which the queued retry used to still be
+    // armed, because activate() only reaches disconnectTTY after it settles.
+    let release;
+    h.window.loadLog = (s) => {
+      h.calls.loadLog.push(s.id);
+      return new Promise((resolve) => { release = resolve; });
+    };
+    h.window.__releaseLoadLog = () => release();
+  }
   const session = makeSession("inst1", extra);
   h.window.state.instances = [{ id: "inst1", kind: "pty", status }];
   h.window.state.activeInst = "inst1";
@@ -635,6 +645,20 @@ test("pty activate(): a queued reconnect does not freeze an explicit re-selectio
   await new Promise(r => setTimeout(r, 0));
   assert.deepEqual(calls.connect, ["inst1"], "and the handover connects");
   assert.equal(session.ttyReconnectTimer, null, "the queued retry is cancelled, not left to fire");
+});
+
+test("pty activate(): the handover cancels the retry before loadLog settles", async () => {
+  // The window that made the handover racy: connectTTY — and therefore
+  // disconnectTTY, the only thing that clears ttyReconnectTimer — does not run
+  // until loadLog resolves. A retry firing inside that window opened one
+  // socket and replayed the tail, and the connect that followed opened a
+  // second and replayed it again.
+  const { window, session, calls } = activateWith("running", { ttyReconnectTimer: 42 }, { pendingLoad: true });
+  assert.equal(session.ttyReconnectTimer, null, "the retry is cancelled at the takeover, not at connect time");
+
+  window.__releaseLoadLog();
+  await new Promise(r => setTimeout(r, 0));
+  assert.deepEqual(calls.connect, ["inst1"], "so exactly one connect ever happens");
 });
 
 test("pty activate(): the handover still yields to its own loadLog and its socket", () => {
