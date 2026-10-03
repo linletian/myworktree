@@ -150,6 +150,30 @@ func TestRegisterSubstitutesPageTitle(t *testing.T) {
 	}
 }
 
+func fetchStaticAsset(t *testing.T, path string) string {
+	t.Helper()
+	mux := http.NewServeMux()
+	if err := Register(mux, "myworktree", nil); err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + path)
+	if err != nil {
+		t.Fatalf("GET %s failed: %v", path, err)
+	}
+	body, err := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if err != nil {
+		t.Fatalf("GET %s read body failed: %v", path, err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET %s status: %d", path, resp.StatusCode)
+	}
+	return string(body)
+}
+
 func TestIndexHTMLCoversMultiInstanceSwitching(t *testing.T) {
 	bodyText := fetchIndexHTML(t)
 	checks := []string{
@@ -514,7 +538,9 @@ func TestIndexHTMLCoversReconcileLogic(t *testing.T) {
 		"destroyTerminalSession(id);",
 		"disconnectTTY(session);",
 		"function reconnectRunningTerminalSessions()",
-		"if (inst && inst.status === 'running' && !hasLiveTTYConnection(session.id)) {",
+		// The live bucket, not `status === 'running'`: an unhealthy instance is
+		// still a live process and must keep its transport (issue #80).
+		"if (inst && isInstanceLiveStatus(inst.status) && !hasLiveTTYConnection(session.id)) {",
 		"connectTTY(session);",
 	}
 	for _, check := range checks {
@@ -630,6 +656,101 @@ func TestPtyRendererResetsCursorAfterTerminalReset(t *testing.T) {
 	}
 	if cursorAt < resetAt {
 		t.Fatal("pty.js should reset s.logCursor after resetTerminalForSwitch, not before")
+	}
+}
+
+// TestTerminalStatusBucketsReplaceRunningEquality is the source-level contract
+// for issue #80: a newly created instance is persisted as `starting` and only
+// flips to `running` on the kind's ready signal, so "status !== 'running'" must
+// never gate terminal I/O, the [Process Stopped] banner, or the connect path.
+//
+// The behavior itself (including the poll-driven promotion that replaces the
+// abandoned selection-time activation) is covered by
+// TestTerminalStatusHandling, which runs the same sources under `node --test`.
+// This test pins the two halves of the fix that a refactor would most easily
+// undo silently: the shared bucket helpers, and the fact that BOTH activation
+// paths — index.html's legacy no-renderer fallback and kinds/pty.js — classify
+// the status instead of comparing it to the literal "running".
+func TestTerminalStatusBucketsReplaceRunningEquality(t *testing.T) {
+	bodyText := fetchIndexHTML(t)
+	js := fetchStaticAsset(t, "/static/kinds/pty.js")
+
+	// Single source of truth for the three buckets, exported for pty.js.
+	for _, check := range []string{
+		"const INSTANCE_LIVE_STATUSES = new Set(['running', 'unhealthy']);",
+		"const INSTANCE_PENDING_STATUSES = new Set(['starting', 'stopping']);",
+		"function isInstanceLiveStatus(status)",
+		"function isInstancePendingStatus(status)",
+		"function isInstanceTerminalStatus(status)",
+		"window.isInstanceLiveStatus = isInstanceLiveStatus;",
+		"window.isInstancePendingStatus = isInstancePendingStatus;",
+		"window.isInstanceTerminalStatus = isInstanceTerminalStatus;",
+	} {
+		if !strings.Contains(bodyText, check) {
+			t.Fatalf("GET / should define the shared status buckets: missing %q", check)
+		}
+	}
+
+	// Poll-driven self-heal: reconcileTerminalSessions() promotes an active
+	// session once its status turns live, and refuses to disturb a session that
+	// already has a transport in flight (that guard is what stops the 2s poll
+	// from flapping a CONNECTING socket).
+	for _, check := range []string{
+		"function syncActiveTerminalStatus(session, inst)",
+		"if (isInstanceLiveStatus(inst.status)) {\n                ensureTerminalLiveTransport(session);",
+		"function ensureTerminalLiveTransport(session)",
+		"if (session.loadLogController) return false;",
+		"if (session.ttySocket || session.logStream) return false;",
+		"if (session.ttyState && session.ttyState !== 'IDLE') return false;",
+		"if (session.ttyReconnectTimer) return false;",
+	} {
+		if !strings.Contains(bodyText, check) {
+			t.Fatalf("GET / should include the reconcile promotion hook %q", check)
+		}
+	}
+
+	// Both activation paths must classify the status. pty.js is the live path;
+	// the legacy fallback in index.html only runs when a renderer script fails
+	// to load, and the two must not drift apart (same rule as the log cursor).
+	for _, check := range []string{
+		"const isPending = window.isInstancePendingStatus",
+		"if (isPending) {",
+	} {
+		if !strings.Contains(js, check) {
+			t.Fatalf("GET /static/kinds/pty.js should classify the status: missing %q", check)
+		}
+	}
+	for _, check := range []string{
+		"if (inst && isInstancePendingStatus(inst.status)) {",
+		"} else if (inst && isInstanceTerminalStatus(inst.status)) {",
+	} {
+		if !strings.Contains(bodyText, check) {
+			t.Fatalf("GET / legacy fallback should classify the status: missing %q", check)
+		}
+	}
+
+	// The stopped banner is terminal-bucket-only in both paths.
+	if !strings.Contains(bodyText, "if (inst && isInstanceTerminalStatus(inst.status)) {\n                        session.term.write(\"\\r\\n\\r\\n\\x1b[41;37m[Process Stopped]\\x1b[0m\\r\\n\");") {
+		t.Fatal("GET / should paint [Process Stopped] only for terminal-bucket statuses")
+	}
+
+	// And the equality tests this replaces must not come back.
+	for _, forbidden := range []string{
+		"if (inst && inst.status !== 'running') return;",
+		"if (inst && inst.status !== 'running') {",
+		"const isRunning = inst && inst.status === 'running';",
+	} {
+		if strings.Contains(bodyText, forbidden) {
+			t.Fatalf("GET / must not gate terminal I/O on status equality: found %q", forbidden)
+		}
+	}
+	for _, forbidden := range []string{
+		"if (inst.status !== 'running') {",
+		"if (inst && inst.status !== 'running') return;",
+	} {
+		if strings.Contains(js, forbidden) {
+			t.Fatalf("GET /static/kinds/pty.js must not gate terminal I/O on status equality: found %q", forbidden)
+		}
 	}
 }
 

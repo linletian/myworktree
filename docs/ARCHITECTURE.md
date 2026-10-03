@@ -181,23 +181,39 @@ The client MUST wait for this message before:
 
 ### 5.3 Instance Switch Protocol
 
-When switching between instances (worktree or instance tabs), the frontend distinguishes between stopped and running instances:
+The server's `status` (`internal/framework/status.go`) is a **seven-state** enum, so the frontend MUST NOT collapse it to a boolean "running vs stopped". `POST /api/instances` persists the record as `starting` and returns `201` immediately; the flip to `running` happens on the kind's `ReadySignal` in a separate goroutine (`Manager.runLifecycle`), so a freshly created instance is legitimately observed as `starting` for a short window — and for web-UI kinds for seconds. The frontend classifies each status into exactly one of three buckets (`isInstanceLiveStatus` / `isInstancePendingStatus` / `isInstanceTerminalStatus` in `index.html`, re-exported on `window` for `kinds/pty.js`):
+
+| Bucket | Statuses | Meaning for the terminal |
+|---|---|---|
+| **live** | `running`, `unhealthy` | The process is alive and accepts I/O. `unhealthy` means a health probe failed but the framework keeps the process alive and re-probes — the PTY still works, so it MUST stay connected. |
+| **pending** | `starting`, `stopping` | Transient. No transport, no `[Process Stopped]` banner, no grayscale styling — the instance is between two states and the next poll decides. |
+| **terminal** | `stopped`, `failed`, `exited`, unknown/absent | The process is gone. Disconnect, replay the log once, show the banner. |
+
+Only the **terminal** bucket means "the process is gone". Treating a **pending** status as stopped strands the session: nothing re-runs the activation path (see below), so the terminal keeps no WS and no SSE, input silently degrades to the buffered HTTP fallback, and output never comes back (issue #80).
+
+When switching between instances (worktree or instance tabs):
 
 ```
-Stopped instance
+Terminal instance (stopped / failed / exited)
 ├── 1. Ensure terminal session exists for the instance
 ├── 2. Disconnect live transport for that stopped session
 ├── 3. Replay persisted log into that session
 └── 4. Show stopped styling/banner
 
-Running instance with healthy session
+Pending instance (starting / stopping)
+├── 1. Ensure terminal session exists for the instance
+├── 2. Do NOT disconnect and do NOT paint the stopped banner
+├── 3. Report "starting…"/"stopping…" in the status bar
+└── 4. Wait for reconcileTerminalSessions() to promote it (see below)
+
+Live instance (running / unhealthy) with healthy session
 ├── 1. Keep the existing per-instance xterm/WS session alive
 ├── 2. Hide previously active terminal containers
 ├── 3. Show the selected instance container
 ├── 4. Re-fit and resize the active terminal
 └── 5. Focus only after the session is READY
 
-Running instance without healthy session
+Live instance without healthy session
 ├── 1. Ensure terminal session exists for the instance
 ├── 2. Reset that instance's local terminal state
 ├── 3. Replay recent log once into that same instance session
@@ -207,10 +223,20 @@ Running instance without healthy session
 └── 7. Focus only after the session is READY
 ```
 
+**Re-activation is poll-driven, not selection-driven.** `selectInstance()` returns early when the tab is already selected and `renderTerminalSessions()` (the per-2s-poll render path) only toggles container visibility, so `activate()` runs exactly once per selection change. The liveness transition therefore has to be driven by `reconcileTerminalSessions()`, which runs on every `refresh()` **after** `state.instances` is replaced:
+
+- active session + **live** status + no transport → `connectTTY()` (**promote**). The WS handshake replays the tail itself, so the promotion deliberately does **not** also call `loadLog()` (which would duplicate the screen — see #87).
+- active session + **pending** status → no-op; the next poll promotes it. This is the self-heal for issue #80.
+- active session + **terminal** status → disconnect, and `loadLog()` (banner included) on the transition into that bucket only, tracked per session via `lastKnownStatus`.
+- inactive session + **terminal** status → destroy the session. A pending inactive session is kept.
+
+The promotion guard requires a clean slate (`ttySocket == null`, `ttyState === 'IDLE'`, no pending reconnect timer) so the 2s poll can never flap an in-flight connection.
+
 **Critical Timing Rules:**
-1. Running instances MUST NOT be detached purely because another instance becomes active.
-2. Each running instance owns its own frontend terminal session; TUI modes are isolated by session rather than cleared out of a shared xterm.
+1. Live instances MUST NOT be detached purely because another instance becomes active.
+2. Each live instance owns its own frontend terminal session; TUI modes are isolated by session rather than cleared out of a shared xterm.
 3. The terminal MUST NOT receive focus until that instance session is READY (after `ready` is received and resize is sent).
+4. A **pending** status MUST NOT be rendered or wired as terminal. The stopped banner, the grayscale styling, the input guard, and the connect guard are all terminal-bucket-only.
 
 ### 5.4 Focus Management Rules
 
@@ -224,13 +250,15 @@ function focusTerminalIfPossible() {
     if (!state.activeInst) return;        // No active instance
     if (ttyState !== 'READY') return;     // ⚠️ Connection not ready
     const inst = state.instances.find(i => i.id === state.activeInst);
-    if (inst && inst.status !== 'running') return; // Instance not running
-    
+    if (inst && !isInstanceLiveStatus(inst.status)) return; // Instance not live
+
     term.focus();
 }
 ```
 
 **The `ttyState` check is CRITICAL** - it prevents focus before the WebSocket is ready, which would cause xterm.js to send terminal query sequences (OSC 11, DA, DEC Private Mode queries) before the data path is established.
+
+**The status check uses the live bucket, not `status === 'running'`** - an `unhealthy` instance is still a live process whose PTY accepts focus (issue #80).
 
 ### 5.5 Terminal Query Sequence Prevention
 
@@ -253,7 +281,10 @@ If these responses arrive before the WebSocket is in READY state, they may be in
 |----------|-----------|-----------------|
 | Handshake timeout | No `ready` in 5s | Close WS, fallback to SSE |
 | WebSocket close | onclose event | Retry after 1s delay |
-| Instance stopped | status !== 'running' | Disconnect WS, show log with banner |
+| Instance stopped | status in the **terminal** bucket (`stopped` / `failed` / `exited`) | Disconnect WS, show log with banner |
+| Instance starting / stopping | status in the **pending** bucket | No banner, no disconnect; wait for the next poll, which promotes it once the status turns live |
+| Instance unhealthy | status `unhealthy` | Process is still alive — keep the transport and the input path open |
+| New instance still `starting` when its tab is selected | status in the **pending** bucket at `activate()` | Nothing is painted as stopped; `reconcileTerminalSessions()` promotes it within one poll interval (issue #80) |
 | Browser blur | blur event | Track windowHasFocus = false |
 | Dialog open | showModal intercept | Track openDialogs.add() |
 
@@ -281,9 +312,11 @@ When implementing or modifying terminal connection code, verify:
 - [ ] `focusTerminalIfPossible()` checks connection state before focusing
 - [ ] WebSocket handshake timeout (5s) is implemented
 - [ ] `ready` message triggers resize BEFORE focus
-- [ ] Running instance switch preserves inactive session attachments
+- [ ] Live instance switch preserves inactive session attachments
 - [ ] Dialog close delays focus until connection is ready
 - [ ] Window focus event respects connection state
+- [ ] No `status === 'running'` equality test gates terminal I/O — use the live/pending/terminal buckets (§5.3); `starting` must not paint a stopped terminal
+- [ ] A pending instance reaches a live transport without user action (`reconcileTerminalSessions()` promotion, §5.3)
 - [ ] `beforeunload` handler triggers browser confirmation on any page close/refresh/navigation
 
 ### 5.9 Terminal Query Response Filtering

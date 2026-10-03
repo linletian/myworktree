@@ -57,8 +57,34 @@ class PtyRenderer {
             ? window.state.instances.find(i => i.id === id)
             : null;
         if (!inst) return;
+        s.lastKnownStatus = inst.status;
 
-        if (inst.status !== 'running') {
+        // `status !== 'running'` does NOT mean stopped: Manager.Start persists
+        // a new record as `starting` and flips it to `running` on the kind's
+        // ready signal in a separate goroutine, so a freshly created instance
+        // is routinely observed as `starting` here. activate() runs exactly
+        // once per selection change, so treating that transient state as
+        // terminal stranded the session with no WS and no SSE — [Process
+        // Stopped] over a live PTY, and input that only reached the process
+        // through the silent HTTP fallback (issue #80).
+        //
+        // The bucket helpers live in index.html and are re-exported on window;
+        // the inline fallbacks keep this file unit-testable in isolation.
+        const isPending = window.isInstancePendingStatus
+            ? window.isInstancePendingStatus(inst.status)
+            : (inst.status === 'starting' || inst.status === 'stopping');
+        const isTerminal = window.isInstanceTerminalStatus
+            ? window.isInstanceTerminalStatus(inst.status)
+            : !window.isInstanceLiveStatus(inst.status) && !isPending;
+
+        if (isPending) {
+            // Transient. No banner, no disconnect: reconcileTerminalSessions()
+            // promotes this session as soon as a poll observes a live status.
+            if (window.updateStatus) window.updateStatus(inst.status + "...");
+            return;
+        }
+
+        if (isTerminal) {
             if (window.disconnectTTY) window.disconnectTTY(s);
             if (window.loadLog) window.loadLog(s);
             if (window.updateStatus) window.updateStatus('stopped');
@@ -142,6 +168,9 @@ class PtyRenderer {
             // Unknown until loadLog establishes one from X-Log-Offset;
             // -1 is the same "unknown" sentinel index.html uses.
             logCursor: -1,
+            // Status observed by the previous reconcileTerminalSessions()
+            // tick; null until the first observation (issue #80).
+            lastKnownStatus: null,
             ttySocket: null,
             ttyState: 'IDLE',
             appliedTTYSize: null,
@@ -191,7 +220,13 @@ class PtyRenderer {
             const inst = window.state && window.state.instances
                 ? window.state.instances.find(i => i.id === session.id)
                 : null;
-            if (inst && inst.status !== 'running') return;
+            // Only refuse input for a process that is gone. A `starting`
+            // instance already accepts keystrokes, and dropping them there was
+            // part of the "cannot type" half of issue #80.
+            const isTerminal = window.isInstanceTerminalStatus
+                ? window.isInstanceTerminalStatus(inst && inst.status)
+                : !inst || inst.status === 'stopped' || inst.status === 'failed' || inst.status === 'exited';
+            if (inst && isTerminal) return;
             if (window.isTerminalQueryResponse && window.isTerminalQueryResponse(data)) return;
 
             // Forward raw keystrokes to the daemon. Prefer WS

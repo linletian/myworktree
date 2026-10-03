@@ -340,8 +340,10 @@ Example (ad-hoc command without tags):
 
 Response (201):
 ```json
-{ "id":"...","pid":123,"status":"running","created_at":"...","kind":"pty" }
+{ "id":"...","pid":123,"status":"starting","created_at":"...","kind":"pty" }
 ```
+
+**`status` is `starting`, not `running`.** Start returns as soon as the process is spawned; the record is persisted as `starting` and flipped to `running` on the kind's ready signal by a separate goroutine, so the `201` body — and any `GET /api/instances` issued immediately afterwards — legitimately reports `starting`. The full status vocabulary is `starting` / `running` / `unhealthy` / `stopping` / `stopped` / `failed` / `exited` (`internal/framework/status.go`); see `docs/ARCHITECTURE.md` §5.3 for how the UI buckets them. Clients MUST NOT treat "not `running`" as "stopped": a `starting` instance is alive and accepts I/O.
 
 **Error: log buffer budget exceeded (`503 Service Unavailable`)**
 
