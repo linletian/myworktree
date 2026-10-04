@@ -23,9 +23,9 @@ import (
 // (testdata/dsh-mock-modern.go): launch-token ready line, browser-auth
 // cookie gate on /api/*, and the /api/remote.mux WebSocket echo — the
 // full remote-access stack (auth relay + WS<->SSE bridge) end-to-end
-// through spawn -> proxy. The legacy variant (dsh-mock.go +
-// integration_test.go) is untouched and keeps passing its pre-existing
-// assertions.
+// through spawn -> proxy. The ungated variant (dsh-mock.go +
+// integration_test.go) speaks the same dsh 0.2.x RPC wire and keeps
+// passing its pre-existing assertions.
 
 // buildMockDshModern compiles testdata/dsh-mock-modern.go and returns
 // its path.
@@ -109,15 +109,15 @@ func TestDshWebRemoteEndToEnd(t *testing.T) {
 		t.Fatalf("proxy fields missing from blob: %+v", blob)
 	}
 	if !blob.RemoteCapable {
-		t.Fatalf("RemoteCapable = false, want true (mock --version %s parses to core 0.1.5 >= floor 0.1.5)", "0.1.5-rc.1")
+		t.Fatalf("RemoteCapable = false, want true (mock --version %s parses to core 0.2.0 >= floor 0.2.0)", "0.2.0-rc.2")
 	}
-	if blob.Version != "0.1.5" {
-		t.Errorf("Version = %q, want 0.1.5 (parsed core of 0.1.5-rc.1)", blob.Version)
+	if blob.Version != "0.2.0" {
+		t.Errorf("Version = %q, want 0.2.0 (parsed core of 0.2.0-rc.2)", blob.Version)
 	}
 	if !blob.VersionSupported {
 		t.Error("VersionSupported = false, want true")
 	}
-	// The bootstrap ran the workspace.create RPC DIRECTLY against the
+	// The bootstrap ran the workspace/create RPC DIRECTLY against the
 	// gated upstream through the shared auth relay (bootstrap.go).
 	wantWS := "mock-ws-" + shortHash(wtPath)
 	if blob.WorkspaceID != wantWS {
@@ -129,10 +129,10 @@ func TestDshWebRemoteEndToEnd(t *testing.T) {
 	// PIN (misleading-success guard): the modern stub REALLY gates —
 	// direct upstream /api requests WITHOUT the cookie get 401.
 	gateBody, _ := json.Marshal(map[string]any{
-		"type": "client-request", "rpcId": "gate", "method": "session.create",
-		"payload": map[string]string{"cwd": wtPath},
+		"type": "client-request", "rpcId": "gate", "method": "session/create",
+		"payload": map[string]any{"args": map[string]any{"request": map[string]string{"cwd": wtPath}}},
 	})
-	resp, err := http.Post(upstream+"/api/session.create", "application/json", bytes.NewReader(gateBody))
+	resp, err := http.Post(upstream+"/api/session/create", "application/json", bytes.NewReader(gateBody))
 	if err != nil {
 		t.Fatalf("direct upstream POST: %v", err)
 	}
@@ -186,10 +186,10 @@ func TestDshWebRemoteEndToEnd(t *testing.T) {
 	// An RPC through the proxy rides the relay cookie -> 200, and the
 	// scope observation records it (record-only), exactly like legacy.
 	body, _ := json.Marshal(map[string]any{
-		"type": "client-request", "rpcId": "x", "method": "session.create",
-		"payload": map[string]string{"cwd": "/other"},
+		"type": "client-request", "rpcId": "x", "method": "session/create",
+		"payload": map[string]any{"args": map[string]any{"request": map[string]string{"cwd": "/other"}}},
 	})
-	req, _ := http.NewRequest(http.MethodPost, blob.IframeURL+"api/session.create", bytes.NewReader(body))
+	req, _ := http.NewRequest(http.MethodPost, blob.IframeURL+"api/session/create", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	resp, err = http.DefaultClient.Do(req)
 	if err != nil {
@@ -210,6 +210,40 @@ func TestDshWebRemoteEndToEnd(t *testing.T) {
 	st, ok := tracker.Get(inst.ID)
 	if !ok || st.Scope != ScopeOutOfScope || st.Directory != "/other" {
 		t.Errorf("scope record = %+v ok=%v, want out-of-scope /other", st, ok)
+	}
+
+	// Write-verb routing coverage — the mirror of the loop in
+	// TestDshWebProxyEndToEnd, and the guard that actually exercises
+	// THIS mock's eight-verb case list: every verb in
+	// ownSessionWriteMethods (the source of truth the loop derives
+	// from, so this stays no second hand-maintained copy) is POSTed
+	// through the proxy as a client-request with payload.args.request
+	// .sessionId and must come back in a server-response with
+	// result.ok true — HTTP 200 alone would also be answered by the
+	// mock's method-not-found envelope. The request rides the same
+	// relay-cookie path as the session/create POST above (the proxy
+	// injects the dsh-auth cookie; no client-side auth here).
+	for verb := range ownSessionWriteMethods {
+		vbody, _ := json.Marshal(map[string]any{
+			"type": "client-request", "rpcId": "v-" + verb, "method": verb,
+			"payload": map[string]any{"args": map[string]any{"request": map[string]string{"sessionId": "s-" + verb}}},
+		})
+		req, _ := http.NewRequest(http.MethodPost, blob.IframeURL+"api/"+verb, bytes.NewReader(vbody))
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("POST /api/%s via proxy: %v", verb, err)
+		}
+		var rpc rpcResponse
+		decErr := json.NewDecoder(resp.Body).Decode(&rpc)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Errorf("POST /api/%s status = %d, want 200 (modern mock must route every write verb)", verb, resp.StatusCode)
+			continue
+		}
+		if decErr != nil || !rpc.Result.OK {
+			t.Errorf("POST /api/%s not ok: decErr=%v result=%+v", verb, decErr, rpc.Result)
+		}
 	}
 
 	// The WS<->SSE bridge through the proxy: GET opens the SSE downlink

@@ -192,10 +192,12 @@ func numericPort(p string) bool {
 
 // dshProxyConfig derives the dsh-web reverse-proxy settings from the
 // main listener: loopback bind + no token locally; the main listener's
-// host + a mandatory token gate when non-loopback or TLS (the dsh
-// upstream has no authentication layer — the proxy is the only
-// boundary). TLS mirrors the main certificate so an https page never
-// embeds a mixed-content iframe.
+// host + a mandatory token gate when non-loopback or TLS (the proxy is
+// the only boundary between the network and the upstream's own
+// browser-session credential — it holds the `dsh-auth-*` cookie,
+// auth.go — so the mandatory myworktree token gate layers on top of
+// dsh's own auth rather than replacing it). TLS mirrors the main
+// certificate so an https page never embeds a mixed-content iframe.
 func dshProxyConfig(cfg Config, isSecure bool) dsh_web.ProxyConfig {
 	pc := dsh_web.ProxyConfig{
 		BindHost: "127.0.0.1",
@@ -259,9 +261,11 @@ func New(cfg Config, logger *log.Logger) (*Server, error) {
 	// The dsh web driver and its framework kind. The per-instance
 	// reverse proxy binds 127.0.0.1 locally (loopback trust model, no
 	// token); when the main listener is non-loopback or TLS it binds
-	// the main listener's host with a MANDATORY token gate — dsh has
-	// no authentication layer, so the proxy is the only boundary
-	// between the LAN and the unauthenticated upstream.
+	// the main listener's host with a MANDATORY token gate — the proxy
+	// is the upstream's sole credential holder (it holds the minted
+	// `dsh-auth-*` cookie, auth.go), so this gate layers on top of
+	// dsh's own browser-session auth as the only boundary between the
+	// LAN and the upstream's credential.
 	dshDrv := &dsh_web.Driver{
 		DataDir: dataDir,
 		Logger:  logger,
@@ -1879,7 +1883,8 @@ func (s *Server) handleInstanceDshInfo(w http.ResponseWriter, r *http.Request) {
 
 // handleInstanceDshScope returns the current out-of-scope state for a
 // dsh-web instance, recorded in-memory by the per-instance reverse
-// proxy from RPC request bodies (session.create / workspace.create).
+// proxy from RPC request bodies (session/create / workspace/create,
+// dsh 0.2.x slash-style endpoints).
 func (s *Server) handleInstanceDshScope(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)

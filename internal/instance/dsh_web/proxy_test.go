@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"reflect"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -239,22 +241,25 @@ func TestProxyStripsRefererUpstream(t *testing.T) {
 func TestProxyScopeRecording(t *testing.T) {
 	ph, _, tracker, _ := newProxyFixture(t, ProxyConfig{BindHost: "127.0.0.1"}, "/wt")
 
-	envelope := func(method string, payload any) []byte {
+	// dsh 0.2.x envelope: `<namespace>/<method>` endpoint + the verb's
+	// object argument nested at payload.args.request.
+	envelope := func(method string, request any) []byte {
 		b, _ := json.Marshal(map[string]any{
-			"type": "client-request", "rpcId": "r1", "method": method, "payload": payload,
+			"type": "client-request", "rpcId": "r1", "method": method,
+			"payload": map[string]any{"args": map[string]any{"request": request}},
 		})
 		return b
 	}
 
-	// Out-of-scope session.create {cwd} → recorded out-of-scope.
-	doProxy(t, ph, http.MethodPost, "/api", envelope("session.create", map[string]string{"cwd": "/other"}), "")
+	// Out-of-scope session/create {cwd} → recorded out-of-scope.
+	doProxy(t, ph, http.MethodPost, "/api/session/create", envelope("session/create", map[string]string{"cwd": "/other"}), "")
 	st, ok := tracker.Get("inst-1")
 	if !ok || st.Scope != ScopeOutOfScope || st.Directory != "/other" {
 		t.Errorf("out-of-scope record = %+v ok=%v", st, ok)
 	}
 
-	// In-scope workspace.create {path} → recorded in-scope.
-	doProxy(t, ph, http.MethodPost, "/api", envelope("workspace.create", map[string]string{"path": "/wt"}), "")
+	// In-scope workspace/create {path} → recorded in-scope.
+	doProxy(t, ph, http.MethodPost, "/api/workspace/create", envelope("workspace/create", map[string]string{"path": "/wt"}), "")
 	st, ok = tracker.Get("inst-1")
 	if !ok || st.Scope != ScopeInScope {
 		t.Errorf("in-scope record = %+v ok=%v", st, ok)
@@ -273,12 +278,24 @@ func TestProxyScopeRecording(t *testing.T) {
 	if st.Scope != ScopeInScope {
 		t.Errorf("non-RPC body clobbered scope = %+v", st)
 	}
+
+	// The 0.1.x flat payload (no args.request) carries nothing the 0.2
+	// classifier can read: the last good record must survive untouched.
+	doProxy(t, ph, http.MethodPost, "/api/session/create",
+		[]byte(`{"type":"client-request","rpcId":"r1","method":"session/create","payload":{"cwd":"/legacy"}}`), "")
+	st, _ = tracker.Get("inst-1")
+	if st.Scope != ScopeInScope || st.Directory == "/legacy" {
+		t.Errorf("flat 0.1 payload was classified: %+v", st)
+	}
 }
 
 func TestClassifyRPCBody(t *testing.T) {
-	env := func(method string, payload any) []byte {
+	// dsh 0.2.x envelope: `<namespace>/<method>` method names, target
+	// fields at payload.args.request (verified live on 0.2.0-rc.2).
+	env := func(method string, request any) []byte {
 		b, _ := json.Marshal(map[string]any{
-			"type": "client-request", "rpcId": "r1", "method": method, "payload": payload,
+			"type": "client-request", "rpcId": "r1", "method": method,
+			"payload": map[string]any{"args": map[string]any{"request": request}},
 		})
 		return b
 	}
@@ -292,17 +309,31 @@ func TestClassifyRPCBody(t *testing.T) {
 		dir      string
 		ok       bool
 	}{
-		{"session cwd in-scope", env("session.create", map[string]string{"cwd": "/wt"}), "/wt", "w1", ScopeInScope, "/wt", true},
-		{"session cwd out-of-scope", env("session.create", map[string]string{"cwd": "/other"}), "/wt", "w1", ScopeOutOfScope, "/other", true},
-		{"workspace.create in-scope", env("workspace.create", map[string]string{"path": "/wt"}), "/wt", "w1", ScopeInScope, "/wt", true},
-		{"workspace.create out-of-scope", env("workspace.create", map[string]string{"path": "/x"}), "/wt", "w1", ScopeOutOfScope, "/x", true},
-		{"session workspaceId in-scope", env("session.create", map[string]string{"workspaceId": "w1"}), "/wt", "w1", ScopeInScope, "w1", true},
-		{"session workspaceId out-of-scope", env("session.create", map[string]string{"workspaceId": "w2"}), "/wt", "w1", ScopeOutOfScope, "w2", true},
-		{"session workspaceId unknown worktree ws", env("session.create", map[string]string{"workspaceId": "w1"}), "/wt", "", ScopeInScope, "", false},
+		{"session cwd in-scope", env("session/create", map[string]string{"cwd": "/wt"}), "/wt", "w1", ScopeInScope, "/wt", true},
+		{"session cwd out-of-scope", env("session/create", map[string]string{"cwd": "/other"}), "/wt", "w1", ScopeOutOfScope, "/other", true},
+		{"workspace/create in-scope", env("workspace/create", map[string]string{"path": "/wt"}), "/wt", "w1", ScopeInScope, "/wt", true},
+		{"workspace/create out-of-scope", env("workspace/create", map[string]string{"path": "/x"}), "/wt", "w1", ScopeOutOfScope, "/x", true},
+		{"session workspaceId in-scope", env("session/create", map[string]string{"workspaceId": "w1"}), "/wt", "w1", ScopeInScope, "w1", true},
+		{"session workspaceId out-of-scope", env("session/create", map[string]string{"workspaceId": "w2"}), "/wt", "w1", ScopeOutOfScope, "w2", true},
+		{"session workspaceId unknown worktree ws", env("session/create", map[string]string{"workspaceId": "w1"}), "/wt", "", ScopeInScope, "", false},
 		{"non-RPC body", []byte(`{"foo":1}`), "/wt", "w1", ScopeInScope, "", false},
 		{"wrong type", env("server-response", nil), "/wt", "w1", ScopeInScope, "", false},
-		{"unknown method", env("settings.get", map[string]string{}), "/wt", "w1", ScopeInScope, "", false},
-		{"empty payload", env("session.create", map[string]string{}), "/wt", "w1", ScopeInScope, "", false},
+		{"unknown method", env("settings/get", map[string]string{}), "/wt", "w1", ScopeInScope, "", false},
+		{"empty request", env("session/create", map[string]string{}), "/wt", "w1", ScopeInScope, "", false},
+		// `request:null` is ABSENT, not an empty object: decoding "null"
+		// into a struct is a silent no-op, so the guard inside
+		// decodeArgsRequest (not classifyRPC's empty-dir fallthrough)
+		// must reject it.
+		{"null request", env("session/create", nil), "/wt", "w1", ScopeInScope, "", false},
+		{"null request workspace/create", env("workspace/create", nil), "/wt", "w1", ScopeInScope, "", false},
+		// 0.1.x shapes are NOT understood any more (support dropped): the
+		// dotted method name and the flat payload both classify nothing.
+		{"legacy dotted method", []byte(`{"type":"client-request","rpcId":"r1","method":"session.create","payload":{"cwd":"/other"}}`), "/wt", "w1", ScopeInScope, "", false},
+		{"legacy dotted workspace.create", []byte(`{"type":"client-request","rpcId":"r1","method":"workspace.create","payload":{"path":"/wt"}}`), "/wt", "w1", ScopeInScope, "", false},
+		{"legacy flat payload", []byte(`{"type":"client-request","rpcId":"r1","method":"session/create","payload":{"cwd":"/other"}}`), "/wt", "w1", ScopeInScope, "", false},
+		// The subagent namespace is PLURAL upstream — a singular
+		// `subagent/prompt` names nothing and classifies nothing.
+		{"singular subagent/prompt classifies nothing", env("subagent/prompt", map[string]string{"sessionId": "s1"}), "/wt", "w1", ScopeInScope, "", false},
 	}
 	for _, c := range cases {
 		st, ok := classifyRPCBody(c.body, c.worktree, c.wsID)
@@ -318,9 +349,39 @@ func TestClassifyRPCBody(t *testing.T) {
 	}
 }
 
+// TestDecodeArgsRequestNullIsAbsent pins the structural guard: a
+// payload whose args.request is `null` must fail to decode. `"null"` is
+// 4 bytes (so a len()==0 emptiness check misses it) and unmarshalling
+// "null" into a struct is a documented silent no-op returning nil —
+// without the explicit comparison the call would "succeed" with an
+// all-zero dst.
+func TestDecodeArgsRequestNullIsAbsent(t *testing.T) {
+	cases := []struct {
+		name    string
+		payload string
+		ok      bool
+	}{
+		{"null request", `{"args":{"request":null}}`, false},
+		{"null request with whitespace", `{"args":{"request":  null  }}`, false},
+		{"missing request", `{"args":{}}`, false},
+		{"null args", `{"args":null}`, false},
+		{"present request", `{"args":{"request":{"sessionId":"s1"}}}`, true},
+		{"empty object request", `{"args":{"request":{}}}`, true},
+	}
+	for _, c := range cases {
+		var dst struct {
+			SessionID string `json:"sessionId"`
+		}
+		got := decodeArgsRequest(json.RawMessage(c.payload), &dst)
+		if got != c.ok {
+			t.Errorf("%s: decodeArgsRequest = %v, want %v", c.name, got, c.ok)
+		}
+	}
+}
+
 // TestProxyBridgeGatedOnRemoteCapable pins the remote bridge gate:
-// with cfg.RequireToken=true but blob.RemoteCapable=false (a dsh
-// 0.1.2-0.1.4 shape — token-bearing but below the remote floor),
+// with cfg.RequireToken=true but blob.RemoteCapable=false (a pre-0.2
+// dsh shape — token-bearing but below the 0.2.0 remote floor),
 // startProxyListener must NOT construct the bridge. The shim URL, the
 // bridge endpoint and HTML injection all belong to the bridge, so each
 // falls through to the upstream untouched.
@@ -388,7 +449,8 @@ func TestProxyBridgeGatedOnRemoteCapable(t *testing.T) {
 
 // TestProxyWebSocketPassthrough drives a raw Upgrade handshake through
 // the proxy and round-trips bytes — the dsh event channel
-// (/api/events.mux, /api/events.host) depends on this path.
+// (/api/remote.mux) depends on this path. The passthrough is
+// path-generic: the proxy does not special-case the carrier path.
 func TestProxyWebSocketPassthrough(t *testing.T) {
 	// Upstream: an echo "websocket" that hijacks the connection.
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -437,7 +499,7 @@ func TestProxyWebSocketPassthrough(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer conn.Close()
-	req := "GET /api/events.mux HTTP/1.1\r\nHost: " + ln.Addr().String() + "\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n"
+	req := "GET /api/remote.mux HTTP/1.1\r\nHost: " + ln.Addr().String() + "\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n"
 	if _, err := conn.Write([]byte(req)); err != nil {
 		t.Fatal(err)
 	}
@@ -589,45 +651,154 @@ func TestProxyUpstreamMidBodyFailureAbortsConnection(t *testing.T) {
 	}
 }
 
-// TestProxySessionOwnMarking pins the write-driving RPC attribution:
-// a session.prompt (mutating the log) marks its sessionId as owned by
-// this instance in the session watch, while a read-only session.history
-// must NOT (opening a session is not writing — marking it would
-// suppress the foreign-activity warning exactly when it matters).
+// TestProxySessionOwnMarking pins the write-driving RPC attribution: a
+// verb that mutates the session log marks its args.request.sessionId as
+// owned by this instance in the session watch, while a read-only
+// session/list must NOT (listing sessions is not writing — marking it
+// would suppress the foreign-activity warning exactly when it matters).
+// Names/shapes are the dsh 0.2.x wire (`<namespace>/<method>` +
+// payload.args.request; the subagent namespace is PLURAL).
+//
+// The table covers EVERY entry of ownSessionWriteMethods (proxy.go) and
+// the coverage guard fails if the map grows a verb this table does not
+// exercise: an unverified entry is a silent hole — a typo there
+// (`session/promt`, a dropped `session/selectModel`) disables own
+// attribution for that verb only, so a session this daemon really drives
+// gets reported as foreign activity with every test still green.
 func TestProxySessionOwnMarking(t *testing.T) {
 	ph, _, _, _ := newProxyFixture(t, ProxyConfig{BindHost: "127.0.0.1"}, "/wt")
-	watch := NewSessionWatch(t.TempDir(), nil)
-	ph.h.watch = watch
 
-	envelope := func(method, payload string) []byte {
-		return []byte(`{"type":"client-request","rpcId":"r1","method":"` + method + `","payload":` + payload + `}`)
+	envelope := func(method, request string) []byte {
+		return []byte(`{"type":"client-request","rpcId":"r1","method":"` + method +
+			`","payload":{"args":{"request":` + request + `}}}`)
 	}
-	ownCount := func() int {
-		watch.mu.Lock()
-		defer watch.mu.Unlock()
-		return len(watch.own)
+	ownIDs := func(w *SessionWatch) []string {
+		w.mu.Lock()
+		defer w.mu.Unlock()
+		out := make([]string, 0, len(w.own))
+		for id := range w.own {
+			out = append(out, id)
+		}
+		sort.Strings(out)
+		return out
 	}
 
-	doProxy(t, ph, http.MethodPost, "/api", envelope("session.prompt", `{"sessionId":"s-1"}`), "")
-	if ownCount() != 1 {
-		t.Fatalf("own sessions = %d, want 1 after session.prompt", ownCount())
+	// One case per entry of ownSessionWriteMethods. `want` is the exact
+	// owned set after that single request: subagents/prompt contributes
+	// TWO ids (parent + child), every other verb exactly one. Distinct ids
+	// per verb, so a shared/misread id cannot pass by accident. The final
+	// row is the `request:null` negative: decodeArgsRequest treats a null
+	// request as absent (json.Unmarshal of "null" into a struct is a
+	// silent no-op), so nothing is marked.
+	cases := []struct {
+		name    string
+		method  string
+		request string
+		want    []string
+	}{
+		{"session/prompt", "session/prompt", `{"sessionId":"s-prompt"}`, []string{"s-prompt"}},
+		{"session/cancel", "session/cancel", `{"sessionId":"s-cancel"}`, []string{"s-cancel"}},
+		{"session/fork", "session/fork", `{"sessionId":"s-fork"}`, []string{"s-fork"}},
+		{"session/rename", "session/rename", `{"sessionId":"s-rename"}`, []string{"s-rename"}},
+		{"session/selectModel", "session/selectModel", `{"sessionId":"s-model"}`, []string{"s-model"}},
+		{"session/attachment", "session/attachment", `{"sessionId":"s-attach"}`, []string{"s-attach"}},
+		{"session/updateQueue", "session/updateQueue", `{"sessionId":"s-queue"}`, []string{"s-queue"}},
+		{"subagents/prompt marks parent AND child", "subagents/prompt",
+			`{"parentSessionId":"s-parent","childSessionId":"s-child"}`, []string{"s-child", "s-parent"}},
+		{"request:null marks nothing", "session/prompt", `null`, []string{}},
 	}
-	doProxy(t, ph, http.MethodPost, "/api", envelope("subagent.prompt", `{"parentSessionId":"s-p","childSessionId":"s-c"}`), "")
-	if ownCount() != 3 {
-		t.Fatalf("own sessions = %d, want 3 after subagent.prompt", ownCount())
+
+	// Coverage guard: the map is the source of truth — the table must
+	// neither lag behind it nor invent verbs it does not own.
+	covered := map[string]bool{}
+	for _, c := range cases {
+		covered[c.method] = true
 	}
-	doProxy(t, ph, http.MethodPost, "/api", envelope("session.history", `{"sessionId":"s-readonly"}`), "")
-	if ownCount() != 3 {
-		t.Fatalf("own sessions = %d, want 3 (session.history is read-only)", ownCount())
+	for m := range ownSessionWriteMethods {
+		if !covered[m] {
+			t.Errorf("ownSessionWriteMethods entry %q has no case here — its own attribution is unverified", m)
+		}
 	}
-	doProxy(t, ph, http.MethodPost, "/api", envelope("session.cancel", `{"sessionId":"s-1"}`), "")
-	if ownCount() != 3 {
-		t.Fatalf("own sessions = %d, want 3 (s-1 already marked)", ownCount())
+	for m := range covered {
+		if !ownSessionWriteMethods[m] {
+			t.Errorf("table case %q is not in ownSessionWriteMethods (map and table drifted apart)", m)
+		}
 	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			watch := NewSessionWatch(t.TempDir(), nil)
+			ph.h.watch = watch
+			resp, _ := doProxy(t, ph, http.MethodPost, "/api/"+c.method, envelope(c.method, c.request), "")
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("POST /api/%s status = %d, want 200", c.method, resp.StatusCode)
+			}
+			if got := ownIDs(watch); !reflect.DeepEqual(got, c.want) {
+				t.Errorf("owned sessions = %v, want exactly %v", got, c.want)
+			}
+		})
+	}
+
+	// NEGATIVE: a read-only verb marks nothing (and must stay out of the
+	// write set — that membership check is the load-bearing half).
+	t.Run("session/list is read-only", func(t *testing.T) {
+		if ownSessionWriteMethods["session/list"] {
+			t.Fatal("session/list is in ownSessionWriteMethods — listing sessions is not writing")
+		}
+		watch := NewSessionWatch(t.TempDir(), nil)
+		ph.h.watch = watch
+		doProxy(t, ph, http.MethodPost, "/api/session/list", envelope("session/list", `{"sessionId":"s-readonly"}`), "")
+		if got := ownIDs(watch); len(got) != 0 {
+			t.Errorf("owned sessions = %v, want none for a read-only verb", got)
+		}
+	})
+
+	// NEGATIVE: flat 0.1.x payload (no args.request) marks nothing — the
+	// id simply is not there for the 0.2 reader.
+	t.Run("flat 0.1.x payload marks nothing", func(t *testing.T) {
+		watch := NewSessionWatch(t.TempDir(), nil)
+		ph.h.watch = watch
+		doProxy(t, ph, http.MethodPost, "/api/session/prompt",
+			[]byte(`{"type":"client-request","rpcId":"r1","method":"session/prompt","payload":{"sessionId":"s-flat"}}`), "")
+		if got := ownIDs(watch); len(got) != 0 {
+			t.Errorf("owned sessions = %v, want none for a flat 0.1.x payload", got)
+		}
+	})
+
+	// NEGATIVE: the SINGULAR `subagent/prompt` names nothing upstream (the
+	// namespace is PLURAL) — it must neither classify nor mark, and must
+	// stay out of the write set.
+	t.Run("singular subagent/prompt marks nothing", func(t *testing.T) {
+		if ownSessionWriteMethods["subagent/prompt"] {
+			t.Fatal("singular subagent/prompt is in ownSessionWriteMethods — upstream the namespace is PLURAL")
+		}
+		watch := NewSessionWatch(t.TempDir(), nil)
+		ph.h.watch = watch
+		doProxy(t, ph, http.MethodPost, "/api/subagent/prompt", envelope("subagent/prompt", `{"sessionId":"s-singular"}`), "")
+		if got := ownIDs(watch); len(got) != 0 {
+			t.Errorf("owned sessions = %v, want none for the singular subagent namespace", got)
+		}
+	})
+
+	// NEGATIVE: the dotted 0.1.x `workspace.create` is not a route and
+	// not a known method — it classifies nothing (mirror of the
+	// classifyRPCBody table case).
+	t.Run("dotted workspace.create classifies nothing", func(t *testing.T) {
+		body := []byte(`{"type":"client-request","rpcId":"r1","method":"workspace.create","payload":{"args":{"request":{"path":"/wt"}}}}`)
+		if _, ok := classifyRPCBody(body, "/wt", "w1"); ok {
+			t.Error("dotted workspace.create classified — 0.1.x dotted names are dead")
+		}
+		watch := NewSessionWatch(t.TempDir(), nil)
+		ph.h.watch = watch
+		doProxy(t, ph, http.MethodPost, "/api/workspace.create", body, "")
+		if got := ownIDs(watch); len(got) != 0 {
+			t.Errorf("owned sessions = %v, want none for a dotted workspace.create", got)
+		}
+	})
 }
 
 // TestProxySessionCreateResponseMarking pins the response tee: the
-// session id of a session.create lives in the response VALUE
+// session id of a session/create lives in the response VALUE
 // ({sessionId}), not the request — the proxy must parse the streamed
 // envelope and mark it owned.
 func TestProxySessionCreateResponseMarking(t *testing.T) {
@@ -650,8 +821,8 @@ func TestProxySessionCreateResponseMarking(t *testing.T) {
 		h:            h,
 	}
 
-	body := []byte(`{"type":"client-request","rpcId":"r1","method":"session.create","payload":{"cwd":"/wt"}}`)
-	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:39999/api/session.create", bytes.NewReader(body))
+	body := []byte(`{"type":"client-request","rpcId":"r1","method":"session/create","payload":{"args":{"request":{"cwd":"/wt"}}}}`)
+	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:39999/api/session/create", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	ph.ServeHTTP(rec, req)
@@ -663,7 +834,7 @@ func TestProxySessionCreateResponseMarking(t *testing.T) {
 	_, marked := watch.own["s-created"]
 	watch.mu.Unlock()
 	if !marked {
-		t.Error("session.create response id not marked as owned")
+		t.Error("session/create response id not marked as owned")
 	}
 }
 

@@ -673,23 +673,42 @@ Response (200):
   "host": "127.0.0.1",
   "port": 35421,
   "worktree_path": "/abs/path/to/worktree",
-  "version": "0.1.0-rc.6",
+  "version": "0.2.0",
   "version_supported": true,
-  "overlay_verified": true,
-  "missing_dsh": {"npm_available": true, "suggested_pin": "0.1.0-rc.6"}
+  "remote_capable": true,
+  "min_remote_version": "0.2.0",
+  "overlay_verified": true
+}
+```
+
+Failed instance — `missing_dsh` is present **only** when spawn failed because the `dsh` executable could not be resolved (instance `failed`); there is then no live upstream, so `host` / `port` / `version` come back empty and never sit next to a live `version`:
+```json
+{
+  "iframe_src": "",
+  "proxy_host": "",
+  "proxy_port": "",
+  "host": "",
+  "port": "",
+  "worktree_path": "/abs/path/to/worktree",
+  "version": "",
+  "version_supported": false,
+  "remote_capable": false,
+  "min_remote_version": "0.2.0",
+  "overlay_verified": false,
+  "missing_dsh": {"npm_available": true, "suggested_pin": "0.2.0-rc.2"}
 }
 ```
 
 - `host`/`port` are the upstream `dsh web` server's bound address; `proxy_host`/`proxy_port` are the per-instance myworktree reverse-proxy listener (a **dedicated loopback origin** — the dsh SPA hardcodes its API base to `location.origin + '/api'`, so same-origin subpath mounting is not possible). `iframe_src` is what the iframe loads (plain `http://127.0.0.1:<proxyPort>/` locally).
 - **Remote access**: when the main listener is non-loopback or TLS, the proxy binds the main listener's host with a **mandatory token gate** — `?token=` or the `mw_token` cookie, validated on every **non-loopback client** request including WebSocket upgrades (loopback clients bypass the gate, the same trust model as the main UI). The embed is a dedicated origin, so the main-origin HttpOnly `mw_token` cookie cannot travel to it — **the server appends `?token=` to `iframe_src` itself** (page JS can never read the HttpOnly cookie, and portal/login flows carry no address-bar token); the frontend only falls back to an address-bar token for a src that somehow lacks one. The proxy validates the first navigation, sets the HttpOnly `mw_token` cookie on the proxy origin, and 302-redirects to the token-free URL so the embedded document never retains the token in its own `location.search`. The token is stripped (`authq.StripToken`) before anything is forwarded upstream (see `docs/ARCHITECTURE.md` §9).
-- `version` is the installed `dsh --version` probed at spawn; `version_supported` is `false` when it is outside the `[0.1.0, 0.2.0)` range the restrict overlay targets (advisory — the instance still starts; the hard gate below `0.1.0` blocks startup). `overlay_verified` (L2 check) is `false` when a spawn-time `dsh web --dump-config --patch <restrict.yml>` run did not confirm the four overlay rows (`storage-json` root redirect, `directory-picker` composer disabled, `directory-picker-browse` host backend inserted and not disabled, `client-hmr` disabled) — the frontend then shows the "裁剪失效" (restriction not effective) warning. `missing_dsh` is present only when the `dsh` executable was not found at spawn (instance `failed`); `npm_available` tells the frontend whether the install option is offered, `suggested_pin` is the pinned npx version.
+- `version` is the installed `dsh --version` probed at spawn — the **parsed core** (`x.y.z`; npx mode records the raw pinned version instead); `version_supported` is `false` when it is outside the `[0.2.0, 0.3.0)` range the restrict overlay and the slash-style RPC wire target (advisory — the instance still starts; the hard gate below `0.2.0` blocks startup — 0.1.x is out of support). `overlay_verified` (L2 check) is `false` when a spawn-time `dsh web --dump-config --patch <restrict.yml>` run did not confirm the four overlay rows (`storage-json` root redirect, `directory-picker` composer disabled, `directory-picker-browse` host backend inserted and not disabled, `client-hmr` disabled) — the frontend then shows the "裁剪失效" (restriction not effective) warning. `missing_dsh` belongs to the **failed instance only** (second example above): it is present only when the `dsh` executable was not found at spawn (instance `failed`, `host`/`port`/`version` empty — never alongside a live `version`); `npm_available` tells the frontend whether the install option is offered, `suggested_pin` is the pinned npx version.
 - Design: `docs/plans/dsh-native-ui/FEASIBILITY.md`; threat model: `docs/ARCHITECTURE.md` §9.
 
 ### 5.15 dsh-web scope (out-of-scope state)
 
 `GET /api/instances/dsh/scope?id=<id>`
 
-Returns the last observed out-of-scope state for a dsh-web instance, recorded in-memory by the per-instance reverse proxy from **RPC request bodies** (`session.create {cwd|workspaceId}` / `workspace.create {path}`). The frontend polls it (~1.5s) to render the persistent warning bar.
+Returns the last observed out-of-scope state for a dsh-web instance, recorded in-memory by the per-instance reverse proxy from **RPC request bodies** (dsh 0.2.x slash-style endpoints — `session/create` with `payload.args.request.{cwd|workspaceId}`, `workspace/create` with `payload.args.request.path`). The frontend polls it (~1.5s) to render the persistent warning bar.
 
 Response (200):
 ```json
@@ -703,7 +722,7 @@ Response (200):
 
 `scope` is `in-scope` / `out-of-scope`. Observation is record-only — the request is forwarded unchanged; out-of-scope sessions still succeed (their sandbox root is the out-of-scope directory; OS-level write limits still apply) and the warning stays until the user navigates back to the worktree.
 
-`foreign_active_sessions` (omitempty) lists the sessions in the shared `$DSH_HOME/sessions` pool that the daemon's session watch classified as **actively written by another dsh process** (mtime within 90s, excluding sessions this daemon itself drives — own traffic is attributed from `session.prompt`-family RPC bodies through the proxy, `session.create` responses, and the workspace-bootstrap preseed). dsh is a single-writer-per-process system: opening such a session from the embed appends an unguarded `session/end-seed` and can permanently corrupt the log, so the frontend renders a warning bar telling the user to wait until the session is idle (record-only — nothing is blocked; see `docs/plans/dsh-native-ui/CROSS-PROCESS-SESSION.md`).
+`foreign_active_sessions` (omitempty) lists the sessions in the shared `$DSH_HOME/sessions` pool that the daemon's session watch classified as **actively written by another dsh process** (mtime within 90s, excluding sessions this daemon itself drives — own traffic is attributed from `session/*`-family RPC bodies through the proxy (`session/prompt`, `session/cancel`, `session/fork`, `session/rename`, `session/selectModel`, `session/attachment`, `session/updateQueue`, plus the plural-namespaced `subagents/prompt` — ids read from `payload.args.request`), `session/create` responses, and the workspace-bootstrap preseed). dsh is a single-writer-per-process system: opening such a session from the embed appends an unguarded `session/end-seed` and can permanently corrupt the log, so the frontend renders a warning bar telling the user to wait until the session is idle (record-only — nothing is blocked; see `docs/plans/dsh-native-ui/CROSS-PROCESS-SESSION.md`).
 
 ### 5.16 dsh-web launch mode
 

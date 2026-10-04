@@ -4,6 +4,7 @@
 > 涉及版本：dsh 0.1.0-rc.6（npm 安装，`~/.npm-global`）；myworktree `feature/dsh-native-ui`
 > 状态：**已定位**——网络路径问题（浏览器发起的 WebSocket 升级在远程路径上死亡），非 myworktree、非 dsh 代码缺陷；修复方向待决策（见 §8）
 > 关联文档：`CROSS-PROCESS-SESSION.md`（单写者边界，与本问题正交）；`PLAN.md` §数据面（共享 sessions 池设计）
+> ⚠️ 0.2.x 现状：下文点名的 0.1.x 事件通道 `/api/events.mux` / `/api/events.host` 在 dsh 0.2.x 已不存在，WS 载体现在是 `/api/remote.mux`；见 `PLAN.md` §「⚠️ 修订（dsh 0.2.x）」
 
 ---
 

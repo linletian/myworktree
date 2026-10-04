@@ -6,6 +6,8 @@
 >
 > **实施修订（2026-08-15 真机验证，见 PLAN.md §实施踩坑补充）**：① §2.3「restrict overlay 禁用 directory-picker 行」在本版 dsh（0.1.0-rc.6）不成立——该行是自动组合器，api-gateway 硬依赖其 host 后端的 `directoryPicker` 服务，直接禁用会整树加载失败；已改为「停组合器 + `insert` 裸挂 `-browse` host 后端行（服务保留、client 表面不挂）」。② §2.1 Spawn 命令的 flag 顺序须为 `dsh web --patch <overlay> --host 127.0.0.1 --port 0`（launcher 选项前置，否则 `--patch` 被透传给 app 层报 unknown option）。③ §2.2 的 `POST /api/workspace.create` wire 表述正确（endpoint 从 URL 解析，body `method` 须一致）。④ **跨进程会话边界（dsh 上游问题）**：§2.2 的"会话跨进程互通"需限定为"可见、可打开、可读快照"——dsh 会话实时事件只在写入者进程内广播（无跨进程同步），且第二个进程打开活跃会话会因 `session/end-seed` 无锁追加撞 seq 而损坏日志（实测：`corrupt session log: seq gap in committed region`）；完整分析见 `CROSS-PROCESS-SESSION.md`。
 >
+> **实施修订（dsh 0.2.x，真机验证于 dsh 0.2.0-rc.2）**：上一条 2026-08-15 修订**作为历史保留**。在其之上，0.2.0 又推翻了本文档的 wire 表述：上文 ③ 的 `POST /api/workspace.create` 表述**已失效**——endpoint 段改为 `<namespace>/<method>`（`workspace/create`、`session/create`、`subagents/prompt`，复数命名空间；点号名在 0.2.0 上 404），且每个 verb 的唯一对象参数嵌套到 `payload.args.request`（`{"args":{"request":{…}}}`；flat payload 被上游拒绝：`Remote payload must contain exactly one plain-object args field`）。Spawn 命令追加 `--no-open`（issue #84，仍保持 launcher 选项前置）。版本门上调至 `minVersion 0.2.0` / `supportedMaxVersion 0.3.0`（exclusive）/ `minRemoteVersion 0.2.0` / `NpxPin 0.2.0-rc.2`——**0.1.x 整体停止支持**。完整对照与"在 0.2.0 上复核后依旧成立、刻意未动"的清单见 `PLAN.md` 顶部「⚠️ 修订（dsh 0.2.x）」一节。
+>
 > **结论一句话**：可行。`dsh web` = 无头 HTTP server + 内嵌 SPA，形态与 `opencode serve` 同构；dsh 自带 OS 级工作区沙箱（比 opencode 的"只提醒"更强）；myworktree 侧按 opencode 式哲学做外围——数据面按 worktree 切分注册表 + 禁用跨 worktree 入口 + 观察式监测只提醒，全部经 dsh 官方 patch / 插件机制实现，**零 dsh 源码改动**。
 
 ---
@@ -22,7 +24,7 @@
 ### 1.2 认证与信任栅栏（`packages/client/connection/src/api-request-trust.ts`）
 
 - **无认证层**。`/api` 栅栏：①Host ∈ loopback / trustedHosts；②`sec-fetch-site: cross-site` 拒；③有 Origin 时 `Origin.host === Host.authority`（**无 Origin 放行**）。
-- 反代要点：Host 设为上游 loopback、**删除 Origin**、透传 WebSocket Upgrade（事件通道是 WS：`/api/events.mux`、`/api/events.host`）。
+- 反代要点：Host 设为上游 loopback、**删除 Origin**、透传 WebSocket Upgrade（事件通道是 WS：`/api/remote.mux`；透传按路径通用，代理不特判该路径）。
 - `settings`/`credentials` 等 loopback-gated 接口，经代理后 Host 即 loopback → 远程访问必须由 myworktree portal 自己叠 token。
 
 ### 1.3 会话 / 工作区 / 沙箱模型

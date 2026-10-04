@@ -10,9 +10,11 @@ import (
 // Scope classification for dsh-web instances (PLAN.md §工作区限制).
 // Unlike opencode-web — which observes the request directory carried in
 // headers / query params — dsh carries the target directory only in RPC
-// request BODIES (workspace.create {path} / session.create {cwd |
-// workspaceId}), so the per-instance reverse proxy parses those bodies
-// and records the result here. Observation is record-only: requests are
+// request BODIES, at payload.args.request.path (workspace/create) or
+// payload.args.request.{cwd|workspaceId} (session/create) — the dsh
+// 0.2.x nested form of the single object argument (verified live on
+// 0.2.0-rc.2). The per-instance reverse proxy parses those bodies and
+// records the result here. Observation is record-only: requests are
 // forwarded unchanged, out-of-scope sessions still succeed (their
 // sandbox root is the out-of-scope directory; OS-level write limits
 // still apply), and the warning stays until the user navigates back.
@@ -110,8 +112,9 @@ func normalizeDir(dir string) string {
 }
 
 // classifyRPC compares one RPC target against the instance worktree.
-// dir is a cwd path (workspace.create path / session.create cwd);
-// workspaceID is the session.create workspaceId form. Exactly one is
+// dir is a cwd path (workspace/create args.request.path /
+// session/create args.request.cwd); workspaceID is the session/create
+// args.request.workspaceId form. Exactly one is
 // non-empty. ok=false when nothing comparable was supplied (no
 // observation recorded). A workspaceId observation with no known
 // worktree workspace id (bootstrap not done / failed) is skipped — it

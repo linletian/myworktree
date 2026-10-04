@@ -8,6 +8,25 @@
 
 ---
 
+## ⚠️ 修订（dsh 0.2.x，真机验证于 dsh 0.2.0-rc.2）—— 本节覆盖下文所有 0.1.x 表述
+
+> **本节是 wire 层面唯一的现行事实来源。** 下文的 0.1.x 记录（§踩坑 11–15、§版本门、以及各处 `workspace.create` / `session.create` 的点号写法）**作为历史原样保留、不改写**——它们在 0.1.0-rc.6 / 0.1.5-rc.1 上确实如此，也正是当初这些决策成立的原因。凡与本节冲突处，以本节为准。
+
+**结论：0.1.x 支持整体放弃，驱动只说 0.2.x wire。** 不是"新旧双分支共存"，而是去掉 0.1 形态——上游 gateway 对 flat payload 直接拒绝（实测报错 `Remote payload must contain exactly one plain-object args field`），没有可回退的旧形状。
+
+1. **BREAKING — RPC endpoint 段改为 `<namespace>/<method>`**：`workspace/create`、`session/create`、`session/prompt`、`subagents/prompt`（**subagent 命名空间是复数**）。0.1.x 的点号名（`workspace.create`）在 0.2.0 上 **404**。仍然成立的部分：endpoint 依旧从 URL 路径解析、信封 `method` 须与 endpoint 一致、打到裸 `/api` 仍 404 `not found`（§踩坑 13 的结论不变，只是 endpoint 的名字变了）。
+2. **BREAKING — 每个 verb 的唯一对象参数嵌套到 `payload.args.request`**：
+   - `POST /api/workspace/create` → `{"type":"client-request","rpcId":"r","method":"workspace/create","payload":{"args":{"request":{"path":"<worktree>"}}}}`
+   - `POST /api/session/create` → `{"type":"client-request","rpcId":"r","method":"session/create","payload":{"args":{"request":{"cwd":"<worktree>"}}}}`
+   - 信封本身 `{type,rpcId,method,payload}` 不变；应答仍是 `{type:"server-response",rpcId,result:{ok,value}}`；`value` 形态不变（`workspace/create` → `{workspace:{workspaceId,path,…},created}`；`session/create` → `{sessionId,agentPreset?}`）。
+   - 上游依据（安装包内只读参考）：`@deepseek-ai/dsh-api-session-controller/lib/typert.host.js` 与 `…/dsh-api-workspace-controller/lib/typert.host.js`，两者都是 `@Remote('create') create(request: …Request)`——单个名为 `request` 的对象参数，落到 wire 上即 `payload.args.request`。
+   - 代码落点：`bootstrap.go`（新增 `requestPayload` + 两个自举调用）、`proxy.go`（`/api/session/create` tee、`ownSessionWriteMethods`、`ownSessionIDsInBody`、`classifyRPCBody`，共用新增的 `decodeArgsRequest`）。
+3. **新增 `--no-open`（issue #84）**：0.2.x 的 `dsh web` 默认每次启动拉起宿主默认浏览器（就绪输出原文就写着 "opening the default browser; pass --no-open to disable"）；SPA 是 iframe 内嵌的，于是每个 Start 都会多开一个游离标签页。`webArgs()` 追加 `--no-open`，**跟在 `--port 0` 之后**与其他 web-app 选项同组——**绝不前置于 `--patch`**（§踩坑 11 的顺序不变式依旧成立）：`dsh web --patch <overlay> --host 127.0.0.1 --port 0 --no-open`。commander 的 `--no-open` ⇒ `openBrowser:false` ⇒ `handoffBrowser=false`，而 `printUrl` 仍为 true，所以 `dsh web: http://…` 就绪行照常打印，`pumpAndWatch` 的解析不受影响。`dsh web --help` 实测选项集：`--host` / `--no-open` / `--port` / `--trusted-host`。
+4. **版本门上调**：`minVersion = 0.2.0`、`supportedMaxVersion = 0.3.0`（exclusive）、`minRemoteVersion = 0.2.0`、`NpxPin = "0.2.0-rc.2"`（npm 上 `latest` 与 `next` 两个 tag 都指向它，且上面每条事实都是在这一 build 上手测的）。远程下限与硬门在该 policy 下**数值重合于 0.2.0**，但仍保留为两个常量——它们门控的是不同机器（远程桥 vs. Spawn）。`RemoteMinVersion()` 签名不变，仍经 `/api/dsh/capability` 与 `/api/instances/dsh` 暴露。
+5. **真机复核：以下 0.1.x 结论在 0.2.0 上依旧成立，故刻意未动**：`--patch <file>`、`--dump-config`（打印 composed tree）、就绪行格式 `dsh web: http://127.0.0.1:<port>/?token=<tok>`（+ 可选 ` (LAN: …)`）、无 cookie 的 `GET /` → `401`（健康探针本就容忍）、`GET /?token=` → `303` + `Set-Cookie: dsh-auth-<hash>=…`（auth relay 不变）、`POST /api/<endpoint>` 传输层、`GET /` 的 HTML 含 `</head>`（bridge shim 注入仍可用）、`/api/remote.mux` WS 升级、`$DSH_HOME/sessions/<slug>/<id>/session.jsonl.zstd` 布局、`storage-json.root` 按 worktree 隔离。**restrict overlay 四行在 0.2.0 上仍正确组合**（`dsh web --patch <restrict.yml> --dump-config` 复核）；live 实例的 `pluginInventory/list` 显示 `directory-picker-auto` 与 `dsh-client-hmr` 为 `enabled:false / fiberPhase:null`、`dsh-host-directory-picker-browse` 为 `enabled:true / fiberPhase:active`，且**完全没有 `dsh-client-ui-directory-picker-*` client 表面加载**，enabled 条目中无非 active 项——0.2 的 composer 会同时挂 host 后端与 client 表面，所以"停组合器 + 裸挂 `-browse` 后端"如今**更加**正确（§踩坑 12 的方案不改，只追加验证）。
+
+---
+
 ## Context
 
 `dsh web` = 无头 HTTP server + 内嵌 SPA（`dsh --profile web` 别名），形态与 `opencode serve` 同构：前台长驻、`--port 0` OS 分配端口、SIGTERM 优雅关停、就绪行 `dsh web: http://127.0.0.1:<port>`。dsh 自带 OS 级工作区沙箱（比 opencode 的"只提醒"更强）与官方 patch / 插件机制，myworktree 侧按 opencode 式哲学做外围：数据面按 worktree 切分注册表 + 禁用跨 worktree 入口 + 观察式监测只提醒。

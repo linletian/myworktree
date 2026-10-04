@@ -12,8 +12,8 @@ import (
 )
 
 // Workspace bootstrap (PLAN.md §数据面): dsh's workspace registry only
-// adopts a directory via the workspace.create RPC — the process cwd and
-// session.create do NOT register it (upstream
+// adopts a directory via the workspace/create RPC — the process cwd and
+// session/create do NOT register it (upstream
 // packages/workspace/workspace/src/index.ts). Without the bootstrap the
 // sidebar would show an empty workspace list on first run, breaking
 // "启动就是对应工作区". After the ready line, the driver POSTs the RPC
@@ -25,6 +25,10 @@ import (
 //
 // bootstrapCreateSession optionally preseeds a blank session so the UI
 // lands on a session page right away.
+//
+// WIRE (dsh 0.2.x): endpoint segments are `<namespace>/<method>` and
+// every verb's single argument object rides under
+// payload.args.request — see callRPC for the verified contract.
 
 const (
 	bootstrapCreateSession = true
@@ -77,16 +81,26 @@ func (d *Driver) bootstrap(ctx context.Context, h *Handle) {
 	}
 }
 
+// requestPayload wraps a verb's single argument object in the dsh 0.2.x
+// payload form: {"args":{"request":{…}}}. Verified against the installed
+// 0.2.0-rc.2 — the remote controllers declare one object argument named
+// `request` (dsh-api-workspace-controller / dsh-api-session-controller:
+// `@Remote('create') create(request: WorkspaceCreateRequest)`), and the
+// wire nests it as payload.args.request.
+func requestPayload(request any) map[string]any {
+	return map[string]any{"args": map[string]any{"request": request}}
+}
+
 // createWorkspace adopts the worktree path and returns the workspace
 // id from the response value ({workspace: {workspaceId, …}, created}).
 func (d *Driver) createWorkspace(ctx context.Context, h *Handle, base, worktree string) (string, bool) {
-	payload := map[string]string{"path": worktree}
+	payload := requestPayload(map[string]string{"path": worktree})
 	var value struct {
 		Workspace struct {
 			WorkspaceID string `json:"workspaceId"`
 		} `json:"workspace"`
 	}
-	if err := d.callRPC(ctx, h, base, "workspace.create", payload, &value); err != nil {
+	if err := d.callRPC(ctx, h, base, "workspace/create", payload, &value); err != nil {
 		d.logf("dsh: workspace bootstrap failed (warn-only): %v", err)
 		return "", false
 	}
@@ -100,11 +114,11 @@ func (d *Driver) createWorkspace(ctx context.Context, h *Handle, base, worktree 
 // sessionCreateValueSchema), so the preseed never trips the
 // foreign-activity advisory.
 func (d *Driver) createSession(ctx context.Context, h *Handle, base, worktree string) {
-	payload := map[string]string{"cwd": worktree}
+	payload := requestPayload(map[string]string{"cwd": worktree})
 	var value struct {
 		SessionID string `json:"sessionId"`
 	}
-	if err := d.callRPC(ctx, h, base, "session.create", payload, &value); err != nil {
+	if err := d.callRPC(ctx, h, base, "session/create", payload, &value); err != nil {
 		d.logf("dsh: session preseed failed (warn-only): %v", err)
 		return
 	}
@@ -116,11 +130,16 @@ func (d *Driver) createSession(ctx context.Context, h *Handle, base, worktree st
 // callRPC performs one unary RPC against the upstream with retries —
 // the ready line can appear before the API surface is fully up.
 //
-// WIRE CONTRACT (verified against the installed dsh): the endpoint is
-// derived from the URL PATH — POST /api/<method> — and the envelope's
-// `method` field must equal the endpoint (rpcFetchHandler: "method …
+// WIRE CONTRACT (verified against the installed dsh 0.2.0-rc.2): the
+// endpoint is derived from the URL PATH — POST /api/<namespace>/<method>
+// (e.g. /api/workspace/create, /api/session/create) — and the envelope's
+// `method` field must equal that endpoint (rpcFetchHandler: "method …
 // does not match endpoint"); posting the envelope to bare /api returns
-// 404 "not found". Content-Type must be application/json.
+// 404 "not found". Content-Type must be application/json. The caller's
+// `payload` is already wrapped in the 0.2.x {"args":{"request":…}}
+// form (requestPayload); the envelope itself is unchanged
+// {type,rpcId,method,payload} and the answer is still
+// {type:"server-response",rpcId,result:{ok,value}}.
 func (d *Driver) callRPC(ctx context.Context, h *Handle, base, method string, payload any, value any) error {
 	env, err := json.Marshal(map[string]any{
 		"type":    "client-request",
