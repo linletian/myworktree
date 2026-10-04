@@ -443,16 +443,45 @@ Body:
 ```
 
 ### Web TTY stream (WebSocket)
-`GET /api/instances/tty/ws?id=<instanceId>`
+`GET /api/instances/tty/ws?id=<instanceId>[&since=<offset>]`
 
 Bi-directional stream for terminal output/input with PTY support.
+
+`since` is an optional byte cursor (issue #87):
+- **omitted / not a valid integer** → the server replays its newest 64KB
+  tail, as before (this is the first-connect path).
+- **`since=0`** → accepted, but it is NOT a "tail" mode. On
+  `GET /api/instances/log` a single read starting at 0 starts at the
+  OLDEST live byte (the #81 symptom); on this WS endpoint the catch-up
+  loop runs to head and retains the newest ≤64KB, so the effect there is
+  a tail-like replay with `sync` at head. The shipped UI never sends `0`;
+  it omits `since` entirely when its cursor is unknown (the `-1` sentinel).
+- **`since>0`** → the server replays only the bytes at or after that
+  offset, so a reconnecting client that still holds its rendered screen does
+  not receive the tail a second time.
+
+Each replay read is capped at 64KB. When the delta since `since` exceeds
+64KB, the server loops reads until it is caught up and keeps only the
+newest chunk, so the replay is the newest ≤64KB **contiguous with the live
+stream** and the `sync` offset equals the head of the final replay read.
+Output produced between that final read and the live subscription sits behind
+the published cursor and is re-requested by the next reconnect (self-healing
+contiguity, not absolute coverage). A `since` older than the oldest byte
+still in the ring buffer is silently clamped to the oldest live byte; a
+`since` at or beyond head replays nothing (at head) or falls back to the
+tail (beyond head, defensive) — the client's own number is never echoed back
+as authoritative.
 
 **Handshake Protocol:**
 1. Server sends `{"type":"ready"}` immediately after connection
 2. Client should wait for this message before sending resize
 3. Client sends `{"type":"resize","cols":80,"rows":24}` to start data flow
-4. Server sends initial log + real-time output as binary frames
-5. Client receives first data and triggers second resize (50ms delay) for TUI redraw
+4. Server sends initial log (the tail, or only the bytes after `since`) as binary frames
+5. Server sends `{"type":"sync","offset":<int64>}` (text frame) — the end
+   offset of that replay; the client stores it and sends it back as `since`
+   on its next reconnect
+6. Real-time output continues as binary frames
+7. Client receives first data and triggers second resize (50ms delay) for TUI redraw
 
 **Frontend session model:**
 - The current UI keeps transport state per running instance rather than sharing a single terminal across tabs.
@@ -468,6 +497,7 @@ Bi-directional stream for terminal output/input with PTY support.
 *Server → Client:*
 - Ready: `{"type":"ready"}` (text frame)
 - Output: binary frames (terminal output chunks)
+- Sync: `{"type":"sync","offset":<int64>}` (text frame, sent after the handshake replay — even when that replay was empty. The client latches it per connection: replay frames received BEFORE the sync never touch the cursor — the sync publishes the authoritative end of the whole replay in one step; binary frames received AFTER it advance the cursor by their wire byte count — every one of them is ring-buffer output, as the server closes the connection rather than writing diagnostics as binary)
 
 **Timeout & Fallback:**
 - Client should implement handshake timeout (recommended: 5s)
@@ -477,13 +507,15 @@ Bi-directional stream for terminal output/input with PTY support.
 ```
 Client                    Server
    |                         |
-   |--- Connect ------------>|
+   |--- Connect ----------->|  (optionally ?since=<cursor> on reconnect)
    |<-- {"type":"ready"} ----|  Handshake
    |                         |
    |-- {"type":"resize", --->|  Notify terminal size
    |    "cols":80,"rows":24} |
    |                         |
-   |<-- binary output -------|  Initial log + realtime
+   |<-- binary output -------|  Replay: tail, or bytes after `since`
+   |<-- {"type":"sync", ----|  End offset of that replay
+   |    "offset":4096}      |
    |                         |
    |--- (50ms delay) -------|
    |                         |

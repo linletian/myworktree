@@ -2210,6 +2210,13 @@ func (s *Server) handleInstanceTTYWS(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "id is required", http.StatusBadRequest)
 		return
 	}
+	// Optional byte cursor for the handshake replay (issue #87). A
+	// reconnecting client sends the offset of everything it has already
+	// rendered, so the handshake replays only newer bytes instead of the
+	// full 64KB tail (which it would append under its live screen).
+	// Unknown/absent yields -1: the "no cursor" sentinel that keeps the
+	// first-connect tail behaviour.
+	since := parseInt64Default(r.URL.Query().Get("since"), -1)
 	conn, err := ws.Upgrade(w, r)
 	if err != nil {
 		return
@@ -2267,19 +2274,152 @@ func (s *Server) handleInstanceTTYWS(w http.ResponseWriter, r *http.Request) {
 	handshakeTimer := time.NewTimer(5 * time.Second)
 	defer handshakeTimer.Stop()
 
-	completeHandshake := func() bool {
-		initial, _, err := s.instanceMgr.Tail(id, 64*1024)
-		if err != nil {
-			_ = conn.WriteBinary([]byte(err.Error()))
-			return false
+	// completeHandshake replays what the client has not seen yet, publishes
+	// the replay's end offset in a `sync` frame, then hands the connection
+	// to the live output subscription.
+	//
+	// Invariant (issue #87): the offset published in `sync` must equal the
+	// ring-buffer head of the FINAL replay read, so the replay is
+	// contiguous with the live stream. Output produced between that final
+	// read and the SubscribeOutput below is covered by neither path — but
+	// the published cursor sits at the last read's head, BEHIND the bytes
+	// that window produced, so the next reconnect re-requests exactly that
+	// window (self-healing; this is contiguity, not absolute coverage).
+	// A single ReadSince caps at 64KB — for a delta larger than that it
+	// would publish a cursor 64KB BEHIND head with nothing queued to
+	// re-request the skipped window on this connection, and every later
+	// reconnect starts past the bytes the client never saw. So loop until
+	// caught up, retaining only the newest chunk: peak memory stays ~64KB
+	// regardless of the ring cap, and the retained replay is the newest
+	// ≤64KB contiguous with head — exactly what Tail(64KB) delivered
+	// pre-#87, so the over-cap case does not regress against baseline.
+	completeHandshake := func(since int64) bool {
+		var replay string
+		var endOffset int64
+		if since < 0 {
+			// No cursor (first connect): replay the newest bytes (AC2).
+			body, off, err := s.instanceMgr.Tail(id, 64*1024)
+			if err != nil {
+				// Diagnostics never travel as binary frames: every
+				// binary frame is ring-buffer output, because the client
+				// advances its byte cursor by their length. Close instead
+				// (same precedent as newTTYClientHandle above); the
+				// client reports "ws closed, retrying..." and reconnects.
+				_ = conn.WriteClose(ws.CloseMessage(1013, err.Error()))
+				return false
+			}
+			replay, endOffset = body, off
+		} else {
+			cursor := since
+			first := true
+			for {
+				// RingBuffer.ReadSince silently clamps a stale cursor to
+				// the oldest live byte and returns ("", since, nil) once
+				// since >= head (ringbuffer.go), so a normal loop exit
+				// terminates with endOffset == head and a stale offset
+				// degrades to a tail replay (AC3).
+				body, next, err := s.instanceMgr.ReadSince(id, cursor, 64*1024)
+				if err != nil {
+					_ = conn.WriteClose(ws.CloseMessage(1013, err.Error()))
+					return false
+				}
+				if body == "" {
+					if !first {
+						// Normal loop exit: the cursor reached head
+						// after at least one delivered chunk;
+						// endOffset already carries that read's
+						// head. Keep the accumulated replay.
+						break
+					}
+					// Zero progress on the FIRST read: at this
+					// read's instant the cursor was at or beyond
+					// head, and continuing would publish the
+					// client's own number back as authoritative.
+					// Consult the real head via Tail — the ring
+					// may have written since that instant, so
+					// split three ways:
+					tail, head, herr := s.instanceMgr.Tail(id, 64*1024)
+					if herr != nil {
+						_ = conn.WriteClose(ws.CloseMessage(1013, herr.Error()))
+						return false
+					}
+					switch {
+					case cursor > head:
+						// Cursor ahead of head: bogus (not
+						// reachable through normal flows today
+						// — Restart mints a new id), but if it
+						// ever appeared it must degrade to the
+						// first-connect tail, never to a cursor
+						// the ring never held.
+						replay, endOffset = tail, head
+					case head > cursor:
+						// FIX-F: the PTY wrote in the window
+						// between the caught-up ReadSince and
+						// this Tail consult. [cursor, head) is
+						// in neither the replay nor the live
+						// subscription (SubscribeOutput has not
+						// run), and a client cursor only moves
+						// forward — publishing head here would
+						// skip those bytes forever. Do NOT
+						// break: continue and let the next
+						// ReadSince(cursor) deliver them.
+						// Termination is structural, no extra
+						// guard needed: this consult runs only
+						// while first is true, and clearing it
+						// right here means the branch can be
+						// taken at most once — the next
+						// iteration either delivers a chunk and
+						// advances, or hits the !first break.
+						// Do not "optimise" this back into a
+						// break.
+						first = false
+						continue
+					default:
+						// head == cursor: genuinely caught up
+						// (the common idle reconnect) — replay
+						// nothing, publish head. Must stay a
+						// no-op.
+						endOffset = head
+					}
+					break
+				}
+				replay = body
+				endOffset = next
+				if next <= cursor {
+					// Defensive: a kind whose ReadLogs returns a
+					// non-empty body without advancing the cursor would
+					// otherwise spin here forever — the handshake timer
+					// is already stopped at this point, so the client
+					// would sit at "live" with no output. Exit with the
+					// chunk already read instead.
+					break
+				}
+				cursor = next
+				first = false
+			}
 		}
-		if initial != "" {
-			_ = conn.WriteBinary([]byte(initial))
+		if replay != "" {
+			// Do not publish a cursor over bytes the client never
+			// received: a failed replay write ends the handshake.
+			if err := conn.WriteBinary([]byte(replay)); err != nil {
+				return false
+			}
+		}
+		// Offset echo: hand the client the end offset of the replay so
+		// its next reconnect can send it back as `since`. Without this
+		// the client can never learn a valid cursor and every reconnect
+		// replays the full tail again. Sent even when the replay was
+		// empty — offset 0 is a legitimate cursor on a fresh instance.
+		// Built with strconv (not json.Marshal) so there is no
+		// unreachable error branch.
+		syncPayload := []byte(`{"type":"sync","offset":` + strconv.FormatInt(endOffset, 10) + `}`)
+		if err := conn.WriteText(syncPayload); err != nil {
+			return false
 		}
 
 		ch, cancelFn, err := s.instanceMgr.SubscribeOutput(id)
 		if err != nil {
-			_ = conn.WriteBinary([]byte(err.Error()))
+			_ = conn.WriteClose(ws.CloseMessage(1013, err.Error()))
 			return false
 		}
 		cancel = cancelFn
@@ -2320,7 +2460,7 @@ func (s *Server) handleInstanceTTYWS(w http.ResponseWriter, r *http.Request) {
 			if !handshakeComplete && isResize {
 				handshakeComplete = true
 				handshakeTimer.Stop()
-				if !completeHandshake() {
+				if !completeHandshake(since) {
 					return
 				}
 				continue
@@ -2335,7 +2475,7 @@ func (s *Server) handleInstanceTTYWS(w http.ResponseWriter, r *http.Request) {
 		case <-handshakeTimer.C:
 			if !handshakeComplete {
 				handshakeComplete = true
-				if !completeHandshake() {
+				if !completeHandshake(since) {
 					return
 				}
 			}
