@@ -98,21 +98,33 @@ function sliceStatement(src, header) {
 
 const indexFactory = new Function("deps", `
   const {
-    state, terminalSessions, window,
+    state, terminalSessions, window, WebSocket, setTimeout,
     disconnectTTY, loadLog, connectTTY, hasLiveTTYConnection, destroyTerminalSession,
   } = deps;
   ${[
     "const INSTANCE_LIVE_STATUSES",
     "const INSTANCE_PENDING_STATUSES",
+    "const TTY_LIVENESS_CHECK_MS",
+    "const TTY_LIVENESS_STALE_MS",
+    "const TTY_RECONNECT_DELAY_MS",
   ].map(h => sliceStatement(inlineScript(indexSource), h)).join("\n")}
   ${[
     "function isInstanceLiveStatus",
     "function isInstancePendingStatus",
     "function isInstanceTerminalStatus",
     "function instanceStatusLabel",
+    // Sliced with its consumers: hasTerminalTransportInFlight and
+    // ensureTerminalLiveTransport consult the heartbeat staleness
+    // predicate (issue #83), so the guard under test is the predicate
+    // plus the guard, never a stub of either. reconnectStaleTTY is
+    // sliced too - the poll's stale arm delegates to it, and a stub
+    // would hide the DISCONNECTING wait-loop the helper exists to
+    // prevent.
+    "function isTTYHeartbeatStale",
     "function reconcileTerminalSessions",
     "function syncActiveTerminalStatus",
     "function hasTerminalTransportInFlight",
+    "function reconnectStaleTTY",
     "function ensureTerminalLiveTransport",
     "function maybeDestroyInactiveStoppedSession",
   ].map(h => sliceBlock(inlineScript(indexSource), h)).join("\n\n")}
@@ -121,7 +133,9 @@ const indexFactory = new Function("deps", `
     isInstancePendingStatus,
     isInstanceTerminalStatus,
     instanceStatusLabel,
+    isTTYHeartbeatStale,
     hasTerminalTransportInFlight,
+    reconnectStaleTTY,
     reconcileTerminalSessions,
     syncActiveTerminalStatus,
     ensureTerminalLiveTransport,
@@ -139,6 +153,11 @@ function makeSession(id, extra = {}) {
     logStream: null,
     ttyReconnectTimer: null,
     lastKnownStatus: null,
+    // Mirrors both shipped session factories (issue #83); the harness and
+    // the factories are pinned to agree by
+    // TestTerminalStatusLivenessHeartbeatContract on the Go side.
+    lastDataAt: 0,
+    ttyLivenessTimer: null,
     ...extra,
   };
 }
@@ -153,6 +172,8 @@ function indexHarness({ instances = [], activeInst = null, sessions = [] } = {})
     state,
     terminalSessions: {},
     window,
+    WebSocket: { OPEN: 1 },
+    setTimeout: () => 0, // reconnectStaleTTY arms a retry; these tests never fire it
     disconnectTTY: s => calls.disconnect.push(s.id),
     loadLog: (s) => { calls.loadLog.push(s.id); return Promise.resolve(); },
     // Mirrors the real connectTTY's two synchronous writes (index.html sets
@@ -588,6 +609,8 @@ function ptyHarness({ doc } = {}) {
     state: window.state,
     terminalSessions: {},
     window,
+    WebSocket: { OPEN: 1 },
+    setTimeout: () => 0, // reconnectStaleTTY arms a retry; these tests never fire it
     disconnectTTY: () => {},
     loadLog: () => Promise.resolve(),
     connectTTY: () => {},
@@ -827,10 +850,16 @@ test("pty input: a stopped instance swallows keystrokes", async () => {
 // and the cursor accounting run against real code. writeSanitizedTerminalOutput
 // and decodeTTYOutputChunk are stubbed only to observe the calls; the
 // cursor arithmetic itself lives in the sliced onmessage/onclose handlers.
+//
+// The issue #83 liveness path needs the OTHER half sliced in too, not
+// stubbed: hasLiveTTYConnection + isTTYHeartbeatStale + the real
+// disconnectTTY are the functions under test (a stub would make the
+// "stale => reconnect" assertion assert nothing), and setInterval /
+// clearInterval record the watchdog so the test can fire it on demand.
 const ttyWsFactory = new Function("deps", `
   const {
-    state, updateStatus, token, window, location, WebSocket,
-    disconnectTTY, resetTTYOutputDecoder, applyTTYSize, sendResize,
+    state, updateStatus, token, window, location, WebSocket, terminalSessions,
+    resetTTYOutputDecoder, applyTTYSize, sendResize,
     syncTerminalToAppliedSize, focusTerminalIfPossible,
     writeSanitizedTerminalOutput, decodeTTYOutputChunk, startSSE,
     setTimeout, clearTimeout, setInterval, clearInterval, console,
@@ -838,14 +867,38 @@ const ttyWsFactory = new Function("deps", `
   ${[
     "const INSTANCE_LIVE_STATUSES",
     "const INSTANCE_PENDING_STATUSES",
+    "const TTY_LIVENESS_CHECK_MS",
+    "const TTY_LIVENESS_STALE_MS",
+    "const TTY_RECONNECT_DELAY_MS",
   ].map(h => sliceStatement(inlineScript(indexSource), h)).join("\n")}
   ${[
     "function isInstanceLiveStatus",
     "function isInstancePendingStatus",
     "function parseTTYControlMessage",
+    "function getTerminalSession",
+    "function isTTYHeartbeatStale",
+    "function hasLiveTTYConnection",
+    "function disconnectTTY",
+    "function reconnectStaleTTY",
+    "function hasTerminalTransportInFlight",
+    "function ensureTerminalLiveTransport",
+    "function reconnectRunningTerminalSessions",
     "function connectTTY",
   ].map(h => sliceBlockQuoted(inlineScript(indexSource), h)).join("\n\n")}
-  return { connectTTY, parseTTYControlMessage };
+  return {
+    connectTTY,
+    disconnectTTY,
+    reconnectStaleTTY,
+    ensureTerminalLiveTransport,
+    reconnectRunningTerminalSessions,
+    parseTTYControlMessage,
+    hasLiveTTYConnection,
+    isTTYHeartbeatStale,
+    hasTerminalTransportInFlight,
+    TTY_LIVENESS_STALE_MS,
+    TTY_LIVENESS_CHECK_MS,
+    TTY_RECONNECT_DELAY_MS,
+  };
 `);
 
 // Fake timers: every scheduled callback is recorded and only runs when the
@@ -855,6 +908,7 @@ function ttyWsHarness({ ttyOffset = -1, status = "running", token = "" } = {}) {
   const sockets = [];
   const writes = [];
   const timers = [];
+  const intervals = [];
   let nextTimerId = 1;
   class FakeWebSocket {
     constructor(url) {
@@ -873,6 +927,7 @@ function ttyWsHarness({ ttyOffset = -1, status = "running", token = "" } = {}) {
   }
   FakeWebSocket.OPEN = 1;
   const session = makeSession("inst1", { ttyOffset });
+  const terminalSessions = { inst1: session };
   const fireTimers = (ms) => {
     for (const t of timers.filter(t => t.ms === ms)) {
       const at = timers.indexOf(t);
@@ -880,6 +935,12 @@ function ttyWsHarness({ ttyOffset = -1, status = "running", token = "" } = {}) {
       t.fn();
     }
   };
+  const fireIntervals = (ms) => {
+    for (const t of intervals.filter(t => t.ms === ms)) {
+      t.fn(); // repeating: stays armed, like the real setInterval
+    }
+  };
+  const consoleWarns = [];
   const api = ttyWsFactory({
     state: { instances: [{ id: "inst1", kind: "pty", status }], activeInst: "inst1" },
     updateStatus: () => {},
@@ -887,13 +948,7 @@ function ttyWsHarness({ ttyOffset = -1, status = "running", token = "" } = {}) {
     window: { WebSocket: FakeWebSocket },
     location: { protocol: "http:", host: "ws.test" },
     WebSocket: FakeWebSocket,
-    // Mirrors the real disconnectTTY's state handling for the paths the
-    // connect/reconnect flow actually takes (no socket in flight here).
-    disconnectTTY: (s) => {
-      s.ttyState = s.ttySocket ? "DISCONNECTING" : "IDLE";
-      s.ttySocket = null;
-      s.ttyReconnectTimer = null;
-    },
+    terminalSessions,
     resetTTYOutputDecoder: () => {},
     applyTTYSize: () => {},
     sendResize: () => {},
@@ -904,12 +959,15 @@ function ttyWsHarness({ ttyOffset = -1, status = "running", token = "" } = {}) {
     startSSE: () => { throw new Error("must not fall back to SSE while a WebSocket is available"); },
     setTimeout: (fn, ms) => { const t = { id: nextTimerId++, fn, ms }; timers.push(t); return t.id; },
     clearTimeout: (id) => { const at = timers.findIndex(t => t.id === id); if (at >= 0) timers.splice(at, 1); },
-    setInterval: () => 0,
-    clearInterval: () => {},
-    console: { warn: () => {}, error: () => {}, log: () => {} },
+    // Real interval tracking (issue #83): the watchdog's whole contract is
+    // "fires on a tick, cleared by disconnectTTY/onclose, never stacked",
+    // so the fake must record registrations and removals faithfully.
+    setInterval: (fn, ms) => { const t = { id: nextTimerId++, fn, ms }; intervals.push(t); return t.id; },
+    clearInterval: (id) => { const at = intervals.findIndex(t => t.id === id); if (at >= 0) intervals.splice(at, 1); },
+    console: { warn: (...args) => { consoleWarns.push(args.join(" ")); }, error: () => {}, log: () => {} },
   });
   const enc = new TextEncoder();
-  return { api, session, sockets, writes, timers, fireTimers, enc, connect: () => api.connectTTY(session) };
+  return { api, session, sockets, writes, timers, intervals, consoleWarns, fireTimers, fireIntervals, enc, connect: () => api.connectTTY(session) };
 }
 
 test("issue #87: connectTTY sends `since` only for a known positive cursor", () => {
@@ -1362,4 +1420,357 @@ test("issue #87 review: loadLog pins its cursors only where the bytes actually l
   assert.ok(termAt < paintAt && paintAt < pinAt, "the pin follows the paint, inside the term scope");
   assert.ok(block.indexOf("if (Number.isFinite(next) && next >= 0) {") > termAt,
     "the valid-header-only rule moved with the pin");
+});
+// --- liveness heartbeat (issue #83) -----------------------------------------
+
+// Bring a ttyWsHarness connection to READY and return its socket.
+function toReady(h) {
+  h.connect();
+  const ws = h.sockets[0];
+  ws.readyState = 1;
+  ws.onopen();
+  ws.onmessage({ data: '{"type":"ready"}' });
+  assert.equal(h.session.ttyState, "READY");
+  return ws;
+}
+
+test("issue #83: heartbeat traffic decides liveness; ping/pong refresh it and never paint", () => {
+  const h = ttyWsHarness({ ttyOffset: 42 });
+  const ws = toReady(h);
+
+  // Reaching READY arms exactly one watchdog, and it is the shipped
+  // interval, not a stub.
+  assert.equal(h.intervals.length, 1, "READY arms one liveness interval");
+  assert.equal(h.session.ttyLivenessTimer, h.intervals[0].id);
+
+  // A fresh connection is live, and a tick on it sends the client probe
+  // (the client->server half of the round trip that a server-only ping
+  // cannot provide).
+  assert.equal(h.api.hasLiveTTYConnection("inst1"), true);
+  h.fireIntervals(h.api.TTY_LIVENESS_CHECK_MS);
+  assert.deepEqual(ws.sent, ['{"type":"ping"}'], "a live tick sends the probe");
+
+  // ping/pong control frames refresh lastDataAt and are NEVER painted.
+  // If parseTTYControlMessage failed to whitelist them these would fall
+  // through to writeSanitizedTerminalOutput and paint JSON into the shell.
+  const stale = Date.now() - h.api.TTY_LIVENESS_STALE_MS - 1000;
+  h.session.lastDataAt = stale;
+  assert.equal(h.api.hasLiveTTYConnection("inst1"), false, "stale stamp reads dead even while OPEN");
+  assert.equal(h.api.isTTYHeartbeatStale(h.session), true);
+
+  ws.onmessage({ data: '{"type":"ping"}' });
+  assert.ok(h.session.lastDataAt > stale, "a server ping refreshes lastDataAt");
+  assert.equal(h.writes.length, 0, "the ping frame must not be painted");
+  assert.equal(h.api.hasLiveTTYConnection("inst1"), true, "the ping revived the connection");
+
+  h.session.lastDataAt = stale;
+  ws.onmessage({ data: '{"type":"pong"}' });
+  assert.ok(h.session.lastDataAt > stale, "a pong refreshes lastDataAt");
+  assert.equal(h.writes.length, 0, "the pong frame must not be painted");
+
+  // A binary output frame also refreshes the stamp (the refresh is every
+  // inbound frame, not only heartbeats) and still paints.
+  h.session.lastDataAt = stale;
+  ws.onmessage({ data: h.enc.encode("real output").buffer });
+  assert.ok(h.session.lastDataAt > stale, "binary output refreshes lastDataAt");
+  assert.deepEqual(h.writes, ["real output"], "binary output paints");
+});
+
+test("issue #83: a stale-but-OPEN socket is reaped and reconnects from the cursor", () => {
+  const h = ttyWsHarness({ ttyOffset: 42 });
+  const ws = toReady(h);
+
+  // The socket is nominally OPEN but has heard nothing past the threshold:
+  // the half-open case that used to read live forever.
+  h.session.lastDataAt = Date.now() - h.api.TTY_LIVENESS_STALE_MS - 1000;
+  assert.equal(h.api.hasLiveTTYConnection("inst1"), false);
+
+  // The watchdog tick notices, tears the dead socket down, and schedules
+  // the reconnect (it mirrors onclose because disconnectTTY detaches the
+  // handler before closing).
+  h.fireIntervals(h.api.TTY_LIVENESS_CHECK_MS);
+  assert.equal(ws.readyState, 3, "the stale socket is closed");
+  assert.equal(h.session.ttySocket, null, "the dead socket reference is dropped");
+  assert.notEqual(h.session.ttyReconnectTimer, null, "a reconnect is scheduled");
+  assert.equal(h.intervals.length, 0, "disconnectTTY (called by the reap) cleared the interval");
+
+  // Firing the reconnect reopens from the surviving byte cursor (issue #87),
+  // not the full tail, and arms exactly one fresh watchdog (no stacking).
+  // The reconnect timer is the only 5000ms one-shot outstanding: the
+  // connect/handshake timeouts were already cleared at open/ready.
+  h.fireTimers(5000);
+  assert.equal(h.sockets.length, 2, "reconnect opened a new socket");
+  assert.ok(h.sockets[1].url.includes("&since=42"), "reconnect resumes from the cursor");
+  const ws2 = h.sockets[1];
+  ws2.readyState = 1;
+  ws2.onopen();
+  ws2.onmessage({ data: '{"type":"ready"}' });
+  assert.equal(h.intervals.length, 1, "exactly one watchdog after reconnect");
+});
+
+test("issue #83 review FIX-K: the poll's stale arm queues reconnectStaleTTY, never the DISCONNECTING wait-loop", () => {
+  const h = ttyWsHarness({ ttyOffset: 42 });
+  // The reconnect delay is literally the pinned value: the reap tests guard
+  // it transitively through fireTimers(5000), this pins it directly.
+  assert.equal(h.api.TTY_RECONNECT_DELAY_MS, 5000);
+  toReady(h);
+  h.session.lastDataAt = Date.now() - h.api.TTY_LIVENESS_STALE_MS - 1000;
+
+  // Precondition: the staleness fix says "dead" and the in-flight guard
+  // has released the half-open socket, so the poll's stale arm is reached.
+  assert.equal(h.api.hasLiveTTYConnection("inst1"), false);
+  assert.equal(h.api.hasTerminalTransportInFlight(h.session), false);
+
+  // The 2s poll is the PRIMARY healer for the active session. Its arm
+  // must delegate to reconnectStaleTTY, never call connectTTY directly:
+  // the dead socket still exists here, so connectTTY's leading
+  // disconnectTTY would leave 'DISCONNECTING' and the connect would burn
+  // ~1.05s in the 100ms state wait-loop behind a misleading warn.
+  const live = h.api.ensureTerminalLiveTransport(h.session);
+  assert.equal(live, false, "a queued reconnect is NOT a live transport - ensure... must not lie");
+  assert.equal(h.sockets.length, 1, "the arm queues the reconnect; it opens nothing inline");
+  assert.equal(h.session.ttyState, "IDLE", "the helper forced IDLE past disconnectTTY's DISCONNECTING");
+  assert.equal(h.session.ttySocket, null, "the dead socket was torn down");
+  assert.equal(h.intervals.filter(t => t.ms === 100).length, 0,
+    "connectTTY's ttyStateCheckInterval wait-loop must never arm");
+  assert.ok(!h.consoleWarns.some(w => w.includes("invalid state transition")),
+    `no wait-loop warn expected, got: ${JSON.stringify(h.consoleWarns)}`);
+  assert.notEqual(h.session.ttyReconnectTimer, null, "the reconnect is scheduled");
+
+  // And the queued reconnect lands on the pinned delay and resumes from
+  // the surviving cursor - the helper's whole point.
+  h.fireTimers(h.api.TTY_RECONNECT_DELAY_MS);
+  assert.equal(h.sockets.length, 2, "the delayed reconnect opened exactly one socket");
+  assert.ok(h.sockets[1].url.includes("&since=42"), "resumes from the cursor");
+});
+
+test("issue #83 FIX-T: no-socket reconnect is immediate, socket-teardown reconnect is backed off", () => {
+  // The connection-overlay recovery case: refresh() succeeded, the overlay
+  // is being hidden, and the session has NO socket. There is nothing to
+  // tear down and nothing to flap against, so the helper must connect NOW
+  // - a quiet refactor that routes this through the backoff would make the
+  // user stare at "reconnecting..." for 5 extra seconds.
+  const h = ttyWsHarness();
+  assert.equal(h.session.ttySocket, null);
+  h.api.reconnectRunningTerminalSessions();
+  assert.equal(h.sockets.length, 1, "no-socket session opens its socket immediately");
+  assert.equal(h.timers.filter(t => t.ms === h.api.TTY_RECONNECT_DELAY_MS).length, 0,
+    "no backoff armed when there was no socket to tear down");
+  assert.equal(h.session.ttyReconnectTimer, null, "the connect was inline, not queued");
+
+  // The half-open case through the SAME entry point: staleness implies a
+  // socket, so this keeps the delayed teardown shape - close it, force
+  // IDLE, arm the pinned delay, open nothing inline.
+  const h2 = ttyWsHarness({ ttyOffset: 42 });
+  toReady(h2);
+  h2.session.lastDataAt = Date.now() - h2.api.TTY_LIVENESS_STALE_MS - 1000;
+  h2.api.reconnectRunningTerminalSessions();
+  assert.equal(h2.sockets.length, 1, "nothing opens inline on the teardown path");
+  assert.equal(h2.session.ttySocket, null, "the stale socket was torn down");
+  assert.equal(h2.timers.filter(t => t.ms === 5000).length, 1, "the pinned backoff is armed");
+  assert.notEqual(h2.session.ttyReconnectTimer, null, "the retry is queued");
+  h2.fireTimers(5000);
+  assert.equal(h2.sockets.length, 2, "and the queued retry reconnects from the cursor");
+  assert.ok(h2.sockets[1].url.includes("&since=42"), "cursor preserved across the backed-off reconnect");
+
+  // FIX-U: a session with a socket that is NOT heartbeat-stale - here
+  // mid-CONNECTING - must keep the pre-#83 DIRECT connectTTY: the helper
+  // would add 5s of backoff it never needed. connectTTY's no-socket guard
+  // (FIX-V) means the direct path no longer spins the DISCONNECTING wait
+  // loop either: the replacement socket opens inline.
+  const h3 = ttyWsHarness();
+  h3.connect(); // CONNECTING socket, not live
+  assert.equal(h3.api.hasLiveTTYConnection("inst1"), false);
+  assert.equal(h3.api.isTTYHeartbeatStale(h3.session), false, "CONNECTING is never stale");
+  h3.api.reconnectRunningTerminalSessions();
+  assert.equal(h3.sockets.length, 2, "mid-CONNECTING session reconnected directly, inline");
+  assert.equal(h3.timers.filter(t => t.ms === 5000).length, 0, "no backoff for a non-stale socket");
+  assert.equal(h3.intervals.filter(t => t.ms === 100).length, 0, "FIX-V guard: connectTTY's wait-loop must not arm");
+
+  // FIX-X: the state that would re-introduce the wait loop if the
+  // no-socket branch were ever rewritten - 'DISCONNECTING' with NO
+  // socket. Driven straight into the helper: it must STILL connect
+  // inline, with zero 100ms wait-loop intervals and zero backoff timers.
+  const h4 = ttyWsHarness({ ttyOffset: 7 });
+  h4.session.ttyState = "DISCONNECTING";
+  assert.equal(h4.session.ttySocket, null);
+  h4.api.reconnectStaleTTY(h4.session);
+  assert.equal(h4.sockets.length, 1, "DISCONNECTING-with-no-socket still connects inline");
+  assert.equal(h4.intervals.filter(t => t.ms === 100).length, 0, "the wait-loop must never arm here");
+  assert.equal(h4.timers.filter(t => t.ms === 5000).length, 0, "nothing to tear down, nothing to back off");
+  assert.ok(h4.sockets[0].url.includes("&since=7"), "cursor still rides the immediate connect");
+
+  // FIX-W: an ARMED retry survives the overlay pass. During the backoff
+  // window the session has no socket; taking any reconnect path here
+  // would run disconnectTTY, which CANCELS the armed timer, and connect
+  // inline - voiding the documented flap-avoidance. The retry is already
+  // coming; the pass must leave it alone.
+  const h5 = ttyWsHarness();
+  toReady(h5);
+  h5.session.lastDataAt = Date.now() - h5.api.TTY_LIVENESS_STALE_MS - 1000;
+  h5.fireIntervals(h5.api.TTY_LIVENESS_CHECK_MS); // watchdog reaps, arms retry
+  const armedRetry = h5.session.ttyReconnectTimer;
+  assert.notEqual(armedRetry, null, "the watchdog armed the retry");
+  assert.equal(h5.sockets.length, 1);
+  h5.api.reconnectRunningTerminalSessions(); // overlay pass inside the backoff window
+  assert.equal(h5.session.ttyReconnectTimer, armedRetry, "the armed retry survives the overlay pass");
+  assert.equal(h5.sockets.length, 1, "no inline connect during the backoff window");
+});
+
+test("issue #83 review P4: re-delivering ready on the same socket re-arms exactly one watchdog", () => {
+  // The stacking contract of the ready handler: clear-then-set. A single
+  // ready per socket can never distinguish it (nothing to clear), so drive
+  // ready TWICE on the same socket - the second pass must clear the first
+  // interval and arm a replacement, never stack a second watchdog on the
+  // session.
+  const h = ttyWsHarness({ ttyOffset: 42 });
+  const ws = toReady(h);
+  assert.equal(h.intervals.length, 1, "first ready arms one watchdog");
+  const firstHandle = h.session.ttyLivenessTimer;
+  ws.onmessage({ data: '{"type":"ready"}' }); // duplicate ready, same socket
+  assert.equal(h.intervals.length, 1, "second ready re-arms, never stacks");
+  assert.notEqual(h.session.ttyLivenessTimer, firstHandle, "the interval was replaced, not shared");
+});
+
+test("issue #83 review P5: activate() over a stale READY socket reconnects inline, never through the wait-loop", async () => {
+  // The regression test for the round-1 MAJOR, on the EXACT wiring that
+  // carried it: pty.js activate() -> loadLog().finally(connectTTY) with
+  // the stale socket STILL attached. ptyHarness normally stubs connectTTY,
+  // so this drives the REAL pty.js renderer against the REAL sliced
+  // connectTTY/disconnectTTY: FIX-V's guard must turn the attach-into-
+  // connectTTY case into an inline reconnect - zero 100ms wait-loop
+  // intervals and no misleading 'invalid state transition' warn.
+  const h = ttyWsHarness({ ttyOffset: 42 });
+  const ws = toReady(h);
+  ws.closed = false;
+  h.session.lastDataAt = Date.now() - h.api.TTY_LIVENESS_STALE_MS - 1000;
+  assert.equal(h.api.hasLiveTTYConnection("inst1"), false, "stale: not live");
+  assert.equal(h.api.hasTerminalTransportInFlight(h.session, { ignoreQueuedRetry: true }), false,
+    "#83 released this case into the bring-up path");
+  h.session.container = { style: { display: "none" } };
+  let releaseLoad;
+  const win = {
+    state: { instances: [{ id: "inst1", kind: "pty", status: "running" }], activeInst: "inst1" },
+    registerRenderer(kind, renderer) {
+      this.KindRenderers = this.KindRenderers || {};
+      this.KindRenderers[kind] = renderer;
+    },
+    hasLiveTTYConnection: id => h.api.hasLiveTTYConnection(id),
+    hasTerminalTransportInFlight: (s, o) => h.api.hasTerminalTransportInFlight(s, o),
+    resetTerminalForSwitch: () => {},
+    disconnectTTY: s => h.api.disconnectTTY(s),
+    loadLog: s => new Promise(resolve => { releaseLoad = () => resolve(); }),
+    connectTTY: s => h.api.connectTTY(s),
+    focusTerminalIfPossible: () => {},
+    updateStatus: () => {},
+  };
+  new Function("window", "document", "WebSocket", "ResizeObserver", ptySource)(
+    win, { getElementById: () => null }, { OPEN: 1 }, class { observe() {} disconnect() {} });
+  win.__ptyRenderer._sessions.set("inst1", h.session);
+  win.__ptyRenderer.activate(h.session, null);
+  assert.equal(h.sockets.length, 1, "nothing opens before loadLog settles");
+  releaseLoad();
+  await new Promise(resolve => process.nextTick(resolve)); // flush the finally chain
+  assert.equal(h.sockets.length, 2, "activate reconnected inline once loadLog settled");
+  assert.equal(h.sockets[0], ws, "the stale socket was the one replaced");
+  assert.equal(h.intervals.filter(t => t.ms === 100).length, 0,
+    "FIX-V guard: the DISCONNECTING wait-loop must never run for this wiring");
+  assert.ok(!h.consoleWarns.some(w => String(w).includes("invalid state transition")),
+    "no misleading 'invalid state transition' warn on the healthy reconnect path");
+});
+
+test("issue #83: disconnectTTY and onclose both clear the watchdog interval", () => {
+  // disconnectTTY (explicit teardown) clears the interval even though it
+  // detaches onclose first, so the interval cannot outlive the connection.
+  const h = ttyWsHarness();
+  toReady(h);
+  assert.equal(h.intervals.length, 1);
+  h.api.disconnectTTY(h.session);
+  assert.equal(h.intervals.length, 0, "disconnectTTY cleared the interval");
+  assert.equal(h.session.ttyLivenessTimer, null, "the handle was nulled");
+
+  // onclose (a genuine drop) clears it too, so the queued reconnect does
+  // not leave a duplicate running against the old socket.
+  const h2 = ttyWsHarness();
+  const ws = toReady(h2);
+  assert.equal(h2.intervals.length, 1);
+  ws.close();
+  assert.equal(h2.intervals.length, 0, "onclose cleared the interval");
+  assert.equal(h2.session.ttyLivenessTimer, null);
+});
+
+test("issue #87 x #83: a replaced socket never refreshes the live session's liveness stamp", () => {
+  // The socket-identity guard is the FIRST statement of ws.onmessage and the
+  // #83 liveness stamp is the first thing AFTER it; that order is the whole
+  // of it. session.lastDataAt is session-wide state exactly like ttyOffset,
+  // so a frame off a socket the session no longer owns must not move it
+  // either. Stamp first and the guard is dead code for liveness: a replaced
+  // socket that still dispatches keeps the stamp fresh, so
+  // isTTYHeartbeatStale stays false, the watchdog never reaps the half-open
+  // session, and the terminal freezes while reading alive — the exact
+  // failure #83 exists to fix. Deleting the guard today trips only
+  // "issue #87 review: a queued frame from a replaced socket never moves the
+  // live cursor" above, which pins the cursor alone, so this case is what
+  // protects the ordering itself.
+  const h = ttyWsHarness();
+  h.connect();
+  const stale = h.sockets[0];
+  stale.readyState = 1;
+  stale.onopen();
+  stale.onmessage({ data: '{"type":"ready"}' });
+  stale.onmessage({ data: '{"type":"sync","offset":100}' });
+  stale.onmessage({ data: h.enc.encode("live").buffer });
+
+  // The socket that owns the session owns the clock, and EVERY frame it
+  // receives re-stamps — heartbeats, echoes and output alike.
+  const stamped = h.session.lastDataAt;
+  assert.ok(stamped > 0, "the live socket stamped the session's liveness clock");
+
+  // Replacement exactly as the shipped onclose drives it: the old socket
+  // releases the session, the queued 5s retry opens the successor, and
+  // connectTTY hands it session.ttySocket synchronously.
+  stale.close();
+  h.fireTimers(5000);
+  assert.equal(h.sockets.length, 2, "the reconnect opened a new socket");
+  const live = h.sockets[1];
+  assert.equal(h.session.ttySocket, live, "the new socket owns the session now");
+
+  // The heartbeat that actually carries liveness, off the replaced socket.
+  stale.onmessage({ data: '{"type":"ping"}' });
+  assert.equal(h.session.lastDataAt, stamped, "a replaced socket never refreshes the stamp");
+
+  // The same rejection where the clock cannot forgive it: rewound past the
+  // stale threshold, any re-stamp lands on a current timestamp, so the
+  // equalities below have no millisecond-collision escape hatch.
+  live.readyState = 1;
+  live.onopen();
+  live.onmessage({ data: '{"type":"ready"}' });
+  assert.equal(h.session.ttyState, "READY", "the successor reached READY and armed its watchdog");
+  const rewound = Date.now() - h.api.TTY_LIVENESS_STALE_MS - 1000;
+  h.session.lastDataAt = rewound;
+  assert.equal(h.api.isTTYHeartbeatStale(h.session), true,
+    "READY + OPEN + a rewound stamp reads dead, exactly as the watchdog sees it");
+
+  const paintedBefore = h.writes.length;
+  stale.onmessage({ data: '{"type":"ping"}' });
+  stale.onmessage({ data: '{"type":"pong"}' });
+  stale.onmessage({ data: h.enc.encode("QUEUED-STALE").buffer });
+  assert.equal(h.session.lastDataAt, rewound, "no frame off a replaced socket touches the stamp");
+  assert.equal(h.api.isTTYHeartbeatStale(h.session), true,
+    "so the session stays stale to the watchdog instead of looking revived");
+  assert.equal(h.writes.length, paintedBefore, "and none of them paint");
+
+  // Non-vacuous: the identical heartbeat off the LIVE socket does revive it,
+  // so a harness whose dispatches go nowhere cannot pass this case.
+  live.onmessage({ data: '{"type":"ping"}' });
+  assert.ok(h.session.lastDataAt > rewound, "the live socket refreshes the stamp");
+  assert.equal(h.api.isTTYHeartbeatStale(h.session), false, "and revives the session");
+
+  // Source contract: guard first, stamp second. The order is the fix, and
+  // nothing else in this file pins it.
+  const block = sliceBlockQuoted(inlineScript(indexSource), "ws.onmessage = (ev) => {");
+  const guardAt = block.indexOf("if (session.ttySocket !== ws) return;");
+  const stampAt = block.indexOf("session.lastDataAt = Date.now();");
+  assert.ok(guardAt >= 0 && stampAt >= 0, "both the guard and the stamp ship in the handler");
+  assert.ok(guardAt < stampAt, "the guard precedes the liveness stamp, never the reverse");
 });

@@ -2253,7 +2253,73 @@ func (s *Server) handleInstanceInput(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
+// Liveness knobs for the TTY WebSocket path (issue #83).
+//
+// The problem: a half-open TCP socket — laptop sleep, NAT/proxy idle
+// timeout, a silently swapped network path — never delivers FIN or RST,
+// so ReadMessage blocks forever, the browser fires no onclose, and the
+// handler goroutine, the reader goroutine, the fd and the ttyClients
+// entry pin the daemon for its entire lifetime. Nothing on this path
+// generated traffic while the terminal was idle, so nothing ever noticed.
+//
+// The fix is a heartbeat the peer answers WITHOUT any app-layer code:
+// every ttyPingInterval the handler writes an RFC 6455 ping (browsers
+// auto-reply Pong from their network stack) plus a TEXT {"type":"ping"}
+// control frame (onmessage never fires for control frames, so the text
+// frame is the only heartbeat browser JavaScript can observe).
+//
+// The numbers, and the margin between them:
+//
+//		ttyPingInterval (10s)  →  4.5 ticks fit inside ttyReadDeadline (45s)
+//		client threshold (30s) =  3 × ttyPingInterval; < ttyReadDeadline
+//
+//	  - 4.5×: a healthy peer refreshes the read deadline with an automatic
+//	    Pong on EVERY ping, so expiry needs ~4.5 consecutive missed ping
+//	    rounds — peer-dead, not peer-busy. A shell at a prompt, vim, less
+//	    or top emit zero OUTPUT for hours but still answer pings, which is
+//	    exactly why liveness rides on heartbeat traffic and never on the
+//	    absence of output.
+//	  - The client-side staleness threshold the browser pairs with these
+//	    numbers is 3 × ttyPingInterval (30s, set in index.html): a
+//	    background tab's setInterval is commonly throttled to ~1/min while
+//	    WebSocket message delivery is NOT — the server's frames keep the
+//	    client's lastDataAt fresh there, so the client threshold needs
+//	    margin over the ping interval (delivery jitter, TCP retransmits),
+//	    not over the throttled watchdog tick. A short server interval is
+//	    therefore safe: it cannot cause background-tab reconnect churn.
+//	  - client threshold < ttyReadDeadline: the browser's watchdog reaps a
+//	    half-open socket first and reconnects on its own terms (keeping
+//	    its #87 byte cursor); the server deadline is the backstop that
+//	    caps the goroutine/fd/ttyClients leak at ~45s of inbound silence
+//	    for peers that run no watchdog at all (stale cached pages,
+//	    scripts, clients that half-close and go silent).
+const (
+	ttyPingInterval = 10 * time.Second
+	ttyReadDeadline = 45 * time.Second
+)
+
+// handleInstanceTTYWS is the mux entry point: production liveness
+// intervals, no mutable interval state anywhere on this path.
 func (s *Server) handleInstanceTTYWS(w http.ResponseWriter, r *http.Request) {
+	s.handleInstanceTTYWSLiveness(w, r, ttyPingInterval, ttyReadDeadline)
+}
+
+// handleInstanceTTYWSLiveness is the production handler with the two
+// liveness intervals as explicit parameters — the test seam for issue
+// #83. It is a signature, not a mutable package var: a test that
+// compresses the windows to milliseconds cannot make a parallel test's
+// connection flap, so -race and t.Parallel stay clean.
+func (s *Server) handleInstanceTTYWSLiveness(w http.ResponseWriter, r *http.Request, pingInterval, readDeadline time.Duration) {
+	// Non-positive intervals are nonsense for a liveness seam
+	// (time.NewTicker panics on <= 0; a non-positive read deadline would
+	// either reap instantly or silently disable the deadline). Fall back
+	// to the production constants rather than trusting every caller.
+	if pingInterval <= 0 {
+		pingInterval = ttyPingInterval
+	}
+	if readDeadline <= 0 {
+		readDeadline = ttyReadDeadline
+	}
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -2306,6 +2372,22 @@ func (s *Server) handleInstanceTTYWS(w http.ResponseWriter, r *http.Request) {
 	go func() {
 		defer close(msgChan)
 		for {
+			// Issue #83: arm a fresh read deadline before EVERY read. A
+			// half-open peer that stops answering can no longer block this
+			// ReadMessage forever: on expiry it errors, the goroutine
+			// returns, msgChan closes, and the existing
+			// `case msg, ok := <-msgChan: if !ok { return }` below unwinds
+			// the handler through its existing defers (clientHandle.Close
+			// drops the ttyClients entry, conn.Close frees the fd). No
+			// second exit path is added. A healthy peer keeps the deadline
+			// refreshed — every resize echo, keystroke, automatic RFC 6455
+			// Pong to the heartbeat ping, and the app-level {"type":"ping"}
+			// probe all land here. The read deadline is independent of
+			// net.Conn's write deadline, so this cannot interfere with the
+			// writes on this path.
+			if err := conn.SetReadDeadline(time.Now().Add(readDeadline)); err != nil {
+				return
+			}
 			op, data, err := conn.ReadMessage()
 			if err != nil {
 				return
@@ -2326,6 +2408,13 @@ func (s *Server) handleInstanceTTYWS(w http.ResponseWriter, r *http.Request) {
 
 	handshakeTimer := time.NewTimer(5 * time.Second)
 	defer handshakeTimer.Stop()
+
+	// Liveness heartbeat ticker (issue #83): the same tick drives both the
+	// RFC 6455 ping (A3) and the observable TEXT control frame (A4), so
+	// the two can never drift apart. Stopped via defer, same pattern as
+	// handshakeTimer above.
+	heartbeat := time.NewTicker(pingInterval)
+	defer heartbeat.Stop()
 
 	// completeHandshake replays what the client has not seen yet, publishes
 	// the replay's end offset in a `sync` frame, then hands the connection
@@ -2565,7 +2654,11 @@ func (s *Server) handleInstanceTTYWS(w http.ResponseWriter, r *http.Request) {
 				Cols int    `json:"cols"`
 				Rows int    `json:"rows"`
 			}
-			isResize := json.Unmarshal(msg.data, &resizeMsg) == nil && resizeMsg.Type == "resize"
+			parseOK := json.Unmarshal(msg.data, &resizeMsg) == nil
+			isResize := parseOK && resizeMsg.Type == "resize"
+			// App-level liveness probe (issue #83): parsed the same way
+			// as isResize, from the SAME unmarshal.
+			isPing := parseOK && resizeMsg.Type == "ping"
 
 			if isResize && resizeMsg.Cols > 0 && resizeMsg.Rows > 0 {
 				s.updateTTYClientSize(id, clientHandle.clientID, resizeMsg.Cols, resizeMsg.Rows)
@@ -2580,10 +2673,45 @@ func (s *Server) handleInstanceTTYWS(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 
+			// MANDATORY placement: BEFORE the input fallthrough below. A
+			// {"type":"ping"} probe is transport traffic, not keystrokes —
+			// forwarding it would type JSON into the user's shell. Answer
+			// with {"type":"pong"} (the reply is the point: a client whose
+			// server→client direction is dead but whose client→server
+			// direction still "looks" writable learns the truth only from
+			// a missing pong) and consume the frame. The collision with a
+			// user literally typing that exact JSON is the same accepted
+			// trade-off as {"type":"resize",...} above.
+			if isPing {
+				if err := conn.WriteText([]byte(`{"type":"pong"}`)); err != nil {
+					return
+				}
+				continue
+			}
+
 			if handshakeComplete && !isResize {
 				if err := s.instanceMgr.SendInput(id, string(msg.data)); err != nil {
 					return
 				}
+			}
+
+		case <-heartbeat.C:
+			// Liveness heartbeat (issue #83), two frames per tick:
+			//  1. RFC 6455 ping — the browser's network stack auto-replies
+			//     Pong, which lands on the reader and refreshes its
+			//     read deadline, so a healthy connection is NEVER reaped.
+			//     Invisible to page JS (onmessage never fires for control
+			//     frames), hence frame 2:
+			//  2. TEXT {"type":"ping"} — the heartbeat the client can
+			//     actually observe and stamp lastDataAt from.
+			// A failed write means the peer is gone: return and let the
+			// existing defers unwind (same treatment as the binary output
+			// write below).
+			if err := conn.WritePing(nil); err != nil {
+				return
+			}
+			if err := conn.WriteText([]byte(`{"type":"ping"}`)); err != nil {
+				return
 			}
 
 		case <-handshakeTimer.C:
@@ -2615,10 +2743,12 @@ func (s *Server) handleInstanceTTYWS(w http.ResponseWriter, r *http.Request) {
 				// handler's other writes — a handler already blocked inside
 				// a live WriteBinary above never reaches this branch, and is
 				// reclaimed only when that write returns: ws.Upgrade sets no
-				// write deadline, and adding one for every connection is
-				// issue #83's write-deadline territory, deliberately out of
-				// scope here. What keeps this failure path from writing the
-				// backlog onto the stalled socket is upstream, in the pty
+				// write deadline, and a write deadline on this socket is
+				// STILL not implemented — issue #83 (since merged) added
+				// only the READ deadline and deliberately scoped a write
+				// deadline out of its contract, so this is settled design,
+				// not pending work. What keeps this failure path from writing
+				// the backlog onto the stalled socket is upstream, in the pty
 				// kind: broadcast drains the closed subscriber's queue at
 				// the source (driver.go) — after it releases subsMu, never
 				// inside that process-global lock, because the drain only

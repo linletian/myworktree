@@ -523,11 +523,15 @@ as authoritative.
 *Client → Server:*
 - Input: text/binary frames (raw bytes)
 - Resize: `{"type":"resize","cols":<number>,"rows":<number>}`
+- Liveness probe: `{"type":"ping"}` (text frame, issue #83) — answered with `{"type":"pong"}` and **not** treated as input: the server consumes it before the input fallthrough, so the probe JSON is never typed into the instance's PTY. (A user literally typing that exact JSON is swallowed the same way `{"type":"resize",...}` already is.)
 
 *Server → Client:*
 - Ready: `{"type":"ready"}` (text frame)
 - Output: binary frames (terminal output chunks)
 - Sync: `{"type":"sync","offset":<int64>}` (text frame, sent after the handshake replay — even when that replay was empty. The client latches it per connection: replay frames received BEFORE the sync never touch the cursor — the sync publishes the authoritative end of the whole replay in one step; binary frames received AFTER it advance the cursor by their wire byte count — every one of them is ring-buffer output, as the server closes the connection rather than writing diagnostics as binary)
+- Heartbeat: `{"type":"ping"}` (text frame, every 10 s, issue #83) — the application-level mirror of the RFC 6455 ping the server sends on the same tick. Browsers answer the protocol ping automatically from their network stack (which refreshes the server's 45 s read deadline); this text frame is the heartbeat browser JavaScript can observe, since `onmessage` never fires for control frames. Clients MUST whitelist `ping` (and `pong`) as control types and MUST NOT render them as terminal output.
+
+**Liveness (issue #83):** half-open TCP sockets (laptop sleep, NAT/proxy idle timeout) keep `readyState === OPEN` without ever firing `onclose`, so liveness rides on heartbeat traffic in both directions. Server: pings every 10 s; arms a 45 s read deadline before every read and reaps a peer that has sent nothing for that long (the browser's automatic Pong refreshes it). **Non-browser clients get no automatic Pong** — `internal/ws`'s own client returns `opPing` as an ordinary message and installs no responder — so any Go or embedded client of this endpoint MUST answer protocol pings with Pong and/or send `{"type":"ping"}` periodically, or it will be reaped at the 45 s deadline. Client: stamps the arrival of every frame, probes `{"type":"ping"}` every 5 s once READY, and reconnects after 30 s without heartbeat traffic (3 × the ping interval, under the server's 45 s backstop). The web UI's **primary detector is the 2 s poll** — `ensureTerminalLiveTransport()` notices the stale stamp on the active session at ~30 s and queues the reconnect (returning `false`: a queued reconnect is not yet a live transport); the 5 s watchdog is the fallback that also covers sessions the poll does not promote. Liveness is never inferred from the absence of program output — a prompt, `vim` or `top` emit zero bytes for hours and stay connected. A write deadline was deliberately **not** part of issue #83: normal-traffic writes on this socket carry none (the only bounded write here is the 5 s deadline on #82's overflow close-frame), so a handler blocked mid-write is reclaimed when that write fails or returns, not by the read deadline.
 
 *Server → Client close codes:*
 - `1013` with reason `subscriber overflow: slow consumer` (issue #82) — the live
@@ -552,8 +556,9 @@ as authoritative.
   pre-drain — the same post-swap loss ARCHITECTURE §4.1 already declares intentional
   for the buffer swap itself. The close frame itself is BEST-EFFORT (the stalled
   socket may never drain it; its write carries a bounded 5 s deadline set on this
-  teardown path only — a
-  write deadline for healthy connections is the separate liveness issue #83), so the
+  teardown path only — normal-traffic writes on this socket carry **no** write
+  deadline, and that is unchanged after issue #83, which deliberately scoped a
+  write deadline out and shipped read-deadline liveness only), so the
   client must treat **any** abnormal close as "reconnect with your stored `since`
   cursor", not only this one. The shipped UI's `ws.onclose` logs the code and reason
   and reconnects after 5 s; the server logs the overflow at the disconnect too
@@ -587,6 +592,12 @@ Client                    Server
    |                         |
    |--- input bytes -------->|  User input
    |<-- binary output -------|  Process output
+   |                         |
+   |<-- {"type":"ping"} -----|  Heartbeat every 10s (issue #83; the same
+   |                         |    tick also writes an RFC 6455 ping, which
+   |                         |    the browser answers invisibly to JS)
+   |-- {"type":"ping"} ------->|  Client probe every 5s once READY
+   |<-- {"type":"pong"} ------|  Answered - never typed into the PTY
 ```
 
 ### Delete

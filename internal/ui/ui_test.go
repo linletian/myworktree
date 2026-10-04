@@ -626,7 +626,7 @@ func TestIndexHTMLCoversPerSessionConnectionManagement(t *testing.T) {
 		"if (session.ttySocket) { session.ttySocket.close(); session.ttySocket = null; }",
 		"session.ttySocket = ws;",
 		"if (session.ttySocket === ws) {",
-		"session.ttyReconnectTimer = setTimeout(() => connectTTY(session), 5000);",
+		"session.ttyReconnectTimer = setTimeout(() => connectTTY(session), TTY_RECONNECT_DELAY_MS);",
 	}
 	for _, check := range checks {
 		if !strings.Contains(bodyText, check) {
@@ -846,9 +846,12 @@ func TestTerminalStatusBucketsReplaceRunningEquality(t *testing.T) {
 		// owner of the bring-up shows up.
 		"function hasTerminalTransportInFlight(session, options)",
 		"if (session.loadLogController) return true;",
-		"if (session.ttySocket) return true;",
+		// Issue #83: every socket/state arm is gated on !stale - a
+		// READY-but-heartbeat-silent socket is NOT in flight, or the
+		// guard would veto the very reconnect the liveness fix unblocks.
+		"if (session.ttySocket && !stale) return true;",
 		"if (session.logStream) return true;",
-		"if (session.ttyState && session.ttyState !== 'IDLE') return true;",
+		"if (session.ttyState && session.ttyState !== 'IDLE' && !stale) return true;",
 		// The promotion is the bystander: it lets a queued retry fire, so it
 		// passes no options and therefore respects the timer arm.
 		"if (session.ttyReconnectTimer && !(options && options.ignoreQueuedRetry)) return true;",

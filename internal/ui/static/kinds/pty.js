@@ -239,6 +239,18 @@ class PtyRenderer {
             lastLogLoadAttemptAt: 0,
             ttySocket: null,
             ttyState: 'IDLE',
+            // Liveness heartbeat bookkeeping (issue #83) - names, init
+            // values and semantics are identical to the legacy factory in
+            // index.html, which the two session factories must mirror
+            // (they have drifted before). lastDataAt is the instant the
+            // last frame of ANY kind arrived over the WebSocket - the
+            // heartbeat stamp hasLiveTTYConnection() and the watchdog read;
+            // 0 means "never", which reads as stale by design.
+            // ttyLivenessTimer is the watchdog interval armed by
+            // connectTTY once READY; cleared by disconnectTTY and
+            // ws.onclose in both files.
+            lastDataAt: 0,
+            ttyLivenessTimer: null,
             appliedTTYSize: null,
             lastResizeTime: 0,
         };
