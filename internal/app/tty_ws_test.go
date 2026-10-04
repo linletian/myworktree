@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -40,7 +41,7 @@ const (
 type ttyHandshakeKind struct {
 	buf      *framework.RingBuffer
 	subsMu   sync.Mutex
-	subs     map[chan string]struct{}
+	subs     map[*ttySubscriber]struct{}
 	failRead atomic.Bool
 
 	// scriptSince, when non-nil, makes ReadLogs for since>=0 pop a
@@ -66,8 +67,27 @@ var errTTYReadSimulated = errors.New("synthetic tty read failure")
 func newTTYHandshakeKind(capBytes int64) *ttyHandshakeKind {
 	return &ttyHandshakeKind{
 		buf:  framework.NewRingBuffer(capBytes),
-		subs: map[chan string]struct{}{},
+		subs: map[*ttySubscriber]struct{}{},
 	}
+}
+
+// ttySubscriber mirrors internal/instance/pty's subscriber value (issue
+// #82): the channel plus the exactly-once close flag, closed only under
+// subsMu. The double has to carry the same shape because the handler is
+// tested against the same two closers — an overflow in publish and the
+// handler's deferred cancel — and a bare channel would panic on the
+// second one.
+type ttySubscriber struct {
+	ch     chan string
+	closed bool
+}
+
+func (s *ttySubscriber) closeLocked() {
+	if s.closed {
+		return
+	}
+	s.closed = true
+	close(s.ch)
 }
 
 func (k *ttyHandshakeKind) Manifest() framework.KindInfo {
@@ -128,32 +148,48 @@ func (k *ttyHandshakeKind) RegisterHTTP(mux *http.ServeMux, instanceID string, h
 
 func (k *ttyHandshakeKind) Resize(h framework.Handle, cols, rows int) error { return nil }
 
+// SubscribeOutput mirrors the pty driver's subscription registry,
+// including the issue #82 contract: the channel closes when the
+// subscription ends, whether that is this cancel or an overflow in
+// publish, and cancel stays safe to call after either.
 func (k *ttyHandshakeKind) SubscribeOutput(id string) (<-chan string, func(), error) {
-	ch := make(chan string, 16)
+	sub := &ttySubscriber{ch: make(chan string, 16)}
 	k.subsMu.Lock()
-	k.subs[ch] = struct{}{}
+	k.subs[sub] = struct{}{}
 	k.subsMu.Unlock()
-	var once sync.Once
 	cancel := func() {
-		once.Do(func() {
-			k.subsMu.Lock()
-			delete(k.subs, ch)
-			k.subsMu.Unlock()
-		})
+		k.subsMu.Lock()
+		defer k.subsMu.Unlock()
+		delete(k.subs, sub)
+		sub.closeLocked()
 	}
-	return ch, cancel, nil
+	return sub.ch, cancel, nil
 }
 
-// publish stands in for pumpLogs' broadcast side of the PTY output pump.
+// publish stands in for pumpLogs' broadcast side of the PTY output pump,
+// overflow behaviour included (issue #82): a subscriber whose buffer is
+// full is removed and closed rather than having the chunk dropped in an
+// empty `default:` arm.
 func (k *ttyHandshakeKind) publish(chunk string) {
 	k.subsMu.Lock()
 	defer k.subsMu.Unlock()
-	for ch := range k.subs {
+	for sub := range k.subs {
 		select {
-		case ch <- chunk:
+		case sub.ch <- chunk:
 		default:
+			delete(k.subs, sub)
+			sub.closeLocked()
 		}
 	}
+}
+
+// subscriberCount reports how many subscribers are still registered — the
+// observable proof that an overflowing subscriber was dropped rather than
+// kept and silently skipped.
+func (k *ttyHandshakeKind) subscriberCount() int {
+	k.subsMu.Lock()
+	defer k.subsMu.Unlock()
+	return len(k.subs)
 }
 
 // waitSubscribers blocks until the server's completeHandshake has reached
@@ -335,6 +371,26 @@ func dialHandshake(t *testing.T, addr, path string) (c *ws.Conn, replay string, 
 		body.Write(f)
 	}
 	return conn, body.String(), syncOffset
+}
+
+// expectSocketClosed asserts the server stopped serving this connection: the
+// next read fails (EOF / reset) instead of delivering another frame. A
+// timeout is reported as a failure too — a socket left open and silent is
+// precisely the unreported stall this teardown exists to end.
+func expectSocketClosed(t *testing.T, c *ws.Conn, d time.Duration) {
+	t.Helper()
+	if err := c.SetReadDeadline(time.Now().Add(d)); err != nil {
+		t.Fatalf("set read deadline: %v", err)
+	}
+	op, p, err := c.ReadMessage()
+	_ = c.SetReadDeadline(time.Time{})
+	if err == nil {
+		t.Fatalf("connection still serving after the teardown: op=%d payload=%q", op, p)
+	}
+	var ne net.Error
+	if errors.As(err, &ne) && ne.Timeout() {
+		t.Fatalf("connection still open and silent after the teardown (read timed out): %v", err)
+	}
 }
 
 // TestHandleInstanceTTYWS_ReconnectWithSinceDoesNotRedeliverSeenBytes is
@@ -837,5 +893,100 @@ func TestHandleInstanceTTYWS_ConsultSeesNewBytesDeliversThem(t *testing.T) {
 	}
 	if syncOffset != 16 {
 		t.Fatalf("sync offset = %d, want 16 (head of the delivered replay)", syncOffset)
+	}
+}
+
+// TestHandleInstanceTTYWS_SubscriberOverflowClosesConnectionWith1013 pins
+// issue #82 end to end: when the live subscription is closed because the
+// consumer stopped keeping up, the handler must NAME the reason on the wire
+// and then stop serving.
+//
+// The condition exercised is the one that matters: the producer outruns the
+// consumer's queue. The client goes quiet after the handshake, so nothing
+// drains, while publish keeps pushing 32 KB chunks until the double's
+// 16-slot channel fills and its overflow arm removes and closes the
+// subscriber — the same state a production socket stall produces (a
+// backgrounded tab stops reading, `conn.WriteBinary` blocks inside
+// `rw.Flush()` because Upgrade sets no write deadline, the select loop stops
+// draining, the queue backs up).
+//
+// To be exact about the fidelity: this test does NOT reproduce the TCP
+// stall itself. A publish is a mutex plus a non-blocking send (~100 ns)
+// while one handler loop iteration costs a 32 KB `write()` syscall, so the
+// flood outruns the drain by orders of magnitude and the socket buffers never
+// become the binding constraint — the overflow is reached in milliseconds.
+// What is genuine, and what #82 actually changed, is everything downstream of
+// the close: the real handler sees `<-outputChan` closed, writes 1013 with
+// the reason on a real hijacked WebSocket, returns, closes the socket, and
+// the deferred cancel runs against an already-closed channel.
+//
+// That frame is best-effort in production as well — the stalled socket may
+// never drain it, which is why the teardown write carries a bounded deadline
+// (app.go) — and the client resyncs on any socket close, reasoned or not.
+func TestHandleInstanceTTYWS_SubscriberOverflowClosesConnectionWith1013(t *testing.T) {
+	t.Parallel()
+	k := newTTYHandshakeKind(1024)
+	addr, _, instID := ttyWSTestServer(t, k)
+
+	c, _, _ := dialHandshake(t, addr, ttyWSPath(instID, ""))
+	k.waitSubscribers(t, 5*time.Second)
+
+	// Outrun the queue: the client is not reading, so every chunk the
+	// handler does take has to be matched by several more publishes before
+	// the 16 slots run out.
+	chunk := strings.Repeat("x", 32*1024)
+	published := 0
+	deadline := time.Now().Add(20 * time.Second)
+	for k.subscriberCount() > 0 {
+		if time.Now().After(deadline) {
+			t.Fatalf("overflow never happened after %d chunks (%d MB published): the slow consumer was not disconnected", published, published*len(chunk)/(1<<20))
+		}
+		k.publish(chunk)
+		published++
+	}
+	if published < 17 {
+		// 16 slots + 1 is the earliest an overflow can happen; fewer means
+		// the subscriber vanished without overflowing.
+		t.Fatalf("subscriber vanished after only %d chunks, want at least 17 (the 16-slot capacity plus the one that did not fit)", published)
+	}
+
+	// Chunks the handler had already drained, and the resize echo its own
+	// handshake queued, may still precede the close. What must never
+	// precede it is a second `sync`: that would hand the client a cursor
+	// past bytes it never received, so its next reconnect would skip them.
+	for {
+		op, p := readFrame(t, c, 10*time.Second)
+		if op == wsOpClose {
+			if len(p) < 2 {
+				t.Fatalf("close frame payload too short: %v", p)
+			}
+			if got := binary.BigEndian.Uint16(p); got != 1013 {
+				t.Fatalf("close code = %d, want 1013 (reason %q)", got, string(p[2:]))
+			}
+			if !strings.Contains(string(p[2:]), "overflow") {
+				t.Fatalf("close reason = %q, want it to name the overflow so the browser console explains the drop", string(p[2:]))
+			}
+			break
+		}
+		if op == wsOpText && strings.Contains(string(p), `"sync"`) {
+			t.Fatalf("a second sync after the teardown claims a cursor past undelivered bytes: %q", p)
+		}
+	}
+
+	// Nothing after the close: the handler returned instead of looping on a
+	// subscription it had already lost.
+	expectSocketClosed(t, c, 10*time.Second)
+
+	// The teardown deregistered the subscriber, and the handler's deferred
+	// cancel ran against the channel the overflow had already closed.
+	// Read this assertion for what it covers: an empty registry. It is NOT
+	// the double-close pin — net/http recovers handler panics and logs them
+	// to stderr, so a `close of closed channel` in that defer would be
+	// reported by the harness, not by this test. The real exactly-once pin is
+	// TestSubscribeOutput_CancelAfterOverflowDoesNotPanic (and its concurrent
+	// counterpart TestSubscribeOutput_CancelRacesOverflow) in
+	// internal/instance/pty/driver_test.go, where a panic fails the test.
+	if n := k.subscriberCount(); n != 0 {
+		t.Fatalf("%d subscriber(s) still registered after the teardown", n)
 	}
 }

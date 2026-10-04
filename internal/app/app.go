@@ -2596,6 +2596,34 @@ func (s *Server) handleInstanceTTYWS(w http.ResponseWriter, r *http.Request) {
 
 		case chunk, ok := <-outputChan:
 			if !ok {
+				// The live subscription ended while this handler was
+				// still serving. cancel() only runs in this function's
+				// own defer, so the only way here is the pty kind's
+				// overflow disconnect (issue #82): our consumer fell
+				// behind, its buffer filled, and it was closed instead
+				// of having chunks silently dropped. Say so on the
+				// wire — the client's ws.onclose logs abnormal codes
+				// and reasons, so the browser console names the cause
+				// instead of showing an unexplained drop.
+				//
+				// This frame is BEST-EFFORT and resync does not depend on
+				// it: the browser reconnects on any socket close, reasoned
+				// or not, and resyncs from its own cursor (the #87 offset
+				// contract). It is also deliberately BOUNDED, because this
+				// branch exists precisely because the socket stalled — the
+				// peer stopped draining, which is what filled the queue in
+				// the first place — so an unbounded close write would just
+				// move the stall from WriteBinary to WriteClose and keep
+				// the handler parked forever. ws.writeFrame ends in
+				// rw.Flush() and Upgrade sets no write deadline (adding one
+				// for every connection is issue #83), so the deadline is
+				// set here, on this failure path only: nothing else writes
+				// on this conn afterwards — this branch returns immediately
+				// and the deferred conn.Close() follows — so healthy
+				// connections keep the unbounded write behaviour they have
+				// today.
+				_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+				_ = conn.WriteClose(ws.CloseMessage(1013, "subscriber overflow: slow consumer"))
 				return
 			}
 			if err := conn.WriteBinary([]byte(chunk)); err != nil {
