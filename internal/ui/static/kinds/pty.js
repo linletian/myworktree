@@ -160,6 +160,12 @@ class PtyRenderer {
         // transport, and the screen was just cleared. Keeping it would make
         // connectTTY send since=<oldOffset> and paint only the delta onto
         // an empty terminal. Must match the reset in index.html.
+        //
+        // window.resetTerminalForSwitch above now performs this reset for
+        // BOTH cursors itself, so these two lines are defensive depth: the
+        // invariant must not depend on the helper's internals, and the
+        // harness stubs that helper out (see testdata) precisely to keep
+        // this pair load-bearing.
         s.ttyOffset = -1;
         if (window.loadLog) {
             window.loadLog(s).finally(() => {

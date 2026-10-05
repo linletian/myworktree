@@ -1,6 +1,7 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"encoding/json"
@@ -8,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -278,24 +280,23 @@ func expectCloseFrame(t *testing.T, c *ws.Conn, code uint16, wantReason string) 
 	}
 }
 
-// dialHandshake dials the TTY endpoint, consumes the ready frame, sends
-// the first resize (which completes the handshake immediately instead of
-// waiting out the 5s timer), and collects frames up to the `sync` echo.
-// It returns the connection, the concatenated binary replay, and the
-// offset carried by the sync frame.
-func dialHandshake(t *testing.T, addr, path string) (c *ws.Conn, replay string, syncOffset int64) {
+// dialHandshakeFrames dials, completes the handshake with the first
+// resize, and collects the replay up to the `sync` echo — but keeps the
+// binary frames SEPARATE, so a test can pin how the replay was chunked
+// (each frame is one streamed ring-buffer read, never the whole delta
+// re-buffered) without an extra concatenation copy.
+func dialHandshakeFrames(t *testing.T, addr, path string) (c *ws.Conn, frames [][]byte, syncOffset int64) {
 	t.Helper()
 	conn := dialTTY(t, addr, path)
 
 	sendResize(t, conn)
 
-	var body strings.Builder
 	sawSync := false
 	for !sawSync {
 		op, p := readFrame(t, conn, 5*time.Second)
 		switch op {
 		case wsOpBinary:
-			body.Write(p)
+			frames = append(frames, p)
 		case wsOpText:
 			var ctl struct {
 				Type   string `json:"type"`
@@ -317,6 +318,21 @@ func dialHandshake(t *testing.T, addr, path string) (c *ws.Conn, replay string, 
 		default:
 			t.Fatalf("unexpected opcode %d during handshake", op)
 		}
+	}
+	return conn, frames, syncOffset
+}
+
+// dialHandshake dials the TTY endpoint, consumes the ready frame, sends
+// the first resize (which completes the handshake immediately instead of
+// waiting out the 5s timer), and collects frames up to the `sync` echo.
+// It returns the connection, the concatenated binary replay, and the
+// offset carried by the sync frame.
+func dialHandshake(t *testing.T, addr, path string) (c *ws.Conn, replay string, syncOffset int64) {
+	t.Helper()
+	conn, frames, syncOffset := dialHandshakeFrames(t, addr, path)
+	var body strings.Builder
+	for _, f := range frames {
+		body.Write(f)
 	}
 	return conn, body.String(), syncOffset
 }
@@ -413,14 +429,17 @@ func TestHandleInstanceTTYWS_StaleSinceClampsSilently(t *testing.T) {
 	}
 }
 
-// TestHandleInstanceTTYWS_LargeDeltaReplaysNewestContiguousChunk pins the
-// over-64KB reconnect case (review BLOCKER): when the offline delta
-// exceeds the 64KB read cap, a single ReadSince would publish a sync
-// cursor 64KB behind head while the live subscription starts AT head —
-// a permanent, silent hole, because the client cursor only moves forward.
-// The catch-up loop must instead replay the newest chunk contiguous with
-// head and publish sync == head.
-func TestHandleInstanceTTYWS_LargeDeltaReplaysNewestContiguousChunk(t *testing.T) {
+// TestHandleInstanceTTYWS_LargeDeltaStreamsEveryByteSinceCursor is the
+// over-64KB reconnect case (review BLOCKER A1): when the offline delta
+// exceeds the 64KB read cap, the catch-up loop must deliver EVERY byte
+// from `since`, not just the newest chunk. Buffering only the newest chunk
+// — the earlier shape of the loop — handed the client a replay of
+// content[65636:] while publishing sync == 100100, so the [100, 65636)
+// window was never sent and, because a client cursor only moves forward,
+// never re-requested: 65536 bytes gone. Streaming each chunk as it is read
+// sends the whole delta with the SAME iteration count and the same published
+// offset, so the fix is free and peak memory stays one chunk (~64KB).
+func TestHandleInstanceTTYWS_LargeDeltaStreamsEveryByteSinceCursor(t *testing.T) {
 	t.Parallel()
 	k := newTTYHandshakeKind(128 * 1024) // ring cap above the 64KB read cap
 	addr, _, instID := ttyWSTestServer(t, k)
@@ -442,26 +461,159 @@ func TestHandleInstanceTTYWS_LargeDeltaReplaysNewestContiguousChunk(t *testing.T
 	_ = c1.WriteClose(ws.CloseMessage(1000, "bye"))
 	_ = c1.Close()
 
-	c2, replay2, sync2 := dialHandshake(t, addr, ttyWSPath(instID, "since=100"))
+	c2, frames2, sync2 := dialHandshakeFrames(t, addr, ttyWSPath(instID, "since=100"))
 	_ = c2.WriteClose(ws.CloseMessage(1000, "bye"))
 	_ = c2.Close()
 
+	// Every byte of the delta is on the wire, in order, with nothing lost
+	// and nothing re-delivered: the replay IS content[100:100100).
+	var replay2 strings.Builder
+	for _, f := range frames2 {
+		if int64(len(f)) > 64*1024 {
+			t.Fatalf("replay frame of %d bytes exceeds the 64KB read cap", len(f))
+		}
+		replay2.Write(f)
+	}
+	if replay2.String() != content[100:] {
+		t.Fatalf("replay = %d bytes, want all %d bytes of the delta [100,100100) — over-cap bytes must be streamed, not dropped", replay2.Len(), 100100-100)
+	}
+	// Exact pin of the loop's chunking: [100,65636) then [65636,100100),
+	// two chunks, then the loop sees head.
+	if len(frames2) != 2 || len(frames2[0]) != 65536 || len(frames2[1]) != 100100-65636 {
+		t.Fatalf("replay arrived as %d frames of sizes %v, want 2 frames of [65536, %d]", len(frames2), frameSizes(frames2), 100100-65636)
+	}
+	// sync equals the end of the LAST chunk written, which here is head:
+	// the live stream continues exactly where the replay stops.
 	if sync2 != 100100 {
 		t.Fatalf("sync offset = %d, want 100100 — the published cursor must equal head so the live stream stays contiguous with the replay (no hole)", sync2)
 	}
-	if len(replay2) > 65536 {
-		t.Fatalf("replay = %d bytes, want the 64KB cap respected", len(replay2))
+}
+
+// frameSizes renders frame lengths for a failure message.
+func frameSizes(frames [][]byte) []int {
+	out := make([]int, 0, len(frames))
+	for _, f := range frames {
+		out = append(out, len(f))
 	}
-	// The retained replay is contiguous with head: the exact suffix of
-	// everything ever written, and — with sync == head — the live stream
-	// continues exactly where it ends.
-	if !strings.HasSuffix(content, replay2) {
-		t.Fatal("replay must be contiguous with head (a suffix of the ring content)")
+	return out
+}
+
+// TestHandleInstanceTTYWS_ReplayBudgetTruncatesAndPublishesLastWrittenOffset
+// pins the replay budget (review finding A3). A delta larger than
+// ttyHandshakeReplayBudget must NOT be replayed in full on one handshake:
+// the loop stops at the budget and publishes the end offset of the last
+// chunk it actually WROTE, which is strictly behind head. The bytes past the
+// budget are then ahead of the client's cursor, so the next reconnect
+// re-requests them — truncation defers bytes, it never skips them (the same
+// self-healing property as the final-read→SubscribeOutput window).
+//
+// The budget is a byte count, not a deadline, so the truncation point is
+// exact and machine-independent: the client receives exactly
+// ttyHandshakeReplayBudget bytes (8MB is a whole multiple of the 64KB read
+// cap, so the loop's stop-before-read guard lands on the boundary) and sync
+// equals that count.
+func TestHandleInstanceTTYWS_ReplayBudgetTruncatesAndPublishesLastWrittenOffset(t *testing.T) {
+	t.Parallel()
+	// A delta of budget + 4 chunks, and a ring cap above it, so the
+	// truncation under test is the budget's — never the ring's eviction.
+	// It stays a few bytes past the boundary on purpose: with the guard
+	// removed the loop delivers the whole delta, so any overshoot (or any
+	// missing stop) shows up as delivered != budget.
+	delta := make([]byte, ttyHandshakeReplayBudget+4*64*1024)
+	for i := range delta {
+		delta[i] = byte('a' + i%26)
 	}
-	// Exact pin of the loop's chunking: [100,65636) is read first and
-	// discarded, [65636,100100) is retained, then the loop sees head.
-	if replay2 != content[65636:] {
-		t.Fatalf("replay = %d bytes, want the newest chunk [65636,100100) = %d bytes", len(replay2), 100100-65636)
+	k := newTTYHandshakeKind(int64(len(delta)) + 1024)
+	addr, _, instID := ttyWSTestServer(t, k)
+	k.buf.Write(delta) // head = budget + 4 chunks
+	head := k.buf.Offset()
+
+	c, frames, syncOffset := dialHandshakeFrames(t, addr, ttyWSPath(instID, "since=0"))
+	_ = c.WriteClose(ws.CloseMessage(1000, "bye"))
+	_ = c.Close()
+
+	var delivered int64
+	for i, f := range frames {
+		if int64(len(f)) > 64*1024 {
+			t.Fatalf("replay frame of %d bytes exceeds the 64KB read cap", len(f))
+		}
+		// Byte-exact and in order: each frame is the delta at its own
+		// offset, so the budget cut at the TAIL and skipped nothing from
+		// the middle.
+		if !bytes.Equal(f, delta[delivered:delivered+int64(len(f))]) {
+			t.Fatalf("replay frame %d at offset %d is not the delta's bytes there", i, delivered)
+		}
+		delivered += int64(len(f))
+	}
+	// The cap held: exactly the budget, not the 4 chunks beyond it.
+	if delivered != ttyHandshakeReplayBudget {
+		t.Fatalf("replay = %d bytes, want exactly the budget (%d) out of a %d-byte delta — the loop must stop there", delivered, ttyHandshakeReplayBudget, len(delta))
+	}
+	if len(frames) != int(ttyHandshakeReplayBudget/(64*1024)) {
+		t.Fatalf("replay arrived as %d frames, want %d full 64KB chunks", len(frames), ttyHandshakeReplayBudget/(64*1024))
+	}
+	// The published cursor is the end of the LAST chunk written, behind
+	// head: the remainder stays re-requestable.
+	if syncOffset != ttyHandshakeReplayBudget {
+		t.Fatalf("sync offset = %d, want %d (end of the last delivered chunk)", syncOffset, ttyHandshakeReplayBudget)
+	}
+	if syncOffset >= head {
+		t.Fatalf("sync offset = %d, want strictly behind head %d — publishing head here would strand the undelivered remainder forever", syncOffset, head)
+	}
+
+	// Self-healing: a reconnect from the published cursor re-requests the
+	// bytes the budget deferred — the last 4 chunks — and catches up to
+	// head, so nothing was lost, only deferred.
+	c2, replay2, sync2 := dialHandshake(t, addr, ttyWSPath(instID, "since="+strconv.FormatInt(syncOffset, 10)))
+	_ = c2.WriteClose(ws.CloseMessage(1000, "bye"))
+	_ = c2.Close()
+	want2 := delta[ttyHandshakeReplayBudget:]
+	if replay2 != string(want2) {
+		t.Fatalf("re-request after truncation = %d bytes, want the %d deferred bytes — the budget must defer, never skip", len(replay2), len(want2))
+	}
+	if sync2 != head {
+		t.Fatalf("sync offset after the re-request = %d, want head %d — the deferred remainder must be recoverable in full", sync2, head)
+	}
+}
+
+// TestHandleInstanceTTYWS_EmptyReadAfterConsultPublishesHeadNotZero pins
+// review finding B3, the FIX-F counterpart. The scripted queue drives the
+// same shape TestHandleInstanceTTYWS_ConsultSeesNewBytesDeliversThem uses
+// (first incremental read lies "caught up" at T1, the Tail consult then sees
+// the genuine head 16 > cursor 10 and continues the loop), except the SECOND
+// read answers with an EMPTY body and next == head. That read is real: on a
+// CLOSED ring RingBuffer.ReadSince(50, 64KB) returns ("", 100, nil) — empty
+// body while since < head, cursor advanced to head. The old `!first` break
+// left endOffset at its zero value, so the handshake published offset 0 — a
+// cursor the ring never held — and the client fell back to a full tail
+// replay (the duplicate paint this issue is about). The break now carries
+// that read's `next`, so the published offset is the truthful head.
+func TestHandleInstanceTTYWS_EmptyReadAfterConsultPublishesHeadNotZero(t *testing.T) {
+	t.Parallel()
+	k := newTTYHandshakeKind(1024)
+	addr, _, instID := ttyWSTestServer(t, k)
+	k.buf.WriteString("0123456789ABCDEF") // real head = 16
+
+	// Read 1: "caught up" at the cursor (T1). Read 2 (after the consult saw
+	// head 16 > cursor 10): empty body with next == head — the closed-ring
+	// shape. Nothing more is scripted; the loop must not read again.
+	k.scriptIncrementalReads(
+		scriptedRead{body: "", next: 10},
+		scriptedRead{body: "", next: 16},
+	)
+
+	c, replay, syncOffset := dialHandshake(t, addr, ttyWSPath(instID, "since=10"))
+	_ = c.WriteClose(ws.CloseMessage(1000, "bye"))
+	_ = c.Close()
+
+	if replay != "" {
+		t.Fatalf("replay = %q, want nothing — both scripted reads were empty", replay)
+	}
+	if syncOffset != 16 {
+		t.Fatalf("sync offset = %d, want 16 (the ring head the empty read reported) — publishing 0 hands back a cursor the ring never held and sends the client into a full tail replay", syncOffset)
+	}
+	if syncOffset == 0 {
+		t.Fatal("sync offset is 0 — the B3 regression")
 	}
 }
 
