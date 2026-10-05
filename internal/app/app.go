@@ -2200,6 +2200,27 @@ func (s *Server) handleInstanceInput(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
+// sinceFollowLiveEnd is the `since` sentinel meaning "send nothing, publish
+// the current end offset, then stream only new data" (issue #86).
+//
+// A client reaches it when its screen is ALREADY painted with the ring
+// buffer's tail but it never learned that tail's offset — the usual cause
+// being a reverse proxy that strips `X-Log-Offset` from the
+// GET /api/instances/log response. The plain-unknown sentinel (-1, an
+// omitted `since`) means the opposite: nothing is painted, so the client
+// genuinely wants the tail. Collapsing the two into one -1 is this bug:
+// loadLog paints the tail, the stream serves the tail again, and the tail
+// renders twice.
+//
+// parseInt64Default passes any negative value through untouched, so each
+// sentinel must be branched on EXPLICITLY, ahead of `since < 0` — a -2
+// that fell into a tail branch would behave exactly like an omitted `since`
+// and reproduce the duplication this value exists to prevent. Consumers:
+// handleInstanceLogStream (SSE) and completeHandshake (TTY WS). The client
+// side of the contract is CURSOR_FOLLOW_LIVE_END in index.html /
+// kinds/pty.js, which is what puts the value on the wire.
+const sinceFollowLiveEnd int64 = -2
+
 func (s *Server) handleInstanceTTYWS(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -2214,8 +2235,10 @@ func (s *Server) handleInstanceTTYWS(w http.ResponseWriter, r *http.Request) {
 	// reconnecting client sends the offset of everything it has already
 	// rendered, so the handshake replays only newer bytes instead of the
 	// full 64KB tail (which it would append under its live screen).
-	// Unknown/absent yields -1: the "no cursor" sentinel that keeps the
-	// first-connect tail behaviour.
+	// Unknown/absent yields -1: the "nothing painted" sentinel that keeps
+	// the first-connect tail behaviour. sinceFollowLiveEnd (-2) is the
+	// OTHER unknown-cursor state — the screen IS painted, only its end
+	// offset is unknown — and is handled inside completeHandshake.
 	since := parseInt64Default(r.URL.Query().Get("since"), -1)
 	conn, err := ws.Upgrade(w, r)
 	if err != nil {
@@ -2278,6 +2301,11 @@ func (s *Server) handleInstanceTTYWS(w http.ResponseWriter, r *http.Request) {
 	// the replay's end offset in a `sync` frame, then hands the connection
 	// to the live output subscription.
 	//
+	// Three cursors, three modes: a real `since >= 0` replays only [since,
+	// head); the -1 sentinel (nothing painted) replays the tail; and the
+	// sinceFollowLiveEnd sentinel (-2, painted but offset unknown) replays
+	// NOTHING and publishes the live head instead (issue #86).
+	//
 	// Invariant (issue #87): the offset published in `sync` must equal the
 	// ring-buffer head of the FINAL replay read, so the replay is
 	// contiguous with the live stream. Output produced between that final
@@ -2296,7 +2324,45 @@ func (s *Server) handleInstanceTTYWS(w http.ResponseWriter, r *http.Request) {
 	completeHandshake := func(since int64) bool {
 		var replay string
 		var endOffset int64
-		if since < 0 {
+		if since == sinceFollowLiveEnd {
+			// Follow from the live end (issue #86): the client's screen
+			// already holds the tail and ONLY its end offset is unknown (a
+			// proxy stripped X-Log-Offset), so replay nothing — any byte
+			// sent here lands under a screen that already shows it. Publish
+			// the current head and hand over to the live subscription, which
+			// from there carries only newly produced data. EndOffset rather
+			// than Tail because the body would be thrown away.
+			//
+			// Bytes produced between this read and the SubscribeOutput below
+			// are the pre-existing read→subscribe window described above: the
+			// client's cursor is the offset published here, so a later reconnect
+			// sends it as `since` and gets those bytes back out of the ring.
+			// Self-healing, and deliberately not closed here.
+			//
+			// The window this mode OPENS is the other one, and it does not
+			// heal. The client reached this sentinel because it painted
+			// GET /api/instances/log's tail, which ended at some head H1. This
+			// read reports H2 >= H1, and the client adopts H2 — so its cursor
+			// is AHEAD of its own screen by H2-H1, and [H1, H2) is in nothing:
+			// not in the tail it painted, not in a replay (there is none), not
+			// in the live stream (that starts at H2). Because the cursor sits
+			// past them, no reconnect ever re-requests them: those bytes are
+			// permanently gone from this client's screen. Normally the hole is
+			// the loadLog()→connectTTY hop plus the WS upgrade, i.e.
+			// milliseconds; if the handshake times out and the client falls back
+			// to SSE it is 5s + 500ms of output, which on a chatty instance is
+			// real lost lines. That is the price of a proxy stripping
+			// X-Log-Offset: choose between duplicating the tail and losing a
+			// window, and losing the window is the one that keeps the screen
+			// readable. Fixing it properly needs the client to know H1, which
+			// is exactly the number the stripped header took away.
+			off, err := s.instanceMgr.EndOffset(id)
+			if err != nil {
+				_ = conn.WriteClose(ws.CloseMessage(1013, err.Error()))
+				return false
+			}
+			endOffset = off
+		} else if since < 0 {
 			// No cursor (first connect): replay the newest bytes (AC2).
 			body, off, err := s.instanceMgr.Tail(id, 64*1024)
 			if err != nil {
@@ -2518,6 +2584,20 @@ func (s *Server) handleInstanceLog(w http.ResponseWriter, r *http.Request) {
 	}
 	id := strings.TrimSpace(r.URL.Query().Get("id"))
 	since := parseInt64Default(r.URL.Query().Get("since"), -1)
+	if since == sinceFollowLiveEnd {
+		// 400 rather than a silent tail (issue #86): this endpoint answers a
+		// negative `since` with the tail, which is the EXACT OPPOSITE of what
+		// the sentinel asks for — the sentinel means "I already painted the
+		// tail, do not send it". Serving the tail here would reproduce the
+		// duplication this value exists to prevent, invisibly. Follow-from-the-
+		// live-end is a property of a LONG-LIVED stream (publish the head,
+		// then keep streaming), not of a one-shot body, so it lives only on
+		// /api/instances/log/stream and /api/instances/tty/ws. The shipped UI
+		// never sends `since` here at all (loadLog deliberately omits it), so
+		// rejecting is safe and turns a caller's mistake into an error.
+		writeErr(w, http.StatusBadRequest, fmt.Errorf("since=%d (follow from the live end) is only valid on /api/instances/log/stream and /api/instances/tty/ws", sinceFollowLiveEnd))
+		return
+	}
 	if since >= 0 {
 		body, next, err := s.instanceMgr.ReadSince(id, since, 64*1024)
 		if err != nil {
@@ -2550,7 +2630,32 @@ func (s *Server) handleInstanceLogStream(w http.ResponseWriter, r *http.Request)
 	var initial string
 	var next int64
 	var err error
-	if since < 0 {
+	if since == sinceFollowLiveEnd {
+		// Follow from the live end (issue #86): the client's screen already
+		// holds the tail and only its END OFFSET is unknown, so serve no
+		// body at all — the tail it just painted must not be painted twice.
+		// Publish the current head and let the poll loop below deliver only
+		// bytes produced after this instant. EndOffset (not Tail) because a
+		// 64KB copy thrown away here is pure waste; an empty `initial` needs
+		// no new frame format, since writeSSELogEvent always writes
+		// {"chunk":…,"next":…}.
+		//
+		// Nothing after this read is lost: the poll loop below reads from the
+		// published cursor, not from a subscription, so bytes produced while
+		// the client is still painting arrive as ordinary frames. What IS
+		// lost is the window BEFORE it — [H1, H2), where H1 is the head of
+		// the tail the client actually painted via GET /api/instances/log and
+		// H2 is the head published here. The client adopts H2, so its cursor
+		// runs ahead of its own screen and [H1, H2) is in no replay, no
+		// painted body and no later frame; because the cursor is already past
+		// them, no reconnect re-requests them either. Those bytes are
+		// permanently gone from this client's screen — normally the
+		// loadLog()→startSSE hop (milliseconds), but seconds if the WS
+		// handshake times out first and SSE is the fallback. That is the
+		// accepted cost of a stripped X-Log-Offset: the alternative is
+		// repainting the whole tail over the screen that already shows it.
+		next, err = s.instanceMgr.EndOffset(id)
+	} else if since < 0 {
 		initial, next, err = s.instanceMgr.Tail(id, 64*1024)
 	} else {
 		initial, next, err = s.instanceMgr.ReadSince(id, since, 64*1024)

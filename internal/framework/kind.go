@@ -179,6 +179,11 @@ type Kind interface { // Manifest returns static metadata. Called once at regist
 	// A negative since requests tail semantics: return the newest
 	// maxBytes of captured output, with the cursor set to the current
 	// end offset (so callers can follow with ReadLogs(cursor, ...)).
+	// The cursor is required even when maxBytes is 0: a zero-length
+	// tail read is the sanctioned way to ask for the end offset alone
+	// without copying the buffer (framework.Manager.EndOffset, issue
+	// #86), so a kind that DOES capture output must report its real
+	// head there, not 0 because the body came back empty.
 	// Kinds without log capture (no ring buffer / no pipe to drain)
 	// return an empty body; echoing since back is fine, because
 	// Manager.Tail normalizes a non-conforming cursor before any

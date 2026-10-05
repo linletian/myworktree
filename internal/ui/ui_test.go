@@ -656,8 +656,19 @@ func TestLogCursorBootstrapNeverRequestsOldestBytes(t *testing.T) {
 		"if (Number.isFinite(next) && next >= 0) {",
 		// Same acceptance rule for cursor values arriving over the stream.
 		"if (Number.isFinite(msg.next) && msg.next >= 0) session.logCursor = msg.next;",
-		// Legacy no-renderer fallback bootstraps "unknown" as -1.
-		"logCursor: -1,",
+		// Legacy no-renderer fallback bootstraps the named "nothing painted"
+		// state (issue #86 named these; the value stays -1).
+		"const CURSOR_UNKNOWN = -1;",
+		"logCursor: CURSOR_UNKNOWN,",
+		// Issue #86: the OTHER unknown-cursor state — the tail IS painted,
+		// only its offset was stripped — has to be a distinct value the
+		// server branches on, and both transports must send it explicitly.
+		// An unparseable header must never degrade to since=0 (the oldest
+		// live byte, #81) nor to the plain-unknown tail request.
+		"const CURSOR_FOLLOW_LIVE_END = -2;",
+		"session.logCursor = CURSOR_FOLLOW_LIVE_END;",
+		"else if (session.logCursor === CURSOR_FOLLOW_LIVE_END) url += `&since=${CURSOR_FOLLOW_LIVE_END}`;",
+		"else if (session.ttyOffset === CURSOR_FOLLOW_LIVE_END) url += `&since=${CURSOR_FOLLOW_LIVE_END}`;",
 	}
 	for _, check := range checks {
 		if !strings.Contains(bodyText, check) {
@@ -677,7 +688,7 @@ func TestLogCursorBootstrapNeverRequestsOldestBytes(t *testing.T) {
 	// delta onto an empty screen. Mirrors the ordering assertion the pty
 	// renderer test makes about the same two statements.
 	resetAt := strings.Index(bodyText, "resetTerminalForSwitch(session);")
-	cursorAt := strings.Index(bodyText, "session.logCursor = -1;")
+	cursorAt := strings.Index(bodyText, "session.logCursor = CURSOR_UNKNOWN;")
 	if cursorAt < 0 {
 		t.Fatal("GET / should reset session.logCursor after clearing the terminal")
 	}
@@ -719,9 +730,9 @@ func TestPtyRendererResetsCursorAfterTerminalReset(t *testing.T) {
 		t.Fatal("pty.js should clear the terminal before reloading the log")
 	}
 	resetAt := strings.Index(js, "window.resetTerminalForSwitch(s);")
-	cursorAt := strings.Index(js, "s.logCursor = -1;")
+	cursorAt := strings.Index(js, "s.logCursor = PTY_CURSOR_UNKNOWN;")
 	if cursorAt < 0 {
-		t.Fatal("pty.js should reset s.logCursor to the unknown sentinel after clearing the terminal")
+		t.Fatal("pty.js should reset s.logCursor to the named unknown state after clearing the terminal")
 	}
 	if cursorAt < resetAt {
 		t.Fatal("pty.js should reset s.logCursor after resetTerminalForSwitch, not before")

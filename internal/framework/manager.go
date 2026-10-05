@@ -443,6 +443,44 @@ func (m *Manager) Tail(id string, n int64) (string, int64, error) {
 	return body, off, err
 }
 
+// EndOffset returns the current end offset (head) of an instance's
+// captured log WITHOUT copying any buffered bytes, for callers that need
+// the cursor only (issue #86).
+//
+// It is `Tail(id, 0)` in every respect that matters: the same running-map
+// lookup, the same kind delegation with a negative `since` (tail semantics),
+// and the same clamps — a kind without log capture echoes the -1 sentinel
+// and gets 0 here exactly as in Tail, and a non-running instance reports
+// (0, nil) exactly as Tail returns ("", 0, nil). The difference is the
+// zero-length read: RingBuffer.Tail short-circuits n <= 0 to ("", head),
+// so a caller that already holds the tail on screen — the "follow from the
+// live end" mode of the log stream and of the TTY WS handshake — does not
+// pay for a 64KB copy it is about to throw away.
+//
+// It relies on the Kind.ReadLogs tail contract that the cursor accompanies
+// a tail read even when the body is empty (see kind.go); no shipped kind
+// breaks it, and the log-stream / handshake callers treat a bogus 0 as
+// "nothing buffered", which costs a replay, never a lost byte.
+func (m *Manager) EndOffset(id string) (int64, error) {
+	m.mu.Lock()
+	ri, ok := m.running[id]
+	m.mu.Unlock()
+	if !ok {
+		return 0, nil
+	}
+	k, err := m.Registry.Get(ri.handle.KindName)
+	if err != nil {
+		return 0, err
+	}
+	_, off, err := k.ReadLogs(ri.handle, -1, 0)
+	if off < 0 {
+		// Kinds without log capture echo the -1 sentinel back (Tail
+		// applies the same clamp).
+		off = 0
+	}
+	return off, err
+}
+
 // ReadSince returns log content starting at byte offset since. A
 // negative since is clamped to 0; tail reads go through Tail.
 func (m *Manager) ReadSince(id string, since int64, maxBytes int64) (string, int64, error) {
