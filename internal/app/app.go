@@ -2596,6 +2596,69 @@ func (s *Server) handleInstanceTTYWS(w http.ResponseWriter, r *http.Request) {
 
 		case chunk, ok := <-outputChan:
 			if !ok {
+				// The live subscription ended while this handler was
+				// still serving. cancel() only runs in this function's
+				// own defer, so the only way here is the pty kind's
+				// overflow disconnect (issue #82): our consumer fell
+				// behind, its buffer filled, and it was closed instead
+				// of having chunks silently dropped. Say so on the
+				// wire — the client's ws.onclose logs abnormal codes
+				// and reasons, so the browser console names the cause
+				// instead of showing an unexplained drop.
+				//
+				// This frame is BEST-EFFORT and resync does not depend on
+				// it: the browser reconnects on any socket close, reasoned
+				// or not, and resyncs from its own cursor (the #87 offset
+				// contract). The 5 s deadline below is deliberately
+				// BOUNDED, and it bounds exactly one thing: THIS close-frame
+				// write, on this teardown path. It does NOT bound the
+				// handler's other writes — a handler already blocked inside
+				// a live WriteBinary above never reaches this branch, and is
+				// reclaimed only when that write returns: ws.Upgrade sets no
+				// write deadline, and adding one for every connection is
+				// issue #83's write-deadline territory, deliberately out of
+				// scope here. What keeps this failure path from writing the
+				// backlog onto the stalled socket is upstream, in the pty
+				// kind: broadcast drains the closed subscriber's queue at
+				// the source (driver.go) — after it releases subsMu, never
+				// inside that process-global lock, because the drain only
+				// terminates by virtue of the channel already being closed.
+				// That BOUNDS what this branch can write; it does not order
+				// it. The queue is empty by the time broadcast returns, but
+				// close() readies any receiver already parked on the channel
+				// — that is this handler, sitting in the select above — and a
+				// readied receiver races the drain loop for the values still
+				// buffered, so a few chunks may legitimately reach the socket
+				// before this branch runs. What the drain does make impossible
+				// is the unbounded version: this handler cannot flush a full
+				// queue — up to 64 queued chunks (~64 KB) — onto the socket
+				// that stalled. Every
+				// drained chunk that is STILL IN THE RING BUFFER comes back
+				// on the cursor reconnect; the exception is a ring the
+				// framework has already closed and dropped, whose writes were
+				// no-ops by the time they were broadcast (ARCHITECTURE §4.1,
+				// and docs/API.md states the same qualifier). Nothing writes
+				// on this conn after this branch returns —
+				// this branch returns immediately and the deferred
+				// conn.Close() follows — so healthy connections keep the
+				// unbounded write behaviour they have today.
+				//
+				// Server-side, this is the only trace of the disconnect
+				// besides the close frame: the client retries on a
+				// hard-coded 5 s timer with no backoff, so without this line
+				// a repeatedly-overflowing consumer would be a silent
+				// reconnect+replay loop. The nil guard is defensive against a
+				// state production cannot reach — app.New rejects a nil
+				// logger ("logger is required") — and it is NOT dead to the
+				// test suite: ttyWSTestServer injects a logger into the
+				// Server it builds, so
+				// TestHandleInstanceTTYWS_SubscriberOverflowClosesConnectionWith1013
+				// asserts this line actually fired.
+				if s.logger != nil {
+					s.logger.Printf("tty output subscriber overflow for %s: consumer fell behind, closing with 1013 for cursor resync", id)
+				}
+				_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+				_ = conn.WriteClose(ws.CloseMessage(1013, "subscriber overflow: slow consumer"))
 				return
 			}
 			if err := conn.WriteBinary([]byte(chunk)); err != nil {
