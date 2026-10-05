@@ -311,9 +311,14 @@ func registeredInstanceCount() int {
 // socket down. Asserted on observable behaviour: the consumer's very next
 // receive is the close — not the up-to-64 queued chunks it never took — so
 // the resync signal arrives without first flushing ~64 KB onto the socket
-// that stalled. Discarding the backlog loses nothing: pumpLogs wrote every
-// chunk to the ring buffer BEFORE broadcasting it, so the reconnect's replay
-// from the client's #87 cursor delivers those bytes again.
+// that stalled. That "very next receive" is a property of THIS test, not of
+// the mechanism: here the test goroutine is the channel's sole consumer and
+// does not read during broadcast, so nothing competes with the drain. A real
+// WS handler parked in its select is readied by close() and races the drain
+// for the buffered values, and may legitimately take some of them. Discarding
+// the backlog loses nothing: pumpLogs wrote every chunk to the ring buffer
+// BEFORE broadcasting it, so the reconnect's replay from the client's #87
+// cursor delivers those bytes again.
 func TestBroadcast_OverflowDisconnectsSubscriber(t *testing.T) {
 	const id = "inst-overflow"
 
@@ -338,6 +343,16 @@ func TestBroadcast_OverflowDisconnectsSubscriber(t *testing.T) {
 		broadcast(id, fmt.Sprintf("chunk-%03d", i))
 	}
 
+	// The next receive IS the close here, and the assertion below is what
+	// pins the drain — but read the precondition with the claim: THIS test is
+	// the channel's sole consumer and has not read a single value during the
+	// broadcasts above, so nothing competes with broadcast's post-unlock drain.
+	// That makes "the close is next" a property of this test's construction,
+	// not of the mechanism. A real WS handler parked in its select is readied
+	// by close() and races the drain for the buffered values, and may
+	// legitimately win some of them; see broadcast in driver.go, which states
+	// the guarantee as bounded (no full backlog on a stalled socket) rather
+	// than ordered.
 	select {
 	case got, ok := <-ch:
 		if ok {
@@ -409,13 +424,30 @@ func TestBroadcast_WithinCapacitySubscriberIsNeverDisconnected(t *testing.T) {
 		t.Fatalf("fast subscriber got %q, want after-overflow: the peer's overflow must not disconnect a healthy subscriber", got)
 	}
 
-	// The dropped subscriber's backlog is DISCARDED at the source: the
-	// overflow arm drains the closed channel inside subsMu, so the very
-	// next receive is the close. That is safe — pumpLogs wrote every
-	// dropped chunk to the ring buffer before broadcasting it, so the
-	// client's cursor replay (issue #87) delivers those bytes again — and
-	// it is the point: the WS handler must reach the 1013 teardown without
-	// first flushing ~64 KB onto the socket that stalled.
+	// The dropped subscriber's backlog is DISCARDED at the source — but NOT
+	// inside subsMu, and that placement is the whole point of broadcast's shape.
+	// Under the lock broadcast only deletes the subscriber and closeLocked()s
+	// its channel, collecting it into `closed` when that call is the one that
+	// performed the close; the drain itself runs in broadcast's deferred func,
+	// AFTER subsMu.Unlock(). It must, because `for range` over a channel
+	// terminates only by virtue of that channel already being closed, and subsMu
+	// is process-global: run the drain inside the critical section and one
+	// future edit that drops or reorders the closeLocked() call — while keeping
+	// the `delete`, which looks load-bearing and would survive — parks this
+	// goroutine holding subsMu forever, silently freezing every other instance's
+	// PTY output with no panic and no log. So the backlog is gone by the time
+	// broadcast returns, and the next receive here IS the close — with the
+	// precondition stated plainly, because it is the test's and not the
+	// mechanism's: THIS test is that channel's only consumer and has not read
+	// anything during the broadcast, so nothing competes with the drain. A real
+	// WS handler parked in its select is readied by close() and races the drain
+	// for the buffered values, and may legitimately win some of them (see
+	// broadcast in driver.go: the guarantee is bounded, not ordered). Discarding
+	// is safe because pumpLogs wrote every dropped chunk to the ring buffer
+	// before broadcasting it, so the client's cursor replay (issue #87) delivers
+	// those bytes again — everything STILL in the ring buffer — and it is the
+	// point: the WS handler must reach the 1013 teardown without first flushing
+	// ~64 KB onto the socket that stalled.
 	select {
 	case got, ok := <-slow:
 		if ok {
@@ -466,8 +498,13 @@ func TestSubscribeOutput_CancelAfterOverflowDoesNotPanic(t *testing.T) {
 	for i := 0; i <= capacity; i++ {
 		broadcast(id, fmt.Sprintf("chunk-%03d", i))
 	}
-	// Overflow happened: the overflow arm drained the backlog at the
-	// source, so the channel reports closed on the very next receive.
+	// Overflow happened: the overflow arm drained the backlog at the source —
+	// in broadcast's deferred func, after subsMu was released, never under it —
+	// so the channel reports closed on the very next receive. That ordering is
+	// again this test's, not the mechanism's: this test is the channel's sole
+	// consumer and does not read during the broadcast, so nothing competes with
+	// the drain; a real WS handler readied by close() races it and may
+	// legitimately take some buffered values first.
 	select {
 	case _, ok := <-ch:
 		if ok {

@@ -535,14 +535,29 @@ as authoritative.
   its 64-slot output queue filled (the PTY pump reads in 1024-byte chunks, so ≈64 KB
   of unread output) and the server disconnected the subscriber rather than dropping
   chunks forever. Any queued chunks still in flight are **discarded at the source** —
-  every one of them was already written to the ring buffer before being broadcast, so
-  they come back on the reconnect's replay from the client's `since` cursor; nothing
-  is lost. The close frame itself is BEST-EFFORT (the stalled socket may never drain
-  it; its write carries a bounded 5 s deadline set on this teardown path only — a
+  the drain runs once the subscriber registry's lock is released, never inside it —
+  so that backlog never reaches the socket writer. That **bounds** what this handler
+  can write: the queue is empty by the time `broadcast` returns, so a full backlog
+  (~64 KB) cannot be pushed onto a socket that has already stalled. It does **not**
+  order the teardown: `close()` readies any receiver already parked on the channel,
+  and a readied receiver races the drain loop for the values still buffered, so a
+  few chunks may legitimately still reach the socket before the handler sees `!ok`.
+  Each of those chunks was already written to the ring
+  buffer before being broadcast, so they come back on the reconnect's replay from the
+  client's `since` cursor: nothing is lost **that is still in the ring buffer**. The
+  one exception is an instance whose ring buffer the framework has already closed and
+  dropped (`Manager.dropBuffer` → `RingBuffer.Close`, which nils the data and refuses
+  further writes): a chunk broadcast after that point was never stored, so no replay
+  can bring it back, and a still-connected client would have received it on the wire
+  pre-drain — the same post-swap loss ARCHITECTURE §4.1 already declares intentional
+  for the buffer swap itself. The close frame itself is BEST-EFFORT (the stalled
+  socket may never drain it; its write carries a bounded 5 s deadline set on this
+  teardown path only — a
   write deadline for healthy connections is the separate liveness issue #83), so the
   client must treat **any** abnormal close as "reconnect with your stored `since`
   cursor", not only this one. The shipped UI's `ws.onclose` logs the code and reason
-  and reconnects after 5 s; the server also logs the overflow.
+  and reconnects after 5 s; the server logs the overflow at the disconnect too
+  (`tty output subscriber overflow for <id>…`), which is its only server-side trace.
 - `1013` with a dynamic error reason — handshake/setup failures on this endpoint
   (upgrade, replay-read or subscribe errors); the connection is closed rather than
   served half-configured, and the client retries like any other abnormal close.

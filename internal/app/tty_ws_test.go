@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"log"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -77,17 +78,35 @@ func newTTYHandshakeKind(capBytes int64) *ttyHandshakeKind {
 // tested against the same two closers — an overflow in publish and the
 // handler's deferred cancel — and a bare channel would panic on the
 // second one.
+//
+// drain mirrors production's drain for the same reason the subscriber mirrors
+// the close flag: this double is what feeds the REAL handler's <-outputChan,
+// so if it did not discard the backlog the e2e test would exercise the
+// PRE-drain shape — the handler flushing its whole queue onto the socket
+// before it ever sees the close — and reverting production's drain would
+// leave internal/app green. Same contract as pty.subscriber.drain: it
+// terminates ONLY because the channel is already closed, which is why publish
+// collects under its lock and drains after releasing it.
 type ttySubscriber struct {
 	ch     chan string
 	closed bool
 }
 
-func (s *ttySubscriber) closeLocked() {
+func (s *ttySubscriber) drain() {
+	for range s.ch {
+	}
+}
+
+// closeLocked mirrors pty.subscriber.closeLocked, return value included: it
+// reports whether THIS call performed the close, which is how publish knows
+// exactly which channels it may drain.
+func (s *ttySubscriber) closeLocked() bool {
 	if s.closed {
-		return
+		return false
 	}
 	s.closed = true
 	close(s.ch)
+	return true
 }
 
 func (k *ttyHandshakeKind) Manifest() framework.KindInfo {
@@ -161,24 +180,46 @@ func (k *ttyHandshakeKind) SubscribeOutput(id string) (<-chan string, func(), er
 		k.subsMu.Lock()
 		defer k.subsMu.Unlock()
 		delete(k.subs, sub)
+		// Mirrors production: cancel ignores closeLocked's answer and does
+		// NOT drain. It is the polite unsubscribe — a consumer that is still
+		// reading is entitled to what it queued. Only the overflow path
+		// discards, and it does so outside the lock.
 		sub.closeLocked()
 	}
 	return sub.ch, cancel, nil
 }
 
 // publish stands in for pumpLogs' broadcast side of the PTY output pump,
-// overflow behaviour included (issue #82): a subscriber whose buffer is
-// full is removed and closed rather than having the chunk dropped in an
-// empty `default:` arm.
+// overflow behaviour included (issue #82): a subscriber whose buffer is full
+// is removed, closed and DRAINED rather than having the chunk dropped in an
+// empty `default:` arm, and the drain runs after k.subsMu is released —
+// the same shape as production broadcast (driver.go), for the same reason:
+// `for range` over a channel terminates only because that channel is already
+// closed, so it belongs outside a lock, and production's lock is
+// process-global. The double's lock is per-kind, so the blast radius here is
+// smaller; the fidelity is what matters. This double is what feeds the real
+// handler's <-outputChan, so a double that skipped the drain would leave the
+// e2e test pinned to the pre-drain shape and a revert of production's drain
+// would keep internal/app green.
 func (k *ttyHandshakeKind) publish(chunk string) {
+	// Declared before the lock so the deferred unlock below can drain what
+	// this critical section provably closed.
+	var closed []*ttySubscriber
 	k.subsMu.Lock()
-	defer k.subsMu.Unlock()
+	defer func() {
+		k.subsMu.Unlock()
+		for _, sub := range closed {
+			sub.drain()
+		}
+	}()
 	for sub := range k.subs {
 		select {
 		case sub.ch <- chunk:
 		default:
 			delete(k.subs, sub)
-			sub.closeLocked()
+			if sub.closeLocked() {
+				closed = append(closed, sub)
+			}
 		}
 	}
 }
@@ -214,18 +255,53 @@ func (k *ttyHandshakeKind) waitSubscribers(t *testing.T, d time.Duration) {
 	}
 }
 
+// lockedLogBuffer is an io.Writer that is also readable by the test, with
+// its own mutex. The Server's logger is written from the WS handler
+// goroutine while the test reads it from the test goroutine, so a bare
+// bytes.Buffer would be a data race under -race. Zero flags: no timestamp
+// prefix, so the assertion reads the log line exactly as production wrote
+// it.
+type lockedLogBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedLogBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedLogBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
 // ttyWSTestServer wires handleInstanceTTYWS at its canonical route on a
 // real httptest server (the handler hijacks the connection, so
 // ResponseRecorder cannot serve it) and starts one live instance.
-func ttyWSTestServer(t *testing.T, k *ttyHandshakeKind) (addr string, m *framework.Manager, instID string) {
+//
+// The Server it mounts carries a REAL logger writing into the returned
+// lockedLogBuffer, because the handler's observable behaviour includes a
+// log line (app.go: "tty output subscriber overflow for <id>..."). A nil
+// logger there is legal — app.go nil-guards it — but it made that line dead
+// in every test here, so any claim about the overflow being observable on
+// the server side was unverified. Injecting one is what lets
+// TestHandleInstanceTTYWS_SubscriberOverflowClosesConnectionWith1013 assert
+// it fired. Production never reaches the nil branch: app.New rejects a nil
+// logger ("logger is required").
+func ttyWSTestServer(t *testing.T, k *ttyHandshakeKind) (addr string, m *framework.Manager, instID string, logOut *lockedLogBuffer) {
 	t.Helper()
 	_, m = newLogTestServer(t, k)
+	logOut = &lockedLogBuffer{}
 	mux := http.NewServeMux()
-	mux.HandleFunc("/api/instances/tty/ws", (&Server{instanceMgr: m}).handleInstanceTTYWS)
+	srv := &Server{instanceMgr: m, logger: log.New(logOut, "", 0)}
+	mux.HandleFunc("/api/instances/tty/ws", srv.handleInstanceTTYWS)
 	hs := httptest.NewServer(mux)
 	t.Cleanup(hs.Close)
 	instID = startKindInstance(t, m, "tty-handshake")
-	return strings.TrimPrefix(hs.URL, "http://"), m, instID
+	return strings.TrimPrefix(hs.URL, "http://"), m, instID, logOut
 }
 
 func ttyWSPath(id, query string) string {
@@ -400,7 +476,7 @@ func expectSocketClosed(t *testing.T, c *ws.Conn, d time.Duration) {
 func TestHandleInstanceTTYWS_ReconnectWithSinceDoesNotRedeliverSeenBytes(t *testing.T) {
 	t.Parallel()
 	k := newTTYHandshakeKind(1024)
-	addr, _, instID := ttyWSTestServer(t, k)
+	addr, _, instID, _ := ttyWSTestServer(t, k)
 	k.buf.WriteString("HELLO-TAIL") // 10 bytes
 
 	c1, replay1, sync1 := dialHandshake(t, addr, ttyWSPath(instID, ""))
@@ -436,7 +512,7 @@ func TestHandleInstanceTTYWS_ReconnectWithSinceDoesNotRedeliverSeenBytes(t *test
 func TestHandleInstanceTTYWS_OmittedSinceReplaysTail(t *testing.T) {
 	t.Parallel()
 	k := newTTYHandshakeKind(1024)
-	addr, _, instID := ttyWSTestServer(t, k)
+	addr, _, instID, _ := ttyWSTestServer(t, k)
 	k.buf.WriteString("tail-body") // 9 bytes
 
 	for _, query := range []string{"", "since=", "since=bogus"} {
@@ -462,7 +538,7 @@ func TestHandleInstanceTTYWS_OmittedSinceReplaysTail(t *testing.T) {
 func TestHandleInstanceTTYWS_StaleSinceClampsSilently(t *testing.T) {
 	t.Parallel()
 	k := newTTYHandshakeKind(64)
-	addr, _, instID := ttyWSTestServer(t, k)
+	addr, _, instID, _ := ttyWSTestServer(t, k)
 
 	var full strings.Builder
 	for i := 0; i < 100; i++ {
@@ -498,7 +574,7 @@ func TestHandleInstanceTTYWS_StaleSinceClampsSilently(t *testing.T) {
 func TestHandleInstanceTTYWS_LargeDeltaStreamsEveryByteSinceCursor(t *testing.T) {
 	t.Parallel()
 	k := newTTYHandshakeKind(128 * 1024) // ring cap above the 64KB read cap
-	addr, _, instID := ttyWSTestServer(t, k)
+	addr, _, instID, _ := ttyWSTestServer(t, k)
 
 	var full strings.Builder
 	for i := 0; i < 100100; i++ {
@@ -580,7 +656,7 @@ func TestHandleInstanceTTYWS_ReplayBudgetTruncatesAndPublishesLastWrittenOffset(
 		delta[i] = byte('a' + i%26)
 	}
 	k := newTTYHandshakeKind(int64(len(delta)) + 1024)
-	addr, _, instID := ttyWSTestServer(t, k)
+	addr, _, instID, _ := ttyWSTestServer(t, k)
 	k.buf.Write(delta) // head = budget + 4 chunks
 	head := k.buf.Offset()
 
@@ -647,7 +723,7 @@ func TestHandleInstanceTTYWS_ReplayBudgetTruncatesAndPublishesLastWrittenOffset(
 func TestHandleInstanceTTYWS_EmptyReadAfterConsultPublishesHeadNotZero(t *testing.T) {
 	t.Parallel()
 	k := newTTYHandshakeKind(1024)
-	addr, _, instID := ttyWSTestServer(t, k)
+	addr, _, instID, _ := ttyWSTestServer(t, k)
 	k.buf.WriteString("0123456789ABCDEF") // real head = 16
 
 	// Read 1: "caught up" at the cursor (T1). Read 2 (after the consult saw
@@ -679,7 +755,7 @@ func TestHandleInstanceTTYWS_EmptyReadAfterConsultPublishesHeadNotZero(t *testin
 func TestHandleInstanceTTYWS_SyncFrameCarriesEndOffset(t *testing.T) {
 	t.Parallel()
 	k := newTTYHandshakeKind(1024)
-	addr, _, instID := ttyWSTestServer(t, k)
+	addr, _, instID, _ := ttyWSTestServer(t, k)
 
 	// Empty ring buffer: no binary frame, but still a sync with offset 0.
 	c, replay, syncOffset := dialHandshake(t, addr, ttyWSPath(instID, ""))
@@ -744,7 +820,7 @@ func TestHandleInstanceTTYWS_SyncFrameCarriesEndOffset(t *testing.T) {
 func TestHandleInstanceTTYWS_ReplayReadFailureClosesConnection(t *testing.T) {
 	t.Parallel()
 	k := newTTYHandshakeKind(1024)
-	addr, _, instID := ttyWSTestServer(t, k)
+	addr, _, instID, _ := ttyWSTestServer(t, k)
 	k.buf.WriteString("some-bytes")
 	k.failRead.Store(true)
 
@@ -804,7 +880,7 @@ func TestHandleInstanceTTYWS_ReplayReadFailureClosesConnection(t *testing.T) {
 func TestHandleInstanceTTYWS_NonRunningInstanceDegradesToFirstConnect(t *testing.T) {
 	t.Parallel()
 	k := newTTYHandshakeKind(1024)
-	addr, m, instID := ttyWSTestServer(t, k)
+	addr, m, instID, _ := ttyWSTestServer(t, k)
 	k.buf.WriteString("buffered-before-stop")
 	if err := m.Stop(instID); err != nil {
 		t.Fatalf("Stop: %v", err)
@@ -834,7 +910,7 @@ func TestHandleInstanceTTYWS_NonRunningInstanceDegradesToFirstConnect(t *testing
 func TestHandleInstanceTTYWS_CursorAheadOfHeadFallsBackToTail(t *testing.T) {
 	t.Parallel()
 	k := newTTYHandshakeKind(1024)
-	addr, _, instID := ttyWSTestServer(t, k)
+	addr, _, instID, _ := ttyWSTestServer(t, k)
 	k.buf.WriteString("HELLO-RING") // head = 10
 
 	c, replay, syncOffset := dialHandshake(t, addr, ttyWSPath(instID, "since=999"))
@@ -872,7 +948,7 @@ func TestHandleInstanceTTYWS_CursorAheadOfHeadFallsBackToTail(t *testing.T) {
 func TestHandleInstanceTTYWS_ConsultSeesNewBytesDeliversThem(t *testing.T) {
 	t.Parallel()
 	k := newTTYHandshakeKind(1024)
-	addr, _, instID := ttyWSTestServer(t, k)
+	addr, _, instID, _ := ttyWSTestServer(t, k)
 	k.buf.WriteString("0123456789ABCDEF") // real head = 16
 
 	// since=10. Script: first incremental read says "caught up" (T1),
@@ -923,10 +999,60 @@ func TestHandleInstanceTTYWS_ConsultSeesNewBytesDeliversThem(t *testing.T) {
 // That frame is best-effort in production as well — the stalled socket may
 // never drain it, which is why the teardown write carries a bounded deadline
 // (app.go) — and the client resyncs on any socket close, reasoned or not.
+//
+// Two things this pins beyond the close frame, both added because they were
+// previously unverifiable here:
+//
+//   - THE OVERFLOW IS LOGGED SERVER-SIDE. ttyWSTestServer injects a real
+//     logger, so app.go's `s.logger.Printf` is executed and asserted here
+//     instead of being nil-skipped by every TTY WS test.
+//   - THE BACKLOG DISCARD RUNS IN THE SHAPE IT SHIPS. publish mirrors
+//     production broadcast exactly — delete, closeLocked, then drain after
+//     releasing its lock — so what this test drives is the code that ships,
+//     not a pre-drain approximation of it. That fidelity is the point of the
+//     double; it is NOT what the assertions here measure, see below.
+//
+// What this test deliberately does NOT assert is how many binary frames reach
+// the wire before the close. An earlier revision pinned that count to
+// published-17 — the chunks the handler had taken before the queue filled —
+// on the premise that publish's drain collects all 16 values still buffered
+// when the overflow fires. That premise is false, and the test failed roughly
+// 1 run in 10 under load because of it. The drain runs after closeLocked, on
+// the publishing goroutine, and the handler is not asleep at that instant: an
+// earlier send handed it a value directly and it is runnable, or it is inside
+// a blocked conn.WriteBinary returning to its select. Either way it reaches
+// `chunk, ok := <-outputChan` while the channel is closed but still non-empty,
+// and recv hands it those buffered values with ok == true — one at a time, in
+// a straight race with the drain loop, the channel's own queue deciding each
+// one. (close() likewise readies any receiver parked on the channel.) So the
+// count legitimately lands anywhere in [published-17, published-1]: the low
+// end is the drain taking all 16, the high end is the handler taking all 16
+// and writing them out before it ever sees `!ok`. Measured on this machine,
+// unmodified code, 2000 runs under load: 2 failures at the old exact count
+// (published 18 with 17 frames; published 17 with 1 frame). No bound separates
+// the drained case from the undrained one, so widening it to a tolerance would
+// pin nothing; the wire-level frame count is simply not an observable of the
+// drain at this layer, and it is not asserted here at all.
+//
+// The drain is pinned one layer down, in internal/instance/pty/driver_test.go,
+// where the test goroutine is the channel's ONLY consumer, so there is nobody
+// to race it with and the same slack does not exist:
+//
+//   - TestBroadcast_OverflowDisconnectsSubscriber,
+//   - TestBroadcast_WithinCapacitySubscriberIsNeverDisconnected, and
+//   - TestSubscribeOutput_CancelAfterOverflowDoesNotPanic
+//
+// each fail if `sub.drain()` is deleted from broadcast, and each fail if
+// closeLocked stops reporting that it performed the close (broadcast collects
+// only what its own call closed, so dropping the success report skips the
+// drain entirely). Both deletions were run and observed to fail all three;
+// restoring them returns the package to green. That layer observes the drained
+// channel directly, which is the only place the discard can be pinned without
+// betting on who wins a scheduling race.
 func TestHandleInstanceTTYWS_SubscriberOverflowClosesConnectionWith1013(t *testing.T) {
 	t.Parallel()
 	k := newTTYHandshakeKind(1024)
-	addr, _, instID := ttyWSTestServer(t, k)
+	addr, _, instID, logOut := ttyWSTestServer(t, k)
 
 	c, _, _ := dialHandshake(t, addr, ttyWSPath(instID, ""))
 	k.waitSubscribers(t, 5*time.Second)
@@ -950,10 +1076,25 @@ func TestHandleInstanceTTYWS_SubscriberOverflowClosesConnectionWith1013(t *testi
 		t.Fatalf("subscriber vanished after only %d chunks, want at least 17 (the 16-slot capacity plus the one that did not fit)", published)
 	}
 
-	// Chunks the handler had already drained, and the resize echo its own
-	// handshake queued, may still precede the close. What must never
-	// precede it is a second `sync`: that would hand the client a cursor
-	// past bytes it never received, so its next reconnect would skip them.
+	// Read everything up to the teardown, and pin only what the teardown pins
+	// deterministically. The binary frames are deliberately NOT counted: the
+	// handler is a live consumer of the closed channel and wins a scheduling
+	// race against publish's drain for the buffered backlog, so how many of
+	// them reach the wire says nothing about whether the drain exists (see the
+	// doc comment — measured, not theorised). What is invariant, and what the
+	// client actually depends on, is the shape of the teardown:
+	//
+	//   - the close carries 1013, the code that tells the browser to retry
+	//     rather than treat the session as finished;
+	//   - its reason names the overflow, so the console explains the drop
+	//     instead of showing an unexplained disconnect;
+	//   - no second `sync` precedes it. `sync` is written exactly once, in
+	//     completeHandshake, before SubscribeOutput (app.go), so a second one
+	//     here would advertise a cursor past bytes the client never received
+	//     and its next reconnect would silently skip them. The resize echo the
+	//     handler's own handshake queued is a TEXT frame on a different
+	//     channel, so it may land anywhere in this sequence; it is not a
+	//     cursor and is allowed through.
 	for {
 		op, p := readFrame(t, c, 10*time.Second)
 		if op == wsOpClose {
@@ -971,6 +1112,17 @@ func TestHandleInstanceTTYWS_SubscriberOverflowClosesConnectionWith1013(t *testi
 		if op == wsOpText && strings.Contains(string(p), `"sync"`) {
 			t.Fatalf("a second sync after the teardown claims a cursor past undelivered bytes: %q", p)
 		}
+	}
+
+	// The server-side half of the observability claim: the handler logged the
+	// overflow with the instance id, into the logger ttyWSTestServer injected
+	// for exactly this assertion. Deliberately not an exact-string match —
+	// the id and the word that names the cause are the contract; the close
+	// frame above already pins the wire wording byte-for-byte. The log write
+	// precedes the close-frame write in app.go, so observing the close here
+	// means the line is already in the buffer.
+	if logged := logOut.String(); !strings.Contains(logged, instID) || !strings.Contains(logged, "overflow") {
+		t.Fatalf("handler never logged the overflow for %s; log so far = %q", instID, logged)
 	}
 
 	// Nothing after the close: the handler returned instead of looping on a
