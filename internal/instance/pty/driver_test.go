@@ -88,6 +88,63 @@ func TestDriver_ReadLogs_TailReturnsNewestBytes(t *testing.T) {
 	}
 }
 
+// TestDriver_ReadLogs_SinceReadsIncremental pins the OTHER ReadLogs
+// branch (since >= 0 → RingBuffer.ReadSince) next to the tail pin above,
+// so the hand-written mirror in internal/app/tty_ws_test.go cannot
+// silently drift from the real driver (issue #87 review): an incremental
+// read returns [since, head) with the cursor advanced to head, a cursor
+// already at head returns nothing with it unchanged, and a stale cursor
+// silently clamps to the oldest live byte without erroring.
+func TestDriver_ReadLogs_SinceReadsIncremental(t *testing.T) {
+	var sb strings.Builder
+	for i := 0; i < 100; i++ {
+		fmt.Fprintf(&sb, "line-%03d\n", i)
+	}
+	all := sb.String() // 900 bytes
+
+	d := Driver{}
+
+	buf := framework.NewRingBuffer(4096)
+	buf.WriteString(all)
+	h := framework.NewHandle("pty", &Handle{buf: buf})
+
+	body, next, err := d.ReadLogs(h, 300, 4096)
+	if err != nil {
+		t.Fatalf("ReadLogs: %v", err)
+	}
+	if body != all[300:] {
+		t.Fatalf("incremental body = %d bytes, want all[300:] (%d bytes)", len(body), len(all)-300)
+	}
+	if next != int64(len(all)) {
+		t.Fatalf("cursor = %d, want head %d", next, len(all))
+	}
+
+	// At head: nothing new, cursor unchanged (the poll-loop contract).
+	body, next, err = d.ReadLogs(h, int64(len(all)), 4096)
+	if err != nil {
+		t.Fatalf("ReadLogs at head: %v", err)
+	}
+	if body != "" || next != int64(len(all)) {
+		t.Fatalf("read at head = (%q, %d), want (\"\", %d)", body, next, len(all))
+	}
+
+	// Stale: a 64-byte ring holding the last 64 of the 900 bytes has
+	// its oldest live byte at 836; since=10 clamps there, no error.
+	small := framework.NewRingBuffer(64)
+	small.WriteString(all)
+	h2 := framework.NewHandle("pty", &Handle{buf: small})
+	body, next, err = d.ReadLogs(h2, 10, 64*1024)
+	if err != nil {
+		t.Fatalf("ReadLogs stale since: %v", err)
+	}
+	if body != all[836:] {
+		t.Fatalf("stale read = %d bytes, want the live bytes from 836 (%d bytes)", len(body), len(all)-836)
+	}
+	if next != int64(len(all)) {
+		t.Fatalf("cursor after clamp = %d, want head %d", next, len(all))
+	}
+}
+
 // TestSubscribeOutput_ScopedPerInstance guards against the
 // pre-kind-refactor regression where all PTY instances shared a single
 // subscriber set (a WS subscriber to instance A would receive

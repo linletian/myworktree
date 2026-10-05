@@ -638,7 +638,23 @@ func TestIndexHTMLCoversPerSessionConnectionManagement(t *testing.T) {
 // TestLogCursorBootstrapNeverRequestsOldestBytes pins the client half of
 // the issue #81 tail contract. The server treats an omitted `since` as a
 // tail request and `since=0` as "read from the oldest live byte", so the
-// browser must never emit `since=0`.
+// browser must never emit `since=0`: startSSE builds the parameter from
+// `sseCursor` and appends it only when that value is a real positive byte
+// cursor, and a cursor arriving over the stream is accepted under one rule.
+//
+// Since issue #87 the same suppression guards a bigger cursor: `sseCursor`
+// is the greater of `logCursor` and `ttyOffset`, because the two siblings
+// count the same ring-buffer bytes and the poll-driven promotion advances
+// `ttyOffset` with `connectTTY` alone — reading `logCursor` there would
+// omit `since` and replay the server's whole tail on top of what the
+// WebSocket already painted.
+//
+// It also pins the invalidation half of that contract, which is the same
+// rule seen from the other side: a screen that no longer holds bytes must
+// not leave a cursor claiming it does. So `resetTerminalForSwitch`
+// invalidates BOTH cursors itself, `loadLog` pins its cursors only where
+// the bytes actually land, and `ws.onmessage` moves the session cursor only
+// for the socket that currently owns the session.
 //
 // This covers index.html only — the legacy no-renderer fallback. The pty
 // renderer's own bootstrap is pinned by TestPtyRendererResetsCursorAfter-
@@ -648,14 +664,28 @@ func TestLogCursorBootstrapNeverRequestsOldestBytes(t *testing.T) {
 	bodyText := fetchIndexHTML(t)
 	checks := []string{
 		// The shared SSE connect helper omits `since` unless a real byte
-		// cursor exists; this is what protects every kind.
-		"if (session.logCursor > 0) url += `&since=${session.logCursor}`;",
+		// cursor exists; this is what protects every kind. Issue #87 made
+		// the cursor the GREATER of the two siblings — logCursor and
+		// ttyOffset count the same ring-buffer bytes, and the poll-driven
+		// promotion advances ttyOffset through connectTTY alone, so reading
+		// logCursor alone would omit `since` here and replay the whole tail
+		// over what the WebSocket already painted. The #81 suppression rule
+		// itself is unchanged: only a real positive cursor becomes `since`,
+		// and each sibling degrades through `??` to the -1 sentinel so an
+		// absent one cannot turn the max into NaN and swallow the cursor.
+		"const sseCursor = Math.max(session.logCursor ?? -1, session.ttyOffset ?? -1);",
+		"if (sseCursor > 0) url += `&since=${sseCursor}`;",
 		// loadLog must not send an explicit offset, and must not fabricate
 		// one when the header is missing.
 		"const res = await fetch(`/api/instances/log?id=${session.id}`",
 		"if (Number.isFinite(next) && next >= 0) {",
-		// Same acceptance rule for cursor values arriving over the stream.
-		"if (Number.isFinite(msg.next) && msg.next >= 0) session.logCursor = msg.next;",
+		// Same acceptance rule for cursor values arriving over the stream,
+		// and one rule for BOTH cursors (issue #87): every byte SSE paints
+		// is a byte this screen has seen, so the WebSocket cursor advances
+		// with it and a later reconnect never re-requests rendered bytes.
+		"if (Number.isFinite(msg.next) && msg.next >= 0) {",
+		"session.logCursor = msg.next;",
+		"session.ttyOffset = msg.next;",
 		// Legacy no-renderer fallback bootstraps "unknown" as -1.
 		"logCursor: -1,",
 	}
@@ -667,6 +697,9 @@ func TestLogCursorBootstrapNeverRequestsOldestBytes(t *testing.T) {
 
 	if strings.Contains(bodyText, "/api/instances/log/stream?id=${encodeURIComponent(session.id)}&since=${session.logCursor}") {
 		t.Fatalf("GET / must not build an unconditional since= URL from session.logCursor")
+	}
+	if strings.Contains(bodyText, "/api/instances/log/stream?id=${encodeURIComponent(session.id)}&since=${session.ttyOffset}") {
+		t.Fatalf("GET / must not build an unconditional since= URL from session.ttyOffset")
 	}
 	if strings.Contains(bodyText, "/api/instances/log?id=${session.id}&since=0") {
 		t.Fatalf("GET / must not request since=0, which the server reads as the oldest live byte")
@@ -686,6 +719,45 @@ func TestLogCursorBootstrapNeverRequestsOldestBytes(t *testing.T) {
 	}
 	if cursorAt < resetAt {
 		t.Fatal("GET / should reset session.logCursor after resetTerminalForSwitch, not before")
+	}
+
+	// Source contract for the issue #87 review round, pinned the way this
+	// file already scopes a pin to a block: a contiguous literal whose exact
+	// indentation is part of the check, so the statements must sit at the
+	// depth they belong to. Full-file offsets are deliberately not used.
+	for _, check := range []string{
+		// resetTerminalForSwitch owns the screen, so it invalidates BOTH
+		// cursors itself, inside its own screen-content guard: it is
+		// exported on window for other kinds to call, and a caller that
+		// cleared the screen through it while keeping a stale ttyOffset
+		// would make the next connectTTY send since=<oldHead> and paint
+		// only [oldHead, head) onto a blank terminal. The guard is the
+		// anchor — with no term nothing was cleared, so nothing is
+		// invalidated. The literal's uniqueness comes from this pair's own
+		// shape: resetTerminalForSwitch's two statements sit at 12-space
+		// indent and list ttyOffset FIRST, while refreshCurrentInstance's
+		// defensive pair sits at 24 spaces and lists logCursor first
+		// (index.html) — indent and order together are the discriminator,
+		// not the closing brace. The callers keep their own resets as
+		// depth.
+		"function resetTerminalForSwitch(session) {\n            if (!session || !session.term) return;",
+		"session.ttyOffset = -1;\n            session.logCursor = -1;\n        }",
+		// loadLog pins cursors only where the bytes actually land: inside
+		// its if (session.term) block, after the paint, and under the same
+		// one-rule acceptance as before. Pinning a cursor for bytes no
+		// screen holds would contradict the screen-content rule the whole
+		// path is built on.
+		"if (Number.isFinite(next) && next >= 0) {\n                        session.logCursor = next;\n                        session.ttyOffset = next;\n                    }",
+		// ws.onmessage mutates the session-wide cursor, so it runs only for
+		// the socket that currently owns the session: a frame dispatched off
+		// a replaced socket must never move the live socket's cursor and
+		// claim bytes the live transport never painted. Unique in the file,
+		// so the Contains check is this guard and not a look-alike.
+		"if (session.ttySocket !== ws) return;",
+	} {
+		if !strings.Contains(bodyText, check) {
+			t.Fatalf("GET / should pin the cursor-invalidation source contract: missing %q", check)
+		}
 	}
 }
 

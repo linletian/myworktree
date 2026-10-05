@@ -2866,8 +2866,11 @@
                         focusTerminalIfPossible();
                     } else if (hasTerminalTransportInFlight(session, { ignoreQueuedRetry: true })) {
                         // A poll-driven promotion or an earlier activation
-                        // already owns this bring-up; racing it would replay
-                        // the tail twice (#87). Same status treatment as
+                        // already owns this bring-up; racing it would paint
+                        // the same post-cursor replay window twice (#87 —
+                        // the handshake replays only the delta since the
+                        // client's cursor now, but two owners still overlap).
+                        // Same status treatment as
                         // kinds/pty.js activate(): say something rather than
                         // look inert, but never over a transport that is
                         // already reporting itself. A queued retry does not
@@ -2880,8 +2883,9 @@
                         // Cancel the queued retry here rather than leaving it
                         // to disconnectTTY: connectTTY only runs once loadLog
                         // settles, so a retry firing in between would open one
-                        // socket and replay the tail, and the connect that
-                        // follows would open a second and replay it again.
+                        // socket and replay from its cursor, and the connect
+                        // that follows would open a second socket replaying the
+                        // same window again.
                         if (session.ttyReconnectTimer) {
                             clearTimeout(session.ttyReconnectTimer);
                             session.ttyReconnectTimer = null;
@@ -2898,6 +2902,16 @@
                         // agreement. Residual trade-off: if X-Log-Offset is
                         // stripped, the tail renders twice (issue #86).
                         session.logCursor = -1;
+                        // Same rule for the WebSocket cursor (issue #87):
+                        // ttyOffset describes bytes rendered on this screen,
+                        // and the screen was just cleared. Keeping it would
+                        // make connectTTY send since=<oldOffset> and paint
+                        // only the delta onto an empty terminal.
+                        // resetTerminalForSwitch above performs this for BOTH
+                        // cursors itself; this pair stays as defensive depth so
+                        // the invariant does not depend on the helper's
+                        // internals, and it keeps matching kinds/pty.js.
+                        session.ttyOffset = -1;
                         loadLog(session).finally(() => {
                             connectTTY(session);
                             focusTerminalIfPossible();
@@ -3352,6 +3366,14 @@
                 // a renderer (all four today) builds its own session in
                 // kinds/*.js — see the same convention in kinds/pty.js.
                 logCursor: -1,
+                // WebSocket-path byte cursor, the sibling of logCursor. The
+                // WS handshake replays whatever the server still holds, so
+                // the client must track how many ring-buffer bytes it has
+                // already rendered and send it back as `since` on reconnect
+                // (issue #87). -1 is the same "unknown" sentinel: connectTTY
+                // omits `since` for a non-positive cursor, so the server
+                // replays the tail. Keep in step with kinds/pty.js.
+                ttyOffset: -1,
                 ttySocket: null,
                 ttyReconnectTimer: null,
                 // Status seen by the previous reconcileTerminalSessions() tick.
@@ -3572,8 +3594,10 @@
         // True when something other than a fresh caller already owns this
         // session's bring-up: a poll-driven promotion, an activation still
         // inside its `await loadLog()`, an open or closing socket, a live SSE
-        // stream, or a queued reconnect. Two owners means two connects, and the
-        // second one replays the ring-buffer tail a second time (issue #87).
+        // stream, or a queued reconnect. Two owners means two connects, and
+        // the second one replays the same post-cursor window the first is
+        // already painting (issue #87 made the handshake incremental — the
+        // overlap is the delta since the cursor, not the whole tail).
         //
         // The guard is load-bearing precisely because the cheaper
         // hasLiveTTYConnection() is false while a socket is still CONNECTING:
@@ -3609,8 +3633,9 @@
         // which after the guard above means it has nothing in flight either.
         //
         // Deliberately no loadLog() here: the WS handshake replays the ring
-        // buffer tail itself, so replaying first would duplicate the screen
-        // (tracked as issue #87).
+        // buffer itself — the tail on a first connect, and only the bytes
+        // after the client's `since` cursor once it holds one (issue #87) —
+        // so replaying first would duplicate the screen.
         function ensureTerminalLiveTransport(session) {
             if (!session || !session.term) return false;
             if (state.activeInst !== session.id) return false;
@@ -3690,6 +3715,29 @@
             session.term.reset();
             session.term.clear();
             session.term.write('\x1b[2J\x1b[3J\x1b[H');
+            // The screen is gone by the time this returns, so BOTH cursors
+            // are invalidated HERE instead of being left to the callers:
+            // this is exported on window for other kinds to call, and a
+            // caller that cleared the screen through it while keeping a
+            // stale ttyOffset would make the next connectTTY send
+            // since=<oldHead> and paint only [oldHead, head) onto a blank
+            // terminal (issue #87). The screen-content guard above is what
+            // makes this correct — with no term nothing was cleared, so
+            // nothing is invalidated.
+            //
+            // -1 is the "unknown" sentinel. The exact value is not
+            // load-bearing: both transports omit since for any non-positive
+            // cursor and fall back to the server's tail default, while
+            // since=0 would replay the OLDEST live bytes — the #81 symptom.
+            // It must match the sentinel in the session factories here and in
+            // kinds/pty.js so the two cannot drift apart. Residual trade-off:
+            // if X-Log-Offset is stripped, the tail renders twice (#86).
+            //
+            // The current callers keep their own resets immediately after
+            // this one — defensive depth, and the kinds/pty.js pair must keep
+            // matching index.html.
+            session.ttyOffset = -1;
+            session.logCursor = -1;
         }
 
         function focusTerminalIfPossible() {
@@ -3800,7 +3848,10 @@
             if (typeof data !== "string" || data.length === 0 || data[0] !== "{") return null;
             try {
                 const msg = JSON.parse(data);
-                if (!msg || (msg.type !== "ready" && msg.type !== "resize")) return null;
+                // "sync" is the handshake offset echo (issue #87): anything
+                // not whitelisted here falls through ws.onmessage and gets
+                // painted into the terminal as literal text.
+                if (!msg || (msg.type !== "ready" && msg.type !== "resize" && msg.type !== "sync")) return null;
                 return msg;
             } catch (e) {
                 return null;
@@ -3837,12 +3888,6 @@
                 let text = await res.text();
                 const rawOffset = res.headers.get("X-Log-Offset");
                 const next = rawOffset === null ? NaN : parseInt(rawOffset, 10);
-                // Only advance the cursor from a valid header. Falling back to 0 would
-                // make startSSE connect with since=0 and replay the oldest 64KB on top
-                // of the tail just written; the previous cursor is strictly safer.
-                if (Number.isFinite(next) && next >= 0) {
-                    session.logCursor = next;
-                }
                 if (session.term) {
                     const inst = state.instances.find(i => i.id === session.id);
                     // Only a terminal status means "this process is gone".
@@ -3856,6 +3901,30 @@
                     writeSanitizedTerminalOutput(session, text);
                     if (inst && isInstanceTerminalStatus(inst.status)) {
                         session.term.write("\r\n\r\n\x1b[41;37m[Process Stopped]\x1b[0m\r\n");
+                    }
+                    // Pin the cursors only for bytes this terminal actually
+                    // holds, and only after the paint: ttyOffset and logCursor
+                    // mean "rendered on this screen", so a session without a
+                    // term keeps whatever it had — pinning a cursor for bytes
+                    // no screen holds would contradict the screen-content rule
+                    // this whole path is built on (issue #87 review).
+                    //
+                    // Only advance from a valid header. Falling back to 0 would
+                    // make startSSE connect with since=0 and replay the oldest
+                    // 64KB on top of the tail just written; the previous cursor
+                    // is strictly safer (issue #81).
+                    //
+                    // One ring-buffer end offset, two consumers: the screen now
+                    // holds every byte up to next, so the WS cursor must equal
+                    // logCursor here. The screen-clear sites put the sentinel
+                    // back — resetTerminalForSwitch invalidates BOTH cursors
+                    // itself at the clear, and refreshCurrentInstance resets
+                    // them beside its own term.clear() — so a failed loadLog
+                    // here can only leave the sentinel behind, never a stale
+                    // value claiming bytes that are no longer on screen.
+                    if (Number.isFinite(next) && next >= 0) {
+                        session.logCursor = next;
+                        session.ttyOffset = next;
                     }
                 }
                 session.lastLogLoadFailures = 0;
@@ -3965,12 +4034,38 @@
                 const proto = location.protocol === "https:" ? "wss" : "ws";
                 let url = `${proto}://${location.host}/api/instances/tty/ws?id=${encodeURIComponent(id)}`;
                 if (token) url += `&token=${encodeURIComponent(token)}`;
+                // Same acceptance rule as startSSE's `since`: only send a
+                // real byte cursor. -1 (unknown) must omit `since` so the
+                // server replays its tail; since=0 would replay the OLDEST
+                // live bytes (the #81 symptom). A positive cursor means the
+                // screen already holds everything up to it, so the server
+                // replays only newer bytes (issue #87).
+                if (session.ttyOffset > 0) url += `&since=${session.ttyOffset}`;
 
                 resetTTYOutputDecoder(session);
                 const ws = new WebSocket(url);
                 ws.binaryType = "arraybuffer";
 
                 let isFirstData = true;
+                // Per-connection latch (issue #87 review): true once this
+                // connection's `sync` frame has been handled. Binary frames
+                // before the latch belong to the handshake replay, and that
+                // replay does not necessarily start where we asked for it:
+                // RingBuffer.ReadSince silently clamps a stale cursor to the
+                // oldest live byte, so advancing the cursor per frame would
+                // add painted bytes to a cursor that no longer points at the
+                // first of them and could land PAST bytes the client never
+                // received — strictly worse than duplicating them. The sync
+                // frame is the only frame carrying an authoritative ABSOLUTE
+                // offset, so it is the one that moves the cursor, publishing
+                // the end offset of the whole replay in a single step. Blast
+                // radius if the socket dies in the replay→sync gap: the cursor
+                // never advanced, so the reconnect re-requests from where the
+                // client really was and re-paints up to
+                // ttyHandshakeReplayBudget (8MB) now that the replay streams,
+                // instead of a single 64KB frame — bounded duplication that
+                // self-corrects on that reconnect.
+                let handshakeSynced = false;
                 let handshakeTimeout = null;
                 let connectTimeout = setTimeout(() => {
                     if (session.ttySocket === ws && ws.readyState !== WebSocket.OPEN) {
@@ -3995,6 +4090,27 @@
                 };
 
                 ws.onmessage = (ev) => {
+                    // Socket-identity guard (issue #87 review): this handler
+                    // mutates the session-wide cursor, so it runs only for the
+                    // socket that currently owns the session. A stale socket
+                    // dispatches nothing in practice — connectTTY calls
+                    // disconnectTTY first, and disconnectTTY nulls this
+                    // socket's onmessage before it closes it, so a queued frame
+                    // cannot reach here after a reconnect; the connect-timeout
+                    // path only fires while the socket is not OPEN and the
+                    // handshake-timeout path requires that no "ready" frame
+                    // arrived, so neither can deliver a frame either. The
+                    // guard makes that invariant explicit and cheap instead of
+                    // emergent: a frame that somehow does get dispatched off a
+                    // replaced socket must never move the cursor of the live
+                    // socket, which would claim bytes the live transport never
+                    // painted. session.ttySocket = ws is assigned synchronously
+                    // at the end of connectTTY, before any message can be
+                    // dispatched, so no legitimate frame is dropped here. The
+                    // deferred setTimeout callbacks below keep their own
+                    // ws === session.ttySocket checks: identity can change
+                    // between scheduling and firing.
+                    if (session.ttySocket !== ws) return;
                     const controlMsg = parseTTYControlMessage(ev.data);
                     if (controlMsg && controlMsg.type === 'ready') {
                         session.ttyState = 'READY';
@@ -4020,11 +4136,33 @@
                         applyTTYSize(session, controlMsg.cols, controlMsg.rows);
                         return;
                     }
+                    if (controlMsg && controlMsg.type === 'sync') {
+                        // Handshake offset echo (issue #87): the server tells
+                        // us the end offset of the replay it just sent, so a
+                        // later reconnect can resume incrementally with it.
+                        if (Number.isFinite(controlMsg.offset) && controlMsg.offset >= 0) session.ttyOffset = controlMsg.offset;
+                        handshakeSynced = true;
+                        return;
+                    }
 
                     if (ev.data instanceof ArrayBuffer) {
                         const u8 = new Uint8Array(ev.data);
                         if (u8.length && session.term) {
                             writeSanitizedTerminalOutput(session, decodeTTYOutputChunk(session, u8));
+                            // Every binary frame is ring-buffer output: the
+                            // server never writes a diagnostic as a binary
+                            // frame — handshake failures close the connection
+                            // instead (issue #87). That is what makes
+                            // advancing the cursor by the wire length correct
+                            // AFTER the latch: redaction happens once in
+                            // pumpLogs, before both the ring write and the
+                            // broadcast, so wire bytes and buffered bytes are
+                            // the same bytes. BEFORE the latch the frames are
+                            // still replay bytes and must not touch the
+                            // cursor: the sync frame that follows on the same
+                            // TCP stream publishes the authoritative end
+                            // offset of the entire replay in one step.
+                            if (handshakeSynced) session.ttyOffset += u8.length;
                         }
                     } else if (session.term) {
                         writeSanitizedTerminalOutput(session, ev.data);
@@ -4045,7 +4183,27 @@
                     }
                 };
 
-                ws.onclose = () => {
+                ws.onclose = (ev) => {
+                    // Surface abnormal closes (issue #87 review nit): the
+                    // server's 1013 reasons ("instance not running", replay
+                    // read failures) were previously invisible.
+                    if (ev && ev.code && ev.code !== 1000) {
+                        console.warn("tty ws closed:", ev.code, ev.reason || "");
+                    }
+                    // Deliberately NOT resetting session.ttyOffset here (issue
+                    // #87): the terminal screen survives the drop, so the byte
+                    // cursor for what has already been rendered must survive
+                    // too. The reconnect below then sends it as `since` and
+                    // resumes incrementally instead of re-appending the whole
+                    // tail under the live screen. The cursor is invalidated
+                    // only where the screen genuinely is: a successful loadLog
+                    // pins ttyOffset to logCursor (the new screen end), and
+                    // the screen-clear sites reset it to the -1 sentinel —
+                    // refreshCurrentInstance beside its own term.clear(), and
+                    // resetTerminalForSwitch itself, inside the clear it
+                    // performs, so a kind that clears the screen through the
+                    // exported helper cannot survive with a cursor claiming
+                    // bytes a blank screen no longer holds.
                     resetTTYOutputDecoder(session);
                     if (connectTimeout) { clearTimeout(connectTimeout); connectTimeout = null; }
                     if (handshakeTimeout) { clearTimeout(handshakeTimeout); handshakeTimeout = null; }
@@ -4082,14 +4240,44 @@
             // cursor (-1, e.g. loadLog failed) must fall through to the
             // server's default tail semantics; since=0 would replay the
             // oldest 64KB of the ring buffer (issue #81).
-            if (session.logCursor > 0) url += `&since=${session.logCursor}`;
+            //
+            // The cursor is the GREATER of the two siblings (issue #87):
+            // logCursor and ttyOffset both count ring-buffer bytes painted
+            // on this screen, and ensureTerminalLiveTransport promotes with
+            // connectTTY alone — no loadLog — so on that promote path
+            // logCursor stays -1 while ttyOffset advances. Reading logCursor
+            // alone would then omit `since` and the server would replay its
+            // whole tail on top of what the WS already painted.
+            //
+            // A sibling that is ABSENT must not poison that max, so each one
+            // degrades through ?? down to -1, the "unknown" sentinel. Read
+            // raw, one known sibling next to one absent one makes the max
+            // NaN, the guard below then drops it, and the server replays its
+            // whole tail over a screen that already holds bytes — the exact
+            // duplicate paint this issue exists to remove. Unreachable while
+            // both session factories initialise both cursors, which is
+            // precisely why the node test pins it anyway. The #81 rule is
+            // untouched: > 0 still means only a real positive cursor becomes
+            // since.
+            const sseCursor = Math.max(session.logCursor ?? -1, session.ttyOffset ?? -1);
+            if (sseCursor > 0) url += `&since=${sseCursor}`;
             if (token) url += `&token=${encodeURIComponent(token)}`;
             const es = new EventSource(url);
             const onLog = (ev) => {
                 try {
                     const msg = JSON.parse(ev.data);
                     if (msg.chunk && session.term) writeSanitizedTerminalOutput(session, msg.chunk);
-                    if (Number.isFinite(msg.next) && msg.next >= 0) session.logCursor = msg.next;
+                    // One ring-buffer end offset, two consumers (issue #87):
+                    // SSE and WS advance over the same ring-buffer offsets,
+                    // and every byte SSE paints is a byte the screen has
+                    // seen, so both cursors move together under one
+                    // acceptance rule. A later WS reconnect must send this
+                    // cursor, not an older one, or it would replay content
+                    // already on screen.
+                    if (Number.isFinite(msg.next) && msg.next >= 0) {
+                        session.logCursor = msg.next;
+                        session.ttyOffset = msg.next;
+                    }
                 } catch (e) { }
             };
             es.addEventListener("log", onLog);
@@ -4333,6 +4521,18 @@
                 session.term.reset();
                 session.term.clear();
             }
+            // A cleared screen knows nothing: invalidate BOTH cursors to
+            // the unknown sentinel (issue #87). If loadLog below then
+            // FAILS (or its X-Log-Offset header is stripped), stale
+            // pre-refresh cursors would make connectTTY send
+            // since=<oldHead> and paint only [oldHead, head) onto the
+            // blank screen — strictly worse than the pre-#87 full-tail
+            // replay this button used to get. The sentinel makes the
+            // reconnect fall back to the server's tail default; a
+            // successful loadLog re-pins both cursors to the new screen
+            // end immediately afterwards.
+            session.ttyOffset = -1;
+            session.logCursor = -1;
             
             // Reload logs
             await loadLog(session);

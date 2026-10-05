@@ -155,6 +155,18 @@ class PtyRenderer {
         // writes the tail without establishing a cursor and the stream then
         // replays it, so the tail renders twice (issue #86).
         s.logCursor = -1;
+        // Same rule for the WebSocket cursor (issue #87): ttyOffset counts
+        // the ring-buffer bytes rendered on this screen by the TTY
+        // transport, and the screen was just cleared. Keeping it would make
+        // connectTTY send since=<oldOffset> and paint only the delta onto
+        // an empty terminal. Must match the reset in index.html.
+        //
+        // window.resetTerminalForSwitch above now performs this reset for
+        // BOTH cursors itself, so these two lines are defensive depth: the
+        // invariant must not depend on the helper's internals, and the
+        // harness stubs that helper out (see testdata) precisely to keep
+        // this pair load-bearing.
+        s.ttyOffset = -1;
         if (window.loadLog) {
             window.loadLog(s).finally(() => {
                 if (window.connectTTY) window.connectTTY(s);
@@ -210,6 +222,13 @@ class PtyRenderer {
             // Unknown until loadLog establishes one from X-Log-Offset;
             // -1 is the same "unknown" sentinel index.html uses.
             logCursor: -1,
+            // WebSocket-path byte cursor (issue #87): tracks the ring-buffer
+            // bytes rendered over the live TTY transport so a reconnect can
+            // send it back as `since` and resume incrementally instead of
+            // re-appending the whole tail. -1 sentinel and semantics match
+            // ensureTerminalSession in index.html — keep the two session
+            // factories in agreement.
+            ttyOffset: -1,
             // Status observed by the previous reconcileTerminalSessions()
             // tick; null until the first observation (issue #80).
             lastKnownStatus: null,

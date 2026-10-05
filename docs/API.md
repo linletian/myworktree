@@ -443,16 +443,70 @@ Body:
 ```
 
 ### Web TTY stream (WebSocket)
-`GET /api/instances/tty/ws?id=<instanceId>`
+`GET /api/instances/tty/ws?id=<instanceId>[&since=<offset>]`
 
 Bi-directional stream for terminal output/input with PTY support.
+
+`since` is an optional byte cursor (issue #87):
+- **omitted / not a valid integer** → the server replays its newest 64KB
+  tail, as before (this is the first-connect path).
+- **`since=0`** → accepted, but it is NOT a "tail" mode. On
+  `GET /api/instances/log` a single read starting at 0 starts at the
+  OLDEST live byte (the #81 symptom); on this WS endpoint the catch-up
+  loop reads forward from 0 and streams every chunk it reads straight to
+  the socket, so the effect there is a replay of everything still live in
+  the ring — up to the 8 MB handshake budget — with `sync` at the end of
+  the last chunk actually written. The shipped UI never sends `0`;
+  it omits `since` entirely when its cursor is unknown (the `-1` sentinel).
+- **`since>0`** → the server replays the bytes at or after that offset, in
+  full, so a reconnecting client that still holds its rendered screen does
+  not receive the tail a second time.
+
+Each replay read is capped at 64KB. When the delta since `since` exceeds
+64KB, the server loops reads until it is caught up and **streams each chunk
+to the socket as it reads it** instead of retaining one, so the whole delta
+is delivered and peak memory stays ~64KB (one chunk) regardless of the ring
+cap. The `sync` offset is the end of the **last chunk actually written** to
+this socket — never an offset over bytes the client did not receive **and can
+still receive**, because a client cursor only moves forward and would never ask
+for them again. The two deliberate exceptions both publish the ring's real
+head, and neither re-delivers anything a healthy client still had coming: a
+path that writes nothing has no last chunk to name, and a ring whose process
+has exited and whose buffer has been dropped publishes head precisely because
+the bytes behind it are permanently undeliverable — publishing 0 there would
+instead throw the client into a full tail replay. One handshake replays at
+most 8 MB
+(`ttyHandshakeReplayBudget` in `internal/app/app.go`), counted in bytes
+already written and checked before the next read: once the budget is spent
+the loop stops, and the undelivered remainder sits **ahead** of the published
+cursor, so the next reconnect re-requests exactly those bytes — truncation is
+**deferred to the next reconnect, never a skip**. The deferral has a cost:
+ring caps are 16–256 MB, so a badly lagged client can need up to 32 reconnects
+to converge, and until it reconnects the deferred bytes stay off a screen whose
+socket still looks healthy (the replay lands in xterm.js `scrollback: 10000`,
+so it is the older replayed content that scrolls out, never the live output
+that follows it). There is deliberately no write deadline on this path: the
+handshake is not yet subscribed to the output stream, so a blocked write does
+not stall the pump, and a wall-clock deadline would livelock a slow-but-
+progressing consumer where a byte budget simply resumes next reconnect. Output produced between the
+last chunk written and the live subscription sits behind
+the published cursor and is re-requested by the next reconnect (self-healing
+contiguity, not absolute coverage). A `since` older than the oldest byte
+still in the ring buffer is silently clamped to the oldest live byte; a
+`since` at or beyond head replays nothing (at head) or falls back to the
+tail (beyond head, defensive) — the client's own number is never echoed back
+as authoritative.
 
 **Handshake Protocol:**
 1. Server sends `{"type":"ready"}` immediately after connection
 2. Client should wait for this message before sending resize
 3. Client sends `{"type":"resize","cols":80,"rows":24}` to start data flow
-4. Server sends initial log + real-time output as binary frames
-5. Client receives first data and triggers second resize (50ms delay) for TUI redraw
+4. Server sends initial log (the tail, or only the bytes after `since`) as binary frames
+5. Server sends `{"type":"sync","offset":<int64>}` (text frame) — the end
+   offset of that replay; the client stores it and sends it back as `since`
+   on its next reconnect
+6. Real-time output continues as binary frames
+7. Client receives first data and triggers second resize (50ms delay) for TUI redraw
 
 **Frontend session model:**
 - The current UI keeps transport state per running instance rather than sharing a single terminal across tabs.
@@ -468,6 +522,7 @@ Bi-directional stream for terminal output/input with PTY support.
 *Server → Client:*
 - Ready: `{"type":"ready"}` (text frame)
 - Output: binary frames (terminal output chunks)
+- Sync: `{"type":"sync","offset":<int64>}` (text frame, sent after the handshake replay — even when that replay was empty. The client latches it per connection: replay frames received BEFORE the sync never touch the cursor — the sync publishes the authoritative end of the whole replay in one step; binary frames received AFTER it advance the cursor by their wire byte count — every one of them is ring-buffer output, as the server closes the connection rather than writing diagnostics as binary)
 
 **Timeout & Fallback:**
 - Client should implement handshake timeout (recommended: 5s)
@@ -477,13 +532,15 @@ Bi-directional stream for terminal output/input with PTY support.
 ```
 Client                    Server
    |                         |
-   |--- Connect ------------>|
+   |--- Connect ----------->|  (optionally ?since=<cursor> on reconnect)
    |<-- {"type":"ready"} ----|  Handshake
    |                         |
    |-- {"type":"resize", --->|  Notify terminal size
    |    "cols":80,"rows":24} |
    |                         |
-   |<-- binary output -------|  Initial log + realtime
+   |<-- binary output -------|  Replay: tail, or bytes after `since`
+   |<-- {"type":"sync", ----|  End offset of that replay
+   |    "offset":4096}      |
    |                         |
    |--- (50ms delay) -------|
    |                         |

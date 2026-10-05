@@ -47,6 +47,44 @@ function sliceBlock(src, header) {
   throw new Error(`unbalanced braces while slicing ${JSON.stringify(header)}`);
 }
 
+// Quote/comment-aware variant of sliceBlock. parseTTYControlMessage holds
+// the literal string "{" and a literal "}" comparison, which the naive brace
+// counter of sliceBlock cannot balance; this variant skips over string
+// literals, line comments and block comments while counting. It is used only
+// by the issue #87 WS-cursor section so existing slices are untouched.
+function sliceBlockQuoted(src, header) {
+  const start = src.indexOf(header);
+  assert.notEqual(start, -1, `source no longer contains ${JSON.stringify(header)}`);
+  let depth = 0;
+  let quote = null;
+  for (let i = src.indexOf("{", start); i < src.length; i++) {
+    const ch = src[i];
+    if (quote) {
+      if (ch === "\\") { i++; continue; }
+      if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === '"' || ch === "'" || ch === "`") { quote = ch; continue; }
+    if (ch === "/" && src[i + 1] === "/") {
+      i = src.indexOf("\n", i);
+      if (i < 0) break;
+      continue;
+    }
+    if (ch === "/" && src[i + 1] === "*") {
+      i = src.indexOf("*/", i);
+      if (i < 0) break;
+      i++;
+      continue;
+    }
+    if (ch === "{") depth++;
+    else if (ch === "}") {
+      depth--;
+      if (depth === 0) return src.slice(start, i + 1);
+    }
+  }
+  throw new Error(`unbalanced braces while slicing ${JSON.stringify(header)}`);
+}
+
 // Slices a single `const X = ...;` statement up to its terminating semicolon.
 function sliceStatement(src, header) {
   const start = src.indexOf(header);
@@ -781,4 +819,547 @@ test("pty input: a stopped instance swallows keystrokes", async () => {
     await h.type("x");
     assert.equal(h.posts.length, 0, `status ${status} must not accept input`);
   }
+});
+// --- WS byte cursor (issue #87) ---------------------------------------------
+
+// connectTTY is sliced out of the shipped index.html and driven against a
+// fake WebSocket so the URL construction, the `sync` offset echo handling
+// and the cursor accounting run against real code. writeSanitizedTerminalOutput
+// and decodeTTYOutputChunk are stubbed only to observe the calls; the
+// cursor arithmetic itself lives in the sliced onmessage/onclose handlers.
+const ttyWsFactory = new Function("deps", `
+  const {
+    state, updateStatus, token, window, location, WebSocket,
+    disconnectTTY, resetTTYOutputDecoder, applyTTYSize, sendResize,
+    syncTerminalToAppliedSize, focusTerminalIfPossible,
+    writeSanitizedTerminalOutput, decodeTTYOutputChunk, startSSE,
+    setTimeout, clearTimeout, setInterval, clearInterval, console,
+  } = deps;
+  ${[
+    "const INSTANCE_LIVE_STATUSES",
+    "const INSTANCE_PENDING_STATUSES",
+  ].map(h => sliceStatement(inlineScript(indexSource), h)).join("\n")}
+  ${[
+    "function isInstanceLiveStatus",
+    "function isInstancePendingStatus",
+    "function parseTTYControlMessage",
+    "function connectTTY",
+  ].map(h => sliceBlockQuoted(inlineScript(indexSource), h)).join("\n\n")}
+  return { connectTTY, parseTTYControlMessage };
+`);
+
+// Fake timers: every scheduled callback is recorded and only runs when the
+// test fires it, so nothing in the 5s/10s handshake windows can delay or
+// nondeterministically drive the assertions.
+function ttyWsHarness({ ttyOffset = -1, status = "running", token = "" } = {}) {
+  const sockets = [];
+  const writes = [];
+  const timers = [];
+  let nextTimerId = 1;
+  class FakeWebSocket {
+    constructor(url) {
+      this.url = url;
+      this.readyState = 0; // CONNECTING
+      this.binaryType = "";
+      this.sent = [];
+      sockets.push(this);
+    }
+    send(data) { this.sent.push(data); }
+    close() {
+      if (this.readyState === 3) return; // already CLOSED
+      this.readyState = 3;
+      if (this.onclose) this.onclose();
+    }
+  }
+  FakeWebSocket.OPEN = 1;
+  const session = makeSession("inst1", { ttyOffset });
+  const fireTimers = (ms) => {
+    for (const t of timers.filter(t => t.ms === ms)) {
+      const at = timers.indexOf(t);
+      if (at >= 0) timers.splice(at, 1); // one-shot semantics
+      t.fn();
+    }
+  };
+  const api = ttyWsFactory({
+    state: { instances: [{ id: "inst1", kind: "pty", status }], activeInst: "inst1" },
+    updateStatus: () => {},
+    token,
+    window: { WebSocket: FakeWebSocket },
+    location: { protocol: "http:", host: "ws.test" },
+    WebSocket: FakeWebSocket,
+    // Mirrors the real disconnectTTY's state handling for the paths the
+    // connect/reconnect flow actually takes (no socket in flight here).
+    disconnectTTY: (s) => {
+      s.ttyState = s.ttySocket ? "DISCONNECTING" : "IDLE";
+      s.ttySocket = null;
+      s.ttyReconnectTimer = null;
+    },
+    resetTTYOutputDecoder: () => {},
+    applyTTYSize: () => {},
+    sendResize: () => {},
+    syncTerminalToAppliedSize: () => {},
+    focusTerminalIfPossible: () => {},
+    decodeTTYOutputChunk: (s, bytes) => new TextDecoder().decode(bytes),
+    writeSanitizedTerminalOutput: (s, text) => { writes.push(text); },
+    startSSE: () => { throw new Error("must not fall back to SSE while a WebSocket is available"); },
+    setTimeout: (fn, ms) => { const t = { id: nextTimerId++, fn, ms }; timers.push(t); return t.id; },
+    clearTimeout: (id) => { const at = timers.findIndex(t => t.id === id); if (at >= 0) timers.splice(at, 1); },
+    setInterval: () => 0,
+    clearInterval: () => {},
+    console: { warn: () => {}, error: () => {}, log: () => {} },
+  });
+  const enc = new TextEncoder();
+  return { api, session, sockets, writes, timers, fireTimers, enc, connect: () => api.connectTTY(session) };
+}
+
+test("issue #87: connectTTY sends `since` only for a known positive cursor", () => {
+  for (const [label, offset, want] of [
+    ["unknown cursor (-1)", -1, false],
+    ["zero cursor (would mean oldest live byte)", 0, false],
+    ["real cursor", 4096, true],
+  ]) {
+    const h = ttyWsHarness({ ttyOffset: offset });
+    h.connect();
+    const url = h.sockets[0].url;
+    assert.ok(url.includes(`/api/instances/tty/ws?id=inst1`), `${label}: base URL`);
+    assert.equal(url.includes("since="), want, `${label}: since presence`);
+    if (want) assert.ok(url.includes("&since=4096"), `${label}: since value`);
+  }
+});
+
+test("issue #87: binary frames move the cursor only after the sync latch (FIX-B)", () => {
+  const h = ttyWsHarness();
+  h.connect();
+  const ws = h.sockets[0];
+  ws.readyState = 1;
+  ws.onopen();
+  ws.onmessage({ data: '{"type":"ready"}' });
+  assert.equal(h.session.ttyState, "READY");
+
+  // A binary frame BEFORE the sync echo belongs to the handshake replay:
+  // it renders, but must NOT touch the cursor. The sync frame that
+  // follows on the same TCP stream publishes the authoritative end offset
+  // of the entire replay in one step; counting replay bytes here would
+  // leave a behind-by-one-chunk value if the socket died in the
+  // replay→sync gap, duplicating that window on the next reconnect.
+  ws.onmessage({ data: h.enc.encode("tail-bytes").buffer });
+  assert.equal(h.session.ttyOffset, -1, "pre-sync replay frames leave the sentinel untouched");
+  assert.deepEqual(h.writes, ["tail-bytes"], "the bytes still render");
+
+  ws.onmessage({ data: '{"type":"sync","offset":4242}' });
+  assert.equal(h.session.ttyOffset, 4242, "the sync echo is the authoritative cursor");
+  assert.deepEqual(h.writes, ["tail-bytes"], "the sync frame must not be painted as text");
+
+  // AFTER the latch every binary frame is live ring-buffer output (the
+  // server closes the connection instead of writing diagnostics as
+  // binary), so the wire length is exactly the ring-buffer advance.
+  ws.onmessage({ data: h.enc.encode(" more").buffer });
+  assert.equal(h.session.ttyOffset, 4247, "post-sync binary frames advance by byte count");
+
+  // Junk offsets must not move a latched cursor.
+  for (const junk of ['{"type":"sync"}', '{"type":"sync","offset":-5}', '{"type":"sync","offset":"12"}']) {
+    ws.onmessage({ data: junk });
+    assert.equal(h.session.ttyOffset, 4247, `${junk} must not move the cursor`);
+  }
+
+  // And the whitelist still rejects unknown control types.
+  assert.equal(h.api.parseTTYControlMessage('{"type":"bogus"}'), null);
+});
+
+test("issue #87: the cursor survives the drop and the reconnect resumes from it", () => {
+  const h = ttyWsHarness();
+  h.connect();
+  const ws = h.sockets[0];
+  assert.ok(!ws.url.includes("since="), "first connect has no cursor yet");
+  ws.readyState = 1;
+  ws.onopen();
+  ws.onmessage({ data: '{"type":"ready"}' });
+  ws.onmessage({ data: '{"type":"sync","offset":9}' });
+  ws.onmessage({ data: h.enc.encode("live").buffer });
+  assert.equal(h.session.ttyOffset, 13);
+
+  // Drop the socket — the screen keeps its contents, so the cursor must
+  // survive for the queued reconnect to use (the crux of issue #87).
+  ws.close();
+  assert.equal(h.session.ttyOffset, 13, "onclose must preserve the cursor");
+  assert.equal(h.session.ttySocket, null, "the dead socket is dropped");
+
+  // Fire the queued 5s reconnect: it carries the cursor as `since`.
+  h.fireTimers(5000);
+  assert.equal(h.sockets.length, 2, "the reconnect opened a new socket");
+  assert.ok(h.sockets[1].url.includes("&since=13"),
+    `reconnect must resume from the cursor, got ${h.sockets[1].url}`);
+
+  // The new connection starts with its own fresh latch: replay bytes
+  // arriving before ITS sync frame must not touch the cursor (FIX-B) —
+  // counting them would leave the cursor short by one replay chunk if
+  // this socket died in the replay→sync gap, duplicating that window on
+  // the next reconnect.
+  const ws2 = h.sockets[1];
+  ws2.readyState = 1;
+  ws2.onopen();
+  ws2.onmessage({ data: '{"type":"ready"}' });
+  ws2.onmessage({ data: h.enc.encode("bytes-since").buffer });
+  assert.equal(h.session.ttyOffset, 13, "pre-sync replay bytes on the NEW socket must not move the cursor");
+  ws2.onmessage({ data: '{"type":"sync","offset":24}' });
+  assert.equal(h.session.ttyOffset, 24, "the new connection's sync republishes the cursor");
+});
+
+test("issue #87: both session factories and both screen-clear resets carry ttyOffset", () => {
+  // The two session factories have drifted before (see kinds/pty.js's
+  // comment) — pin both, plus both reset sites that must invalidate the
+  // cursor when the screen is genuinely cleared.
+  assert.ok(indexSource.includes("ttyOffset: -1,"), "index.html factory initialises the cursor");
+  assert.ok(ptySource.includes("ttyOffset: -1,"), "pty.js factory initialises the cursor");
+  assert.ok(indexSource.includes("session.ttyOffset = -1;"), "index.html clears the cursor with the screen");
+  assert.ok(ptySource.includes("s.ttyOffset = -1;"), "pty.js clears the cursor with the screen");
+
+  // refreshCurrentInstance wipes the screen before loadLog (FIX-A): both
+  // cursors must go to the -1 sentinel AT the clear, before loadLog runs.
+  // A loadLog that then fails (or loses its X-Log-Offset header) would
+  // otherwise leave stale pre-refresh cursors behind, and connectTTY would
+  // send since=<oldHead> painting only [oldHead, head) onto the blank
+  // screen — worse than the pre-#87 full-tail replay this button got.
+  const refreshBlock = sliceBlockQuoted(inlineScript(indexSource), "async function refreshCurrentInstance");
+  assert.ok(refreshBlock.includes("session.ttyOffset = -1;"), "refresh resets the WS cursor with the screen");
+  assert.ok(refreshBlock.includes("session.logCursor = -1;"), "refresh resets the SSE cursor with the screen");
+  assert.ok(refreshBlock.indexOf("session.term.clear()") < refreshBlock.indexOf("session.ttyOffset = -1;"),
+    "the cursor reset sits at the screen clear, not before it");
+  assert.ok(refreshBlock.indexOf("session.ttyOffset = -1;") < refreshBlock.indexOf("await loadLog(session)"),
+    "the cursors are invalidated before loadLog can half-succeed");
+
+  // And behaviourally: the pty factory and the clearing activation both
+  // hand the session a fresh unknown cursor.
+  assert.equal(ptySessionHarness("running").session.ttyOffset, -1, "pty factory");
+  assert.equal(activateWith("running").session.ttyOffset, -1, "clearing activate()");
+});
+
+test("issue #87: a successful loadLog pins ttyOffset to logCursor", async () => {
+  // One ring-buffer end offset, two consumers: refreshCurrentInstance
+  // clears the screen, replays via loadLog and reconnects the WS — if
+  // ttyOffset did not follow logCursor there, the reconnect would replay
+  // painted bytes back onto the freshly painted screen (review MAJOR-4).
+  const ok = loadLogHarness("running", { offset: "4096" });
+  await ok.api.loadLog(ok.session);
+  assert.equal(ok.session.logCursor, 4096);
+  assert.equal(ok.session.ttyOffset, 4096, "the WS cursor equals the new screen end");
+
+  // A failed loadLog must not fabricate a cursor for bytes nobody saw.
+  const failed = loadLogHarness("running", { fail: true });
+  failed.session.ttyOffset = -1;
+  await failed.api.loadLog(failed.session);
+  assert.equal(failed.session.ttyOffset, -1, "failed replay leaves the cursor unknown");
+
+  // A stripped X-Log-Offset must leave both cursors at their previous value.
+  const stripped = loadLogHarness("running", { offset: null });
+  stripped.session.logCursor = 1234;
+  stripped.session.ttyOffset = 1234;
+  await stripped.api.loadLog(stripped.session);
+  assert.equal(stripped.session.ttyOffset, 1234, "missing header keeps the previous cursor");
+});
+
+// startSSE is sliced separately: while the transport is SSE, logCursor
+// advances and ttyOffset would stay frozen — a later WS reconnect would
+// then replay bytes the SSE path already painted. Both cursors track the
+// same ring-buffer end offset, so the SSE handler must move them together
+// (review MAJOR-5).
+const sseCursorFactory = new Function("deps", `
+  const {
+    state, updateStatus, token, EventSource, writeSanitizedTerminalOutput, setTimeout,
+  } = deps;
+  ${sliceBlockQuoted(inlineScript(indexSource), "function startSSE")}
+  return { startSSE };
+`);
+
+test("issue #87: the SSE fallback advances ttyOffset together with logCursor", () => {
+  const opened = [];
+  class FakeEventSource {
+    constructor(url) { this.url = url; this.listeners = {}; opened.push(this); }
+    addEventListener(name, cb) { this.listeners[name] = cb; }
+    close() { this.closed = true; }
+    emit(data) { (this.listeners.log || this.onmessage)({ data }); }
+  }
+  const writes = [];
+  const api = sseCursorFactory({
+    state: { instances: [], activeInst: "inst1" },
+    updateStatus: () => {},
+    token: "",
+    EventSource: FakeEventSource,
+    writeSanitizedTerminalOutput: (s, text) => writes.push(text),
+    setTimeout: () => 0,
+  });
+  const session = makeSession("inst1", { logCursor: 100, ttyOffset: -1 });
+  api.startSSE(session);
+  assert.ok(opened[0].url.includes("&since=100"), "SSE resumes from logCursor");
+
+  opened[0].emit(JSON.stringify({ chunk: "a-chunk", next: 123 }));
+  assert.equal(session.logCursor, 123);
+  assert.equal(session.ttyOffset, 123, "the WS cursor must not lag the SSE cursor");
+
+  // Junk next values move neither cursor.
+  opened[0].emit(JSON.stringify({ chunk: "junk", next: -5 }));
+  assert.equal(session.logCursor, 123);
+  assert.equal(session.ttyOffset, 123);
+});
+
+// --- issue #87 review round 2: whose cursor is it, and where does it live --
+// Four hardening follow-ups on the same byte cursor, each pinned here:
+// (1) ws.onmessage mutates the session-wide cursor, so it must run only for
+// the socket that currently owns the session; (2) the two sibling cursors are
+// one offset space, so the SSE URL must ask from whichever is ahead; (3) the
+// exported screen-clear helper is a cursor-invalidation site, not just a
+// screen clear; (4) loadLog pins a cursor only for bytes a screen holds.
+
+test("issue #87 review: a queued frame from a replaced socket never moves the live cursor", () => {
+  const h = ttyWsHarness();
+  h.connect();
+  const stale = h.sockets[0];
+  stale.readyState = 1;
+  stale.onopen();
+  stale.onmessage({ data: '{"type":"ready"}' });
+  stale.onmessage({ data: '{"type":"sync","offset":100}' });
+  stale.onmessage({ data: h.enc.encode("live").buffer });
+  assert.equal(h.session.ttyOffset, 104, "the live socket advances the cursor normally");
+
+  // Drop and reconnect exactly the way the shipped onclose does: the old
+  // socket releases the session and the queued 5s retry opens a new one.
+  stale.close();
+  h.fireTimers(5000);
+  assert.equal(h.sockets.length, 2, "the reconnect opened a new socket");
+  const live = h.sockets[1];
+  assert.equal(h.session.ttySocket, live, "the new socket owns the session now");
+
+  // A frame dispatched off the replaced socket must not move the cursor of
+  // the transport that is actually in flight. Today it cannot arrive at all
+  // — disconnectTTY nulls onmessage before it closes, the connect-timeout
+  // only fires while the socket is not OPEN, and the handshake-timeout
+  // requires that no ready frame arrived — so this guard pins the invariant
+  // itself rather than an ordering accident.
+  const paintedBefore = h.writes.length;
+  stale.onmessage({ data: h.enc.encode("QUEUED-STALE").buffer });
+  stale.onmessage({ data: '{"type":"sync","offset":999999}' });
+  stale.onmessage({ data: '{"type":"ready"}' });
+  assert.equal(h.session.ttyOffset, 104, "a stale frame must not move the live cursor");
+  assert.equal(h.writes.length, paintedBefore, "a stale frame must not paint onto the screen");
+  assert.equal(h.session.ttyState, "CONNECTING", "a stale ready must not claim the transport is READY");
+
+  // The live socket is untouched by the guard: session.ttySocket is assigned
+  // synchronously at the end of connectTTY, before any frame can dispatch.
+  live.readyState = 1;
+  live.onopen();
+  live.onmessage({ data: '{"type":"ready"}' });
+  assert.equal(h.session.ttyState, "READY", "the live socket still reaches READY");
+  live.onmessage({ data: '{"type":"sync","offset":200}' });
+  live.onmessage({ data: h.enc.encode("ok").buffer });
+  assert.equal(h.session.ttyOffset, 202, "the live socket still advances the cursor");
+
+  // Source contract: the guard sits at the TOP of the handler, before any
+  // frame is parsed, and the deferred callbacks keep their own identity
+  // checks — they fire later, so the identity can change under them.
+  const block = sliceBlockQuoted(inlineScript(indexSource), "ws.onmessage = (ev) => {");
+  const guardAt = block.indexOf("if (session.ttySocket !== ws) return;");
+  assert.ok(guardAt >= 0, "the stale-socket guard is in the shipped handler");
+  assert.ok(guardAt < block.indexOf("parseTTYControlMessage(ev.data)"),
+    "it returns before anything is parsed or painted");
+  assert.ok(block.includes("ws === session.ttySocket && ws.readyState === WebSocket.OPEN"),
+    "the isFirstData deferred resize keeps its own socket-identity check");
+});
+
+// Harness for the SSE `since` choice: the URL is built once, at open, out of
+// the pair of sibling cursors carried on the session. A key the caller omits
+// stays ABSENT on the session, so the ?? degradation to the -1 sentinel is
+// observable rather than hidden by a destructuring default.
+function sseCursorHarness(cursors = {}) {
+  const opened = [];
+  class FakeEventSource {
+    constructor(url) { this.url = url; this.listeners = {}; opened.push(this); }
+    addEventListener(name, cb) { this.listeners[name] = cb; }
+    close() { this.closed = true; }
+    emit(data) { (this.listeners.log || this.onmessage)({ data }); }
+  }
+  const writes = [];
+  const api = sseCursorFactory({
+    state: { instances: [], activeInst: "inst1" },
+    updateStatus: () => {},
+    token: "",
+    EventSource: FakeEventSource,
+    writeSanitizedTerminalOutput: (s, text) => writes.push(text),
+    setTimeout: () => 0,
+  });
+  const session = makeSession("inst1");
+  for (const key of ["logCursor", "ttyOffset"]) {
+    if (key in cursors) session[key] = cursors[key];
+  }
+  api.startSSE(session);
+  return { api, session, opened, writes };
+}
+
+test("issue #87 review: startSSE resumes from the cursor that is actually ahead", () => {
+  // logCursor and ttyOffset are siblings over ONE ring-buffer offset space,
+  // and ttyOffset is the superset: ensureTerminalLiveTransport promotes with
+  // connectTTY alone — no loadLog — so on that path logCursor stays -1 while
+  // ttyOffset advances. Asking from logCursor alone would omit `since` and
+  // the server would replay its whole tail on top of what the WS painted.
+  for (const [label, cursors, want] of [
+    ["WS ahead, SSE cursor unknown", { logCursor: -1, ttyOffset: 4096 }, 4096],
+    ["WS ahead of a lagging SSE cursor", { logCursor: 10, ttyOffset: 4096 }, 4096],
+    ["SSE ahead of the WS cursor", { logCursor: 2048, ttyOffset: 512 }, 2048],
+    ["the two agree", { logCursor: 77, ttyOffset: 77 }, 77],
+  ]) {
+    const h = sseCursorHarness(cursors);
+    assert.ok(h.opened[0].url.includes(`&since=${want}`),
+      `${label}: expected since=${want}, got ${h.opened[0].url}`);
+  }
+
+  // The #81 rule survives the max(): no real positive cursor on EITHER
+  // sibling means no since at all — since=0 asks for the OLDEST live byte.
+  for (const [label, cursors] of [
+    ["both unknown", { logCursor: -1, ttyOffset: -1 }],
+    ["zero is not a cursor", { logCursor: 0, ttyOffset: 0 }],
+    ["unknown + zero", { logCursor: -1, ttyOffset: 0 }],
+    ["zero + unknown", { logCursor: 0, ttyOffset: -1 }],
+  ]) {
+    const h = sseCursorHarness(cursors);
+    assert.ok(!h.opened[0].url.includes("since="),
+      `${label}: must omit since, got ${h.opened[0].url}`);
+  }
+
+  // A sibling that is ABSENT must not poison the max: each one degrades to
+  // the -1 sentinel, so the sibling that IS known still wins. These are the
+  // one-sided landmines — read raw they make the max NaN, the > 0 guard
+  // drops it, and the server replays its whole tail over a screen that
+  // already holds the bytes, which is the duplicate paint issue #87 was
+  // filed for. Unreachable while both session factories initialise both
+  // cursors, so this pins the rule rather than a live path.
+  const neverSet = sseCursorHarness({ ttyOffset: 4096 });
+  assert.ok(!("logCursor" in neverSet.session), "the harness really left the sibling absent");
+  assert.ok(neverSet.opened[0].url.includes("&since=4096"),
+    `an absent logCursor must not discard the known ttyOffset, got ${neverSet.opened[0].url}`);
+  const explicitUndefined = sseCursorHarness({ logCursor: undefined, ttyOffset: 4096 });
+  assert.ok(explicitUndefined.opened[0].url.includes("&since=4096"),
+    "an undefined sibling degrades to -1 exactly like an absent one");
+  const mirrorAbsent = sseCursorHarness({ logCursor: 5000 });
+  assert.ok(!("ttyOffset" in mirrorAbsent.session), "the harness really left the other sibling absent");
+  assert.ok(mirrorAbsent.opened[0].url.includes("&since=5000"),
+    `the mirror case: an absent ttyOffset must not discard the known logCursor, got ${mirrorAbsent.opened[0].url}`);
+
+  // Every painted chunk still moves BOTH siblings, under one acceptance rule.
+  const live = sseCursorHarness({ logCursor: -1, ttyOffset: 4096 });
+  live.opened[0].emit(JSON.stringify({ chunk: "a-chunk", next: 4200 }));
+  assert.deepEqual(live.writes, ["a-chunk"], "the chunk is painted");
+  assert.equal(live.session.logCursor, 4200);
+  assert.equal(live.session.ttyOffset, 4200, "the WS cursor must not lag the SSE cursor");
+
+  // Junk next values move neither cursor.
+  for (const junk of [{ next: -5 }, { next: "42" }, { next: null }, {}]) {
+    live.opened[0].emit(JSON.stringify({ chunk: "junk", ...junk }));
+    assert.equal(live.session.logCursor, 4200, `${JSON.stringify(junk)} must not move logCursor`);
+    assert.equal(live.session.ttyOffset, 4200, `${JSON.stringify(junk)} must not move ttyOffset`);
+  }
+});
+
+// resetTerminalForSwitch is exported on window for other kinds to call, so
+// the cursor invalidation has to live INSIDE it: a kind that wiped the
+// screen through the helper while keeping a stale ttyOffset would make the
+// next connectTTY send since=<oldHead> and paint only [oldHead, head) onto a
+// blank terminal (issue #87).
+const resetSwitchFactory = new Function(`
+  ${sliceBlockQuoted(inlineScript(indexSource), "function resetTerminalForSwitch")}
+  return { resetTerminalForSwitch };
+`);
+
+test("issue #87 review: resetTerminalForSwitch invalidates BOTH cursors itself", () => {
+  const api = resetSwitchFactory();
+
+  const screen = { resets: 0, clears: 0, writes: [] };
+  const session = makeSession("inst1", {
+    logCursor: 4096,
+    ttyOffset: 4096,
+    term: {
+      reset: () => { screen.resets++; },
+      clear: () => { screen.clears++; },
+      write: text => screen.writes.push(text),
+    },
+  });
+  api.resetTerminalForSwitch(session);
+  assert.equal(screen.resets, 1, "the screen is reset");
+  assert.equal(screen.clears, 1, "the screen is cleared");
+  assert.deepEqual(screen.writes, ["\x1b[2J\x1b[3J\x1b[H"], "and the clears are written");
+  assert.equal(session.ttyOffset, -1, "the WS cursor goes to the unknown sentinel with the screen");
+  assert.equal(session.logCursor, -1, "and so does the SSE cursor");
+
+  // Screen-content driven: with no terminal nothing was wiped, so nothing is
+  // invalidated — resetting here would claim a clear that never happened.
+  const blind = makeSession("inst2", { term: null, logCursor: 1234, ttyOffset: 5678 });
+  api.resetTerminalForSwitch(blind);
+  assert.equal(blind.ttyOffset, 5678, "no term, no wipe, no invalidation");
+  assert.equal(blind.logCursor, 1234, "same for the SSE cursor");
+  assert.doesNotThrow(() => api.resetTerminalForSwitch(null), "a missing session is a no-op");
+  assert.doesNotThrow(() => api.resetTerminalForSwitch(undefined), "same for undefined");
+
+  // The exported entry point is this same function, and both call sites keep
+  // their own resets as defensive depth — the pty harness stubs the helper
+  // out, so that pair is what keeps the renderer's cursor honest.
+  assert.ok(indexSource.includes("window.resetTerminalForSwitch = resetTerminalForSwitch;"),
+    "still exported on window for other kinds");
+  assert.ok(ptySource.includes("s.ttyOffset = -1;") && ptySource.includes("s.logCursor = -1;"),
+    "kinds/pty.js keeps its matching defensive pair");
+  assert.equal(activateWith("running").session.ttyOffset, -1,
+    "pty activate() resets the cursor even with the helper stubbed out");
+});
+
+test("issue #87 review: loadLog pins its cursors only where the bytes actually land", async () => {
+  // The cursors mean "rendered on THIS screen". A session without a terminal
+  // paints nothing, so loadLog must leave both siblings exactly as it found
+  // them — pinning a cursor for bytes no screen holds is the same bug class
+  // as the stale cursor of issue #87, just pointing the other way.
+  const blind = loadLogHarness("running", { offset: "4096" });
+  blind.session.term = null;
+  blind.session.logCursor = 1234;
+  blind.session.ttyOffset = 1234;
+  await blind.api.loadLog(blind.session);
+  assert.deepEqual(blind.writes, [], "nothing was painted");
+  assert.equal(blind.session.ttyOffset, 1234, "no term: the WS cursor is untouched");
+  assert.equal(blind.session.logCursor, 1234, "no term: the SSE cursor is untouched");
+
+  // Same from the sentinel: a blind load must not manufacture a cursor even
+  // when the server sent a perfectly good X-Log-Offset header.
+  const sentinel = loadLogHarness("running", { offset: "4096" });
+  sentinel.session.term = null;
+  sentinel.session.logCursor = -1;
+  sentinel.session.ttyOffset = -1;
+  await sentinel.api.loadLog(sentinel.session);
+  assert.equal(sentinel.session.ttyOffset, -1, "no term: the sentinel stays the sentinel");
+  assert.equal(sentinel.session.logCursor, -1);
+
+  // With a terminal the pin still happens, and both siblings land on the
+  // screen end the header published.
+  const painted = loadLogHarness("running", { offset: "4096" });
+  painted.session.logCursor = 10;
+  painted.session.ttyOffset = 10;
+  await painted.api.loadLog(painted.session);
+  assert.ok(painted.writes.includes("log bytes"), "the bytes landed on the screen");
+  assert.equal(painted.session.logCursor, 4096);
+  assert.equal(painted.session.ttyOffset, 4096, "the WS cursor follows the paint");
+
+  // A stripped X-Log-Offset still leaves both siblings alone: never fall
+  // back to 0, which is the oldest live byte (issue #81).
+  const stripped = loadLogHarness("running", { offset: null });
+  stripped.session.logCursor = 4321;
+  stripped.session.ttyOffset = 4321;
+  await stripped.api.loadLog(stripped.session);
+  assert.ok(stripped.writes.includes("log bytes"), "the log is still painted");
+  assert.equal(stripped.session.ttyOffset, 4321, "no header, no pin");
+  assert.equal(stripped.session.logCursor, 4321);
+
+  // Source contract: the pin lives inside the if (session.term) scope and
+  // after the paint, not above it.
+  const block = sliceBlock(inlineScript(indexSource), "async function loadLog");
+  const termAt = block.indexOf("if (session.term)");
+  const paintAt = block.indexOf("writeSanitizedTerminalOutput(session, text);");
+  const pinAt = block.indexOf("session.ttyOffset = next;");
+  assert.ok(termAt >= 0 && paintAt >= 0 && pinAt >= 0, "the three anchors are still in loadLog");
+  assert.ok(termAt < paintAt && paintAt < pinAt, "the pin follows the paint, inside the term scope");
+  assert.ok(block.indexOf("if (Number.isFinite(next) && next >= 0) {") > termAt,
+    "the valid-header-only rule moved with the pin");
 });
