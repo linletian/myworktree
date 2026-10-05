@@ -978,19 +978,24 @@ func TestHandleInstanceTTYWS_ConsultSeesNewBytesDeliversThem(t *testing.T) {
 // and then stop serving.
 //
 // The condition exercised is the one that matters: the producer outruns the
-// consumer's queue. The client goes quiet after the handshake, so nothing
-// drains, while publish keeps pushing 32 KB chunks until the double's
+// consumer's queue. The client goes quiet after the handshake, so nothing reads
+// the socket, while publish keeps pushing 32 KB chunks until the double's
 // 16-slot channel fills and its overflow arm removes and closes the
 // subscriber — the same state a production socket stall produces (a
 // backgrounded tab stops reading, `conn.WriteBinary` blocks inside
 // `rw.Flush()` because Upgrade sets no write deadline, the select loop stops
-// draining, the queue backs up).
+// draining, the queue backs up). Note that the handler does keep draining the
+// channel into whatever socket buffer still has room — that is why the overflow
+// lands on publish 17 or 18 rather than exactly 17, and it is the very same
+// consumption that races the drain further down.
 //
 // To be exact about the fidelity: this test does NOT reproduce the TCP
 // stall itself. A publish is a mutex plus a non-blocking send (~100 ns)
 // while one handler loop iteration costs a 32 KB `write()` syscall, so the
-// flood outruns the drain by orders of magnitude and the socket buffers never
-// become the binding constraint — the overflow is reached in milliseconds.
+// flood outruns the drain by orders of magnitude and the queue backs up on
+// publish throughput rather than on socket capacity — the overflow is reached
+// in milliseconds. (Measured overflow point: publish 17 or 18, not a
+// socket-buffer-determined number.)
 // What is genuine, and what #82 actually changed, is everything downstream of
 // the close: the real handler sees `<-outputChan` closed, writes 1013 with
 // the reason on a real hijacked WebSocket, returns, closes the socket, and
@@ -1013,26 +1018,51 @@ func TestHandleInstanceTTYWS_ConsultSeesNewBytesDeliversThem(t *testing.T) {
 //     double; it is NOT what the assertions here measure, see below.
 //
 // What this test deliberately does NOT assert is how many binary frames reach
-// the wire before the close. An earlier revision pinned that count to
-// published-17 — the chunks the handler had taken before the queue filled —
-// on the premise that publish's drain collects all 16 values still buffered
-// when the overflow fires. That premise is false, and the test failed roughly
-// 1 run in 10 under load because of it. The drain runs after closeLocked, on
-// the publishing goroutine, and the handler is not asleep at that instant: an
-// earlier send handed it a value directly and it is runnable, or it is inside
-// a blocked conn.WriteBinary returning to its select. Either way it reaches
+// the wire before the close. Read that as a decision about STABILITY, not as a
+// claim that the count could not carry the signal — the earlier version of this
+// comment asserted the latter and it is retracted below.
+//
+// MEASURED (by me, before the assertion was removed): the exact count
+// `binaries == published-17` failed about 1 run in 10 under scheduling load, in
+// two shapes — `published 18 -> 17 frames` and `published 17 -> 1 frame`. The
+// mechanism is a plain race. The drain runs after closeLocked, on the publishing
+// goroutine, and the handler is not asleep at that instant: an earlier send
+// handed it a value directly and it is runnable, or it is inside a blocked
+// conn.WriteBinary returning to its select. Either way it reaches
 // `chunk, ok := <-outputChan` while the channel is closed but still non-empty,
-// and recv hands it those buffered values with ok == true — one at a time, in
-// a straight race with the drain loop, the channel's own queue deciding each
-// one. (close() likewise readies any receiver parked on the channel.) So the
-// count legitimately lands anywhere in [published-17, published-1]: the low
-// end is the drain taking all 16, the high end is the handler taking all 16
-// and writing them out before it ever sees `!ok`. Measured on this machine,
-// unmodified code, 2000 runs under load: 2 failures at the old exact count
-// (published 18 with 17 frames; published 17 with 1 frame). No bound separates
-// the drained case from the undrained one, so widening it to a tolerance would
-// pin nothing; the wire-level frame count is simply not an observable of the
-// drain at this layer, and it is not asserted here at all.
+// and recv hands it those buffered values with ok == true — one at a time, in a
+// straight race with the drain loop, the channel's own queue deciding each one.
+// (close() likewise readies any receiver parked on the channel.) So the count
+// ranges over [published-17, published-1]: the low end is the drain taking all
+// 16, the high end is the handler taking all 16 and writing them out before it
+// ever sees `!ok`. That evidence establishes exactly one thing — that the EXACT
+// count is unsafe to assert. It does not establish anything about looser checks,
+// and I had written it as though it did.
+//
+// RETRACTED, explicitly rather than softened: this comment previously said "No
+// bound separates the drained case from the undrained one, so widening it to a
+// tolerance would pin nothing" and that the wire-level frame count is "simply not
+// an observable of the drain at this layer". Neither was measured; both are
+// wrong. A third-round review measured the discriminator itself and it is a good
+// one: 280 runs of the drained double — 60 plain, 60 at 3x CPU oversubscription,
+// 120 inside the full parallel package suite, 40 of them under -race — produced
+// counts entirely inside [0, 2], while 60 runs against a drain-less double all
+// landed on 17. Re-measured here independently, to confirm it rather than quote
+// it: 120 drained runs produced only {0, 1}; 64 drain-less runs produced
+// `binaries == published-1` every single time (17 x61, 18 x2, 23 x1 — 17 is the
+// modal value, not a fixed one, since `published` itself varies). So the actual
+// separation is drained at most 2 versus undrained at least 17, better than 8x
+// margin, and a loose bound such as `frames > 8` would very likely catch a revert
+// of the drain.
+//
+// It is still not asserted, because a bound is load-sensitive in exactly the way
+// the exact count was, and it would buy nothing. Those drained runs topped out at
+// 2, but my 2000-run sweep hit the high end once — 17 frames with the drain fully
+// in place, the handler having won the whole buffered backlog. That single run
+// falls inside the undrained region above, so no threshold can both catch a
+// revert at `> 8` and survive it: the bound would have failed a correctly-drained
+// run. Accepting that rare-but-real flake rate here covers nothing that is not
+// already pinned deterministically one layer down:
 //
 // The drain is pinned one layer down, in internal/instance/pty/driver_test.go,
 // where the test goroutine is the channel's ONLY consumer, so there is nobody
@@ -1077,12 +1107,16 @@ func TestHandleInstanceTTYWS_SubscriberOverflowClosesConnectionWith1013(t *testi
 	}
 
 	// Read everything up to the teardown, and pin only what the teardown pins
-	// deterministically. The binary frames are deliberately NOT counted: the
-	// handler is a live consumer of the closed channel and wins a scheduling
-	// race against publish's drain for the buffered backlog, so how many of
-	// them reach the wire says nothing about whether the drain exists (see the
-	// doc comment — measured, not theorised). What is invariant, and what the
-	// client actually depends on, is the shape of the teardown:
+	// deterministically. The binary frames are deliberately NOT counted — not
+	// because the count carries no signal, it does (measured: drained runs stay
+	// inside [0, 2], a drain-less double sits at exactly 17), but because the
+	// handler is a live consumer of the closed channel and races publish's drain
+	// for the buffered backlog, so every threshold that separates those two
+	// cleanly in 280 runs still has the rare failure mode the exact assertion
+	// already demonstrated — 17 frames with the drain in place, once in 2000.
+	// A flaky check here would cover nothing that internal/instance/pty does not
+	// already pin deterministically. What is invariant, and what the client
+	// actually depends on, is the shape of the teardown:
 	//
 	//   - the close carries 1013, the code that tells the browser to retry
 	//     rather than treat the session as finished;
