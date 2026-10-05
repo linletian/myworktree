@@ -282,6 +282,20 @@ func liveSubscribers(id string) int {
 	return len(subs[id])
 }
 
+// registeredInstanceCount reports how many instance ids currently hold a
+// key in the top-level subs map — the registry level ABOVE liveSubscribers,
+// which counts subscribers *within* one id and answers 0 just as happily for
+// a stale empty set as for a removed key. Without this second lens the
+// CHANGELOG claim that the overflow arm preserves the "key exists iff it has
+// a live subscriber" invariant is unpinned: deleting
+// `if len(subs[id]) == 0 { delete(subs, id) }` from broadcast's overflow
+// arm leaves every per-id assertion green.
+func registeredInstanceCount() int {
+	subsMu.Lock()
+	defer subsMu.Unlock()
+	return len(subs)
+}
+
 // TestBroadcast_OverflowDisconnectsSubscriber pins the core of issue #82.
 //
 // Before the fix the `default:` arm was empty: once the 64-slot buffer
@@ -292,13 +306,20 @@ func liveSubscribers(id string) int {
 // terminal (one missed clear-screen or cursor move corrupts everything
 // rendered after it).
 //
-// Now the overflowing subscriber is removed and its channel closed, which is
-// what makes the WS handler tear the socket down. Asserted on observable
-// behaviour: everything that fitted arrived, in order; the chunk that did
-// not fit is the last thing that will ever be sent; the channel then reads
-// as closed instead of staying open and silent.
+// Now the overflowing subscriber is removed, its channel closed AND its
+// backlog drained at the source, which is what makes the WS handler tear the
+// socket down. Asserted on observable behaviour: the consumer's very next
+// receive is the close — not the up-to-64 queued chunks it never took — so
+// the resync signal arrives without first flushing ~64 KB onto the socket
+// that stalled. Discarding the backlog loses nothing: pumpLogs wrote every
+// chunk to the ring buffer BEFORE broadcasting it, so the reconnect's replay
+// from the client's #87 cursor delivers those bytes again.
 func TestBroadcast_OverflowDisconnectsSubscriber(t *testing.T) {
 	const id = "inst-overflow"
+
+	// Registry-level baseline taken BEFORE subscribing; the assertions below
+	// are deltas, so they hold regardless of what other ids exist.
+	before := registeredInstanceCount()
 
 	ch, cancel, err := SubscribeOutput(id)
 	if err != nil {
@@ -308,20 +329,19 @@ func TestBroadcast_OverflowDisconnectsSubscriber(t *testing.T) {
 	// against a channel the overflow already closed, and must not panic.
 	defer cancel()
 
+	if n := registeredInstanceCount(); n != before+1 {
+		t.Fatalf("registered instance ids = %d right after subscribing %q, want %d", n, id, before+1)
+	}
+
 	capacity := cap(ch)
 	for i := 0; i < capacity+5; i++ {
 		broadcast(id, fmt.Sprintf("chunk-%03d", i))
 	}
 
-	for i := 0; i < capacity; i++ {
-		if got := readWithTimeout(t, ch, 200*time.Millisecond); got != fmt.Sprintf("chunk-%03d", i) {
-			t.Fatalf("chunk %d = %q, want chunk-%03d", i, got, i)
-		}
-	}
 	select {
 	case got, ok := <-ch:
 		if ok {
-			t.Fatalf("chunk %q was delivered past the %d-slot capacity: an overflowing subscriber must stop the stream, not thin it", got, capacity)
+			t.Fatalf("chunk %q was delivered after the overflow: the overflow arm must drain the closed subscriber's backlog at the source, so the consumer's next receive is the resync signal, not stale queue contents the WS handler would write onto the stalled socket", got)
 		}
 	case <-time.After(200 * time.Millisecond):
 		t.Fatal("subscriber channel is still open after overflowing: it was neither disconnected nor closed")
@@ -329,6 +349,16 @@ func TestBroadcast_OverflowDisconnectsSubscriber(t *testing.T) {
 
 	if n := liveSubscribers(id); n != 0 {
 		t.Fatalf("%d subscriber(s) still registered for %q after overflow: the failing subscriber must be removed, not kept and silently skipped", n, id)
+	}
+
+	// The len(subs) half of the invariant: the id key itself must leave the
+	// top-level registry with its last subscriber. liveSubscribers(id) == 0
+	// above cannot distinguish the removed key from a stale empty set, so
+	// without this assertion the `delete(subs, id)` in the overflow arm —
+	// and the CHANGELOG's claim about preserving that invariant — is
+	// unpinned: removing the delete leaves every per-id check green.
+	if n := registeredInstanceCount(); n != before {
+		t.Fatalf("registered instance ids = %d after the overflow removed %q's last subscriber, want %d: the id key must leave the top-level registry, not linger over an empty subscriber set", n, id, before)
 	}
 }
 
@@ -339,6 +369,8 @@ func TestBroadcast_OverflowDisconnectsSubscriber(t *testing.T) {
 // dropped, while the drained one keeps streaming.
 func TestBroadcast_WithinCapacitySubscriberIsNeverDisconnected(t *testing.T) {
 	const id = "inst-within-capacity"
+
+	baseline := registeredInstanceCount()
 
 	fast, cancelFast, err := SubscribeOutput(id)
 	if err != nil {
@@ -377,23 +409,30 @@ func TestBroadcast_WithinCapacitySubscriberIsNeverDisconnected(t *testing.T) {
 		t.Fatalf("fast subscriber got %q, want after-overflow: the peer's overflow must not disconnect a healthy subscriber", got)
 	}
 
-	// The dropped subscriber still hands over everything that had fitted —
-	// a closed channel drains its buffer first — and then reads as closed.
-	for i := 0; i < capacity; i++ {
-		if got := readWithTimeout(t, slow, 200*time.Millisecond); got != fmt.Sprintf("chunk-%03d", i) {
-			t.Fatalf("slow chunk %d = %q, want chunk-%03d", i, got, i)
-		}
-	}
+	// The dropped subscriber's backlog is DISCARDED at the source: the
+	// overflow arm drains the closed channel inside subsMu, so the very
+	// next receive is the close. That is safe — pumpLogs wrote every
+	// dropped chunk to the ring buffer before broadcasting it, so the
+	// client's cursor replay (issue #87) delivers those bytes again — and
+	// it is the point: the WS handler must reach the 1013 teardown without
+	// first flushing ~64 KB onto the socket that stalled.
 	select {
 	case got, ok := <-slow:
 		if ok {
-			t.Fatalf("slow subscriber got %q past capacity, want the channel closed", got)
+			t.Fatalf("slow subscriber got %q after the overflow, want the channel closed with its backlog discarded at the source", got)
 		}
 	case <-time.After(200 * time.Millisecond):
 		t.Fatal("slow subscriber channel is still open, want it closed by the overflow")
 	}
 	if n := liveSubscribers(id); n != 1 {
 		t.Fatalf("%d subscriber(s) registered, want exactly 1 (the healthy one)", n)
+	}
+	// The registry-level complement of the overflow test's assertion: the
+	// id key STAYS in the top-level map while a healthy subscriber still
+	// lives — dropping it early would deafen the survivor to every later
+	// broadcast.
+	if n := registeredInstanceCount(); n != baseline+1 {
+		t.Fatalf("registered instance ids = %d while %q still has a healthy subscriber, want %d", n, id, baseline+1)
 	}
 
 	// The survivor keeps working after its peer was dropped.
@@ -427,13 +466,8 @@ func TestSubscribeOutput_CancelAfterOverflowDoesNotPanic(t *testing.T) {
 	for i := 0; i <= capacity; i++ {
 		broadcast(id, fmt.Sprintf("chunk-%03d", i))
 	}
-	// Overflow happened: the buffered chunks are still readable, and then
-	// the channel reports closed.
-	for i := 0; i < capacity; i++ {
-		if got := readWithTimeout(t, ch, 200*time.Millisecond); got != fmt.Sprintf("chunk-%03d", i) {
-			t.Fatalf("chunk %d = %q, want chunk-%03d", i, got, i)
-		}
-	}
+	// Overflow happened: the overflow arm drained the backlog at the
+	// source, so the channel reports closed on the very next receive.
 	select {
 	case _, ok := <-ch:
 		if ok {
@@ -458,11 +492,31 @@ func TestSubscribeOutput_CancelAfterOverflowDoesNotPanic(t *testing.T) {
 
 // TestSubscribeOutput_CancelRacesOverflow runs the two closers against each
 // other from different goroutines instead of in a scripted order: one floods
-// past capacity so broadcast closes, the other cancels. Exactly-once rests
-// entirely on subsMu covering both the check and the close, so "no panic
-// under -race" is the actual proof, and a `closed` flag that was read or
-// written outside the lock would show up here as a race report even when the
-// panic stayed rare.
+// past capacity so broadcast closes, the other cancels. It pins the
+// concurrent contract: no panic, and the subscriber is deregistered however
+// the two goroutines interleave.
+//
+// What it does NOT prove, stated honestly: it is not a proof that exactly-
+// once close rests on subsMu covering the flag check and the close. The
+// two closeLocked calls can never run concurrently here regardless of the
+// flag: broadcast holds subsMu across BOTH its map delete and its close,
+// so once broadcast has deleted the entry, cancel cannot even reach its own
+// delete until broadcast releases the lock. The serialisation that matters
+// is the map delete under subsMu — a subscriber removed from the map can
+// never be reached by broadcast again. (Moving cancel's closeLocked outside
+// subsMu still passes this test under -race, which is exactly why the
+// earlier wording here — "exactly-once rests entirely on subsMu covering
+// both the check and the close", a flag read outside the lock "would show
+// up here as a race report" — was wrong: it asserted something this test
+// structurally cannot falsify.)
+//
+// The `closed` flag is load-bearing for the SEQUENTIAL cases instead —
+// cancel after an overflow, and cancel called twice — where a naive
+// close(sub.ch) in either closer panics with `close of closed channel`;
+// those are pinned by TestSubscribeOutput_CancelAfterOverflowDoesNotPanic.
+// A future refactor that kept the deletes but relaxed the locking would
+// still pass this test, so read the locking contract from broadcast and
+// cancel themselves, not from this test's greenness.
 func TestSubscribeOutput_CancelRacesOverflow(t *testing.T) {
 	const id = "inst-cancel-race"
 

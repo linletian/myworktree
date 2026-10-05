@@ -343,10 +343,28 @@ type subscriber struct {
 	closed bool
 }
 
-// closeLocked closes the channel at most once. Callers must hold subsMu;
-// the flag is meaningless without it, because that lock is what keeps a
-// second closer — cancel, or a later broadcast to the same set — out of
-// the window between the check and the close.
+// closeLocked closes the channel at most once. Callers must hold subsMu.
+//
+// The division of labour between the two guards, stated exactly — they do
+// different jobs:
+//
+//   - The map `delete` (under subsMu, performed by BOTH closers before
+//     they close) is what serialises the two closers. Once broadcast has
+//     removed a subscriber from subs[id], broadcast can never reach it
+//     again, and cancel's delete under the same lock cannot interleave with
+//     it; the two closeLocked calls therefore cannot run concurrently for
+//     one subscriber regardless of what the flag does.
+//   - The `closed` flag is what makes the remaining SEQUENTIAL cases safe:
+//     cancel after an overflow, and cancel called twice. In those cases
+//     there is no race to win — the second close simply arrives later at
+//     an already-closed channel — and without the flag each would panic
+//     with `close of closed channel`. Both are pinned by
+//     TestSubscribeOutput_CancelAfterOverflowDoesNotPanic.
+//
+// Callers must still hold subsMu when they call this, because the flag is
+// meaningless if two goroutines can read it at the same time — but the
+// concurrency proof rests on the delete-plus-lock-ordering above, not on
+// this function being lock-guarded in isolation.
 func (s *subscriber) closeLocked() {
 	if s.closed {
 		return
@@ -358,11 +376,12 @@ func (s *subscriber) closeLocked() {
 // broadcast fans one chunk out to every live subscriber of one instance.
 //
 // A subscriber whose buffer is full is DISCONNECTED, not skipped: it is
-// removed from the registry and its channel is closed, so the WS handler
-// observes `<-outputChan` closing, answers with a 1013 close frame and
-// returns (internal/app/app.go). The browser's ws.onclose fires and
-// reconnects, and because the #87 offset contract is already in place it
-// resumes from its own cursor instead of re-appending the whole tail.
+// removed from the registry, its channel is closed AND its queued backlog
+// drained at the source, so the WS handler's very next receive is the
+// close itself — it answers with a 1013 close frame and returns
+// (internal/app/app.go). The browser's ws.onclose fires and reconnects,
+// and because the #87 offset contract is already in place it resumes from
+// its own cursor instead of re-appending the whole tail.
 //
 // The threshold is concrete, not "a bit slow": pumpLogs reads the PTY in
 // 1024-byte chunks and each subscriber queue holds 64 of them, so a
@@ -398,6 +417,23 @@ func broadcast(id string, chunk string) {
 			// produced again.
 			delete(subs[id], sub)
 			sub.closeLocked()
+			// Discard the backlog at the source. Go delivers a
+			// closed channel's BUFFERED values with ok == true
+			// before it ever reports ok == false, so an undrained
+			// queue would have the WS handler WriteBinary every
+			// queued chunk — up to 64 of them, ~64 KB — onto the
+			// socket that stalled in the first place, and only
+			// then reach the `!ok` teardown branch (app.go).
+			// Draining here makes the consumer observe `!ok` on
+			// its very next receive. Discarding is safe because
+			// pumpLogs writes every chunk to the ring buffer
+			// BEFORE broadcasting it, so every chunk dropped here
+			// is still replayable from the client's #87 cursor
+			// after it reconnects — the whole premise of #82's
+			// resync. The loop cannot block: a closed, empty
+			// channel terminates `for range` immediately.
+			for range sub.ch {
+			}
 			if len(subs[id]) == 0 {
 				// Keep the invariant cancel already holds: an id
 				// key exists only while it has a live subscriber.
@@ -416,7 +452,10 @@ func broadcast(id string, chunk string) {
 // The returned channel closes on unsubscribe — when cancel runs, and
 // also when broadcast overflows (issue #82) — so a consumer must treat a
 // closed channel as "you were disconnected, resync", never as end of
-// output. cancel is idempotent and safe to call after such an overflow.
+// output. On an overflow the queued backlog is discarded at the source
+// (see broadcast): everything the consumer missed is still in the ring
+// buffer and comes back on the cursor replay. cancel is idempotent and
+// safe to call after such an overflow.
 func SubscribeOutput(id string) (<-chan string, func(), error) {
 	if id == "" {
 		return nil, nil, errors.New("pty: SubscribeOutput requires instance id")

@@ -507,6 +507,11 @@ as authoritative.
    on its next reconnect
 6. Real-time output continues as binary frames
 7. Client receives first data and triggers second resize (50ms delay) for TUI redraw
+8. If the client stops draining the live stream, the server closes the
+   connection with **`1013` / reason `subscriber overflow: slow consumer`**
+   (issue #82) instead of silently dropping output — see Close codes below;
+   the client reconnects with the `since` cursor it already holds, exactly
+   as after any abnormal close
 
 **Frontend session model:**
 - The current UI keeps transport state per running instance rather than sharing a single terminal across tabs.
@@ -523,6 +528,24 @@ as authoritative.
 - Ready: `{"type":"ready"}` (text frame)
 - Output: binary frames (terminal output chunks)
 - Sync: `{"type":"sync","offset":<int64>}` (text frame, sent after the handshake replay — even when that replay was empty. The client latches it per connection: replay frames received BEFORE the sync never touch the cursor — the sync publishes the authoritative end of the whole replay in one step; binary frames received AFTER it advance the cursor by their wire byte count — every one of them is ring-buffer output, as the server closes the connection rather than writing diagnostics as binary)
+
+*Server → Client close codes:*
+- `1013` with reason `subscriber overflow: slow consumer` (issue #82) — the live
+  output subscription was torn down server-side because this client stopped draining:
+  its 64-slot output queue filled (the PTY pump reads in 1024-byte chunks, so ≈64 KB
+  of unread output) and the server disconnected the subscriber rather than dropping
+  chunks forever. Any queued chunks still in flight are **discarded at the source** —
+  every one of them was already written to the ring buffer before being broadcast, so
+  they come back on the reconnect's replay from the client's `since` cursor; nothing
+  is lost. The close frame itself is BEST-EFFORT (the stalled socket may never drain
+  it; its write carries a bounded 5 s deadline set on this teardown path only — a
+  write deadline for healthy connections is the separate liveness issue #83), so the
+  client must treat **any** abnormal close as "reconnect with your stored `since`
+  cursor", not only this one. The shipped UI's `ws.onclose` logs the code and reason
+  and reconnects after 5 s; the server also logs the overflow.
+- `1013` with a dynamic error reason — handshake/setup failures on this endpoint
+  (upgrade, replay-read or subscribe errors); the connection is closed rather than
+  served half-configured, and the client retries like any other abnormal close.
 
 **Timeout & Fallback:**
 - Client should implement handshake timeout (recommended: 5s)

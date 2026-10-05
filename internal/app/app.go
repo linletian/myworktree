@@ -2609,19 +2609,28 @@ func (s *Server) handleInstanceTTYWS(w http.ResponseWriter, r *http.Request) {
 				// This frame is BEST-EFFORT and resync does not depend on
 				// it: the browser reconnects on any socket close, reasoned
 				// or not, and resyncs from its own cursor (the #87 offset
-				// contract). It is also deliberately BOUNDED, because this
-				// branch exists precisely because the socket stalled — the
-				// peer stopped draining, which is what filled the queue in
-				// the first place — so an unbounded close write would just
-				// move the stall from WriteBinary to WriteClose and keep
-				// the handler parked forever. ws.writeFrame ends in
-				// rw.Flush() and Upgrade sets no write deadline (adding one
-				// for every connection is issue #83), so the deadline is
-				// set here, on this failure path only: nothing else writes
-				// on this conn afterwards — this branch returns immediately
-				// and the deferred conn.Close() follows — so healthy
-				// connections keep the unbounded write behaviour they have
-				// today.
+				// contract). The 5 s deadline below is deliberately
+				// BOUNDED, and it bounds exactly one thing: THIS close-frame
+				// write, on this teardown path. It does NOT bound the
+				// handler's other writes — a handler already blocked inside
+				// a live WriteBinary above never reaches this branch, and is
+				// reclaimed only when that write returns: ws.Upgrade sets no
+				// write deadline, and adding one for every connection is
+				// issue #83's write-deadline territory, deliberately out of
+				// scope here. What keeps this failure path from writing the
+				// backlog onto the stalled socket is upstream, in the pty
+				// kind: broadcast drains the closed subscriber's queue at
+				// the source (driver.go), so the handler sees `!ok` on its
+				// very next receive instead of first flushing up to 64
+				// queued chunks (~64 KB) — and every drained chunk is
+				// replayed from the ring buffer on the cursor reconnect.
+				// Nothing writes on this conn after this branch returns —
+				// this branch returns immediately and the deferred
+				// conn.Close() follows — so healthy connections keep the
+				// unbounded write behaviour they have today.
+				if s.logger != nil {
+					s.logger.Printf("tty output subscriber overflow for %s: consumer fell behind, closing with 1013 for cursor resync", id)
+				}
 				_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 				_ = conn.WriteClose(ws.CloseMessage(1013, "subscriber overflow: slow consumer"))
 				return
