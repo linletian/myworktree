@@ -103,6 +103,20 @@ The script verifies the SHA256 of the downloaded archive against
 `checksums.txt` from the GitHub release. See
 [`scripts/install.sh`](scripts/install.sh) for the full implementation.
 
+**Beta (prerelease):** betas are cut from `develop` and published as GitHub
+prereleases — the default install above always serves the latest **stable**.
+To install a beta:
+
+```bash
+# latest beta:
+curl -fsSL https://raw.githubusercontent.com/linletian/myworktree/develop/scripts/install.sh | bash -s -- --beta
+# or pin a specific beta tag:
+curl -fsSL .../install.sh | bash -s -- -v v0.5.1-beta.1
+```
+
+(`--beta` rides the `develop` copy of the script until the next stable
+release carries it to `main`.)
+
 ### Release binaries
 
 If you just want to use `myworktree`, download the latest release assets from GitHub Releases:

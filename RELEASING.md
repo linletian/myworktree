@@ -13,6 +13,10 @@ how `v0.4.2` (PR #61) and `v0.4.3` (PR #77) were shipped.
   publishes the GitHub Release. There is no version constant in the source —
   the workflow injects `Version`/`Commit`/`BuildDate` via `-ldflags -X`, so
   **no code change is needed to bump the version**.
+- **Beta tags** = annotated tags on `develop`, named `vX.Y.Z-beta.N`. Pushing
+  one runs `.github/workflows/release-beta.yml`, which publishes a GitHub
+  **prerelease** without touching `main`. See the "Beta releases" section
+  below.
 
 ## 1. Preflight
 
@@ -130,7 +134,71 @@ review.
 The push triggers a normal go-ci run on `develop`; that is expected, no action
 needed.
 
-## 7. Hotfix releases (patch on `main`, not yet exercised)
+## 7. Beta releases (prereleases from `develop`, no merge to `main`)
+
+Betas ship the current state of `develop` for early testing. A beta is just:
+tag the tip of `develop`, push the tag, done. There is **no release PR, no
+squash merge, no back-merge, and no prep commit** — `main` is untouched, the
+CHANGELOG's `## Unreleased` keeps accumulating, and the READMEs keep pointing
+at the stable release (the next stable prep commit — step 2 — owns all of
+that).
+
+Rules:
+
+- **Naming**: `vX.Y.Z-beta.N`, where `vX.Y.Z` is the *upcoming* stable
+  version the beta leads to (e.g. `v0.5.1-beta.1` ahead of `v0.5.1`).
+  Increment `N` per beta round (`-beta.1`, `-beta.2`, …).
+- **Tag**: annotated (`-a`), message `Beta release vX.Y.Z-beta.N`, placed on
+  the tip of `develop` — never on `main`. Same immutability rules as stable
+  tags: never re-tag or move a pushed beta tag; cut `-beta.N+1` instead.
+- **Workflow**: pushing a `v*-beta.*` tag runs `release-beta.yml` — the same
+  build matrix and codesign gate as `release.yml`, but the publish step sets
+  `prerelease: true`. `release.yml`'s jobs are guarded with
+  `!contains(github.ref_name, '-')`, so a beta tag never fires the stable
+  pipeline (its `v*` pattern would otherwise match).
+- **`/releases/latest` ignores prereleases**, so the default one-line install
+  keeps serving the latest stable; betas are strictly opt-in.
+
+Cut a beta:
+
+```bash
+git checkout develop && git pull --ff-only origin develop
+git status --porcelain            # must be empty
+test -z "$(gofmt -l .)"
+go test ./...
+go build -o myworktree ./cmd/myworktree
+go build -o mw ./cmd/mw
+
+git tag -a vX.Y.Z-beta.N -m "Beta release vX.Y.Z-beta.N" develop
+git push origin vX.Y.Z-beta.N
+```
+
+Verify (same shape as step 5, plus the prerelease flag):
+
+```bash
+gh run list --workflow release-beta.yml --limit 1
+gh run watch <run-id> --exit-status
+gh release view vX.Y.Z-beta.N --json isPrerelease,assets \
+  --jq '{prerelease: .isPrerelease, assets: [.assets[].name]}'
+# expect: prerelease=true, 4 tarballs + checksums.txt
+curl -fsSI https://github.com/linletian/myworktree/releases/latest | grep -i '^location:'
+# expect: STILL the latest stable tag, not the beta
+```
+
+Install a beta (one line):
+
+```bash
+# latest beta (resolved via the releases atom feed):
+curl -fsSL https://raw.githubusercontent.com/linletian/myworktree/develop/scripts/install.sh | bash -s -- --beta
+# or pin a specific beta tag (works with install.sh from any branch):
+curl -fsSL .../install.sh | bash -s -- -v vX.Y.Z-beta.N
+```
+
+(`--beta` lives on `develop`'s copy of `install.sh` until the next stable
+release carries it to `main` — that is why the first command pulls the script
+from the `develop` branch.)
+
+## 8. Hotfix releases (patch on `main`, not yet exercised)
 
 No hotfix has been shipped so far. When one is needed: branch from `main`
 (`hotfix/vX.Y.Z`), land the fix + the same CHANGELOG/README sweep in one PR to

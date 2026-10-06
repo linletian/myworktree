@@ -103,6 +103,18 @@ curl -fsSL .../install.sh | bash -s -- --no-modify-path    # 不改 rc 文件
 脚本会用 GitHub Release 的 `checksums.txt` 校验下载文件的 SHA256。
 完整实现见 [`scripts/install.sh`](scripts/install.sh)。
 
+**Beta（预发布版）：** beta 从 `develop` 分支发布，以 GitHub prerelease 形式发布——上面默认的一行安装始终装最新**稳定版**。
+安装 beta：
+
+```bash
+# 最新 beta：
+curl -fsSL https://raw.githubusercontent.com/linletian/myworktree/develop/scripts/install.sh | bash -s -- --beta
+# 或指定某个 beta tag：
+curl -fsSL .../install.sh | bash -s -- -v v0.5.1-beta.1
+```
+
+（`--beta` 参数在下一个稳定版合入 `main` 之前，需使用 `develop` 分支上的脚本。）
+
 ### 发布版使用
 
 如果你只是想直接使用 `myworktree`，推荐从 GitHub Releases 下载已打包的发布版：

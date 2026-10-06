@@ -4,6 +4,8 @@
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/linletian/myworktree/main/scripts/install.sh | bash
 #   curl -fsSL .../install.sh | bash -s -- -v v0.5.0
+#   curl -fsSL .../install.sh | bash -s -- -v v0.5.1-beta.1   # pin a beta
+#   curl -fsSL .../install.sh | bash -s -- --beta             # latest beta
 #   curl -fsSL .../install.sh | bash -s -- --no-modify-path
 #   INSTALL_ALIAS=mwt bash install.sh        # avoid `mw` name clash
 #
@@ -11,6 +13,7 @@
 #   INSTALL_DIR=<dir>       target directory (default: ~/.local/bin)
 #   INSTALL_ALIAS=<name>    short alias command (default: mw; empty to skip)
 #   MYWORKTREE_VERSION=<v>  pin version (default: latest release)
+#   MYWORKTREE_BETA=1       install the latest beta (prerelease) instead
 #   NO_MODIFY_PATH=1        do not modify shell rc files
 
 set -euo pipefail
@@ -35,6 +38,7 @@ else
   INSTALL_ALIAS_SET=1
 fi
 requested_version="${MYWORKTREE_VERSION:-}"
+want_beta="${MYWORKTREE_BETA:-false}"
 no_modify_path="${NO_MODIFY_PATH:-false}"
 binary_path=""
 
@@ -46,13 +50,17 @@ Usage: install.sh [options]
 
 Options:
   -h, --help              show this help
-  -v, --version <ver>     install a specific version (e.g., v0.5.0 or 0.4.3)
+  -v, --version <ver>     install a specific version (e.g., v0.5.0, 0.4.3,
+                          or a beta like v0.5.1-beta.1)
+      --beta              install the latest beta (prerelease) instead of
+                          the latest stable release
       --no-modify-path    do not modify shell rc files
 
 Env vars:
   INSTALL_DIR=<dir>       target directory (default: ~/.local/bin)
   INSTALL_ALIAS=<name>    short alias command (default: mw; empty to skip)
   MYWORKTREE_VERSION=<v>  pin version (default: latest release)
+  MYWORKTREE_BETA=1       same as --beta
   NO_MODIFY_PATH=1        same as --no-modify-path
 
 Examples:
@@ -72,6 +80,7 @@ while [[ $# -gt 0 ]]; do
     -v|--version)
       [[ -n "${2:-}" ]] || die "--version requires a value"
       requested_version="$2"; shift 2 ;;
+    --beta) want_beta=true; shift ;;
     --no-modify-path) no_modify_path=true; shift ;;
     *) info "Warning: unknown option '$1' (ignored)"; shift ;;
   esac
@@ -102,9 +111,33 @@ fi
 info "Platform: ${platform}/${goarch}"
 
 # --- version resolution --------------------------------------------------
+if [ -n "$requested_version" ] && [ "$want_beta" = "true" ]; then
+  die "--beta and --version are mutually exclusive (a pinned version can already be a beta tag, e.g. -v v0.5.1-beta.1)"
+fi
+
 if [ -n "$requested_version" ]; then
   version="${requested_version#v}"
   tag="v${version}"
+elif [ "$want_beta" = "true" ]; then
+  info "Resolving latest beta version from GitHub..."
+  # /releases/latest never points at prereleases, so resolve from the
+  # releases atom feed (newest-first, includes prereleases, no API rate
+  # limit); entry ids look like
+  #   <id>tag:github.com,2008:Repository/<id>/v0.5.1-beta.1</id>
+  # Fall back to the API if the feed yields nothing.
+  tag=$(curl -fsSL "https://github.com/${REPO}/releases.atom" \
+        | sed -n 's#.*<id>tag:github.com,2008:Repository/[0-9][0-9]*/\(v[^<]*-beta\.[0-9][0-9]*\)</id>.*#\1#p' \
+        | head -1)
+  if [ -z "$tag" ]; then
+    tag=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases?per_page=30" 2>/dev/null \
+          | sed -n 's/.*"tag_name": *"\(v[^"]*-beta\.[0-9][0-9]*\)".*/\1/p' \
+          | head -1 || true)
+  fi
+  [ -n "$tag" ] || die "Failed to resolve a beta version from GitHub.
+No published beta (prerelease) found, or GitHub was unreachable.
+Pin one explicitly instead:  bash install.sh -v vX.Y.Z-beta.N
+(see https://github.com/${REPO}/releases for the available tags)"
+  version="${tag#v}"
 else
   info "Resolving latest version from GitHub..."
   # /releases/latest redirects to /releases/tag/<tag>; capture the redirect target
@@ -163,8 +196,8 @@ check_existing() {
     info "Existing ${label} is an older myworktree (matched 'myworktree' in --version); will upgrade in place"
     return 0
   fi
-  if [ -n "$out" ] && echo "$out" | grep -Eq '^[^ ]+ +v[0-9]+\.[0-9]+\.[0-9]+( \([^)]+\))?( built [^ ]+)?$'; then
-    # matches "<prog> vX.Y.Z [(commit)] [built <date>]" — the myworktree format
+  if [ -n "$out" ] && echo "$out" | grep -Eq '^[^ ]+ +v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?( \([^)]+\))?( built [^ ]+)?$'; then
+    # matches "<prog> vX.Y.Z[-prerelease] [(commit)] [built <date>]" — the myworktree format
     info "Existing ${label} looks like a myworktree build (--version: ${out}); will upgrade in place"
     return 0
   fi

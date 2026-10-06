@@ -1,20 +1,21 @@
-name: Release
+name: Release (beta)
+
+# Beta releases are cut from the tip of `develop` and published as GitHub
+# prereleases. They NEVER touch `main` (no release PR, no back-merge) and
+# `/releases/latest` keeps pointing at the latest stable tag, so the default
+# one-line install is unaffected. See RELEASING.md §"Beta releases".
 
 on:
   push:
     tags:
-      # Stable tags only. Prerelease tags (vX.Y.Z-beta.N) contain a '-' and
-      # are handled by release-beta.yml; every job below is additionally
-      # guarded with !contains(github.ref_name, '-') because this 'v*'
-      # pattern matches them too.
-      - "v*"
+      # Semver prerelease tags only, e.g. v0.5.1-beta.1
+      - "v*-beta.*"
 
 permissions:
   contents: write
 
 jobs:
   build-platforms:
-    if: ${{ !contains(github.ref_name, '-') }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -71,9 +72,9 @@ jobs:
           if-no-files-found: error
 
   codesign-notarize:
-    if: ${{ vars.APPLE_ENABLE_CODESIGN == 'true' && !contains(github.ref_name, '-') }}
     runs-on: macos-latest
     needs: build-platforms
+    if: ${{ vars.APPLE_ENABLE_CODESIGN == 'true' }}
     strategy:
       fail-fast: false
       matrix:
@@ -146,7 +147,7 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     needs: [build-platforms, codesign-notarize]
-    if: ${{ !failure() && !contains(github.ref_name, '-') }}
+    if: ${{ !failure() }}
     steps:
       - name: Download archives
         uses: actions/download-artifact@v4
@@ -161,9 +162,10 @@ jobs:
           cd dist
           shasum -a 256 ./*.tar.gz > checksums.txt
 
-      - name: Publish GitHub release
+      - name: Publish GitHub prerelease
         uses: softprops/action-gh-release@v2
         with:
+          prerelease: true
           generate_release_notes: true
           files: |
             dist/*.tar.gz
