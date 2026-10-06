@@ -3,6 +3,7 @@ package dsh_web
 import (
 	"fmt"
 	"strings"
+	"unicode"
 )
 
 // restrict.yml — the --patch overlay every dsh-web instance spawns
@@ -67,7 +68,18 @@ func yamlQuote(s string) string {
 func verifyOverlayDump(dump, storagesRoot string) bool {
 	checks := map[string]func(block []string) bool{
 		"storage-json": func(block []string) bool {
-			return blockContains(block, storagesRoot)
+			// The root is a long filesystem path, and dsh's YAML dump
+			// emits long scalars as `>-` FOLDED block scalars, wrapping
+			// the line AT the spaces in the path — every macOS data dir
+			// contains "Application Support", so the literal root never
+			// appears contiguously there and the plain substring check
+			// reported overlay_verified=false on every macOS instance
+			// (Linux paths have no spaces, so it only ever passed
+			// contiguously). YAML folding only breaks at whitespace, so
+			// a whitespace-stripped comparison over the block is the
+			// same check with the wrapping undone.
+			return blockContains(block, storagesRoot) ||
+				blockContainsFolded(block, storagesRoot)
 		},
 		"directory-picker": func(block []string) bool {
 			return blockContains(block, "disabled: true")
@@ -120,4 +132,27 @@ func blockContains(block []string, needle string) bool {
 		}
 	}
 	return false
+}
+
+// blockContainsFolded reports whether the block contains needle once ALL
+// whitespace is removed from both sides. This undoes the YAML emitter's
+// folded-scalar line wrapping (`root: >-` + newline + indent), which only
+// ever breaks a value at its whitespace, so the comparison keeps the
+// semantics of blockContains — just insensitive to the wrap. The block is
+// already scoped to the single row being checked, so collapsing its
+// whitespace cannot pull a match in from an unrelated row.
+func blockContainsFolded(block []string, needle string) bool {
+	return strings.Contains(
+		stripWhitespace(strings.Join(block, "")),
+		stripWhitespace(needle),
+	)
+}
+
+func stripWhitespace(s string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.IsSpace(r) {
+			return -1
+		}
+		return r
+	}, s)
 }
