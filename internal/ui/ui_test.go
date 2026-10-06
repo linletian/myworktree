@@ -694,10 +694,19 @@ func TestLogCursorBootstrapNeverRequestsOldestBytes(t *testing.T) {
 		// only its offset was stripped — has to be a distinct value the
 		// server branches on, and both transports must send it explicitly.
 		// An unparseable header must never degrade to since=0 (the oldest
-		// live byte, #81) nor to the plain-unknown tail request.
+		// live byte, #81) nor to the plain-unknown tail request. The SSE
+		// fallback reads BOTH siblings, so "outranks -2 on either side"
+		// holds in the code and not just in the prose: today every site
+		// assigns the cursors as a pair, so the split it guards is
+		// unreachable and the check is bit-identical in every state that
+		// exists today. connectTTY's guard reads ttyOffset ALONE, and
+		// that is complete there: every logCursor write is paired with an
+		// equal ttyOffset write at the same site, and only ttyOffset ever
+		// advances alone, so no reachable state lets the sibling hold
+		// screen truth ttyOffset does not.
 		"const CURSOR_FOLLOW_LIVE_END = -2;",
 		"session.logCursor = CURSOR_FOLLOW_LIVE_END;",
-		"else if (session.logCursor === CURSOR_FOLLOW_LIVE_END) url += `&since=${CURSOR_FOLLOW_LIVE_END}`;",
+		"else if (session.logCursor === CURSOR_FOLLOW_LIVE_END || session.ttyOffset === CURSOR_FOLLOW_LIVE_END) url += `&since=${CURSOR_FOLLOW_LIVE_END}`;",
 		"else if (session.ttyOffset === CURSOR_FOLLOW_LIVE_END) url += `&since=${CURSOR_FOLLOW_LIVE_END}`;",
 	}
 	for _, check := range checks {

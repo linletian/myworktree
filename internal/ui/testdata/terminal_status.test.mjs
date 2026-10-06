@@ -519,8 +519,9 @@ function loadLogHarness(status, { offset = "42", fail = false } = {}) {
     AbortController,
     reportSessionError: (s, what, err) => errors.push(`${what}: ${err}`),
     // Mirrors the REAL writeSanitizedTerminalOutput contract: sanitizes,
-    // writes nothing when the result is empty, and RETURNS the byte count the
-    // caller uses to decide whether the screen holds anything (issue #86).
+    // writes nothing when the result is empty, and RETURNS the character
+    // count (.length, not bytes) the caller uses as a > 0 gate on whether
+    // the screen holds anything (issue #86).
     writeSanitizedTerminalOutput: (s, text) => {
       if (!text) return 0;
       writes.push(text);
@@ -1196,8 +1197,9 @@ test("issue #87: the SSE fallback advances ttyOffset together with logCursor", (
     token: "",
     EventSource: FakeEventSource,
     // Mirrors the REAL writeSanitizedTerminalOutput contract: sanitizes,
-    // writes nothing when the result is empty, and RETURNS the byte count the
-    // caller uses to decide whether the screen holds anything (issue #86).
+    // writes nothing when the result is empty, and RETURNS the character
+    // count (.length, not bytes) the caller uses as a > 0 gate on whether
+    // the screen holds anything (issue #86).
     writeSanitizedTerminalOutput: (s, text) => {
       if (!text) return 0;
       writes.push(text);
@@ -1373,6 +1375,37 @@ test("issue #87 review: startSSE resumes from the cursor that is actually ahead"
     assert.equal(live.session.logCursor, 4200, `${JSON.stringify(junk)} must not move logCursor`);
     assert.equal(live.session.ttyOffset, 4200, `${JSON.stringify(junk)} must not move ttyOffset`);
   }
+});
+
+test("issue #86 follow: startSSE asks for the sentinel when EITHER sibling holds the live end", () => {
+  // startSSE's sentinel fallback reads BOTH siblings, so the shipped
+  // comment's "outranks -2 on either side" is true of the code and not
+  // just of the prose. Today every site assigns logCursor and ttyOffset
+  // as a pair, so the split state below is unreachable and this pins the
+  // rule rather than a live path — but if any future site ever assigned
+  // ttyOffset = CURSOR_FOLLOW_LIVE_END (-2) alone, the old logCursor-only
+  // check would silently omit `since`, the server would answer with its
+  // whole tail, and the screen that already holds it would show it twice.
+  const split = sseCursorHarness({ logCursor: -1, ttyOffset: -2 });
+  assert.ok(split.opened[0].url.includes("&since=-2"),
+    `ttyOffset alone must still put the sentinel on the wire, got ${split.opened[0].url}`);
+
+  // The mirror split still asks for the sentinel (the side the branch
+  // always read), and the OR must not make -2 unconditional: with neither
+  // sibling holding it, `since` stays omitted and the server's tail
+  // default applies (issue #81 — since=0 would ask for the oldest byte).
+  const mirror = sseCursorHarness({ logCursor: -2, ttyOffset: -1 });
+  assert.ok(mirror.opened[0].url.includes("&since=-2"),
+    `logCursor alone still asks for the sentinel, got ${mirror.opened[0].url}`);
+  const unknown = sseCursorHarness({ logCursor: -1, ttyOffset: -1 });
+  assert.ok(!unknown.opened[0].url.includes("since="),
+    `two unknowns still omit since, got ${unknown.opened[0].url}`);
+
+  // A real cursor on either sibling still outranks -2 on the other: the
+  // positive guard runs first, untouched.
+  const ahead = sseCursorHarness({ logCursor: -2, ttyOffset: 4096 });
+  assert.ok(ahead.opened[0].url.includes("&since=4096") && !ahead.opened[0].url.includes("=-2"),
+    `a real sibling cursor outranks -2, got ${ahead.opened[0].url}`);
 });
 
 // resetTerminalForSwitch is exported on window for other kinds to call, so
@@ -2125,8 +2158,9 @@ function followLiveEndHarness({ offset = "4096", fail = false, tail = "TAIL", no
     AbortController,
     reportSessionError: () => {},
     // Mirrors the REAL writeSanitizedTerminalOutput contract: sanitizes,
-    // writes nothing when the result is empty, and RETURNS the byte count the
-    // caller uses to decide whether the screen holds anything (issue #86).
+    // writes nothing when the result is empty, and RETURNS the character
+    // count (.length, not bytes) the caller uses as a > 0 gate on whether
+    // the screen holds anything (issue #86).
     writeSanitizedTerminalOutput: (s, text) => {
       if (!text) return 0;
       writes.push(text);
@@ -2519,10 +2553,11 @@ test("issue #86: an EMPTY painted tail does not claim the live end", () => {
   // is byte-for-byte the pre-#86 behaviour for that state and costs nothing,
   // because an empty tail has nothing to duplicate.
   //
-  // Note the gate this pins is the byte count writeSanitizedTerminalOutput
-  // returns, NOT text.length: sanitizeTerminalOutput can empty a non-empty
-  // input (a tail of only stripped escape sequences), and the harness fake
-  // above mirrors that contract.
+  // Note the gate this pins is the character count (.length, not bytes)
+  // writeSanitizedTerminalOutput returns, NOT the raw text.length:
+  // sanitizeTerminalOutput can empty a non-empty input (a tail of only
+  // stripped escape sequences), and the harness fake above mirrors that
+  // contract.
   const since = (url) => {
     const m = url.match(/[?&]since=(-?\d+)/);
     return m ? m[1] : null;

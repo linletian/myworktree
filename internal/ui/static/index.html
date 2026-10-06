@@ -3934,13 +3934,16 @@
         }
 
         // Writes sanitized text to the session's terminal and RETURNS THE
-        // NUMBER OF BYTES THAT ACTUALLY REACHED THE SCREEN (0 if nothing was
-        // written). The count is not decoration: sanitizeTerminalOutput can
-        // empty a non-empty input — a tail consisting only of a cursor
-        // position report or an OSC colour reply is stripped to "" — so
-        // callers that need to know whether the user saw anything cannot use
-        // the input length as a proxy. Callers that do not care simply ignore
-        // the return value.
+        // NUMBER OF CHARACTERS THAT ACTUALLY REACHED THE SCREEN — the
+        // sanitized text's `.length`, UTF-16 code units, NOT bytes (0 if
+        // nothing was written). A non-zero return means something really
+        // reached the screen; it is currently used ONLY as a `> 0` boolean
+        // gate and must not be used for byte accounting. The count is not
+        // decoration: sanitizeTerminalOutput can empty a non-empty input —
+        // a tail consisting only of a cursor position report or an OSC
+        // colour reply is stripped to "" — so callers that need to know
+        // whether the user saw anything cannot use the input length as a
+        // proxy. Callers that do not care simply ignore the return value.
         function writeSanitizedTerminalOutput(session, text) {
             if (!session || !session.term) return 0;
             text = sanitizeTerminalOutput(text);
@@ -4149,13 +4152,16 @@
                 // that threw — still told the server "do not replay, I have
                 // the tail", and the tail would then never appear at all.
                 //
-                // `painted` counts BYTES THAT REACHED THE SCREEN. Not
+                // `painted` counts the CHARACTERS THAT REACHED THE SCREEN
+                // — the write's `.length`, not bytes — and is consumed below
+                // ONLY as a `> 0` gate, never as byte accounting. Not
                 // "session.term existed", and not even "text was non-empty":
                 // writeSanitizedTerminalOutput sanitizes first and writes
                 // nothing when the sanitized result is empty, so a tail made
                 // only of stripped escape sequences paints nothing too (this
                 // is why the gate is the return value of the write rather than
-                // text.length, and the reason it must not look incidental).
+                // the raw text.length, and the reason it must not look
+                // incidental).
                 // An empty painted tail means NOTHING reached the screen, so
                 // the sentinel's premise — "the screen IS painted with the
                 // tail" — is false and there is no duplicate to prevent, while
@@ -4205,7 +4211,8 @@
                         session.logCursor = next;
                         session.ttyOffset = next;
                     } else if (painted > 0) {
-                        // The fetch SUCCEEDED and tail BYTES were just painted;
+                        // The fetch SUCCEEDED and tail content actually reached
+                        // the screen (`painted` is a character count, not bytes);
                         // only X-Log-Offset is missing or unparseable (issue #86).
                         // That is precisely CURSOR_FOLLOW_LIVE_END: the screen is
                         // no longer empty, so a tail replay would paint it twice.
@@ -4215,7 +4222,7 @@
                         // branch and keep the empty-screen sentinel instead, which
                         // still asks for the tail: a FAILED fetch (it throws into
                         // the catch below), no terminal to paint into, and a tail
-                        // that reached the screen as zero bytes — empty body, or
+                        // that reached the screen as zero characters — empty body, or
                         // only escape sequences sanitize stripped (issue #86
                         // review). In all three there is nothing on screen to
                         // duplicate, so suppressing the replay would hide output.
@@ -4419,6 +4426,17 @@
                 // offset was stripped) asks the handshake to replay NOTHING
                 // and publish the live end offset instead — otherwise the
                 // tail lands under the screen that already shows it.
+                //
+                // Unlike startSSE, this guard reads ttyOffset ALONE, and
+                // that is complete here rather than one-sided: every write
+                // to logCursor is PAIRED — the same site writes ttyOffset
+                // the same value (both factories, every screen clear,
+                // loadLog's pin, the SSE handler) — while only ttyOffset
+                // ever advances alone (the sync frame and the latched
+                // binary frames below). ttyOffset is therefore the
+                // superset cursor: no reachable state lets logCursor hold
+                // screen truth that ttyOffset does not, so the sibling
+                // check startSSE gained has nothing here to find.
                 if (session.ttyOffset > 0) url += `&since=${session.ttyOffset}`;
                 else if (session.ttyOffset === CURSOR_FOLLOW_LIVE_END) url += `&since=${CURSOR_FOLLOW_LIVE_END}`;
 
@@ -4776,10 +4794,19 @@
             // screen demonstrably holds bytes through it; only when neither
             // sibling has a positive cursor can the painted-but-unoffset
             // state decide, and then `since=-2` goes on the wire — never
-            // since=0, never an omitted tail request (issue #86).
+            // since=0, never an omitted tail request (issue #86). The
+            // sentinel check reads BOTH siblings, so "either side" is true
+            // of the code and not just of the prose: today every site
+            // assigns logCursor and ttyOffset as a pair, so a split —
+            // unknown logCursor beside a sentinel ttyOffset — is
+            // unreachable and this is bit-identical in every state that
+            // exists today — but if any future site ever assigned ttyOffset = CURSOR_FOLLOW_LIVE_END
+            // alone, a logCursor-only check would silently omit `since`
+            // and replay the whole tail over the screen that already holds
+            // it — the exact duplication this branch exists to prevent.
             const sseCursor = Math.max(session.logCursor ?? -1, session.ttyOffset ?? -1);
             if (sseCursor > 0) url += `&since=${sseCursor}`;
-            else if (session.logCursor === CURSOR_FOLLOW_LIVE_END) url += `&since=${CURSOR_FOLLOW_LIVE_END}`;
+            else if (session.logCursor === CURSOR_FOLLOW_LIVE_END || session.ttyOffset === CURSOR_FOLLOW_LIVE_END) url += `&since=${CURSOR_FOLLOW_LIVE_END}`;
             if (token) url += `&token=${encodeURIComponent(token)}`;
             const es = new EventSource(url);
             const onLog = (ev) => {
