@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -26,6 +27,8 @@ import (
 const (
 	wsOpText   byte = 0x1
 	wsOpBinary byte = 0x2
+	wsOpPong   byte = 0xA
+	wsOpPing   byte = 0x9
 	wsOpClose  byte = 0x8
 )
 
@@ -44,6 +47,13 @@ type ttyHandshakeKind struct {
 	subsMu   sync.Mutex
 	subs     map[*ttySubscriber]struct{}
 	failRead atomic.Bool
+
+	// inputMu guards input: the exact bytes Manager.SendInput forwarded to
+	// the kind. The issue #83 probe test asserts the {"type":"ping"}
+	// control frames never land here — forwarding them would type literal
+	// JSON into the user's shell.
+	inputMu sync.Mutex
+	input   []string
 
 	// scriptSince, when non-nil, makes ReadLogs for since>=0 pop a
 	// scripted (body, next) instead of consulting the ring. It exists to
@@ -167,6 +177,25 @@ func (k *ttyHandshakeKind) RegisterHTTP(mux *http.ServeMux, instanceID string, h
 
 func (k *ttyHandshakeKind) Resize(h framework.Handle, cols, rows int) error { return nil }
 
+// SendInput captures forwarded keystrokes so tests can assert exactly what
+// did and did NOT reach the "PTY". Manager.SendInput reaches the kind
+// through this optional interface (framework/manager.go); before this kind
+// implemented it, every data frame answered "kind does not support input"
+// and the handler returned — which is precisely how the issue #83 probe
+// leak would have surfaced.
+func (k *ttyHandshakeKind) SendInput(h framework.Handle, input string) error {
+	k.inputMu.Lock()
+	defer k.inputMu.Unlock()
+	k.input = append(k.input, input)
+	return nil
+}
+
+func (k *ttyHandshakeKind) gotInput() string {
+	k.inputMu.Lock()
+	defer k.inputMu.Unlock()
+	return strings.Join(k.input, "")
+}
+
 // SubscribeOutput mirrors the pty driver's subscription registry,
 // including the issue #82 contract: the channel closes when the
 // subscription ends, whether that is this cancel or an overflow in
@@ -280,7 +309,9 @@ func (b *lockedLogBuffer) String() string {
 
 // ttyWSTestServer wires handleInstanceTTYWS at its canonical route on a
 // real httptest server (the handler hijacks the connection, so
-// ResponseRecorder cannot serve it) and starts one live instance.
+// ResponseRecorder cannot serve it) and starts one live instance, at the
+// PRODUCTION liveness intervals. Short-window tests use
+// ttyWSTestServerWithLiveness (issue #83).
 //
 // The Server it mounts carries a REAL logger writing into the returned
 // lockedLogBuffer, because the handler's observable behaviour includes a
@@ -293,15 +324,37 @@ func (b *lockedLogBuffer) String() string {
 // logger ("logger is required").
 func ttyWSTestServer(t *testing.T, k *ttyHandshakeKind) (addr string, m *framework.Manager, instID string, logOut *lockedLogBuffer) {
 	t.Helper()
+	addr, _, m, instID, logOut = ttyWSTestServerWithLiveness(t, k, ttyPingInterval, ttyReadDeadline)
+	return addr, m, instID, logOut
+}
+
+// ttyWSTestServerWithLiveness is the short-heartbeat seam for issue #83:
+// it registers handleInstanceTTYWSLiveness — the PRODUCTION handler with
+// the two liveness intervals as explicit parameters — so tests observe a
+// heartbeat tick or a read-deadline reap in milliseconds instead of
+// waiting out the production 10s/45s windows. The seam is a signature,
+// not a mutable package var: a test that compresses the windows cannot
+// make a parallel test's connection flap, so t.Parallel and -race stay
+// clean. It returns the *Server so a test can watch ttyClients — the map
+// entry that used to leak for the life of the daemon — empty out when the
+// reap unwinds the handler. It also carries the REAL logger into the
+// lockedLogBuffer it returns (issue #82): ttyWSTestServer delegates here,
+// so the overflow log line stays assertable at every interval, including
+// the compressed ones — a seam that dropped the logger would silently make
+// app.go's s.logger.Printf nil-skipped again.
+func ttyWSTestServerWithLiveness(t *testing.T, k *ttyHandshakeKind, pingInterval, readDeadline time.Duration) (addr string, srv *Server, m *framework.Manager, instID string, logOut *lockedLogBuffer) {
+	t.Helper()
 	_, m = newLogTestServer(t, k)
 	logOut = &lockedLogBuffer{}
+	srv = &Server{instanceMgr: m, logger: log.New(logOut, "", 0)}
 	mux := http.NewServeMux()
-	srv := &Server{instanceMgr: m, logger: log.New(logOut, "", 0)}
-	mux.HandleFunc("/api/instances/tty/ws", srv.handleInstanceTTYWS)
+	mux.HandleFunc("/api/instances/tty/ws", func(w http.ResponseWriter, r *http.Request) {
+		srv.handleInstanceTTYWSLiveness(w, r, pingInterval, readDeadline)
+	})
 	hs := httptest.NewServer(mux)
 	t.Cleanup(hs.Close)
 	instID = startKindInstance(t, m, "tty-handshake")
-	return strings.TrimPrefix(hs.URL, "http://"), m, instID, logOut
+	return strings.TrimPrefix(hs.URL, "http://"), srv, m, instID, logOut
 }
 
 func ttyWSPath(id, query string) string {
@@ -409,6 +462,12 @@ func dialHandshakeFrames(t *testing.T, addr, path string) (c *ws.Conn, frames []
 		switch op {
 		case wsOpBinary:
 			frames = append(frames, p)
+		case wsOpPing:
+			// Liveness heartbeat (issue #83): with the interval seam
+			// compressed to milliseconds a tick can legitimately
+			// interleave with handshake frames. Control frames carry
+			// no replay bytes and no cursor, so the handshake contract
+			// ignores them.
 		case wsOpText:
 			var ctl struct {
 				Type   string `json:"type"`
@@ -424,6 +483,9 @@ func dialHandshakeFrames(t *testing.T, addr, path string) (c *ws.Conn, frames []
 			case "resize":
 				// Size echo from the shared-size recompute; arriving
 				// before sync is fine, it just is not the cursor.
+			case "ping", "pong":
+				// App-level heartbeat / probe answer (issue #83):
+				// text control traffic, not part of the replay.
 			default:
 				t.Fatalf("unexpected control frame %q before sync", p)
 			}
@@ -1175,4 +1237,269 @@ func TestHandleInstanceTTYWS_SubscriberOverflowClosesConnectionWith1013(t *testi
 	if n := k.subscriberCount(); n != 0 {
 		t.Fatalf("%d subscriber(s) still registered after the teardown", n)
 	}
+}
+
+// --- liveness heartbeat & read-deadline reap (issue #83) -------------------
+
+// waitNoTTYClients blocks until the server has unregistered every tty
+// client of the instance. That removal is performed by the handler's
+// deferred clientHandle.Close(), so an empty map is the observable proof
+// the handler goroutine unwound; a lingering entry means a half-open
+// connection still pins the map (the issue #83 leak). Bounded, so a
+// missing reap fails the test instead of hanging it.
+func waitNoTTYClients(t *testing.T, s *Server, id string, d time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(d)
+	for {
+		s.ttyMu.Lock()
+		n := len(s.ttyClients[id])
+		s.ttyMu.Unlock()
+		if n == 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%d ttyClients entries still registered for %s — the handler never unwound (issue #83 leak)", n, id)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// TestHandleInstanceTTYWS_HeartbeatEmitsPingControlFrames pins the two
+// server heartbeats (issue #83): every tick must emit BOTH the RFC 6455
+// ping — the frame the browser's network stack auto-answers, refreshing
+// the read deadline so a healthy connection is never reaped — and the
+// TEXT {"type":"ping"} control frame, the only heartbeat browser
+// JavaScript can observe (onmessage never fires for control frames). The
+// text frame must be JSON carrying type "ping" — what the client does with
+// it (the parseTTYControlMessage whitelist that keeps it out of the
+// terminal) is pinned by the node suite, not here — and it must NOT be
+// binary:
+// every binary frame is ring-buffer output the client counts into its
+// byte cursor, so a heartbeat smuggled as binary would fabricate cursor
+// bytes — the same contract issue #87 fixed for error diagnostics.
+func TestHandleInstanceTTYWS_HeartbeatEmitsPingControlFrames(t *testing.T) {
+	t.Parallel()
+	k := newTTYHandshakeKind(1024)
+	addr, _, _, instID, _ := ttyWSTestServerWithLiveness(t, k, 100*time.Millisecond, 30*time.Second)
+
+	c, _, _ := dialHandshake(t, addr, ttyWSPath(instID, ""))
+
+	sawRFCPing := false
+	deadline := time.Now().Add(3 * time.Second) // 30 × the test tick
+	for time.Now().Before(deadline) {
+		op, p := readFrame(t, c, 2*time.Second)
+		if op == wsOpPing {
+			sawRFCPing = true
+			continue
+		}
+		if op != wsOpText {
+			t.Fatalf("heartbeat arrived as opcode %d payload=%q, want text (binary would be counted as ring-buffer bytes by the client)", op, p)
+		}
+		var ctl struct {
+			Type string `json:"type"`
+		}
+		if err := json.Unmarshal(p, &ctl); err != nil {
+			t.Fatalf("heartbeat text frame %q is not JSON: %v", p, err)
+		}
+		if ctl.Type == "ping" {
+			if !sawRFCPing {
+				t.Fatal(`{"type":"ping"} arrived before any RFC 6455 ping — the two share one ticker and the ping is written first; a client that only saw the text frame would never refresh the server's read deadline`)
+			}
+			return
+		}
+		// Legitimate post-handshake resize echo (same precedent as
+		// TestHandleInstanceTTYWS_SyncFrameCarriesEndOffset); skip it.
+		if ctl.Type != "resize" {
+			t.Fatalf("unexpected control frame %q while waiting for the heartbeat", p)
+		}
+	}
+	t.Fatal(`no {"type":"ping"} heartbeat frame within the deadline`)
+}
+
+// TestHandleInstanceTTYWS_PingProbeAnsweredAndNotTypedIntoShell pins the
+// client-probe round trip (issue #83): a client-sent {"type":"ping"} must
+// be answered with {"type":"pong"} AND must never reach SendInput — the
+// probe is transport traffic, not keystrokes, and forwarding it would
+// type literal JSON into the user's shell. The other half of the guard
+// matters just as much: ordinary input still flows after a probe (the
+// branch must not become a blanket input block), and the second pong
+// proves the handler survived its first probe instead of returning —
+// before the fix the probe fell through to SendInput, this kind answered
+// "kind does not support input", and the handler took the connection
+// down with it.
+func TestHandleInstanceTTYWS_PingProbeAnsweredAndNotTypedIntoShell(t *testing.T) {
+	t.Parallel()
+	k := newTTYHandshakeKind(1024)
+	// Heartbeat parked an hour away: this test drives the CLIENT probe,
+	// and with the server tick off the only possible text frames are the
+	// resize echo and the probe's own answer — zero interleaving noise.
+	addr, _, _, instID, _ := ttyWSTestServerWithLiveness(t, k, time.Hour, time.Hour)
+
+	c, _, _ := dialHandshake(t, addr, ttyWSPath(instID, ""))
+
+	readAnswer := func(what string) {
+		t.Helper()
+		for {
+			op, p := readFrame(t, c, 5*time.Second)
+			if op == wsOpText && strings.Contains(string(p), `"resize"`) {
+				continue // legitimate post-handshake size echo
+			}
+			if op != wsOpText || string(p) != `{"type":"pong"}` {
+				t.Fatalf("%s: got op=%d payload=%q, want text {\"type\":\"pong\"}", what, op, p)
+			}
+			return
+		}
+	}
+
+	if err := c.WriteText([]byte(`{"type":"ping"}`)); err != nil {
+		t.Fatalf("write probe: %v", err)
+	}
+	readAnswer("probe 1")
+
+	// Ordinary keystrokes still reach the PTY...
+	if err := c.WriteText([]byte("ls\r")); err != nil {
+		t.Fatalf("write input: %v", err)
+	}
+	// ...and the handler is alive to answer a second probe.
+	if err := c.WriteText([]byte(`{"type":"ping"}`)); err != nil {
+		t.Fatalf("write probe 2: %v", err)
+	}
+	readAnswer("probe 2")
+
+	// The msgChan is FIFO and the handler processes sequentially, so by
+	// the time the second pong is on the wire the keystroke forward has
+	// run. The PTY's entire inbox must be exactly the keystroke — no
+	// probe JSON, ever.
+	if got := k.gotInput(); got != "ls\r" {
+		t.Fatalf("PTY received %q, want exactly %q — the {\"type\":\"ping\"} probes must be answered and consumed before the input fallthrough, never typed into the user's shell", got, "ls\r")
+	}
+}
+
+// TestHandleInstanceTTYWS_DeadPeerReapedByReadDeadline pins the reap
+// (issue #83): a peer that goes silent after the handshake — the
+// half-open case, no data, no probe, no Pong to the server's pings, and
+// deliberately no FIN and no RST from this side — must be reaped by the
+// read deadline instead of pinning the fd, the handler goroutine, the
+// reader goroutine and the ttyClients entry for the life of the daemon.
+// The reap surfaces as the server closing the connection (the reader's
+// ReadMessage times out, msgChan closes, the EXISTING !ok arm returns and
+// the existing defers free everything); the client never calls Close, so
+// anything that ends this connection is the server.
+func TestHandleInstanceTTYWS_DeadPeerReapedByReadDeadline(t *testing.T) {
+	t.Parallel()
+	k := newTTYHandshakeKind(1024)
+	const readDeadline = time.Second
+	addr, srv, _, instID, _ := ttyWSTestServerWithLiveness(t, k, 200*time.Millisecond, readDeadline)
+
+	// Measured from BEFORE the dial: the server arms its read deadline
+	// inside the handshake, so a floor taken from a post-handshake start
+	// implicitly assumes the handshake completes in under the floor - a
+	// loaded or -race'd runner breaks that assumption and flakes. Deriving
+	// the floor from the configured deadline keeps the bound honest.
+	start := time.Now()
+	c, _, _ := dialHandshake(t, addr, ttyWSPath(instID, ""))
+
+	// Bound the wait so a never-reaping server fails the test instead of
+	// hanging it: the reap must land ~readDeadline after the dial, long
+	// before this deadline.
+	if err := c.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatalf("set client read deadline: %v", err)
+	}
+	var readErr error
+	for {
+		if _, _, err := c.ReadMessage(); err != nil {
+			readErr = err
+			break
+		}
+		// Buffered heartbeat frames may still be in flight; the silence
+		// that must kill this connection is the INBOUND silence the
+		// server measures. Keep draining.
+	}
+	elapsed := time.Since(start)
+
+	if errors.Is(readErr, os.ErrDeadlineExceeded) {
+		t.Fatalf("the client's own bounded read expired at %v without the server ever closing the connection — the silent peer was not reaped", elapsed)
+	}
+	// The server closed it (EOF). It must NOT have done so before its
+	// read deadline: an early close would mean something other than the
+	// reap — or a deadline shorter than configured — ended the session.
+	if elapsed < readDeadline/2 {
+		t.Fatalf("connection died after %v, well before the %v read deadline — not the reap closing it (read error %v)", elapsed, readDeadline, readErr)
+	}
+	waitNoTTYClients(t, srv, instID, 5*time.Second)
+}
+
+// TestHandleInstanceTTYWS_ResponsivePeerSurvivesReadDeadline pins the
+// POSITIVE half of issue #83 that the reap test cannot see: a peer that
+// ANSWERS the heartbeats must never be reaped, however long it produces
+// zero program output. This is the "don't kill the healthy vim/top user"
+// guarantee. With pingInterval/readDeadline compressed 300x from
+// production, an auto-answering client must still be connected - and
+// still usable - after 3 FULL read deadlines of silence. The client
+// answers with the RFC 6455 Pong ONLY: a TEXT {"type":"pong"} from a
+// client is NOT special-cased by the server (only {"type":"ping"} is),
+// so writing one here would be forwarded to SendInput - exactly the
+// class of bug the probe-branch ordering exists to prevent.
+func TestHandleInstanceTTYWS_ResponsivePeerSurvivesReadDeadline(t *testing.T) {
+	t.Parallel()
+	k := newTTYHandshakeKind(1024)
+	const pingInterval = 100 * time.Millisecond
+	const readDeadline = 300 * time.Millisecond
+	addr, srv, _, instID, _ := ttyWSTestServerWithLiveness(t, k, pingInterval, readDeadline)
+
+	c, _, _ := dialHandshake(t, addr, ttyWSPath(instID, ""))
+
+	windowStart := time.Now()
+	surviveUntil := windowStart.Add(3 * readDeadline)
+	sawRFCPing, sawTextPing := 0, 0
+	for time.Now().Before(surviveUntil) {
+		if err := c.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+			t.Fatalf("set read deadline: %v", err)
+		}
+		op, p, err := c.ReadMessage()
+		if err != nil {
+			t.Fatalf("a heartbeat-answering peer was dropped after %v with zero program output - liveness must ride heartbeat traffic, never output traffic (read error: %v)", time.Since(windowStart), err)
+		}
+		switch op {
+		case wsOpPing:
+			sawRFCPing++
+			// The browser's automatic answer, spelled in Go: the
+			// Pong is an inbound frame that refreshes the server's
+			// read deadline - this write is why the peer survives.
+			if err := c.WritePong(p); err != nil {
+				t.Fatalf("write pong: %v", err)
+			}
+		case wsOpText:
+			if strings.Contains(string(p), `"type":"ping"`) {
+				sawTextPing++
+			}
+			// resize echoes are legitimate background traffic here.
+		default:
+			// binary / pong / anything else: nothing to do.
+		}
+	}
+	if sawRFCPing < 3 || sawTextPing < 3 {
+		t.Fatalf("over %v of survival the server emitted %d RFC pings and %d text pings, want >= 3 each (pingInterval=%v) - the frames that keep a silent-but-healthy peer alive", 3*readDeadline, sawRFCPing, sawTextPing, pingInterval)
+	}
+
+	// Still fully usable at 3x the read deadline: a probe round trip
+	// proves reader, handler and write path are all alive...
+	if err := c.WriteText([]byte(`{"type":"ping"}`)); err != nil {
+		t.Fatalf("write probe after survival window: %v", err)
+	}
+	answered := false
+	for !answered {
+		op, p := readFrame(t, c, 5*time.Second)
+		if op == wsOpText && string(p) == `{"type":"pong"}` {
+			answered = true
+		}
+	}
+	// ...and the shell's inbox must be exactly empty.
+	if got := k.gotInput(); got != "" {
+		t.Fatalf("PTY inbox = %q, want empty - every probe is transport traffic", got)
+	}
+
+	_ = c.WriteClose(ws.CloseMessage(1000, "bye"))
+	_ = c.Close()
+	waitNoTTYClients(t, srv, instID, 5*time.Second)
 }
