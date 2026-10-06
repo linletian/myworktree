@@ -263,6 +263,47 @@ func TestOpencodeWebRendererKeepsFrameAlive(t *testing.T) {
 	}
 }
 
+// TestWebRenderersStoppedSwitchHidesAllFrames pins the issue #96 fix:
+// switching from a running web-ui instance to a STOPPED instance of the
+// SAME kind never runs deactivate() (selectInstance only deactivates a
+// DIFFERENT renderer), so each renderer's stopped / not-running branch
+// must hide EVERY cached keep-alive iframe itself. Before the fix the
+// previous instance's iframe kept hidden=false and stacked half/half
+// under the stopped overlay (switching from a terminal instance did not
+// reproduce because that cross-kind switch DID deactivate).
+func TestWebRenderersStoppedSwitchHidesAllFrames(t *testing.T) {
+	// The dispatch-side invariant that makes the renderer-side fix
+	// necessary: same-kind switches never deactivate. If this guard ever
+	// goes away, re-evaluate whether the renderer branches still need
+	// their own hide-all.
+	indexJS := fetchStaticAsset(t, "/")
+	if !strings.Contains(indexJS, "prevRenderer !== renderer") {
+		t.Fatal("index.html selectInstance lost the prevRenderer !== renderer guard on deactivate()")
+	}
+
+	cases := map[string]string{
+		// asset → opener of the stopped / not-running branch to inspect
+		"/static/kinds/dsh_web.js":      "inst && inst.status === 'stopped'",
+		"/static/kinds/opencode_web.js": "inst && inst.status === 'stopped'",
+		"/static/kinds/reasonix.js":     "inst.status !== 'running' && inst.status !== 'starting'",
+	}
+	for asset, branchOpen := range cases {
+		js := fetchStaticAsset(t, asset)
+		start := strings.Index(js, branchOpen)
+		if start < 0 {
+			t.Fatalf("%s: stopped/not-running branch opener %q not found", asset, branchOpen)
+		}
+		end := strings.Index(js[start:], "return;")
+		if end < 0 {
+			t.Fatalf("%s: no return; after %q", asset, branchOpen)
+		}
+		branch := js[start : start+end]
+		if !strings.Contains(branch, "this._showOnly(null)") {
+			t.Fatalf("%s: stopped branch does not hide every cached frame (this._showOnly(null)) — switching to a stopped same-kind instance stacks iframes half/half (issue #96)", asset)
+		}
+	}
+}
+
 func TestReasonixRendererKeepsFrameAlive(t *testing.T) {
 	mux := http.NewServeMux()
 	if err := Register(mux, "myworktree", nil); err != nil {
