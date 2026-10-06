@@ -177,6 +177,21 @@ func TestTerminalStatusLivenessHeartbeatContract(t *testing.T) {
 	if !strings.Contains(index, `ws.send(JSON.stringify({ type: "ping" }));`) {
 		t.Fatal(`the watchdog must send the {"type":"ping"} probe (issue #83)`)
 	}
+	// The input gate lives in BOTH session factories, and the renderer's copy
+	// can only reach the predicate through this export - the node FIX-A cases
+	// drive the renderer against a harness that publishes the sliced function
+	// itself, so without this anchor deleting the export line would quietly
+	// revert kinds/pty.js to the readyState-only gate it shipped before #83
+	// while every node case stayed green.
+	if !strings.Contains(index, "window.isTTYHeartbeatStale = isTTYHeartbeatStale;") {
+		t.Fatal("index.html must export isTTYHeartbeatStale for kinds/pty.js (issue #83 input gate)")
+	}
+	for name, src := range map[string]string{"index.html": index, "kinds/pty.js": string(pty)} {
+		if !strings.Contains(src, "&& !isTTYHeartbeatStale(session);") &&
+			!strings.Contains(src, "&& !(window.isTTYHeartbeatStale ? window.isTTYHeartbeatStale(session) : false);") {
+			t.Fatalf("%s must gate its onData socket arm on the heartbeat stamp (issue #83)", name)
+		}
+	}
 }
 
 // TestTerminalStatusPollReconnectsStaleSocket pins the two guards that make

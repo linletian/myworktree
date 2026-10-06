@@ -134,6 +134,9 @@ const indexFactory = new Function("deps", `
     isInstanceTerminalStatus,
     instanceStatusLabel,
     isTTYHeartbeatStale,
+    // Exported so a harness can rewind lastDataAt by the SHIPPED threshold
+    // instead of hardcoding 30000 and drifting from the constant.
+    TTY_LIVENESS_STALE_MS,
     hasTerminalTransportInFlight,
     reconnectStaleTTY,
     reconcileTerminalSessions,
@@ -791,7 +794,19 @@ test("pty activate(): a tab switch during bring-up does not start a second one",
 
 // The keystroke guard is the other half of issue #80: while the status read
 // "starting", onData dropped every keystroke instead of forwarding it.
-function ptySessionHarness(status) {
+//
+// `transport` (issue #83) additionally attaches a nominally-OPEN socket in
+// the given ttyState, with lastDataAt fresh or past TTY_LIVENESS_STALE_MS,
+// and records every send() on it - the gate under test is readyState PLUS
+// the heartbeat stamp, and the socket has to exist for the stamp to mean
+// anything. The predicate is wired in as the SLICED index.html function
+// (that is exactly how the shipped page delivers it: the window export in
+// index.html's export block), never a stub, so the renderer is judged
+// against the same code the browser runs. `publishExport: false` reproduces
+// a page where that export never happened, which must fall back to
+// readyState-only instead of throwing. No transport at all - every
+// pre-existing case here - keeps the plain HTTP path untouched.
+function ptySessionHarness(status, transport = null, { publishExport = true } = {}) {
   const posts = [];
   let onDataHandler = null;
   const termContainer = { appendChild() {} };
@@ -812,12 +827,25 @@ function ptySessionHarness(status) {
     onData(cb) { onDataHandler = cb; return { dispose() {} }; }
   };
   const session = h.renderer._createSession("inst1", termContainer);
+  // The window export the renderer's gate reads (issue #83). Assigned after
+  // load() on the same object pty.js closed over, so it arrives exactly as
+  // the page's export statement would deliver it.
+  if (publishExport) h.window.isTTYHeartbeatStale = h.api.isTTYHeartbeatStale;
+  if (transport) {
+    session.ttySocket = { readyState: 1, sent: [], send(d) { this.sent.push(d); } };
+    session.ttyState = transport.ttyState || "READY";
+    session.lastDataAt = transport.stale
+      ? Date.now() - h.api.TTY_LIVENESS_STALE_MS - 1000
+      : Date.now();
+  }
   // The factory batches keystrokes and flushes them on a short timer.
   const type = async (data) => {
     onDataHandler(data);
     await new Promise(resolve => setTimeout(resolve, 60));
   };
-  return { posts, session, type };
+  // window/api ride out with the harness: the #83 gate cases assert against
+  // the very export the renderer reads, not a parallel copy of it.
+  return { posts, session, type, window: h.window, api: h.api };
 }
 
 test("pty input: a starting instance still forwards keystrokes", async () => {
@@ -1773,4 +1801,204 @@ test("issue #87 x #83: a replaced socket never refreshes the live session's live
   const stampAt = block.indexOf("session.lastDataAt = Date.now();");
   assert.ok(guardAt >= 0 && stampAt >= 0, "both the guard and the stamp ship in the handler");
   assert.ok(guardAt < stampAt, "the guard precedes the liveness stamp, never the reverse");
+});
+
+// --- input gate over a heartbeat-stale socket (issue #83, review round) ----
+
+// The liveness rule has to hold on the INPUT path too, in BOTH session
+// factories. `readyState === OPEN` on a half-open socket is exactly the
+// lie issue #83 is about, and `send()` does not throw there - it writes
+// into a socket nobody reads - so gating on readyState alone swallowed the
+// keystroke: the HTTP input fallback, which reaches a live daemon whatever
+// the socket looks like, was never taken. What the gate does NOT buy is
+// immediate delivery - the watchdog's reap nulls the socket on the same
+// tick it first observes staleness - so these cases pin the gate itself
+// (stale ⇒ buffered HTTP, fresh ⇒ WS, pre-READY ⇒ untouched), which is
+// the only window the fix actually covers.
+//
+// index.html's legacy (pre-renderer) factory is sliced WHOLE - down through
+// createTerminalHost and the real isTerminalQueryResponse - so the gate is
+// read out of the shipped createTerminalSession rather than retyped here.
+// isInstanceLiveStatus/PendingStatus come along because
+// isInstanceTerminalStatus is defined in terms of them.
+const legacySessionFactory = new Function("deps", `
+  const {
+    state, terminalSessions, window, document, WebSocket, Terminal,
+    api, reportSessionError, sendResize, syncTerminalToAppliedSize,
+    setTimeout, setInterval, clearInterval, console, ResizeObserver,
+  } = deps;
+  ${[
+    "const INSTANCE_LIVE_STATUSES",
+    "const INSTANCE_PENDING_STATUSES",
+    "const TTY_LIVENESS_STALE_MS",
+    "const MIN_RESPONSE_LENGTH",
+  ].map(h => sliceStatement(inlineScript(indexSource), h)).join("\n")}
+  ${[
+    "function isInstanceLiveStatus",
+    "function isInstancePendingStatus",
+    "function isInstanceTerminalStatus",
+    "function isTTYHeartbeatStale",
+    "function isTerminalQueryResponse",
+    "function createTerminalHost",
+    "function createTerminalSession",
+  ].map(h => sliceBlockQuoted(inlineScript(indexSource), h)).join("\n\n")}
+  return {
+    createTerminalSession,
+    isTTYHeartbeatStale,
+    TTY_LIVENESS_STALE_MS,
+  };
+`);
+
+// Drives the legacy factory's real onData against a fake terminal: `posts`
+// records the buffered HTTP fallback, the socket records every send(). A
+// reportSessionError that throws is deliberate - a failed POST would
+// otherwise vanish into the flush timer's catch and the case would pass on
+// the strength of an input that never reached the daemon.
+function legacyInputHarness(status = "running", transport = null) {
+  const posts = [];
+  let onDataHandler = null;
+  const termContainer = { appendChild() {} };
+  class FakeTerminal {
+    constructor() { this.cols = 80; this.rows = 24; }
+    loadAddon() {}
+    open() {}
+    resize() {}
+    onData(cb) { onDataHandler = cb; return { dispose() {} }; }
+  }
+  const api = legacySessionFactory({
+    state: { instances: [{ id: "inst1", kind: "pty", status }], activeInst: "inst1" },
+    terminalSessions: {},
+    // No __ptyRenderer: this is the pre-renderer fallback the factory keeps
+    // alive, and the harness must reach it rather than the renderer's copy.
+    window: { Terminal: FakeTerminal },
+    document: {
+      createElement: () => ({ dataset: {}, style: {}, appendChild() {} }),
+      getElementById: () => termContainer,
+    },
+    WebSocket: { OPEN: 1 },
+    Terminal: FakeTerminal,
+    api: (url, opts) => { posts.push({ url, opts }); return Promise.resolve(); },
+    reportSessionError: (s, what, e) => { throw new Error(`input fallback failed: ${what}: ${e}`); },
+    sendResize: () => {},
+    syncTerminalToAppliedSize: () => {},
+    // Real one-shot timers: the factory batches keystrokes and flushes them
+    // after 40ms, and the type() helper below waits past that.
+    setTimeout,
+    setInterval: () => { throw new Error("the input path must not arm a watchdog"); },
+    clearInterval: () => {},
+    console,
+    ResizeObserver: class { observe() {} disconnect() {} },
+  });
+  const session = api.createTerminalSession("inst1");
+  assert.ok(session, "the legacy factory must build a session (window.Terminal stubbed)");
+  if (transport) {
+    session.ttySocket = { readyState: 1, sent: [], send(d) { this.sent.push(d); } };
+    session.ttyState = transport.ttyState || "READY";
+    session.lastDataAt = transport.stale
+      ? Date.now() - api.TTY_LIVENESS_STALE_MS - 1000
+      : Date.now();
+  }
+  const type = async (data) => {
+    onDataHandler(data);
+    await new Promise(resolve => setTimeout(resolve, 60));
+  };
+  return { api, posts, session, type };
+}
+
+test("issue #83 FIX-A (index.html factory): a keystroke on a heartbeat-stale socket takes the HTTP fallback, never send()", async () => {
+  const h = legacyInputHarness("running", { ttyState: "READY", stale: true });
+  // Preconditions, stated so the case cannot pass vacuously: the socket is
+  // OPEN (so the pre-fix condition would have taken send()), the session is
+  // READY, and the stamp is past the threshold - the exact half-open shape.
+  assert.equal(h.session.ttySocket.readyState, 1, "the half-open socket still looks OPEN");
+  assert.equal(h.api.isTTYHeartbeatStale(h.session), true, "and IS heartbeat-stale");
+
+  await h.type("ls\r");
+  assert.deepEqual(h.session.ttySocket.sent, [],
+    "a stale socket must never be handed the keystroke");
+  assert.equal(h.posts.length, 1, "the keystroke goes to the buffered HTTP input path");
+  assert.equal(h.posts[0].url, "/api/instances/input");
+  assert.match(h.posts[0].opts.body, /"input":"ls\\r"/, "the keystroke is the buffered payload");
+});
+
+test("issue #83 FIX-A (index.html factory): the same keystroke on a fresh socket still goes to send()", async () => {
+  // The non-vacuous half: identical harness, stamp fresh. Without this the
+  // stale case above could pass on a gate that simply never sends.
+  const h = legacyInputHarness("running", { ttyState: "READY", stale: false });
+  assert.equal(h.api.isTTYHeartbeatStale(h.session), false, "the stamp is fresh");
+
+  await h.type("ls\r");
+  assert.deepEqual(h.session.ttySocket.sent, ["ls\r"], "a live socket keeps the real-time path");
+  assert.equal(h.posts.length, 0, "and nothing is duplicated into the HTTP fallback");
+});
+
+test("issue #83 FIX-A (index.html factory): a HANDSHAKING socket is untouched by the gate", async () => {
+  // isTTYHeartbeatStale requires READY, so a socket that has not reached
+  // READY has no heartbeat baseline and must keep the pre-#83 behaviour even
+  // with a stale-looking stamp. A gate that fired here would push every
+  // mid-handshake keystroke onto HTTP - a behaviour change the fix does not
+  // claim and the handshake timeout window owns instead.
+  const h = legacyInputHarness("running", { ttyState: "HANDSHAKING", stale: true });
+  assert.equal(h.api.isTTYHeartbeatStale(h.session), false, "pre-READY is never stale");
+
+  await h.type("ls\r");
+  assert.deepEqual(h.session.ttySocket.sent, ["ls\r"], "pre-handshake input still rides the socket, as before");
+  assert.equal(h.posts.length, 0, "no HTTP detour before READY");
+});
+
+// kinds/pty.js side of the same gate, through the existing ptySessionHarness
+// (which now takes the transport and publishes the predicate the renderer's
+// gate reads). The renderer cannot see module scope, so it consumes the
+// predicate through window - defensively, like every other index.html export
+// in that file - which is why a missing export gets its own case below: it
+// must degrade to readyState-only, not throw on every keystroke.
+
+test("issue #83 FIX-A (pty.js renderer): a keystroke on a heartbeat-stale socket is buffered for the HTTP POST, never send()", async () => {
+  const h = ptySessionHarness("running", { ttyState: "READY", stale: true });
+  assert.equal(h.session.ttySocket.readyState, 1, "the half-open socket still looks OPEN");
+  assert.equal(h.window.isTTYHeartbeatStale(h.session), true,
+    "and IS stale, per the predicate index.html exports");
+
+  await h.type("ls\r");
+  assert.deepEqual(h.session.ttySocket.sent, [],
+    "the renderer must not hand a keystroke to a stale socket");
+  assert.equal(h.posts.length, 1, "the keystroke lands in the renderer's own HTTP buffer");
+  assert.equal(h.posts[0].url, "/api/instances/input");
+  assert.match(h.posts[0].opts.body, /"input":"ls\\r"/);
+});
+
+test("issue #83 FIX-A (pty.js renderer): the same keystroke on a fresh socket still goes to send()", async () => {
+  const h = ptySessionHarness("running", { ttyState: "READY", stale: false });
+  assert.equal(h.window.isTTYHeartbeatStale(h.session), false, "the stamp is fresh");
+
+  await h.type("ls\r");
+  assert.deepEqual(h.session.ttySocket.sent, ["ls\r"], "a live socket keeps the real-time path");
+  assert.equal(h.posts.length, 0, "and nothing is duplicated into the HTTP fallback");
+});
+
+test("issue #83 FIX-A (pty.js renderer): a HANDSHAKING socket is untouched by the gate", async () => {
+  const h = ptySessionHarness("running", { ttyState: "HANDSHAKING", stale: true });
+  assert.equal(h.window.isTTYHeartbeatStale(h.session), false, "pre-READY is never stale");
+
+  await h.type("ls\r");
+  assert.deepEqual(h.session.ttySocket.sent, ["ls\r"], "pre-handshake input still rides the socket");
+  assert.equal(h.posts.length, 0, "no HTTP detour before READY");
+});
+
+test("issue #83 FIX-A (pty.js renderer): a missing window export degrades to readyState-only, never a throw", async () => {
+  // The renderer probes the export (window.X ? ... : fallback) like every
+  // other helper it borrows from index.html. Without that probe a load-order
+  // change - or simply deleting the export line - would turn every keystroke
+  // into a TypeError instead of the pre-#83 behaviour. This case is what
+  // makes the fallback branch load-bearing rather than decorative.
+  const h = ptySessionHarness("running", { ttyState: "READY", stale: true }, { publishExport: false });
+  assert.equal(h.window.isTTYHeartbeatStale, undefined,
+    "the export is genuinely absent - the fallback branch is the one running");
+  assert.equal(h.api.isTTYHeartbeatStale(h.session), true,
+    "the socket WOULD be stale if the predicate were reachable");
+
+  await h.type("ls\r");
+  assert.deepEqual(h.session.ttySocket.sent, ["ls\r"],
+    "no export: today's readyState-only behaviour, keystroke rides the socket");
+  assert.equal(h.posts.length, 0, "and no HTTP detour, exactly as before #83");
 });

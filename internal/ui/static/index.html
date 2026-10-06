@@ -3521,7 +3521,30 @@
                     return;
                 }
 
-                if (session.ttySocket && session.ttySocket.readyState === WebSocket.OPEN) {
+                // Issue #83: a heartbeat-stale socket is NOT live for input
+                // either. A send on a half-open socket does not throw - it
+                // writes into a socket nobody reads - so gating on readyState
+                // alone here swallowed the keystroke and never reached the
+                // HTTP fallback below, which reaches a live daemon whatever
+                // the socket looks like. What this does NOT buy is immediate
+                // delivery: the reap nulls the socket on the SAME tick that
+                // first observes staleness (reconnectStaleTTY ->
+                // disconnectTTY), so the only window this covers runs from
+                // the stamp crossing TTY_LIVENESS_STALE_MS to the next
+                // watchdog tick - at most TTY_LIVENESS_CHECK_MS, longer in
+                // a timer-throttled background tab. Exactly one branch runs
+                // per keystroke, so nothing is sent twice, and a FALSE stale
+                // (a healthy socket whose stamp lapsed) merely routes the
+                // keystroke through HTTP into the same PTY. Staleness
+                // requires READY + OPEN, so the HANDSHAKING window and every
+                // non-OPEN socket behave exactly as before.
+                // The first two conditions stay on one line verbatim:
+                // TestIndexHTMLCoversPerSessionConnectionManagement anchors
+                // that exact hook text, and re-wrapping it would break a
+                // passing test for no behavioural reason.
+                const socketLive = session.ttySocket && session.ttySocket.readyState === WebSocket.OPEN
+                    && !isTTYHeartbeatStale(session);
+                if (socketLive) {
                     session.ttySocket.send(data);
                 } else {
                     session.termInputBuffer += data;
@@ -4385,6 +4408,17 @@
                                 // preserved #87 cursor as `since`) - the exact
                                 // shape the onclose arm takes, because
                                 // disconnectTTY detaches onclose before closing.
+                                // Deliberately NOT status-gated (review): the
+                                // failure modes are asymmetric. Missing a gate
+                                // here costs ONE wasted connection (opened,
+                                // answered 1013, declined); adding it would stop
+                                // reaping a genuinely half-open socket the moment
+                                // its status flapped into the pending bucket,
+                                // leaving a frozen terminal until the server's
+                                // 45s read deadline caught up - strictly worse
+                                // than the waste it prevents. The poll's arm and
+                                // ws.onclose do gate on status; this does not,
+                                // by decision, not by oversight.
                                 console.warn("tty heartbeat silent for over " + TTY_LIVENESS_STALE_MS + "ms, forcing reconnect:", id);
                                 reconnectStaleTTY(session);
                                 if (state.activeInst === id) {
@@ -4405,8 +4439,16 @@
                                 try {
                                     ws.send(JSON.stringify({ type: "ping" }));
                                 } catch (e) {
-                                    // CLOSED/CREATED: onclose/connect paths own
-                                    // it; the watchdog re-checks next tick.
+                                    // Recovery rests ENTIRELY on onclose/connect
+                                    // here - there is no second line of defence,
+                                    // and this tick cannot be it: a socket that is
+                                    // not OPEN is excluded from
+                                    // isTTYHeartbeatStale by definition, and this
+                                    // tick's own probe is gated on OPEN too, so
+                                    // once send throws the stale arm can never
+                                    // fire for this socket and every later tick
+                                    // does nothing until the browser reports the
+                                    // close. Silent by design; it does not retry.
                                 }
                             }
                         }, TTY_LIVENESS_CHECK_MS);
@@ -5061,6 +5103,12 @@
         window.disconnectTTY = disconnectTTY;
         window.connectTTY = connectTTY;
         window.hasLiveTTYConnection = hasLiveTTYConnection;
+        // Exported for kinds/pty.js, whose onData gate reads the SAME
+        // predicate (issue #83): the renderer cannot see module scope and
+        // consumes it through window like the helpers above, defensively, so
+        // this line is load-bearing for the input path there - deleting it
+        // silently reverts that gate to readyState-only.
+        window.isTTYHeartbeatStale = isTTYHeartbeatStale;
         window.hasTerminalTransportInFlight = hasTerminalTransportInFlight;
         window.ensureTerminalSession = ensureTerminalSession;
         window.maybeDestroyInactiveStoppedSession = maybeDestroyInactiveStoppedSession;

@@ -307,10 +307,26 @@ class PtyRenderer {
             if (inst && isTerminal) return;
             if (window.isTerminalQueryResponse && window.isTerminalQueryResponse(data)) return;
 
-            // Forward raw keystrokes to the daemon. Prefer WS
-            // (real-time) when live; fall back to HTTP POST for
-            // input buffering.
-            if (session.ttySocket && session.ttySocket.readyState === WebSocket.OPEN) {
+            // Forward raw keystrokes to the daemon. Prefer WS when live;
+            // fall back to HTTP POST buffering. "Live" is readyState PLUS
+            // the heartbeat stamp (issue #83): a send on a half-open socket
+            // does not throw, it writes where nobody reads, so without the
+            // stamp the HTTP fallback below - which reaches a live daemon
+            // either way - is never taken. Not instant: the reap nulls the
+            // socket on the same tick that first sees staleness, so this
+            // only covers the gap from the stamp crossing the threshold to
+            // that tick. One branch per keystroke, so never a duplicate;
+            // a false stale just takes HTTP into the same PTY, and
+            // staleness is READY+OPEN-only, so HANDSHAKING is untouched.
+            // Probed optionally like the other index.html exports here: a
+            // missing export degrades to today's readyState-only gate
+            // rather than throwing on every keystroke.
+            // Same shape as index.html's gate, line breaks included - the
+            // two session factories have drifted before and this one is the
+            // copy a reader diffs against.
+            const socketLive = session.ttySocket && session.ttySocket.readyState === WebSocket.OPEN
+                && !(window.isTTYHeartbeatStale ? window.isTTYHeartbeatStale(session) : false);
+            if (socketLive) {
                 session.ttySocket.send(data);
             } else if (window.api) {
                 if (!session._inputBuffer) session._inputBuffer = '';
