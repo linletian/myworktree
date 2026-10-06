@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -1502,4 +1503,463 @@ func TestHandleInstanceTTYWS_ResponsivePeerSurvivesReadDeadline(t *testing.T) {
 	_ = c.WriteClose(ws.CloseMessage(1000, "bye"))
 	_ = c.Close()
 	waitNoTTYClients(t, srv, instID, 5*time.Second)
+}
+
+// --- the follow-from-live-end sentinel (issue #86) ------------------------
+
+// sseLogFrame is one `event: log` payload of the SSE stream.
+type sseLogFrame struct {
+	Chunk string `json:"chunk"`
+	Next  int64  `json:"next"`
+}
+
+// parseSSELogFrames extracts the log events of a recorded SSE body in
+// order, ignoring the `: ping` keep-alive comment blocks.
+func parseSSELogFrames(t *testing.T, body string) []sseLogFrame {
+	t.Helper()
+	const prefix = "event: log\ndata: "
+	var out []sseLogFrame
+	for _, block := range strings.Split(body, "\n\n") {
+		if !strings.HasPrefix(block, prefix) {
+			continue
+		}
+		var f sseLogFrame
+		if err := json.Unmarshal([]byte(strings.TrimPrefix(block, prefix)), &f); err != nil {
+			t.Fatalf("undecodable log frame %q: %v", block, err)
+		}
+		out = append(out, f)
+	}
+	return out
+}
+
+// startStream runs handleInstanceLogStream on a cancellable request against
+// a recording writer and returns it with a waiter. Unlike runStreamUntilCancel
+// it stays open while the test produces more data, so a follow-up frame can
+// be observed on the SAME stream — which is the whole point of the
+// follow-from-live-end sentinel (issue #86).
+func startStream(t *testing.T, srv *Server, url string) (*syncStreamWriter, func(t *testing.T, want string) string) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	req := httptest.NewRequest(http.MethodGet, url, nil).WithContext(ctx)
+	w := newSyncStreamWriter()
+	done := make(chan struct{})
+	go func() {
+		srv.handleInstanceLogStream(w, req)
+		close(done)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Error("handleInstanceLogStream did not return after its context was cancelled")
+		}
+	})
+	wait := func(t *testing.T, want string) string {
+		t.Helper()
+		deadline := time.Now().Add(5 * time.Second)
+		for !strings.Contains(w.String(), want) {
+			if time.Now().After(deadline) {
+				t.Fatalf("stream body never contained %q; got %q", want, w.String())
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		return w.String()
+	}
+	return w, wait
+}
+
+// TestHandleInstanceLogStream_FollowLiveEndServesNoReplayThenOnlyNewBytes is
+// the SSE half of issue #86: a client whose screen already holds the tail but
+// whose offset was stripped (hence since=-2) must get an EMPTY first frame
+// carrying the live end offset — not the tail again — and then only bytes
+// produced after that instant.
+func TestHandleInstanceLogStream_FollowLiveEndServesNoReplayThenOnlyNewBytes(t *testing.T) {
+	t.Parallel()
+	k := newTTYHandshakeKind(1024)
+	srv, m := newLogTestServer(t, k)
+	instID := startKindInstance(t, m, "tty-handshake")
+	k.buf.WriteString("SEEDED-TAIL") // head = 11
+
+	_, wait := startStream(t, srv, "/api/instances/log/stream?id="+instID+"&since=-2")
+	body := wait(t, `"next":11`)
+	frames := parseSSELogFrames(t, body)
+	if len(frames) != 1 {
+		t.Fatalf("frames before the new data = %d, want exactly 1 (the empty sentinel frame): %v", len(frames), frames)
+	}
+	if frames[0].Chunk != "" {
+		t.Fatalf("first frame chunk = %q, want empty — the client already painted this tail (issue #86)", frames[0].Chunk)
+	}
+	if frames[0].Next != 11 {
+		t.Fatalf("first frame next = %d, want 11 (the live end offset the client lacked)", frames[0].Next)
+	}
+
+	// Only bytes produced after the sentinel read may ever follow on this
+	// stream. The 1s poll loop picks them up off the ring buffer.
+	k.buf.WriteString("NEW")
+	k.publish("NEW")
+	body = wait(t, `"chunk":"NEW"`)
+	frames = parseSSELogFrames(t, body)
+	if len(frames) != 2 {
+		t.Fatalf("frames = %d, want the empty sentinel frame then the new data: %v", len(frames), frames)
+	}
+	if frames[1].Chunk != "NEW" || frames[1].Next != 14 {
+		t.Fatalf("second frame = (%q, %d), want (\"NEW\", 14)", frames[1].Chunk, frames[1].Next)
+	}
+	if strings.Contains(body, "SEEDED-TAIL") {
+		t.Fatalf("the sentinel stream re-delivered the seeded tail: %q", body)
+	}
+}
+
+// TestHandleInstanceLogStream_OmittedAndRealSinceKeepTodaySemantics is the
+// regression guard beside it: the sentinel must not have moved the two
+// existing modes. An omitted `since` (the plain-unknown cursor: nothing
+// painted) still gets the tail; a real cursor still gets [since, head).
+func TestHandleInstanceLogStream_OmittedAndRealSinceKeepTodaySemantics(t *testing.T) {
+	t.Parallel()
+	k := newTTYHandshakeKind(1024)
+	srv, m := newLogTestServer(t, k)
+	instID := startKindInstance(t, m, "tty-handshake")
+	k.buf.WriteString("SEEDED-TAIL") // head = 11
+
+	_, waitTail := startStream(t, srv, "/api/instances/log/stream?id="+instID)
+	tailFrames := parseSSELogFrames(t, waitTail(t, `"chunk":"SEEDED-TAIL"`))
+	if tailFrames[0].Chunk != "SEEDED-TAIL" || tailFrames[0].Next != 11 {
+		t.Fatalf("omitted since: first frame = (%q, %d), want the tail (\"SEEDED-TAIL\", 11)", tailFrames[0].Chunk, tailFrames[0].Next)
+	}
+
+	_, waitFrom6 := startStream(t, srv, "/api/instances/log/stream?id="+instID+"&since=6")
+	from6 := parseSSELogFrames(t, waitFrom6(t, `"chunk":"-TAIL"`))
+	if from6[0].Chunk != "-TAIL" || from6[0].Next != 11 {
+		t.Fatalf("since=6: first frame = (%q, %d), want the incremental (\"-TAIL\", 11)", from6[0].Chunk, from6[0].Next)
+	}
+}
+
+// TestHandleInstanceTTYWS_FollowLiveEndReplaysNothing is the WS half of
+// issue #86: the handshake emits NO binary frame at all (every binary frame
+// is ring-buffer output the client counts into its cursor), publishes the
+// live end offset in `sync`, and then delivers live output normally.
+func TestHandleInstanceTTYWS_FollowLiveEndReplaysNothing(t *testing.T) {
+	t.Parallel()
+	k := newTTYHandshakeKind(1024)
+	addr, _, instID, _ := ttyWSTestServer(t, k)
+	k.buf.WriteString("HELLO-TAIL") // head = 10
+
+	c, replay, syncOffset := dialHandshake(t, addr, ttyWSPath(instID, "since=-2"))
+	if replay != "" {
+		t.Fatalf("sentinel handshake replayed %q, want no binary frame at all — the client's screen already holds the tail", replay)
+	}
+	if syncOffset != 10 {
+		t.Fatalf("sync offset = %d, want 10 (the live end offset)", syncOffset)
+	}
+
+	// Live output still flows: the sentinel suppresses the replay, not the
+	// stream. Wait for the subscription before publishing (see waitSubscribers).
+	k.waitSubscribers(t, 5*time.Second)
+	k.buf.WriteString("LIVE")
+	k.publish("LIVE")
+	var op byte
+	var p []byte
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); {
+		op, p = readFrame(t, c, 5*time.Second)
+		if op == wsOpBinary {
+			break
+		}
+	}
+	if op != wsOpBinary || string(p) != "LIVE" {
+		t.Fatalf("live frame op=%d payload=%q, want binary LIVE", op, p)
+	}
+	if k.buf.Offset()-syncOffset != int64(len("LIVE")) {
+		t.Fatalf("ring advanced by %d from sync %d, want %d", k.buf.Offset()-syncOffset, syncOffset, len("LIVE"))
+	}
+	_ = c.WriteClose(ws.CloseMessage(1000, "bye"))
+	_ = c.Close()
+}
+
+// TestHandleInstanceTTYWS_FollowLiveEndOnEmptyRingPublishesZero pins the
+// fresh-instance edge: with nothing ever written the sentinel still completes
+// the handshake — no replay, sync at 0 — and 0 is a legitimate cursor the
+// client keeps, not a failure. (A stopped instance's equivalent is
+// TestHandleInstanceTTYWS_FollowLiveEndOnStoppedInstanceCloses.)
+func TestHandleInstanceTTYWS_FollowLiveEndOnEmptyRingPublishesZero(t *testing.T) {
+	t.Parallel()
+	k := newTTYHandshakeKind(1024)
+	addr, _, instID, _ := ttyWSTestServer(t, k)
+
+	c, replay, syncOffset := dialHandshake(t, addr, ttyWSPath(instID, "since=-2"))
+	if replay != "" {
+		t.Fatalf("replay on an empty ring = %q, want nothing", replay)
+	}
+	if syncOffset != 0 {
+		t.Fatalf("sync offset = %d, want 0 (head of an untouched ring)", syncOffset)
+	}
+
+	k.waitSubscribers(t, 5*time.Second)
+	k.buf.WriteString("first")
+	k.publish("first")
+	var op byte
+	var p []byte
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); {
+		op, p = readFrame(t, c, 5*time.Second)
+		if op == wsOpBinary {
+			break
+		}
+	}
+	if op != wsOpBinary || string(p) != "first" {
+		t.Fatalf("live frame op=%d payload=%q, want binary first", op, p)
+	}
+	_ = c.WriteClose(ws.CloseMessage(1000, "bye"))
+	_ = c.Close()
+}
+
+// TestHandleInstanceTTYWS_FollowLiveEndOnStoppedInstanceCloses pins the
+// non-running edge the sentinel must share with Tail: Manager.EndOffset of a
+// stopped instance is 0 exactly as Manager.Tail is ("", 0, nil), so the
+// handshake publishes 0 and then SubscribeOutput closes the connection with
+// 1013 — never a binary frame, never a hang.
+func TestHandleInstanceTTYWS_FollowLiveEndOnStoppedInstanceCloses(t *testing.T) {
+	t.Parallel()
+	k := newTTYHandshakeKind(1024)
+	addr, m, instID, _ := ttyWSTestServer(t, k)
+	k.buf.WriteString("buffered-before-stop")
+	if err := m.Stop(instID); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+
+	c := dialTTY(t, addr, ttyWSPath(instID, "since=-2"))
+	sendResize(t, c)
+	for {
+		op, p := readFrame(t, c, 5*time.Second)
+		switch {
+		case op == wsOpBinary:
+			t.Fatalf("binary frame on a stopped instance: %q", p)
+		case op == wsOpText && strings.Contains(string(p), `"sync"`):
+			// sync is written before SubscribeOutput runs, so it may reach
+			// the wire before the close — and it must carry 0, the stopped
+			// instance's end offset, never anything the client claimed.
+			if !strings.Contains(string(p), `"offset":0`) {
+				t.Fatalf("sync on a stopped instance = %q, want offset 0", p)
+			}
+		case op == wsOpText:
+			// The shared-size resize echo: not a cursor, not a failure.
+		case op == wsOpClose:
+			if len(p) < 2 {
+				t.Fatalf("close frame payload too short: %v", p)
+			}
+			if got := binary.BigEndian.Uint16(p); got != 1013 {
+				t.Fatalf("close code = %d, want 1013 (reason %q)", got, string(p[2:]))
+			}
+			if !strings.Contains(string(p[2:]), "instance not running") {
+				t.Fatalf("close reason = %q, want it to name the missing instance", string(p[2:]))
+			}
+			return
+		default:
+			t.Fatalf("unexpected opcode %d before the close: %q", op, p)
+		}
+	}
+}
+
+// TestHandleInstanceTTYWS_FollowLiveEndReadFailureClosesConnection pins the
+// sentinel branch's error path: it must fail like the other two — a 1013
+// close, no binary frame, and no sync claiming an offset nobody read.
+func TestHandleInstanceTTYWS_FollowLiveEndReadFailureClosesConnection(t *testing.T) {
+	t.Parallel()
+	k := newTTYHandshakeKind(1024)
+	addr, _, instID, _ := ttyWSTestServer(t, k)
+	k.buf.WriteString("some-bytes")
+	k.failRead.Store(true)
+
+	c := dialTTY(t, addr, ttyWSPath(instID, "since=-2"))
+	sendResize(t, c)
+	for {
+		op, p := readFrame(t, c, 5*time.Second)
+		if op == wsOpClose {
+			if len(p) < 2 {
+				t.Fatalf("close frame payload too short: %v", p)
+			}
+			if got := binary.BigEndian.Uint16(p); got != 1013 {
+				t.Fatalf("close code = %d, want 1013 (reason %q)", got, string(p[2:]))
+			}
+			break
+		}
+		if op == wsOpBinary {
+			t.Fatalf("error text smuggled as binary frame: %q", p)
+		}
+		if op == wsOpText && strings.Contains(string(p), `"sync"`) {
+			t.Fatalf("sync published after a failed end-offset read: %q", p)
+		}
+	}
+}
+
+// TestFollowLiveEndSentinelAgreesAcrossTheWire pins the one number that has
+// no compiler between its two declarations: the browser's
+// CURSOR_FOLLOW_LIVE_END and the server's sinceFollowLiveEnd must be the
+// same value, or every stripped-header client silently falls back to the
+// tail — the exact bug of issue #86.
+//
+// It also pins the OTHER half of the contract, which is a crash rather than a
+// behaviour change: every <script> index.html loads is a classic script, so
+// they share one global lexical environment and kinds/pty.js must NOT declare
+// a top-level CURSOR_* name. If it ever does, the inline application script
+// dies at parse time and no amount of passing Go tests would notice.
+func TestFollowLiveEndSentinelAgreesAcrossTheWire(t *testing.T) {
+	t.Parallel()
+
+	indexSrc, err := os.ReadFile("../ui/static/index.html")
+	if err != nil {
+		t.Fatalf("read index.html: %v", err)
+	}
+	m := regexp.MustCompile(`(?m)^\s*const CURSOR_FOLLOW_LIVE_END = ([^;\n]+);`).FindSubmatch(indexSrc)
+	if m == nil {
+		t.Fatal("index.html no longer declares CURSOR_FOLLOW_LIVE_END as a named constant")
+	}
+	nums := regexp.MustCompile(`-?\d+`).FindAllString(string(m[1]), -1)
+	if len(nums) != 1 {
+		t.Fatalf("index.html declares CURSOR_FOLLOW_LIVE_END = %q, want exactly one numeric literal", m[1])
+	}
+	n, err := strconv.ParseInt(nums[0], 10, 64)
+	if err != nil {
+		t.Fatalf("index.html sentinel literal %q is not an int: %v", nums[0], err)
+	}
+	if n != sinceFollowLiveEnd {
+		t.Fatalf("index.html CURSOR_FOLLOW_LIVE_END = %d, but the server branches on %d", n, sinceFollowLiveEnd)
+	}
+
+	ptySrc, err := os.ReadFile("../ui/static/kinds/pty.js")
+	if err != nil {
+		t.Fatalf("read kinds/pty.js: %v", err)
+	}
+	// Same -1, prefixed name: the prefix is what stops the two classic
+	// scripts colliding in the shared global lexical environment.
+	uk := regexp.MustCompile(`(?m)^\s*const PTY_CURSOR_UNKNOWN = ([^;\n]+);`).FindSubmatch(ptySrc)
+	if uk == nil {
+		t.Fatal("kinds/pty.js no longer declares PTY_CURSOR_UNKNOWN as a named constant")
+	}
+	if pn := regexp.MustCompile(`-?\d+`).FindAllString(string(uk[1]), -1); len(pn) != 1 || pn[0] != "-1" {
+		t.Fatalf("kinds/pty.js PTY_CURSOR_UNKNOWN = %q, want exactly the literal -1 that index.html uses", uk[1])
+	}
+	if c := regexp.MustCompile(`(?m)^\s*const CURSOR_\w+ =`).FindString(string(ptySrc)); c != "" {
+		t.Fatalf("kinds/pty.js declares %q at top level; index.html declares the same global lexical name, so its script block would throw SyntaxError and kill the whole page", c)
+	}
+}
+
+// TestHandleInstanceLogStream_FollowLiveEndOnStoppedInstancePublishesZero
+// covers the SSE half of what docs/API.md promises for a stopped instance in
+// sentinel mode: 200, ONE empty frame whose cursor is 0, then keep-alives —
+// the stream stays open and never replays what the ring still holds, because
+// a client that sent the sentinel has already painted that tail.
+func TestHandleInstanceLogStream_FollowLiveEndOnStoppedInstancePublishesZero(t *testing.T) {
+	t.Parallel()
+	k := newTTYHandshakeKind(1024)
+	srv, m := newLogTestServer(t, k)
+	instID := startKindInstance(t, m, "tty-handshake")
+	k.buf.WriteString("SEEDED-TAIL") // still in the ring after the Stop below
+	if err := m.Stop(instID); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+
+	w, wait := startStream(t, srv, "/api/instances/log/stream?id="+instID+"&since=-2")
+	body := wait(t, `"next":0`)
+	frames := parseSSELogFrames(t, body)
+	if len(frames) != 1 {
+		t.Fatalf("frames = %d, want exactly the one empty sentinel frame: %v", len(frames), frames)
+	}
+	if frames[0].Chunk != "" {
+		t.Fatalf("chunk = %q, want empty — the ring still holds the tail and it must NOT be replayed here", frames[0].Chunk)
+	}
+	if frames[0].Next != 0 {
+		t.Fatalf("next = %d, want 0 (EndOffset of a stopped instance reports 0 like Tail does)", frames[0].Next)
+	}
+	// Stays open on keep-alives rather than closing or replaying.
+	body = wait(t, ": ping")
+	if strings.Contains(body, "SEEDED-TAIL") {
+		t.Fatalf("a stopped instance's sentinel stream replayed the ring: %q", body)
+	}
+	if strings.Contains(body, "-2") {
+		t.Fatalf("the sentinel leaked into a published cursor: %q", body)
+	}
+	_ = w
+}
+
+// TestHandleInstanceLogStream_FollowLiveEndOnNonCapturingKindNeverEchoesTheSentinel
+// is the wire-level pin for Manager.EndOffset's `off < 0` clamp. A kind with
+// no log capture echoes the `since` it was handed back — and EndOffset hands
+// it a negative (tail semantics) — so without the clamp this stream would
+// publish {"next":-1} or {"next":-2}. The client would then re-send the
+// sentinel on every reconnect forever, never advancing, and the tail it
+// already painted would never be resolved into a real cursor. The manager
+// tests pin the clamp at the manager layer; this is the only place the number
+// reaches the wire.
+func TestHandleInstanceLogStream_FollowLiveEndOnNonCapturingKindNeverEchoesTheSentinel(t *testing.T) {
+	t.Parallel()
+	srv, m := newLogTestServer(t, &emptyLogsKind{})
+	instID := startKindInstance(t, m, "empty-logs")
+
+	w, wait := startStream(t, srv, "/api/instances/log/stream?id="+instID+"&since=-2")
+	body := wait(t, `"next":0`)
+	frames := parseSSELogFrames(t, body)
+	if len(frames) == 0 {
+		t.Fatalf("no frames at all in %q", body)
+	}
+	if frames[0].Chunk != "" {
+		t.Fatalf("chunk = %q, want empty", frames[0].Chunk)
+	}
+	for i, f := range frames {
+		if f.Next < 0 {
+			t.Fatalf("frame %d published cursor %d — a negative cursor on the wire makes the client re-send the sentinel forever; the body was %q", i, f.Next, body)
+		}
+	}
+	if got := frames[0].Next; got != 0 {
+		t.Fatalf("first frame next = %d, want the clamped 0", got)
+	}
+	_ = w
+}
+
+// TestHandleInstanceLog_RejectsFollowLiveEndSentinel pins FIX-F: the
+// non-streaming endpoint treats any negative `since` as "give me the tail",
+// which is the exact OPPOSITE of what the sentinel means. Silently serving the
+// tail there would resurrect the duplication this value exists to prevent, so
+// the mistake has to surface as a 400 — while the ordinary negative cursor
+// (an omitted `since` from loadLog, or any other negative) keeps its tail
+// semantics untouched.
+func TestHandleInstanceLog_RejectsFollowLiveEndSentinel(t *testing.T) {
+	t.Parallel()
+	k := &logReplayKind{}
+	srv, m := newLogTestServer(t, k)
+	instID := startKindInstance(t, m, "log-replay")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/instances/log?id="+instID+"&since=-2", nil)
+	w := httptest.NewRecorder()
+	srv.handleInstanceLog(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 — this endpoint has no follow-from-the-live-end mode", w.Code)
+	}
+	if body := w.Body.String(); !strings.Contains(body, "/api/instances/log/stream") {
+		t.Fatalf("error body = %q, want it to name the endpoints where the sentinel IS valid", body)
+	}
+	if body := w.Body.String(); body == "" || strings.Contains(body, "newest-bytes") {
+		t.Fatalf("the rejected request must not be served a tail; body = %q", body)
+	}
+
+	// The neighbouring cursors are untouched: omitted still means tail,
+	// a positive one still means incremental.
+	req = httptest.NewRequest(http.MethodGet, "/api/instances/log?id="+instID, nil)
+	w = httptest.NewRecorder()
+	srv.handleInstanceLog(w, req)
+	if w.Code != http.StatusOK || w.Body.String() != "newest-bytes" {
+		t.Fatalf("omitted since = (%d, %q), want (200, \"newest-bytes\")", w.Code, w.Body.String())
+	}
+	req = httptest.NewRequest(http.MethodGet, "/api/instances/log?id="+instID+"&since=7", nil)
+	w = httptest.NewRecorder()
+	srv.handleInstanceLog(w, req)
+	if w.Code != http.StatusOK || w.Body.String() != "chunk-from-cursor" {
+		t.Fatalf("since=7 = (%d, %q), want (200, \"chunk-from-cursor\")", w.Code, w.Body.String())
+	}
+	req = httptest.NewRequest(http.MethodGet, "/api/instances/log?id="+instID+"&since=-1", nil)
+	w = httptest.NewRecorder()
+	srv.handleInstanceLog(w, req)
+	if w.Code != http.StatusOK || w.Body.String() != "newest-bytes" {
+		t.Fatalf("since=-1 = (%d, %q), want the tail as always", w.Code, w.Body.String())
+	}
 }

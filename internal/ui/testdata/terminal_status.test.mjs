@@ -479,6 +479,9 @@ const loadLogFactory = new Function("deps", `
   ${[
     "const INSTANCE_LIVE_STATUSES",
     "const INSTANCE_PENDING_STATUSES",
+    // The two cursor states loadLog chooses between (issue #86).
+    "const CURSOR_UNKNOWN",
+    "const CURSOR_FOLLOW_LIVE_END",
   ].map(h => sliceStatement(inlineScript(indexSource), h)).join("\n")}
   ${[
     "function isInstanceLiveStatus",
@@ -515,7 +518,15 @@ function loadLogHarness(status, { offset = "42", fail = false } = {}) {
     rememberServerRevision: () => {},
     AbortController,
     reportSessionError: (s, what, err) => errors.push(`${what}: ${err}`),
-    writeSanitizedTerminalOutput: (s, text) => writes.push(text),
+    // Mirrors the REAL writeSanitizedTerminalOutput contract: sanitizes,
+    // writes nothing when the result is empty, and RETURNS the character
+    // count (.length, not bytes) the caller uses as a > 0 gate on whether
+    // the screen holds anything (issue #86).
+    writeSanitizedTerminalOutput: (s, text) => {
+      if (!text) return 0;
+      writes.push(text);
+      return text.length;
+    },
   });
   return { api, session, writes, resets, requests, errors };
 }
@@ -570,11 +581,15 @@ test("loadLog keeps the byte cursor in step with the replay (issue #81 contract)
   assert.equal(session.logCursor, 4096);
 
   // A stripped X-Log-Offset must not reset the cursor to 0: startSSE would
-  // then replay the oldest 64 KB on top of the tail just written.
+  // then replay the oldest 64 KB on top of the tail just written. Issue
+  // #86 gave that case its own state — the tail IS painted, only its
+  // offset is unknown — so the answer is the follow-live-end sentinel, and
+  // a stale positive cursor is not retained either: it describes a screen
+  // this replay has already overwritten.
   const missing = loadLogHarness("running", { offset: null });
   missing.session.logCursor = 1234;
   await missing.api.loadLog(missing.session);
-  assert.equal(missing.session.logCursor, 1234);
+  assert.equal(missing.session.logCursor, -2);
 });
 
 // --- kinds/pty.js activate() ------------------------------------------------
@@ -898,6 +913,9 @@ const ttyWsFactory = new Function("deps", `
     "const TTY_LIVENESS_CHECK_MS",
     "const TTY_LIVENESS_STALE_MS",
     "const TTY_RECONNECT_DELAY_MS",
+    // connectTTY's three-state `since` (issue #86) branches on these.
+    "const CURSOR_UNKNOWN",
+    "const CURSOR_FOLLOW_LIVE_END",
   ].map(h => sliceStatement(inlineScript(indexSource), h)).join("\n")}
   ${[
     "function isInstanceLiveStatus",
@@ -1094,24 +1112,25 @@ test("issue #87: the cursor survives the drop and the reconnect resumes from it"
 test("issue #87: both session factories and both screen-clear resets carry ttyOffset", () => {
   // The two session factories have drifted before (see kinds/pty.js's
   // comment) — pin both, plus both reset sites that must invalidate the
-  // cursor when the screen is genuinely cleared.
-  assert.ok(indexSource.includes("ttyOffset: -1,"), "index.html factory initialises the cursor");
-  assert.ok(ptySource.includes("ttyOffset: -1,"), "pty.js factory initialises the cursor");
-  assert.ok(indexSource.includes("session.ttyOffset = -1;"), "index.html clears the cursor with the screen");
-  assert.ok(ptySource.includes("s.ttyOffset = -1;"), "pty.js clears the cursor with the screen");
+  // cursor when the screen is genuinely cleared. Both name the state
+  // (issue #86) instead of scattering a bare -1 through the file.
+  assert.ok(indexSource.includes("ttyOffset: CURSOR_UNKNOWN,"), "index.html factory initialises the cursor");
+  assert.ok(ptySource.includes("ttyOffset: PTY_CURSOR_UNKNOWN,"), "pty.js factory initialises the cursor");
+  assert.ok(indexSource.includes("session.ttyOffset = CURSOR_UNKNOWN;"), "index.html clears the cursor with the screen");
+  assert.ok(ptySource.includes("s.ttyOffset = PTY_CURSOR_UNKNOWN;"), "pty.js clears the cursor with the screen");
 
   // refreshCurrentInstance wipes the screen before loadLog (FIX-A): both
-  // cursors must go to the -1 sentinel AT the clear, before loadLog runs.
-  // A loadLog that then fails (or loses its X-Log-Offset header) would
-  // otherwise leave stale pre-refresh cursors behind, and connectTTY would
-  // send since=<oldHead> painting only [oldHead, head) onto the blank
-  // screen — worse than the pre-#87 full-tail replay this button got.
+  // cursors must go to the unknown sentinel AT the clear, before loadLog
+  // runs. A loadLog that then fails would otherwise leave stale pre-refresh
+  // cursors behind, and connectTTY would send since=<oldHead> painting only
+  // [oldHead, head) onto the blank screen — worse than the pre-#87
+  // full-tail replay this button got.
   const refreshBlock = sliceBlockQuoted(inlineScript(indexSource), "async function refreshCurrentInstance");
-  assert.ok(refreshBlock.includes("session.ttyOffset = -1;"), "refresh resets the WS cursor with the screen");
-  assert.ok(refreshBlock.includes("session.logCursor = -1;"), "refresh resets the SSE cursor with the screen");
-  assert.ok(refreshBlock.indexOf("session.term.clear()") < refreshBlock.indexOf("session.ttyOffset = -1;"),
+  assert.ok(refreshBlock.includes("session.ttyOffset = CURSOR_UNKNOWN;"), "refresh resets the WS cursor with the screen");
+  assert.ok(refreshBlock.includes("session.logCursor = CURSOR_UNKNOWN;"), "refresh resets the SSE cursor with the screen");
+  assert.ok(refreshBlock.indexOf("session.term.clear()") < refreshBlock.indexOf("session.ttyOffset = CURSOR_UNKNOWN;"),
     "the cursor reset sits at the screen clear, not before it");
-  assert.ok(refreshBlock.indexOf("session.ttyOffset = -1;") < refreshBlock.indexOf("await loadLog(session)"),
+  assert.ok(refreshBlock.indexOf("session.ttyOffset = CURSOR_UNKNOWN;") < refreshBlock.indexOf("await loadLog(session)"),
     "the cursors are invalidated before loadLog can half-succeed");
 
   // And behaviourally: the pty factory and the clearing activation both
@@ -1136,12 +1155,16 @@ test("issue #87: a successful loadLog pins ttyOffset to logCursor", async () => 
   await failed.api.loadLog(failed.session);
   assert.equal(failed.session.ttyOffset, -1, "failed replay leaves the cursor unknown");
 
-  // A stripped X-Log-Offset must leave both cursors at their previous value.
+  // A stripped X-Log-Offset moves BOTH cursors to the follow-live-end
+  // state (issue #86): the tail is on the screen now, so the next transport
+  // must not replay anything — but a stale positive cursor would be worse
+  // still, claiming an offset this repaint never established.
   const stripped = loadLogHarness("running", { offset: null });
   stripped.session.logCursor = 1234;
   stripped.session.ttyOffset = 1234;
   await stripped.api.loadLog(stripped.session);
-  assert.equal(stripped.session.ttyOffset, 1234, "missing header keeps the previous cursor");
+  assert.equal(stripped.session.ttyOffset, -2, "missing header means follow the live end");
+  assert.equal(stripped.session.logCursor, -2, "and both cursors say the same thing");
 });
 
 // startSSE is sliced separately: while the transport is SSE, logCursor
@@ -1150,6 +1173,8 @@ test("issue #87: a successful loadLog pins ttyOffset to logCursor", async () => 
 // same ring-buffer end offset, so the SSE handler must move them together
 // (review MAJOR-5).
 const sseCursorFactory = new Function("deps", `
+  // startSSE's sentinel branch (issue #86) names this constant.
+  ${sliceStatement(inlineScript(indexSource), "const CURSOR_FOLLOW_LIVE_END")}
   const {
     state, updateStatus, token, EventSource, writeSanitizedTerminalOutput, setTimeout,
   } = deps;
@@ -1171,7 +1196,15 @@ test("issue #87: the SSE fallback advances ttyOffset together with logCursor", (
     updateStatus: () => {},
     token: "",
     EventSource: FakeEventSource,
-    writeSanitizedTerminalOutput: (s, text) => writes.push(text),
+    // Mirrors the REAL writeSanitizedTerminalOutput contract: sanitizes,
+    // writes nothing when the result is empty, and RETURNS the character
+    // count (.length, not bytes) the caller uses as a > 0 gate on whether
+    // the screen holds anything (issue #86).
+    writeSanitizedTerminalOutput: (s, text) => {
+      if (!text) return 0;
+      writes.push(text);
+      return text.length;
+    },
     setTimeout: () => 0,
   });
   const session = makeSession("inst1", { logCursor: 100, ttyOffset: -1 });
@@ -1344,12 +1377,44 @@ test("issue #87 review: startSSE resumes from the cursor that is actually ahead"
   }
 });
 
+test("issue #86 follow: startSSE asks for the sentinel when EITHER sibling holds the live end", () => {
+  // startSSE's sentinel fallback reads BOTH siblings, so the shipped
+  // comment's "outranks -2 on either side" is true of the code and not
+  // just of the prose. Today every site assigns logCursor and ttyOffset
+  // as a pair, so the split state below is unreachable and this pins the
+  // rule rather than a live path — but if any future site ever assigned
+  // ttyOffset = CURSOR_FOLLOW_LIVE_END (-2) alone, the old logCursor-only
+  // check would silently omit `since`, the server would answer with its
+  // whole tail, and the screen that already holds it would show it twice.
+  const split = sseCursorHarness({ logCursor: -1, ttyOffset: -2 });
+  assert.ok(split.opened[0].url.includes("&since=-2"),
+    `ttyOffset alone must still put the sentinel on the wire, got ${split.opened[0].url}`);
+
+  // The mirror split still asks for the sentinel (the side the branch
+  // always read), and the OR must not make -2 unconditional: with neither
+  // sibling holding it, `since` stays omitted and the server's tail
+  // default applies (issue #81 — since=0 would ask for the oldest byte).
+  const mirror = sseCursorHarness({ logCursor: -2, ttyOffset: -1 });
+  assert.ok(mirror.opened[0].url.includes("&since=-2"),
+    `logCursor alone still asks for the sentinel, got ${mirror.opened[0].url}`);
+  const unknown = sseCursorHarness({ logCursor: -1, ttyOffset: -1 });
+  assert.ok(!unknown.opened[0].url.includes("since="),
+    `two unknowns still omit since, got ${unknown.opened[0].url}`);
+
+  // A real cursor on either sibling still outranks -2 on the other: the
+  // positive guard runs first, untouched.
+  const ahead = sseCursorHarness({ logCursor: -2, ttyOffset: 4096 });
+  assert.ok(ahead.opened[0].url.includes("&since=4096") && !ahead.opened[0].url.includes("=-2"),
+    `a real sibling cursor outranks -2, got ${ahead.opened[0].url}`);
+});
+
 // resetTerminalForSwitch is exported on window for other kinds to call, so
 // the cursor invalidation has to live INSIDE it: a kind that wiped the
 // screen through the helper while keeping a stale ttyOffset would make the
 // next connectTTY send since=<oldHead> and paint only [oldHead, head) onto a
 // blank terminal (issue #87).
 const resetSwitchFactory = new Function(`
+  ${sliceStatement(inlineScript(indexSource), "const CURSOR_UNKNOWN")}
   ${sliceBlockQuoted(inlineScript(indexSource), "function resetTerminalForSwitch")}
   return { resetTerminalForSwitch };
 `);
@@ -1388,8 +1453,8 @@ test("issue #87 review: resetTerminalForSwitch invalidates BOTH cursors itself",
   // out, so that pair is what keeps the renderer's cursor honest.
   assert.ok(indexSource.includes("window.resetTerminalForSwitch = resetTerminalForSwitch;"),
     "still exported on window for other kinds");
-  assert.ok(ptySource.includes("s.ttyOffset = -1;") && ptySource.includes("s.logCursor = -1;"),
-    "kinds/pty.js keeps its matching defensive pair");
+  assert.ok(ptySource.includes("s.ttyOffset = PTY_CURSOR_UNKNOWN;") && ptySource.includes("s.logCursor = PTY_CURSOR_UNKNOWN;"),
+    "kinds/pty.js keeps its matching defensive pair (issue #86 named the sentinel)");
   assert.equal(activateWith("running").session.ttyOffset, -1,
     "pty activate() resets the cursor even with the helper stubbed out");
 });
@@ -1428,15 +1493,18 @@ test("issue #87 review: loadLog pins its cursors only where the bytes actually l
   assert.equal(painted.session.logCursor, 4096);
   assert.equal(painted.session.ttyOffset, 4096, "the WS cursor follows the paint");
 
-  // A stripped X-Log-Offset still leaves both siblings alone: never fall
-  // back to 0, which is the oldest live byte (issue #81).
+  // A stripped X-Log-Offset, on a screen the paint just filled, moves BOTH
+  // siblings to the follow-live-end sentinel (issue #86): never 0 (the
+  // oldest live byte, #81), and no longer the stale 4321 — that number
+  // describes a screen this repaint has already overwritten, and the
+  // sentinel is the state #86 gave exactly this case.
   const stripped = loadLogHarness("running", { offset: null });
   stripped.session.logCursor = 4321;
   stripped.session.ttyOffset = 4321;
   await stripped.api.loadLog(stripped.session);
   assert.ok(stripped.writes.includes("log bytes"), "the log is still painted");
-  assert.equal(stripped.session.ttyOffset, 4321, "no header, no pin");
-  assert.equal(stripped.session.logCursor, 4321);
+  assert.equal(stripped.session.ttyOffset, -2, "painted-but-unoffset: follow the live end");
+  assert.equal(stripped.session.logCursor, -2, "and both siblings say the same thing");
 
   // Source contract: the pin lives inside the if (session.term) scope and
   // after the paint, not above it.
@@ -1832,6 +1900,9 @@ const legacySessionFactory = new Function("deps", `
     "const INSTANCE_PENDING_STATUSES",
     "const TTY_LIVENESS_STALE_MS",
     "const MIN_RESPONSE_LENGTH",
+    // The named cursor states the legacy factory bootstraps (issue #86).
+    "const CURSOR_UNKNOWN",
+    "const CURSOR_FOLLOW_LIVE_END",
   ].map(h => sliceStatement(inlineScript(indexSource), h)).join("\n")}
   ${[
     "function isInstanceLiveStatus",
@@ -2001,4 +2072,512 @@ test("issue #83 FIX-A (pty.js renderer): a missing window export degrades to rea
   assert.deepEqual(h.session.ttySocket.sent, ["ls\r"],
     "no export: today's readyState-only behaviour, keystroke rides the socket");
   assert.equal(h.posts.length, 0, "and no HTTP detour, exactly as before #83");
+});
+
+const followLiveEndFactory = new Function("deps", `
+  const {
+    state, fetch, headers, rememberServerRevision, AbortController,
+    reportSessionError, writeSanitizedTerminalOutput, updateStatus, token,
+    window, location, WebSocket, EventSource, disconnectTTY,
+    resetTTYOutputDecoder, applyTTYSize, sendResize, syncTerminalToAppliedSize,
+    focusTerminalIfPossible, decodeTTYOutputChunk, terminalSessions,
+    setTimeout, clearTimeout, setInterval, clearInterval, console,
+  } = deps;
+  ${[
+    "const INSTANCE_LIVE_STATUSES",
+    "const INSTANCE_PENDING_STATUSES",
+    "const CURSOR_UNKNOWN",
+    "const CURSOR_FOLLOW_LIVE_END",
+    // The merged connectTTY carries #83's liveness machinery; slicing it
+    // without these would ReferenceError the moment the handshake runs.
+    "const TTY_LIVENESS_CHECK_MS",
+    "const TTY_LIVENESS_STALE_MS",
+    "const TTY_RECONNECT_DELAY_MS",
+  ].map(h => sliceStatement(inlineScript(indexSource), h)).join("\n")}
+  ${[
+    "function isInstanceLiveStatus",
+    "function isInstancePendingStatus",
+    "function isInstanceTerminalStatus",
+    "function parseTTYControlMessage",
+    "function getTerminalSession",
+    "function isTTYHeartbeatStale",
+    "function hasLiveTTYConnection",
+    "function hasTerminalTransportInFlight",
+    "function reconnectStaleTTY",
+    "async function loadLog",
+    "function connectTTY",
+    "function startSSE",
+  ].map(h => sliceBlockQuoted(inlineScript(indexSource), h)).join("\n\n")}
+  return { loadLog, connectTTY, startSSE };
+`);
+
+// offset: null is the proxy that strips X-Log-Offset; fail: true is a fetch
+// that never lands (the two unknown states, respectively). noTerm: true is a
+// session with no terminal to paint into, so even a successful fetch paints
+// nothing.
+function followLiveEndHarness({ offset = "4096", fail = false, tail = "TAIL", noTerm = false } = {}) {
+  const writes = []; // everything painted on the fake screen, in order
+  const wsUrls = [];
+  const sseUrls = [];
+  let socket = null;
+  let eventSource = null;
+  class FakeWebSocket {
+    constructor(url) {
+      this.url = url; this.readyState = 0; this.binaryType = ""; this.sent = [];
+      wsUrls.push(url); socket = this;
+    }
+    send(data) { this.sent.push(data); }
+    close() {
+      if (this.readyState === 3) return;
+      this.readyState = 3;
+      if (this.onclose) this.onclose();
+    }
+  }
+  FakeWebSocket.OPEN = 1;
+  class FakeEventSource {
+    constructor(url) { this.url = url; this.listeners = {}; sseUrls.push(url); eventSource = this; }
+    addEventListener(name, cb) { this.listeners[name] = cb; }
+    close() { this.closed = true; }
+    emit(obj) { (this.listeners.log || this.onmessage)({ data: JSON.stringify(obj) }); }
+  }
+  const session = makeSession("inst1", {
+    ttyState: "IDLE", logCursor: -1, ttyOffset: -1, term: noTerm ? null : {},
+  });
+  const api = followLiveEndFactory({
+    state: { instances: [{ id: "inst1", kind: "pty", status: "running" }], activeInst: "inst1" },
+    fetch: () => {
+      if (fail) return Promise.reject(new Error("network down"));
+      return Promise.resolve({
+        ok: true,
+        text: () => Promise.resolve(tail),
+        headers: { get: (name) => (name === "X-Log-Offset" ? offset : null) },
+      });
+    },
+    headers: {},
+    rememberServerRevision: () => {},
+    AbortController,
+    reportSessionError: () => {},
+    // Mirrors the REAL writeSanitizedTerminalOutput contract: sanitizes,
+    // writes nothing when the result is empty, and RETURNS the character
+    // count (.length, not bytes) the caller uses as a > 0 gate on whether
+    // the screen holds anything (issue #86).
+    writeSanitizedTerminalOutput: (s, text) => {
+      if (!text) return 0;
+      writes.push(text);
+      return text.length;
+    },
+    updateStatus: () => {},
+    token: "",
+    window: { WebSocket: FakeWebSocket },
+    location: { protocol: "http:", host: "ws.test" },
+    WebSocket: FakeWebSocket,
+    EventSource: FakeEventSource,
+    terminalSessions: { inst1: session },
+    disconnectTTY: (s) => {
+      s.ttyState = s.ttySocket ? "DISCONNECTING" : "IDLE";
+      s.ttySocket = null;
+      s.ttyReconnectTimer = null;
+    },
+    resetTTYOutputDecoder: () => {},
+    applyTTYSize: () => {},
+    sendResize: () => {},
+    syncTerminalToAppliedSize: () => {},
+    focusTerminalIfPossible: () => {},
+    decodeTTYOutputChunk: (s, bytes) => new TextDecoder().decode(bytes),
+    // Recorded, never fired: nothing in the handshake windows may drive an
+    // assertion on its own schedule.
+    setTimeout: () => 0,
+    clearTimeout: () => {},
+    setInterval: () => 0,
+    clearInterval: () => {},
+    console: { warn: () => {}, error: () => {}, log: () => {} },
+  });
+  return {
+    api, session, writes, wsUrls, sseUrls,
+    enc: new TextEncoder(),
+    socket: () => socket,
+    eventSource: () => eventSource,
+    loadLog: () => api.loadLog(session),
+    connectTTY: () => api.connectTTY(session),
+    startSSE: () => api.startSSE(session),
+  };
+}
+
+test("issue #86: a stripped X-Log-Offset means painted-but-unoffset, not empty", async () => {
+  // The stripped-header case is the bug's trigger: the tail is on the
+  // screen, only its end offset is missing, so the cursor must say "do not
+  // replay" rather than the plain unknown that asks for the tail again.
+  const stripped = followLiveEndHarness({ offset: null });
+  await stripped.loadLog();
+  assert.deepEqual(stripped.writes, ["TAIL"], "the tail was painted");
+  assert.equal(stripped.session.logCursor, -2, "SSE cursor follows the live end");
+  assert.equal(stripped.session.ttyOffset, -2, "WS cursor follows the live end");
+
+  // A real header still pins the real offset (unchanged, issue #87).
+  const ok = followLiveEndHarness({ offset: "4096" });
+  await ok.loadLog();
+  assert.equal(ok.session.logCursor, 4096);
+  assert.equal(ok.session.ttyOffset, 4096);
+
+  // A FAILED fetch paints nothing, so the screen genuinely wants the tail:
+  // the plain-unknown sentinel stays, and the catch path must not have been
+  // swept into the follow-live-end state.
+  const failed = followLiveEndHarness({ fail: true });
+  await failed.loadLog();
+  assert.deepEqual(failed.writes, [], "nothing was painted");
+  assert.equal(failed.session.logCursor, -1);
+  assert.equal(failed.session.ttyOffset, -1);
+});
+
+test("issue #86: both transports ask for the sentinel, and never since=0", () => {
+  // since=0 is the #81 symptom — the oldest live byte — so the sentinel
+  // must be an explicit -2 and plain unknown must stay an OMITTED since.
+  const since = (url) => {
+    const m = url.match(/[?&]since=(-?\d+)/);
+    return m ? m[1] : null;
+  };
+  for (const [label, cursor, want] of [
+    ["follow-live-end", -2, "-2"],
+    ["plain unknown (nothing painted)", -1, null],
+    ["a real cursor", 4096, "4096"],
+  ]) {
+    const sse = followLiveEndHarness();
+    sse.session.logCursor = cursor;
+    sse.startSSE();
+    assert.equal(since(sse.sseUrls.at(-1)), want, `SSE with ${label}`);
+
+    const ws = followLiveEndHarness();
+    ws.session.ttyOffset = cursor;
+    ws.connectTTY();
+    assert.equal(since(ws.wsUrls.at(-1)), want, `WS with ${label}`);
+  }
+});
+
+test("issue #86: off a stripped header the SSE stream paints the tail once", async () => {
+  const h = followLiveEndHarness({ offset: null });
+  await h.loadLog();
+  h.startSSE();
+  assert.ok(h.sseUrls.at(-1).includes("&since=-2"), `stream must request the sentinel: ${h.sseUrls.at(-1)}`);
+
+  // The server's answer to the sentinel is an EMPTY first frame carrying the
+  // live end offset: nothing to paint, and the cursor the client lacked.
+  h.eventSource().emit({ chunk: "", next: 4096 });
+  assert.deepEqual(h.writes, ["TAIL"], "the empty first frame paints nothing");
+  assert.equal(h.session.logCursor, 4096, "the client now holds a real cursor");
+  assert.equal(h.session.ttyOffset, 4096, "both cursors track the same offset");
+
+  h.eventSource().emit({ chunk: "NEW", next: 4099 });
+  assert.deepEqual(h.writes, ["TAIL", "NEW"], "only new bytes are added — the tail rendered once");
+  assert.equal(h.session.logCursor, 4099);
+});
+
+test("issue #86: off a stripped header the WS handshake replays nothing", async () => {
+  const h = followLiveEndHarness({ offset: null });
+  await h.loadLog();
+  h.connectTTY();
+  assert.ok(h.wsUrls.at(-1).includes("&since=-2"), `handshake must request the sentinel: ${h.wsUrls.at(-1)}`);
+
+  const ws = h.socket();
+  ws.readyState = 1;
+  ws.onopen();
+  ws.onmessage({ data: '{"type":"ready"}' });
+  ws.onmessage({ data: '{"type":"sync","offset":4096}' });
+  assert.deepEqual(h.writes, ["TAIL"], "no replay frame — the screen already holds the tail");
+  assert.equal(h.session.ttyOffset, 4096, "sync publishes the live end offset");
+
+  ws.onmessage({ data: h.enc.encode("NEW").buffer });
+  assert.deepEqual(h.writes, ["TAIL", "NEW"], "live output still flows");
+  assert.equal(h.session.ttyOffset, 4099);
+});
+
+test("issue #86: index.html and kinds/pty.js agree on the cursor numbers without sharing a global name", () => {
+  // The two session factories have drifted before, and -2 is a wire value the
+  // server branches on, so the NUMBERS must stay equal. The NAMES must stay
+  // DIFFERENT: every <script> in this page is a classic script sharing one
+  // global lexical environment, so a second top-level `const CURSOR_UNKNOWN`
+  // would throw SyntaxError and kill the whole inline app (that is what the
+  // "no two classic scripts declare the same top-level name" test below
+  // enforces; pty.js therefore owns a prefixed PTY_CURSOR_UNKNOWN).
+  const rhs = (src, name) => {
+    const m = src.match(new RegExp(`const ${name} = ([^;]+);`));
+    assert.ok(m, `${name} is no longer declared as a named constant`);
+    return m[1];
+  };
+  assert.deepEqual((rhs(indexSource, "CURSOR_UNKNOWN").match(/-?\d+/g) || []).map(Number), [-1], "index.html CURSOR_UNKNOWN");
+  assert.deepEqual((rhs(ptySource, "PTY_CURSOR_UNKNOWN").match(/-?\d+/g) || []).map(Number), [-1], "pty.js PTY_CURSOR_UNKNOWN");
+  assert.deepEqual((rhs(indexSource, "CURSOR_FOLLOW_LIVE_END").match(/-?\d+/g) || []).map(Number), [-2], "index.html CURSOR_FOLLOW_LIVE_END");
+
+  // pty.js declares the follow-live-end state neither under its own name nor
+  // under index.html's: nothing in the pty renderer ever assigns it, and a
+  // top-level copy here would be dead weight at best and a collision at worst.
+  assert.ok(!/^\s*const (PTY_)?CURSOR_FOLLOW_LIVE_END\b/m.test(ptySource), "pty.js must not declare a follow-live-end constant");
+  assert.ok(!/^\s*const CURSOR_UNKNOWN\b/m.test(ptySource), "pty.js must not declare an unprefixed CURSOR_UNKNOWN (global lexical collision with index.html)");
+
+  // Nothing publishes the sentinels on window: pty.js parses before index.html
+  // runs, so such a publication could only ever be read as `undefined` there.
+  assert.ok(!indexSource.includes("window.CURSOR_UNKNOWN"), "index.html must not publish CURSOR_UNKNOWN on window (dead by load order)");
+  assert.ok(!indexSource.includes("window.CURSOR_FOLLOW_LIVE_END"), "index.html must not publish CURSOR_FOLLOW_LIVE_END on window (dead by load order)");
+
+  for (const [src, label] of [[indexSource, "index.html"], [ptySource, "kinds/pty.js"]]) {
+    for (const bare of [/logCursor: -1,/, /ttyOffset: -1,/, /logCursor = -1;/, /ttyOffset = -1;/]) {
+      assert.ok(!bare.test(src), `${label} still assigns a bare -1 at ${bare}`);
+    }
+  }
+});
+
+// --- classic-script global scope --------------------------------------------
+
+// Every <script> index.html loads is a CLASSIC script — there is no
+// type="module" anywhere in the page — so all of them share ONE global
+// lexical environment. A top-level `const`/`let`/`class` declared by two of
+// them is a SyntaxError thrown when the second one parses, and that kills the
+// ENTIRE inline application script: no `state`, no session map, no loadLog /
+// connectTTY / startSSE, no terminal — just the static shell. The slicing
+// harness above evaluates each function through new Function(...), which puts
+// every declaration in its own scope, so the suite is structurally blind to
+// this class of bug. This test is the guard.
+//
+// `var`/`function` pairs are LEGAL across scripts (redeclaration; last one
+// wins), so they are collected and reported as notes rather than failures —
+// they still shadow each other, and the note keeps that visible.
+
+function stripCode(src) {
+  let out = "", i = 0, n = src.length, prevSig = "";
+  while (i < n) {
+    const c = src[i], d = src[i + 1];
+    if (c === "/" && d === "/") { while (i < n && src[i] !== "\n") i++; continue; }
+    if (c === "/" && d === "*") { i += 2; while (i < n && !(src[i] === "*" && src[i + 1] === "/")) i++; i += 2; out += " "; continue; }
+    if (c === '"' || c === "'") { const q = c; i++; while (i < n && src[i] !== q) { if (src[i] === "\\") i++; i++; } i++; out += "''"; prevSig = "'"; continue; }
+    if (c === "`") {
+      i++; let o = "``";
+      while (i < n && src[i] !== "`") {
+        if (src[i] === "\\") { i += 2; continue; }
+        if (src[i] === "$" && src[i + 1] === "{") {
+          let dep = 1; i += 2; let inner = "";
+          while (i < n && dep > 0) { if (src[i] === "{") dep++; else if (src[i] === "}") { dep--; if (dep === 0) break; } inner += src[i]; i++; }
+          i++; o += "${" + stripCode(inner) + "}"; continue;
+        }
+        i++;
+      }
+      i++; out += o; prevSig = "`"; continue;
+    }
+    // Division vs regex literal: only treat `/` as a regex when the previous
+    // significant character cannot end an expression.
+    if (c === "/" && /[=(,:![&|?{};+\-*%<>~^]/.test(prevSig)) {
+      let j = i + 1, cls = false, ok = false;
+      while (j < n) {
+        const e = src[j];
+        if (e === "\\") { j += 2; continue; }
+        if (e === "\n") break;
+        if (e === "[") cls = true; else if (e === "]") cls = false;
+        else if (e === "/" && !cls) { ok = true; break; }
+        j++;
+      }
+      if (ok) { i = j + 1; while (i < n && /[a-z]/.test(src[i])) i++; out += "/RX/"; prevSig = "/"; continue; }
+    }
+    out += c; if (/\S/.test(c)) prevSig = c; i++;
+  }
+  return out;
+}
+
+function depthAt(s, target) {
+  let depth = 0;
+  for (let i = 0; i < target; i++) {
+    const c = s[i];
+    if (c === "{" || c === "(" || c === "[") depth++;
+    else if (c === "}" || c === ")" || c === "]") depth--;
+  }
+  return depth;
+}
+
+// Names bound by a declarator list: `a`, `a = 1, b = 2`, `{a, b: c}`, `[x, y]`.
+function boundNames(pat) {
+  const parts = [];
+  let depth = 0, cur = "";
+  for (const ch of pat) {
+    if (ch === "{" || ch === "[" || ch === "(") depth++;
+    if (ch === "}" || ch === "]" || ch === ")") depth--;
+    if (ch === "," && depth === 0) { parts.push(cur); cur = ""; continue; }
+    cur += ch;
+  }
+  parts.push(cur);
+  const names = [];
+  for (const raw of parts) {
+    const t = raw.trim();
+    if (!t) continue;
+    if (/^[[{]/.test(t)) {
+      const open = t[0], close = open === "{" ? "}" : "]";
+      let d = 0, body = "";
+      for (let k = 0; k < t.length; k++) {
+        if (t[k] === open) { d++; if (d === 1) continue; }
+        if (t[k] === close) { d--; if (d === 0) break; }
+        if (d >= 1) body += t[k];
+      }
+      names.push(...boundNames(body));
+      continue;
+    }
+    const head = t.split("=")[0].trim();
+    const renamed = head.lastIndexOf(":");
+    const id = (renamed > -1 ? head.slice(renamed + 1) : head).trim();
+    if (/^[A-Za-z_$][\w$]*$/.test(id)) names.push(id);
+  }
+  return names;
+}
+
+// Top-level declarations of one classic script: brace/paren depth 0 AND the
+// keyword actually starting a statement, so `for (const x of ys)` and a named
+// function expression (`window.f = function g() {}`, which binds no global)
+// are not mistaken for global bindings. Indentation is irrelevant — the inline
+// block in index.html is indented by eight spaces and is still top level.
+function topLevelDecls(src) {
+  const s = stripCode(src);
+  const decls = [];
+  const kw = /(?:const|let|var|class|function)[ \t\r\n]+/g;
+  let m;
+  while ((m = kw.exec(s))) {
+    const kwAt = m.index;
+    let k = kwAt - 1;
+    while (k >= 0 && /[ \t]/.test(s[k])) k--;
+    if (k >= 0 && !/[;{}():,=\n]/.test(s[k])) continue;
+    if (depthAt(s, kwAt) !== 0) continue;
+    const kind = s.slice(kwAt, kwAt + m[0].trimEnd().length);
+    let p = kwAt + m[0].length;
+    while (p < s.length && /\s/.test(s[p])) p++;
+    let names;
+    if (kind === "function" || kind === "class") {
+      const id = s.slice(p).match(/^[A-Za-z_$][\w$]*/);
+      names = id && id[0] ? [id[0]] : [];
+    } else if (s[p] === "{" || s[p] === "[") {
+      const open = s[p], close = open === "{" ? "}" : "]";
+      let d = 0, q = p;
+      for (; q < s.length; q++) {
+        if (s[q] === open) d++;
+        else if (s[q] === close) { d--; if (d === 0) { q++; break; } }
+      }
+      names = boundNames(s.slice(p, q));
+    } else {
+      let q = p;
+      while (q < s.length && s[q] !== ";" && s[q] !== "\n") q++;
+      names = boundNames(s.slice(p, q));
+    }
+    for (const nm of names) if (nm) decls.push({ kind, name: nm });
+  }
+  return decls;
+}
+
+// The classic, non-vendor scripts in the order index.html loads them.
+function classicScripts(html, htmlLabel) {
+  const out = [];
+  const tag = /<script\b([^>]*)>([\s\S]*?)<\/script>/gi;
+  let m;
+  while ((m = tag.exec(html))) {
+    const srcMatch = (m[1] || "").match(/\bsrc\s*=\s*["']([^"']+)["']/i);
+    if (srcMatch) {
+      const src = srcMatch[1];
+      if (src.includes("/vendor/")) continue;
+      const rel = src.replace(/^\/static\//, "").split("?")[0];
+      const body = readFileSync(join(staticDir, rel), "utf8");
+      out.push({ label: `static/${rel}`, body });
+    } else if ((m[2] || "").trim()) {
+      out.push({ label: `${htmlLabel} (inline)`, body: m[2] });
+    }
+  }
+  return out;
+}
+
+test("no two classic scripts declare the same top-level name", () => {
+  const scripts = classicScripts(indexSource, "index.html");
+  // Sanity: the page really is classic scripts, and the guard really sees
+  // the files. Without this a selector typo would silently scan nothing.
+  assert.ok(!/type\s*=\s*["']module["']/i.test(indexSource), "index.html now loads a module; the shared-global-scope assumption needs revisiting");
+  const labels = scripts.map(s => s.label);
+  for (const want of ["static/framework.js", "static/kinds/renderer.js", "static/kinds/pty.js", "static/kinds/opencode_web.js", "static/kinds/reasonix.js", "static/kinds/dsh_web.js", "index.html (inline)"]) {
+    assert.ok(labels.includes(want), `guard did not scan ${want}; loaded scripts: ${labels.join(", ")}`);
+  }
+
+  const lexical = new Map(); // name -> label of the script that declared it
+  const varLike = new Map();
+  const fatal = [], notes = [];
+  let total = 0;
+  for (const sc of scripts) {
+    for (const d of topLevelDecls(sc.body)) {
+      total++;
+      const isLex = d.kind !== "var" && d.kind !== "function";
+      const byLex = lexical.get(d.name), byVar = varLike.get(d.name);
+      if (isLex) {
+        if (byLex) fatal.push(`'${d.name}' is declared at top level by BOTH ${byLex} and ${sc.label} — the second <script> throws SyntaxError and the whole inline app dies`);
+        else if (byVar) fatal.push(`'${d.name}' (${sc.label}) is a lexical declaration of a name already declared var/function by ${byVar} — throws SyntaxError`);
+        lexical.set(d.name, sc.label);
+      } else {
+        if (byLex) fatal.push(`'${d.name}' (${sc.label}) is var/function but already declared lexically by ${byLex} — throws SyntaxError`);
+        else if (byVar) notes.push(`'${d.name}': var/function in both ${byVar} and ${sc.label} (legal, last one wins — but one shadows the other)`);
+        varLike.set(d.name, byVar || sc.label);
+      }
+    }
+  }
+  assert.ok(total > 100, `guard only found ${total} top-level declarations across ${scripts.length} scripts; it is not really scanning`);
+  for (const n of notes) console.log("note:", n);
+  assert.deepEqual(fatal, [], "duplicate top-level names across classic scripts");
+});
+
+test("issue #86: an unpainted session never claims the live end it lacks", () => {
+  // The sentinel is a claim about SCREEN CONTENT. With no terminal to paint
+  // into, loadLog succeeded but nothing reached the user, so the cursor must
+  // stay CURSOR_UNKNOWN and both transports must still ask for the tail —
+  // sending -2 here would mean the tail is never shown at all. That is the
+  // gate a cursor assigned before the paint block could not honour.
+  const since = (url) => {
+    const m = url.match(/[?&]since=(-?\d+)/);
+    return m ? m[1] : null;
+  };
+  const h = followLiveEndHarness({ offset: null, noTerm: true });
+  return h.loadLog().then(() => {
+    assert.deepEqual(h.writes, [], "with no terminal, nothing was painted");
+    assert.equal(h.session.logCursor, -1, "an unpainted session keeps the unknown cursor, not -2");
+    assert.equal(h.session.ttyOffset, -1, "and the same for the WS cursor");
+
+    h.startSSE();
+    assert.equal(since(h.sseUrls.at(-1)), null, `an unpainted session must request the tail, got ${h.sseUrls.at(-1)}`);
+    h.connectTTY();
+    assert.equal(since(h.wsUrls.at(-1)), null, `an unpainted WS connect must request the tail, got ${h.wsUrls.at(-1)}`);
+  });
+});
+
+test("issue #86: an EMPTY painted tail does not claim the live end", () => {
+  // The sentinel's premise is "the screen IS painted with the tail". A tail
+  // of zero bytes paints nothing, so the premise is false, there is no
+  // duplicate to prevent, and claiming the live end would SUPPRESS the first
+  // line the process prints right after this load — a regression against HEAD
+  // and issue #80's "new instance shows nothing" symptom. So an empty tail
+  // keeps CURSOR_UNKNOWN and both transports keep asking for the tail, which
+  // is byte-for-byte the pre-#86 behaviour for that state and costs nothing,
+  // because an empty tail has nothing to duplicate.
+  //
+  // Note the gate this pins is the character count (.length, not bytes)
+  // writeSanitizedTerminalOutput returns, NOT the raw text.length:
+  // sanitizeTerminalOutput can empty a non-empty input (a tail of only
+  // stripped escape sequences), and the harness fake above mirrors that
+  // contract.
+  const since = (url) => {
+    const m = url.match(/[?&]since=(-?\d+)/);
+    return m ? m[1] : null;
+  };
+  const h = followLiveEndHarness({ offset: null, tail: "" });
+  return h.loadLog().then(() => {
+    assert.deepEqual(h.writes, [], "an empty tail reached no screen");
+    assert.equal(h.session.logCursor, -1, "empty tail keeps the unknown cursor, not -2");
+    assert.equal(h.session.ttyOffset, -1, "same for the WS cursor");
+
+    h.startSSE();
+    assert.equal(since(h.sseUrls.at(-1)), null, `SSE must still ask for the tail, got ${h.sseUrls.at(-1)}`);
+    h.connectTTY();
+    assert.equal(since(h.wsUrls.at(-1)), null, `WS must still ask for the tail, got ${h.wsUrls.at(-1)}`);
+
+    // And the output that arrived in the meantime is not lost: the stream
+    // that follows paints it and puts a REAL cursor on the session.
+    h.eventSource().emit({ chunk: "FIRST-LINE", next: 10 });
+    assert.deepEqual(h.writes, ["FIRST-LINE"], "the first real line still arrives");
+    assert.equal(h.session.logCursor, 10, "and the cursor becomes a real offset, not the sentinel");
+    assert.equal(h.session.ttyOffset, 10, "startSSE advances both cursors together, per the #87 contract");
+  });
 });

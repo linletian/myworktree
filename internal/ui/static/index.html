@@ -1922,6 +1922,63 @@
             return !isInstanceLiveStatus(status) && !isInstancePendingStatus(status);
         }
 
+        // The two "no valid byte offset" states a terminal cursor can be in
+        // (issue #86). Both are negative, and telling them apart is the
+        // entire point: collapsing them into one -1 is what made the tail
+        // render twice.
+        //
+        //   CURSOR_UNKNOWN         -1  Nothing is painted on this screen, so
+        //                              the client WANTS the tail: `since` is
+        //                              omitted and the server's tail default
+        //                              applies. (A bare `since=0` would be
+        //                              read as "the oldest live byte" and
+        //                              replay the oldest 64KB — issue #81.)
+        //   CURSOR_FOLLOW_LIVE_END -2  The screen IS painted with the tail,
+        //                              only the offset it ends at is unknown
+        //                              (a proxy stripped X-Log-Offset off the
+        //                              log response). The client wants NO
+        //                              replay: it sends this sentinel, the
+        //                              server answers with an empty first
+        //                              frame carrying the live end offset,
+        //                              and only newly produced data follows.
+        //
+        // -2 is a wire value: internal/app/app.go branches on it explicitly
+        // (sinceFollowLiveEnd) ahead of its `since < 0` tail branch.
+        //
+        // kinds/pty.js declares its OWN prefixed copy (PTY_CURSOR_UNKNOWN),
+        // not a reference to these: every script tag here loads a classic
+        // script, so they share ONE global lexical environment, and a second
+        // top-level lexical declaration of either name would throw SyntaxError
+        // and take this whole inline application script down. (Two hazards of
+        // spelling things out in this block: the testdata suite locates it by
+        // its script delimiters and slices these declarations by their own
+        // text, so neither the delimiters nor the words "const CURSOR_..."
+        // may appear in a comment above them.) Nothing here is published on
+        // window for kinds/*.js to read either — pty.js parses before this
+        // block runs, so such a publication could only ever be `undefined`
+        // there.
+        // The numbers are held together by tests, not by load order:
+        // testdata/terminal_status.test.mjs compares both files' literals (and
+        // fails the moment two classic scripts declare the same top-level
+        // name), and TestFollowLiveEndSentinelAgreesAcrossTheWire pins this
+        // -2 against the server's sinceFollowLiveEnd.
+        //
+        // NON-GOAL, deliberately: a cursor of exactly 0 is still treated as
+        // "no cursor" by the `> 0` guards below, so a proxy that REWROTE
+        // X-Log-Offset to 0 (rather than stripping it) would get the tail
+        // again instead of the live end. Pre-existing, and harmless ONLY if
+        // that 0 is truthful: a genuine head of 0 means the ring is empty, so
+        // the tail re-requested is empty too. The whole premise of this
+        // sentinel is that the header cannot be trusted, so the same proxy
+        // could fabricate 0 over a NON-empty ring and the duplicate tail
+        // would return — this fix does not defend against that, because
+        // telling a truthful 0 from a fabricated one needs a second,
+        // independently sourced length, which is precisely the datum the proxy
+        // is already willing to lie about. A different bug from a stripped
+        // header, which is what -2 is for.
+        const CURSOR_UNKNOWN = -1;
+        const CURSOR_FOLLOW_LIVE_END = -2;
+
         // Status-bar text for a kind whose renderer owns its panel: the live
         // label, the transient status verbatim ("starting..."), or "stopped".
         // Callers pass `inst` straight through, so a null instance (the id is
@@ -2959,13 +3016,15 @@
                         // meaningless. If loadLog then fails, keeping it would make
                         // startSSE request since=<oldOffset> and repaint only the
                         // bytes produced since then onto an empty terminal. Reset to
-                        // the unknown sentinel instead: startSSE omits `since` for
-                        // any non-positive cursor, so the server's tail default
-                        // repaints the whole screen. Same convention as
-                        // kinds/pty.js — keep the two session factories in
-                        // agreement. Residual trade-off: if X-Log-Offset is
-                        // stripped, the tail renders twice (issue #86).
-                        session.logCursor = -1;
+                        // CURSOR_UNKNOWN instead: startSSE omits `since` for it, so
+                        // the server's tail default repaints the whole screen. Same
+                        // convention as kinds/pty.js — keep the two session factories
+                        // in agreement. A loadLog that then succeeds WITHOUT its
+                        // X-Log-Offset header moves both cursors to
+                        // CURSOR_FOLLOW_LIVE_END instead, because at that point the
+                        // tail IS on screen and only its offset is unknown (issue
+                        // #86) — that is no longer this empty-screen case.
+                        session.logCursor = CURSOR_UNKNOWN;
                         // Same rule for the WebSocket cursor (issue #87):
                         // ttyOffset describes bytes rendered on this screen,
                         // and the screen was just cleared. Keeping it would
@@ -2975,7 +3034,7 @@
                         // cursors itself; this pair stays as defensive depth so
                         // the invariant does not depend on the helper's
                         // internals, and it keeps matching kinds/pty.js.
-                        session.ttyOffset = -1;
+                        session.ttyOffset = CURSOR_UNKNOWN;
                         loadLog(session).finally(() => {
                             connectTTY(session);
                             focusTerminalIfPossible();
@@ -3422,22 +3481,26 @@
                 termDataDisposable: null,
                 fitAddon: null,
                 logStream: null,
-                // -1 means "cursor unknown". startSSE omits `since` entirely for a
-                // non-positive cursor, so the server's tail default applies —
-                // sending since=0 would instead replay the oldest 64KB of the
-                // ring buffer (the #81 symptom). NOTE: this is the legacy
-                // no-renderer fallback's session factory. Every kind that ships
-                // a renderer (all four today) builds its own session in
-                // kinds/*.js — see the same convention in kinds/pty.js.
-                logCursor: -1,
+                // CURSOR_UNKNOWN means "nothing painted on this screen".
+                // startSSE omits `since` entirely for it, so the server's
+                // tail default applies — sending since=0 would instead replay
+                // the oldest 64KB of the ring buffer (the #81 symptom). The
+                // other unknown-cursor state, CURSOR_FOLLOW_LIVE_END, is set
+                // by loadLog when the tail WAS painted but X-Log-Offset was
+                // stripped (issue #86). NOTE: this is the legacy no-renderer
+                // fallback's session factory. Every kind that ships a renderer
+                // (all four today) builds its own session in kinds/*.js — see
+                // the same convention in kinds/pty.js.
+                logCursor: CURSOR_UNKNOWN,
                 // WebSocket-path byte cursor, the sibling of logCursor. The
                 // WS handshake replays whatever the server still holds, so
                 // the client must track how many ring-buffer bytes it has
                 // already rendered and send it back as `since` on reconnect
-                // (issue #87). -1 is the same "unknown" sentinel: connectTTY
-                // omits `since` for a non-positive cursor, so the server
-                // replays the tail. Keep in step with kinds/pty.js.
-                ttyOffset: -1,
+                // (issue #87). CURSOR_UNKNOWN keeps that first-connect tail;
+                // CURSOR_FOLLOW_LIVE_END asks for no replay at all off a
+                // screen that already shows the tail (issue #86). Keep in
+                // step with kinds/pty.js.
+                ttyOffset: CURSOR_UNKNOWN,
                 ttySocket: null,
                 ttyReconnectTimer: null,
                 // Status seen by the previous reconcileTerminalSessions() tick.
@@ -3870,10 +3933,23 @@
             session.ttyOutputDecoder = null;
         }
 
+        // Writes sanitized text to the session's terminal and RETURNS THE
+        // NUMBER OF CHARACTERS THAT ACTUALLY REACHED THE SCREEN — the
+        // sanitized text's `.length`, UTF-16 code units, NOT bytes (0 if
+        // nothing was written). A non-zero return means something really
+        // reached the screen; it is currently used ONLY as a `> 0` boolean
+        // gate and must not be used for byte accounting. The count is not
+        // decoration: sanitizeTerminalOutput can empty a non-empty input —
+        // a tail consisting only of a cursor position report or an OSC
+        // colour reply is stripped to "" — so callers that need to know
+        // whether the user saw anything cannot use the input length as a
+        // proxy. Callers that do not care simply ignore the return value.
         function writeSanitizedTerminalOutput(session, text) {
-            if (!session || !session.term) return;
+            if (!session || !session.term) return 0;
             text = sanitizeTerminalOutput(text);
-            if (text) session.term.write(text);
+            if (!text) return 0;
+            session.term.write(text);
+            return text.length;
         }
 
         function decodeTTYOutputChunk(session, bytes) {
@@ -3899,19 +3975,23 @@
             // makes this correct — with no term nothing was cleared, so
             // nothing is invalidated.
             //
-            // -1 is the "unknown" sentinel. The exact value is not
-            // load-bearing: both transports omit since for any non-positive
-            // cursor and fall back to the server's tail default, while
-            // since=0 would replay the OLDEST live bytes — the #81 symptom.
-            // It must match the sentinel in the session factories here and in
-            // kinds/pty.js so the two cannot drift apart. Residual trade-off:
-            // if X-Log-Offset is stripped, the tail renders twice (#86).
+            // CURSOR_UNKNOWN is the named "unknown" sentinel (issue #86
+            // named these states). Both transports omit since for it and
+            // fall back to the server's tail default, while since=0 would
+            // replay the OLDEST live bytes — the #81 symptom. It must match
+            // the sentinel in the session factories here and in kinds/pty.js
+            // (PTY_CURSOR_UNKNOWN there) so the three cannot drift apart.
+            // The OTHER unknown-cursor state — the tail IS painted, only its
+            // offset was stripped — is CURSOR_FOLLOW_LIVE_END, assigned by
+            // loadLog's painted gate; a screen clear always lands here,
+            // because nothing is painted anymore (#86 fixed the residual
+            // double-tail this used to leave open).
             //
             // The current callers keep their own resets immediately after
             // this one — defensive depth, and the kinds/pty.js pair must keep
             // matching index.html.
-            session.ttyOffset = -1;
-            session.logCursor = -1;
+            session.ttyOffset = CURSOR_UNKNOWN;
+            session.logCursor = CURSOR_UNKNOWN;
         }
 
         function focusTerminalIfPossible() {
@@ -4064,6 +4144,35 @@
                 let text = await res.text();
                 const rawOffset = res.headers.get("X-Log-Offset");
                 const next = rawOffset === null ? NaN : parseInt(rawOffset, 10);
+                // Paint first. A cursor is a claim about what this screen
+                // holds, so the screen has to hold it before the claim is
+                // made (issue #86 review): setting the sentinel here, before
+                // the block below, would mean a loadLog whose paint never ran
+                // — a falsy session.term, or a writeSanitizedTerminalOutput
+                // that threw — still told the server "do not replay, I have
+                // the tail", and the tail would then never appear at all.
+                //
+                // `painted` counts the CHARACTERS THAT REACHED THE SCREEN
+                // — the write's `.length`, not bytes — and is consumed below
+                // ONLY as a `> 0` gate, never as byte accounting. Not
+                // "session.term existed", and not even "text was non-empty":
+                // writeSanitizedTerminalOutput sanitizes first and writes
+                // nothing when the sanitized result is empty, so a tail made
+                // only of stripped escape sequences paints nothing too (this
+                // is why the gate is the return value of the write rather than
+                // the raw text.length, and the reason it must not look
+                // incidental).
+                // An empty painted tail means NOTHING reached the screen, so
+                // the sentinel's premise — "the screen IS painted with the
+                // tail" — is false and there is no duplicate to prevent, while
+                // suppressing the tail would swallow the first line a new
+                // instance prints right after this load (issue #80's "shows
+                // nothing" symptom reborn, and a real regression measured
+                // against HEAD). The [Process Stopped] banner below is
+                // deliberately NOT counted: it is chrome, not ring-buffer
+                // content, so painting it says nothing about where this
+                // screen's copy of the log ends.
+                let painted = 0;
                 if (session.term) {
                     const inst = state.instances.find(i => i.id === session.id);
                     // Only a terminal status means "this process is gone".
@@ -4074,7 +4183,7 @@
                     if (!isLive && !isPending) {
                         session.term.reset();
                     }
-                    writeSanitizedTerminalOutput(session, text);
+                    painted = writeSanitizedTerminalOutput(session, text);
                     if (inst && isInstanceTerminalStatus(inst.status)) {
                         session.term.write("\r\n\r\n\x1b[41;37m[Process Stopped]\x1b[0m\r\n");
                     }
@@ -4101,6 +4210,24 @@
                     if (Number.isFinite(next) && next >= 0) {
                         session.logCursor = next;
                         session.ttyOffset = next;
+                    } else if (painted > 0) {
+                        // The fetch SUCCEEDED and tail content actually reached
+                        // the screen (`painted` is a character count, not bytes);
+                        // only X-Log-Offset is missing or unparseable (issue #86).
+                        // That is precisely CURSOR_FOLLOW_LIVE_END: the screen is
+                        // no longer empty, so a tail replay would paint it twice.
+                        // The server answers the sentinel with an empty first frame
+                        // carrying the live end offset, which is what puts a real
+                        // cursor back on this session. Three cases never take this
+                        // branch and keep the empty-screen sentinel instead, which
+                        // still asks for the tail: a FAILED fetch (it throws into
+                        // the catch below), no terminal to paint into, and a tail
+                        // that reached the screen as zero characters — empty body, or
+                        // only escape sequences sanitize stripped (issue #86
+                        // review). In all three there is nothing on screen to
+                        // duplicate, so suppressing the replay would hide output.
+                        session.logCursor = CURSOR_FOLLOW_LIVE_END;
+                        session.ttyOffset = CURSOR_FOLLOW_LIVE_END;
                     }
                 }
                 session.lastLogLoadFailures = 0;
@@ -4289,13 +4416,29 @@
                 const proto = location.protocol === "https:" ? "wss" : "ws";
                 let url = `${proto}://${location.host}/api/instances/tty/ws?id=${encodeURIComponent(id)}`;
                 if (token) url += `&token=${encodeURIComponent(token)}`;
-                // Same acceptance rule as startSSE's `since`: only send a
-                // real byte cursor. -1 (unknown) must omit `since` so the
-                // server replays its tail; since=0 would replay the OLDEST
-                // live bytes (the #81 symptom). A positive cursor means the
-                // screen already holds everything up to it, so the server
-                // replays only newer bytes (issue #87).
+                // Same three-state rule as startSSE's `since` (issue #86). A
+                // real cursor is echoed so the server replays only newer
+                // bytes (issue #87); CURSOR_UNKNOWN (nothing painted — the
+                // screen was cleared, or loadLog failed) omits `since` so the
+                // server replays its tail, since since=0 would instead replay
+                // the OLDEST live bytes (the #81 symptom); and
+                // CURSOR_FOLLOW_LIVE_END (the tail is on screen but its
+                // offset was stripped) asks the handshake to replay NOTHING
+                // and publish the live end offset instead — otherwise the
+                // tail lands under the screen that already shows it.
+                //
+                // Unlike startSSE, this guard reads ttyOffset ALONE, and
+                // that is complete here rather than one-sided: every write
+                // to logCursor is PAIRED — the same site writes ttyOffset
+                // the same value (both factories, every screen clear,
+                // loadLog's pin, the SSE handler) — while only ttyOffset
+                // ever advances alone (the sync frame and the latched
+                // binary frames below). ttyOffset is therefore the
+                // superset cursor: no reachable state lets logCursor hold
+                // screen truth that ttyOffset does not, so the sibling
+                // check startSSE gained has nothing here to find.
                 if (session.ttyOffset > 0) url += `&since=${session.ttyOffset}`;
+                else if (session.ttyOffset === CURSOR_FOLLOW_LIVE_END) url += `&since=${CURSOR_FOLLOW_LIVE_END}`;
 
                 resetTTYOutputDecoder(session);
                 const ws = new WebSocket(url);
@@ -4572,11 +4715,12 @@
                     // tail under the live screen. The cursor is invalidated
                     // only where the screen genuinely is: a successful loadLog
                     // pins ttyOffset to logCursor (the new screen end), and
-                    // the screen-clear sites reset it to the -1 sentinel —
-                    // refreshCurrentInstance beside its own term.clear(), and
-                    // resetTerminalForSwitch itself, inside the clear it
-                    // performs, so a kind that clears the screen through the
-                    // exported helper cannot survive with a cursor claiming
+                    // the screen-clear sites — refreshCurrentInstance and the
+                    // resetTerminalForSwitch clears in index.html and
+                    // kinds/pty.js — reset it to CURSOR_UNKNOWN.
+                    // resetTerminalForSwitch performs that reset inside the
+                    // clear it runs, so a kind that clears the screen through
+                    // the exported helper cannot survive with a cursor claiming
                     // bytes a blank screen no longer holds.
                     resetTTYOutputDecoder(session);
                     if (connectTimeout) { clearTimeout(connectTimeout); connectTimeout = null; }
@@ -4618,19 +4762,24 @@
             }
             if (state.activeInst === session.id) updateStatus("sse live");
             let url = `/api/instances/log/stream?id=${encodeURIComponent(session.id)}`;
-            // Only send `since` once a real byte cursor exists. An unknown
-            // cursor (-1, e.g. loadLog failed) must fall through to the
-            // server's default tail semantics; since=0 would replay the
-            // oldest 64KB of the ring buffer (issue #81).
+            // Three cursor states, one URL (issue #86), over two sibling
+            // cursors (issue #87). A real positive cursor is echoed so the
+            // server sends only newer bytes; the unknown cursor
+            // (CURSOR_UNKNOWN, e.g. loadLog FAILED and the screen is empty)
+            // omits `since` entirely and falls through to the server's
+            // default tail semantics — since=0 would instead replay the
+            // oldest 64KB of the ring buffer (issue #81); and
+            // CURSOR_FOLLOW_LIVE_END (the tail IS painted, its offset was
+            // stripped) asks for no replay at all, so the stream starts at
+            // the live end instead of duplicating the screen.
             //
-            // The cursor is the GREATER of the two siblings (issue #87):
-            // logCursor and ttyOffset both count ring-buffer bytes painted
-            // on this screen, and ensureTerminalLiveTransport promotes with
-            // connectTTY alone — no loadLog — so on that promote path
-            // logCursor stays -1 while ttyOffset advances. Reading logCursor
-            // alone would then omit `since` and the server would replay its
-            // whole tail on top of what the WS already painted.
-            //
+            // The positive cursor is the GREATER of the two siblings (issue
+            // #87): logCursor and ttyOffset both count ring-buffer bytes
+            // painted on this screen, and ensureTerminalLiveTransport promotes
+            // with connectTTY alone — no loadLog — so on that promote path
+            // logCursor stays unknown while ttyOffset advances. Reading
+            // logCursor alone would then omit `since` and the server would
+            // replay its whole tail on top of what the WS already painted.
             // A sibling that is ABSENT must not poison that max, so each one
             // degrades through ?? down to -1, the "unknown" sentinel. Read
             // raw, one known sibling next to one absent one makes the max
@@ -4638,11 +4787,27 @@
             // whole tail over a screen that already holds bytes — the exact
             // duplicate paint this issue exists to remove. Unreachable while
             // both session factories initialise both cursors, which is
-            // precisely why the node test pins it anyway. The #81 rule is
-            // untouched: > 0 still means only a real positive cursor becomes
-            // since.
+            // precisely why the node test pins it anyway.
+            //
+            // The sentinel check runs AFTER the positive guard: a sibling
+            // that IS a real cursor outranks -2 on either side, because the
+            // screen demonstrably holds bytes through it; only when neither
+            // sibling has a positive cursor can the painted-but-unoffset
+            // state decide, and then `since=-2` goes on the wire — never
+            // since=0, never an omitted tail request (issue #86). The
+            // sentinel check reads BOTH siblings, so "either side" is true
+            // of the code and not just of the prose: today every site
+            // assigns logCursor and ttyOffset as a pair, so a split —
+            // unknown logCursor beside a sentinel ttyOffset — is
+            // unreachable and this is bit-identical in every state that
+            // exists today — but if any future site ever assigned
+            // ttyOffset = CURSOR_FOLLOW_LIVE_END alone, a
+            // logCursor-only check would silently omit `since` and
+            // replay the whole tail over the screen that already holds
+            // it — the exact duplication this branch exists to prevent.
             const sseCursor = Math.max(session.logCursor ?? -1, session.ttyOffset ?? -1);
             if (sseCursor > 0) url += `&since=${sseCursor}`;
+            else if (session.logCursor === CURSOR_FOLLOW_LIVE_END || session.ttyOffset === CURSOR_FOLLOW_LIVE_END) url += `&since=${CURSOR_FOLLOW_LIVE_END}`;
             if (token) url += `&token=${encodeURIComponent(token)}`;
             const es = new EventSource(url);
             const onLog = (ev) => {
@@ -4904,17 +5069,18 @@
                 session.term.clear();
             }
             // A cleared screen knows nothing: invalidate BOTH cursors to
-            // the unknown sentinel (issue #87). If loadLog below then
-            // FAILS (or its X-Log-Offset header is stripped), stale
-            // pre-refresh cursors would make connectTTY send
-            // since=<oldHead> and paint only [oldHead, head) onto the
-            // blank screen — strictly worse than the pre-#87 full-tail
-            // replay this button used to get. The sentinel makes the
-            // reconnect fall back to the server's tail default; a
-            // successful loadLog re-pins both cursors to the new screen
-            // end immediately afterwards.
-            session.ttyOffset = -1;
-            session.logCursor = -1;
+            // CURSOR_UNKNOWN (issue #87). If loadLog below then FAILS,
+            // stale pre-refresh cursors would make connectTTY send
+            // since=<oldHead> and paint only [oldHead, head) onto the blank
+            // screen — strictly worse than the pre-#87 full-tail replay this
+            // button used to get. The sentinel makes the reconnect fall back
+            // to the server's tail default; a successful loadLog re-pins
+            // both cursors to the new screen end immediately afterwards, and
+            // a successful loadLog whose X-Log-Offset header was stripped
+            // moves them to CURSOR_FOLLOW_LIVE_END — the tail is painted,
+            // its offset is not, so no replay (issue #86).
+            session.ttyOffset = CURSOR_UNKNOWN;
+            session.logCursor = CURSOR_UNKNOWN;
             
             // Reload logs
             await loadLog(session);
@@ -5121,6 +5287,12 @@
         window.isInstanceLiveStatus = isInstanceLiveStatus;
         window.isInstancePendingStatus = isInstancePendingStatus;
         window.isInstanceTerminalStatus = isInstanceTerminalStatus;
+        // NOT published: the cursor sentinels above. kinds/pty.js parses
+        // BEFORE this block, so a `window.CURSOR_*` read there could only ever
+        // see undefined — the functions above work only because pty.js calls
+        // them at RUNTIME, from inside methods, long after this line has run.
+        // pty.js therefore owns its own PTY_CURSOR_UNKNOWN literal and the
+        // testdata suite keeps the two numbers equal.
         window.loadLog = loadLog;
         window.disconnectTTY = disconnectTTY;
         window.connectTTY = connectTTY;

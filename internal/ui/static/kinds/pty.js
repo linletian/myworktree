@@ -16,6 +16,32 @@
 // "pty". All session state lives in `this._sessions` (a Map keyed
 // by instance id).
 
+// The "no valid byte offset" cursor state, as this file needs it (issue #86):
+//   PTY_CURSOR_UNKNOWN  -1  nothing is painted on this screen, so the client
+//                           wants the tail: `since` is OMITTED and the
+//                           server's tail default applies (since=0 would
+//                           instead replay the oldest 64KB, #81).
+//
+// This is this file's OWN literal, not a link to index.html's. index.html
+// declares the same number as CURSOR_UNKNOWN and is loaded AFTER this file,
+// so nothing here could read it at parse time: every <script> in this page is
+// a classic script sharing ONE global lexical environment, so declaring the
+// same top-level `const` in both files throws SyntaxError in the second one
+// and kills the whole application script (no state, no session map, no
+// terminal). The PTY_ prefix is what keeps the two files apart, and
+// testdata/terminal_status.test.mjs holds the numbers together —
+// "no two classic scripts declare the same top-level name" fails if the
+// prefix is ever dropped, and the literal comparison fails if either number
+// drifts; TestFollowLiveEndSentinelAgreesAcrossTheWire then pins index.html's
+// sentinel against the server's sinceFollowLiveEnd.
+//
+// This file deliberately does NOT declare the follow-live-end state
+// (index.html's CURSOR_FOLLOW_LIVE_END, -2). Nothing in the pty renderer
+// ever assigns it: both factories reach it only through index.html's loadLog,
+// which is the single place that learns a tail was painted without an
+// X-Log-Offset header.
+const PTY_CURSOR_UNKNOWN = -1;
+
 class PtyRenderer {
     constructor() {
         this._sessions = new Map(); // id → session
@@ -143,18 +169,17 @@ class PtyRenderer {
         // The screen was just cleared, so any previous cursor is meaningless. If
         // loadLog then fails, keeping it would make startSSE request
         // since=<oldOffset> and repaint only the bytes produced since then onto
-        // an empty terminal. Reset to the unknown sentinel so startSSE omits
+        // an empty terminal. Reset to PTY_CURSOR_UNKNOWN so startSSE omits
         // `since` and the server's tail default repaints the whole screen.
         //
-        // The specific value is not load-bearing — startSSE omits `since` for
-        // any non-positive cursor. What matters is that it is non-positive, and
-        // that it matches ensureTerminalSession in index.html so the two
-        // session factories cannot drift apart.
-        //
-        // Residual trade-off: if X-Log-Offset is stripped by a proxy, loadLog
-        // writes the tail without establishing a cursor and the stream then
-        // replays it, so the tail renders twice (issue #86).
-        s.logCursor = -1;
+        // The value IS load-bearing now (issue #86): the other unknown-cursor
+        // state, index.html's CURSOR_FOLLOW_LIVE_END, means the opposite —
+        // the screen holds the tail and must not be replayed — and index.html's
+        // loadLog sets it (for this factory too) when the fetch succeeds
+        // WITHOUT an X-Log-Offset header. Here the screen is empty, so this is
+        // PTY_CURSOR_UNKNOWN, and the -1 must match ensureTerminalSession in
+        // index.html so the two session factories cannot drift apart.
+        s.logCursor = PTY_CURSOR_UNKNOWN;
         // Same rule for the WebSocket cursor (issue #87): ttyOffset counts
         // the ring-buffer bytes rendered on this screen by the TTY
         // transport, and the screen was just cleared. Keeping it would make
@@ -166,7 +191,7 @@ class PtyRenderer {
         // invariant must not depend on the helper's internals, and the
         // harness stubs that helper out (see testdata) precisely to keep
         // this pair load-bearing.
-        s.ttyOffset = -1;
+        s.ttyOffset = PTY_CURSOR_UNKNOWN;
         if (window.loadLog) {
             window.loadLog(s).finally(() => {
                 if (window.connectTTY) window.connectTTY(s);
@@ -219,16 +244,18 @@ class PtyRenderer {
             fitAddon: null,
             termDataDisposable: null,
             resizeObserver: null,
-            // Unknown until loadLog establishes one from X-Log-Offset;
-            // -1 is the same "unknown" sentinel index.html uses.
-            logCursor: -1,
+            // Nothing painted yet, so CURSOR_UNKNOWN — the same state
+            // index.html bootstraps. loadLog replaces it with the real
+            // offset from X-Log-Offset, or with CURSOR_FOLLOW_LIVE_END if
+            // that header never arrives (issue #86).
+            logCursor: PTY_CURSOR_UNKNOWN,
             // WebSocket-path byte cursor (issue #87): tracks the ring-buffer
             // bytes rendered over the live TTY transport so a reconnect can
             // send it back as `since` and resume incrementally instead of
-            // re-appending the whole tail. -1 sentinel and semantics match
+            // re-appending the whole tail. Same states and semantics as
             // ensureTerminalSession in index.html — keep the two session
             // factories in agreement.
-            ttyOffset: -1,
+            ttyOffset: PTY_CURSOR_UNKNOWN,
             // Status observed by the previous reconcileTerminalSessions()
             // tick; null until the first observation (issue #80).
             lastKnownStatus: null,
