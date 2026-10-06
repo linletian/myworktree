@@ -3,8 +3,8 @@
 #
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/linletian/myworktree/main/scripts/install.sh | bash
-#   curl -fsSL .../install.sh | bash -s -- -v v0.5.0
-#   curl -fsSL .../install.sh | bash -s -- -v v0.5.1-beta.1   # pin a beta
+#   curl -fsSL .../install.sh | bash -s -- -v v0.5.1
+#   curl -fsSL .../install.sh | bash -s -- -v vX.Y.Z-beta.N   # pin a beta
 #   curl -fsSL .../install.sh | bash -s -- --beta             # latest beta
 #   curl -fsSL .../install.sh | bash -s -- --no-modify-path
 #   INSTALL_ALIAS=mwt bash install.sh        # avoid `mw` name clash
@@ -50,8 +50,8 @@ Usage: install.sh [options]
 
 Options:
   -h, --help              show this help
-  -v, --version <ver>     install a specific version (e.g., v0.5.0, 0.4.3,
-                          or a beta like v0.5.1-beta.1)
+  -v, --version <ver>     install a specific version (e.g., v0.5.1, 0.5.0,
+                          or a beta like vX.Y.Z-beta.N)
       --beta              install the latest beta (prerelease) instead of
                           the latest stable release
       --no-modify-path    do not modify shell rc files
@@ -65,7 +65,7 @@ Env vars:
 
 Examples:
   curl -fsSL https://raw.githubusercontent.com/${REPO}/main/scripts/install.sh | bash
-  curl -fsSL .../install.sh | bash -s -- -v v0.5.0
+  curl -fsSL .../install.sh | bash -s -- -v v0.5.1
   INSTALL_ALIAS=mwt bash install.sh     # avoid conflict with the Debian/Ubuntu 'mw' package
   INSTALL_DIR=~/bin bash install.sh     # install into a custom dir
 EOF
@@ -117,7 +117,7 @@ info "Platform: ${platform}/${goarch}"
 
 # --- version resolution --------------------------------------------------
 if [ -n "$requested_version" ] && [ "$want_beta" = "true" ]; then
-  die "--beta and --version are mutually exclusive (a pinned version can already be a beta tag, e.g. -v v0.5.1-beta.1)"
+  die "--beta and --version are mutually exclusive (a pinned version can already be a beta tag, e.g. -v vX.Y.Z-beta.N)"
 fi
 
 if [ -n "$requested_version" ]; then
@@ -128,7 +128,7 @@ elif [ "$want_beta" = "true" ]; then
   # /releases/latest never points at prereleases, so resolve from the
   # releases atom feed (newest-first, includes prereleases, no API rate
   # limit); entry ids look like
-  #   <id>tag:github.com,2008:Repository/<id>/v0.5.1-beta.1</id>
+  #   <id>tag:github.com,2008:Repository/<id>/vX.Y.Z-beta.N</id>
   # Fall back to the API if the feed yields nothing.
   tag=$(curl -fsSL "https://github.com/${REPO}/releases.atom" \
         | sed -n 's#.*<id>tag:github.com,2008:Repository/[0-9][0-9]*/\(v[^<]*-beta\.[0-9][0-9]*\)</id>.*#\1#p' \

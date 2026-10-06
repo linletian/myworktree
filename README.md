@@ -93,7 +93,7 @@ PATH is auto-appended to `~/.zshrc` / `~/.bashrc` (open a new shell to pick it u
 Pin a version, change the install location, or skip PATH modification:
 
 ```bash
-curl -fsSL .../install.sh | bash -s -- -v v0.5.0         # pin a version
+curl -fsSL .../install.sh | bash -s -- -v v0.5.1         # pin a version
 INSTALL_ALIAS=mwt bash install.sh                          # avoid the Debian/Ubuntu `mw` clash
 INSTALL_DIR=~/bin bash install.sh                          # install elsewhere
 curl -fsSL .../install.sh | bash -s -- --no-modify-path    # do not touch rc files
@@ -109,13 +109,13 @@ To install a beta:
 
 ```bash
 # latest beta:
-curl -fsSL https://raw.githubusercontent.com/linletian/myworktree/develop/scripts/install.sh | bash -s -- --beta
+curl -fsSL https://raw.githubusercontent.com/linletian/myworktree/main/scripts/install.sh | bash -s -- --beta
 # or pin a specific beta tag:
-curl -fsSL .../install.sh | bash -s -- -v v0.5.1-beta.1
+curl -fsSL .../install.sh | bash -s -- -v vX.Y.Z-beta.N
 ```
 
-(`--beta` rides the `develop` copy of the script until the next stable
-release carries it to `main`.)
+(Beta tags are removed once the corresponding stable ships, so prefer
+`--beta` over pinning an old one.)
 
 ### Release binaries
 
@@ -132,17 +132,17 @@ Example:
 ```bash
 # Pick the archive that matches your platform, then verify and unpack it.
 # macOS Apple Silicon:
-curl -LO https://github.com/linletian/myworktree/releases/download/v0.5.0/myworktree_v0.5.0_macOS_arm64.tar.gz
+curl -LO https://github.com/linletian/myworktree/releases/download/v0.5.1/myworktree_v0.5.1_macOS_arm64.tar.gz
 # macOS Intel (replace arch in the filename):
-#   curl -LO .../myworktree_v0.5.0_macOS_amd64.tar.gz
+#   curl -LO .../myworktree_v0.5.1_macOS_amd64.tar.gz
 # Linux amd64:
-#   curl -LO .../myworktree_v0.5.0_Linux_amd64.tar.gz
+#   curl -LO .../myworktree_v0.5.1_Linux_amd64.tar.gz
 # Linux arm64:
-#   curl -LO .../myworktree_v0.5.0_Linux_arm64.tar.gz
+#   curl -LO .../myworktree_v0.5.1_Linux_arm64.tar.gz
 
-curl -LO https://github.com/linletian/myworktree/releases/download/v0.5.0/checksums.txt
+curl -LO https://github.com/linletian/myworktree/releases/download/v0.5.1/checksums.txt
 shasum -a 256 -c checksums.txt --ignore-missing
-tar -xzf myworktree_v0.5.0_macOS_arm64.tar.gz
+tar -xzf myworktree_v0.5.1_macOS_arm64.tar.gz
 
 # Optional: install into PATH
 sudo install -m 755 ./mw /usr/local/bin/mw
@@ -161,7 +161,7 @@ mw --version
 > Or open **System Settings → Privacy & Security** and click "Allow Anyway" for the
 > blocked binaries.
 
-Start from `v0.5.0` or newer for public release binaries. The earlier `v0.1.0` GitHub Release assets were withdrawn after post-release validation uncovered severe terminal interaction issues, and `v0.5.0` is the current recommended public release.
+Start from `v0.5.1` or newer for public release binaries. The earlier `v0.1.0` GitHub Release assets were withdrawn after post-release validation uncovered severe terminal interaction issues, and `v0.5.1` is the current recommended public release.
 
 Each release archive contains `mw`, `myworktree`, `README.md`, `LICENSE`, and `CHANGELOG.md`.
 If you need a platform we do not publish, follow the source build steps below.
