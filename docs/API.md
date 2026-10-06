@@ -340,8 +340,10 @@ Example (ad-hoc command without tags):
 
 Response (201):
 ```json
-{ "id":"...","pid":123,"status":"running","created_at":"...","kind":"pty" }
+{ "id":"...","pid":123,"status":"starting","created_at":"...","kind":"pty" }
 ```
+
+**`status` is `starting`, not `running`.** Start returns as soon as the process is spawned; the record is persisted as `starting` and flipped to `running` on the kind's ready signal by a separate goroutine, so the `201` body — and any `GET /api/instances` issued immediately afterwards — legitimately reports `starting`. The full status vocabulary is `starting` / `running` / `unhealthy` / `stopping` / `stopped` / `failed` / `exited` (`internal/framework/status.go`); see `docs/ARCHITECTURE.md` §5.3 for how the UI buckets them. Clients MUST NOT treat "not `running`" as "stopped": a `starting` instance is alive and accepts I/O.
 
 **Error: log buffer budget exceeded (`503 Service Unavailable`)**
 
@@ -441,16 +443,110 @@ Body:
 ```
 
 ### Web TTY stream (WebSocket)
-`GET /api/instances/tty/ws?id=<instanceId>`
+`GET /api/instances/tty/ws?id=<instanceId>[&since=<offset>]`
 
 Bi-directional stream for terminal output/input with PTY support.
+
+`since` is an optional byte cursor (issue #87), with three states (issue #86):
+- **omitted / not a valid integer** → the client has painted NOTHING, so the
+  server replays its newest 64KB tail, as before (the first-connect path).
+  This is the browser's `CURSOR_UNKNOWN` (-1).
+- **`since=-2`** → **follow from the live end**: the client's screen already
+  holds the tail and only its end offset is unknown (a reverse proxy stripped
+  `X-Log-Offset` off `GET /api/instances/log`). The handshake replays
+  NOTHING — no binary frame at all — and answers with
+  `{"type":"sync","offset":<currentHead>}` and then live output only. Sending
+  the tail here would paint it a second time under the screen that already
+  shows it, which was the bug. This is the browser's
+  `CURSOR_FOLLOW_LIVE_END` (-2), mirrored by `sinceFollowLiveEnd` in
+  `internal/app/app.go`; it is branched on explicitly, ahead of the negative
+  tail branch, so it is never confused with an omitted `since`.
+- **`since=0`** → accepted, but it is NOT a "tail" mode. On
+  `GET /api/instances/log` a single read starting at 0 starts at the
+  OLDEST live byte (the #81 symptom); on this WS endpoint the catch-up
+  loop reads forward from 0 and streams every chunk it reads straight to
+  the socket, so the effect there is a replay of everything still live in
+  the ring — up to the 8 MB handshake budget — with `sync` at the end of
+  the last chunk actually written. The shipped UI never sends `0`;
+  it omits `since` entirely when its cursor is unknown (`CURSOR_UNKNOWN`)
+  and sends `-2` when the screen is painted but the offset is not.
+- **`since>0`** → the server replays the bytes at or after that offset, in
+  full, so a reconnecting client that still holds its rendered screen does
+  not receive the tail a second time.
+
+Each replay read is capped at 64KB. When the delta since `since` exceeds
+64KB, the server loops reads until it is caught up and **streams each chunk
+to the socket as it reads it** instead of retaining one, so the whole delta
+is delivered and peak memory stays ~64KB (one chunk) regardless of the ring
+cap. The `sync` offset is the end of the **last chunk actually written** to
+this socket — never an offset over bytes the client did not receive **and can
+still receive**, because a client cursor only moves forward and would never ask
+for them again. The two deliberate exceptions both publish the ring's real
+head, and neither re-delivers anything a healthy client still had coming: a
+path that writes nothing has no last chunk to name, and a ring whose process
+has exited and whose buffer has been dropped publishes head precisely because
+the bytes behind it are permanently undeliverable — publishing 0 there would
+instead throw the client into a full tail replay. One handshake replays at
+most 8 MB
+(`ttyHandshakeReplayBudget` in `internal/app/app.go`), counted in bytes
+already written and checked before the next read: once the budget is spent
+the loop stops, and the undelivered remainder sits **ahead** of the published
+cursor, so the next reconnect re-requests exactly those bytes — truncation is
+**deferred to the next reconnect, never a skip**. The deferral has a cost:
+ring caps are 16–256 MB, so a badly lagged client can need up to 32 reconnects
+to converge, and until it reconnects the deferred bytes stay off a screen whose
+socket still looks healthy (the replay lands in xterm.js `scrollback: 10000`,
+so it is the older replayed content that scrolls out, never the live output
+that follows it). There is deliberately no write deadline on this path: the
+handshake is not yet subscribed to the output stream, so a blocked write does
+not stall the pump, and a wall-clock deadline would livelock a slow-but-
+progressing consumer where a byte budget simply resumes next reconnect. Output produced between the
+last chunk written and the live subscription sits behind
+the published cursor and is re-requested by the next reconnect (self-healing
+contiguity, not absolute coverage). A `since` older than the oldest byte
+still in the ring buffer is silently clamped to the oldest live byte; a
+`since` at or beyond head replays nothing (at head) or falls back to the
+tail (beyond head, defensive) — the client's own number is never echoed back
+as authoritative.
+
+In `since=-2` mode the published offset comes from `Manager.EndOffset` —
+the head read with a zero-length body, because there is no replay to attach
+it to. Two windows surround that read and they behave differently, so do not
+conflate them:
+
+- **After it** (head → `SubscribeOutput`): bytes produced in that gap are not
+  delivered live, but the client's cursor still points at the published head,
+  so its next reconnect asks for `[head, …)` and takes them out of the ring.
+  Self-healing, exactly like the read→subscribe window of every other mode.
+- **Before it** (the client's painted tail → this read): the client reached
+  `-2` by painting `GET /api/instances/log`'s tail, which ended at some head
+  `H1`. This read reports `H2 >= H1` and the client adopts `H2`, so its cursor
+  runs AHEAD of its own screen. `[H1, H2)` is in no replay (there is none), no
+  painted body and no live frame — and because the cursor is already past it,
+  **no reconnect ever re-requests it: those bytes are permanently gone from
+  that client's screen.** Normally the hole is the `loadLog()` → `connectTTY`
+  hop plus the upgrade (milliseconds); if the WS handshake times out and the
+  client falls back to SSE it is 5s + 500ms of output, i.e. real lost lines.
+  That is the accepted price of a proxy stripping `X-Log-Offset`: duplicate the
+  tail, or lose a window. Closing it would need the client to know `H1`, which
+  is precisely the number the stripped header took away.
 
 **Handshake Protocol:**
 1. Server sends `{"type":"ready"}` immediately after connection
 2. Client should wait for this message before sending resize
 3. Client sends `{"type":"resize","cols":80,"rows":24}` to start data flow
-4. Server sends initial log + real-time output as binary frames
-5. Client receives first data and triggers second resize (50ms delay) for TUI redraw
+4. Server sends initial log (the tail, or only the bytes after `since`) as binary frames — and in `since=-2` mode sends NO binary frame at all
+5. Server sends `{"type":"sync","offset":<int64>}` (text frame) — the end
+   offset of that replay (in `since=-2` mode, the live head it refused to
+   replay); the client stores it and sends it back as `since`
+   on its next reconnect
+6. Real-time output continues as binary frames
+7. Client receives first data and triggers second resize (50ms delay) for TUI redraw
+8. If the client stops draining the live stream, the server closes the
+   connection with **`1013` / reason `subscriber overflow: slow consumer`**
+   (issue #82) instead of silently dropping output — see Close codes below;
+   the client reconnects with the `since` cursor it already holds, exactly
+   as after any abnormal close
 
 **Frontend session model:**
 - The current UI keeps transport state per running instance rather than sharing a single terminal across tabs.
@@ -462,10 +558,49 @@ Bi-directional stream for terminal output/input with PTY support.
 *Client → Server:*
 - Input: text/binary frames (raw bytes)
 - Resize: `{"type":"resize","cols":<number>,"rows":<number>}`
+- Liveness probe: `{"type":"ping"}` (text frame, issue #83) — answered with `{"type":"pong"}` and **not** treated as input: the server consumes it before the input fallthrough, so the probe JSON is never typed into the instance's PTY. (A user literally typing that exact JSON is swallowed the same way `{"type":"resize",...}` already is.)
 
 *Server → Client:*
 - Ready: `{"type":"ready"}` (text frame)
 - Output: binary frames (terminal output chunks)
+- Sync: `{"type":"sync","offset":<int64>}` (text frame, sent after the handshake replay — even when that replay was empty. The client latches it per connection: replay frames received BEFORE the sync never touch the cursor — the sync publishes the authoritative end of the whole replay in one step; binary frames received AFTER it advance the cursor by their wire byte count — every one of them is ring-buffer output, as the server closes the connection rather than writing diagnostics as binary)
+- Heartbeat: `{"type":"ping"}` (text frame, every 10 s, issue #83) — the application-level mirror of the RFC 6455 ping the server sends on the same tick. Browsers answer the protocol ping automatically from their network stack (which refreshes the server's 45 s read deadline); this text frame is the heartbeat browser JavaScript can observe, since `onmessage` never fires for control frames. Clients MUST whitelist `ping` (and `pong`) as control types and MUST NOT render them as terminal output.
+
+**Liveness (issue #83):** half-open TCP sockets (laptop sleep, NAT/proxy idle timeout) keep `readyState === OPEN` without ever firing `onclose`, so liveness rides on heartbeat traffic in both directions. Server: pings every 10 s; arms a 45 s read deadline before every read and reaps a peer that has sent nothing for that long (the browser's automatic Pong refreshes it). **Non-browser clients get no automatic Pong** — `internal/ws`'s own client returns `opPing` as an ordinary message and installs no responder — so any Go or embedded client of this endpoint MUST answer protocol pings with Pong and/or send `{"type":"ping"}` periodically, or it will be reaped at the 45 s deadline. Client: stamps the arrival of every frame, probes `{"type":"ping"}` every 5 s once READY, and reconnects after 30 s without heartbeat traffic (3 × the ping interval, under the server's 45 s backstop). The web UI's **primary detector is the 2 s poll** — `ensureTerminalLiveTransport()` notices the stale stamp on the active session at ~30 s and queues the reconnect (returning `false`: a queued reconnect is not yet a live transport); the 5 s watchdog is the fallback that also covers sessions the poll does not promote. Liveness is never inferred from the absence of program output — a prompt, `vim` or `top` emit zero bytes for hours and stay connected. A write deadline was deliberately **not** part of issue #83: normal-traffic writes on this socket carry none (the only bounded write here is the 5 s deadline on #82's overflow close-frame), so a handler blocked mid-write is reclaimed when that write fails or returns, not by the read deadline.
+
+*Server → Client close codes:*
+- `1013` with reason `subscriber overflow: slow consumer` (issue #82) — the live
+  output subscription was torn down server-side because this client stopped draining:
+  its 64-slot output queue filled (the PTY pump reads in 1024-byte chunks, so ≈64 KB
+  of unread output) and the server disconnected the subscriber rather than dropping
+  chunks forever. Any queued chunks still in flight are **discarded at the source** —
+  the drain runs once the subscriber registry's lock is released, never inside it —
+  so that backlog never reaches the socket writer. That **bounds** what this handler
+  can write: the queue is empty by the time `broadcast` returns, so a full backlog
+  (~64 KB) cannot be pushed onto a socket that has already stalled. It does **not**
+  order the teardown: `close()` readies any receiver already parked on the channel,
+  and a readied receiver races the drain loop for the values still buffered, so a
+  few chunks may legitimately still reach the socket before the handler sees `!ok`.
+  Each of those chunks was already written to the ring
+  buffer before being broadcast, so they come back on the reconnect's replay from the
+  client's `since` cursor: nothing is lost **that is still in the ring buffer**. The
+  one exception is an instance whose ring buffer the framework has already closed and
+  dropped (`Manager.dropBuffer` → `RingBuffer.Close`, which nils the data and refuses
+  further writes): a chunk broadcast after that point was never stored, so no replay
+  can bring it back, and a still-connected client would have received it on the wire
+  pre-drain — the same post-swap loss ARCHITECTURE §4.1 already declares intentional
+  for the buffer swap itself. The close frame itself is BEST-EFFORT (the stalled
+  socket may never drain it; its write carries a bounded 5 s deadline set on this
+  teardown path only — normal-traffic writes on this socket carry **no** write
+  deadline, and that is unchanged after issue #83, which deliberately scoped a
+  write deadline out and shipped read-deadline liveness only), so the
+  client must treat **any** abnormal close as "reconnect with your stored `since`
+  cursor", not only this one. The shipped UI's `ws.onclose` logs the code and reason
+  and reconnects after 5 s; the server logs the overflow at the disconnect too
+  (`tty output subscriber overflow for <id>…`), which is its only server-side trace.
+- `1013` with a dynamic error reason — handshake/setup failures on this endpoint
+  (upgrade, replay-read or subscribe errors); the connection is closed rather than
+  served half-configured, and the client retries like any other abnormal close.
 
 **Timeout & Fallback:**
 - Client should implement handshake timeout (recommended: 5s)
@@ -475,13 +610,15 @@ Bi-directional stream for terminal output/input with PTY support.
 ```
 Client                    Server
    |                         |
-   |--- Connect ------------>|
+   |--- Connect ----------->|  (optionally ?since=<cursor> on reconnect)
    |<-- {"type":"ready"} ----|  Handshake
    |                         |
    |-- {"type":"resize", --->|  Notify terminal size
    |    "cols":80,"rows":24} |
    |                         |
-   |<-- binary output -------|  Initial log + realtime
+   |<-- binary output -------|  Replay: tail, or bytes after `since`
+   |<-- {"type":"sync", ----|  End offset of that replay
+   |    "offset":4096}      |
    |                         |
    |--- (50ms delay) -------|
    |                         |
@@ -490,6 +627,12 @@ Client                    Server
    |                         |
    |--- input bytes -------->|  User input
    |<-- binary output -------|  Process output
+   |                         |
+   |<-- {"type":"ping"} -----|  Heartbeat every 10s (issue #83; the same
+   |                         |    tick also writes an RFC 6455 ping, which
+   |                         |    the browser answers invisibly to JS)
+   |-- {"type":"ping"} ------->|  Client probe every 5s once READY
+   |<-- {"type":"pong"} ------|  Answered - never typed into the PTY
 ```
 
 ### Delete
@@ -505,9 +648,10 @@ Deletes a stopped (non-running) instance record. The instance's in-memory log bu
 ### Log replay (tail / incremental)
 `GET /api/instances/log?id=<instanceId>[&since=<byteOffset>]`
 
-- Without `since`: returns recent tail as `text/plain`.
+- Without `since`: returns the recent tail (newest bytes) as `text/plain`; the response also includes `X-Log-Offset: <endOffset>` — the cursor at the end of the tail, usable as `since` on a follow-up incremental read.
 - With `since`: returns incremental content from byte offset and includes response header `X-Log-Offset: <nextByteOffset>`.
-- Logs live in an in-memory ring buffer attached to the **running** instance (see `docs/ARCHITECTURE.md` §4.1 *Instance log buffer*). After the instance stops, exits, or fails — or after the daemon restarts — the buffer is released and this endpoint returns an empty body. Unknown / never-started instance IDs also return empty.
+- This endpoint has no follow-from-the-live-end mode, and it does not pretend to have one: `since=-2` returns **400** (issue #86). The sentinel means "I already painted the tail, do not send it", while this endpoint's answer to any negative `since` is the tail — the exact inversion that caused the duplication in the first place, so serving it silently would resurrect the bug invisibly. Follow-from-the-live-end is a property of a long-lived stream, so it exists only on `/api/instances/log/stream` and `/api/instances/tty/ws`. Every other negative `since` (and an omitted one) keeps its tail semantics untouched; the shipped UI never sends `since` here at all, because `loadLog` deliberately omits it so the response is always the tail plus its `X-Log-Offset` — that header being present is what lets the client keep a real cursor, and its being stripped is what makes the client fall back to `since=-2` on the streams.
+- Logs live in an in-memory ring buffer attached to the **running** instance (see `docs/ARCHITECTURE.md` §4.1 *Instance log buffer*). After the instance stops, exits, or fails — or after the daemon restarts — the buffer is released and this endpoint returns `200 OK` with an empty body (tail reads carry `X-Log-Offset: 0`; incremental reads echo the requested `since`). Unknown / never-started instance IDs behave the same.
 - The `byteOffset` cursor is the running total of bytes the instance has produced (monotonic; never decreases). When `since` points to data that has already been evicted from the ring (oldest-byte > since), the response silently clamps to the oldest live byte and `X-Log-Offset` advances accordingly.
 
 Response: `text/plain`
@@ -520,8 +664,10 @@ Response: `text/plain`
 ```json
 {"chunk":"...","next":12345}
 ```
-- Same in-memory backing as the tail endpoint above. The cursor `next` is the same monotonic byte counter; clients should echo it as `since` on the next request to receive only new chunks.
+- Same in-memory backing as the tail endpoint above. Without `since` (or with any negative `since` other than the `-2` sentinel below), the stream starts from the tail (newest bytes), same as the log endpoint. The cursor `next` is the same monotonic byte counter; clients should echo it as `since` on the next request to receive only new chunks.
+- **`since=-2` — follow from the live end (issue #86).** For a client whose screen ALREADY holds the tail but which never learned its end offset (a reverse proxy stripped `X-Log-Offset` off the tail response): the server sends NO body, opens the stream with one EMPTY `log` event carrying the current head — `{"chunk":"","next":<head>}` — and then delivers only bytes produced after that instant. A tail here would be painted a second time under the screen that already shows it, which was the bug. The sentinel is branched on explicitly, ahead of the `since < 0` tail branch (`parseInt64Default` passes any negative value through untouched), so it can never be mistaken for an omitted `since`. Client side: `CURSOR_FOLLOW_LIVE_END` in `index.html`; its only assignment site is `loadLog`, and it is taken only after tail content actually reached the screen — `writeSanitizedTerminalOutput` returns the number of characters it wrote (`.length`, not bytes) and is consumed only as a `> 0` gate, and an empty tail (or one that sanitizing emptied) keeps `CURSOR_UNKNOWN` and keeps asking for the tail, because there is nothing on screen to duplicate and suppressing the replay would hide output instead. Server side: `sinceFollowLiveEnd` in `internal/app/app.go`, with the head read by `Manager.EndOffset` (a zero-length tail read, not a 64KB copy that gets thrown away). Because this endpoint polls from the published cursor rather than subscribing, nothing produced AFTER that read is lost — it arrives as an ordinary frame. What is lost is the window BEFORE it: `[H1, <head>)`, where `H1` is the end of the tail the client actually painted. That range is in no replay, no painted body and no frame, and the client's cursor now sits past it, so no reconnect asks for it again — it is gone from that client's screen for good. See the TTY WebSocket section above for the same asymmetry, its size, and why it is accepted. A cursor of exactly `0` is still treated as "no cursor" by the client's `> 0` guards, so a proxy that REWROTE the header to `0` instead of stripping it gets the tail again; that is harmless only if the `0` is truthful (a genuine head of 0 means the ring is empty), and a fabricated `0` over a non-empty ring does restore the duplicate — no client-side rule can distinguish them without a second, independently sourced length, which is the very datum the proxy is already lying about.
 - Polling cadence: 1 s. When no new data is available, the server emits an SSE comment line (`: ping`) as a keep-alive — no `log` event, no cursor update. Clients should treat the absence of a `log` event as "no progress" and keep using the last `next` they saw.
+- Stopped / unknown / never-started instance IDs return `200 OK` and emit one empty `log` event followed by `: ping` keep-alives — the stream stays open; clients decide when to give up. The cursor in that first event is `0` for a tail read (omitted / negative `since`), echoes the requested `since` for an incremental read, and is `0` for `since=-2` as well (`Manager.EndOffset` reports `0` for a non-running instance, exactly as `Manager.Tail` returns an empty body and `0`).
 
 ### Instance resource stats
 `GET /api/instances/stats`
@@ -670,23 +816,42 @@ Response (200):
   "host": "127.0.0.1",
   "port": 35421,
   "worktree_path": "/abs/path/to/worktree",
-  "version": "0.1.0-rc.6",
+  "version": "0.2.0",
   "version_supported": true,
-  "overlay_verified": true,
-  "missing_dsh": {"npm_available": true, "suggested_pin": "0.1.0-rc.6"}
+  "remote_capable": true,
+  "min_remote_version": "0.2.0",
+  "overlay_verified": true
+}
+```
+
+Failed instance — `missing_dsh` is present **only** when spawn failed because the `dsh` executable could not be resolved (instance `failed`); there is then no live upstream, so `host` / `port` / `version` come back empty and never sit next to a live `version`:
+```json
+{
+  "iframe_src": "",
+  "proxy_host": "",
+  "proxy_port": "",
+  "host": "",
+  "port": "",
+  "worktree_path": "/abs/path/to/worktree",
+  "version": "",
+  "version_supported": false,
+  "remote_capable": false,
+  "min_remote_version": "0.2.0",
+  "overlay_verified": false,
+  "missing_dsh": {"npm_available": true, "suggested_pin": "0.2.0-rc.2"}
 }
 ```
 
 - `host`/`port` are the upstream `dsh web` server's bound address; `proxy_host`/`proxy_port` are the per-instance myworktree reverse-proxy listener (a **dedicated loopback origin** — the dsh SPA hardcodes its API base to `location.origin + '/api'`, so same-origin subpath mounting is not possible). `iframe_src` is what the iframe loads (plain `http://127.0.0.1:<proxyPort>/` locally).
 - **Remote access**: when the main listener is non-loopback or TLS, the proxy binds the main listener's host with a **mandatory token gate** — `?token=` or the `mw_token` cookie, validated on every **non-loopback client** request including WebSocket upgrades (loopback clients bypass the gate, the same trust model as the main UI). The embed is a dedicated origin, so the main-origin HttpOnly `mw_token` cookie cannot travel to it — **the server appends `?token=` to `iframe_src` itself** (page JS can never read the HttpOnly cookie, and portal/login flows carry no address-bar token); the frontend only falls back to an address-bar token for a src that somehow lacks one. The proxy validates the first navigation, sets the HttpOnly `mw_token` cookie on the proxy origin, and 302-redirects to the token-free URL so the embedded document never retains the token in its own `location.search`. The token is stripped (`authq.StripToken`) before anything is forwarded upstream (see `docs/ARCHITECTURE.md` §9).
-- `version` is the installed `dsh --version` probed at spawn; `version_supported` is `false` when it is outside the `[0.1.0, 0.2.0)` range the restrict overlay targets (advisory — the instance still starts; the hard gate below `0.1.0` blocks startup). `overlay_verified` (L2 check) is `false` when a spawn-time `dsh web --dump-config --patch <restrict.yml>` run did not confirm the four overlay rows (`storage-json` root redirect, `directory-picker` composer disabled, `directory-picker-browse` host backend inserted and not disabled, `client-hmr` disabled) — the frontend then shows the "裁剪失效" (restriction not effective) warning. `missing_dsh` is present only when the `dsh` executable was not found at spawn (instance `failed`); `npm_available` tells the frontend whether the install option is offered, `suggested_pin` is the pinned npx version.
+- `version` is the installed `dsh --version` probed at spawn — the **parsed core** (`x.y.z`; npx mode records the raw pinned version instead); `version_supported` is `false` when it is outside the `[0.2.0, 0.3.0)` range the restrict overlay and the slash-style RPC wire target (advisory — the instance still starts; the hard gate below `0.2.0` blocks startup — 0.1.x is out of support). `overlay_verified` (L2 check) is `false` when a spawn-time `dsh web --dump-config --patch <restrict.yml>` run did not confirm the four overlay rows (`storage-json` root redirect, `directory-picker` composer disabled, `directory-picker-browse` host backend inserted and not disabled, `client-hmr` disabled) — the frontend then shows the "裁剪失效" (restriction not effective) warning. `missing_dsh` belongs to the **failed instance only** (second example above): it is present only when the `dsh` executable was not found at spawn (instance `failed`, `host`/`port`/`version` empty — never alongside a live `version`); `npm_available` tells the frontend whether the install option is offered, `suggested_pin` is the pinned npx version.
 - Design: `docs/plans/dsh-native-ui/FEASIBILITY.md`; threat model: `docs/ARCHITECTURE.md` §9.
 
 ### 5.15 dsh-web scope (out-of-scope state)
 
 `GET /api/instances/dsh/scope?id=<id>`
 
-Returns the last observed out-of-scope state for a dsh-web instance, recorded in-memory by the per-instance reverse proxy from **RPC request bodies** (`session.create {cwd|workspaceId}` / `workspace.create {path}`). The frontend polls it (~1.5s) to render the persistent warning bar.
+Returns the last observed out-of-scope state for a dsh-web instance, recorded in-memory by the per-instance reverse proxy from **RPC request bodies** (dsh 0.2.x slash-style endpoints — `session/create` with `payload.args.request.{cwd|workspaceId}`, `workspace/create` with `payload.args.request.path`). The frontend polls it (~1.5s) to render the persistent warning bar.
 
 Response (200):
 ```json
@@ -700,7 +865,7 @@ Response (200):
 
 `scope` is `in-scope` / `out-of-scope`. Observation is record-only — the request is forwarded unchanged; out-of-scope sessions still succeed (their sandbox root is the out-of-scope directory; OS-level write limits still apply) and the warning stays until the user navigates back to the worktree.
 
-`foreign_active_sessions` (omitempty) lists the sessions in the shared `$DSH_HOME/sessions` pool that the daemon's session watch classified as **actively written by another dsh process** (mtime within 90s, excluding sessions this daemon itself drives — own traffic is attributed from `session.prompt`-family RPC bodies through the proxy, `session.create` responses, and the workspace-bootstrap preseed). dsh is a single-writer-per-process system: opening such a session from the embed appends an unguarded `session/end-seed` and can permanently corrupt the log, so the frontend renders a warning bar telling the user to wait until the session is idle (record-only — nothing is blocked; see `docs/plans/dsh-native-ui/CROSS-PROCESS-SESSION.md`).
+`foreign_active_sessions` (omitempty) lists the sessions in the shared `$DSH_HOME/sessions` pool that the daemon's session watch classified as **actively written by another dsh process** (mtime within 90s, excluding sessions this daemon itself drives — own traffic is attributed from `session/*`-family RPC bodies through the proxy (`session/prompt`, `session/cancel`, `session/fork`, `session/rename`, `session/selectModel`, `session/attachment`, `session/updateQueue`, plus the plural-namespaced `subagents/prompt` — ids read from `payload.args.request`), `session/create` responses, and the workspace-bootstrap preseed). dsh is a single-writer-per-process system: opening such a session from the embed appends an unguarded `session/end-seed` and can permanently corrupt the log, so the frontend renders a warning bar telling the user to wait until the session is idle (record-only — nothing is blocked; see `docs/plans/dsh-native-ui/CROSS-PROCESS-SESSION.md`).
 
 ### 5.16 dsh-web launch mode
 
@@ -752,6 +917,11 @@ Supported tool names:
 - `worktree_list`, `worktree_create`, `worktree_delete`
 - `branch_list`, `tag_list`
 - `instance_list`, `instance_start`, `instance_stop`, `instance_input`, `instance_delete`, `instance_log_tail`
+
+### `instance_log_tail`
+Args: `{ "id": "<instanceId>", "n": 65536 }` — `n` is the max bytes to return (defaults to `4096` when absent or non-positive).
+
+Returns the **newest** `n` bytes of the instance's ring buffer (tail semantics, same bytes as `GET /api/instances/log` without `since`), not the oldest. Instances that are stopped, exited, or unknown return an empty string, since the buffer is released with the running instance. Instances whose kind does not capture logs (`reasonix`, `opencode-web`, `dsh-web`) also return an empty string.
 
 ## 7) Portal Dashboard
 

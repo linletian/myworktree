@@ -74,6 +74,13 @@ class OpencodeWebRenderer {
             // memory, and don't poll a dead server. A later start gets a
             // fresh instance id, so a fresh iframe is built lazily.
             this.destroyFrame(session.id);
+            // Hide EVERY cached frame, not just the stopped one: switching
+            // from a running opencode-web instance to this stopped one never
+            // ran deactivate() (selectInstance only deactivates a DIFFERENT
+            // renderer), so the previous instance's keep-alive iframe is
+            // still visible and would stack half/half under the stopped
+            // overlay (issue #96). Only the overlay should be on screen.
+            this._showOnly(null);
             if (ocWarning) {
                 ocWarning.hidden = true;
                 ocWarning.textContent = '';

@@ -152,6 +152,12 @@ class ReasonixRenderer {
                 frame.dataset.instance = '';
                 frame.dataset.src = '';
             }
+            // Hide EVERY cached frame, not just the active id's: switching
+            // from a running reasonix instance to this stopped one never ran
+            // deactivate() (selectInstance only deactivates a DIFFERENT
+            // renderer), so the previous instance's keep-alive iframe is
+            // still visible and would stack half/half with it (issue #96).
+            this._showOnly(null);
             if (this._currentFrame === frame) this._currentFrame = null;
             return;
         }

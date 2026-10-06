@@ -3,7 +3,9 @@
 #
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/linletian/myworktree/main/scripts/install.sh | bash
-#   curl -fsSL .../install.sh | bash -s -- -v v0.5.0
+#   curl -fsSL .../install.sh | bash -s -- -v v0.5.1
+#   curl -fsSL .../install.sh | bash -s -- -v vX.Y.Z-beta.N   # pin a beta
+#   curl -fsSL .../install.sh | bash -s -- --beta             # latest beta
 #   curl -fsSL .../install.sh | bash -s -- --no-modify-path
 #   INSTALL_ALIAS=mwt bash install.sh        # avoid `mw` name clash
 #
@@ -11,6 +13,7 @@
 #   INSTALL_DIR=<dir>       target directory (default: ~/.local/bin)
 #   INSTALL_ALIAS=<name>    short alias command (default: mw; empty to skip)
 #   MYWORKTREE_VERSION=<v>  pin version (default: latest release)
+#   MYWORKTREE_BETA=1       install the latest beta (prerelease) instead
 #   NO_MODIFY_PATH=1        do not modify shell rc files
 
 set -euo pipefail
@@ -35,6 +38,7 @@ else
   INSTALL_ALIAS_SET=1
 fi
 requested_version="${MYWORKTREE_VERSION:-}"
+want_beta="${MYWORKTREE_BETA:-false}"
 no_modify_path="${NO_MODIFY_PATH:-false}"
 binary_path=""
 
@@ -46,18 +50,22 @@ Usage: install.sh [options]
 
 Options:
   -h, --help              show this help
-  -v, --version <ver>     install a specific version (e.g., v0.5.0 or 0.4.3)
+  -v, --version <ver>     install a specific version (e.g., v0.5.1, 0.5.0,
+                          or a beta like vX.Y.Z-beta.N)
+      --beta              install the latest beta (prerelease) instead of
+                          the latest stable release
       --no-modify-path    do not modify shell rc files
 
 Env vars:
   INSTALL_DIR=<dir>       target directory (default: ~/.local/bin)
   INSTALL_ALIAS=<name>    short alias command (default: mw; empty to skip)
   MYWORKTREE_VERSION=<v>  pin version (default: latest release)
+  MYWORKTREE_BETA=1       same as --beta
   NO_MODIFY_PATH=1        same as --no-modify-path
 
 Examples:
   curl -fsSL https://raw.githubusercontent.com/${REPO}/main/scripts/install.sh | bash
-  curl -fsSL .../install.sh | bash -s -- -v v0.5.0
+  curl -fsSL .../install.sh | bash -s -- -v v0.5.1
   INSTALL_ALIAS=mwt bash install.sh     # avoid conflict with the Debian/Ubuntu 'mw' package
   INSTALL_DIR=~/bin bash install.sh     # install into a custom dir
 EOF
@@ -72,10 +80,16 @@ while [[ $# -gt 0 ]]; do
     -v|--version)
       [[ -n "${2:-}" ]] || die "--version requires a value"
       requested_version="$2"; shift 2 ;;
+    --beta) want_beta=true; shift ;;
     --no-modify-path) no_modify_path=true; shift ;;
     *) info "Warning: unknown option '$1' (ignored)"; shift ;;
   esac
 done
+
+# Accept the documented truthy spellings for NO_MODIFY_PATH / MYWORKTREE_BETA
+# (the docs say NO_MODIFY_PATH=1; previously only the literal "true" worked).
+case "$no_modify_path" in 1|true|yes) no_modify_path=true ;; *) no_modify_path=false ;; esac
+case "$want_beta" in 1|true|yes) want_beta=true ;; *) want_beta=false ;; esac
 
 # --- platform detection ---------------------------------------------------
 case "$(uname -s)" in
@@ -102,9 +116,33 @@ fi
 info "Platform: ${platform}/${goarch}"
 
 # --- version resolution --------------------------------------------------
+if [ -n "$requested_version" ] && [ "$want_beta" = "true" ]; then
+  die "--beta and --version are mutually exclusive (a pinned version can already be a beta tag, e.g. -v vX.Y.Z-beta.N)"
+fi
+
 if [ -n "$requested_version" ]; then
   version="${requested_version#v}"
   tag="v${version}"
+elif [ "$want_beta" = "true" ]; then
+  info "Resolving latest beta version from GitHub..."
+  # /releases/latest never points at prereleases, so resolve from the
+  # releases atom feed (newest-first, includes prereleases, no API rate
+  # limit); entry ids look like
+  #   <id>tag:github.com,2008:Repository/<id>/vX.Y.Z-beta.N</id>
+  # Fall back to the API if the feed yields nothing.
+  tag=$(curl -fsSL "https://github.com/${REPO}/releases.atom" \
+        | sed -n 's#.*<id>tag:github.com,2008:Repository/[0-9][0-9]*/\(v[^<]*-beta\.[0-9][0-9]*\)</id>.*#\1#p' \
+        | head -1)
+  if [ -z "$tag" ]; then
+    tag=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases?per_page=30" 2>/dev/null \
+          | sed -n 's/.*"tag_name": *"\(v[^"]*-beta\.[0-9][0-9]*\)".*/\1/p' \
+          | head -1 || true)
+  fi
+  [ -n "$tag" ] || die "Failed to resolve a beta version from GitHub.
+No published beta (prerelease) found, or GitHub was unreachable.
+Pin one explicitly instead:  bash install.sh -v vX.Y.Z-beta.N
+(see https://github.com/${REPO}/releases for the available tags)"
+  version="${tag#v}"
 else
   info "Resolving latest version from GitHub..."
   # /releases/latest redirects to /releases/tag/<tag>; capture the redirect target
@@ -163,8 +201,8 @@ check_existing() {
     info "Existing ${label} is an older myworktree (matched 'myworktree' in --version); will upgrade in place"
     return 0
   fi
-  if [ -n "$out" ] && echo "$out" | grep -Eq '^[^ ]+ +v[0-9]+\.[0-9]+\.[0-9]+( \([^)]+\))?( built [^ ]+)?$'; then
-    # matches "<prog> vX.Y.Z [(commit)] [built <date>]" — the myworktree format
+  if [ -n "$out" ] && echo "$out" | grep -Eq '^[^ ]+ +v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?( \([^)]+\))?( built [^ ]+)?$'; then
+    # matches "<prog> vX.Y.Z[-prerelease] [(commit)] [built <date>]" — the myworktree format
     info "Existing ${label} looks like a myworktree build (--version: ${out}); will upgrade in place"
     return 0
   fi
@@ -301,8 +339,27 @@ echo -e "${MUTED}If 'command not found', open a new shell (PATH was added to you
 # to pick up the new binary. We do NOT auto-stop: that could hard-kill
 # long-running PTY / opencode / reasonix sessions and discard the
 # in-memory ring buffer + WebSocket state.
-if command -v pgrep >/dev/null 2>&1 && pgrep -x myworktree >/dev/null 2>&1; then
-  pids=$(pgrep -x myworktree | tr '\n' ' ')
+#
+# Detection must check BOTH the binary name and the alias: the process
+# comm is the basename of the path the daemon was LAUNCHED through, so a
+# daemon started via the alias symlink (the common case — `mw` / `mw
+# start`) reports as "mw" and pgrep -x myworktree alone never sees it.
+daemon_pids=""
+if command -v pgrep >/dev/null 2>&1; then
+  check_names="$APP"
+  if [ -n "$INSTALL_ALIAS" ] && [ "$INSTALL_ALIAS" != "$APP" ]; then
+    check_names="$check_names $INSTALL_ALIAS"
+  fi
+  for proc_name in $check_names; do
+    hits=$(pgrep -x "$proc_name" 2>/dev/null || true)
+    if [ -n "$hits" ]; then
+      daemon_pids="${daemon_pids}${daemon_pids:+ }$(echo $hits | tr '\n' ' ')"
+    fi
+  done
+  daemon_pids=$(echo $daemon_pids | tr ' ' '\n' | sort -un | tr '\n' ' ')
+fi
+if [ -n "${daemon_pids// /}" ]; then
+  pids=$daemon_pids
   echo ""
   echo -e "${RED}Heads up:${NC} a myworktree daemon is currently running (PID(s): ${pids})."
   echo "The installed binary (${version}) is on disk but the running daemon"
@@ -327,6 +384,9 @@ if command -v pgrep >/dev/null 2>&1 && pgrep -x myworktree >/dev/null 2>&1; then
   echo "  (in any worktree — the daemon does not need to be inside the repo)"
   echo ""
   echo -e "${MUTED}Force fallback (only if '${APP} stop' hangs):${NC}"
-  echo "  pkill -x myworktree           # then: kill any orphaned children"
+  echo "  pkill -x ${APP}           # then: kill any orphaned children"
+  if [ -n "$INSTALL_ALIAS" ] && [ "$INSTALL_ALIAS" != "$APP" ]; then
+    echo "  pkill -x ${INSTALL_ALIAS}                # (if you started the daemon via the alias)"
+  fi
   echo "  pkill -x opencode             #   e.g. opencode serve, if any"
 fi

@@ -34,7 +34,7 @@ curl -fsSL https://raw.githubusercontent.com/linletian/myworktree/main/scripts/i
 - **配置热加载** —— `mw config regen` 重新生成 token / 重新载入配置，无需重启 daemon。
 - **Changes 面板里的文件预览 & 差异** —— 点击任意已变更或未跟踪文件即可看带行号的预览和 diff。
 - **Reasonix Web 聊天实例** —— 勾选一下就能在 worktree 里跑 `reasonix serve`，其 Web 聊天界面内嵌在同一个侧栏。
-- **dsh Web 实例** —— 把 DeepSeek Harness 浏览器 UI 作为受管实例内嵌（工作区注册表按 worktree 隔离、会话池共享、越界只提醒；见 `docs/plans/dsh-native-ui/`）。dsh ≥ 0.1.5 支持远程访问（LAN/Tailnet）：每实例反代上的 WS↔SSE 桥（`/api/remote.mux`）+ 注入式连接 shim；loopback 访问对所有 0.1.x 均可用。
+- **dsh Web 实例** —— 把 DeepSeek Harness 浏览器 UI 作为受管实例内嵌（工作区注册表按 worktree 隔离、会话池共享、越界只提醒；见 `docs/plans/dsh-native-ui/`）。**需要 dsh 0.2.x**（`[0.2.0, 0.3.0)`；**不再支持 0.1.x**——0.2 起 RPC 方法名改为 `<namespace>/<method>` 斜线端点，参数嵌套在 `payload.args.request`）。支持远程访问（LAN/Tailnet）：每实例反代上的 WS↔SSE 桥（`/api/remote.mux`）+ 注入式连接 shim；loopback 访问在整个受支持的 0.2.x 区间均可用。
 - **分支 divergence 徽标** —— 一眼看清分支相对上游 ahead / behind 状态，支持定时刷新。
 
 ## 背景与痛点
@@ -94,7 +94,7 @@ curl -fsSL https://raw.githubusercontent.com/linletian/myworktree/main/scripts/i
 可指定版本、改安装路径、跳过 PATH 修改：
 
 ```bash
-curl -fsSL .../install.sh | bash -s -- -v v0.5.0         # 指定版本
+curl -fsSL .../install.sh | bash -s -- -v v0.5.1         # 指定版本
 INSTALL_ALIAS=mwt bash install.sh                          # 避开 Debian/Ubuntu 的 `mw` 占用
 INSTALL_DIR=~/bin bash install.sh                          # 装到自定义目录
 curl -fsSL .../install.sh | bash -s -- --no-modify-path    # 不改 rc 文件
@@ -102,6 +102,18 @@ curl -fsSL .../install.sh | bash -s -- --no-modify-path    # 不改 rc 文件
 
 脚本会用 GitHub Release 的 `checksums.txt` 校验下载文件的 SHA256。
 完整实现见 [`scripts/install.sh`](scripts/install.sh)。
+
+**Beta（预发布版）：** beta 从 `develop` 分支发布，以 GitHub prerelease 形式发布——上面默认的一行安装始终装最新**稳定版**。
+安装 beta：
+
+```bash
+# 最新 beta：
+curl -fsSL https://raw.githubusercontent.com/linletian/myworktree/main/scripts/install.sh | bash -s -- --beta
+# 或指定某个 beta tag：
+curl -fsSL .../install.sh | bash -s -- -v vX.Y.Z-beta.N
+```
+
+（beta tag 会在对应稳定版发布后移除，建议用 `--beta` 而不是钉旧版本。）
 
 ### 发布版使用
 
@@ -118,17 +130,17 @@ curl -fsSL .../install.sh | bash -s -- --no-modify-path    # 不改 rc 文件
 ```bash
 # 根据你的平台选择对应压缩包，然后校验并解压
 # macOS Apple Silicon：
-curl -LO https://github.com/linletian/myworktree/releases/download/v0.5.0/myworktree_v0.5.0_macOS_arm64.tar.gz
+curl -LO https://github.com/linletian/myworktree/releases/download/v0.5.1/myworktree_v0.5.1_macOS_arm64.tar.gz
 # macOS Intel（替换文件名中的架构字段）：
-#   curl -LO .../myworktree_v0.5.0_macOS_amd64.tar.gz
+#   curl -LO .../myworktree_v0.5.1_macOS_amd64.tar.gz
 # Linux amd64：
-#   curl -LO .../myworktree_v0.5.0_Linux_amd64.tar.gz
+#   curl -LO .../myworktree_v0.5.1_Linux_amd64.tar.gz
 # Linux arm64：
-#   curl -LO .../myworktree_v0.5.0_Linux_arm64.tar.gz
+#   curl -LO .../myworktree_v0.5.1_Linux_arm64.tar.gz
 
-curl -LO https://github.com/linletian/myworktree/releases/download/v0.5.0/checksums.txt
+curl -LO https://github.com/linletian/myworktree/releases/download/v0.5.1/checksums.txt
 shasum -a 256 -c checksums.txt --ignore-missing
-tar -xzf myworktree_v0.5.0_macOS_arm64.tar.gz
+tar -xzf myworktree_v0.5.1_macOS_arm64.tar.gz
 
 # 可选：安装到 PATH
 sudo install -m 755 ./mw /usr/local/bin/mw
@@ -145,7 +157,7 @@ mw --version
 > ```
 > 或在 **系统设置 → 隐私与安全性** 中为被阻止的二进制文件点击"仍要打开"。
 
-建议从 `v0.5.0` 或更新版本开始使用公开发布版二进制。更早的 `v0.1.0` GitHub Release 资产在补充实测中发现严重终端交互问题后已撤回，而 `v0.5.0` 是当前推荐的公开发布版本。
+建议从 `v0.5.1` 或更新版本开始使用公开发布版二进制。更早的 `v0.1.0` GitHub Release 资产在补充实测中发现严重终端交互问题后已撤回，而 `v0.5.1` 是当前推荐的公开发布版本。
 
 每个发布压缩包内都包含 `mw`、`myworktree`、`README.md`、`LICENSE` 和 `CHANGELOG.md`。
 如果你的平台暂无对应产物，就直接使用下面的源码编译步骤。
@@ -353,9 +365,18 @@ Reasonix 实例运行 `reasonix serve` 时**不设置** `REASONIX_HOME`，嵌入
 
 实例生命周期不会触碰共享会话池：Start / Stop / Restart / Delete 只管理 `serve` 子进程及其管理文件（实例状态目录下的 `token`/`port`/`pid`/`serve.log`）。会话存放在 `~/.reasonix/projects/<cwd-slug>/sessions`，因此重启实例会打开一个**全新会话**（无 `--resume`），而你的历史会话仍可在侧边栏切换。
 
-### dsh-web 远程访问（dsh ≥ 0.1.5）
+### dsh-web 远程访问
 
-对具备远程能力的 dsh，dsh-web 实例的远程访问（LAN/Tailnet）已不再被阻断：每实例反代在 `/api/remote.mux` 提供 WS↔SSE 桥（SSE 下行 + POST 上行，帧级透传），并在远程模式 + 具备远程能力时向上游 `index.html` 注入一个 `<script>` 标签的 shim，仅对 mux 路径替换 `window.WebSocket`——优先走原生 WebSocket，1000 ms 探测超时后透明回退到桥。在静默丢弃 WebSocket 升级的网络路径上，这次探测会让首次连接最多多花约 1 秒，之后由桥接管。Start Instance 对话框会探测 `GET /api/dsh/capability`，dsh 低于 0.1.5（`minRemoteVersion`）时禁用远程 Start 并显示英文"版本过低"提示；loopback 访问对所有 0.1.x 继续可用。另外，dsh ≥ 0.1.2 的浏览器会话认证（launch token → `dsh-auth-*` cookie）由每实例代理中转，浏览器不会接触到 dsh 凭据。
+对具备远程能力的 dsh，dsh-web 实例的远程访问（LAN/Tailnet）已不再被阻断：每实例反代在 `/api/remote.mux` 提供 WS↔SSE 桥（SSE 下行 + POST 上行，帧级透传），并在远程模式 + 具备远程能力时向上游 `index.html` 注入一个 `<script>` 标签的 shim，仅对 mux 路径替换 `window.WebSocket`——优先走原生 WebSocket，1000 ms 探测超时后透明回退到桥。在静默丢弃 WebSocket 升级的网络路径上，这次探测会让首次连接最多多花约 1 秒，之后由桥接管。Start Instance 对话框会探测 `GET /api/dsh/capability`，dsh 低于 `minRemoteVersion`（0.2.0）时禁用远程 Start 并显示英文"版本过低"提示；loopback 访问在整个受支持的 0.2.x 区间继续可用。另外，dsh 的浏览器会话认证（launch token → `dsh-auth-*` cookie，≥ 0.1.2 引入，0.2.0 上不变——`GET /?token=` 仍返回 303 + `Set-Cookie`）由每实例代理中转，浏览器不会接触到 dsh 凭据。
+
+### dsh-web 需要 dsh 0.2.x
+
+内嵌集成**只面向 dsh 0.2.x**（`minVersion = 0.2.0`，advisory 区间 `[0.2.0, 0.3.0)`，npx pin `0.2.0-rc.2`）。dsh 0.2.0 对 RPC wire 做了两处破坏性改动，驱动只说新形态：
+
+- **endpoint 段是 `<namespace>/<method>`**——`POST /api/workspace/create`、`POST /api/session/create`、`POST /api/subagents/prompt`（注意 subagent 命名空间是**复数**）。信封的 `method` 字段仍须与 URL-path endpoint 一致；0.1.x 的点号名（`workspace.create`）现在一律 404。
+- **每个 verb 的唯一对象参数嵌套在 `payload.args.request`**——`{type:'client-request', rpcId, method:'workspace/create', payload:{args:{request:{path:…}}}}`。信封本身与 `{ok, value}` 应答形态不变。
+
+launcher 另外会传 **`--no-open`**（issue #84）：dsh 0.2.x 每次启动都会拉起宿主默认浏览器，而 SPA 是 iframe 内嵌的，于是每个实例 Start 都会多开一个游离标签页。它跟在 `--port 0` 之后、与其他 web-app 选项分在一组——launcher 选项（`--patch`）必须保持前置（见 `docs/plans/dsh-native-ui/PLAN.md` §踩坑 11）。
 
 ### dsh-web 会话跨进程只有快照（dsh 上游问题）
 

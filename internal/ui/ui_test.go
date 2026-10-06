@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -150,6 +151,30 @@ func TestRegisterSubstitutesPageTitle(t *testing.T) {
 	}
 }
 
+func fetchStaticAsset(t *testing.T, path string) string {
+	t.Helper()
+	mux := http.NewServeMux()
+	if err := Register(mux, "myworktree", nil); err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + path)
+	if err != nil {
+		t.Fatalf("GET %s failed: %v", path, err)
+	}
+	body, err := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if err != nil {
+		t.Fatalf("GET %s read body failed: %v", path, err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET %s status: %d", path, resp.StatusCode)
+	}
+	return string(body)
+}
+
 func TestIndexHTMLCoversMultiInstanceSwitching(t *testing.T) {
 	bodyText := fetchIndexHTML(t)
 	checks := []string{
@@ -234,6 +259,47 @@ func TestOpencodeWebRendererKeepsFrameAlive(t *testing.T) {
 	for _, check := range negativeChecks {
 		if strings.Contains(js, check) {
 			t.Fatalf("opencode_web.js should not contain unconditional navigation %q", check)
+		}
+	}
+}
+
+// TestWebRenderersStoppedSwitchHidesAllFrames pins the issue #96 fix:
+// switching from a running web-ui instance to a STOPPED instance of the
+// SAME kind never runs deactivate() (selectInstance only deactivates a
+// DIFFERENT renderer), so each renderer's stopped / not-running branch
+// must hide EVERY cached keep-alive iframe itself. Before the fix the
+// previous instance's iframe kept hidden=false and stacked half/half
+// under the stopped overlay (switching from a terminal instance did not
+// reproduce because that cross-kind switch DID deactivate).
+func TestWebRenderersStoppedSwitchHidesAllFrames(t *testing.T) {
+	// The dispatch-side invariant that makes the renderer-side fix
+	// necessary: same-kind switches never deactivate. If this guard ever
+	// goes away, re-evaluate whether the renderer branches still need
+	// their own hide-all.
+	indexJS := fetchStaticAsset(t, "/")
+	if !strings.Contains(indexJS, "prevRenderer !== renderer") {
+		t.Fatal("index.html selectInstance lost the prevRenderer !== renderer guard on deactivate()")
+	}
+
+	cases := map[string]string{
+		// asset → opener of the stopped / not-running branch to inspect
+		"/static/kinds/dsh_web.js":      "inst && inst.status === 'stopped'",
+		"/static/kinds/opencode_web.js": "inst && inst.status === 'stopped'",
+		"/static/kinds/reasonix.js":     "inst.status !== 'running' && inst.status !== 'starting'",
+	}
+	for asset, branchOpen := range cases {
+		js := fetchStaticAsset(t, asset)
+		start := strings.Index(js, branchOpen)
+		if start < 0 {
+			t.Fatalf("%s: stopped/not-running branch opener %q not found", asset, branchOpen)
+		}
+		end := strings.Index(js[start:], "return;")
+		if end < 0 {
+			t.Fatalf("%s: no return; after %q", asset, branchOpen)
+		}
+		branch := js[start : start+end]
+		if !strings.Contains(branch, "this._showOnly(null)") {
+			t.Fatalf("%s: stopped branch does not hide every cached frame (this._showOnly(null)) — switching to a stopped same-kind instance stacks iframes half/half (issue #96)", asset)
 		}
 	}
 }
@@ -438,6 +504,17 @@ func TestKindBadgesUnified(t *testing.T) {
 	}
 }
 
+// TestIndexHTMLInlineScriptIsIndented catches a block pasted into the inline
+// script at the wrong indentation. Both halves of that defect are invisible in
+// review and survive every behavioural test, since the sliced functions
+// evaluate the same either way:
+//
+//   - a declaration at column 0 (an exact-8-spaces rule would flag every nested
+//     `const`, so the check stays one-sided);
+//   - a comment block whose lines disagree among themselves, which is how a
+//     moved block strands one line behind and leaves an explanation sitting on
+//     the wrong neighbour.
+//
 // TestUICopyIsEnglishOnly pins the single-language English UI direction
 // (issue #73) across the whole served UI, not just index.html: the web-kind
 // renderer JS files (dsh_web.js / opencode_web.js / reasonix.js) and
@@ -446,6 +523,63 @@ func TestKindBadgesUnified(t *testing.T) {
 // covered even when they live in JS. Key user-visible strings are also
 // asserted positively per file so a reword cannot silently hide a CJK
 // regression behind a full-file rewrite.
+func TestIndexHTMLInlineScriptIsIndented(t *testing.T) {
+	bodyText := fetchStaticAsset(t, "/")
+	start := strings.Index(bodyText, "<script>\n")
+	end := strings.LastIndex(bodyText, "\n    </script>")
+	if start < 0 || end < start {
+		t.Fatal("GET / no inline <script> block found")
+	}
+	script := bodyText[start+len("<script>\n") : end]
+
+	// Declarations: only a column-0 hit is provably wrong here. Requiring exactly
+	// 8 spaces would flag every nested `const`, and deciding top level properly
+	// needs a parser. The comment check below is what covers the
+	// over-indented case, which is how a moved block actually shows up.
+	decl := regexp.MustCompile(`(?m)^( *)(async function |function |const |let |var )`)
+	for i, line := range strings.Split(script, "\n") {
+		if m := decl.FindStringSubmatch(line); m != nil && len(m[1]) == 0 {
+			t.Errorf("GET / inline script line %d starts a declaration at column 0: %s", i+1, line)
+		}
+	}
+
+	// A comment run is a contiguous block of `//` lines and every line in it
+	// has to sit at the same depth. Single-line runs are exempt: a closing
+	// brace followed by one top-level comment legitimately changes depth.
+	comment := regexp.MustCompile(`^(\s*)//`)
+	var run []string
+	flush := func() {
+		if len(run) > 1 {
+			// Compare against the run's minimum, not its first line: a block
+			// whose odd line happens to be line 1 and one whose odd line is in
+			// the middle are the same defect, and only the minimum catches
+			// both. Extra indentation inside a comment goes after the slashes
+			// in this file, which is why a stepped block is not the style here.
+			want := -1
+			for _, l := range run {
+				if d := len(comment.FindStringSubmatch(l)[1]); want < 0 || d < want {
+					want = d
+				}
+			}
+			for _, l := range run {
+				if got := len(comment.FindStringSubmatch(l)[1]); got != want {
+					t.Errorf("GET / inline script comment block mixes indents (%d and %d): %q", want, got, run[0])
+					break
+				}
+			}
+		}
+		run = nil
+	}
+	for _, line := range strings.Split(script, "\n") {
+		if comment.MatchString(line) && !strings.HasPrefix(strings.TrimSpace(line), "///") {
+			run = append(run, line)
+			continue
+		}
+		flush()
+	}
+	flush()
+}
+
 func TestUICopyIsEnglishOnly(t *testing.T) {
 	paths := map[string][]string{
 		"/": {
@@ -514,7 +648,9 @@ func TestIndexHTMLCoversReconcileLogic(t *testing.T) {
 		"destroyTerminalSession(id);",
 		"disconnectTTY(session);",
 		"function reconnectRunningTerminalSessions()",
-		"if (inst && inst.status === 'running' && !hasLiveTTYConnection(session.id)) {",
+		// The live bucket, not `status === 'running'`: an unhealthy instance is
+		// still a live process and must keep its transport (issue #80).
+		"if (inst && isInstanceLiveStatus(inst.status) && !hasLiveTTYConnection(session.id)) {",
 		"connectTTY(session);",
 	}
 	for _, check := range checks {
@@ -531,11 +667,393 @@ func TestIndexHTMLCoversPerSessionConnectionManagement(t *testing.T) {
 		"if (session.ttySocket) { session.ttySocket.close(); session.ttySocket = null; }",
 		"session.ttySocket = ws;",
 		"if (session.ttySocket === ws) {",
-		"session.ttyReconnectTimer = setTimeout(() => connectTTY(session), 5000);",
+		"session.ttyReconnectTimer = setTimeout(() => connectTTY(session), TTY_RECONNECT_DELAY_MS);",
 	}
 	for _, check := range checks {
 		if !strings.Contains(bodyText, check) {
 			t.Fatalf("GET / should include per-session connection management hook %q", check)
+		}
+	}
+}
+
+// TestLogCursorBootstrapNeverRequestsOldestBytes pins the client half of
+// the issue #81 tail contract. The server treats an omitted `since` as a
+// tail request and `since=0` as "read from the oldest live byte", so the
+// browser must never emit `since=0`: startSSE builds the parameter from
+// `sseCursor` and appends it only when that value is a real positive byte
+// cursor, and a cursor arriving over the stream is accepted under one rule.
+//
+// Since issue #87 the same suppression guards a bigger cursor: `sseCursor`
+// is the greater of `logCursor` and `ttyOffset`, because the two siblings
+// count the same ring-buffer bytes and the poll-driven promotion advances
+// `ttyOffset` with `connectTTY` alone — reading `logCursor` there would
+// omit `since` and replay the server's whole tail on top of what the
+// WebSocket already painted.
+//
+// It also pins the invalidation half of that contract, which is the same
+// rule seen from the other side: a screen that no longer holds bytes must
+// not leave a cursor claiming it does. So `resetTerminalForSwitch`
+// invalidates BOTH cursors itself, `loadLog` pins its cursors only where
+// the bytes actually land, and `ws.onmessage` moves the session cursor only
+// for the socket that currently owns the session.
+//
+// This covers index.html only — the legacy no-renderer fallback. The pty
+// renderer's own bootstrap is pinned by TestPtyRendererResetsCursorAfter-
+// TerminalReset; the two together are the complete picture, and neither
+// test alone is.
+func TestLogCursorBootstrapNeverRequestsOldestBytes(t *testing.T) {
+	bodyText := fetchIndexHTML(t)
+	checks := []string{
+		// The shared SSE connect helper omits `since` unless a real byte
+		// cursor exists; this is what protects every kind. Issue #87 made
+		// the cursor the GREATER of the two siblings — logCursor and
+		// ttyOffset count the same ring-buffer bytes, and the poll-driven
+		// promotion advances ttyOffset through connectTTY alone, so reading
+		// logCursor alone would omit `since` here and replay the whole tail
+		// over what the WebSocket already painted. The #81 suppression rule
+		// itself is unchanged: only a real positive cursor becomes `since`,
+		// and each sibling degrades through `??` to the -1 sentinel so an
+		// absent one cannot turn the max into NaN and swallow the cursor.
+		"const sseCursor = Math.max(session.logCursor ?? -1, session.ttyOffset ?? -1);",
+		"if (sseCursor > 0) url += `&since=${sseCursor}`;",
+		// loadLog must not send an explicit offset, and must not fabricate
+		// one when the header is missing.
+		"const res = await fetch(`/api/instances/log?id=${session.id}`",
+		"if (Number.isFinite(next) && next >= 0) {",
+		// Same acceptance rule for cursor values arriving over the stream,
+		// and one rule for BOTH cursors (issue #87): every byte SSE paints
+		// is a byte this screen has seen, so the WebSocket cursor advances
+		// with it and a later reconnect never re-requests rendered bytes.
+		"if (Number.isFinite(msg.next) && msg.next >= 0) {",
+		"session.logCursor = msg.next;",
+		"session.ttyOffset = msg.next;",
+		// Legacy no-renderer fallback bootstraps the named "nothing painted"
+		// state (issue #86 named these; the value stays -1).
+		"const CURSOR_UNKNOWN = -1;",
+		"logCursor: CURSOR_UNKNOWN,",
+		// Issue #86: the OTHER unknown-cursor state — the tail IS painted,
+		// only its offset was stripped — has to be a distinct value the
+		// server branches on, and both transports must send it explicitly.
+		// An unparseable header must never degrade to since=0 (the oldest
+		// live byte, #81) nor to the plain-unknown tail request. The SSE
+		// fallback reads BOTH siblings, so "outranks -2 on either side"
+		// holds in the code and not just in the prose: today every site
+		// assigns the cursors as a pair, so the split it guards is
+		// unreachable and the check is bit-identical in every state that
+		// exists today. connectTTY's guard reads ttyOffset ALONE, and
+		// that is complete there: every logCursor write is paired with an
+		// equal ttyOffset write at the same site, and only ttyOffset ever
+		// advances alone, so no reachable state lets the sibling hold
+		// screen truth ttyOffset does not.
+		"const CURSOR_FOLLOW_LIVE_END = -2;",
+		"session.logCursor = CURSOR_FOLLOW_LIVE_END;",
+		"else if (session.logCursor === CURSOR_FOLLOW_LIVE_END || session.ttyOffset === CURSOR_FOLLOW_LIVE_END) url += `&since=${CURSOR_FOLLOW_LIVE_END}`;",
+		"else if (session.ttyOffset === CURSOR_FOLLOW_LIVE_END) url += `&since=${CURSOR_FOLLOW_LIVE_END}`;",
+	}
+	for _, check := range checks {
+		if !strings.Contains(bodyText, check) {
+			t.Fatalf("GET / should include log cursor bootstrap hook %q", check)
+		}
+	}
+
+	if strings.Contains(bodyText, "/api/instances/log/stream?id=${encodeURIComponent(session.id)}&since=${session.logCursor}") {
+		t.Fatalf("GET / must not build an unconditional since= URL from session.logCursor")
+	}
+	if strings.Contains(bodyText, "/api/instances/log/stream?id=${encodeURIComponent(session.id)}&since=${session.ttyOffset}") {
+		t.Fatalf("GET / must not build an unconditional since= URL from session.ttyOffset")
+	}
+	if strings.Contains(bodyText, "/api/instances/log?id=${session.id}&since=0") {
+		t.Fatalf("GET / must not request since=0, which the server reads as the oldest live byte")
+	}
+
+	// A cleared terminal invalidates any previous cursor: retaining it would
+	// make startSSE request since=<oldOffset> and repaint only the post-offset
+	// delta onto an empty screen. Mirrors the ordering assertion the pty
+	// renderer test makes about the same two statements.
+	resetAt := strings.Index(bodyText, "resetTerminalForSwitch(session);")
+	cursorAt := strings.Index(bodyText, "session.logCursor = CURSOR_UNKNOWN;")
+	if cursorAt < 0 {
+		t.Fatal("GET / should reset session.logCursor after clearing the terminal")
+	}
+	if resetAt < 0 {
+		t.Fatal("GET / fallback should clear the terminal before reloading the log")
+	}
+	if cursorAt < resetAt {
+		t.Fatal("GET / should reset session.logCursor after resetTerminalForSwitch, not before")
+	}
+
+	// Source contract for the issue #87 review round, pinned the way this
+	// file already scopes a pin to a block: a contiguous literal whose exact
+	// indentation is part of the check, so the statements must sit at the
+	// depth they belong to. Full-file offsets are deliberately not used.
+	for _, check := range []string{
+		// resetTerminalForSwitch owns the screen, so it invalidates BOTH
+		// cursors itself, inside its own screen-content guard: it is
+		// exported on window for other kinds to call, and a caller that
+		// cleared the screen through it while keeping a stale ttyOffset
+		// would make the next connectTTY send since=<oldHead> and paint
+		// only [oldHead, head) onto a blank terminal. The guard is the
+		// anchor — with no term nothing was cleared, so nothing is
+		// invalidated. The literal's uniqueness comes from this pair's own
+		// shape: resetTerminalForSwitch's two statements sit at 12-space
+		// indent and list ttyOffset FIRST, while refreshCurrentInstance's
+		// defensive pair sits at 24 spaces and lists logCursor first
+		// (index.html) — indent and order together are the discriminator,
+		// not the closing brace. The callers keep their own resets as
+		// depth.
+		"function resetTerminalForSwitch(session) {\n            if (!session || !session.term) return;",
+		"session.ttyOffset = CURSOR_UNKNOWN;\n            session.logCursor = CURSOR_UNKNOWN;\n        }",
+		// loadLog pins cursors only where the bytes actually land: inside
+		// its if (session.term) block, after the paint, and under the same
+		// one-rule acceptance as before. Pinning a cursor for bytes no
+		// screen holds would contradict the screen-content rule the whole
+		// path is built on.
+		"if (Number.isFinite(next) && next >= 0) {\n                        session.logCursor = next;\n                        session.ttyOffset = next;\n                    }",
+		// ws.onmessage mutates the session-wide cursor, so it runs only for
+		// the socket that currently owns the session: a frame dispatched off
+		// a replaced socket must never move the live socket's cursor and
+		// claim bytes the live transport never painted. Unique in the file,
+		// so the Contains check is this guard and not a look-alike.
+		"if (session.ttySocket !== ws) return;",
+	} {
+		if !strings.Contains(bodyText, check) {
+			t.Fatalf("GET / should pin the cursor-invalidation source contract: missing %q", check)
+		}
+	}
+}
+
+func TestPtyRendererResetsCursorAfterTerminalReset(t *testing.T) {
+	mux := http.NewServeMux()
+	if err := Register(mux, "myworktree", nil); err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/static/kinds/pty.js")
+	if err != nil {
+		t.Fatalf("GET /static/kinds/pty.js failed: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /static/kinds/pty.js status: %d", resp.StatusCode)
+	}
+	js := string(body)
+
+	// The pty kind is the only one with a ring buffer, so it is the one
+	// where a cursor bug is user-visible. activate() clears the terminal
+	// and then resets the cursor to the unknown sentinel: if loadLog fails
+	// afterwards, startSSE must fall back to a full tail rather than resume
+	// from a stale offset and repaint only a delta onto the cleared screen.
+	// Companion to TestLogCursorBootstrapNeverRequestsOldestBytes, which pins
+	// the same rule in index.html's legacy fallback.
+	if !strings.Contains(js, "window.resetTerminalForSwitch(s);") {
+		t.Fatal("pty.js should clear the terminal before reloading the log")
+	}
+	resetAt := strings.Index(js, "window.resetTerminalForSwitch(s);")
+	cursorAt := strings.Index(js, "s.logCursor = PTY_CURSOR_UNKNOWN;")
+	if cursorAt < 0 {
+		t.Fatal("pty.js should reset s.logCursor to the named unknown state after clearing the terminal")
+	}
+	if cursorAt < resetAt {
+		t.Fatal("pty.js should reset s.logCursor after resetTerminalForSwitch, not before")
+	}
+}
+
+// TestTerminalStatusBucketsReplaceRunningEquality is the source-level contract
+// for issue #80: a newly created instance is persisted as `starting` and only
+// flips to `running` on the kind's ready signal, so "status !== 'running'" must
+// never gate terminal I/O, the [Process Stopped] banner, or the connect path.
+//
+// The behavior itself (including the poll-driven promotion that replaces the
+// abandoned selection-time activation) is covered by
+// TestTerminalStatusHandling, which runs the same sources under `node --test`.
+// This test pins the two halves of the fix that a refactor would most easily
+// undo silently: the shared bucket helpers, and the fact that BOTH activation
+// paths — index.html's legacy no-renderer fallback and kinds/pty.js — classify
+// the status instead of comparing it to the literal "running".
+func TestTerminalStatusBucketsReplaceRunningEquality(t *testing.T) {
+	bodyText := fetchIndexHTML(t)
+	js := fetchStaticAsset(t, "/static/kinds/pty.js")
+
+	// Single source of truth for the three buckets, exported for pty.js.
+	for _, check := range []string{
+		"const INSTANCE_LIVE_STATUSES = new Set(['running', 'unhealthy']);",
+		"const INSTANCE_PENDING_STATUSES = new Set(['starting', 'stopping']);",
+		"function isInstanceLiveStatus(status)",
+		"function isInstancePendingStatus(status)",
+		"function isInstanceTerminalStatus(status)",
+		"window.isInstanceLiveStatus = isInstanceLiveStatus;",
+		"window.isInstancePendingStatus = isInstancePendingStatus;",
+		"window.isInstanceTerminalStatus = isInstanceTerminalStatus;",
+	} {
+		if !strings.Contains(bodyText, check) {
+			t.Fatalf("GET / should define the shared status buckets: missing %q", check)
+		}
+	}
+
+	// Poll-driven self-heal: reconcileTerminalSessions() promotes an active
+	// session once its status turns live, and refuses to disturb a session that
+	// already has a transport in flight (that guard is what stops the 2s poll
+	// from flapping a CONNECTING socket).
+	for _, check := range []string{
+		"function syncActiveTerminalStatus(session, inst)",
+		"if (isInstanceLiveStatus(inst.status)) {\n                ensureTerminalLiveTransport(session);",
+		"function ensureTerminalLiveTransport(session)",
+		"if (hasTerminalTransportInFlight(session)) return false;",
+		// The guard is one function so the poll-driven promotion and
+		// kinds/pty.js cannot drift apart; each entry below is one way a second
+		// owner of the bring-up shows up.
+		"function hasTerminalTransportInFlight(session, options)",
+		"if (session.loadLogController) return true;",
+		// Issue #83: every socket/state arm is gated on !stale - a
+		// READY-but-heartbeat-silent socket is NOT in flight, or the
+		// guard would veto the very reconnect the liveness fix unblocks.
+		"if (session.ttySocket && !stale) return true;",
+		"if (session.logStream) return true;",
+		"if (session.ttyState && session.ttyState !== 'IDLE' && !stale) return true;",
+		// The promotion is the bystander: it lets a queued retry fire, so it
+		// passes no options and therefore respects the timer arm.
+		"if (session.ttyReconnectTimer && !(options && options.ignoreQueuedRetry)) return true;",
+	} {
+		if !strings.Contains(bodyText, check) {
+			t.Fatalf("GET / should include the reconcile promotion hook %q", check)
+		}
+	}
+
+	// Both activation paths must classify the status. pty.js is the live path;
+	// the legacy fallback in index.html only runs when a renderer script fails
+	// to load, and the two must not drift apart (same rule as the log cursor).
+	for _, check := range []string{
+		"const isPending = window.isInstancePendingStatus",
+		"if (isPending) {",
+		// Activation shares the promotion's in-flight guard; without it a tab
+		// switch during bring-up resets the screen and opens a second socket.
+		"if (window.hasTerminalTransportInFlight\n            && window.hasTerminalTransportInFlight(s, { ignoreQueuedRetry: true })) {",
+		// The early return is not silent: deactivate() leaves the status bar on
+		// "idle", so re-selecting a tab mid bring-up would look inert until the
+		// connect finished. It says connecting... and stays quiet over a live
+		// SSE stream, whose own message is the accurate one.
+		"if (window.updateStatus && !s.logStream) {\n                window.updateStatus('connecting...');\n            }",
+		// ...and the takeover cancels the queued retry itself rather than
+		// leaving it to disconnectTTY, which activate() only reaches after
+		// loadLog() settles — a retry firing in between opens two sockets and
+		// replays the tail twice.
+		"if (s.ttyReconnectTimer) {\n            clearTimeout(s.ttyReconnectTimer);\n            s.ttyReconnectTimer = null;\n        }",
+	} {
+		if !strings.Contains(js, check) {
+			t.Fatalf("GET /static/kinds/pty.js should classify the status: missing %q", check)
+		}
+	}
+	for _, check := range []string{
+		// Anchored on the comment: index.html has a second `if (!inst) {` in
+		// reconcileTerminalSessions, so the bare line would match either.
+		"if (!inst) {\n                    // Nothing to drive; leave the session alone.",
+		"} else if (isInstancePendingStatus(inst.status)) {",
+		"} else if (isInstanceTerminalStatus(inst.status)) {",
+		"} else if (hasTerminalTransportInFlight(session, { ignoreQueuedRetry: true })) {",
+		"updateStatus(\"connecting...\");",
+		// ...and the takeover cancels the queued retry itself, as in pty.js.
+		"if (session.ttyReconnectTimer) {\n                            clearTimeout(session.ttyReconnectTimer);\n                            session.ttyReconnectTimer = null;",
+	} {
+		if !strings.Contains(bodyText, check) {
+			t.Fatalf("GET / legacy fallback should classify the status: missing %q", check)
+		}
+	}
+
+	// The stopped banner is terminal-bucket-only in both paths.
+	if !strings.Contains(bodyText, "if (inst && isInstanceTerminalStatus(inst.status)) {\n                        session.term.write(\"\\r\\n\\r\\n\\x1b[41;37m[Process Stopped]\\x1b[0m\\r\\n\");") {
+		t.Fatal("GET / should paint [Process Stopped] only for terminal-bucket statuses")
+	}
+
+	// And the equality tests this replaces must not come back. The `===`
+	// forms matter as much as the `!==` ones: index.html shipped two
+	// `status === 'running'` status-bar labels that read "stopped" for a
+	// seconds-long `starting` window next to a live iframe.
+	for _, forbidden := range []string{
+		"if (inst && inst.status !== 'running') return;",
+		"if (inst && inst.status !== 'running') {",
+		"const isRunning = inst && inst.status === 'running';",
+		"inst.status === 'running' ?",
+		// A strict substring of the line above, kept on purpose: it is the only
+		// one of the two that also catches the destructured form, where the
+		// status is a local rather than a property of `inst`.
+		"status === 'running' ?",
+	} {
+		if strings.Contains(bodyText, forbidden) {
+			t.Fatalf("GET / must not gate terminal I/O on status equality: found %q", forbidden)
+		}
+	}
+
+	// The status-bar label for the renderer-owned kinds goes through the same
+	// buckets: kinds/reasonix.js keeps its iframe navigating while the
+	// instance is `starting`, so "stopped" was self-contradicting.
+	for _, check := range []string{
+		"function instanceStatusLabel(inst, liveLabel)",
+		"updateStatus(instanceStatusLabel(inst, 'reasonix web'))",
+		"updateStatus(instanceStatusLabel(inst, 'dsh web ui'))",
+	} {
+		if !strings.Contains(bodyText, check) {
+			t.Fatalf("GET / should label the web-UI kinds by bucket: missing %q", check)
+		}
+	}
+
+	// loadLog() swallows its own errors, so the once-per-transition terminal
+	// replay needs a separate success flag or a failed fetch strands the tab
+	// with neither log nor banner until someone presses Refresh.
+	for _, check := range []string{
+		"session.lastLogLoadFailed = true;",
+		"session.lastLogLoadFailed = false;",
+		"session.lastLogLoadFailures = (session.lastLogLoadFailures || 0) + 1;",
+		"session.lastLogLoadAttemptAt = Date.now();",
+		// Unbounded 2s retries would append one error line per tick, since
+		// loadLog() reports its failures into the terminal.
+		"const retryBackoffMs = Math.min(60, 2 ** Math.min(session.lastLogLoadFailures || 0, 6)) * 1000;",
+		"const retryDue = !!session.lastLogLoadFailed",
+		"if (enteringTerminalBucket || retryDue) {",
+	} {
+		if !strings.Contains(bodyText, check) {
+			t.Fatalf("GET / should retry a failed terminal replay with a backoff: missing %q", check)
+		}
+	}
+
+	// The legacy factory in index.html and the renderer's in kinds/pty.js both
+	// initialise the replay latches, next to the lastKnownStatus latch they
+	// now sit beside.
+	for _, check := range []string{
+		"lastLogLoadFailed: false,",
+		"lastLogLoadFailures: 0,",
+		"lastLogLoadAttemptAt: 0,",
+	} {
+		if !strings.Contains(bodyText, check) {
+			t.Fatalf("GET / legacy session factory should initialise %q", check)
+		}
+		if !strings.Contains(js, check) {
+			t.Fatalf("GET /static/kinds/pty.js session factory should initialise %q", check)
+		}
+	}
+
+	// connectTTY must refuse an id state.instances cannot resolve: the server
+	// accepts the socket and then closes it with 1013, which surfaces as a
+	// dropped connection rather than a bad request. The `!inst` half is easy to
+	// drop because only the status half changed in the first draft.
+	if !strings.Contains(bodyText, "if (!inst || !isInstanceLiveStatus(inst.status)) {") {
+		t.Fatal("GET / connectTTY should refuse both an unresolvable id and a non-live status")
+	}
+
+	// A CLOSED socket left on the session reads as "transport in flight" and
+	// would block the promotion until something else cleared it. Anchored on
+	// the assignment, not the comment above it.
+	if !strings.Contains(bodyText, "session.ttySocket = null;\n                        const latest = state.instances.find") {
+		t.Fatal("GET / should clear ttySocket when the socket closes")
+	}
+	for _, forbidden := range []string{
+		"if (inst.status !== 'running') {",
+		"if (inst && inst.status !== 'running') return;",
+	} {
+		if strings.Contains(js, forbidden) {
+			t.Fatalf("GET /static/kinds/pty.js must not gate terminal I/O on status equality: found %q", forbidden)
 		}
 	}
 }

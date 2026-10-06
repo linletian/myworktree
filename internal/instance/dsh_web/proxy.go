@@ -40,11 +40,8 @@ import (
 //     exchange itself — injecting the minted dsh-auth-* cookie into
 //     every forwarded request, stripping any browser-sent dsh-auth-*,
 //     and never letting an upstream dsh-auth-* Set-Cookie reach the
-//     browser. On legacy dsh (<0.1.2, no browser auth) the proxy
-//     remains the only boundary between the LAN and the
-//     unauthenticated upstream (settings/credentials become reachable
-//     once Host is rewritten to loopback). The gate is hardcoded and
-//     cannot be disabled.
+//     browser. The gate is hardcoded and cannot
+//     be disabled.
 //   - Token hygiene (remote mode): the FIRST navigation carries
 //     ?token= — the main-origin mw_token cookie cannot travel to the
 //     proxy origin. On a valid query token the proxy sets the
@@ -62,7 +59,7 @@ import (
 // same-origin with the proxy, so it never carries "cross-site").
 //
 // Scope monitoring (PLAN.md §工作区限制): POST /api RPC bodies are
-// parsed for workspace.create / session.create and recorded in the
+// parsed for workspace/create / session/create and recorded in the
 // ScopeTracker — record-only, never blocking or rewriting.
 
 // ProxyConfig is the myworktree-side configuration for the per-instance
@@ -332,7 +329,7 @@ func (p *proxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// THE response chain — always installed, steps run in order and
 	// each no-ops when its precondition does not hold (modifyResponse):
-	// 401 invalidation, upstream Set-Cookie stripping, session.create
+	// 401 invalidation, upstream Set-Cookie stripping, session/create
 	// tee, and HTML shim injection. New response-side behavior composes
 	// by appending a guarded step there.
 	proxy.ModifyResponse = p.modifyResponse
@@ -372,12 +369,14 @@ func (p *proxyHandler) modifyResponse(resp *http.Response) error {
 	// upstream-planted dsh-auth-* Set-Cookie (defense in depth — the
 	// token exchange answer itself is never proxied).
 	stripUpstreamAuthSetCookies(resp.Header)
-	// (3) session.create carries the new session id in its response
+	// (3) session/create carries the new session id in its response
 	// VALUE ({sessionId, agentPreset?} — upstream
 	// sessionCreateValueSchema), not the request body. Tee the (tiny)
 	// response so the id lands in the session watch's own-attribution
-	// (sessionwatch.go).
-	if req := resp.Request; req != nil && req.Method == http.MethodPost && req.URL.Path == "/api/session.create" {
+	// (sessionwatch.go). The path is the 0.2.x slash-style endpoint
+	// `/api/session/create` (verified against 0.2.0-rc.2; the dotted
+	// `/api/session.create` of 0.1.x 404s there).
+	if req := resp.Request; req != nil && req.Method == http.MethodPost && req.URL.Path == "/api/session/create" {
 		resp.Body = &sessionCreateBody{
 			ReadCloser: resp.Body,
 			mark:       p.h.markOwnSession,
@@ -463,7 +462,7 @@ func (w *headerTrackRW) Write(b []byte) (int, error) {
 
 func (w *headerTrackRW) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 
-// sessionCreateBody tees the session.create response stream and parses
+// sessionCreateBody tees the session/create response stream and parses
 // the RPC envelope once the stream ends, marking the created session id
 // as owned by this instance (sessionwatch.go). The body is tiny (an
 // envelope carrying a session id), so buffering is harmless and the
@@ -567,10 +566,12 @@ func (p *proxyHandler) observeBody(r *http.Request) {
 
 	// Foreign-activity attribution (sessionwatch.go): only methods
 	// that DRIVE the session (mutate its log) count as our own writes.
-	// Read-only methods (session.history/models/list/search) are
-	// deliberately excluded — opening a session does not write, and
-	// marking it would wrongly suppress the warning for a session a
-	// terminal dsh is actively writing.
+	// Read-only methods (session/list, session/search, session/page,
+	// session/projections, session/modelCatalog — session/follow and
+	// session/control are streams, not writes) are deliberately
+	// excluded — opening a session does not write, and marking it
+	// would wrongly suppress the warning for a session a terminal dsh
+	// is actively writing.
 	for _, id := range ownSessionIDsInBody(body) {
 		p.h.markOwnSession(id)
 	}
@@ -584,24 +585,30 @@ func (p *proxyHandler) observeBody(r *http.Request) {
 	}
 }
 
-// ownSessionWriteMethods are the session.* RPCs that mutate the
+// ownSessionWriteMethods are the session/* RPCs that mutate the
 // session log (dsh single-writer model): traffic on these means THIS
-// instance is the writer. session.create is handled via its response
-// (sessionCreateBody below) because the id lives in the value.
+// instance is the writer. session/create is handled via its response
+// (sessionCreateBody above) because the id lives in the value.
+//
+// NAMES + SHAPES are the dsh 0.2.x wire (verified against 0.2.0-rc.2):
+// endpoint segments are `<namespace>/<method>` — the subagent namespace
+// is PLURAL (`subagents/prompt`) — and the ids live under
+// payload.args.request, not directly in payload.
 var ownSessionWriteMethods = map[string]bool{
-	"session.prompt":      true,
-	"session.cancel":      true,
-	"session.fork":        true,
-	"session.rename":      true,
-	"session.selectModel": true,
-	"session.attachment":  true,
-	"session.updateQueue": true,
-	"subagent.prompt":     true, // payload carries parentSessionId + childSessionId
+	"session/prompt":      true,
+	"session/cancel":      true,
+	"session/fork":        true,
+	"session/rename":      true,
+	"session/selectModel": true,
+	"session/attachment":  true,
+	"session/updateQueue": true,
+	"subagents/prompt":    true, // args.request carries parentSessionId + childSessionId
 }
 
 // ownSessionIDsInBody extracts the session ids of a write-driving RPC
-// envelope: payload.sessionId for session.* methods, and both
-// parentSessionId / childSessionId for subagent.prompt.
+// envelope (dsh 0.2.x): payload.args.request.sessionId for session.*
+// methods, and both parentSessionId / childSessionId for
+// subagents/prompt.
 func ownSessionIDsInBody(body []byte) []string {
 	var env rpcEnvelope
 	if err := json.Unmarshal(body, &env); err != nil {
@@ -610,23 +617,49 @@ func ownSessionIDsInBody(body []byte) []string {
 	if env.Type != "client-request" || !ownSessionWriteMethods[env.Method] {
 		return nil
 	}
-	if env.Method == "subagent.prompt" {
-		var payload struct {
+	if env.Method == "subagents/prompt" {
+		var req struct {
 			ParentSessionID string `json:"parentSessionId"`
 			ChildSessionID  string `json:"childSessionId"`
 		}
-		if json.Unmarshal(env.Payload, &payload) != nil {
+		if !decodeArgsRequest(env.Payload, &req) {
 			return nil
 		}
-		return []string{payload.ParentSessionID, payload.ChildSessionID}
+		return []string{req.ParentSessionID, req.ChildSessionID}
 	}
-	var payload struct {
+	var req struct {
 		SessionID string `json:"sessionId"`
 	}
-	if json.Unmarshal(env.Payload, &payload) != nil {
+	if !decodeArgsRequest(env.Payload, &req) {
 		return nil
 	}
-	return []string{payload.SessionID}
+	return []string{req.SessionID}
+}
+
+// decodeArgsRequest unwraps the dsh 0.2.x payload envelope
+// {"args":{"request":{…}}} into dst. Every 0.2 verb that takes one
+// object argument nests it there — upstream rejects anything else
+// ("Remote payload must contain exactly one plain-object args field",
+// observed live on 0.2.0-rc.2), so there is no legacy shape to fall
+// back to. A `null` request is treated as ABSENT: `"null"` is 4 bytes,
+// so the emptiness check alone would wave it through, and unmarshalling
+// "null" into a struct is a documented silent no-op returning nil —
+// without this guard a `request:null` envelope would decode "successfully"
+// into an all-zero dst and be classified/marked on nothing.
+func decodeArgsRequest(payload json.RawMessage, dst any) bool {
+	var wrap struct {
+		Args struct {
+			Request json.RawMessage `json:"request"`
+		} `json:"args"`
+	}
+	if json.Unmarshal(payload, &wrap) != nil {
+		return false
+	}
+	req := bytes.TrimSpace(wrap.Args.Request)
+	if len(req) == 0 || bytes.Equal(req, []byte("null")) {
+		return false
+	}
+	return json.Unmarshal(req, dst) == nil
 }
 
 // worktreeWorkspaceID reads the worktree's own workspace id learned by
@@ -638,7 +671,9 @@ func (p *proxyHandler) worktreeWorkspaceID() string {
 }
 
 // rpcEnvelope is the wire form of a client request (upstream
-// rpc.schema.ts): {type:'client-request', rpcId, method, payload}.
+// rpc.schema.ts): {type:'client-request', rpcId, method, payload}. On
+// dsh 0.2.x `method` is a `<namespace>/<method>` endpoint segment and
+// `payload` nests the verb's argument(s) under args.request.
 type rpcEnvelope struct {
 	Type    string          `json:"type"`
 	Method  string          `json:"method"`
@@ -648,6 +683,12 @@ type rpcEnvelope struct {
 // classifyRPCBody parses a client-request envelope and classifies the
 // workspace/session targets against the instance worktree. Non-RPC
 // bodies and irrelevant methods are ignored (ok=false).
+//
+// dsh 0.2.x wire (verified live on 0.2.0-rc.2): the methods are
+// `workspace/create` / `session/create`, and the directory / workspace
+// target rides at payload.args.request.{path,cwd,workspaceId} — the
+// 0.1.x dotted names with a flat payload carry nothing here and fall
+// through unrecorded.
 func classifyRPCBody(body []byte, worktree, worktreeWorkspaceID string) (ScopeState, bool) {
 	var env rpcEnvelope
 	if err := json.Unmarshal(body, &env); err != nil {
@@ -657,23 +698,23 @@ func classifyRPCBody(body []byte, worktree, worktreeWorkspaceID string) (ScopeSt
 		return ScopeState{}, false
 	}
 	switch env.Method {
-	case "workspace.create":
-		var payload struct {
+	case "workspace/create":
+		var req struct {
 			Path string `json:"path"`
 		}
-		if json.Unmarshal(env.Payload, &payload) != nil || payload.Path == "" {
+		if !decodeArgsRequest(env.Payload, &req) || req.Path == "" {
 			return ScopeState{}, false
 		}
-		return classifyRPC(worktree, worktreeWorkspaceID, payload.Path, "")
-	case "session.create":
-		var payload struct {
+		return classifyRPC(worktree, worktreeWorkspaceID, req.Path, "")
+	case "session/create":
+		var req struct {
 			Cwd         string `json:"cwd"`
 			WorkspaceID string `json:"workspaceId"`
 		}
-		if json.Unmarshal(env.Payload, &payload) != nil {
+		if !decodeArgsRequest(env.Payload, &req) {
 			return ScopeState{}, false
 		}
-		return classifyRPC(worktree, worktreeWorkspaceID, payload.Cwd, payload.WorkspaceID)
+		return classifyRPC(worktree, worktreeWorkspaceID, req.Cwd, req.WorkspaceID)
 	default:
 		return ScopeState{}, false
 	}

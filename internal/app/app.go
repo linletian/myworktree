@@ -125,6 +125,59 @@ type ttyClientState struct {
 
 const maxTTYClientsPerInstance = 8
 
+// ttyHandshakeReplayBudget bounds how many bytes ONE TTY WebSocket
+// handshake replays before handing the connection to the live output
+// subscription (issue #87).
+//
+// Why a budget at all: the catch-up loop reads in 64KB chunks, and a ring
+// buffer is 16-256MB (internal/framework/memsampler.go), so a client that
+// reconnects after a long offline window can drive up to 4096 iterations —
+// each one taking the ring mutex against the live pumpLogs writer — while
+// the user stares at "websocket live" with no output, because the `ready`
+// frame already cleared the handshake timer. An unbounded loop turns one
+// reconnect into an unbounded stall of the output pump.
+//
+// Why 8MB: it is 128 x 64KB chunks, so the worst case is bounded at
+// ~8MB of wire and ~8MB of ring-mutex serialization per reconnect — a
+// fraction of a second on loopback — while still replaying far more output
+// than a terminal viewport can hold (a full 8MB scrollback of missed
+// output). It is a byte count, not a wall-clock deadline, so the
+// truncation point is deterministic and testable rather than machine-speed
+// dependent, and it never depends on a live writer being idle.
+//
+// Truncation is self-healing, not lossy: when the budget runs out the loop
+// stops and publishes the end offset of the LAST chunk actually written, so
+// the undelivered remainder sits ahead of the published cursor and the next
+// reconnect re-requests exactly those bytes — the same property that covers
+// the final-read→SubscribeOutput window. Bytes are never skipped, only
+// deferred to a later reconnect.
+//
+// What 8MB costs, because the self-healing framing above can hide it: the
+// ring caps are 16-256MB (internal/framework/memsampler.go), so a client
+// whose cursor is far behind can have up to 256MB outstanding, and 8MB per
+// handshake means up to 32 reconnects to converge. Those deferred bytes
+// travel on the NEXT reconnect only — a connection that stays healthy never
+// reconnects — so a truncated client keeps a behind screen while its socket
+// looks fine. It is strictly better than pre-#87, where no cursor existed
+// and every reconnect re-appended the newest 64KB forever and never
+// converged, but it is a trade-off, not a free bound. The client appends
+// the replay into xterm.js with scrollback: 10000 (index.html), so an 8MB
+// replay is far larger than the history it lands in; what scrolls out is
+// the replayed content, because the replay is OLDER output and arrives
+// BEFORE the live stream — the recent live output still lands at the end
+// and stays visible.
+//
+// There is deliberately no write deadline on this path, and that is an
+// accepted cost rather than an oversight: the handshake has not called
+// SubscribeOutput yet, so a blocked write here does not stall the live pump;
+// and a wall-clock deadline would livelock a slow-but-progressing consumer,
+// which can never catch up and would be re-truncated on every attempt. A
+// byte budget degrades gracefully — the next reconnect resumes from the
+// published cursor — where a deadline can livelock forever. (The broader
+// absence of a TTY write deadline is issue #83's documented boundary; this
+// notes it, it does not move it.)
+const ttyHandshakeReplayBudget int64 = 8 << 20 // 8 MB
+
 type ttyClientHandle struct {
 	server     *Server
 	instanceID string
@@ -192,10 +245,12 @@ func numericPort(p string) bool {
 
 // dshProxyConfig derives the dsh-web reverse-proxy settings from the
 // main listener: loopback bind + no token locally; the main listener's
-// host + a mandatory token gate when non-loopback or TLS (the dsh
-// upstream has no authentication layer — the proxy is the only
-// boundary). TLS mirrors the main certificate so an https page never
-// embeds a mixed-content iframe.
+// host + a mandatory token gate when non-loopback or TLS (the proxy is
+// the only boundary between the network and the upstream's own
+// browser-session credential — it holds the `dsh-auth-*` cookie,
+// auth.go — so the mandatory myworktree token gate layers on top of
+// dsh's own auth rather than replacing it). TLS mirrors the main
+// certificate so an https page never embeds a mixed-content iframe.
 func dshProxyConfig(cfg Config, isSecure bool) dsh_web.ProxyConfig {
 	pc := dsh_web.ProxyConfig{
 		BindHost: "127.0.0.1",
@@ -259,9 +314,11 @@ func New(cfg Config, logger *log.Logger) (*Server, error) {
 	// The dsh web driver and its framework kind. The per-instance
 	// reverse proxy binds 127.0.0.1 locally (loopback trust model, no
 	// token); when the main listener is non-loopback or TLS it binds
-	// the main listener's host with a MANDATORY token gate — dsh has
-	// no authentication layer, so the proxy is the only boundary
-	// between the LAN and the unauthenticated upstream.
+	// the main listener's host with a MANDATORY token gate — the proxy
+	// is the upstream's sole credential holder (it holds the minted
+	// `dsh-auth-*` cookie, auth.go), so this gate layers on top of
+	// dsh's own browser-session auth as the only boundary between the
+	// LAN and the upstream's credential.
 	dshDrv := &dsh_web.Driver{
 		DataDir: dataDir,
 		Logger:  logger,
@@ -1879,7 +1936,8 @@ func (s *Server) handleInstanceDshInfo(w http.ResponseWriter, r *http.Request) {
 
 // handleInstanceDshScope returns the current out-of-scope state for a
 // dsh-web instance, recorded in-memory by the per-instance reverse
-// proxy from RPC request bodies (session.create / workspace.create).
+// proxy from RPC request bodies (session/create / workspace/create,
+// dsh 0.2.x slash-style endpoints).
 func (s *Server) handleInstanceDshScope(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -2195,7 +2253,94 @@ func (s *Server) handleInstanceInput(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
+// sinceFollowLiveEnd is the `since` sentinel meaning "send nothing, publish
+// the current end offset, then stream only new data" (issue #86).
+//
+// A client reaches it when its screen is ALREADY painted with the ring
+// buffer's tail but it never learned that tail's offset — the usual cause
+// being a reverse proxy that strips `X-Log-Offset` from the
+// GET /api/instances/log response. The plain-unknown sentinel (-1, an
+// omitted `since`) means the opposite: nothing is painted, so the client
+// genuinely wants the tail. Collapsing the two into one -1 is this bug:
+// loadLog paints the tail, the stream serves the tail again, and the tail
+// renders twice.
+//
+// parseInt64Default passes any negative value through untouched, so each
+// sentinel must be branched on EXPLICITLY, ahead of `since < 0` — a -2
+// that fell into a tail branch would behave exactly like an omitted `since`
+// and reproduce the duplication this value exists to prevent. Consumers:
+// handleInstanceLogStream (SSE) and completeHandshake (TTY WS). The client
+// side of the contract is CURSOR_FOLLOW_LIVE_END in index.html /
+// kinds/pty.js, which is what puts the value on the wire.
+const sinceFollowLiveEnd int64 = -2
+
+// Liveness knobs for the TTY WebSocket path (issue #83).
+//
+// The problem: a half-open TCP socket — laptop sleep, NAT/proxy idle
+// timeout, a silently swapped network path — never delivers FIN or RST,
+// so ReadMessage blocks forever, the browser fires no onclose, and the
+// handler goroutine, the reader goroutine, the fd and the ttyClients
+// entry pin the daemon for its entire lifetime. Nothing on this path
+// generated traffic while the terminal was idle, so nothing ever noticed.
+//
+// The fix is a heartbeat the peer answers WITHOUT any app-layer code:
+// every ttyPingInterval the handler writes an RFC 6455 ping (browsers
+// auto-reply Pong from their network stack) plus a TEXT {"type":"ping"}
+// control frame (onmessage never fires for control frames, so the text
+// frame is the only heartbeat browser JavaScript can observe).
+//
+// The numbers, and the margin between them:
+//
+//		ttyPingInterval (10s)  →  4.5 ticks fit inside ttyReadDeadline (45s)
+//		client threshold (30s) =  3 × ttyPingInterval; < ttyReadDeadline
+//
+//	  - 4.5×: a healthy peer refreshes the read deadline with an automatic
+//	    Pong on EVERY ping, so expiry needs ~4.5 consecutive missed ping
+//	    rounds — peer-dead, not peer-busy. A shell at a prompt, vim, less
+//	    or top emit zero OUTPUT for hours but still answer pings, which is
+//	    exactly why liveness rides on heartbeat traffic and never on the
+//	    absence of output.
+//	  - The client-side staleness threshold the browser pairs with these
+//	    numbers is 3 × ttyPingInterval (30s, set in index.html): a
+//	    background tab's setInterval is commonly throttled to ~1/min while
+//	    WebSocket message delivery is NOT — the server's frames keep the
+//	    client's lastDataAt fresh there, so the client threshold needs
+//	    margin over the ping interval (delivery jitter, TCP retransmits),
+//	    not over the throttled watchdog tick. A short server interval is
+//	    therefore safe: it cannot cause background-tab reconnect churn.
+//	  - client threshold < ttyReadDeadline: the browser's watchdog reaps a
+//	    half-open socket first and reconnects on its own terms (keeping
+//	    its #87 byte cursor); the server deadline is the backstop that
+//	    caps the goroutine/fd/ttyClients leak at ~45s of inbound silence
+//	    for peers that run no watchdog at all (stale cached pages,
+//	    scripts, clients that half-close and go silent).
+const (
+	ttyPingInterval = 10 * time.Second
+	ttyReadDeadline = 45 * time.Second
+)
+
+// handleInstanceTTYWS is the mux entry point: production liveness
+// intervals, no mutable interval state anywhere on this path.
 func (s *Server) handleInstanceTTYWS(w http.ResponseWriter, r *http.Request) {
+	s.handleInstanceTTYWSLiveness(w, r, ttyPingInterval, ttyReadDeadline)
+}
+
+// handleInstanceTTYWSLiveness is the production handler with the two
+// liveness intervals as explicit parameters — the test seam for issue
+// #83. It is a signature, not a mutable package var: a test that
+// compresses the windows to milliseconds cannot make a parallel test's
+// connection flap, so -race and t.Parallel stay clean.
+func (s *Server) handleInstanceTTYWSLiveness(w http.ResponseWriter, r *http.Request, pingInterval, readDeadline time.Duration) {
+	// Non-positive intervals are nonsense for a liveness seam
+	// (time.NewTicker panics on <= 0; a non-positive read deadline would
+	// either reap instantly or silently disable the deadline). Fall back
+	// to the production constants rather than trusting every caller.
+	if pingInterval <= 0 {
+		pingInterval = ttyPingInterval
+	}
+	if readDeadline <= 0 {
+		readDeadline = ttyReadDeadline
+	}
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -2205,6 +2350,15 @@ func (s *Server) handleInstanceTTYWS(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "id is required", http.StatusBadRequest)
 		return
 	}
+	// Optional byte cursor for the handshake replay (issue #87). A
+	// reconnecting client sends the offset of everything it has already
+	// rendered, so the handshake replays only newer bytes instead of the
+	// full 64KB tail (which it would append under its live screen).
+	// Unknown/absent yields -1: the "nothing painted" sentinel that keeps
+	// the first-connect tail behaviour. sinceFollowLiveEnd (-2) is the
+	// OTHER unknown-cursor state — the screen IS painted, only its end
+	// offset is unknown — and is handled inside completeHandshake.
+	since := parseInt64Default(r.URL.Query().Get("since"), -1)
 	conn, err := ws.Upgrade(w, r)
 	if err != nil {
 		return
@@ -2241,6 +2395,22 @@ func (s *Server) handleInstanceTTYWS(w http.ResponseWriter, r *http.Request) {
 	go func() {
 		defer close(msgChan)
 		for {
+			// Issue #83: arm a fresh read deadline before EVERY read. A
+			// half-open peer that stops answering can no longer block this
+			// ReadMessage forever: on expiry it errors, the goroutine
+			// returns, msgChan closes, and the existing
+			// `case msg, ok := <-msgChan: if !ok { return }` below unwinds
+			// the handler through its existing defers (clientHandle.Close
+			// drops the ttyClients entry, conn.Close frees the fd). No
+			// second exit path is added. A healthy peer keeps the deadline
+			// refreshed — every resize echo, keystroke, automatic RFC 6455
+			// Pong to the heartbeat ping, and the app-level {"type":"ping"}
+			// probe all land here. The read deadline is independent of
+			// net.Conn's write deadline, so this cannot interfere with the
+			// writes on this path.
+			if err := conn.SetReadDeadline(time.Now().Add(readDeadline)); err != nil {
+				return
+			}
 			op, data, err := conn.ReadMessage()
 			if err != nil {
 				return
@@ -2262,19 +2432,265 @@ func (s *Server) handleInstanceTTYWS(w http.ResponseWriter, r *http.Request) {
 	handshakeTimer := time.NewTimer(5 * time.Second)
 	defer handshakeTimer.Stop()
 
+	// Liveness heartbeat ticker (issue #83): the same tick drives both the
+	// RFC 6455 ping (A3) and the observable TEXT control frame (A4), so
+	// the two can never drift apart. Stopped via defer, same pattern as
+	// handshakeTimer above.
+	heartbeat := time.NewTicker(pingInterval)
+	defer heartbeat.Stop()
+
+	// completeHandshake replays what the client has not seen yet, publishes
+	// the replay's end offset in a `sync` frame, then hands the connection
+	// to the live output subscription. It reads the outer `since` (the
+	// cursor parsed from the query string) rather than taking a parameter;
+	// both call sites below pass that same variable.
+	//
+	// Three cursors, three modes: a real `since >= 0` replays only [since,
+	// head); the -1 sentinel (nothing painted) replays the tail; and the
+	// sinceFollowLiveEnd sentinel (-2, painted but offset unknown) replays
+	// NOTHING and publishes the live head instead (issue #86).
+	//
+	// Invariant (issue #87): the offset published in `sync` is the end
+	// offset of the LAST chunk actually WRITTEN to this socket — never an
+	// offset over bytes the client did not receive AND CAN STILL RECEIVE,
+	// because the client cursor only moves forward and would never
+	// re-request them. Three paths publish the ring's head instead of a
+	// write's end offset, and none breaks that invariant, because on all
+	// three the bytes behind head are ones this client can no longer get:
+	// a path that writes nothing (caught up at head), where there is no
+	// last chunk to name; the sinceFollowLiveEnd (-2) path that replays
+	// NOTHING on purpose (issue #86), because the client's screen already
+	// holds the tail; and a ring whose process has exited and whose
+	// buffer has been dropped, where head is the truthful cursor precisely
+	// because those bytes are permanently undeliverable. All three are
+	// spelled out at their sites below.
+	//
+	// The whole delta is STREAMED, not buffered: every chunk the catch-up
+	// loop reads is written to the socket and dropped, so peak memory stays
+	// ~64KB (one chunk) regardless of the ring cap. Retaining only the
+	// newest chunk would deliver a replay BEHIND the cursor it publishes,
+	// permanently stranding everything older — so this loop writes as it
+	// reads and never publishes ahead of the wire.
+	//
+	// Output produced between the last chunk write and the SubscribeOutput
+	// below is covered by neither path — but the published cursor sits at
+	// that last write's end offset, BEHIND the bytes the window produced,
+	// so the next reconnect re-requests exactly that window (self-healing;
+	// this is contiguity, not absolute coverage). ttyHandshakeReplayBudget
+	// truncation is self-healing the same way: when the budget runs out the
+	// loop stops and publishes the end offset of the last chunk WRITTEN,
+	// so the remainder stays ahead of the cursor and the next reconnect
+	// re-requests it — deferred, never skipped.
 	completeHandshake := func() bool {
-		initial, err := s.instanceMgr.Tail(id, 64*1024)
-		if err != nil {
-			_ = conn.WriteBinary([]byte(err.Error()))
-			return false
+		// endOffset is the end offset of the newest byte on the wire from
+		// this handshake. Every path that writes bytes sets it from that
+		// write's own end offset; every path that writes nothing sets it
+		// from the ring's real head (or leaves the 0 of a fresh instance).
+		var endOffset int64
+		if since == sinceFollowLiveEnd {
+			// Follow from the live end (issue #86): the client's screen
+			// already holds the tail and ONLY its end offset is unknown (a
+			// proxy stripped X-Log-Offset), so replay nothing — any byte
+			// sent here lands under a screen that already shows it. Publish
+			// the current head and hand over to the live subscription, which
+			// from there carries only newly produced data. EndOffset rather
+			// than Tail because the body would be thrown away.
+			//
+			// Bytes produced between this read and the SubscribeOutput below
+			// are the pre-existing read→subscribe window described above: the
+			// client's cursor is the offset published here, so a later reconnect
+			// sends it as `since` and gets those bytes back out of the ring.
+			// Self-healing, and deliberately not closed here.
+			//
+			// The window this mode OPENS is the other one, and it does not
+			// heal. The client reached this sentinel because it painted
+			// GET /api/instances/log's tail, which ended at some head H1. This
+			// read reports H2 >= H1, and the client adopts H2 — so its cursor
+			// is AHEAD of its own screen by H2-H1, and [H1, H2) is in nothing:
+			// not in the tail it painted, not in a replay (there is none), not
+			// in the live stream (that starts at H2). Because the cursor sits
+			// past them, no reconnect ever re-requests them: those bytes are
+			// permanently gone from this client's screen. Normally the hole is
+			// the loadLog()→connectTTY hop plus the WS upgrade, i.e.
+			// milliseconds; if the handshake times out and the client falls back
+			// to SSE it is 5s + 500ms of output, which on a chatty instance is
+			// real lost lines. That is the price of a proxy stripping
+			// X-Log-Offset: choose between duplicating the tail and losing a
+			// window, and losing the window is the one that keeps the screen
+			// readable. Fixing it properly needs the client to know H1, which
+			// is exactly the number the stripped header took away.
+			off, err := s.instanceMgr.EndOffset(id)
+			if err != nil {
+				_ = conn.WriteClose(ws.CloseMessage(1013, err.Error()))
+				return false
+			}
+			endOffset = off
+		} else if since < 0 {
+			// No cursor (first connect): replay the newest bytes (AC2).
+			body, off, err := s.instanceMgr.Tail(id, 64*1024)
+			if err != nil {
+				// Diagnostics never travel as binary frames: every
+				// binary frame is ring-buffer output, because the client
+				// advances its byte cursor by their length. Close instead
+				// (same precedent as newTTYClientHandle above); the
+				// client reports "ws closed, retrying..." and reconnects.
+				_ = conn.WriteClose(ws.CloseMessage(1013, err.Error()))
+				return false
+			}
+			if body != "" {
+				if err := conn.WriteBinary([]byte(body)); err != nil {
+					return false
+				}
+			}
+			endOffset = off
+		} else {
+			cursor := since
+			first := true
+			var streamed int64
+			for {
+				if streamed >= ttyHandshakeReplayBudget {
+					// Budget exhausted — the ONE budget guard, checked
+					// before the read so no further read is issued once the
+					// budget is spent. Reaching this line already means
+					// ttyHandshakeReplayBudget (>0) bytes went out on this
+					// socket, so endOffset holds the end offset of the LAST
+					// chunk written — never the zero value. The undelivered
+					// remainder is AHEAD of that cursor, so the next
+					// reconnect re-requests it: truncated, not skipped.
+					//
+					// The guard counts bytes already written, so in principle
+					// a stream could end one chunk past the boundary; 8MB is
+					// a whole multiple of the 64KB read cap, so it lands
+					// exactly on it — which is what the budget test pins. Do
+					// not "harden" this by also trimming the read size to
+					// the remainder: both routes produce the same truncation
+					// point, and the second one would silently leave this
+					// stop unexercised by every test.
+					break
+				}
+				// RingBuffer.ReadSince silently clamps a stale cursor to
+				// the oldest live byte and returns ("", since, nil) once
+				// since >= head (ringbuffer.go), so a normal loop exit
+				// terminates with endOffset == head and a stale offset
+				// degrades to a tail replay (AC3).
+				body, next, err := s.instanceMgr.ReadSince(id, cursor, 64*1024)
+				if err != nil {
+					_ = conn.WriteClose(ws.CloseMessage(1013, err.Error()))
+					return false
+				}
+				if body == "" {
+					if !first {
+						// Normal loop exit (and the exhausted-budget-and-
+						// caught-up exit): at least one chunk is already on
+						// the wire. Take this read's `next` — for a live
+						// ring that is head, the contiguous cursor; for a
+						// CLOSED ring ReadSince answers ("", head, nil) with
+						// an empty body while since < head, and head is
+						// still the truthful value because those bytes can
+						// never be delivered. Publishing the zero value
+						// here instead would hand back a cursor the ring
+						// never held and send the client into a full tail
+						// replay (the duplicate paint this issue is about).
+						endOffset = next
+						break
+					}
+					// Zero progress on the FIRST read: at this
+					// read's instant the cursor was at or beyond
+					// head, and continuing would publish the
+					// client's own number back as authoritative.
+					// Consult the real head via Tail — the ring
+					// may have written since that instant, so
+					// split three ways:
+					tail, head, herr := s.instanceMgr.Tail(id, 64*1024)
+					if herr != nil {
+						_ = conn.WriteClose(ws.CloseMessage(1013, herr.Error()))
+						return false
+					}
+					switch {
+					case cursor > head:
+						// Cursor ahead of head: bogus (not
+						// reachable through normal flows today
+						// — Restart mints a new id), but if it
+						// ever appeared it must degrade to the
+						// first-connect tail, never to a cursor
+						// the ring never held. Write the tail
+						// before claiming head over it.
+						if tail != "" {
+							if err := conn.WriteBinary([]byte(tail)); err != nil {
+								return false
+							}
+						}
+						endOffset = head
+					case head > cursor:
+						// FIX-F: the PTY wrote in the window
+						// between the caught-up ReadSince and
+						// this Tail consult. [cursor, head) is
+						// in neither the replay nor the live
+						// subscription (SubscribeOutput has not
+						// run), and a client cursor only moves
+						// forward — publishing head here would
+						// skip those bytes forever. Do NOT
+						// break: continue and let the next
+						// ReadSince(cursor) deliver them.
+						// Termination is structural, no extra
+						// guard needed: this consult runs only
+						// while first is true, and clearing it
+						// right here means the branch can be
+						// taken at most once — the next
+						// iteration either delivers a chunk and
+						// advances, or hits the !first break
+						// (which now carries that read's
+						// `next`, so it cannot publish 0).
+						// Do not "optimise" this back into a
+						// break.
+						first = false
+						continue
+					default:
+						// head == cursor: genuinely caught up
+						// (the common idle reconnect) — replay
+						// nothing, publish head. Must stay a
+						// no-op.
+						endOffset = head
+					}
+					break
+				}
+				// Write as we read: the chunk is on the wire now, so the
+				// cursor published below is never ahead of it, and nothing
+				// older than the next read is retained in memory.
+				if err := conn.WriteBinary([]byte(body)); err != nil {
+					return false
+				}
+				endOffset = next
+				streamed += int64(len(body))
+				if next <= cursor {
+					// Defensive: a kind whose ReadLogs returns a
+					// non-empty body without advancing the cursor would
+					// otherwise spin here forever — the handshake timer
+					// is already stopped at this point, so the client
+					// would sit at "live" with no output. Exit with the
+					// chunk already written instead.
+					break
+				}
+				cursor = next
+				first = false
+			}
 		}
-		if initial != "" {
-			_ = conn.WriteBinary([]byte(initial))
+		// Offset echo: hand the client the end offset of the last byte it
+		// received, so its next reconnect can send it back as `since`.
+		// Without this the client can never learn a valid cursor and every
+		// reconnect replays the full tail again. Sent even when the replay
+		// was empty — offset 0 is a legitimate cursor on a fresh instance,
+		// and every other empty-replay path set a truthful head above.
+		// Built with strconv (not json.Marshal) so there is no
+		// unreachable error branch.
+		syncPayload := []byte(`{"type":"sync","offset":` + strconv.FormatInt(endOffset, 10) + `}`)
+		if err := conn.WriteText(syncPayload); err != nil {
+			return false
 		}
 
 		ch, cancelFn, err := s.instanceMgr.SubscribeOutput(id)
 		if err != nil {
-			_ = conn.WriteBinary([]byte(err.Error()))
+			_ = conn.WriteClose(ws.CloseMessage(1013, err.Error()))
 			return false
 		}
 		cancel = cancelFn
@@ -2306,7 +2722,11 @@ func (s *Server) handleInstanceTTYWS(w http.ResponseWriter, r *http.Request) {
 				Cols int    `json:"cols"`
 				Rows int    `json:"rows"`
 			}
-			isResize := json.Unmarshal(msg.data, &resizeMsg) == nil && resizeMsg.Type == "resize"
+			parseOK := json.Unmarshal(msg.data, &resizeMsg) == nil
+			isResize := parseOK && resizeMsg.Type == "resize"
+			// App-level liveness probe (issue #83): parsed the same way
+			// as isResize, from the SAME unmarshal.
+			isPing := parseOK && resizeMsg.Type == "ping"
 
 			if isResize && resizeMsg.Cols > 0 && resizeMsg.Rows > 0 {
 				s.updateTTYClientSize(id, clientHandle.clientID, resizeMsg.Cols, resizeMsg.Rows)
@@ -2321,10 +2741,45 @@ func (s *Server) handleInstanceTTYWS(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 
+			// MANDATORY placement: BEFORE the input fallthrough below. A
+			// {"type":"ping"} probe is transport traffic, not keystrokes —
+			// forwarding it would type JSON into the user's shell. Answer
+			// with {"type":"pong"} (the reply is the point: a client whose
+			// server→client direction is dead but whose client→server
+			// direction still "looks" writable learns the truth only from
+			// a missing pong) and consume the frame. The collision with a
+			// user literally typing that exact JSON is the same accepted
+			// trade-off as {"type":"resize",...} above.
+			if isPing {
+				if err := conn.WriteText([]byte(`{"type":"pong"}`)); err != nil {
+					return
+				}
+				continue
+			}
+
 			if handshakeComplete && !isResize {
 				if err := s.instanceMgr.SendInput(id, string(msg.data)); err != nil {
 					return
 				}
+			}
+
+		case <-heartbeat.C:
+			// Liveness heartbeat (issue #83), two frames per tick:
+			//  1. RFC 6455 ping — the browser's network stack auto-replies
+			//     Pong, which lands on the reader and refreshes its
+			//     read deadline, so a healthy connection is NEVER reaped.
+			//     Invisible to page JS (onmessage never fires for control
+			//     frames), hence frame 2:
+			//  2. TEXT {"type":"ping"} — the heartbeat the client can
+			//     actually observe and stamp lastDataAt from.
+			// A failed write means the peer is gone: return and let the
+			// existing defers unwind (same treatment as the binary output
+			// write below).
+			if err := conn.WritePing(nil); err != nil {
+				return
+			}
+			if err := conn.WriteText([]byte(`{"type":"ping"}`)); err != nil {
+				return
 			}
 
 		case <-handshakeTimer.C:
@@ -2337,6 +2792,71 @@ func (s *Server) handleInstanceTTYWS(w http.ResponseWriter, r *http.Request) {
 
 		case chunk, ok := <-outputChan:
 			if !ok {
+				// The live subscription ended while this handler was
+				// still serving. cancel() only runs in this function's
+				// own defer, so the only way here is the pty kind's
+				// overflow disconnect (issue #82): our consumer fell
+				// behind, its buffer filled, and it was closed instead
+				// of having chunks silently dropped. Say so on the
+				// wire — the client's ws.onclose logs abnormal codes
+				// and reasons, so the browser console names the cause
+				// instead of showing an unexplained drop.
+				//
+				// This frame is BEST-EFFORT and resync does not depend on
+				// it: the browser reconnects on any socket close, reasoned
+				// or not, and resyncs from its own cursor (the #87 offset
+				// contract). The 5 s deadline below is deliberately
+				// BOUNDED, and it bounds exactly one thing: THIS close-frame
+				// write, on this teardown path. It does NOT bound the
+				// handler's other writes — a handler already blocked inside
+				// a live WriteBinary above never reaches this branch, and is
+				// reclaimed only when that write returns: ws.Upgrade sets no
+				// write deadline, and a write deadline on this socket is
+				// STILL not implemented — issue #83 (since merged) added
+				// only the READ deadline and deliberately scoped a write
+				// deadline out of its contract, so this is settled design,
+				// not pending work. What keeps this failure path from writing
+				// the backlog onto the stalled socket is upstream, in the pty
+				// kind: broadcast drains the closed subscriber's queue at
+				// the source (driver.go) — after it releases subsMu, never
+				// inside that process-global lock, because the drain only
+				// terminates by virtue of the channel already being closed.
+				// That BOUNDS what this branch can write; it does not order
+				// it. The queue is empty by the time broadcast returns, but
+				// close() readies any receiver already parked on the channel
+				// — that is this handler, sitting in the select above — and a
+				// readied receiver races the drain loop for the values still
+				// buffered, so a few chunks may legitimately reach the socket
+				// before this branch runs. What the drain does make impossible
+				// is the unbounded version: this handler cannot flush a full
+				// queue — up to 64 queued chunks (~64 KB) — onto the socket
+				// that stalled. Every
+				// drained chunk that is STILL IN THE RING BUFFER comes back
+				// on the cursor reconnect; the exception is a ring the
+				// framework has already closed and dropped, whose writes were
+				// no-ops by the time they were broadcast (ARCHITECTURE §4.1,
+				// and docs/API.md states the same qualifier). Nothing writes
+				// on this conn after this branch returns —
+				// this branch returns immediately and the deferred
+				// conn.Close() follows — so healthy connections keep the
+				// unbounded write behaviour they have today.
+				//
+				// Server-side, this is the only trace of the disconnect
+				// besides the close frame: the client retries on a
+				// hard-coded 5 s timer with no backoff, so without this line
+				// a repeatedly-overflowing consumer would be a silent
+				// reconnect+replay loop. The nil guard is defensive against a
+				// state production cannot reach — app.New rejects a nil
+				// logger ("logger is required") — and it is NOT dead to the
+				// test suite: ttyWSTestServer injects a logger into the
+				// Server it builds, so
+				// TestHandleInstanceTTYWS_SubscriberOverflowClosesConnectionWith1013
+				// asserts this line actually fired.
+				if s.logger != nil {
+					s.logger.Printf("tty output subscriber overflow for %s: consumer fell behind, closing with 1013 for cursor resync", id)
+				}
+				_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+				_ = conn.WriteClose(ws.CloseMessage(1013, "subscriber overflow: slow consumer"))
 				return
 			}
 			if err := conn.WriteBinary([]byte(chunk)); err != nil {
@@ -2373,6 +2893,20 @@ func (s *Server) handleInstanceLog(w http.ResponseWriter, r *http.Request) {
 	}
 	id := strings.TrimSpace(r.URL.Query().Get("id"))
 	since := parseInt64Default(r.URL.Query().Get("since"), -1)
+	if since == sinceFollowLiveEnd {
+		// 400 rather than a silent tail (issue #86): this endpoint answers a
+		// negative `since` with the tail, which is the EXACT OPPOSITE of what
+		// the sentinel asks for — the sentinel means "I already painted the
+		// tail, do not send it". Serving the tail here would reproduce the
+		// duplication this value exists to prevent, invisibly. Follow-from-the-
+		// live-end is a property of a LONG-LIVED stream (publish the head,
+		// then keep streaming), not of a one-shot body, so it lives only on
+		// /api/instances/log/stream and /api/instances/tty/ws. The shipped UI
+		// never sends `since` here at all (loadLog deliberately omits it), so
+		// rejecting is safe and turns a caller's mistake into an error.
+		writeErr(w, http.StatusBadRequest, fmt.Errorf("since=%d (follow from the live end) is only valid on /api/instances/log/stream and /api/instances/tty/ws", sinceFollowLiveEnd))
+		return
+	}
 	if since >= 0 {
 		body, next, err := s.instanceMgr.ReadSince(id, since, 64*1024)
 		if err != nil {
@@ -2384,11 +2918,12 @@ func (s *Server) handleInstanceLog(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.WriteString(w, body)
 		return
 	}
-	body, err := s.instanceMgr.Tail(id, 64*1024)
+	body, next, err := s.instanceMgr.Tail(id, 64*1024)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
+	w.Header().Set("X-Log-Offset", strconv.FormatInt(next, 10))
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	_, _ = io.WriteString(w, body)
 }
@@ -2399,9 +2934,41 @@ func (s *Server) handleInstanceLogStream(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	id := strings.TrimSpace(r.URL.Query().Get("id"))
-	since := parseInt64Default(r.URL.Query().Get("since"), 0)
+	since := parseInt64Default(r.URL.Query().Get("since"), -1)
 
-	initial, next, err := s.instanceMgr.ReadSince(id, since, 64*1024)
+	var initial string
+	var next int64
+	var err error
+	if since == sinceFollowLiveEnd {
+		// Follow from the live end (issue #86): the client's screen already
+		// holds the tail and only its END OFFSET is unknown, so serve no
+		// body at all — the tail it just painted must not be painted twice.
+		// Publish the current head and let the poll loop below deliver only
+		// bytes produced after this instant. EndOffset (not Tail) because a
+		// 64KB copy thrown away here is pure waste; an empty `initial` needs
+		// no new frame format, since writeSSELogEvent always writes
+		// {"chunk":…,"next":…}.
+		//
+		// Nothing after this read is lost: the poll loop below reads from the
+		// published cursor, not from a subscription, so bytes produced while
+		// the client is still painting arrive as ordinary frames. What IS
+		// lost is the window BEFORE it — [H1, H2), where H1 is the head of
+		// the tail the client actually painted via GET /api/instances/log and
+		// H2 is the head published here. The client adopts H2, so its cursor
+		// runs ahead of its own screen and [H1, H2) is in no replay, no
+		// painted body and no later frame; because the cursor is already past
+		// them, no reconnect re-requests them either. Those bytes are
+		// permanently gone from this client's screen — normally the
+		// loadLog()→startSSE hop (milliseconds), but seconds if the WS
+		// handshake times out first and SSE is the fallback. That is the
+		// accepted cost of a stripped X-Log-Offset: the alternative is
+		// repainting the whole tail over the screen that already shows it.
+		next, err = s.instanceMgr.EndOffset(id)
+	} else if since < 0 {
+		initial, next, err = s.instanceMgr.Tail(id, 64*1024)
+	} else {
+		initial, next, err = s.instanceMgr.ReadSince(id, since, 64*1024)
+	}
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err)
 		return
@@ -2658,7 +3225,7 @@ func (s *Server) handleMCPCall(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusBadRequest, err)
 			return
 		}
-		body, err := s.instanceMgr.Tail(args.ID, args.N)
+		body, _, err := s.instanceMgr.Tail(args.ID, args.N)
 		if err != nil {
 			writeErr(w, http.StatusBadRequest, err)
 			return

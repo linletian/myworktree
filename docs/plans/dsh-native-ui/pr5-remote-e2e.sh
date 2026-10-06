@@ -1,7 +1,7 @@
 #!/bin/bash
 # PR5 远程模式半自动端到端实测（REVIEW issue #62）
 # 真实 myworktree daemon（0.0.0.0 主监听 + 自签 TLS + token 门）+
-# 真实 dsh 0.1.0-rc.6 二进制 + 隔离 DSH_HOME/仓库；
+# 真实 dsh 0.2.0-rc.2 二进制 + 隔离 DSH_HOME/仓库；
 # 用本机 LAN IP 作为"非 loopback 远端客户端"驱动全部验证。
 set -u
 
@@ -147,14 +147,17 @@ say "server-tokenized src follow (-L) -> HTTP $C6"
 # --- 7. WS upgrade through the remote token gate ----------------------------
 # Browsers speak WS over HTTP/1.1 (Upgrade is invalid over h2 — the
 # Go server would answer 426 before forwarding), so pin http1.1.
+# dsh 0.2's stream carrier is /api/remote.mux (verified 101 on the
+# installed 0.2.0-rc.2); the 0.1.x /api/events.mux no longer exists
+# upstream there — the proxy's upstream 404 comes back as 502.
 WS=$(curl -sk --http1.1 --noproxy '*' -b "$TDIR/jar" --max-time 6 -i \
   -H "Connection: Upgrade" -H "Upgrade: websocket" \
   -H "Sec-WebSocket-Version: 13" -H "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==" \
-  "https://$LANIP:$PP/api/events.mux" | head -1)
+  "https://$LANIP:$PP/api/remote.mux" | head -1)
 say "LAN WS upgrade (cookie) -> $WS"
 case "$WS" in
-  *101*) say "WS upgrade passthrough OK" ;;
-  *) echo "$WS" > "$TDIR/ws.txt"; say "WS upgrade got non-101: $WS (recorded, check upstream behaviour)" ;;
+  *101*) say "WS upgrade passthrough OK (/api/remote.mux)" ;;
+  *) echo "$WS" > "$TDIR/ws.txt"; fail "WS upgrade on /api/remote.mux did not reach 101: $WS" ;;
 esac
 
 # --- 8. session watch real-run validation (#63) ------------------------------

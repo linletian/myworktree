@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"myworktree/internal/framework"
+	"myworktree/internal/store"
 )
 
 func TestExtractListeningAddress(t *testing.T) {
@@ -96,20 +97,20 @@ func TestProbeCapabilityBypassesStaleMemo(t *testing.T) {
 	dir := t.TempDir()
 	wt := t.TempDir()
 	bin := filepath.Join(t.TempDir(), "dsh")
-	writeFakeVersionBin(t, bin, "0.1.5-rc.1")
+	writeFakeVersionBin(t, bin, "0.2.0-rc.2")
 
 	d := &Driver{DataDir: dir, DshBin: bin}
-	d.verMemo = map[string]string{bin: "0.1.2"} // pre-upgrade spawn-gate entry
+	d.verMemo = map[string]string{bin: "0.1.9"} // pre-upgrade spawn-gate entry
 
 	c := d.ProbeCapability(wt)
 	if c.Missing {
 		t.Fatalf("Missing = true, want false (binary probes fine)")
 	}
-	if c.Version != "0.1.5" {
-		t.Errorf("Version = %q, want fresh 0.1.5 (memo held 0.1.2)", c.Version)
+	if c.Version != "0.2.0" {
+		t.Errorf("Version = %q, want fresh 0.2.0 (memo held 0.1.9)", c.Version)
 	}
 	if !c.RemoteCapable {
-		t.Error("RemoteCapable = false, want true for the fresh 0.1.5")
+		t.Error("RemoteCapable = false, want true for the fresh 0.2.0")
 	}
 }
 
@@ -121,15 +122,15 @@ func TestProbeCapabilityBelowHardFloorIsAdvisory(t *testing.T) {
 	dir := t.TempDir()
 	wt := t.TempDir()
 	bin := filepath.Join(t.TempDir(), "dsh")
-	writeFakeVersionBin(t, bin, "0.0.9")
+	writeFakeVersionBin(t, bin, "0.1.9")
 
 	d := &Driver{DataDir: dir, DshBin: bin}
 	c := d.ProbeCapability(wt)
 	if c.Missing {
 		t.Fatal("Missing = true, want false (the binary resolves and probes; floors are advisory)")
 	}
-	if c.Version != "0.0.9" || c.RemoteCapable {
-		t.Errorf("Version/RemoteCapable = %q/%v, want 0.0.9/false", c.Version, c.RemoteCapable)
+	if c.Version != "0.1.9" || c.RemoteCapable {
+		t.Errorf("Version/RemoteCapable = %q/%v, want 0.1.9/false", c.Version, c.RemoteCapable)
 	}
 }
 
@@ -234,5 +235,85 @@ func TestBuildEnv(t *testing.T) {
 	}
 	if !found {
 		t.Error("buildEnv(nil) dropped inherited variable")
+	}
+}
+
+// Given a worktree persisted in npx launch mode, When Spawn boots the
+// instance, Then the blob reports VersionSupported=true with the exact
+// pin as its version. npx mode never probes — Spawn assigns
+// version = NpxPin and versionSupported = isSupportedVersion(NpxPin)
+// (driver.go), and NpxPin is the PRERELEASE "0.2.0-rc.2". Before
+// isSupportedVersion core-parsed its argument, splitVersion choked on
+// the "0-rc.2" segment, versionLess answered false against BOTH bounds
+// and EVERY npx-mode instance shipped VersionSupported=false — the
+// permanent red "dsh version is too new or the restrict overlay is not
+// effective" bar (kinds/dsh_web.js) on the missing-dependency dialog's
+// primary fallback path. The literal in the last assertion is the pin's
+// pin: a future NpxPin bump must not silently re-break npx mode (bump
+// it to a version this test rejects, and it fails here first).
+func TestSpawnNpxModeReportsVersionSupported(t *testing.T) {
+	mockBin := buildMockDsh(t) // skips when the go toolchain is unavailable
+
+	// Fake npx on PATH: drop the "--yes <pkg>" prefix and exec the mock
+	// dsh (exec keeps the process group, exactly like TestNpxModeKills-
+	// ProcessGroup). npx itself only has to resolve — resolveLaunch
+	// LookPaths it and hands the web invocation to it verbatim.
+	binDir := t.TempDir()
+	fakeNpx := filepath.Join(binDir, "npx")
+	if err := os.WriteFile(fakeNpx, []byte("#!/bin/sh\nshift 2\nexec \"$MOCK_DSH\" \"$@\"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("MOCK_DSH", mockBin)
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	dir := t.TempDir()
+	wtPath := filepath.Join(t.TempDir(), "wt")
+	if err := os.MkdirAll(wtPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	fs := store.FileStore{Path: filepath.Join(dir, "state.json")}
+	if err := fs.Save(store.State{
+		Worktrees: []store.ManagedWorktree{{ID: "wt1", Name: "wt1", Path: wtPath}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	drv := &Driver{DataDir: dir}
+	reg := framework.NewRegistry()
+	reg.Register(drv)
+	mgr := framework.NewManager(reg, fs, nil)
+	mgr.DataDir = dir
+	mgr.Root = wtPath
+
+	// The missing-dependency dialog's npx choice, persisted per worktree.
+	if err := writeLaunch(dir, wtPath, launchConfig{Mode: launchNpx}); err != nil {
+		t.Fatal(err)
+	}
+
+	inst, err := mgr.Start(context.Background(), framework.StartParams{
+		WorktreeID: "wt1",
+		Kind:       "dsh-web",
+		Name:       "npx-version-pin",
+	})
+	if err != nil {
+		t.Fatalf("Start (npx mode): %v", err)
+	}
+	defer func() { _ = mgr.Stop(inst.ID) }()
+
+	blob := waitRunning(t, mgr, inst.ID)
+	if blob.Version != NpxPin {
+		t.Errorf("Version = %q, want the exact pin %s (npx mode records the pin, never a probe)", blob.Version, NpxPin)
+	}
+	if !blob.VersionSupported {
+		t.Errorf("VersionSupported = false, want true for the pinned npx launch %s", NpxPin)
+	}
+	if !blob.RemoteCapable {
+		t.Errorf("RemoteCapable = false, want true for the pinned npx launch %s", NpxPin)
+	}
+	// Same inputs Spawn used, pinned directly against the literal.
+	if NpxPin != "0.2.0-rc.2" {
+		t.Errorf("NpxPin = %q, want the literal prerelease pin this mode was verified on", NpxPin)
+	}
+	if !isSupportedVersion("0.2.0-rc.2") {
+		t.Error("isSupportedVersion(\"0.2.0-rc.2\") = false, want true (raw-prerelease regression)")
 	}
 }

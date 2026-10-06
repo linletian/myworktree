@@ -1,13 +1,14 @@
 //go:build ignore
 
-// dsh-mock-modern emulates a MODERN `dsh web` (>= 0.1.5, the remote
+// dsh-mock-modern emulates a MODERN `dsh web` (>= 0.2.0, the remote
 // floor) for integration tests — the browser-session token gate and
 // the unified /api/remote.mux WebSocket endpoint:
 //
-//	--version                    → "0.1.5-rc.1" (remote-capable core 0.1.5)
-//	web --dump-config --patch F  → "# == dump" + contents of F
-//	web --host … --port … --patch F → prints the ready line WITH a
-//	                                 launch token ("dsh web: http://…/?token=test-token"),
+//	--version                    → "0.2.0-rc.2" (remote-capable core 0.2.0)
+//	web --patch F --dump-config  → "# == dump" + contents of F
+//	web --patch F --host 127.0.0.1 --port 0 --no-open → prints the ready
+//	                                 line WITH a launch token
+//	                                 ("dsh web: http://…/?token=test-token"),
 //	                                 then:
 //	                                 GET /?token=test-token → 303 + Set-Cookie
 //	                                   dsh-auth-test=ok (the token exchange)
@@ -18,8 +19,27 @@
 //	                                   upgrade) → echoes text/binary
 //	                                   frames back to the sender
 //
-// The legacy variant (dsh-mock.go) keeps the pre-0.1.2 behavior: no
-// token in the ready line, no gate.
+// Both web invocations are the exact argv the driver emits — launch.go's
+// dumpArgs and webArgs. What THIS mock validates is the flag SET
+// (knownWebFlags membership), NOT the ORDER — it would happily accept
+// `--host 127.0.0.1 --port 0 --no-open --patch F`. The ORDER is the
+// load-bearing part of the real contract (the real launcher parses with
+// allowUnknownOption + passThroughOptions, so the launcher-level --patch
+// must come FIRST and the web-app options (--host / --port / --no-open)
+// stay grouped after it — PLAN.md §踩坑) and is pinned by launch_test.go's
+// TestWebArgs / TestDumpArgs, independently of the expected slices.
+//
+// Anything after `web` outside the recognised flag set (knownWebFlags)
+// fails like commander does: "unknown option '--x'" on stderr, non-zero
+// exit — see checkWebFlags.
+//
+// The RPC surface is the dsh 0.2.x wire: `<namespace>/<method>`
+// endpoints with the verb's object argument nested at
+// payload.args.request (see handleRPC).
+//
+// The ungated variant (dsh-mock.go) differs ONLY in the auth shape: no
+// token in the ready line, no gate. Both speak the 0.2.x wire and both
+// report a 0.2.x version — 0.1.x is out of support.
 //
 // Usage:
 //
@@ -45,7 +65,7 @@ const (
 	launchToken   = "test-token"
 	cookieName    = "dsh-auth-test"
 	cookieValue   = "ok"
-	mockVersion   = "0.1.5-rc.1"
+	mockVersion   = "0.2.0-rc.2"
 	muxPath       = "/api/remote.mux"
 	rpcPathPrefix = "/api/"
 )
@@ -71,6 +91,8 @@ func main() {
 			return
 		}
 	}
+	// Flag contract — see knownWebFlags.
+	checkWebFlags(rest)
 	for i, a := range rest {
 		if a == "--patch" && i+1 < len(rest) {
 			serve()
@@ -79,6 +101,73 @@ func main() {
 	}
 	fmt.Println("mock dsh (modern): web without --patch/--dump-config")
 	os.Exit(1)
+}
+
+// knownWebFlags / valueTakingWebFlags are the mock's FLAG CONTRACT with
+// the real dsh — the same set dsh-mock.go documents and enforces: the
+// web-app options of 0.2.0-rc.2 (`dsh web --help`: --host / --port /
+// --no-open / --patch / --trusted-host) plus the launcher-level
+// --dump-config. Anything else is rejected exactly like commander does —
+// `unknown option '--x'` on stderr, exit 1 — because that is what makes a
+// real boot fail; a mock that swallowed unknown flags would keep the
+// token-gated integration tests green while every real Start died.
+var (
+	knownWebFlags = map[string]bool{
+		"--patch":        true,
+		"--host":         true,
+		"--port":         true,
+		"--no-open":      true,
+		"--trusted-host": true,
+		"--dump-config":  true, // handled by the dump branch before this runs
+	}
+	// valueTakingWebFlags: the ONE token AFTER a single-value flag is
+	// its VALUE and must not be validated as a flag (a path is not an
+	// option). --no-open takes no value, so it is deliberately absent —
+	// as is --dump-config, which takes none either and is consumed by
+	// the dump branch before this ever runs. --trusted-host is NOT in
+	// this map: real 0.2.x declares it variadic/repeatable
+	// (`dsh web --trusted-host <authority…>`), so it lives in
+	// variadicWebFlags and consumes every token up to the next option.
+	valueTakingWebFlags = map[string]bool{
+		"--patch": true,
+		"--host":  true,
+		"--port":  true,
+	}
+	// variadicWebFlags: repeatable value flags — commander's variadic
+	// `--trusted-host <authority…>` takes any number of space-separated
+	// authorities, so the validator skips every token after the flag
+	// until the next `--`-prefixed option or the end of argv.
+	variadicWebFlags = map[string]bool{
+		"--trusted-host": true,
+	}
+)
+
+// checkWebFlags validates the `web` subcommand's argv against the
+// contract above.
+func checkWebFlags(rest []string) {
+	for i := 0; i < len(rest); i++ {
+		tok := rest[i]
+		if !strings.HasPrefix(tok, "--") {
+			continue // positional argument, or the value of a flag before it
+		}
+		name, inline := tok, false
+		if j := strings.IndexByte(tok, '='); j >= 0 {
+			name, inline = tok[:j], true // --port=0 spelling
+		}
+		if !knownWebFlags[name] {
+			fmt.Fprintf(os.Stderr, "mock dsh (modern): unknown option '%s'\n", tok)
+			os.Exit(1)
+		}
+		if variadicWebFlags[name] && !inline {
+			// Variadic: consume every following token until the next
+			// `--` option or the end of argv.
+			for i+1 < len(rest) && !strings.HasPrefix(rest[i+1], "--") {
+				i++
+			}
+		} else if valueTakingWebFlags[name] && !inline {
+			i++ // skip the single value token
+		}
+	}
 }
 
 // dump mirrors the legacy mock: the composed-tree output carries the
@@ -207,12 +296,30 @@ func handleMux(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handleRPC is byte-identical to the legacy mock's: the endpoint comes
-// from the URL path and the envelope's method must equal it.
-// workspace.create adopts the given path (workspaceId =
-// "mock-ws-<hash>"), session.create succeeds with a dummy value.
+// handleRPC is behaviourally identical to the ungated mock's (identical
+// routing and payload.args.request contract; this file uses the
+// rpcPathPrefix constant, the other a "/api/" literal): the route table
+// registers `/api/<namespace>/<method>` only (the 0.1.x dotted
+// `/api/workspace.create` has no route and 404s at the HTTP layer), the
+// envelope's method must equal it; the verb's single object argument is
+// nested at payload.args.request (dsh 0.2.x — anything else the real
+// gateway rejects with "Remote payload must contain exactly one
+// plain-object args field", mirrored here). workspace/create adopts the
+// given path (workspaceId = "mock-ws-<hash>"), session/create succeeds
+// with a dummy value, and the eight write verbs proxy.go's
+// ownSessionWriteMethods observes answer ok:true with a small value.
 func handleRPC(w http.ResponseWriter, r *http.Request) {
 	endpoint := strings.TrimPrefix(r.URL.Path, rpcPathPrefix)
+	// Routing check FIRST, before the envelope is even decoded: on 0.2 a
+	// dotted endpoint never reaches the RPC layer at all, so a regression
+	// to the 0.1 names must fail as a routing miss (404) and not as a
+	// confusing payload complaint. /api/remote.mux is served by an exact
+	// pattern and never reaches here.
+	if !strings.Contains(endpoint, "/") {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"error":"not found"}`))
+		return
+	}
 	var env struct {
 		Type    string          `json:"type"`
 		RPCID   string          `json:"rpcId"`
@@ -228,13 +335,23 @@ func handleRPC(w http.ResponseWriter, r *http.Request) {
 		writeRPCError(w, env.RPCID, "bad-request", "method "+env.Method+" does not match endpoint "+endpoint)
 		return
 	}
+	var payload struct {
+		Args struct {
+			Request json.RawMessage `json:"request"`
+		} `json:"args"`
+	}
+	if err := json.Unmarshal(env.Payload, &payload); err != nil || len(payload.Args.Request) == 0 {
+		writeRPCError(w, env.RPCID, "gateway/internal", "Remote payload must contain exactly one plain-object args field")
+		return
+	}
+
 	var value any
 	switch env.Method {
-	case "workspace.create":
+	case "workspace/create":
 		var p struct {
 			Path string `json:"path"`
 		}
-		_ = json.Unmarshal(env.Payload, &p)
+		_ = json.Unmarshal(payload.Args.Request, &p)
 		sum := sha256.Sum256([]byte(p.Path))
 		value = map[string]any{
 			"workspace": map[string]any{
@@ -247,8 +364,29 @@ func handleRPC(w http.ResponseWriter, r *http.Request) {
 			},
 			"created": true,
 		}
-	case "session.create":
+	case "session/create":
 		value = map[string]any{"sessionId": "mock-session"}
+	// Hand-maintained MIRROR of the upstream verb table — same table,
+	// same caveats as dsh-mock.go. The source of truth for these eight
+	// verb names is the `@Remote('<verb>')` decorators in the dsh 0.2.x
+	// remote controllers' typert.host.js — session: prompt / cancel /
+	// fork / rename / selectModel / attachment / updateQueue; subagents
+	// (PLURAL): prompt. This hand-written copy must be updated in the
+	// same change as proxy.go's ownSessionWriteMethods; an upstream
+	// rename is NOT detected automatically (the map, both mocks and the
+	// test loop would go stale together and no test turns red). What IS
+	// guarded is internal consistency — a drifted copy makes proxy,
+	// mocks and test disagree: the write-verb POSTs of the loop in
+	// TestDshWebRemoteEndToEnd (integration_remote_test.go — NOT
+	// TestDshWebProxyEndToEnd, which builds dsh-mock.go, not this
+	// file) then answer method-not-found instead of ok:true and fail
+	// CI. The one automatic pin is TestProxySessionOwnMarking's
+	// bidirectional map↔table check (proxy.go's map ↔ proxy_test.go's
+	// literal table).
+	case "session/prompt", "session/cancel", "session/fork", "session/rename",
+		"session/selectModel", "session/attachment", "session/updateQueue",
+		"subagents/prompt":
+		value = map[string]any{"accepted": true}
 	default:
 		writeRPCError(w, env.RPCID, "method-not-found", "unknown method "+env.Method)
 		return

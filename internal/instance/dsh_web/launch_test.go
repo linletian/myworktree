@@ -121,13 +121,61 @@ func TestResolveLaunchInstallMode(t *testing.T) {
 
 func TestWebArgs(t *testing.T) {
 	args := webArgs("/tmp/restrict.yml")
-	// Launcher flags (--patch) MUST precede the app flags (--host/--port):
-	// the web subcommand switches to pass-through mode at the first
-	// unknown option, so a trailing --patch would be rejected by the web
-	// app ("unknown option '--patch'") and the server never boots.
-	want := []string{"web", "--patch", "/tmp/restrict.yml", "--host", "127.0.0.1", "--port", "0"}
+	// Launcher flags (--patch) MUST precede the app flags (--host/--port/
+	// --no-open): the web subcommand switches to pass-through mode at the
+	// first option it does not know, so a trailing --patch would be
+	// rejected by the web app ("unknown option '--patch'") and the server
+	// never boots. --no-open (issue #84: dsh 0.2.x opens the host's
+	// default browser on every boot; myworktree embeds the SPA in an
+	// iframe) is a WEB-APP option, so it rides with --host/--port and
+	// never precedes --patch.
+	want := []string{"web", "--patch", "/tmp/restrict.yml", "--host", "127.0.0.1", "--port", "0", "--no-open"}
 	if strings.Join(args, " ") != strings.Join(want, " ") {
 		t.Errorf("webArgs = %v, want %v", args, want)
+	}
+	// The invariant pinned independently of `want`, so reordering the
+	// expectation alongside the bug does not silently pass.
+	idxPatch, idxNoOpen := argIndex(args, "--patch"), argIndex(args, "--no-open")
+	if idxPatch < 0 || idxNoOpen < 0 {
+		t.Fatalf("webArgs lacks --patch or --no-open: %v", args)
+	}
+	if idxPatch > idxNoOpen {
+		t.Errorf("--no-open at %d precedes --patch at %d: %v", idxNoOpen, idxPatch, args)
+	}
+	if argIndex(args, "--host") > idxNoOpen {
+		t.Errorf("--no-open must stay grouped with the web-app options after --host: %v", args)
+	}
+}
+
+func argIndex(args []string, want string) int {
+	for i, a := range args {
+		if a == want {
+			return i
+		}
+	}
+	return -1
+}
+
+// TestDumpArgs mirrors TestWebArgs for the L2 dump invocation. The mock
+// scans ALL argv for --dump-config, so it would accept a reordered
+// vector — without this test nothing pins the --patch-first order that
+// launch.go's ORDER MATTERS note says the real launcher requires.
+func TestDumpArgs(t *testing.T) {
+	args := dumpArgs("/tmp/restrict.yml")
+	want := []string{"web", "--patch", "/tmp/restrict.yml", "--dump-config"}
+	if strings.Join(args, " ") != strings.Join(want, " ") {
+		t.Errorf("dumpArgs = %v, want %v", args, want)
+	}
+	// The invariant pinned independently of `want`, so reordering the
+	// expectation alongside the bug does not silently pass: --patch must
+	// precede --dump-config (launcher-level flags come FIRST — see
+	// webArgs' ORDER MATTERS note).
+	idxPatch, idxDump := argIndex(args, "--patch"), argIndex(args, "--dump-config")
+	if idxPatch < 0 || idxDump < 0 {
+		t.Fatalf("dumpArgs lacks --patch or --dump-config: %v", args)
+	}
+	if idxPatch > idxDump {
+		t.Errorf("--dump-config at %d precedes --patch at %d: %v", idxDump, idxPatch, args)
 	}
 }
 

@@ -95,3 +95,39 @@ func TestVerifyOverlayDump(t *testing.T) {
 		t.Error("verifyOverlayDump(garbage) = true, want false")
 	}
 }
+
+// TestVerifyOverlayDumpFoldedRoot reproduces the macOS failure: dsh's
+// YAML dump emits a long storage root as a `>-` FOLDED block scalar and
+// wraps it AT the space in "Application Support" (folding only breaks at
+// whitespace), so the literal root never appears contiguously and the
+// plain substring check reported overlay_verified=false on every macOS
+// instance (live report, dsh 0.2.0-rc.2). The whitespace-stripped
+// comparison must still pass; a wrong folded root must still fail.
+func TestVerifyOverlayDumpFoldedRoot(t *testing.T) {
+	root := "/Users/linletian/Library/Application Support/myworktree/c3959526305f4656/dsh/1e03391dfca37c9c/storages"
+	folded := `# == @deepseek-ai/dsh-base, patched by /Users/.../restrict.yml
+- id: storage-json
+  name: '@deepseek-ai/dsh-storage-json'
+  config:
+    root: >-
+      /Users/linletian/Library/Application
+      Support/myworktree/c3959526305f4656/dsh/1e03391dfca37c9c/storages
+- id: directory-picker
+  name: '@deepseek-ai/dsh-host-directory-picker-auto'
+  disabled: true
+- id: directory-picker-browse
+  name: '@deepseek-ai/dsh-host-directory-picker-browse'
+- id: client-hmr
+  name: '@deepseek-ai/dsh-client-hmr'
+  disabled: true
+`
+	if !verifyOverlayDump(folded, root) {
+		t.Error("verifyOverlayDump(folded root dump) = false, want true")
+	}
+
+	// A DIFFERENT root folded the same way must not match.
+	other := strings.Replace(folded, "1e03391dfca37c9c", "ffffffffffffffff", 1)
+	if verifyOverlayDump(other, root) {
+		t.Error("verifyOverlayDump(folded dump with wrong root) = true, want false")
+	}
+}

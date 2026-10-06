@@ -71,6 +71,13 @@ class DshWebRenderer {
         const inst = session.instance;
         if (inst && inst.status === 'stopped') {
             this.destroyFrame(session.id);
+            // Hide EVERY cached frame, not just the stopped one: switching
+            // from a running dsh-web instance to this stopped one never ran
+            // deactivate() (selectInstance only deactivates a DIFFERENT
+            // renderer), so the previous instance's keep-alive iframe is
+            // still visible and would stack half/half under the stopped
+            // overlay (issue #96). Only the overlay should be on screen.
+            this._showOnly(null);
             if (dshWarning) {
                 dshWarning.hidden = true;
                 dshWarning.textContent = '';
@@ -259,11 +266,16 @@ class DshWebRenderer {
                             this._versionUnsupported = !!(data.version && !data.version_supported);
                             // Remote-capability is also only meaningful
                             // once the blob carried a version (pre-ready
-                            // polls return the zero value). Re-recorded
-                            // every tick, so a dsh upgraded mid-session
-                            // flips this on the next poll.
+                            // polls return the zero value). Re-read from
+                            // the persisted blob every tick — that is
+                            // what picks the flag up on the first poll
+                            // after readiness — but the blob is a snapshot
+                            // fixed at ready/proxy time (see the note on
+                            // _remoteIncapableMessage), so an in-place dsh
+                            // upgrade does NOT flip this mid-session; a
+                            // re-spawn picks up the new binary.
                             this._remoteIncapable = !!(data.version && data.remote_capable === false);
-                            this._remoteMinVersion = data.min_remote_version || '0.1.5';
+                            this._remoteMinVersion = data.min_remote_version || '0.2.0';
                             this._dshVersion = data.version || '';
                             // overlay_verified is only meaningful once the
                             // blob carried a version (pre-ready polls return
@@ -348,12 +360,30 @@ class DshWebRenderer {
 
     // ---- remote-access mask ----
 
+    // NOTE: unreachable at runtime while minRemoteVersion == minVersion
+    // (both 0.2.0, and isRemoteCapable / hardVersionOK apply the same
+    // core-only comparison), so Blob.RemoteCapable can never be false
+    // for anything this code spawns. The remote-incapable paths that
+    // render this message are KEPT as cheap insurance, at zero runtime
+    // cost today: the two floors are deliberately SEPARATE constants —
+    // minVersion gates spawn, minRemoteVersion gates the remote bridge
+    // — so a future dsh could once again lack the bridge capability
+    // while still being spawnable, which is exactly when this branch
+    // becomes live again. (The earlier justifications — a blob
+    // persisted by an older myworktree, or an in-place dsh downgrade —
+    // were traced and are NOT reachable: ReconcileRunningOnStartup
+    // marks a pre-upgrade instance stopped at startup and activate()
+    // returns early for stopped instances without ever polling it, and
+    // the blob is written once at ready/proxy time and never
+    // re-derived, so a later downgrade cannot rewrite it.) Removing UI
+    // paths late is riskier than keeping them.
     _remoteIncapableMessage() {
-        const min = this._remoteMinVersion || '0.1.5';
+        const min = this._remoteMinVersion || '0.2.0';
         const version = this._dshVersion || 'an older dsh';
-        return 'Remote access requires dsh ≥ ' + min + ': this instance runs dsh ' +
-            version + '. Restart it with an upgraded dsh, or open the local ' +
-            '127.0.0.1 page instead.';
+        return 'Managed dsh-web instances require dsh ≥ ' + min + ': 0.1.x is no longer ' +
+            'supported (0.2 replaced the dotted RPC method names with <namespace>/<method> ' +
+            'endpoints and nests every verb argument at payload.args.request); this instance ' +
+            'runs dsh ' + version + '. Restart it with an upgraded dsh.';
     }
 
     // Issue #72: dsh without the remote bridge cannot sync the SPA's
@@ -429,6 +459,12 @@ class DshWebRenderer {
         //    _updateRemoteMask). Remote-capable instances carry the
         //    bridge and are fine. Highest priority: every other warning
         //    is moot while this one applies.
+        // Branch 0 — currently unreachable while minRemoteVersion ==
+        // minVersion (see _remoteIncapableMessage's note): nothing this
+        // code spawns passes the hard gate but fails the remote floor.
+        // Retained as cheap insurance — the two floors are deliberately
+        // separate constants, so a future dsh could be spawnable yet
+        // lack the remote bridge, and this branch becomes live then.
         if (window.isRemoteAccess() && this._remoteIncapable) {
             dshWarning.hidden = false;
             dshWarning.classList.add('dsh-warning-danger');
@@ -447,7 +483,7 @@ class DshWebRenderer {
         if (this._versionUnsupported || this._overlayIneffective) {
             dshWarning.hidden = false;
             dshWarning.classList.add('dsh-warning-danger');
-            dshWarning.textContent = '⚠ dsh version is too new or the restrict overlay is not effective — cross-worktree entries may not be disabled. Upgrade myworktree or use a supported version (0.1.x)';
+            dshWarning.textContent = '⚠ dsh version is too new or the restrict overlay is not effective — cross-worktree entries may not be disabled. Upgrade myworktree or use a supported version (0.2.x)';
             return;
         }
         // 3. Foreign-process active sessions (dsh upstream single-writer

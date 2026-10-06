@@ -16,6 +16,32 @@
 // "pty". All session state lives in `this._sessions` (a Map keyed
 // by instance id).
 
+// The "no valid byte offset" cursor state, as this file needs it (issue #86):
+//   PTY_CURSOR_UNKNOWN  -1  nothing is painted on this screen, so the client
+//                           wants the tail: `since` is OMITTED and the
+//                           server's tail default applies (since=0 would
+//                           instead replay the oldest 64KB, #81).
+//
+// This is this file's OWN literal, not a link to index.html's. index.html
+// declares the same number as CURSOR_UNKNOWN and is loaded AFTER this file,
+// so nothing here could read it at parse time: every <script> in this page is
+// a classic script sharing ONE global lexical environment, so declaring the
+// same top-level `const` in both files throws SyntaxError in the second one
+// and kills the whole application script (no state, no session map, no
+// terminal). The PTY_ prefix is what keeps the two files apart, and
+// testdata/terminal_status.test.mjs holds the numbers together —
+// "no two classic scripts declare the same top-level name" fails if the
+// prefix is ever dropped, and the literal comparison fails if either number
+// drifts; TestFollowLiveEndSentinelAgreesAcrossTheWire then pins index.html's
+// sentinel against the server's sinceFollowLiveEnd.
+//
+// This file deliberately does NOT declare the follow-live-end state
+// (index.html's CURSOR_FOLLOW_LIVE_END, -2). Nothing in the pty renderer
+// ever assigns it: both factories reach it only through index.html's loadLog,
+// which is the single place that learns a tail was painted without an
+// X-Log-Offset header.
+const PTY_CURSOR_UNKNOWN = -1;
+
 class PtyRenderer {
     constructor() {
         this._sessions = new Map(); // id → session
@@ -57,8 +83,39 @@ class PtyRenderer {
             ? window.state.instances.find(i => i.id === id)
             : null;
         if (!inst) return;
+        s.lastKnownStatus = inst.status;
 
-        if (inst.status !== 'running') {
+        // `status !== 'running'` does NOT mean stopped: Manager.Start persists
+        // a new record as `starting` and flips it to `running` on the kind's
+        // ready signal in a separate goroutine, so a freshly created instance
+        // is routinely observed as `starting` here. activate() runs exactly
+        // once per selection change, so treating that transient state as
+        // terminal stranded the session with no WS and no SSE — [Process
+        // Stopped] over a live PTY, and input that only reached the process
+        // through the silent HTTP fallback (issue #80).
+        //
+        // The bucket helpers live in index.html and are re-exported on window;
+        // the inline fallbacks keep this file unit-testable in isolation.
+        // All three are guarded the same way: an unguarded call here would
+        // throw when the page has not published it yet.
+        const isPending = window.isInstancePendingStatus
+            ? window.isInstancePendingStatus(inst.status)
+            : (inst.status === 'starting' || inst.status === 'stopping');
+        const isLive = window.isInstanceLiveStatus
+            ? window.isInstanceLiveStatus(inst.status)
+            : (inst.status === 'running' || inst.status === 'unhealthy');
+        const isTerminal = window.isInstanceTerminalStatus
+            ? window.isInstanceTerminalStatus(inst.status)
+            : (!isLive && !isPending);
+
+        if (isPending) {
+            // Transient. No banner, no disconnect: reconcileTerminalSessions()
+            // promotes this session as soon as a poll observes a live status.
+            if (window.updateStatus) window.updateStatus(inst.status + "...");
+            return;
+        }
+
+        if (isTerminal) {
             if (window.disconnectTTY) window.disconnectTTY(s);
             if (window.loadLog) window.loadLog(s);
             if (window.updateStatus) window.updateStatus('stopped');
@@ -71,8 +128,70 @@ class PtyRenderer {
             return;
         }
 
+        // A poll-driven promotion (reconcileTerminalSessions) or an earlier
+        // activation already owns this bring-up. hasLiveTTYConnection() is
+        // false while that socket is still CONNECTING, so without this guard
+        // selecting the tab again would reset the screen and open a second
+        // socket — replaying the ring-buffer tail twice (issue #87). The
+        // guard is single-sourced in index.html so the two paths cannot drift.
+        //
+        // ignoreQueuedRetry: re-selecting the tab is an explicit request, so
+        // it takes over from a pending reconnect rather than leaving the
+        // previous screen up until the timer fires. The other four conditions
+        // still block, so this cannot race an activation already mid-loadLog.
+        if (window.hasTerminalTransportInFlight
+            && window.hasTerminalTransportInFlight(s, { ignoreQueuedRetry: true })) {
+            // Staying silent would read as "nothing happened": deactivate()
+            // leaves the status bar on "idle", so re-selecting a tab mid
+            // bring-up would look inert until the connect finished.
+            // Speak up only when no other transport is reporting itself — an
+            // SSE session is live rather than connecting, and its own message
+            // is the accurate one. A queued retry cannot be the reason we got
+            // here: the takeover below clears it first, so whatever stopped us
+            // is a connect already under way.
+            if (window.updateStatus && !s.logStream) {
+                window.updateStatus('connecting...');
+            }
+            return;
+        }
+
+        // Take over from the queued retry, and cancel it here rather than
+        // leaving it to disconnectTTY: connectTTY only runs once loadLog
+        // settles, so a retry firing in between would open one socket and
+        // replay the tail, and the connect that follows would open a second
+        // and replay it again (issue #87).
+        if (s.ttyReconnectTimer) {
+            clearTimeout(s.ttyReconnectTimer);
+            s.ttyReconnectTimer = null;
+        }
+
         if (window.resetTerminalForSwitch) window.resetTerminalForSwitch(s);
-        s.logCursor = 0;
+        // The screen was just cleared, so any previous cursor is meaningless. If
+        // loadLog then fails, keeping it would make startSSE request
+        // since=<oldOffset> and repaint only the bytes produced since then onto
+        // an empty terminal. Reset to PTY_CURSOR_UNKNOWN so startSSE omits
+        // `since` and the server's tail default repaints the whole screen.
+        //
+        // The value IS load-bearing now (issue #86): the other unknown-cursor
+        // state, index.html's CURSOR_FOLLOW_LIVE_END, means the opposite —
+        // the screen holds the tail and must not be replayed — and index.html's
+        // loadLog sets it (for this factory too) when the fetch succeeds
+        // WITHOUT an X-Log-Offset header. Here the screen is empty, so this is
+        // PTY_CURSOR_UNKNOWN, and the -1 must match ensureTerminalSession in
+        // index.html so the two session factories cannot drift apart.
+        s.logCursor = PTY_CURSOR_UNKNOWN;
+        // Same rule for the WebSocket cursor (issue #87): ttyOffset counts
+        // the ring-buffer bytes rendered on this screen by the TTY
+        // transport, and the screen was just cleared. Keeping it would make
+        // connectTTY send since=<oldOffset> and paint only the delta onto
+        // an empty terminal. Must match the reset in index.html.
+        //
+        // window.resetTerminalForSwitch above now performs this reset for
+        // BOTH cursors itself, so these two lines are defensive depth: the
+        // invariant must not depend on the helper's internals, and the
+        // harness stubs that helper out (see testdata) precisely to keep
+        // this pair load-bearing.
+        s.ttyOffset = PTY_CURSOR_UNKNOWN;
         if (window.loadLog) {
             window.loadLog(s).finally(() => {
                 if (window.connectTTY) window.connectTTY(s);
@@ -125,9 +244,40 @@ class PtyRenderer {
             fitAddon: null,
             termDataDisposable: null,
             resizeObserver: null,
-            logCursor: 0,
+            // Nothing painted yet, so CURSOR_UNKNOWN — the same state
+            // index.html bootstraps. loadLog replaces it with the real
+            // offset from X-Log-Offset, or with CURSOR_FOLLOW_LIVE_END if
+            // that header never arrives (issue #86).
+            logCursor: PTY_CURSOR_UNKNOWN,
+            // WebSocket-path byte cursor (issue #87): tracks the ring-buffer
+            // bytes rendered over the live TTY transport so a reconnect can
+            // send it back as `since` and resume incrementally instead of
+            // re-appending the whole tail. Same states and semantics as
+            // ensureTerminalSession in index.html — keep the two session
+            // factories in agreement.
+            ttyOffset: PTY_CURSOR_UNKNOWN,
+            // Status observed by the previous reconcileTerminalSessions()
+            // tick; null until the first observation (issue #80).
+            lastKnownStatus: null,
+            // Outcome of the last loadLog() and its consecutive-failure
+            // count, which the reconciler turns into a retry backoff.
+            lastLogLoadFailed: false,
+            lastLogLoadFailures: 0,
+            lastLogLoadAttemptAt: 0,
             ttySocket: null,
             ttyState: 'IDLE',
+            // Liveness heartbeat bookkeeping (issue #83) - names, init
+            // values and semantics are identical to the legacy factory in
+            // index.html, which the two session factories must mirror
+            // (they have drifted before). lastDataAt is the instant the
+            // last frame of ANY kind arrived over the WebSocket - the
+            // heartbeat stamp hasLiveTTYConnection() and the watchdog read;
+            // 0 means "never", which reads as stale by design.
+            // ttyLivenessTimer is the watchdog interval armed by
+            // connectTTY once READY; cleared by disconnectTTY and
+            // ws.onclose in both files.
+            lastDataAt: 0,
+            ttyLivenessTimer: null,
             appliedTTYSize: null,
             lastResizeTime: 0,
         };
@@ -175,13 +325,52 @@ class PtyRenderer {
             const inst = window.state && window.state.instances
                 ? window.state.instances.find(i => i.id === session.id)
                 : null;
-            if (inst && inst.status !== 'running') return;
+            // Only refuse input for a process that is gone. A `starting`
+            // instance already accepts keystrokes, and dropping them there was
+            // part of the "cannot type" half of issue #80.
+            const isTerminal = window.isInstanceTerminalStatus
+                ? window.isInstanceTerminalStatus(inst && inst.status)
+                : !inst || inst.status === 'stopped' || inst.status === 'failed' || inst.status === 'exited';
+            if (inst && isTerminal) return;
             if (window.isTerminalQueryResponse && window.isTerminalQueryResponse(data)) return;
 
-            // Forward raw keystrokes to the daemon. Prefer WS
-            // (real-time) when live; fall back to HTTP POST for
-            // input buffering.
-            if (session.ttySocket && session.ttySocket.readyState === WebSocket.OPEN) {
+            // Forward raw keystrokes to the daemon. Prefer WS when live;
+            // fall back to HTTP POST buffering. "Live" is readyState PLUS
+            // the heartbeat stamp (issue #83): a send on a half-open socket
+            // does not throw, it writes where nobody reads, so without the
+            // stamp the HTTP fallback below - which reaches a live daemon
+            // either way - is never taken. Not instant: the reap nulls the
+            // socket on the same tick that first sees staleness, so this
+            // covers only the gap from the stamp crossing the threshold to
+            // whichever healer reaps first, NOT one fixed tick: the 2s poll
+            // is the PRIMARY one for the active session (refresh ->
+            // reconcileTerminalSessions -> syncActiveTerminalStatus ->
+            // ensureTerminalLiveTransport's own stale arm ->
+            // reconnectStaleTTY, the call that nulls the socket), so ~2s
+            // there; index.html's TTY_LIVENESS_CHECK_MS (5s watchdog) is
+            // the bound only for a session the poll does not promote, and
+            // longer still in a timer-throttled background tab.
+            // One branch per keystroke, so never a duplicate;
+            // a false stale just takes HTTP into the same PTY, and
+            // staleness is READY+OPEN-only, so HANDSHAKING is untouched.
+            // Probed optionally like the other index.html exports here: a
+            // missing export degrades to today's readyState-only gate
+            // rather than throwing on every keystroke.
+            // The buffering HERE survives the teardown, and that is a real
+            // difference from index.html's legacy gate, not a wording one:
+            // this path buffers under _inputBuffer / _inputFlushTimer, and
+            // disconnectTTY clears only the legacy factory's termSendTimer /
+            // termInputBuffer - it touches neither field here - so a
+            // keystroke taken in the sliver just before a reap still gets
+            // its POST, where the legacy factory discards the identical
+            // keystroke. Same gate, two buffer field names, two outcomes;
+            // recorded, deliberately not unified in this PR.
+            // Same shape as index.html's gate, line breaks included - the
+            // two session factories have drifted before and this one is the
+            // copy a reader diffs against.
+            const socketLive = session.ttySocket && session.ttySocket.readyState === WebSocket.OPEN
+                && !(window.isTTYHeartbeatStale ? window.isTTYHeartbeatStale(session) : false);
+            if (socketLive) {
                 session.ttySocket.send(data);
             } else if (window.api) {
                 if (!session._inputBuffer) session._inputBuffer = '';

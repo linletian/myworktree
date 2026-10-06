@@ -143,6 +143,85 @@ func TestDialRoundtrip(t *testing.T) {
 	waitDone(t, done)
 }
 
+// TestWritePingRoundtrip pins the new server-initiated WritePing (issue
+// #83): the frame must hit the wire as an RFC 6455 PING (opcode 0x9) —
+// which ReadMessage surfaces as its own message rather than swallowing —
+// and a peer's Pong must arrive back as opcode 0xA with the echoed
+// payload. The empty ping is load-bearing: the tty heartbeat writes
+// WritePing(nil), and a header-only frame is the liveness traffic on
+// that path. Real browsers answer the ping/pong legs automatically from
+// their network stack; here the client answers by hand, like the ping
+// leg of TestDialRoundtrip does.
+func TestWritePingRoundtrip(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = ln.Close() }()
+
+	done := make(chan struct{})
+	go serveUpgrade(t, ln, func(s *Conn, req *http.Request) {
+		defer close(done)
+		// Empty ping first — the exact frame the tty heartbeat writes.
+		if err := s.WritePing(nil); err != nil {
+			t.Errorf("server ping(nil): %v", err)
+			return
+		}
+		op, p, err := s.ReadMessage()
+		if err != nil {
+			t.Errorf("server read pong: %v", err)
+			return
+		}
+		if op != opPong || len(p) != 0 {
+			t.Errorf("server got op=%d payload=%q, want pong with empty payload", op, p)
+			return
+		}
+		// Payload-carrying ping: the Pong must echo it back verbatim.
+		if err := s.WritePing([]byte("liveness")); err != nil {
+			t.Errorf("server ping: %v", err)
+			return
+		}
+		op, p, err = s.ReadMessage()
+		if err != nil {
+			t.Errorf("server read pong 2: %v", err)
+			return
+		}
+		if op != opPong || string(p) != "liveness" {
+			t.Errorf("server got op=%d payload=%q, want pong liveness", op, p)
+		}
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	c, err := Dial(ctx, ln.Addr().String(), "/ws", nil)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+
+	op, p, err := c.ReadMessage()
+	if err != nil {
+		t.Fatalf("client read ping: %v", err)
+	}
+	if op != opPing || len(p) != 0 {
+		t.Fatalf("client got op=%d payload=%q, want ping (0x9) with empty payload", op, p)
+	}
+	if err := c.WritePong(p); err != nil {
+		t.Fatalf("client pong: %v", err)
+	}
+	op, p, err = c.ReadMessage()
+	if err != nil {
+		t.Fatalf("client read ping 2: %v", err)
+	}
+	if op != opPing || string(p) != "liveness" {
+		t.Fatalf("client got op=%d payload=%q, want ping liveness", op, p)
+	}
+	if err := c.WritePong(p); err != nil {
+		t.Fatalf("client pong 2: %v", err)
+	}
+	_ = c.Close()
+	waitDone(t, done)
+}
+
 func TestDialSendsMaskedFrames(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

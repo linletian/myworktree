@@ -3,6 +3,7 @@
 > 记录日期：2026-08-15（真机验证，含磁盘字节级取证）
 > 涉及版本：dsh 0.1.0-rc.6（npm 安装，`~/.npm-global`）；myworktree `feature/dsh-native-ui`
 > 状态：**dsh 上游问题**（一个实现缺陷 + 一个设计边界），myworktree 侧暂不处理；已损坏的会话日志按用户要求保留原状，未做任何修复或进程操作。
+> ⚠️ 0.2.x 现状：下文点名的 0.1.x 事件通道 `/api/events.mux` / `/api/events.host` 在 dsh 0.2.x 已不存在，WS 载体现在是 `/api/remote.mux`；见 `PLAN.md` §「⚠️ 修订（dsh 0.2.x）」。
 
 ---
 
