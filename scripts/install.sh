@@ -339,8 +339,27 @@ echo -e "${MUTED}If 'command not found', open a new shell (PATH was added to you
 # to pick up the new binary. We do NOT auto-stop: that could hard-kill
 # long-running PTY / opencode / reasonix sessions and discard the
 # in-memory ring buffer + WebSocket state.
-if command -v pgrep >/dev/null 2>&1 && pgrep -x myworktree >/dev/null 2>&1; then
-  pids=$(pgrep -x myworktree | tr '\n' ' ')
+#
+# Detection must check BOTH the binary name and the alias: the process
+# comm is the basename of the path the daemon was LAUNCHED through, so a
+# daemon started via the alias symlink (the common case — `mw` / `mw
+# start`) reports as "mw" and pgrep -x myworktree alone never sees it.
+daemon_pids=""
+if command -v pgrep >/dev/null 2>&1; then
+  check_names="$APP"
+  if [ -n "$INSTALL_ALIAS" ] && [ "$INSTALL_ALIAS" != "$APP" ]; then
+    check_names="$check_names $INSTALL_ALIAS"
+  fi
+  for proc_name in $check_names; do
+    hits=$(pgrep -x "$proc_name" 2>/dev/null || true)
+    if [ -n "$hits" ]; then
+      daemon_pids="${daemon_pids}${daemon_pids:+ }$(echo $hits | tr '\n' ' ')"
+    fi
+  done
+  daemon_pids=$(echo $daemon_pids | tr ' ' '\n' | sort -un | tr '\n' ' ')
+fi
+if [ -n "${daemon_pids// /}" ]; then
+  pids=$daemon_pids
   echo ""
   echo -e "${RED}Heads up:${NC} a myworktree daemon is currently running (PID(s): ${pids})."
   echo "The installed binary (${version}) is on disk but the running daemon"
@@ -365,6 +384,9 @@ if command -v pgrep >/dev/null 2>&1 && pgrep -x myworktree >/dev/null 2>&1; then
   echo "  (in any worktree — the daemon does not need to be inside the repo)"
   echo ""
   echo -e "${MUTED}Force fallback (only if '${APP} stop' hangs):${NC}"
-  echo "  pkill -x myworktree           # then: kill any orphaned children"
+  echo "  pkill -x ${APP}           # then: kill any orphaned children"
+  if [ -n "$INSTALL_ALIAS" ] && [ "$INSTALL_ALIAS" != "$APP" ]; then
+    echo "  pkill -x ${INSTALL_ALIAS}                # (if you started the daemon via the alias)"
+  fi
   echo "  pkill -x opencode             #   e.g. opencode serve, if any"
 fi
