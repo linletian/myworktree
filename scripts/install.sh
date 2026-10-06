@@ -86,6 +86,11 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+# Accept the documented truthy spellings for NO_MODIFY_PATH / MYWORKTREE_BETA
+# (the docs say NO_MODIFY_PATH=1; previously only the literal "true" worked).
+case "$no_modify_path" in 1|true|yes) no_modify_path=true ;; *) no_modify_path=false ;; esac
+case "$want_beta" in 1|true|yes) want_beta=true ;; *) want_beta=false ;; esac
+
 # --- platform detection ---------------------------------------------------
 case "$(uname -s)" in
   Darwin*) platform="macOS" ;;
