@@ -4800,9 +4800,10 @@
             // assigns logCursor and ttyOffset as a pair, so a split —
             // unknown logCursor beside a sentinel ttyOffset — is
             // unreachable and this is bit-identical in every state that
-            // exists today — but if any future site ever assigned ttyOffset = CURSOR_FOLLOW_LIVE_END
-            // alone, a logCursor-only check would silently omit `since`
-            // and replay the whole tail over the screen that already holds
+            // exists today — but if any future site ever assigned
+            // ttyOffset = CURSOR_FOLLOW_LIVE_END alone, a
+            // logCursor-only check would silently omit `since` and
+            // replay the whole tail over the screen that already holds
             // it — the exact duplication this branch exists to prevent.
             const sseCursor = Math.max(session.logCursor ?? -1, session.ttyOffset ?? -1);
             if (sseCursor > 0) url += `&since=${sseCursor}`;
