@@ -3530,14 +3530,36 @@
                 // delivery: the reap nulls the socket on the SAME tick that
                 // first observes staleness (reconnectStaleTTY ->
                 // disconnectTTY), so the only window this covers runs from
-                // the stamp crossing TTY_LIVENESS_STALE_MS to the next
-                // watchdog tick - at most TTY_LIVENESS_CHECK_MS, longer in
-                // a timer-throttled background tab. Exactly one branch runs
+                // the stamp crossing TTY_LIVENESS_STALE_MS to the next reap,
+                // whichever of the two healers gets there first: the 2s poll
+                // is the PRIMARY one for this active session - refresh ->
+                // reconcileTerminalSessions -> syncActiveTerminalStatus ->
+                // ensureTerminalLiveTransport's own stale arm ->
+                // reconnectStaleTTY, which is the call that nulls the socket
+                // - so ~2s here, and TTY_LIVENESS_CHECK_MS (5s) bounds only
+                // a session the poll does not promote, where the watchdog is
+                // the fallback; longer still in a timer-throttled background
+                // tab. Exactly one branch runs
                 // per keystroke, so nothing is sent twice, and a FALSE stale
                 // (a healthy socket whose stamp lapsed) merely routes the
                 // keystroke through HTTP into the same PTY. Staleness
                 // requires READY + OPEN, so the HANDSHAKING window and every
                 // non-OPEN socket behave exactly as before.
+                // And it does not fully deliver even INSIDE its own window
+                // here: the HTTP fallback below buffers on
+                // session.termInputBuffer behind a 40ms debounce, and the
+                // reap that follows is disconnectTTY, which clears
+                // session.termSendTimer and resets session.termInputBuffer -
+                // so a keystroke landing in the last ~40ms before that tick
+                // is buffered and then discarded by a teardown that was
+                // already coming. Recorded, deliberately NOT changed in this
+                // PR. The renderer path does NOT share this fate:
+                // kinds/pty.js buffers under session._inputBuffer /
+                // session._inputFlushTimer, field names disconnectTTY
+                // touches neither, so there the same keystroke survives the
+                // teardown and its POST still fires. Two factories, two
+                // buffer field names, two outcomes - do not assume they
+                // behave alike.
                 // The first two conditions stay on one line verbatim:
                 // TestIndexHTMLCoversPerSessionConnectionManagement anchors
                 // that exact hook text, and re-wrapping it would break a

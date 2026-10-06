@@ -314,13 +314,30 @@ class PtyRenderer {
             // stamp the HTTP fallback below - which reaches a live daemon
             // either way - is never taken. Not instant: the reap nulls the
             // socket on the same tick that first sees staleness, so this
-            // only covers the gap from the stamp crossing the threshold to
-            // that tick. One branch per keystroke, so never a duplicate;
+            // covers only the gap from the stamp crossing the threshold to
+            // whichever healer reaps first, NOT one fixed tick: the 2s poll
+            // is the PRIMARY one for the active session (refresh ->
+            // reconcileTerminalSessions -> syncActiveTerminalStatus ->
+            // ensureTerminalLiveTransport's own stale arm ->
+            // reconnectStaleTTY, the call that nulls the socket), so ~2s
+            // there; index.html's TTY_LIVENESS_CHECK_MS (5s watchdog) is
+            // the bound only for a session the poll does not promote, and
+            // longer still in a timer-throttled background tab.
+            // One branch per keystroke, so never a duplicate;
             // a false stale just takes HTTP into the same PTY, and
             // staleness is READY+OPEN-only, so HANDSHAKING is untouched.
             // Probed optionally like the other index.html exports here: a
             // missing export degrades to today's readyState-only gate
             // rather than throwing on every keystroke.
+            // The buffering HERE survives the teardown, and that is a real
+            // difference from index.html's legacy gate, not a wording one:
+            // this path buffers under _inputBuffer / _inputFlushTimer, and
+            // disconnectTTY clears only the legacy factory's termSendTimer /
+            // termInputBuffer - it touches neither field here - so a
+            // keystroke taken in the sliver just before a reap still gets
+            // its POST, where the legacy factory discards the identical
+            // keystroke. Same gate, two buffer field names, two outcomes;
+            // recorded, deliberately not unified in this PR.
             // Same shape as index.html's gate, line breaks included - the
             // two session factories have drifted before and this one is the
             // copy a reader diffs against.
