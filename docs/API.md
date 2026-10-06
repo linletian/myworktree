@@ -464,28 +464,55 @@ Bi-directional stream for terminal output/input with PTY support.
 - **`since=0`** → accepted, but it is NOT a "tail" mode. On
   `GET /api/instances/log` a single read starting at 0 starts at the
   OLDEST live byte (the #81 symptom); on this WS endpoint the catch-up
-  loop runs to head and retains the newest ≤64KB, so the effect there is
-  a tail-like replay with `sync` at head. The shipped UI never sends `0`;
+  loop reads forward from 0 and streams every chunk it reads straight to
+  the socket, so the effect there is a replay of everything still live in
+  the ring — up to the 8 MB handshake budget — with `sync` at the end of
+  the last chunk actually written. The shipped UI never sends `0`;
   it omits `since` entirely when its cursor is unknown (`CURSOR_UNKNOWN`)
   and sends `-2` when the screen is painted but the offset is not.
-- **`since>0`** → the server replays only the bytes at or after that
-  offset, so a reconnecting client that still holds its rendered screen does
+- **`since>0`** → the server replays the bytes at or after that offset, in
+  full, so a reconnecting client that still holds its rendered screen does
   not receive the tail a second time.
 
 Each replay read is capped at 64KB. When the delta since `since` exceeds
-64KB, the server loops reads until it is caught up and keeps only the
-newest chunk, so the replay is the newest ≤64KB **contiguous with the live
-stream** and the `sync` offset equals the head of the final replay read.
-Output produced between that final read and the live subscription sits behind
+64KB, the server loops reads until it is caught up and **streams each chunk
+to the socket as it reads it** instead of retaining one, so the whole delta
+is delivered and peak memory stays ~64KB (one chunk) regardless of the ring
+cap. The `sync` offset is the end of the **last chunk actually written** to
+this socket — never an offset over bytes the client did not receive **and can
+still receive**, because a client cursor only moves forward and would never ask
+for them again. The two deliberate exceptions both publish the ring's real
+head, and neither re-delivers anything a healthy client still had coming: a
+path that writes nothing has no last chunk to name, and a ring whose process
+has exited and whose buffer has been dropped publishes head precisely because
+the bytes behind it are permanently undeliverable — publishing 0 there would
+instead throw the client into a full tail replay. One handshake replays at
+most 8 MB
+(`ttyHandshakeReplayBudget` in `internal/app/app.go`), counted in bytes
+already written and checked before the next read: once the budget is spent
+the loop stops, and the undelivered remainder sits **ahead** of the published
+cursor, so the next reconnect re-requests exactly those bytes — truncation is
+**deferred to the next reconnect, never a skip**. The deferral has a cost:
+ring caps are 16–256 MB, so a badly lagged client can need up to 32 reconnects
+to converge, and until it reconnects the deferred bytes stay off a screen whose
+socket still looks healthy (the replay lands in xterm.js `scrollback: 10000`,
+so it is the older replayed content that scrolls out, never the live output
+that follows it). There is deliberately no write deadline on this path: the
+handshake is not yet subscribed to the output stream, so a blocked write does
+not stall the pump, and a wall-clock deadline would livelock a slow-but-
+progressing consumer where a byte budget simply resumes next reconnect. Output produced between the
+last chunk written and the live subscription sits behind
 the published cursor and is re-requested by the next reconnect (self-healing
 contiguity, not absolute coverage). A `since` older than the oldest byte
 still in the ring buffer is silently clamped to the oldest live byte; a
 `since` at or beyond head replays nothing (at head) or falls back to the
 tail (beyond head, defensive) — the client's own number is never echoed back
-as authoritative. In `since=-2` mode the published offset comes from
-`Manager.EndOffset` — the head read with a zero-length body, because there is
-no replay to attach it to. Two windows surround that read and they behave
-differently, so do not conflate them:
+as authoritative.
+
+In `since=-2` mode the published offset comes from `Manager.EndOffset` —
+the head read with a zero-length body, because there is no replay to attach
+it to. Two windows surround that read and they behave differently, so do not
+conflate them:
 
 - **After it** (head → `SubscribeOutput`): bytes produced in that gap are not
   delivered live, but the client's cursor still points at the published head,
@@ -515,6 +542,11 @@ differently, so do not conflate them:
    on its next reconnect
 6. Real-time output continues as binary frames
 7. Client receives first data and triggers second resize (50ms delay) for TUI redraw
+8. If the client stops draining the live stream, the server closes the
+   connection with **`1013` / reason `subscriber overflow: slow consumer`**
+   (issue #82) instead of silently dropping output — see Close codes below;
+   the client reconnects with the `since` cursor it already holds, exactly
+   as after any abnormal close
 
 **Frontend session model:**
 - The current UI keeps transport state per running instance rather than sharing a single terminal across tabs.
@@ -526,11 +558,49 @@ differently, so do not conflate them:
 *Client → Server:*
 - Input: text/binary frames (raw bytes)
 - Resize: `{"type":"resize","cols":<number>,"rows":<number>}`
+- Liveness probe: `{"type":"ping"}` (text frame, issue #83) — answered with `{"type":"pong"}` and **not** treated as input: the server consumes it before the input fallthrough, so the probe JSON is never typed into the instance's PTY. (A user literally typing that exact JSON is swallowed the same way `{"type":"resize",...}` already is.)
 
 *Server → Client:*
 - Ready: `{"type":"ready"}` (text frame)
 - Output: binary frames (terminal output chunks)
 - Sync: `{"type":"sync","offset":<int64>}` (text frame, sent after the handshake replay — even when that replay was empty. The client latches it per connection: replay frames received BEFORE the sync never touch the cursor — the sync publishes the authoritative end of the whole replay in one step; binary frames received AFTER it advance the cursor by their wire byte count — every one of them is ring-buffer output, as the server closes the connection rather than writing diagnostics as binary)
+- Heartbeat: `{"type":"ping"}` (text frame, every 10 s, issue #83) — the application-level mirror of the RFC 6455 ping the server sends on the same tick. Browsers answer the protocol ping automatically from their network stack (which refreshes the server's 45 s read deadline); this text frame is the heartbeat browser JavaScript can observe, since `onmessage` never fires for control frames. Clients MUST whitelist `ping` (and `pong`) as control types and MUST NOT render them as terminal output.
+
+**Liveness (issue #83):** half-open TCP sockets (laptop sleep, NAT/proxy idle timeout) keep `readyState === OPEN` without ever firing `onclose`, so liveness rides on heartbeat traffic in both directions. Server: pings every 10 s; arms a 45 s read deadline before every read and reaps a peer that has sent nothing for that long (the browser's automatic Pong refreshes it). **Non-browser clients get no automatic Pong** — `internal/ws`'s own client returns `opPing` as an ordinary message and installs no responder — so any Go or embedded client of this endpoint MUST answer protocol pings with Pong and/or send `{"type":"ping"}` periodically, or it will be reaped at the 45 s deadline. Client: stamps the arrival of every frame, probes `{"type":"ping"}` every 5 s once READY, and reconnects after 30 s without heartbeat traffic (3 × the ping interval, under the server's 45 s backstop). The web UI's **primary detector is the 2 s poll** — `ensureTerminalLiveTransport()` notices the stale stamp on the active session at ~30 s and queues the reconnect (returning `false`: a queued reconnect is not yet a live transport); the 5 s watchdog is the fallback that also covers sessions the poll does not promote. Liveness is never inferred from the absence of program output — a prompt, `vim` or `top` emit zero bytes for hours and stay connected. A write deadline was deliberately **not** part of issue #83: normal-traffic writes on this socket carry none (the only bounded write here is the 5 s deadline on #82's overflow close-frame), so a handler blocked mid-write is reclaimed when that write fails or returns, not by the read deadline.
+
+*Server → Client close codes:*
+- `1013` with reason `subscriber overflow: slow consumer` (issue #82) — the live
+  output subscription was torn down server-side because this client stopped draining:
+  its 64-slot output queue filled (the PTY pump reads in 1024-byte chunks, so ≈64 KB
+  of unread output) and the server disconnected the subscriber rather than dropping
+  chunks forever. Any queued chunks still in flight are **discarded at the source** —
+  the drain runs once the subscriber registry's lock is released, never inside it —
+  so that backlog never reaches the socket writer. That **bounds** what this handler
+  can write: the queue is empty by the time `broadcast` returns, so a full backlog
+  (~64 KB) cannot be pushed onto a socket that has already stalled. It does **not**
+  order the teardown: `close()` readies any receiver already parked on the channel,
+  and a readied receiver races the drain loop for the values still buffered, so a
+  few chunks may legitimately still reach the socket before the handler sees `!ok`.
+  Each of those chunks was already written to the ring
+  buffer before being broadcast, so they come back on the reconnect's replay from the
+  client's `since` cursor: nothing is lost **that is still in the ring buffer**. The
+  one exception is an instance whose ring buffer the framework has already closed and
+  dropped (`Manager.dropBuffer` → `RingBuffer.Close`, which nils the data and refuses
+  further writes): a chunk broadcast after that point was never stored, so no replay
+  can bring it back, and a still-connected client would have received it on the wire
+  pre-drain — the same post-swap loss ARCHITECTURE §4.1 already declares intentional
+  for the buffer swap itself. The close frame itself is BEST-EFFORT (the stalled
+  socket may never drain it; its write carries a bounded 5 s deadline set on this
+  teardown path only — normal-traffic writes on this socket carry **no** write
+  deadline, and that is unchanged after issue #83, which deliberately scoped a
+  write deadline out and shipped read-deadline liveness only), so the
+  client must treat **any** abnormal close as "reconnect with your stored `since`
+  cursor", not only this one. The shipped UI's `ws.onclose` logs the code and reason
+  and reconnects after 5 s; the server logs the overflow at the disconnect too
+  (`tty output subscriber overflow for <id>…`), which is its only server-side trace.
+- `1013` with a dynamic error reason — handshake/setup failures on this endpoint
+  (upgrade, replay-read or subscribe errors); the connection is closed rather than
+  served half-configured, and the client retries like any other abnormal close.
 
 **Timeout & Fallback:**
 - Client should implement handshake timeout (recommended: 5s)
@@ -557,6 +627,12 @@ Client                    Server
    |                         |
    |--- input bytes -------->|  User input
    |<-- binary output -------|  Process output
+   |                         |
+   |<-- {"type":"ping"} -----|  Heartbeat every 10s (issue #83; the same
+   |                         |    tick also writes an RFC 6455 ping, which
+   |                         |    the browser answers invisibly to JS)
+   |-- {"type":"ping"} ------->|  Client probe every 5s once READY
+   |<-- {"type":"pong"} ------|  Answered - never typed into the PTY
 ```
 
 ### Delete

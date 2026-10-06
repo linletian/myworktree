@@ -1819,11 +1819,75 @@
             return getTerminalSession(state.activeInst);
         }
 
+        // --- TTY liveness heartbeat (issue #83) ---
+        //
+        // readyState === OPEN is instantaneous: a half-open TCP socket
+        // (laptop sleep, NAT/proxy idle timeout, swapped network path)
+        // stays OPEN forever without ever firing onclose, so every
+        // instantaneous check re-affirmed a dead connection as live and
+        // nothing ever reconnected. Liveness now also rides on heartbeat
+        // TRAFFIC: the server emits an RFC 6455 ping plus a TEXT
+        // {"type":"ping"} every TTY_PING_INTERVAL_MS (server:
+        // ttyPingInterval in internal/app/app.go), the client stamps
+        // lastDataAt from EVERY frame it receives, and the watchdog in
+        // connectTTY reaps the socket when the stamp goes stale.
+        //
+        // The numbers, and the margin between them:
+        //   TTY_LIVENESS_STALE_MS (30s) = 3 x the server's 10s ping and
+        //   < the server's 45s read deadline, so a live page's watchdog
+        //   notices a half-open socket first and reconnects on its own
+        //   terms (the #87 byte cursor survives and the reconnect resumes
+        //   incrementally); the server deadline is the backstop for peers
+        //   that run no watchdog at all.
+        //   TTY_LIVENESS_CHECK_MS (5s) is the watchdog tick: it sends the
+        //   client's own {"type":"ping"} probe (the only thing that
+        //   detects a socket whose server->client direction is dead while
+        //   its client->server direction still "looks" writable) and
+        //   checks the stamp. Foreground detection latency is therefore
+        //   30-35s; a background tab's setInterval is commonly throttled
+        //   to ~1/min while WebSocket message delivery is NOT, so the
+        //   server's 10s frames keep lastDataAt fresh there and a late
+        //   tick sees a fresh stamp and does nothing - no reconnect churn.
+        //
+        // CRITICAL: staleness measures heartbeat traffic, NEVER program
+        // output. A shell at a prompt, vim, less, top or an idle agent
+        // TUI emit zero bytes for hours and MUST stay connected - the
+        // heartbeats flow regardless, so the stamp stays fresh exactly
+        // when the connection is fine.
+        const TTY_LIVENESS_CHECK_MS = 5000;
+        // Precondition: Date.now() is wall-clock, not monotonic - a
+        // forward system-time jump past this threshold causes one spurious
+        // reap that self-heals on the immediate reconnect. Accepted, and
+        // consistent with lastResizeTime/lastLogLoadAttemptAt in this file.
+        const TTY_LIVENESS_STALE_MS = 30000;
+        // The reconnect delay was a bare 5000 in ws.onclose; named now
+        // because the watchdog schedules the same retry.
+        const TTY_RECONNECT_DELAY_MS = 5000;
+
+        // True when a NOMINALLY LIVE connection (READY, socket OPEN) has
+        // heard no heartbeat traffic for TTY_LIVENESS_STALE_MS. Handshake
+        // states never count: a socket that has not reached READY has no
+        // heartbeat baseline yet (the 5s handshake timeout owns that
+        // window), and a socket that is not OPEN is already visibly dead.
+        function isTTYHeartbeatStale(session) {
+            return !!session && session.ttyState === 'READY'
+                && !!session.ttySocket
+                && session.ttySocket.readyState === WebSocket.OPEN
+                && Date.now() - (session.lastDataAt || 0) > TTY_LIVENESS_STALE_MS;
+        }
+
         function hasLiveTTYConnection(id = state.activeInst) {
             const session = getTerminalSession(id);
             if (!session || !session.ttySocket) return false;
             if (session.ttySocket.readyState !== WebSocket.OPEN) return false;
-            return session.ttyState === 'HANDSHAKING' || session.ttyState === 'READY';
+            if (session.ttyState !== 'HANDSHAKING' && session.ttyState !== 'READY') return false;
+            // Issue #83: OPEN + READY is only half the truth. A socket that
+            // has heard no heartbeat for TTY_LIVENESS_STALE_MS is dead no
+            // matter how open it looks - and every caller that gets false
+            // here reconnects (or defers to the in-flight guard), which is
+            // what breaks the 2s poll's re-affirmation of half-open
+            // sockets.
+            return !isTTYHeartbeatStale(session);
         }
 
         // --- Instance status classification (issue #80) ---
@@ -2966,6 +3030,10 @@
                         // and the screen was just cleared. Keeping it would
                         // make connectTTY send since=<oldOffset> and paint
                         // only the delta onto an empty terminal.
+                        // resetTerminalForSwitch above performs this for BOTH
+                        // cursors itself; this pair stays as defensive depth so
+                        // the invariant does not depend on the helper's
+                        // internals, and it keeps matching kinds/pty.js.
                         session.ttyOffset = CURSOR_UNKNOWN;
                         loadLog(session).finally(() => {
                             connectTTY(session);
@@ -3452,6 +3520,18 @@
                 ttyOutputDecoder: null,
                 ttyState: 'IDLE',
                 ttyStateCheckInterval: null,
+                // Liveness heartbeat bookkeeping (issue #83) - names, init
+                // values and semantics are identical to the factory in
+                // kinds/pty.js, which the two session factories must mirror
+                // (they have drifted before). lastDataAt is the instant the
+                // last frame of ANY kind arrived over the WebSocket - the
+                // heartbeat stamp hasLiveTTYConnection() and the watchdog
+                // read; 0 means "never", which reads as stale by design.
+                // ttyLivenessTimer is the watchdog interval armed by
+                // connectTTY once READY; cleared by disconnectTTY and
+                // ws.onclose in both files.
+                lastDataAt: 0,
+                ttyLivenessTimer: null,
                 resizeObserver: null,
                 lastResizeTime: 0,
                 appliedTTYSize: null,
@@ -3504,7 +3584,52 @@
                     return;
                 }
 
-                if (session.ttySocket && session.ttySocket.readyState === WebSocket.OPEN) {
+                // Issue #83: a heartbeat-stale socket is NOT live for input
+                // either. A send on a half-open socket does not throw - it
+                // writes into a socket nobody reads - so gating on readyState
+                // alone here swallowed the keystroke and never reached the
+                // HTTP fallback below, which reaches a live daemon whatever
+                // the socket looks like. What this does NOT buy is immediate
+                // delivery: the reap nulls the socket on the SAME tick that
+                // first observes staleness (reconnectStaleTTY ->
+                // disconnectTTY), so the only window this covers runs from
+                // the stamp crossing TTY_LIVENESS_STALE_MS to the next reap,
+                // whichever of the two healers gets there first: the 2s poll
+                // is the PRIMARY one for this active session - refresh ->
+                // reconcileTerminalSessions -> syncActiveTerminalStatus ->
+                // ensureTerminalLiveTransport's own stale arm ->
+                // reconnectStaleTTY, which is the call that nulls the socket
+                // - so ~2s here, and TTY_LIVENESS_CHECK_MS (5s) bounds only
+                // a session the poll does not promote, where the watchdog is
+                // the fallback; longer still in a timer-throttled background
+                // tab. Exactly one branch runs
+                // per keystroke, so nothing is sent twice, and a FALSE stale
+                // (a healthy socket whose stamp lapsed) merely routes the
+                // keystroke through HTTP into the same PTY. Staleness
+                // requires READY + OPEN, so the HANDSHAKING window and every
+                // non-OPEN socket behave exactly as before.
+                // And it does not fully deliver even INSIDE its own window
+                // here: the HTTP fallback below buffers on
+                // session.termInputBuffer behind a 40ms debounce, and the
+                // reap that follows is disconnectTTY, which clears
+                // session.termSendTimer and resets session.termInputBuffer -
+                // so a keystroke landing in the last ~40ms before that tick
+                // is buffered and then discarded by a teardown that was
+                // already coming. Recorded, deliberately NOT changed in this
+                // PR. The renderer path does NOT share this fate:
+                // kinds/pty.js buffers under session._inputBuffer /
+                // session._inputFlushTimer, field names disconnectTTY
+                // touches neither, so there the same keystroke survives the
+                // teardown and its POST still fires. Two factories, two
+                // buffer field names, two outcomes - do not assume they
+                // behave alike.
+                // The first two conditions stay on one line verbatim:
+                // TestIndexHTMLCoversPerSessionConnectionManagement anchors
+                // that exact hook text, and re-wrapping it would break a
+                // passing test for no behavioural reason.
+                const socketLive = session.ttySocket && session.ttySocket.readyState === WebSocket.OPEN
+                    && !isTTYHeartbeatStale(session);
+                if (socketLive) {
                     session.ttySocket.send(data);
                 } else {
                     session.termInputBuffer += data;
@@ -3680,10 +3805,21 @@
         // connecting" means.
         function hasTerminalTransportInFlight(session, options) {
             if (!session) return false;
+            // Issue #83: a READY-but-heartbeat-stale socket is NOT bring-up
+            // in flight - nothing is being brought up, the connection is
+            // dead-but-OPEN. Without this the in-flight guard would veto
+            // every reconnect that the hasLiveTTYConnection() staleness fix
+            // unblocks, and the false answer would be a silent no-op.
+            // CONNECTING sockets keep blocking (that is what this guard
+            // exists for); staleness is READY-only, so they are untouched.
+            const stale = isTTYHeartbeatStale(session);
             if (session.loadLogController) return true;
-            if (session.ttySocket) return true;
+            // isTTYHeartbeatStale is READY+OPEN-only, so a CONNECTING
+            // socket (or a CLOSED one onclose has not dropped yet) is
+            // never stale and still blocks here, as before.
+            if (session.ttySocket && !stale) return true;
             if (session.logStream) return true;
-            if (session.ttyState && session.ttyState !== 'IDLE') return true;
+            if (session.ttyState && session.ttyState !== 'IDLE' && !stale) return true;
             if (session.ttyReconnectTimer && !(options && options.ignoreQueuedRetry)) return true;
             return false;
         }
@@ -3702,6 +3838,28 @@
             if (hasTerminalTransportInFlight(session)) return false;
             const inst = state.instances.find(i => i.id === session.id);
             if (!inst || !isInstanceLiveStatus(inst.status)) return false;
+            // The poll's reconnect arm for a half-open socket (issue #83):
+            // the guard above no longer counts it as in flight, and this is
+            // the caller that runs every 2s, so the poll is the PRIMARY
+            // detector for the active session (~30s) - the watchdog tick
+            // would only get there ~5s later. It must go through
+            // reconnectStaleTTY, never a bare connectTTY: the dead socket
+            // still exists here (staleness requires one), so without the
+            // helper there would be no documented backoff cadence and the
+            // return value would lie about liveness. Deliberately BELOW the
+            // isInstanceLiveStatus guard (review P3): a future caller must
+            // never tear a socket down and arm a retry for a stopped or
+            // pending instance - symmetric with the connectTTY arm it
+            // mirrors. The watchdog still reaps such sessions independently.
+            // Returns FALSE: the reconnect is merely queued
+            // TTY_RECONNECT_DELAY_MS out - no live transport exists yet.
+            // The only present caller discards the value, but a function
+            // named ensure...LiveTransport must not claim liveness it has
+            // not established.
+            if (isTTYHeartbeatStale(session)) {
+                reconnectStaleTTY(session);
+                return false;
+            }
             connectTTY(session);
             return true;
         }
@@ -3712,9 +3870,29 @@
                 ? r.allSessions()
                 : Object.values(terminalSessions);
             for (const session of sessions) {
+                // FIX-W: leave an armed retry alone. Inside the 5s backoff
+                // window there is no socket but a queued connectTTY; taking
+                // the path below would run disconnectTTY, which CANCELS that
+                // timer, and connect inline - measured safe (one socket, no
+                // double-open) but it silently voids the documented
+                // flap-avoidance. The retry is already coming.
+                if (session.ttyReconnectTimer) continue;
                 const inst = state.instances.find(i => i.id === session.id);
                 if (inst && isInstanceLiveStatus(inst.status) && !hasLiveTTYConnection(session.id)) {
-                    connectTTY(session);
+                    // Only a heartbeat-STALE session rides the teardown-plus-
+                    // backoff of the helper (issue #83). Everything else keeps
+                    // the pre-#83 direct connectTTY: mid-CONNECTING or
+                    // READY-but-CLOSED-not-yet-processed sessions have a
+                    // socket that is NOT stale, and giving them the helper
+                    // would add 5s of backoff they never needed. (connectTTY
+                    // made while a socket is attached no longer spins its
+                    // DISCONNECTING wait loop - see the no-socket guard at
+                    // its top.)
+                    if (isTTYHeartbeatStale(session)) {
+                        reconnectStaleTTY(session);
+                    } else {
+                        connectTTY(session);
+                    }
                 }
             }
         }
@@ -3784,6 +3962,33 @@
             session.term.reset();
             session.term.clear();
             session.term.write('\x1b[2J\x1b[3J\x1b[H');
+            // The screen is gone by the time this returns, so BOTH cursors
+            // are invalidated HERE instead of being left to the callers:
+            // this is exported on window for other kinds to call, and a
+            // caller that cleared the screen through it while keeping a
+            // stale ttyOffset would make the next connectTTY send
+            // since=<oldHead> and paint only [oldHead, head) onto a blank
+            // terminal (issue #87). The screen-content guard above is what
+            // makes this correct — with no term nothing was cleared, so
+            // nothing is invalidated.
+            //
+            // CURSOR_UNKNOWN is the named "unknown" sentinel (issue #86
+            // named these states). Both transports omit since for it and
+            // fall back to the server's tail default, while since=0 would
+            // replay the OLDEST live bytes — the #81 symptom. It must match
+            // the sentinel in the session factories here and in kinds/pty.js
+            // (PTY_CURSOR_UNKNOWN there) so the three cannot drift apart.
+            // The OTHER unknown-cursor state — the tail IS painted, only its
+            // offset was stripped — is CURSOR_FOLLOW_LIVE_END, assigned by
+            // loadLog's painted gate; a screen clear always lands here,
+            // because nothing is painted anymore (#86 fixed the residual
+            // double-tail this used to leave open).
+            //
+            // The current callers keep their own resets immediately after
+            // this one — defensive depth, and the kinds/pty.js pair must keep
+            // matching index.html.
+            session.ttyOffset = CURSOR_UNKNOWN;
+            session.logCursor = CURSOR_UNKNOWN;
         }
 
         function focusTerminalIfPossible() {
@@ -3894,10 +4099,12 @@
             if (typeof data !== "string" || data.length === 0 || data[0] !== "{") return null;
             try {
                 const msg = JSON.parse(data);
-                // "sync" is the handshake offset echo (issue #87): anything
-                // not whitelisted here falls through ws.onmessage and gets
-                // painted into the terminal as literal text.
-                if (!msg || (msg.type !== "ready" && msg.type !== "resize" && msg.type !== "sync")) return null;
+                // "sync" is the handshake offset echo (issue #87), "ping"
+                // and "pong" are the liveness heartbeat frames (issue #83):
+                // anything not whitelisted here falls through ws.onmessage
+                // and gets painted into the terminal as literal text - so
+                // every control type the server emits MUST be listed.
+                if (!msg || (msg.type !== "ready" && msg.type !== "resize" && msg.type !== "sync" && msg.type !== "ping" && msg.type !== "pong")) return null;
                 return msg;
             } catch (e) {
                 return null;
@@ -3974,39 +4181,47 @@
                     if (inst && isInstanceTerminalStatus(inst.status)) {
                         session.term.write("\r\n\r\n\x1b[41;37m[Process Stopped]\x1b[0m\r\n");
                     }
-                }
-                // Only advance the cursor from a valid header. Falling back to 0 would
-                // make startSSE connect with since=0 and replay the oldest 64KB on top
-                // of the tail just written; the previous cursor is strictly safer.
-                if (Number.isFinite(next) && next >= 0) {
-                    session.logCursor = next;
-                    // One ring-buffer end offset, two consumers (issue #87):
-                    // the screen now holds every byte up to `next`, so the
-                    // WS cursor must equal logCursor here. The rule is
-                    // screen-content driven: callers that wipe the screen
-                    // first (refreshCurrentInstance, resetTerminalForSwitch)
-                    // reset BOTH cursors to the unknown sentinel at the
-                    // clear, so a failed loadLog here can only leave that
-                    // sentinel behind — never a stale value claiming bytes
-                    // that are no longer on screen.
-                    session.ttyOffset = next;
-                } else if (painted > 0) {
-                    // The fetch SUCCEEDED and tail BYTES were just painted;
-                    // only X-Log-Offset is missing or unparseable (issue #86).
-                    // That is precisely CURSOR_FOLLOW_LIVE_END: the screen is
-                    // no longer empty, so a tail replay would paint it twice.
-                    // The server answers the sentinel with an empty first frame
-                    // carrying the live end offset, which is what puts a real
-                    // cursor back on this session. Three cases never take this
-                    // branch and keep the empty-screen sentinel instead, which
-                    // still asks for the tail: a FAILED fetch (it throws into
-                    // the catch below), no terminal to paint into, and a tail
-                    // that reached the screen as zero bytes — empty body, or
-                    // only escape sequences sanitize stripped (issue #86
-                    // review). In all three there is nothing on screen to
-                    // duplicate, so suppressing the replay would hide output.
-                    session.logCursor = CURSOR_FOLLOW_LIVE_END;
-                    session.ttyOffset = CURSOR_FOLLOW_LIVE_END;
+                    // Pin the cursors only for bytes this terminal actually
+                    // holds, and only after the paint: ttyOffset and logCursor
+                    // mean "rendered on this screen", so a session without a
+                    // term keeps whatever it had — pinning a cursor for bytes
+                    // no screen holds would contradict the screen-content rule
+                    // this whole path is built on (issue #87 review).
+                    //
+                    // Only advance from a valid header. Falling back to 0 would
+                    // make startSSE connect with since=0 and replay the oldest
+                    // 64KB on top of the tail just written; the previous cursor
+                    // is strictly safer (issue #81).
+                    //
+                    // One ring-buffer end offset, two consumers: the screen now
+                    // holds every byte up to next, so the WS cursor must equal
+                    // logCursor here. The screen-clear sites put the sentinel
+                    // back — resetTerminalForSwitch invalidates BOTH cursors
+                    // itself at the clear, and refreshCurrentInstance resets
+                    // them beside its own term.clear() — so a failed loadLog
+                    // here can only leave the sentinel behind, never a stale
+                    // value claiming bytes that are no longer on screen.
+                    if (Number.isFinite(next) && next >= 0) {
+                        session.logCursor = next;
+                        session.ttyOffset = next;
+                    } else if (painted > 0) {
+                        // The fetch SUCCEEDED and tail BYTES were just painted;
+                        // only X-Log-Offset is missing or unparseable (issue #86).
+                        // That is precisely CURSOR_FOLLOW_LIVE_END: the screen is
+                        // no longer empty, so a tail replay would paint it twice.
+                        // The server answers the sentinel with an empty first frame
+                        // carrying the live end offset, which is what puts a real
+                        // cursor back on this session. Three cases never take this
+                        // branch and keep the empty-screen sentinel instead, which
+                        // still asks for the tail: a FAILED fetch (it throws into
+                        // the catch below), no terminal to paint into, and a tail
+                        // that reached the screen as zero bytes — empty body, or
+                        // only escape sequences sanitize stripped (issue #86
+                        // review). In all three there is nothing on screen to
+                        // duplicate, so suppressing the replay would hide output.
+                        session.logCursor = CURSOR_FOLLOW_LIVE_END;
+                        session.ttyOffset = CURSOR_FOLLOW_LIVE_END;
+                    }
                 }
                 session.lastLogLoadFailures = 0;
                 session.lastLogLoadFailed = false;
@@ -4036,6 +4251,14 @@
                 clearInterval(session.ttyStateCheckInterval);
                 session.ttyStateCheckInterval = null;
             }
+            // The liveness watchdog dies with every explicit disconnect too
+            // (issue #83) - disconnectTTY nulls ws.onclose before closing,
+            // so this is the only place its interval is cleared on that
+            // path. No stale interval, no duplicate intervals.
+            if (session.ttyLivenessTimer) {
+                clearInterval(session.ttyLivenessTimer);
+                session.ttyLivenessTimer = null;
+            }
             if (session.termSendTimer) {
                 clearTimeout(session.termSendTimer);
                 session.termSendTimer = null;
@@ -4063,10 +4286,81 @@
             session.termInputBuffer = "";
         }
 
+        // Tear a dead-but-OPEN socket down and reconnect (issue #83).
+        // Two shapes, split on whether a socket actually exists:
+        //
+        // NO socket: nothing to tear down - disconnectTTY would only set
+        // IDLE - and the backoff below exists to avoid flapping against a
+        // socket that just dropped. With no socket there is nothing to back
+        // off from, and this is the connection-overlay recovery path
+        // (reconnectRunningTerminalSessions), where the user is staring at
+        // "connection lost". Connect immediately, as before issue #83.
+        //
+        // SOCKET present (both liveness arms always have one - staleness
+        // requires it): the single teardown shape, in this exact order:
+        //   1. disconnectTTY - clears the watchdog, the old reconnect
+        //      timer and the socket; it deliberately detaches onclose
+        //      BEFORE closing (user-initiated disconnects must not
+        //      auto-reconnect), so NOTHING else schedules the retry from
+        //      here on.
+        //   2. force IDLE - disconnectTTY leaves 'DISCONNECTING' whenever
+        //      a socket existed, so without this the next connectTTY would
+        //      land in its 'invalid state transition' 100ms wait-loop and
+        //      burn ~1.05s plus a misleading console.warn on the very path
+        //      that heals most half-open connections.
+        //   3. arm the retry AFTER disconnectTTY - it clears any existing
+        //      ttyReconnectTimer, so assigning before it would be silently
+        //      dropped.
+        // Used by the watchdog tick, the 2s poll's stale arm in
+        // ensureTerminalLiveTransport (the primary healer for the active
+        // session) and reconnectRunningTerminalSessions.
+        function reconnectStaleTTY(session) {
+            if (!session) return;
+            if (!session.ttySocket) {
+                // Nothing to tear down, and the backoff below exists to
+                // avoid flapping against a socket that just dropped - with
+                // no socket there is nothing to back off from, and this is
+                // the connection-overlay recovery path, where the user is
+                // waiting. The load-bearing act here is the IMMEDIATE
+                // connectTTY (pre-#83 latency); the IDLE assignment is
+                // defensive - the no-socket guard at the top of connectTTY
+                // normalizes a stale DISCONNECTING anyway.
+                session.ttyState = 'IDLE';
+                connectTTY(session);
+                return;
+            }
+            disconnectTTY(session);
+            session.ttyState = 'IDLE';
+            session.ttyReconnectTimer = setTimeout(() => connectTTY(session), TTY_RECONNECT_DELAY_MS);
+        }
+
         function connectTTY(session) {
             if (!session) return;
             disconnectTTY(session);
 
+            // disconnectTTY closes and nulls the socket UNCONDITIONALLY
+            // before returning, so a DISCONNECTING found here describes a
+            // socket that no longer exists - for EVERY caller, not just the
+            // paths issue #83 exposed. The 10x100ms wait-loop below is
+            // therefore unreachable dead code today, and it could never have
+            // SUCCEEDED even before #83: disconnectTTY detaches onclose
+            // before closing, so nothing could ever set the IDLE it waited
+            // for - it only ever burned the full ~1.05s plus a misleading
+            // console.warn before forcing IDLE. The loop and the
+            // ttyStateCheckInterval field are KEPT as defence in depth,
+            // labelled as such. ROT WARNING: this guard is unconditionally
+            // true only while these three statements stay adjacent - if
+            // anyone later inserts an early return or an await between
+            // disconnectTTY(session) and this guard, the guard silently
+            // becomes conditional again and the ~1.05s spin returns with no
+            // test firing. Cannot weaken hasTerminalTransportInFlight:
+            // connectTTY sets CONNECTING immediately below, so the IDLE
+            // window is synchronous and microscopic.
+            if (!session.ttySocket) session.ttyState = 'IDLE';
+
+            // Defence in depth: unreachable while the guard above holds
+            // (every caller) - kept deliberately, labelled, and pinned by
+            // the FIX-X/FIX-V node cases asserting zero 100ms intervals.
             if (session.ttyState !== 'IDLE') {
                 console.warn('connectTTY: invalid state transition from', session.ttyState, '- waiting for IDLE');
                 let retries = 0;
@@ -4135,11 +4429,22 @@
                 let isFirstData = true;
                 // Per-connection latch (issue #87 review): true once this
                 // connection's `sync` frame has been handled. Binary frames
-                // before the latch belong to the handshake replay, whose
-                // authoritative end offset the imminent sync frame is about
-                // to publish — touching the cursor with them would leave a
-                // behind-by-one-chunk value if the socket died in the
-                // replay→sync gap, duplicating that window on reconnect.
+                // before the latch belong to the handshake replay, and that
+                // replay does not necessarily start where we asked for it:
+                // RingBuffer.ReadSince silently clamps a stale cursor to the
+                // oldest live byte, so advancing the cursor per frame would
+                // add painted bytes to a cursor that no longer points at the
+                // first of them and could land PAST bytes the client never
+                // received — strictly worse than duplicating them. The sync
+                // frame is the only frame carrying an authoritative ABSOLUTE
+                // offset, so it is the one that moves the cursor, publishing
+                // the end offset of the whole replay in a single step. Blast
+                // radius if the socket dies in the replay→sync gap: the cursor
+                // never advanced, so the reconnect re-requests from where the
+                // client really was and re-paints up to
+                // ttyHandshakeReplayBudget (8MB) now that the replay streams,
+                // instead of a single 64KB frame — bounded duplication that
+                // self-corrects on that reconnect.
                 let handshakeSynced = false;
                 let handshakeTimeout = null;
                 let connectTimeout = setTimeout(() => {
@@ -4165,6 +4470,36 @@
                 };
 
                 ws.onmessage = (ev) => {
+                    // Socket-identity guard (issue #87 review): this handler
+                    // mutates the session-wide cursor, so it runs only for the
+                    // socket that currently owns the session. A stale socket
+                    // dispatches nothing in practice — connectTTY calls
+                    // disconnectTTY first, and disconnectTTY nulls this
+                    // socket's onmessage before it closes it, so a queued frame
+                    // cannot reach here after a reconnect; the connect-timeout
+                    // path only fires while the socket is not OPEN and the
+                    // handshake-timeout path requires that no "ready" frame
+                    // arrived, so neither can deliver a frame either. The
+                    // guard makes that invariant explicit and cheap instead of
+                    // emergent: a frame that somehow does get dispatched off a
+                    // replaced socket must never move the cursor of the live
+                    // socket, which would claim bytes the live transport never
+                    // painted. session.ttySocket = ws is assigned synchronously
+                    // at the end of connectTTY, before any message can be
+                    // dispatched, so no legitimate frame is dropped here. The
+                    // deferred setTimeout callbacks below keep their own
+                    // ws === session.ttySocket checks: identity can change
+                    // between scheduling and firing.
+                    if (session.ttySocket !== ws) return;
+                    // Liveness stamp (issue #83): EVERY frame counts - the
+                    // TEXT {"type":"ping"} heartbeats, the {"type":"pong"}
+                    // probe answers, resize/sync echoes and binary output
+                    // alike. That is why this is the FIRST thing the handler
+                    // does: an idle program paints nothing for hours, but a
+                    // healthy server keeps the stamp fresh, so liveness rides
+                    // on heartbeat traffic and never on the absence of
+                    // output.
+                    session.lastDataAt = Date.now();
                     const controlMsg = parseTTYControlMessage(ev.data);
                     if (controlMsg && controlMsg.type === 'ready') {
                         session.ttyState = 'READY';
@@ -4172,6 +4507,99 @@
                             clearTimeout(handshakeTimeout);
                             handshakeTimeout = null;
                         }
+                        // Arm the liveness watchdog (issue #83) once READY
+                        // (the 5s handshake timeout above owns the window
+                        // before that). Clear-then-set: this connection is
+                        // the only owner, so a reconnect can never stack a
+                        // single interval on the same session - BEHAVIOURALLY
+                        // PINNED by the review-P4 node case (ready delivered
+                        // twice on one socket, intervals.length stays 1). The
+                        // handle is also captured in the callback's own
+                        // closure, so a superseded tick clears ITS OWN
+                        // interval - never a newer one that may meanwhile
+                        // occupy the field.
+                        // (const is safe despite the callback naming it
+                        // before the assignment line: the first tick cannot
+                        // run before the synchronous assignment completes.)
+                        if (session.ttyLivenessTimer) {
+                            clearInterval(session.ttyLivenessTimer);
+                            session.ttyLivenessTimer = null;
+                        }
+                        const livenessHandle = setInterval(() => {
+                            // Stale interval from a superseded socket: the
+                            // new connect's ready handler re-armed its own;
+                            // stand aside (and stop THIS one, by its own
+                            // handle - the field may already name the newer
+                            // interval). UNVERIFIED defence in depth (review
+                            // P4): no current node case drives a tick after
+                            // supersession; a future reader should not assume
+                            // a test would catch its removal.
+                            if (session.ttySocket !== ws) {
+                                clearInterval(livenessHandle);
+                                if (session.ttyLivenessTimer === livenessHandle) {
+                                    session.ttyLivenessTimer = null;
+                                }
+                                return;
+                            }
+                            // UNVERIFIED defence in depth (review P4): the
+                            // watchdog only arms at READY, and every path
+                            // that leaves READY also clears this interval -
+                            // so no present case reaches this return.
+                            if (session.ttyState !== 'READY') return;
+                            if (isTTYHeartbeatStale(session)) {
+                                // OPEN but no heartbeat traffic for
+                                // TTY_LIVENESS_STALE_MS: half-open. The
+                                // shared helper tears the socket down, forces
+                                // IDLE past disconnectTTY's DISCONNECTING, and
+                                // arms the delayed reconnect (which sends the
+                                // preserved #87 cursor as `since`) - the exact
+                                // shape the onclose arm takes, because
+                                // disconnectTTY detaches onclose before closing.
+                                // Deliberately NOT status-gated (review): the
+                                // failure modes are asymmetric. Missing a gate
+                                // here costs ONE wasted connection (opened,
+                                // answered 1013, declined); adding it would stop
+                                // reaping a genuinely half-open socket the moment
+                                // its status flapped into the pending bucket,
+                                // leaving a frozen terminal until the server's
+                                // 45s read deadline caught up - strictly worse
+                                // than the waste it prevents. The poll's arm and
+                                // ws.onclose do gate on status; this does not,
+                                // by decision, not by oversight.
+                                console.warn("tty heartbeat silent for over " + TTY_LIVENESS_STALE_MS + "ms, forcing reconnect:", id);
+                                reconnectStaleTTY(session);
+                                if (state.activeInst === id) {
+                                    updateStatus("ws stale, reconnecting...");
+                                }
+                                return;
+                            }
+                            // Live: send the client probe (issue #83). A
+                            // server->client heartbeat cannot detect a socket
+                            // whose server->client direction is dead but
+                            // whose client->server direction still "looks"
+                            // writable - only a round trip can, and the
+                            // server answers {"type":"ping"} with
+                            // {"type":"pong"}. A send on a half-open socket
+                            // does NOT throw - the missing pong is the
+                            // signal, surfacing as stamp staleness.
+                            if (ws.readyState === WebSocket.OPEN) {
+                                try {
+                                    ws.send(JSON.stringify({ type: "ping" }));
+                                } catch (e) {
+                                    // Recovery rests ENTIRELY on onclose/connect
+                                    // here - there is no second line of defence,
+                                    // and this tick cannot be it: a socket that is
+                                    // not OPEN is excluded from
+                                    // isTTYHeartbeatStale by definition, and this
+                                    // tick's own probe is gated on OPEN too, so
+                                    // once send throws the stale arm can never
+                                    // fire for this socket and every later tick
+                                    // does nothing until the browser reports the
+                                    // close. Silent by design; it does not retry.
+                                }
+                            }
+                        }, TTY_LIVENESS_CHECK_MS);
+                        session.ttyLivenessTimer = livenessHandle;
                         if (state.activeInst === id) {
                             updateStatus("websocket live");
                         }
@@ -4196,6 +4624,15 @@
                         // later reconnect can resume incrementally with it.
                         if (Number.isFinite(controlMsg.offset) && controlMsg.offset >= 0) session.ttyOffset = controlMsg.offset;
                         handshakeSynced = true;
+                        return;
+                    }
+
+                    if (controlMsg && (controlMsg.type === 'ping' || controlMsg.type === 'pong')) {
+                        // Liveness heartbeat traffic (issue #83): the stamp
+                        // at the top of this handler is its entire job -
+                        // consume the frame here and NEVER let it reach the
+                        // paint path below, or the user watches JSON scroll
+                        // past every TTY_PING_INTERVAL_MS.
                         return;
                     }
 
@@ -4244,6 +4681,14 @@
                     if (ev && ev.code && ev.code !== 1000) {
                         console.warn("tty ws closed:", ev.code, ev.reason || "");
                     }
+                    // This socket is gone, so its watchdog is too (issue
+                    // #83): clearing here (and in disconnectTTY, which
+                    // detaches this handler before closing) is what keeps a
+                    // reconnect from stacking duplicate intervals.
+                    if (session.ttyLivenessTimer) {
+                        clearInterval(session.ttyLivenessTimer);
+                        session.ttyLivenessTimer = null;
+                    }
                     // Deliberately NOT resetting session.ttyOffset here (issue
                     // #87): the terminal screen survives the drop, so the byte
                     // cursor for what has already been rendered must survive
@@ -4255,6 +4700,10 @@
                     // the screen-clear sites — refreshCurrentInstance and the
                     // resetTerminalForSwitch clears in index.html and
                     // kinds/pty.js — reset it to CURSOR_UNKNOWN.
+                    // resetTerminalForSwitch performs that reset inside the
+                    // clear it runs, so a kind that clears the screen through
+                    // the exported helper cannot survive with a cursor claiming
+                    // bytes a blank screen no longer holds.
                     resetTTYOutputDecoder(session);
                     if (connectTimeout) { clearTimeout(connectTimeout); connectTimeout = null; }
                     if (handshakeTimeout) { clearTimeout(handshakeTimeout); handshakeTimeout = null; }
@@ -4271,7 +4720,7 @@
                         // when the process really is gone.
                         if (latest && isInstanceLiveStatus(latest.status)) {
                             if (state.activeInst === session.id) updateStatus("ws closed, retrying...");
-                            session.ttyReconnectTimer = setTimeout(() => connectTTY(session), 5000);
+                            session.ttyReconnectTimer = setTimeout(() => connectTTY(session), TTY_RECONNECT_DELAY_MS);
                         } else if (state.activeInst === session.id) {
                             updateStatus(latest && isInstancePendingStatus(latest.status) ? latest.status + "..." : "stopped");
                         }
@@ -4285,18 +4734,51 @@
 
         function startSSE(session) {
             if (!session) return;
+            // SSE replaces the WS transport, so the TTY watchdog must die
+            // with it (issue #83): it would self-cancel on its next tick
+            // anyway, but clearing here makes "the watchdog never outlives
+            // its transport" true by construction.
+            if (session.ttyLivenessTimer) {
+                clearInterval(session.ttyLivenessTimer);
+                session.ttyLivenessTimer = null;
+            }
             if (state.activeInst === session.id) updateStatus("sse live");
             let url = `/api/instances/log/stream?id=${encodeURIComponent(session.id)}`;
-            // Three cursor states, three URLs (issue #86). A real positive
-            // cursor is echoed so the server sends only newer bytes; the
-            // unknown cursor (CURSOR_UNKNOWN, e.g. loadLog FAILED and the
-            // screen is empty) omits `since` entirely and falls through to
-            // the server's default tail semantics — since=0 would instead
-            // replay the oldest 64KB of the ring buffer (issue #81); and
+            // Three cursor states, one URL (issue #86), over two sibling
+            // cursors (issue #87). A real positive cursor is echoed so the
+            // server sends only newer bytes; the unknown cursor
+            // (CURSOR_UNKNOWN, e.g. loadLog FAILED and the screen is empty)
+            // omits `since` entirely and falls through to the server's
+            // default tail semantics — since=0 would instead replay the
+            // oldest 64KB of the ring buffer (issue #81); and
             // CURSOR_FOLLOW_LIVE_END (the tail IS painted, its offset was
             // stripped) asks for no replay at all, so the stream starts at
             // the live end instead of duplicating the screen.
-            if (session.logCursor > 0) url += `&since=${session.logCursor}`;
+            //
+            // The positive cursor is the GREATER of the two siblings (issue
+            // #87): logCursor and ttyOffset both count ring-buffer bytes
+            // painted on this screen, and ensureTerminalLiveTransport promotes
+            // with connectTTY alone — no loadLog — so on that promote path
+            // logCursor stays unknown while ttyOffset advances. Reading
+            // logCursor alone would then omit `since` and the server would
+            // replay its whole tail on top of what the WS already painted.
+            // A sibling that is ABSENT must not poison that max, so each one
+            // degrades through ?? down to -1, the "unknown" sentinel. Read
+            // raw, one known sibling next to one absent one makes the max
+            // NaN, the guard below then drops it, and the server replays its
+            // whole tail over a screen that already holds bytes — the exact
+            // duplicate paint this issue exists to remove. Unreachable while
+            // both session factories initialise both cursors, which is
+            // precisely why the node test pins it anyway.
+            //
+            // The sentinel check runs AFTER the positive guard: a sibling
+            // that IS a real cursor outranks -2 on either side, because the
+            // screen demonstrably holds bytes through it; only when neither
+            // sibling has a positive cursor can the painted-but-unoffset
+            // state decide, and then `since=-2` goes on the wire — never
+            // since=0, never an omitted tail request (issue #86).
+            const sseCursor = Math.max(session.logCursor ?? -1, session.ttyOffset ?? -1);
+            if (sseCursor > 0) url += `&since=${sseCursor}`;
             else if (session.logCursor === CURSOR_FOLLOW_LIVE_END) url += `&since=${CURSOR_FOLLOW_LIVE_END}`;
             if (token) url += `&token=${encodeURIComponent(token)}`;
             const es = new EventSource(url);
@@ -4304,13 +4786,17 @@
                 try {
                     const msg = JSON.parse(ev.data);
                     if (msg.chunk && session.term) writeSanitizedTerminalOutput(session, msg.chunk);
-                    if (Number.isFinite(msg.next) && msg.next >= 0) session.logCursor = msg.next;
-                    // Keep the WS cursor in step (issue #87): SSE and WS
-                    // advance over the same ring-buffer offsets, and every
-                    // byte SSE paints is a byte the screen has seen — a
-                    // later WS reconnect must send this cursor, not an older
-                    // one, or it would replay content already on screen.
-                    if (Number.isFinite(msg.next) && msg.next >= 0) session.ttyOffset = msg.next;
+                    // One ring-buffer end offset, two consumers (issue #87):
+                    // SSE and WS advance over the same ring-buffer offsets,
+                    // and every byte SSE paints is a byte the screen has
+                    // seen, so both cursors move together under one
+                    // acceptance rule. A later WS reconnect must send this
+                    // cursor, not an older one, or it would replay content
+                    // already on screen.
+                    if (Number.isFinite(msg.next) && msg.next >= 0) {
+                        session.logCursor = msg.next;
+                        session.ttyOffset = msg.next;
+                    }
                 } catch (e) { }
             };
             es.addEventListener("log", onLog);
@@ -4783,6 +5269,12 @@
         window.disconnectTTY = disconnectTTY;
         window.connectTTY = connectTTY;
         window.hasLiveTTYConnection = hasLiveTTYConnection;
+        // Exported for kinds/pty.js, whose onData gate reads the SAME
+        // predicate (issue #83): the renderer cannot see module scope and
+        // consumes it through window like the helpers above, defensively, so
+        // this line is load-bearing for the input path there - deleting it
+        // silently reverts that gate to readyState-only.
+        window.isTTYHeartbeatStale = isTTYHeartbeatStale;
         window.hasTerminalTransportInFlight = hasTerminalTransportInFlight;
         window.ensureTerminalSession = ensureTerminalSession;
         window.maybeDestroyInactiveStoppedSession = maybeDestroyInactiveStoppedSession;

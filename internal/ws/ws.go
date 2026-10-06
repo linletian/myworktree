@@ -255,8 +255,16 @@ func (c *Conn) readFrame() (fin bool, opcode byte, payload []byte, err error) {
 
 func (c *Conn) WriteText(p []byte) error   { return c.writeFrame(opText, p) }
 func (c *Conn) WriteBinary(p []byte) error { return c.writeFrame(opBinary, p) }
-func (c *Conn) WritePong(p []byte) error   { return c.writeFrame(opPong, p) }
-func (c *Conn) WriteClose(p []byte) error  { return c.writeFrame(opClose, p) }
+
+// WritePing emits an RFC 6455 ping control frame (empty payload allowed).
+// Browsers auto-reply with a Pong carrying the same payload — from their
+// network stack, NOT from page JavaScript: onmessage never fires for
+// control frames. That is what makes a server-initiated ping usable as a
+// liveness probe (issue #83): the peer refreshes the server's read
+// deadline with zero cooperation from the app layer.
+func (c *Conn) WritePing(p []byte) error  { return c.writeFrame(opPing, p) }
+func (c *Conn) WritePong(p []byte) error  { return c.writeFrame(opPong, p) }
+func (c *Conn) WriteClose(p []byte) error { return c.writeFrame(opClose, p) }
 
 func (c *Conn) writeFrame(op byte, p []byte) error {
 	c.mu.Lock()
