@@ -1302,11 +1302,19 @@ func TestHandleInstanceTTYWS_CursorAheadOfHeadFallsBackToTail(t *testing.T) {
 	addr, _, instID, _ := ttyWSTestServer(t, k)
 	k.buf.WriteString("HELLO-RING") // head = 10
 
-	c, replay, syncOffset := dialHandshake(t, addr, ttyWSPath(instID, "since=999&caps=sync"))
+	c, frames, startOffset, syncOffset := dialHandshakeStart(t, addr, ttyWSPath(instID, "since=999&caps=sync"))
 	_ = c.WriteClose(ws.CloseMessage(1000, "bye"))
 	_ = c.Close()
-	if replay != "HELLO-RING" {
-		t.Fatalf("replay = %q, want the tail HELLO-RING (cursor ahead of head must fall back to first-connect tail)", replay)
+	if len(frames) != 1 || string(frames[0]) != "HELLO-RING" {
+		t.Fatalf("replay = %d frames %q, want the single tail HELLO-RING (cursor ahead of head must fall back to first-connect tail)", len(frames), frames)
+	}
+	// The degrade announced the tail's real start like every replay
+	// addressed to a cursor-bearing client (issue #94 review): S = head 10
+	// − len 10 = 0. A genuine 0, distinct from the harness's -1 "no start
+	// frame" sentinel — and exactly the value the client's latch needs to
+	// count the tail frame up to the closing sync.
+	if startOffset != 0 {
+		t.Fatalf("start sync offset = %d, want 0 (head 10 − tail 10) — the degrade announces the tail's real start like any other replay", startOffset)
 	}
 	if syncOffset != 10 {
 		t.Fatalf("sync offset = %d, want 10 (the tail's end offset, not the client's bogus 999)", syncOffset)
@@ -1511,13 +1519,16 @@ func TestHandleInstanceTTYWS_SubscriberOverflowClosesConnectionWith1013(t *testi
 	//     rather than treat the session as finished;
 	//   - its reason names the overflow, so the console explains the drop
 	//     instead of showing an unexplained disconnect;
-	//   - no second `sync` precedes it. `sync` is written exactly once, in
-	//     completeHandshake, before SubscribeOutput (app.go), so a second one
-	//     here would advertise a cursor past bytes the client never received
-	//     and its next reconnect would silently skip them. The resize echo the
-	//     handler's own handshake queued is a TEXT frame on a different
-	//     channel, so it may land anywhere in this sequence; it is not a
-	//     cursor and is allowed through.
+	//   - no `sync` precedes it. The handshake's sync frames — since issue
+	//     #94 up to TWO of them, the start announcement ahead of the first
+	//     replay chunk and the closing echo after the last — are ALL written
+	//     inside completeHandshake, before SubscribeOutput (app.go), so one
+	//     arriving HERE, on the live stream, would advertise a cursor past
+	//     bytes the client never received and its next reconnect would
+	//     silently skip them. The resize echo the handler's own handshake
+	//     queued is a TEXT frame on a different channel, so it may land
+	//     anywhere in this sequence; it is not a cursor and is allowed
+	//     through.
 	for {
 		op, p := readFrame(t, c, 10*time.Second)
 		if op == wsOpClose {

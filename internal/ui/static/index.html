@@ -4663,6 +4663,15 @@
                 // so the reconnect re-requests from where the client really
                 // was and re-paints up to ttyHandshakeReplayBudget (8MB) —
                 // bounded duplication that self-corrects on that reconnect.
+                // Recorded trade-off of the start sync (issue #94 review):
+                // a drop landing between a frame that ends mid-UTF-8-
+                // sequence and the next one discards those 1-3 lead bytes
+                // (resetTTYOutputDecoder runs in ws.onclose) while the
+                // cursor has already stepped past them, so the character
+                // renders as U+FFFD where the pre-#94 full re-pull
+                // redelivered it — the same trade-off the LIVE path has
+                // always had, cosmetic only, and the split character is
+                // unrecoverable either way.
                 let handshakeSynced = false;
                 let handshakeTimeout = null;
                 let connectTimeout = setTimeout(() => {
@@ -4849,7 +4858,14 @@
                         // so adopting it and lifting the latch is correct for
                         // both — the start sync makes the per-frame advance
                         // below truthful from chunk 1 on, and the closing
-                        // sync re-pins the same value the frames summed to.
+                        // sync re-pins the value the frames summed to. The
+                        // sum can land SHORT only if the ring rolled a full
+                        // cycle mid-replay and evicted bytes the loop had
+                        // not sent yet (a later chunk then clamps above the
+                        // running cursor): the closing sync jumps the gap,
+                        // which is truthful — those bytes are undeliverable
+                        // anyway, the same rule the read→subscribe window
+                        // already lives by.
                         if (Number.isFinite(controlMsg.offset) && controlMsg.offset >= 0) session.ttyOffset = controlMsg.offset;
                         handshakeSynced = true;
                         return;
