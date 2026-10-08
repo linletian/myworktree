@@ -2884,27 +2884,39 @@
         }
 
         // Interaction
+        // Deactivate the renderer of a (previously active) instance on a
+        // full leave. Kind-agnostic by design: web-ui kinds hide their
+        // panel AND stop their background polling, terminal kinds hide
+        // their host. Unconditional — no same-renderer guard like
+        // selectInstance's: a worktree switch is always a full leave,
+        // never a same-renderer re-activation. An unresolvable id
+        // (concurrent deletion) is skipped rather than falling back to
+        // 'pty': which renderer is actually on screen is unknowable, and
+        // the caller's render() hides every panel regardless (issue #101).
+        function deactivateInstanceRenderer(id) {
+            if (!id) return;
+            const inst = state.instances.find(i => i.id === id);
+            if (!inst) return;
+            const renderer = (window.KindRenderers || {})[inst.kind || 'pty'];
+            if (renderer && typeof renderer.deactivate === 'function') {
+                renderer.deactivate();
+            }
+        }
+
         function selectWorktree(id) {
             if (state.activeWT === id) return;
             const previousID = state.activeInst;
             // Leaving the worktree also leaves its active instance:
-            // deactivate its renderer so web-ui kinds hide their panel AND
-            // stop their background polling. maybeDestroyInactiveStoppedSession
+            // deactivate its renderer BEFORE clearing the selection and
+            // re-rendering — renderWorkspace reads the just-nulled
+            // state.activeInst and paints the new worktree's empty state,
+            // so a deactivate after render() would flash that empty state
+            // over the still-visible old iframe. maybeDestroyInactiveStoppedSession
             // below cannot do it — its terminal-bucket guard returns early for
             // web instances, so without this call a dsh-web iframe stayed
             // visible over the next (instance-less) worktree's empty state and
-            // its renderer kept polling in the background (issue #101). The
-            // deactivation is unconditional — no same-renderer guard like
-            // selectInstance's: a worktree switch is always a full leave,
-            // never a same-renderer re-activation.
-            if (previousID) {
-                const prevInst = state.instances.find(i => i.id === previousID);
-                const prevKind = (prevInst && prevInst.kind) || 'pty';
-                const prevRenderer = (window.KindRenderers || {})[prevKind];
-                if (prevRenderer && typeof prevRenderer.deactivate === 'function') {
-                    prevRenderer.deactivate();
-                }
-            }
+            // its renderer kept polling in the background (issue #101).
+            deactivateInstanceRenderer(previousID);
             state.activeWT = id;
             state.activeInst = null; // Reset instance selection
             maybeDestroyInactiveStoppedSession(previousID);
@@ -2922,8 +2934,20 @@
             gitChangesTimer = setInterval(refreshGitChanges, 10000);
         }
 
+        // Programmatic worktree switch used by the create/import flows.
+        // Same leave semantics as selectWorktree: deactivate the previous
+        // instance's renderer and clear the selection SYNCHRONOUSLY, or
+        // the old worktree's web iframe stays visible (and keeps polling)
+        // over the new worktree until the refresh round-trip finishes
+        // (issue #101 review).
         function selectWorktreeByID(id) {
+            if (state.activeWT === id) return;
+            const previousID = state.activeInst;
+            deactivateInstanceRenderer(previousID);
             state.activeWT = id;
+            state.activeInst = null;
+            maybeDestroyInactiveStoppedSession(previousID);
+            render();
             refresh();
         }
 
