@@ -62,14 +62,17 @@ func TestTerminalStatusChangelogCount(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read CHANGELOG.md: %v", err)
 	}
-	claims := regexp.MustCompile(`Pinned by (\d+) `+"`"+`node --test`+"`"+` cases`).FindAllSubmatch(changelog, -1)
+	claims := regexp.MustCompile(`Pinned by (\d+) `+"`"+`node --test`+"`"+` cases`).FindAllSubmatchIndex(changelog, -1)
 	if len(claims) == 0 {
 		t.Fatal("CHANGELOG.md no longer says \"Pinned by N `node --test` cases\"")
 	}
-	for _, claimed := range claims {
-		if got, err := strconv.Atoi(string(claimed[1])); err != nil || got != cases {
-			t.Fatalf("CHANGELOG.md claims %s `node --test` cases but testdata/terminal_status.test.mjs has %d — EVERY occurrence of the phrase must state the file's total (issue #95)",
-				claimed[1], cases)
+	for _, loc := range claims {
+		num := changelog[loc[2]:loc[3]]
+		// Report the line so a multi-occurrence violation needs no grep.
+		line := 1 + strings.Count(string(changelog[:loc[0]]), "\n")
+		if got, err := strconv.Atoi(string(num)); err != nil || got != cases {
+			t.Errorf("CHANGELOG.md:%d claims %s `node --test` cases but testdata/terminal_status.test.mjs has %d — EVERY occurrence of the phrase must state the file's total (issue #95)",
+				line, num, cases)
 		}
 	}
 }
