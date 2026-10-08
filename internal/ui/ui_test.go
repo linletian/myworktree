@@ -431,6 +431,14 @@ func TestEmptyWorktreeSwitchHidesAllWebPanels(t *testing.T) {
 			t.Fatalf("selectWorktreeByID is missing %q — it bypasses the worktree-switch cleanup and strands the previous renderer (issue #101 review)", want)
 		}
 	}
+	// Same ordering pin as selectWorktree's above: the deactivate must run
+	// BEFORE render(), or render() paints the new worktree's empty state
+	// over the still-visible old iframe — presence alone does not pin this.
+	swbDeact := strings.Index(swb, "deactivateInstanceRenderer(previousID)")
+	swbRender := strings.Index(swb, "render();")
+	if swbDeact < 0 || swbRender < 0 || swbDeact > swbRender {
+		t.Fatal("selectWorktreeByID deactivates the previous renderer only after render() — the empty state flashes over the still-visible old iframe (issue #101 review)")
+	}
 }
 
 func TestReasonixRendererKeepsFrameAlive(t *testing.T) {
