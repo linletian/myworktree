@@ -443,7 +443,7 @@ Body:
 ```
 
 ### Web TTY stream (WebSocket)
-`GET /api/instances/tty/ws?id=<instanceId>[&since=<offset>]`
+`GET /api/instances/tty/ws?id=<instanceId>[&since=<offset>][&caps=<list>]`
 
 Bi-directional stream for terminal output/input with PTY support.
 
@@ -455,7 +455,9 @@ Bi-directional stream for terminal output/input with PTY support.
   holds the tail and only its end offset is unknown (a reverse proxy stripped
   `X-Log-Offset` off `GET /api/instances/log`). The handshake replays
   NOTHING — no binary frame at all — and answers with
-  `{"type":"sync","offset":<currentHead>}` and then live output only. Sending
+  `{"type":"sync","offset":<currentHead>}` (`since=-2` is itself an explicit
+  `since`, so any client in this mode receives the echo) and
+  then live output only. Sending
   the tail here would paint it a second time under the screen that already
   shows it, which was the bug. This is the browser's
   `CURSOR_FOLLOW_LIVE_END` (-2), mirrored by `sinceFollowLiveEnd` in
@@ -473,6 +475,41 @@ Bi-directional stream for terminal output/input with PTY support.
 - **`since>0`** → the server replays the bytes at or after that offset, in
   full, so a reconnecting client that still holds its rendered screen does
   not receive the tail a second time.
+
+`caps` is an optional, comma-separated capability list (issue #98), and the
+parameter may be **repeated** (`?caps=pong&caps=ping` — every value is
+scanned, not just the first). Matching is by whole, case-sensitive token:
+`caps=pinger` and `caps=PING` do NOT opt in. Two capabilities are defined:
+- **`ping`** — the client whitelists the TEXT `{"type":"ping"}` heartbeat
+  (stamps its liveness clock, never renders it), so the server may send that
+  frame. A client that does NOT opt in — a page loaded before the whitelist
+  shipped, any non-browser client that did not ask — is never sent the TEXT
+  heartbeat, because it would render it as terminal output every 10 s. The
+  RFC 6455 ping on the same tick is unaffected: control frames never reach
+  page JavaScript, so it is sent to every client.
+- **`sync`** — the client whitelists the `{"type":"sync"}` offset echo and
+  drives its reconnect cursor off it (issue #87), so the handshake sends it.
+  The echo is also sent to any client that presents an explicit `since`
+  parameter — the **inferred opt-in**: the cursor parameter and the sync
+  whitelist shipped in the same fix (#87, v0.5.1), and v0.5.0 never sends
+  `since` on this endpoint at all, so a client presenting one provably
+  parses the other. This keeps pre-caps v0.5.1 pages on the cursor contract:
+  without the echo their per-connection cursor latch never sets, the cursor
+  freezes, and every reconnect would re-replay from it. A client with
+  NEITHER — v0.5.0, a fresh non-browser probe — is never sent the frame,
+  because it would paint it into the terminal once per connect. Residual: a
+  pre-caps page whose cursor is still the unknown/zero sentinel sends no
+  `since` either, so it gets no echo and its reconnects re-replay the ≤64KB
+  tail until a loadLog re-pin or a refresh lands a cursor — the pre-#87
+  behaviour that page shipped with. In `since=-2` mode the echo is the ONLY
+  cursor handoff (the replay is empty by design) — which is exactly why the
+  explicit-`since` inference matters: a pre-caps page in that mode still
+  receives it.
+The rule is deliberately opt-IN rather than version-gated: the server can
+never again leak a future visible control frame to a client that did not
+declare it. Older servers ignore unknown query parameters, so a new client
+against an old daemon behaves exactly as before (the old daemon sends the
+TEXT ping unconditionally, and the new client whitelists it).
 
 Each replay read is capped at 64KB. When the delta since `since` exceeds
 64KB, the server loops reads until it is caught up and **streams each chunk
@@ -536,7 +573,9 @@ conflate them:
 2. Client should wait for this message before sending resize
 3. Client sends `{"type":"resize","cols":80,"rows":24}` to start data flow
 4. Server sends initial log (the tail, or only the bytes after `since`) as binary frames — and in `since=-2` mode sends NO binary frame at all
-5. Server sends `{"type":"sync","offset":<int64>}` (text frame) — the end
+5. Server sends `{"type":"sync","offset":<int64>}` (text frame, **only to
+   clients that opted in via `caps=sync` or presented an explicit `since`**
+   — issue #98) — the end
    offset of that replay (in `since=-2` mode, the live head it refused to
    replay); the client stores it and sends it back as `since`
    on its next reconnect
@@ -563,8 +602,8 @@ conflate them:
 *Server → Client:*
 - Ready: `{"type":"ready"}` (text frame)
 - Output: binary frames (terminal output chunks)
-- Sync: `{"type":"sync","offset":<int64>}` (text frame, sent after the handshake replay — even when that replay was empty. The client latches it per connection: replay frames received BEFORE the sync never touch the cursor — the sync publishes the authoritative end of the whole replay in one step; binary frames received AFTER it advance the cursor by their wire byte count — every one of them is ring-buffer output, as the server closes the connection rather than writing diagnostics as binary)
-- Heartbeat: `{"type":"ping"}` (text frame, every 10 s, issue #83) — the application-level mirror of the RFC 6455 ping the server sends on the same tick. Browsers answer the protocol ping automatically from their network stack (which refreshes the server's 45 s read deadline); this text frame is the heartbeat browser JavaScript can observe, since `onmessage` never fires for control frames. Clients MUST whitelist `ping` (and `pong`) as control types and MUST NOT render them as terminal output.
+- Sync: `{"type":"sync","offset":<int64>}` (text frame, **opt-in via `caps=sync` — or inferred from an explicit `since` parameter — since issue #98**, sent after the handshake replay — even when that replay was empty. The client latches it per connection: replay frames received BEFORE the sync never touch the cursor — the sync publishes the authoritative end of the whole replay in one step; binary frames received AFTER it advance the cursor by their wire byte count — every one of them is ring-buffer output, as the server closes the connection rather than writing diagnostics as binary)
+- Heartbeat: `{"type":"ping"}` (text frame, every 10 s, issue #83; **opt-in via `caps=ping` since issue #98**) — the application-level mirror of the RFC 6455 ping the server sends on the same tick. Browsers answer the protocol ping automatically from their network stack (which refreshes the server's 45 s read deadline); this text frame is the heartbeat browser JavaScript can observe, since `onmessage` never fires for control frames. Clients MUST whitelist `ping` (and `pong`) as control types and MUST NOT render them as terminal output — and the server only sends this frame to clients that declared `ping` in the handshake `caps` list, so a client without the whitelist never receives it.
 
 **Liveness (issue #83):** half-open TCP sockets (laptop sleep, NAT/proxy idle timeout) keep `readyState === OPEN` without ever firing `onclose`, so liveness rides on heartbeat traffic in both directions. Server: pings every 10 s; arms a 45 s read deadline before every read and reaps a peer that has sent nothing for that long (the browser's automatic Pong refreshes it). **Non-browser clients get no automatic Pong** — `internal/ws`'s own client returns `opPing` as an ordinary message and installs no responder — so any Go or embedded client of this endpoint MUST answer protocol pings with Pong and/or send `{"type":"ping"}` periodically, or it will be reaped at the 45 s deadline. Client: stamps the arrival of every frame, probes `{"type":"ping"}` every 5 s once READY, and reconnects after 30 s without heartbeat traffic (3 × the ping interval, under the server's 45 s backstop). The web UI's **primary detector is the 2 s poll** — `ensureTerminalLiveTransport()` notices the stale stamp on the active session at ~30 s and queues the reconnect (returning `false`: a queued reconnect is not yet a live transport); the 5 s watchdog is the fallback that also covers sessions the poll does not promote. Liveness is never inferred from the absence of program output — a prompt, `vim` or `top` emit zero bytes for hours and stay connected. A write deadline was deliberately **not** part of issue #83: normal-traffic writes on this socket carry none (the only bounded write here is the 5 s deadline on #82's overflow close-frame), so a handler blocked mid-write is reclaimed when that write fails or returns, not by the read deadline.
 
@@ -617,8 +656,9 @@ Client                    Server
    |    "cols":80,"rows":24} |
    |                         |
    |<-- binary output -------|  Replay: tail, or bytes after `since`
-   |<-- {"type":"sync", ----|  End offset of that replay
-   |    "offset":4096}      |
+   |<-- {"type":"sync", ----|  End offset of that replay — only when the
+   |    "offset":4096}      |    client opted in via ?caps=sync or presented
+   |                         |    ?since (issue #98)
    |                         |
    |--- (50ms delay) -------|
    |                         |
@@ -628,9 +668,11 @@ Client                    Server
    |--- input bytes -------->|  User input
    |<-- binary output -------|  Process output
    |                         |
-   |<-- {"type":"ping"} -----|  Heartbeat every 10s (issue #83; the same
-   |                         |    tick also writes an RFC 6455 ping, which
-   |                         |    the browser answers invisibly to JS)
+   |<-- {"type":"ping"} -----|  Heartbeat every 10s (issue #83; only when
+   |                         |    the client opted in via ?caps=ping — issue
+   |                         |    #98. The same tick also writes an RFC 6455
+   |                         |    ping, which the browser answers invisibly
+   |                         |    to JS, caps or not)
    |-- {"type":"ping"} ------->|  Client probe every 5s once READY
    |<-- {"type":"pong"} ------|  Answered - never typed into the PTY
 ```

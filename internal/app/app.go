@@ -2359,6 +2359,43 @@ func (s *Server) handleInstanceTTYWSLiveness(w http.ResponseWriter, r *http.Requ
 	// OTHER unknown-cursor state — the screen IS painted, only its end
 	// offset is unknown — and is handled inside completeHandshake.
 	since := parseInt64Default(r.URL.Query().Get("since"), -1)
+	// Client capability flags (issue #98), a comma-separated list. The
+	// parameter may be REPEATED (?caps=pong&caps=ping) — url.Values.Get
+	// would return only the first value, so the raw slice is scanned.
+	// Defined flags:
+	//   "ping": the client whitelists the TEXT {"type":"ping"} heartbeat
+	//     in parseTTYControlMessage (stamps its liveness clock, never
+	//     paints it), so the server may send it. A client that does NOT
+	//     opt in — a page loaded before the whitelist shipped (v0.5.0),
+	//     any non-browser client — is never sent the text frame, because
+	//     such a client would paint it into the terminal as literal
+	//     output every ttyPingInterval. The RFC 6455 ping below is
+	//     unaffected: control frames never reach page JS, so it is
+	//     always safe.
+	//   "sync": the client whitelists the {"type":"sync"} offset echo
+	//     and drives its reconnect cursor off it (issue #87). The echo
+	//     has a second, INFERRED opt-in: an explicit `since` parameter.
+	//     The cursor parameter and the sync whitelist shipped in the
+	//     same fix (#87, v0.5.1) — v0.5.0 never puts `since` on this
+	//     endpoint at all — so a client presenting one provably parses
+	//     the other, and the inference costs exactly nothing against
+	//     the one population that would paint the frame. It keeps
+	//     pre-caps v0.5.1 pages on the cursor contract: without the
+	//     echo their handshakeSynced latch never sets, the cursor
+	//     freezes, and every reconnect re-replays from it — a
+	//     duplicate-paint regression strictly worse than the leak
+	//     (review round 2). Residual: a pre-caps page whose cursor is
+	//     still the unknown/zero sentinel sends no `since` either, so
+	//     it gets no echo and its reconnects re-replay the ≤64KB tail
+	//     until a loadLog re-pin or a refresh lands a cursor — the
+	//     pre-#87 behaviour that page shipped with.
+	// This is deliberately opt-IN, not version-gated: the server can
+	// never again leak a future visible control frame to a client that
+	// did not declare it understands it.
+	caps := r.URL.Query()["caps"]
+	textPingCap := ttyClientHasCap(caps, "ping")
+	_, sincePresent := r.URL.Query()["since"]
+	syncCap := ttyClientHasCap(caps, "sync") || sincePresent
 	conn, err := ws.Upgrade(w, r)
 	if err != nil {
 		return
@@ -2683,9 +2720,20 @@ func (s *Server) handleInstanceTTYWSLiveness(w http.ResponseWriter, r *http.Requ
 		// and every other empty-replay path set a truthful head above.
 		// Built with strconv (not json.Marshal) so there is no
 		// unreachable error branch.
-		syncPayload := []byte(`{"type":"sync","offset":` + strconv.FormatInt(endOffset, 10) + `}`)
-		if err := conn.WriteText(syncPayload); err != nil {
-			return false
+		//
+		// OPT-IN (the issue #98 orientation): the echo is itself visible
+		// control traffic that post-dates the v0.5.0 whitelist, so an
+		// un-refreshed v0.5.0 page would paint it into the terminal on
+		// every connect — the same leak as the TEXT ping, once per
+		// connect instead of once per tick. It goes only to a client
+		// that declared "sync" in caps or presented an explicit `since`
+		// cursor (the two shipped together in #87 — see the handshake
+		// comment above); v0.5.0 does neither and never receives it.
+		if syncCap {
+			syncPayload := []byte(`{"type":"sync","offset":` + strconv.FormatInt(endOffset, 10) + `}`)
+			if err := conn.WriteText(syncPayload); err != nil {
+				return false
+			}
 		}
 
 		ch, cancelFn, err := s.instanceMgr.SubscribeOutput(id)
@@ -2771,15 +2819,23 @@ func (s *Server) handleInstanceTTYWSLiveness(w http.ResponseWriter, r *http.Requ
 			//     Invisible to page JS (onmessage never fires for control
 			//     frames), hence frame 2:
 			//  2. TEXT {"type":"ping"} — the heartbeat the client can
-			//     actually observe and stamp lastDataAt from.
+			//     actually observe and stamp lastDataAt from. OPT-IN ONLY
+			//     (issue #98): sent solely to clients whose `caps`
+			//     handshake parameter listed "ping" — a client without
+			//     the whitelist (a pre-refresh v0.5.0 page, any older or
+			//     non-browser client) would paint this frame into the
+			//     terminal every 10s, so it gets frame 1 only and
+			//     degrades to the pre-#83 behaviour it always had.
 			// A failed write means the peer is gone: return and let the
 			// existing defers unwind (same treatment as the binary output
 			// write below).
 			if err := conn.WritePing(nil); err != nil {
 				return
 			}
-			if err := conn.WriteText([]byte(`{"type":"ping"}`)); err != nil {
-				return
+			if textPingCap {
+				if err := conn.WriteText([]byte(`{"type":"ping"}`)); err != nil {
+					return
+				}
 			}
 
 		case <-handshakeTimer.C:
@@ -3406,6 +3462,23 @@ func parseInt64Default(s string, def int64) int64 {
 		return def
 	}
 	return v
+}
+
+// ttyClientHasCap reports whether the tty WS handshake's `caps` query
+// parameter — a comma-separated capability list (issue #98) that may be
+// REPEATED, ?caps=pong&caps=ping — contains name as a WHOLE,
+// case-sensitive token. Substring matching is deliberately not enough:
+// "pinger" must not opt a client into the TEXT {"type":"ping"} heartbeat,
+// and "PING" names no capability.
+func ttyClientHasCap(caps []string, name string) bool {
+	for _, v := range caps {
+		for _, tok := range strings.Split(v, ",") {
+			if strings.TrimSpace(tok) == name {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func decodeArgs(raw json.RawMessage, out any) error {

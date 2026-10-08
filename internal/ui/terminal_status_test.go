@@ -87,6 +87,26 @@ func TestTerminalStatusLivenessHeartbeatContract(t *testing.T) {
 	if !strings.Contains(index, `msg.type !== "ping" && msg.type !== "pong"`) {
 		t.Fatal(`parseTTYControlMessage must whitelist both "ping" and "pong" (issue #83)`)
 	}
+	// Issue #98: the TEXT ping heartbeat and the sync offset echo are
+	// opt-in on both halves of the wire — the client must DECLARE the
+	// capabilities and the server must GATE on them (a client without the
+	// whitelist would paint the ping frame every 10s and the sync frame
+	// once per connect).
+	if !strings.Contains(index, "&caps=ping,sync") {
+		t.Fatal(`connectTTY must declare caps=ping,sync so the server sends the TEXT ping heartbeat and the sync offset echo (issue #98)`)
+	}
+	if !strings.Contains(string(appSrc), `ttyClientHasCap(caps, "ping")`) {
+		t.Fatal("the server must gate the TEXT ping heartbeat on the client's caps opt-in (issue #98)")
+	}
+	if !strings.Contains(string(appSrc), `ttyClientHasCap(caps, "sync")`) {
+		t.Fatal("the server must gate the sync offset echo on the client's caps opt-in (issue #98)")
+	}
+	if !strings.Contains(string(appSrc), `r.URL.Query()["since"]`) {
+		t.Fatal("the sync echo must also flow to a client presenting an explicit since cursor — the inferred #87-era opt-in (issue #98 review round 2)")
+	}
+	if !strings.Contains(string(appSrc), `r.URL.Query()["caps"]`) {
+		t.Fatal(`caps must be scanned across ALL repeated parameter values (Query()["caps"]), not Get's first value only`)
+	}
 	// The stamp must be the FIRST thing ws.onmessage does - before any
 	// branch - so EVERY frame (control or binary) refreshes it. Anchoring on
 	// the following line proves nothing was reordered between them.
