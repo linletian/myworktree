@@ -43,3 +43,114 @@ func TestSlugify(t *testing.T) {
 		t.Fatalf("slug should be truncated to 48 chars, got len=%d", len(got))
 	}
 }
+
+// TestDirtyWorktreeErrorSummarizePorcelain pins the classification of the
+// issue #102 refusal summary: every porcelain line lands in EXACTLY ONE
+// bucket (priority delete > rename > add > modify), so the buckets sum to
+// Entries; "!!" lines never appear here in production (the blocking check
+// runs without --ignored) and are skipped defensively.
+func TestDirtyWorktreeErrorSummarizePorcelain(t *testing.T) {
+	out := strings.Join([]string{
+		" D firmware/CMakeLists.txt", // worktree delete
+		"D  tools/gone.txt",          // staged delete
+		" M docs/changed.md",         // worktree modify
+		"M  staged.txt",              // staged modify
+		"MM both.txt",                // both columns — still ONE bucket
+		"T  typechange.txt",          // typechange counts as modify
+		"A  added.txt",               // staged add
+		"R  old.txt -> new.txt",      // rename (path field kept raw)
+		"C  src.txt -> copy.txt",     // copy counts as rename
+		"?? scratch.log",             // untracked
+		"!! debug.log",               // defensive: ignored lines are skipped
+	}, "\n")
+
+	d := &DirtyWorktreeError{}
+	d.summarizePorcelain(out)
+
+	if d.Entries != 10 {
+		t.Fatalf("Entries = %d, want 10 (the !! line is skipped)", d.Entries)
+	}
+	if d.Deleted != 2 || d.Modified != 4 || d.Added != 1 || d.Renamed != 2 || d.Untracked != 1 {
+		t.Fatalf("buckets = %dD/%dM/%dA/%dR/%dU, want 2D/4M/1A/2R/1U — and they must sum to Entries",
+			d.Deleted, d.Modified, d.Added, d.Renamed, d.Untracked)
+	}
+	if got := d.Deleted + d.Modified + d.Added + d.Renamed + d.Untracked; got != d.Entries {
+		t.Fatalf("buckets sum to %d, want Entries=%d", got, d.Entries)
+	}
+	if len(d.FirstPaths) != maxDirtyFirstPaths {
+		t.Fatalf("FirstPaths = %d entries, want the %d-entry cap", len(d.FirstPaths), maxDirtyFirstPaths)
+	}
+	if d.FirstPaths[0] != "firmware/CMakeLists.txt" {
+		t.Fatalf("FirstPaths[0] = %q, want the first path field without its status prefix", d.FirstPaths[0])
+	}
+}
+
+// TestCountIgnoredPorcelain pins the "!!" count used for the gitignored
+// risk warning in the refusal message (issue #102 P3).
+func TestCountIgnoredPorcelain(t *testing.T) {
+	out := " M tracked.txt\n?? scratch.txt\n!! build/\n!! debug.log\n!! nv_backup.bin\n"
+	if n := countIgnoredPorcelain(out); n != 3 {
+		t.Fatalf("countIgnoredPorcelain = %d, want 3", n)
+	}
+	if n := countIgnoredPorcelain(""); n != 0 {
+		t.Fatalf("countIgnoredPorcelain(\"\") = %d, want 0", n)
+	}
+}
+
+// TestDirtyWorktreeErrorMessage pins the refusal wording shape (issue #102
+// P1/P3): counts by category, first paths, the gitignored-file warning,
+// and the force exit — the flat "delete is refused" gave none of these.
+func TestDirtyWorktreeErrorMessage(t *testing.T) {
+	d := &DirtyWorktreeError{
+		Entries: 133, Deleted: 133,
+		FirstPaths: []string{"firmware/CMakeLists.txt", "firmware/main.c"},
+		Ignored:    89,
+	}
+	msg := d.Error()
+	for _, want := range []string{
+		"133 entries", "(133 deleted, 0 modified, 0 untracked)",
+		"first paths: firmware/CMakeLists.txt, firmware/main.c",
+		"89 gitignored entries", "force delete would destroy unrecoverably",
+		"retry with force",
+	} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("refusal message missing %q:\n%s", want, msg)
+		}
+	}
+
+	// Singular forms and the optional buckets.
+	d = &DirtyWorktreeError{Entries: 1, Modified: 1, Added: 2, Renamed: 1, Ignored: 1}
+	msg = d.Error()
+	for _, want := range []string{"1 entry", ", 2 added", ", 1 renamed", "1 gitignored entry present"} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("refusal message missing %q:\n%s", want, msg)
+		}
+	}
+}
+
+func TestCapDirtyPorcelain(t *testing.T) {
+	make := func(n int) string {
+		lines := make([]string, n)
+		for i := range lines {
+			lines[i] = "?? f"
+		}
+		return strings.Join(lines, "\n")
+	}
+
+	// At or under the cap the output is carried verbatim.
+	if got := capDirtyPorcelain(make(maxDirtyPorcelainLines)); got != make(maxDirtyPorcelainLines) {
+		t.Fatalf("output at the cap must pass through unchanged, got %d lines", strings.Count(got, "\n")+1)
+	}
+	// One line over: singular "line", and the carried body stays capped.
+	got := capDirtyPorcelain(make(maxDirtyPorcelainLines + 1))
+	if !strings.HasSuffix(got, "… (1 more line truncated)") {
+		t.Fatalf("1-over truncation marker should be singular, got suffix %q", got[len(got)-40:])
+	}
+	if strings.Count(got, "?? f") != maxDirtyPorcelainLines {
+		t.Fatalf("carried output must be capped at %d lines", maxDirtyPorcelainLines)
+	}
+	// Two over: plural.
+	if got := capDirtyPorcelain(make(maxDirtyPorcelainLines + 2)); !strings.HasSuffix(got, "… (2 more lines truncated)") {
+		t.Fatalf("2-over truncation marker should be plural, got suffix %q", got[len(got)-40:])
+	}
+}

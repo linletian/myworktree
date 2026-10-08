@@ -6,10 +6,12 @@ import (
 	"io"
 	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 
 	"myworktree/internal/config"
+	"myworktree/internal/store"
 	"myworktree/internal/version"
 )
 
@@ -299,5 +301,148 @@ func captureStdin(t *testing.T, input string) (restore func()) {
 	return func() {
 		os.Stdin = oldStdin
 		r.Close()
+	}
+}
+
+// setupWorktreeDeleteCLI builds a real git repo with one registered managed
+// worktree and points the CLI at it (cwd + XDG_CONFIG_HOME), returning the
+// worktree path. The delete subcommand shells out to git, so only a real
+// repo exercises it honestly.
+func setupWorktreeDeleteCLI(t *testing.T) string {
+	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is required")
+	}
+	repo := t.TempDir()
+	// macOS: t.TempDir() lives under /var, a symlink to /private/var, while
+	// the CLI resolves the repo through `git rev-parse --show-toplevel`
+	// (which returns the REAL path) and keys the state dir off it — so the
+	// test must write state.json under the resolved path too, or the CLI
+	// looks up a different HashPath and never finds the worktree.
+	if resolved, err := filepath.EvalSymlinks(repo); err == nil {
+		repo = resolved
+	}
+	runGitCLI := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = repo
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v failed: %v (%s)", args, err, out)
+		}
+	}
+	runGitCLI("init")
+	runGitCLI("config", "user.name", "Test User")
+	runGitCLI("config", "user.email", "test@example.com")
+	if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("init\n"), 0o600); err != nil {
+		t.Fatalf("write seed: %v", err)
+	}
+	runGitCLI("add", "README.md")
+	runGitCLI("commit", "-m", "init")
+	wtDir := t.TempDir()
+	if resolved, err := filepath.EvalSymlinks(wtDir); err == nil {
+		wtDir = resolved
+	}
+	wtPath := filepath.Join(wtDir, "wt")
+	runGitCLI("worktree", "add", wtPath, "-b", "wt-branch")
+
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	dataDir, err := projectDataDir(repo)
+	if err != nil {
+		t.Fatalf("projectDataDir: %v", err)
+	}
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		t.Fatalf("mkdir dataDir: %v", err)
+	}
+	fs := store.FileStore{Path: filepath.Join(dataDir, "state.json")}
+	if err := fs.Save(store.State{
+		Worktrees: []store.ManagedWorktree{{ID: "wt1", Name: "wt1", Path: wtPath, Branch: "wt-branch"}},
+	}); err != nil {
+		t.Fatalf("save state: %v", err)
+	}
+
+	oldWd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	if err := os.Chdir(repo); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(oldWd) })
+	return wtPath
+}
+
+// TestRunWorktreeDeleteTrailingForceFlag pins the issue #102 review fix:
+// `myworktree worktree delete <id> --force` must actually force — Go's flag
+// package stops parsing at the first positional arg, so the previous
+// FlagSet-based parsing silently dropped a trailing --force and the user hit
+// the very refusal the message told them to retry past.
+func TestRunWorktreeDeleteTrailingForceFlag(t *testing.T) {
+	wtPath := setupWorktreeDeleteCLI(t)
+	// Dirty the worktree so only a forced delete can remove it.
+	if err := os.WriteFile(filepath.Join(wtPath, "scratch.txt"), []byte("x\n"), 0o600); err != nil {
+		t.Fatalf("write scratch: %v", err)
+	}
+
+	if code := Run([]string{"myworktree", "worktree", "delete", "wt1", "--force"}, log.New(io.Discard, "", 0)); code != 0 {
+		t.Fatalf("trailing --force delete should succeed, exit code %d", code)
+	}
+	if _, err := os.Stat(wtPath); !os.IsNotExist(err) {
+		t.Fatalf("trailing --force should delete the worktree, stat err=%v", err)
+	}
+}
+
+// TestRunWorktreeDeleteExtraPositionalFails pins the usage guard: anything
+// beyond the single id is a usage error, not a silently ignored argument.
+func TestRunWorktreeDeleteExtraPositionalFails(t *testing.T) {
+	setupWorktreeDeleteCLI(t)
+	if code := Run([]string{"myworktree", "worktree", "delete", "wt1", "wt2"}, log.New(io.Discard, "", 0)); code == 0 {
+		t.Fatal("extra positional args must fail with a usage error")
+	}
+}
+
+// TestRunWorktreeDeleteForceEqualsForms pins the second-review-round parsing
+// consistency: the hand-rolled scan must honor the --force=<bool> spelling
+// the flag-based subcommands accept, in any position.
+func TestRunWorktreeDeleteForceEqualsForms(t *testing.T) {
+	wtPath := setupWorktreeDeleteCLI(t)
+	if err := os.WriteFile(filepath.Join(wtPath, "scratch.txt"), []byte("x\n"), 0o600); err != nil {
+		t.Fatalf("write scratch: %v", err)
+	}
+
+	// --force=false must NOT force: the dirty delete is refused.
+	if code := Run([]string{"myworktree", "worktree", "delete", "wt1", "--force=false"}, log.New(io.Discard, "", 0)); code == 0 {
+		t.Fatal("--force=false should not force the delete of a dirty worktree")
+	}
+	if _, err := os.Stat(wtPath); err != nil {
+		t.Fatalf("refused delete must keep the path: %v", err)
+	}
+
+	// --force=true must force, trailing the id.
+	if code := Run([]string{"myworktree", "worktree", "delete", "wt1", "--force=true"}, log.New(io.Discard, "", 0)); code != 0 {
+		t.Fatalf("--force=true delete should succeed, exit code %d", code)
+	}
+	if _, err := os.Stat(wtPath); !os.IsNotExist(err) {
+		t.Fatalf("--force=true should delete the worktree, stat err=%v", err)
+	}
+}
+
+// TestRunWorktreeDeleteInvalidForceValueFails pins that a garbage
+// --force=<value> is a loud error, never a silent default.
+func TestRunWorktreeDeleteInvalidForceValueFails(t *testing.T) {
+	setupWorktreeDeleteCLI(t)
+	if code := Run([]string{"myworktree", "worktree", "delete", "wt1", "--force=maybe"}, log.New(io.Discard, "", 0)); code == 0 {
+		t.Fatal("--force=maybe must fail loudly")
+	}
+}
+
+// TestRunWorktreeDeleteDashDashTerminator pins that `--` ends flag
+// handling: everything after it is positional.
+func TestRunWorktreeDeleteDashDashTerminator(t *testing.T) {
+	wtPath := setupWorktreeDeleteCLI(t)
+	if code := Run([]string{"myworktree", "worktree", "delete", "--", "wt1"}, log.New(io.Discard, "", 0)); code != 0 {
+		t.Fatalf("delete -- wt1 should succeed on a clean worktree, exit code %d", code)
+	}
+	if _, err := os.Stat(wtPath); !os.IsNotExist(err) {
+		t.Fatalf("delete -- wt1 should remove the worktree, stat err=%v", err)
 	}
 }
