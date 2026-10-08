@@ -4669,9 +4669,11 @@
                 // (resetTTYOutputDecoder runs in ws.onclose) while the
                 // cursor has already stepped past them, so the character
                 // renders as U+FFFD where the pre-#94 full re-pull
-                // redelivered it — the same trade-off the LIVE path has
-                // always had, cosmetic only, and the split character is
-                // unrecoverable either way.
+                // redelivered it. "Either way" names the two paths that
+                // have ALREADY stepped the cursor past those lead bytes
+                // — this replay path post-#94 and the live path, which
+                // has always had the same trade-off: cosmetic only, and
+                // the split character is unrecoverable on both.
                 let handshakeSynced = false;
                 let handshakeTimeout = null;
                 let connectTimeout = setTimeout(() => {

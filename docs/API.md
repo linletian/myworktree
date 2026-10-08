@@ -677,7 +677,7 @@ conflate them:
    ahead of the FIRST binary frame. Sent on every replay addressed to a
    cursor-bearing client (the streamed catch-up AND the beyond-head tail
    degrade); skipped only by the cursor-less first-connect tail and by
-   empty replays. Same opt-in as the closing sync in step 5 — every client
+   empty replays. Same opt-in as the closing sync in step 6 — every client
    that receives it provably parses `"sync"`, and a client that ignores
    the `start` marker is merely back to the pre-#94 behaviour of waiting
    for the closing sync

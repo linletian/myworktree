@@ -951,23 +951,28 @@ func TestHandleInstanceTTYWS_MidReplayResumeContinuesFromRenderedBytes(t *testin
 	}
 }
 
-// TestHandleInstanceTTYWS_StartSyncOnlyOnTheStreamingCatchUpPath pins the
-// boundaries of the issue #94 frame: only a replay that STREAMS CHUNKS
-// announces its start — the tail replay (a single ≤64KB frame whose death
-// window is the pre-#87 one), the sinceFollowLiveEnd path (zero binary
-// frames by design, AC of #86 untouched) and the caught-up-at-head consult
-// exit (nothing to announce) all emit the closing sync ALONE.
-func TestHandleInstanceTTYWS_StartSyncOnlyOnTheStreamingCatchUpPath(t *testing.T) {
+// TestHandleInstanceTTYWS_StartSyncOnlyForChunkedReplaysWithACursor pins the
+// boundaries of the issue #94 frame. The contract is: EVERY replay CHUNK
+// addressed to a cursor-bearing client is preceded by a start frame — the
+// streamed catch-up (pinned by the resume/budget tests above) AND the
+// single-frame beyond-head degrade (pinned by
+// TestHandleInstanceTTYWS_CursorAheadOfHeadFallsBackToTail). What this test
+// pins is the other side, the three paths that must send the closing sync
+// ALONE: the CURSOR-LESS tail replay (no cursor to advance — and such a
+// client may not parse `sync` at all, so that path's syncCap is a genuine
+// gate), the sinceFollowLiveEnd path and the caught-up-at-head consult
+// exit (both cursor-bearing, but zero chunks to announce).
+func TestHandleInstanceTTYWS_StartSyncOnlyForChunkedReplaysWithACursor(t *testing.T) {
 	t.Parallel()
 	k := newTTYHandshakeKind(1024)
 	addr, _, instID, _ := ttyWSTestServer(t, k)
 	k.buf.WriteString("tail-body") // head = 9
 
-	// Tail path: no `since` at all.
+	// Tail path: no `since` at all — the one CURSOR-LESS replay.
 	c1, _, start1, sync1 := dialHandshakeStart(t, addr, ttyWSPath(instID, "caps=sync"))
 	_ = c1.Close()
 	if start1 != -1 {
-		t.Fatalf("tail replay announced a start offset %d — a single ≤64KB frame has the pre-#87 death window and needs none", start1)
+		t.Fatalf("tail replay announced a start offset %d — the client holds no cursor to advance (and may not parse sync at all), so the single ≤64KB frame keeps the pre-#87 death window", start1)
 	}
 	if sync1 != 9 {
 		t.Fatalf("tail replay sync = %d, want head 9", sync1)
