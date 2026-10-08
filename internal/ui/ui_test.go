@@ -441,6 +441,32 @@ func TestEmptyWorktreeSwitchHidesAllWebPanels(t *testing.T) {
 	}
 }
 
+// TestWorktreeDirtyDeleteDialog pins the issue #102 UI contract: a
+// dirty-worktree delete refusal is STRUCTURED (error code "worktree_dirty"
+// plus a breakdown), and the dashboard must open the details dialog —
+// summary, collapsible full git status output, the gitignored force-risk
+// warning — with the force-delete exit behind a two-step confirm, instead
+// of the old flat alert that hid what force would destroy.
+func TestWorktreeDirtyDeleteDialog(t *testing.T) {
+	indexJS := fetchStaticAsset(t, "/")
+
+	checks := []struct{ what, anchor string }{
+		{"the dirty-details dialog exists", `id="modal-wt-dirty"`},
+		{"deleteWorktree matches the structured refusal code", `e.body.error === "worktree_dirty"`},
+		{"the refusal routes to the dialog", "showWorktreeDirtyDialog(id, e.body)"},
+		{"the force exit resends with force:true", `{ id, force: true }`},
+		{"the collapsible full git status output is rendered", "wt-dirty-porcelain"},
+		{"the gitignored force-risk warning is rendered", "wt-dirty-ignored"},
+		{"the force delete is a two-step confirm", "Confirm force delete?"},
+		{"the confirm state resets per open", `btn.dataset.confirm = ""`},
+	}
+	for _, c := range checks {
+		if !strings.Contains(indexJS, c.anchor) {
+			t.Fatalf("index.html: %s — anchor %q not found (issue #102)", c.what, c.anchor)
+		}
+	}
+}
+
 func TestReasonixRendererKeepsFrameAlive(t *testing.T) {
 	mux := http.NewServeMux()
 	if err := Register(mux, "myworktree", nil); err != nil {

@@ -318,7 +318,113 @@ func (m Manager) worktreesRoot() (root string, legacy bool, err error) {
 	return filepath.Join(m.GitRoot, v), false, nil
 }
 
-func (m Manager) Delete(id string) error {
+// DirtyWorktreeError is returned by Delete when the worktree carries
+// uncommitted or untracked changes and force was not set (issue #102). It
+// carries the full breakdown so API clients can render the details: the
+// previous flat message — "worktree has uncommitted or untracked changes;
+// delete is refused" — gave no way to tell "I left a scratch file" (low
+// risk) from "133 tracked source files vanished BEFORE the delete attempt"
+// (the workspace is damaged; restore it instead of deleting), two
+// situations that demand OPPOSITE reactions.
+type DirtyWorktreeError struct {
+	Entries    int      // total git status --porcelain lines
+	Deleted    int      // lines with D in either status column
+	Modified   int      // remaining modification lines (M/T/U in either column)
+	Added      int      // lines with A in either status column
+	Renamed    int      // lines with R/C in either status column
+	Untracked  int      // "??" lines
+	Ignored    int      // gitignored entries present — invisible to the blocking check (which runs without --ignored) but destroyed unrecoverably by a force delete
+	FirstPaths []string // up to maxDirtyFirstPaths raw path fields, in status order
+	Porcelain  string   // the full git status --porcelain output, for UI expansion
+}
+
+// maxDirtyFirstPaths caps how many paths the refusal message names inline;
+// the full list is always available in Porcelain.
+const maxDirtyFirstPaths = 5
+
+func (e *DirtyWorktreeError) Error() string {
+	entryWord := "entries"
+	if e.Entries == 1 {
+		entryWord = "entry"
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "worktree has uncommitted or untracked changes; delete is refused: %d %s (%d deleted, %d modified, %d untracked",
+		e.Entries, entryWord, e.Deleted, e.Modified, e.Untracked)
+	if e.Added > 0 {
+		fmt.Fprintf(&b, ", %d added", e.Added)
+	}
+	if e.Renamed > 0 {
+		fmt.Fprintf(&b, ", %d renamed", e.Renamed)
+	}
+	b.WriteString(")")
+	if len(e.FirstPaths) > 0 {
+		fmt.Fprintf(&b, "; first paths: %s", strings.Join(e.FirstPaths, ", "))
+	}
+	if e.Ignored > 0 {
+		fmt.Fprintf(&b, "; additionally %d gitignored %s present, which a force delete would destroy unrecoverably",
+			e.Ignored, map[bool]string{true: "entry", false: "entries"}[e.Ignored == 1])
+	}
+	b.WriteString("; retry with force to delete anyway")
+	return b.String()
+}
+
+// summarizePorcelain classifies `git status --porcelain` (v1) lines into the
+// DirtyWorktreeError buckets. Every classified line counts in EXACTLY ONE
+// bucket — the two status columns collapse by priority
+// (delete > rename > add > modify) — so the buckets always sum to Entries.
+// "??" lines are untracked; "!!" ignored lines are skipped outright (they
+// never occur here in production — the blocking check runs without
+// --ignored). FirstPaths is capped at maxDirtyFirstPaths.
+func (e *DirtyWorktreeError) summarizePorcelain(out string) {
+	for _, line := range strings.Split(out, "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		if strings.HasPrefix(line, "!!") {
+			// Ignored entries never reach this summary in production
+			// (the blocking check runs WITHOUT --ignored); skip them
+			// defensively so a caller passing the --ignored output
+			// cannot misclassify them as modifications.
+			continue
+		}
+		e.Entries++
+		xy, path := line, ""
+		if len(line) >= 3 {
+			xy = line[:2]
+			path = strings.TrimSpace(line[3:])
+		}
+		switch {
+		case xy == "??":
+			e.Untracked++
+		case strings.ContainsAny(xy, "D"):
+			e.Deleted++
+		case strings.ContainsAny(xy, "RC"):
+			e.Renamed++
+		case strings.ContainsAny(xy, "A"):
+			e.Added++
+		default:
+			e.Modified++
+		}
+		if path != "" && len(e.FirstPaths) < maxDirtyFirstPaths {
+			e.FirstPaths = append(e.FirstPaths, path)
+		}
+	}
+}
+
+// countIgnoredPorcelain counts the "!!" entries of a
+// `git status --porcelain --ignored` run — the gitignored files/dirs the
+// plain dirty check never sees (issue #102: 89 gitignored files, 64 of them
+// single-copy, survived the dirty check unnoticed in the report).
+func countIgnoredPorcelain(out string) (n int) {
+	for _, line := range strings.Split(out, "\n") {
+		if strings.HasPrefix(line, "!!") {
+			n++
+		}
+	}
+	return n
+}
+
+func (m Manager) Delete(id string, force bool) error {
 	st, err := m.Store.Load()
 	if err != nil {
 		return err
@@ -347,17 +453,41 @@ func (m Manager) Delete(id string) error {
 			return fmt.Errorf("git worktree prune failed: %w: %s", err, strings.TrimSpace(string(out)))
 		}
 	} else {
-		// Strict: refuse to delete if dirty.
+		// Strict: refuse to delete if dirty (unless force). The refusal
+		// carries the full breakdown — counts by category, first paths,
+		// and the gitignored-file risk a force delete would destroy
+		// (issue #102): the flat "delete is refused" message made a
+		// damaged workspace (tracked files missing) indistinguishable
+		// from a leftover scratch file.
 		cmdStatus := gitx.GitCommand(10*time.Second, wt.Path, "status", "--porcelain")
 		statusOut, err := cmdStatus.Output()
 		if err != nil {
 			return fmt.Errorf("git status failed: %w", err)
 		}
-		if strings.TrimSpace(string(statusOut)) != "" {
-			return errors.New("worktree has uncommitted or untracked changes; delete is refused")
+		porcelain := strings.TrimSpace(string(statusOut))
+		if porcelain != "" && !force {
+			dirty := &DirtyWorktreeError{Porcelain: porcelain}
+			dirty.summarizePorcelain(porcelain)
+			// Ignored files do NOT block the delete (the check above
+			// runs without --ignored), so name the risk explicitly: a
+			// force delete destroys them unrecoverably (issue #102 P3).
+			// A failed count is not worth failing the refusal over —
+			// the dirty entries alone justify it.
+			cmdIgnored := gitx.GitCommand(10*time.Second, wt.Path, "status", "--porcelain", "--ignored")
+			if ignoredOut, ignoredErr := cmdIgnored.Output(); ignoredErr == nil {
+				dirty.Ignored = countIgnoredPorcelain(string(ignoredOut))
+			}
+			return dirty
 		}
 
-		cmd := gitx.GitCommand(10*time.Second, m.GitRoot, "worktree", "remove", wt.Path)
+		args := []string{"worktree", "remove"}
+		if force {
+			// `git worktree remove` refuses a dirty worktree on its own;
+			// --force is the explicit override the caller opted into.
+			args = append(args, "--force")
+		}
+		args = append(args, wt.Path)
+		cmd := gitx.GitCommand(10*time.Second, m.GitRoot, args...)
 		removeOut, err := cmd.CombinedOutput()
 		if err != nil {
 			return fmt.Errorf("git worktree remove failed: %w: %s", err, strings.TrimSpace(string(removeOut)))

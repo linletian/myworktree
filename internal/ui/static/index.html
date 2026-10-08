@@ -1640,6 +1640,37 @@
         </div>
     </dialog>
 
+    <!-- Modal: worktree delete refused — uncommitted/untracked changes
+         (issue #102). The flat refusal used to hide whether the user had
+         left a scratch file or the workspace had been damaged beforehand;
+         this dialog shows the server's breakdown, the full git status
+         output (collapsible), the gitignored-file force risk, and the
+         force-delete exit behind a two-step confirm. -->
+    <dialog id="modal-wt-dirty">
+        <div class="modal-titlebar">
+            <span class="modal-title">Worktree has uncommitted changes</span>
+            <button class="modal-close-btn" onclick="closeWorktreeDirtyDialog()" title="Close">
+                <svg width="10" height="10" viewBox="0 0 10 10" fill="none" xmlns="http://www.w3.org/2000/svg">
+                    <line x1="1" y1="1" x2="9" y2="9" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                    <line x1="9" y1="1" x2="1" y2="9" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                </svg>
+            </button>
+        </div>
+        <div class="modal-body">
+            <p id="wt-dirty-summary" style="margin-bottom: 12px; line-height: 1.5;"></p>
+            <div id="wt-dirty-ignored" class="form-warning" hidden></div>
+            <details style="margin-bottom: 4px;">
+                <summary style="cursor: pointer; color: var(--text-secondary); font-size: 13px;">Full git status output</summary>
+                <pre id="wt-dirty-porcelain" style="max-height: 240px; overflow: auto; padding: 8px; border-radius: 6px; font-size: 12px; line-height: 1.5; white-space: pre-wrap; background: var(--hover-bg);"></pre>
+            </details>
+            <div class="form-actions" style="flex-wrap: wrap; justify-content: flex-start; gap: 8px;">
+                <button class="danger" id="wt-dirty-force" onclick="forceDeleteDirtyWorktree()">Force delete</button>
+                <button onclick="closeWorktreeDirtyDialog()">Cancel</button>
+            </div>
+            <p id="wt-dirty-error" style="margin-top: 10px; color: #991b1b; font-size: 13px; white-space: pre-wrap;" hidden></p>
+        </div>
+    </dialog>
+
     <!-- Modal: Resource Monitor -->
     <dialog id="modal-monitor">
         <div class="modal-titlebar">
@@ -3331,7 +3362,85 @@
                 await api("/api/worktrees/delete", { method: "POST", body: JSON.stringify({ id }) });
                 if (state.activeWT === id) state.activeWT = null;
                 await refresh();
-            } catch (e) { alert(e); }
+            } catch (e) {
+                // Issue #102: a dirty-worktree refusal is structured — open
+                // the details dialog (breakdown, full git status output,
+                // gitignored-file risk, force exit) instead of a flat alert.
+                if (e && e.body && e.body.error === "worktree_dirty") {
+                    showWorktreeDirtyDialog(id, e.body);
+                    return;
+                }
+                alert(e);
+            }
+        }
+
+        // Worktree dirty-delete dialog (issue #102). The refusal used to
+        // say only "delete is refused" — indistinguishable between "a
+        // scratch file was left" and "the workspace was damaged
+        // beforehand" (133 tracked files missing in the report). The
+        // server now sends the breakdown; this dialog renders it and
+        // offers the force-delete exit behind a two-step confirm.
+        let dirtyDeleteID = null;
+
+        function showWorktreeDirtyDialog(id, body) {
+            dirtyDeleteID = id;
+            const d = (body && body.dirty) || {};
+            const entries = d.entries || 0;
+            let summary = entries + " uncommitted entr" + (entries === 1 ? "y" : "ies") +
+                " (" + (d.deleted || 0) + " deleted, " + (d.modified || 0) + " modified, " + (d.untracked || 0) + " untracked" +
+                (d.added ? ", " + d.added + " added" : "") + (d.renamed ? ", " + d.renamed + " renamed" : "") + ").";
+            if (d.first_paths && d.first_paths.length) {
+                summary += " First paths: " + d.first_paths.join(", ") + ".";
+            }
+            document.getElementById('wt-dirty-summary').textContent = summary;
+            const ignoredEl = document.getElementById('wt-dirty-ignored');
+            if (d.ignored > 0) {
+                ignoredEl.textContent = "⚠ " + d.ignored + " gitignored entr" + (d.ignored === 1 ? "y" : "ies") +
+                    " (build caches, logs, backups) exist only in this worktree — the dirty check does not block on them, but force delete destroys them unrecoverably.";
+                ignoredEl.hidden = false;
+            } else {
+                ignoredEl.hidden = true;
+            }
+            document.getElementById('wt-dirty-porcelain').textContent = d.porcelain || "";
+            const errorEl = document.getElementById('wt-dirty-error');
+            errorEl.hidden = true;
+            // Reset the two-step confirm on every open.
+            const btn = document.getElementById('wt-dirty-force');
+            btn.dataset.confirm = "";
+            btn.textContent = "Force delete";
+            document.getElementById('modal-wt-dirty').showModal();
+        }
+
+        function closeWorktreeDirtyDialog() {
+            const dlg = document.getElementById('modal-wt-dirty');
+            if (dlg && dlg.open) dlg.close();
+            dirtyDeleteID = null;
+        }
+
+        async function forceDeleteDirtyWorktree() {
+            const id = dirtyDeleteID;
+            if (!id) return;
+            const btn = document.getElementById('wt-dirty-force');
+            // Two-step confirm (same pattern as the dsh install button):
+            // force delete is unrecoverable — tracked changes AND every
+            // gitignored file vanish with the directory.
+            if (btn.dataset.confirm !== "1") {
+                btn.dataset.confirm = "1";
+                btn.textContent = "Confirm force delete? All changes and gitignored files are destroyed";
+                return;
+            }
+            const errorEl = document.getElementById('wt-dirty-error');
+            try {
+                await api("/api/worktrees/delete", { method: "POST", body: JSON.stringify({ id, force: true }) });
+                closeWorktreeDirtyDialog();
+                if (state.activeWT === id) state.activeWT = null;
+                await refresh();
+            } catch (e) {
+                btn.dataset.confirm = "";
+                btn.textContent = "Force delete";
+                errorEl.hidden = false;
+                errorEl.textContent = (e && e.message) || String(e);
+            }
         }
 
         async function doStartInstance() {

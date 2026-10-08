@@ -1131,16 +1131,51 @@ func (s *Server) handleWorktreeDelete(w http.ResponseWriter, r *http.Request) {
 	}
 	var req struct {
 		ID string `json:"id"`
+		// Force deletes even with uncommitted/untracked changes (issue
+		// #102). The refusal answer lists what force would destroy —
+		// including gitignored files the dirty check never blocks on —
+		// so a client that resends with force has seen the cost.
+		Force bool `json:"force"`
 	}
 	if err := readJSON(r.Body, &req); err != nil {
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
-	if err := s.worktreeMgr.Delete(req.ID); err != nil {
+	if err := s.worktreeMgr.Delete(req.ID, req.Force); err != nil {
+		var dirty *worktree.DirtyWorktreeError
+		if errors.As(err, &dirty) {
+			writeWorktreeDirtyErr(w, dirty)
+			return
+		}
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// writeWorktreeDirtyErr writes the structured 409 answer for a refused
+// worktree delete (issue #102). The "error" code "worktree_dirty" is part
+// of the API contract — the dashboard matches on it to open the
+// dirty-details dialog (summary, collapsible full git status output,
+// gitignored-file warning, and the force-delete exit) instead of a
+// generic alert. "message" carries the same one-line summary for clients
+// that only surface error text.
+func writeWorktreeDirtyErr(w http.ResponseWriter, dirty *worktree.DirtyWorktreeError) {
+	writeJSON(w, http.StatusConflict, map[string]any{
+		"error":   "worktree_dirty",
+		"message": dirty.Error(),
+		"dirty": map[string]any{
+			"entries":     dirty.Entries,
+			"deleted":     dirty.Deleted,
+			"modified":    dirty.Modified,
+			"added":       dirty.Added,
+			"renamed":     dirty.Renamed,
+			"untracked":   dirty.Untracked,
+			"ignored":     dirty.Ignored,
+			"first_paths": dirty.FirstPaths,
+			"porcelain":   dirty.Porcelain,
+		},
+	})
 }
 
 // resolveWorktreePath returns the filesystem path for a worktree id.
@@ -3157,12 +3192,15 @@ func (s *Server) handleMCPCall(w http.ResponseWriter, r *http.Request) {
 	case "worktree_delete":
 		var args struct {
 			ID string `json:"id"`
+			// Force: same semantics as /api/worktrees/delete (issue
+			// #102) — delete even with uncommitted/untracked changes.
+			Force bool `json:"force"`
 		}
 		if err := decodeArgs(req.Args, &args); err != nil {
 			writeErr(w, http.StatusBadRequest, err)
 			return
 		}
-		if err := s.worktreeMgr.Delete(args.ID); err != nil {
+		if err := s.worktreeMgr.Delete(args.ID, args.Force); err != nil {
 			writeErr(w, http.StatusBadRequest, err)
 			return
 		}

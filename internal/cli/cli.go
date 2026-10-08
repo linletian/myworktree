@@ -209,10 +209,16 @@ func worktreeCmd(logger *log.Logger, args []string) error {
 		return nil
 
 	case "delete":
-		if len(args) < 2 {
-			return fmt.Errorf("usage: myworktree worktree delete <id>")
+		fs := flag.NewFlagSet("worktree delete", flag.ContinueOnError)
+		var force bool
+		fs.BoolVar(&force, "force", false, "delete even with uncommitted or untracked changes; gitignored files are destroyed unrecoverably (issue #102)")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
 		}
-		return mgr.Delete(args[1])
+		if fs.NArg() < 1 {
+			return fmt.Errorf("usage: myworktree worktree delete [--force] <id>")
+		}
+		return mgr.Delete(fs.Arg(0), force)
 
 	default:
 		return fmt.Errorf("unknown worktree subcommand: %s", args[0])

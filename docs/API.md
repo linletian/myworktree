@@ -88,18 +88,54 @@ Body:
 
 Response (201): same as create.
 
-### Delete (strict: refuses if dirty)
+### Delete (strict: refuses if dirty, unless forced)
 `POST /api/worktrees/delete`
 
 Body:
 ```json
-{ "id": "<worktreeId>" }
+{ "id": "<worktreeId>", "force": false }
 ```
+
+- `force` (optional, default `false`, issue #102): delete even with
+  uncommitted or untracked changes. The refusal response lists everything
+  force would destroy — including gitignored files the dirty check never
+  blocks on — so a client that resends with `force: true` has seen the cost.
+  Force delete is unrecoverable: tracked changes AND every gitignored file
+  vanish with the directory.
 
 Response:
 ```json
 { "status": "ok" }
 ```
+
+Refusal (409, dirty worktree and no force): the `error` code
+`"worktree_dirty"` is part of the API contract — the dashboard matches on it
+to open the dirty-details dialog instead of a generic alert. `message`
+carries the one-line summary for text-only clients; `dirty` carries the full
+breakdown (issue #102: the old flat "delete is refused" message made a
+beforehand-damaged workspace indistinguishable from a leftover scratch file):
+```json
+{
+  "error": "worktree_dirty",
+  "message": "worktree has uncommitted or untracked changes; delete is refused: 3 entries (1 deleted, 0 modified, 2 untracked); first paths: .gitignore, README.md, scratch.txt; additionally 1 gitignored entry present, which a force delete would destroy unrecoverably; retry with force to delete anyway",
+  "dirty": {
+    "entries": 3,
+    "deleted": 1,
+    "modified": 0,
+    "added": 0,
+    "renamed": 0,
+    "untracked": 2,
+    "ignored": 1,
+    "first_paths": [".gitignore", "README.md", "scratch.txt"],
+    "porcelain": "?? .gitignore\n D README.md\n?? scratch.txt"
+  }
+}
+```
+`ignored` counts `git status --porcelain --ignored` "!!" entries — gitignored
+files/dirs that do NOT block the delete (the blocking check runs without
+`--ignored`) but a force delete destroys unrecoverably. The same `force`
+flag exists on the MCP `worktree_delete` verb and as
+`myworktree worktree delete --force <id>` on the CLI.
 
 ### Open Terminal (host macOS)
 `POST /api/worktrees/open-terminal`
