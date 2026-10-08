@@ -339,7 +339,8 @@ type DirtyWorktreeError struct {
 }
 
 // maxDirtyFirstPaths caps how many paths the refusal message names inline;
-// the full list is always available in Porcelain.
+// the remaining paths are in Porcelain (itself capped at
+// maxDirtyPorcelainLines lines).
 const maxDirtyFirstPaths = 5
 
 // maxDirtyPorcelainLines bounds the status output carried in the refusal.
@@ -355,7 +356,12 @@ func capDirtyPorcelain(out string) string {
 	if len(lines) <= maxDirtyPorcelainLines {
 		return out
 	}
-	return fmt.Sprintf("%s\n… (%d more lines truncated)", strings.Join(lines[:maxDirtyPorcelainLines], "\n"), len(lines)-maxDirtyPorcelainLines)
+	rest := len(lines) - maxDirtyPorcelainLines
+	word := "lines"
+	if rest == 1 {
+		word = "line"
+	}
+	return fmt.Sprintf("%s\n… (%d more %s truncated)", strings.Join(lines[:maxDirtyPorcelainLines], "\n"), rest, word)
 }
 
 func (e *DirtyWorktreeError) Error() string {
@@ -524,6 +530,11 @@ func (m Manager) Delete(id string, force bool) (int, error) {
 			// destroys every gitignored file with the directory. Count
 			// them so callers can surface the loss; ignoring the count's
 			// error keeps a broken probe from blocking a clean delete.
+			// Edge case (second review round): on a pathologically large
+			// ignored tree the probe can hit the 10 s GitCommand timeout,
+			// which leaves the count at 0 — accepted, because blocking a
+			// legitimate clean delete on a counting failure is worse than
+			// occasionally missing the note.
 			cmdIgnored := gitx.GitCommand(10*time.Second, wt.Path, "-c", "core.quotePath=false", "status", "--porcelain", "--ignored", "-uall")
 			if ignoredOut, ignoredErr := cmdIgnored.Output(); ignoredErr == nil {
 				ignoredDestroyed = countIgnoredPorcelain(string(ignoredOut))

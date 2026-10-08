@@ -111,10 +111,14 @@ Response:
 the directory (issue #102 review): a worktree whose ONLY at-risk contents are
 gitignored files deletes without a refusal — the blocking check never sees
 them — so the success response carries the count and the dashboard surfaces
-it after the delete. It is 0 on the force path, where the status probe is
-skipped entirely (a damaged worktree can fail `git status` while
+it after the delete. **The field is present only when counted**: the force
+path skips the status probe (a damaged worktree can fail `git status` while
 `git worktree remove --force` still succeeds — force must not gate on the
-probe).
+probe), so a forced success OMITS the field rather than answering a 0 that
+would read as "none destroyed" while really meaning "not counted" (second
+review round). Counting itself is best-effort: a probe failure (e.g. the
+10 s timeout on a pathologically large ignored tree) never blocks a clean
+delete and leaves the count at 0.
 
 Refusal (409, dirty worktree and no force): the `error` code
 `"worktree_dirty"` is part of the API contract — the dashboard matches on it
@@ -149,12 +153,13 @@ marker, while counts always reflect the full output. The MCP
 `worktree_delete` verb takes the same `force` flag and answers a dirty
 refusal with the SAME 409 + `worktree_dirty` + `dirty` breakdown shape
 (issue #102 review — it previously returned a flat 400 MCP clients could not
-recognize programmatically); its success result also carries
-`ignored_destroyed`. The CLI spelling is
-`myworktree worktree delete [--force] <id>` — `--force` may appear before or
-after the id (issue #102 review: Go's flag parsing would otherwise silently
-drop a trailing flag), and a clean delete prints the destroyed gitignored
-count to stderr.
+recognize programmatically); its success result carries `ignored_destroyed`
+under the same present-only-when-counted rule (omitted on force). The CLI
+spelling is `myworktree worktree delete [--force] <id>` — `--force` may
+appear before or after the id (issue #102 review: Go's flag parsing would
+otherwise silently drop a trailing flag), the `--force=<bool>` spelling and
+the `--` terminator work as in the flag-based subcommands, and a clean
+delete prints the destroyed gitignored count to stderr.
 
 ### Open Terminal (host macOS)
 `POST /api/worktrees/open-terminal`

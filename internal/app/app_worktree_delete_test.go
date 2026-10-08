@@ -147,6 +147,16 @@ func TestHandleWorktreeDeleteForceDeletes(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200: %s", w.Code, w.Body.String())
 	}
+	// The force path skips the status probe, so ignored_destroyed must be
+	// ABSENT (not 0): 0 would read as "none destroyed" while really
+	// meaning "not counted" (second review round).
+	var okBody map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &okBody); err != nil {
+		t.Fatalf("invalid JSON: %v (%s)", err, w.Body.String())
+	}
+	if _, present := okBody["ignored_destroyed"]; present {
+		t.Fatalf("force success must omit ignored_destroyed (the probe was skipped), got %s", w.Body.String())
+	}
 	if _, err := os.Stat(wtPath); !os.IsNotExist(err) {
 		t.Fatalf("force delete should remove the path, err=%v", err)
 	}

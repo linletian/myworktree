@@ -1151,7 +1151,14 @@ func (s *Server) handleWorktreeDelete(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "ignored_destroyed": ignoredDestroyed})
+	// ignored_destroyed is present only when the count is meaningful: the
+	// force path skips the status probe, so there a 0 would read as "none
+	// destroyed" while really meaning "not counted" (second review round).
+	resp := map[string]any{"status": "ok"}
+	if !req.Force {
+		resp["ignored_destroyed"] = ignoredDestroyed
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // writeWorktreeDirtyErr writes the structured 409 answer for a refused
@@ -3215,7 +3222,13 @@ func (s *Server) handleMCPCall(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusBadRequest, err)
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"result": map[string]any{"status": "ok", "ignored_destroyed": ignoredDestroyed}})
+		// As in the HTTP handler, ignored_destroyed is present only when
+		// counted (the force path skips the probe).
+		result := map[string]any{"status": "ok"}
+		if !args.Force {
+			result["ignored_destroyed"] = ignoredDestroyed
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"result": result})
 	case "branch_list":
 		def, out, err := s.listTopBranches()
 		if err != nil {

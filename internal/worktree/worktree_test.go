@@ -127,3 +127,30 @@ func TestDirtyWorktreeErrorMessage(t *testing.T) {
 		}
 	}
 }
+
+func TestCapDirtyPorcelain(t *testing.T) {
+	make := func(n int) string {
+		lines := make([]string, n)
+		for i := range lines {
+			lines[i] = "?? f"
+		}
+		return strings.Join(lines, "\n")
+	}
+
+	// At or under the cap the output is carried verbatim.
+	if got := capDirtyPorcelain(make(maxDirtyPorcelainLines)); got != make(maxDirtyPorcelainLines) {
+		t.Fatalf("output at the cap must pass through unchanged, got %d lines", strings.Count(got, "\n")+1)
+	}
+	// One line over: singular "line", and the carried body stays capped.
+	got := capDirtyPorcelain(make(maxDirtyPorcelainLines + 1))
+	if !strings.HasSuffix(got, "… (1 more line truncated)") {
+		t.Fatalf("1-over truncation marker should be singular, got suffix %q", got[len(got)-40:])
+	}
+	if strings.Count(got, "?? f") != maxDirtyPorcelainLines {
+		t.Fatalf("carried output must be capped at %d lines", maxDirtyPorcelainLines)
+	}
+	// Two over: plural.
+	if got := capDirtyPorcelain(make(maxDirtyPorcelainLines + 2)); !strings.HasSuffix(got, "… (2 more lines truncated)") {
+		t.Fatalf("2-over truncation marker should be plural, got suffix %q", got[len(got)-40:])
+	}
+}
