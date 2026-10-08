@@ -304,6 +304,143 @@ func TestWebRenderersStoppedSwitchHidesAllFrames(t *testing.T) {
 	}
 }
 
+// sliceJSFunction returns index.html's top-level `function name(...) {…}`,
+// from the declaration to the start of the next (async) function declared
+// at the SAME indentation. The indent is read off the declaration line
+// rather than hardcoded: a re-indented script block must not silently
+// extend every slice to the end of the file, where assertions would match
+// text belonging to a different function and keep passing.
+func sliceJSFunction(t *testing.T, js, name string) string {
+	t.Helper()
+	start := strings.Index(js, "function "+name+"(")
+	if start < 0 {
+		t.Fatalf("index.html: function %s not found", name)
+	}
+	lineStart := strings.LastIndex(js[:start], "\n") + 1
+	indent := js[lineStart:start]
+	if strings.Trim(indent, " \t") != "" {
+		t.Fatalf("index.html: function %s is not declared at line start — cannot derive a slice end marker", name)
+	}
+	rest := js[start:]
+	end := len(rest)
+	for _, marker := range []string{"\n" + indent + "function ", "\n" + indent + "async function "} {
+		if i := strings.Index(rest, marker); i >= 0 && i < end {
+			end = i
+		}
+	}
+	return rest[:end]
+}
+
+// TestEmptyWorktreeSwitchHidesAllWebPanels pins the issue #101 fix: switching
+// to a worktree with ZERO instances must not leave the previous worktree's
+// dsh-web iframe on screen. Three defects combined: (A) renderWorkspace's
+// no-active-instance branch hid only the opencode/reasonix panels and forgot
+// #dsh-panel (whose CSS keeps it full-size until [hidden] is set); (B)
+// selectWorktree never called the previous renderer's deactivate()
+// (maybeDestroyInactiveStoppedSession's terminal-bucket guard returns early
+// for web instances), so the dsh-web panel stayed visible AND its background
+// polling kept running; (C) selectInstance(null) early-returns on the empty
+// worktree path, so its panel-hiding lines never execute there. The fix
+// extracts one hideWebPanels() helper as the single source of truth used by
+// renderWorkspace and selectInstance, and makes worktree switches deactivate the
+// previous renderer through the shared deactivateInstanceRenderer helper
+// (without selectInstance's prevRenderer !== renderer guard — a worktree
+// switch is always a full leave), synchronously, in BOTH switch entry
+// points: selectWorktree and selectWorktreeByID (create/import flows).
+func TestEmptyWorktreeSwitchHidesAllWebPanels(t *testing.T) {
+	indexJS := fetchStaticAsset(t, "/")
+
+	// (A) One helper hides ALL three web panels — adding a kind and hiding
+	// only the older panels is exactly how #dsh-panel was forgotten.
+	helper := sliceJSFunction(t, indexJS, "hideWebPanels")
+	for _, panelID := range []string{"'opencode-panel'", "'reasonix-panel'", "'dsh-panel'"} {
+		if !strings.Contains(helper, panelID) {
+			t.Fatalf("hideWebPanels() does not hide %s — a forgotten panel stays visible over the empty state (issue #101)", panelID)
+		}
+	}
+
+	// renderWorkspace's no-active-instance branch must hide every web panel
+	// through the shared helper (this is the branch the empty worktree lands
+	// on, and it is the visual backstop for every path into it).
+	rw := sliceJSFunction(t, indexJS, "renderWorkspace")
+	emptyStart := strings.Index(rw, `empty.style.display = "block";`)
+	if emptyStart < 0 {
+		t.Fatal("renderWorkspace lost its no-active-instance branch (empty.style.display = \"block;\")")
+	}
+	emptyEnd := strings.Index(rw[emptyStart:], "renderTerminalSessions();")
+	if emptyEnd < 0 {
+		t.Fatal("renderWorkspace empty branch does not end in renderTerminalSessions(); anymore — re-check the slice")
+	}
+	emptyBranch := rw[emptyStart : emptyStart+emptyEnd]
+	if !strings.Contains(emptyBranch, "hideWebPanels()") {
+		t.Fatal("renderWorkspace's empty branch does not hide all web panels — a previous worktree's web iframe covers the empty state (issue #101)")
+	}
+	// The non-web active-instance branch hides panels too; it must use the
+	// same helper rather than an inline subset that can forget a kind.
+	if !strings.Contains(rw[:emptyStart], "hideWebPanels()") {
+		t.Fatal("renderWorkspace's non-web branch no longer hides web panels via hideWebPanels()")
+	}
+
+	// selectInstance hides panels before dispatching to the kind renderer;
+	// it must go through the same helper, not an inline copy that can drift.
+	si := sliceJSFunction(t, indexJS, "selectInstance")
+	if !strings.Contains(si, "hideWebPanels()") {
+		t.Fatal("selectInstance no longer hides web panels via hideWebPanels() — the two call sites can drift (issue #101)")
+	}
+
+	// (B) selectWorktree must deactivate the previous instance's renderer so
+	// web kinds hide their panel and stop polling. It must NOT carry
+	// selectInstance's prevRenderer !== renderer guard: a worktree switch is
+	// always a full leave, and the guard would skip deactivation whenever the
+	// auto-selected instance of the target worktree shares the kind.
+	// Assert the POSITION, not just presence: render() → renderWorkspace
+	// reads the just-nulled state.activeInst and paints the empty state, so
+	// a deactivate() that ran after render() would flash that empty state
+	// over the still-visible old iframe — the exact #101 symptom class.
+	sw := sliceJSFunction(t, indexJS, "selectWorktree")
+	deactIdx := strings.Index(sw, "deactivateInstanceRenderer(previousID)")
+	if deactIdx < 0 {
+		t.Fatal("selectWorktree does not deactivate the previous renderer — web iframes stay visible and keep polling across worktree switches (issue #101)")
+	}
+	assignIdx := strings.Index(sw, "state.activeWT = id;")
+	if assignIdx < 0 || deactIdx > assignIdx {
+		t.Fatal("selectWorktree deactivates the previous renderer only after state.activeWT = id — render() then paints the new worktree's empty state over the still-visible old iframe (issue #101)")
+	}
+	if strings.Contains(sw, "prevRenderer !== renderer") {
+		t.Fatal("selectWorktree must deactivate unconditionally — the prevRenderer !== renderer guard skips same-kind leaves (issue #101)")
+	}
+
+	// The shared leave helper deactivates through the renderer registry and
+	// skips unresolvable ids: on a concurrent deletion the 'pty' fallback
+	// would deactivate the wrong renderer while a web renderer is on screen.
+	leave := sliceJSFunction(t, indexJS, "deactivateInstanceRenderer")
+	if !strings.Contains(leave, ".deactivate()") {
+		t.Fatal("deactivateInstanceRenderer does not call renderer.deactivate() (issue #101)")
+	}
+	if !strings.Contains(leave, "if (!inst) return;") {
+		t.Fatal("deactivateInstanceRenderer lost its unresolvable-id skip — the 'pty' fallback deactivates the wrong renderer (issue #101 review)")
+	}
+
+	// selectWorktreeByID (the create/import flows' switch) must run the
+	// same synchronous leave cleanup: without it the old worktree's web
+	// iframe stays visible — and keeps polling — over the new worktree
+	// until the refresh round-trip finishes.
+	swb := sliceJSFunction(t, indexJS, "selectWorktreeByID")
+	for _, want := range []string{"deactivateInstanceRenderer(previousID)", "state.activeInst = null", "render();"} {
+		if !strings.Contains(swb, want) {
+			t.Fatalf("selectWorktreeByID is missing %q — it bypasses the worktree-switch cleanup and strands the previous renderer (issue #101 review)", want)
+		}
+	}
+	// Same ordering pin as selectWorktree's above: the deactivate must run
+	// BEFORE render(), or render() paints the new worktree's empty state
+	// over the still-visible old iframe — presence alone does not pin this.
+	swbDeact := strings.Index(swb, "deactivateInstanceRenderer(previousID)")
+	swbRender := strings.Index(swb, "render();")
+	if swbDeact < 0 || swbRender < 0 || swbDeact > swbRender {
+		t.Fatal("selectWorktreeByID deactivates the previous renderer only after render() — the empty state flashes over the still-visible old iframe (issue #101 review)")
+	}
+}
+
 func TestReasonixRendererKeepsFrameAlive(t *testing.T) {
 	mux := http.NewServeMux()
 	if err := Register(mux, "myworktree", nil); err != nil {
