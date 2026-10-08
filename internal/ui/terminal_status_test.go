@@ -36,6 +36,18 @@ func TestTerminalStatusHandling(t *testing.T) {
 // a file holding 27) — a hand-maintained count in prose is a claim nobody
 // checks. Derive it here instead: count the cases, then require the entry to
 // say the same thing.
+//
+// Issue #95: EVERY occurrence of the claim phrase must equal the derived
+// count, not just the first match. The previous first-match lookup silently
+// re-anchored the guard to whichever entry happened to sit highest in the
+// file (entries are prepended in reverse chronological order), so a new
+// entry quoting the phrase with a stale number would both hijack the
+// constraint and leave the real claim unchecked. Requiring every occurrence
+// to match makes the phrase position-independent — it now means "the file's
+// total case count" wherever it appears (subset counts use different
+// phrasing, e.g. #83's "fourteen new #83 cases"). Of the issue's two
+// proposals this was chosen over per-entry anchoring as the simpler
+// invariant to keep unambiguous as entries accumulate.
 func TestTerminalStatusChangelogCount(t *testing.T) {
 	src, err := os.ReadFile("testdata/terminal_status.test.mjs")
 	if err != nil {
@@ -50,13 +62,15 @@ func TestTerminalStatusChangelogCount(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read CHANGELOG.md: %v", err)
 	}
-	claimed := regexp.MustCompile(`Pinned by (\d+) ` + "`" + `node --test` + "`" + ` cases`).FindSubmatch(changelog)
-	if claimed == nil {
+	claims := regexp.MustCompile(`Pinned by (\d+) `+"`"+`node --test`+"`"+` cases`).FindAllSubmatch(changelog, -1)
+	if len(claims) == 0 {
 		t.Fatal("CHANGELOG.md no longer says \"Pinned by N `node --test` cases\"")
 	}
-	if got, err := strconv.Atoi(string(claimed[1])); err != nil || got != cases {
-		t.Fatalf("CHANGELOG.md claims %s `node --test` cases but testdata/terminal_status.test.mjs has %d",
-			claimed[1], cases)
+	for _, claimed := range claims {
+		if got, err := strconv.Atoi(string(claimed[1])); err != nil || got != cases {
+			t.Fatalf("CHANGELOG.md claims %s `node --test` cases but testdata/terminal_status.test.mjs has %d — EVERY occurrence of the phrase must state the file's total (issue #95)",
+				claimed[1], cases)
+		}
 	}
 }
 
