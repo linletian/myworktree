@@ -4648,14 +4648,21 @@
                 // first of them and could land PAST bytes the client never
                 // received — strictly worse than duplicating them. The sync
                 // frame is the only frame carrying an authoritative ABSOLUTE
-                // offset, so it is the one that moves the cursor, publishing
-                // the end offset of the whole replay in a single step. Blast
-                // radius if the socket dies in the replay→sync gap: the cursor
-                // never advanced, so the reconnect re-requests from where the
-                // client really was and re-paints up to
-                // ttyHandshakeReplayBudget (8MB) now that the replay streams,
-                // instead of a single 64KB frame — bounded duplication that
-                // self-corrects on that reconnect.
+                // offset, so it is the one that moves the cursor. A post-#94
+                // server sends it TWICE on the streaming catch-up path: a
+                // START sync ahead of the first replay chunk carrying the
+                // replay's real (clamped) start offset S, which lifts this
+                // latch at chunk 1 so the cursor advances frame-by-frame
+                // from S — a socket that dies mid-replay then resumes from
+                // the bytes already painted instead of re-pulling the whole
+                // replay — and the CLOSING sync after the last chunk
+                // carrying the end offset, which re-pins the cursor
+                // absolutely. Against a pre-#94 server only the closing
+                // sync arrives, and the blast radius of dying in the
+                // replay→sync gap is the old one: the cursor never advanced,
+                // so the reconnect re-requests from where the client really
+                // was and re-paints up to ttyHandshakeReplayBudget (8MB) —
+                // bounded duplication that self-corrects on that reconnect.
                 let handshakeSynced = false;
                 let handshakeTimeout = null;
                 let connectTimeout = setTimeout(() => {
@@ -4833,6 +4840,16 @@
                         // Handshake offset echo (issue #87): the server tells
                         // us the end offset of the replay it just sent, so a
                         // later reconnect can resume incrementally with it.
+                        // Since issue #94 the streaming catch-up path sends
+                        // this frame TWICE — a START sync (the replay's real,
+                        // possibly clamped, start offset) ahead of the first
+                        // binary chunk, then the CLOSING sync (the end
+                        // offset) after the last one. This handler needs no
+                        // distinction: every sync carries an ABSOLUTE offset,
+                        // so adopting it and lifting the latch is correct for
+                        // both — the start sync makes the per-frame advance
+                        // below truthful from chunk 1 on, and the closing
+                        // sync re-pins the same value the frames summed to.
                         if (Number.isFinite(controlMsg.offset) && controlMsg.offset >= 0) session.ttyOffset = controlMsg.offset;
                         handshakeSynced = true;
                         return;
@@ -4861,9 +4878,15 @@
                             // broadcast, so wire bytes and buffered bytes are
                             // the same bytes. BEFORE the latch the frames are
                             // still replay bytes and must not touch the
-                            // cursor: the sync frame that follows on the same
-                            // TCP stream publishes the authoritative end
-                            // offset of the entire replay in one step.
+                            // cursor: the replay need not start where we asked
+                            // (the stale-cursor clamp), so only an ABSOLUTE
+                            // offset may move it. Post-#94 that is the START
+                            // sync, which arrives ahead of the first replay
+                            // chunk, so the latch is normally already lifted
+                            // here and replay frames advance the cursor as
+                            // they paint; against a pre-#94 server the latch
+                            // lifts only at the closing sync, which publishes
+                            // the end offset of the entire replay in one step.
                             if (handshakeSynced) session.ttyOffset += u8.length;
                         }
                     } else if (session.term) {

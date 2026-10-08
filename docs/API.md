@@ -606,6 +606,31 @@ still in the ring buffer is silently clamped to the oldest live byte; a
 tail (beyond head, defensive) — the client's own number is never echoed back
 as authoritative.
 
+On that streaming catch-up path the replay is bracketed by TWO sync frames
+(issue #94). Ahead of the FIRST binary chunk the server sends
+`{"type":"sync","offset":<S>,"start":true}`, where S is the replay's real
+start offset: the first chunk's end offset minus its length, so S and the
+first chunk come from the same read — the requested `since` when no clamp
+happened, the clamped oldest live byte when it did, never the raw request
+value. The closing sync after the last chunk is unchanged. A client that
+adopts S on arrival may advance its cursor by every replay frame's wire
+length from chunk 1 on, so a connection that dies mid-replay resumes from
+the bytes it already rendered instead of re-pulling the whole (up to 8 MB)
+replay from its old cursor — under sustained network degradation the pre-#94
+behaviour does not converge. The frame REUSES the `"sync"` type rather than
+inventing a new one: every client that receives it already provably parses
+`"sync"` (the caps token, or the inferred explicit-`since` opt-in above —
+any catch-up request presents `since` by definition), its existing handler —
+adopt the absolute offset, lift the per-connection latch — is exactly the
+wanted semantics, and a new frame type would have to fight the stale-page
+leak class (issue #98) with a new capability gate. The `"start":true` field
+exists for consumers that must know WHEN the replay ends (test harnesses,
+third-party clients); the shipped UI deliberately ignores it and treats both
+sync frames alike, and S + Σ(replay frame bytes) always equals the closing
+offset. Paths that emit no streamed chunk — the tail replay (a single ≤64KB
+frame), `since=-2` (zero binary frames by design) and the caught-up-at-head
+exit — send the closing sync ALONE.
+
 In `since=-2` mode the published offset comes from `Manager.EndOffset` —
 the head read with a zero-length body, because there is no replay to attach
 it to. Two windows surround that read and they behave differently, so do not

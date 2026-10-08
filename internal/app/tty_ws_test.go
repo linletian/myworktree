@@ -447,16 +447,34 @@ func expectCloseFrame(t *testing.T, c *ws.Conn, code uint16, wantReason string) 
 }
 
 // dialHandshakeFrames dials, completes the handshake with the first
-// resize, and collects the replay up to the `sync` echo — but keeps the
-// binary frames SEPARATE, so a test can pin how the replay was chunked
+// resize, and collects the replay up to the CLOSING `sync` echo — but keeps
+// the binary frames SEPARATE, so a test can pin how the replay was chunked
 // (each frame is one streamed ring-buffer read, never the whole delta
 // re-buffered) without an extra concatenation copy.
 func dialHandshakeFrames(t *testing.T, addr, path string) (c *ws.Conn, frames [][]byte, syncOffset int64) {
+	t.Helper()
+	c, frames, _, syncOffset = dialHandshakeStart(t, addr, path)
+	return c, frames, syncOffset
+}
+
+// dialHandshakeStart is dialHandshakeFrames plus the replay's START offset
+// from the issue #94 start sync frame (-1 when none arrived: the tail
+// replay, the empty-replay consult exits and the sinceFollowLiveEnd path
+// emit only the closing sync). On the streaming catch-up path the replay is
+// bracketed by TWO sync frames — {"type":"sync","offset":S,"start":true}
+// ahead of the first binary chunk and the plain closing echo after the last
+// one — so the loop below stops only at a sync WITHOUT the start marker,
+// and pins the wire invariant that the start announcement precedes every
+// replay chunk. The "start" field itself is ignored by the in-repo client
+// (every sync carries an absolute offset to adopt); it exists so consumers
+// that must know WHEN the replay ends can tell the two frames apart.
+func dialHandshakeStart(t *testing.T, addr, path string) (c *ws.Conn, frames [][]byte, startOffset, syncOffset int64) {
 	t.Helper()
 	conn := dialTTY(t, addr, path)
 
 	sendResize(t, conn)
 
+	startOffset = -1
 	sawSync := false
 	for !sawSync {
 		op, p := readFrame(t, conn, 5*time.Second)
@@ -473,12 +491,23 @@ func dialHandshakeFrames(t *testing.T, addr, path string) (c *ws.Conn, frames []
 			var ctl struct {
 				Type   string `json:"type"`
 				Offset int64  `json:"offset"`
+				Start  bool   `json:"start"`
 			}
 			if err := json.Unmarshal(p, &ctl); err != nil {
 				t.Fatalf("control frame %q is not JSON: %v", p, err)
 			}
 			switch ctl.Type {
 			case "sync":
+				if ctl.Start {
+					if startOffset != -1 {
+						t.Fatalf("duplicate start sync frame: %q", p)
+					}
+					if len(frames) != 0 {
+						t.Fatalf("start sync arrived AFTER %d replay chunks — it must precede the first binary frame: %q", len(frames), p)
+					}
+					startOffset = ctl.Offset
+					continue
+				}
 				syncOffset = ctl.Offset
 				sawSync = true
 			case "resize":
@@ -494,7 +523,7 @@ func dialHandshakeFrames(t *testing.T, addr, path string) (c *ws.Conn, frames []
 			t.Fatalf("unexpected opcode %d during handshake", op)
 		}
 	}
-	return conn, frames, syncOffset
+	return conn, frames, startOffset, syncOffset
 }
 
 // dialHandshake dials the TTY endpoint, consumes the ready frame, sends
@@ -723,9 +752,16 @@ func TestHandleInstanceTTYWS_ReplayBudgetTruncatesAndPublishesLastWrittenOffset(
 	k.buf.Write(delta) // head = budget + 4 chunks
 	head := k.buf.Offset()
 
-	c, frames, syncOffset := dialHandshakeFrames(t, addr, ttyWSPath(instID, "since=0&caps=sync"))
+	c, frames, startOffset, syncOffset := dialHandshakeStart(t, addr, ttyWSPath(instID, "since=0&caps=sync"))
 	_ = c.WriteClose(ws.CloseMessage(1000, "bye"))
 	_ = c.Close()
+
+	// The start sync (issue #94) opened the replay at the requested cursor —
+	// no clamp below the oldest live byte applies here — and the client's
+	// frame-by-frame advance from it must land exactly on the closing offset.
+	if startOffset != 0 {
+		t.Fatalf("start sync offset = %d, want 0 (the replay starts at the requested cursor)", startOffset)
+	}
 
 	var delivered int64
 	for i, f := range frames {
@@ -747,6 +783,9 @@ func TestHandleInstanceTTYWS_ReplayBudgetTruncatesAndPublishesLastWrittenOffset(
 	if len(frames) != int(ttyHandshakeReplayBudget/(64*1024)) {
 		t.Fatalf("replay arrived as %d frames, want %d full 64KB chunks", len(frames), ttyHandshakeReplayBudget/(64*1024))
 	}
+	if startOffset+delivered != syncOffset {
+		t.Fatalf("start %d + delivered %d != sync offset %d — advancing the cursor per frame from the start offset must land exactly on the closing offset", startOffset, delivered, syncOffset)
+	}
 	// The published cursor is the end of the LAST chunk written, behind
 	// head: the remainder stays re-requestable.
 	if syncOffset != ttyHandshakeReplayBudget {
@@ -758,16 +797,201 @@ func TestHandleInstanceTTYWS_ReplayBudgetTruncatesAndPublishesLastWrittenOffset(
 
 	// Self-healing: a reconnect from the published cursor re-requests the
 	// bytes the budget deferred — the last 4 chunks — and catches up to
-	// head, so nothing was lost, only deferred.
-	c2, replay2, sync2 := dialHandshake(t, addr, ttyWSPath(instID, "since="+strconv.FormatInt(syncOffset, 10)+"&caps=sync"))
+	// head, so nothing was lost, only deferred. Its start sync must open
+	// exactly AT the published cursor: resuming, not restarting.
+	c2, frames2, start2, sync2 := dialHandshakeStart(t, addr, ttyWSPath(instID, "since="+strconv.FormatInt(syncOffset, 10)+"&caps=sync"))
 	_ = c2.WriteClose(ws.CloseMessage(1000, "bye"))
 	_ = c2.Close()
+	if start2 != syncOffset {
+		t.Fatalf("start sync of the re-request = %d, want the published cursor %d — the replay must resume where the truncated one stopped", start2, syncOffset)
+	}
+	var replay2 []byte
+	for _, f := range frames2 {
+		replay2 = append(replay2, f...)
+	}
 	want2 := delta[ttyHandshakeReplayBudget:]
-	if replay2 != string(want2) {
+	if !bytes.Equal(replay2, want2) {
 		t.Fatalf("re-request after truncation = %d bytes, want the %d deferred bytes — the budget must defer, never skip", len(replay2), len(want2))
 	}
 	if sync2 != head {
 		t.Fatalf("sync offset after the re-request = %d, want head %d — the deferred remainder must be recoverable in full", sync2, head)
+	}
+}
+
+// TestHandleInstanceTTYWS_ReplayStartOffsetPublishesClampedStart pins AC2 of
+// issue #94: when the requested `since` predates the oldest live byte,
+// ReadSince silently clamps to that byte — and the start sync must publish
+// the CLAMPED value, never the raw request. Publishing the request would
+// land the client's cursor PAST bytes it never received once it advances
+// per frame — strictly worse than the pre-#94 re-pull this frame removes.
+func TestHandleInstanceTTYWS_ReplayStartOffsetPublishesClampedStart(t *testing.T) {
+	t.Parallel()
+	// A 64-byte ring with 100 bytes written holds offsets [36, 100): a
+	// request from since=5 is clamped to 36 by the first ReadSince.
+	payload := make([]byte, 100)
+	for i := range payload {
+		payload[i] = byte('A' + i%26)
+	}
+	k := newTTYHandshakeKind(64)
+	addr, _, instID, _ := ttyWSTestServer(t, k)
+	k.buf.Write(payload)
+
+	c, frames, startOffset, syncOffset := dialHandshakeStart(t, addr, ttyWSPath(instID, "since=5&caps=sync"))
+	_ = c.WriteClose(ws.CloseMessage(1000, "bye"))
+	_ = c.Close()
+
+	if startOffset != 36 {
+		t.Fatalf("start sync offset = %d, want 36 (the clamped oldest live byte) — echoing the raw since=5 would strand the cursor past bytes the client never received", startOffset)
+	}
+	var replay []byte
+	for _, f := range frames {
+		replay = append(replay, f...)
+	}
+	if !bytes.Equal(replay, payload[36:]) {
+		t.Fatalf("replay = %d bytes starting at %v, want the live window payload[36:] (%d bytes)", len(replay), replay[:1], len(payload[36:]))
+	}
+	if syncOffset != 100 {
+		t.Fatalf("sync offset = %d, want 100 (the ring head)", syncOffset)
+	}
+	if startOffset+int64(len(replay)) != syncOffset {
+		t.Fatalf("start %d + replay %d != sync %d — the frame-by-frame advance from the clamped start must close exactly on the end offset", startOffset, len(replay), syncOffset)
+	}
+}
+
+// TestHandleInstanceTTYWS_MidReplayResumeContinuesFromRenderedBytes pins AC1
+// of issue #94: a connection that dies MID-REPLAY — after the start sync and
+// two chunks, before the closing sync — has already advanced its cursor to
+// start+painted on the client, so the reconnect resumes with exactly the
+// un-rendered remainder instead of re-pulling the whole replay from the old
+// cursor (the pre-#94 death window, up to 8MB under a degrading link).
+func TestHandleInstanceTTYWS_MidReplayResumeContinuesFromRenderedBytes(t *testing.T) {
+	t.Parallel()
+	// A 200KB delta in a ring that holds it comfortably: a multi-chunk
+	// streaming replay (64KB reads), long enough to die inside.
+	delta := make([]byte, 200*1024)
+	for i := range delta {
+		delta[i] = byte('a' + i%26)
+	}
+	k := newTTYHandshakeKind(int64(len(delta)) + 1024)
+	addr, _, instID, _ := ttyWSTestServer(t, k)
+	k.buf.Write(delta)
+
+	// First connection: "dies" two chunks into the replay. Read frames
+	// manually — dialHandshakeStart would consume the closing sync this
+	// connection never lives to see. The client-side cursor at the drop is
+	// the start sync's S plus the wire bytes already painted.
+	c := dialTTY(t, addr, ttyWSPath(instID, "since=0&caps=sync"))
+	sendResize(t, c)
+	startOffset := int64(-1)
+	var painted int64
+	for painted < 2*64*1024 {
+		op, p := readFrame(t, c, 5*time.Second)
+		switch op {
+		case wsOpBinary:
+			if startOffset == -1 {
+				t.Fatalf("binary replay chunk before the start sync — the client would advance its cursor from a base it never learned")
+			}
+			if !bytes.Equal(p, delta[painted:painted+int64(len(p))]) {
+				t.Fatalf("replay chunk at offset %d is not the delta's bytes there", painted)
+			}
+			painted += int64(len(p))
+		case wsOpPing:
+			// Protocol heartbeat: not part of the replay.
+		case wsOpText:
+			var ctl struct {
+				Type   string `json:"type"`
+				Offset int64  `json:"offset"`
+				Start  bool   `json:"start"`
+			}
+			if err := json.Unmarshal(p, &ctl); err != nil {
+				t.Fatalf("control frame %q is not JSON: %v", p, err)
+			}
+			switch ctl.Type {
+			case "sync":
+				if !ctl.Start {
+					t.Fatalf("closing sync arrived %d bytes into a 200KB replay — it must follow the LAST chunk", painted)
+				}
+				startOffset = ctl.Offset
+			case "resize", "ping", "pong":
+				// Size echo / app-level heartbeat: background traffic.
+			default:
+				t.Fatalf("unexpected control frame %q during the replay", p)
+			}
+		default:
+			t.Fatalf("unexpected opcode %d during the replay", op)
+		}
+	}
+	if startOffset != 0 {
+		t.Fatalf("start sync offset = %d, want 0 (the requested cursor, no clamp on a fresh ring)", startOffset)
+	}
+	// The drop: no closing sync was consumed, the cursor stands at the
+	// rendered byte count. _ = c.Close() via cleanup would also do, but the
+	// explicit close IS the mid-replay death this test is about.
+	_ = c.Close()
+
+	// The reconnect sends the rendered cursor as `since`; the resume must
+	// deliver EXACTLY the un-rendered remainder — neither the two painted
+	// chunks again (the pre-#94 duplication) nor anything past head.
+	cursor := startOffset + painted
+	c2, frames2, start2, sync2 := dialHandshakeStart(t, addr, ttyWSPath(instID, "since="+strconv.FormatInt(cursor, 10)+"&caps=sync"))
+	_ = c2.WriteClose(ws.CloseMessage(1000, "bye"))
+	_ = c2.Close()
+	if start2 != cursor {
+		t.Fatalf("resume start sync = %d, want the rendered cursor %d — resuming must continue where the dropped replay died", start2, cursor)
+	}
+	var replay2 []byte
+	for _, f := range frames2 {
+		replay2 = append(replay2, f...)
+	}
+	if !bytes.Equal(replay2, delta[cursor:]) {
+		t.Fatalf("resume replay = %d bytes, want exactly the %d un-rendered bytes — no re-delivery of what was already painted", len(replay2), len(delta[cursor:]))
+	}
+	if sync2 != int64(len(delta)) {
+		t.Fatalf("resume sync offset = %d, want head %d", sync2, len(delta))
+	}
+}
+
+// TestHandleInstanceTTYWS_StartSyncOnlyOnTheStreamingCatchUpPath pins the
+// boundaries of the issue #94 frame: only a replay that STREAMS CHUNKS
+// announces its start — the tail replay (a single ≤64KB frame whose death
+// window is the pre-#87 one), the sinceFollowLiveEnd path (zero binary
+// frames by design, AC of #86 untouched) and the caught-up-at-head consult
+// exit (nothing to announce) all emit the closing sync ALONE.
+func TestHandleInstanceTTYWS_StartSyncOnlyOnTheStreamingCatchUpPath(t *testing.T) {
+	t.Parallel()
+	k := newTTYHandshakeKind(1024)
+	addr, _, instID, _ := ttyWSTestServer(t, k)
+	k.buf.WriteString("tail-body") // head = 9
+
+	// Tail path: no `since` at all.
+	c1, _, start1, sync1 := dialHandshakeStart(t, addr, ttyWSPath(instID, "caps=sync"))
+	_ = c1.Close()
+	if start1 != -1 {
+		t.Fatalf("tail replay announced a start offset %d — a single ≤64KB frame has the pre-#87 death window and needs none", start1)
+	}
+	if sync1 != 9 {
+		t.Fatalf("tail replay sync = %d, want head 9", sync1)
+	}
+
+	// Follow from the live end (-2): no replay at all, the closing sync IS
+	// the cursor handoff.
+	c2, _, start2, sync2 := dialHandshakeStart(t, addr, ttyWSPath(instID, "since=-2&caps=sync"))
+	_ = c2.Close()
+	if start2 != -1 {
+		t.Fatalf("follow-live-end announced a start offset %d — the -2 path emits zero binary frames and must stay untouched (issue #94 AC)", start2)
+	}
+	if sync2 != 9 {
+		t.Fatalf("follow-live-end sync = %d, want head 9", sync2)
+	}
+
+	// Caught up exactly at head: the empty-replay consult exit.
+	c3, frames3, start3, sync3 := dialHandshakeStart(t, addr, ttyWSPath(instID, "since=9&caps=sync"))
+	_ = c3.Close()
+	if start3 != -1 {
+		t.Fatalf("caught-up reconnect announced a start offset %d — an empty replay has no first chunk to start at", start3)
+	}
+	if len(frames3) != 0 || sync3 != 9 {
+		t.Fatalf("caught-up reconnect frames=%d sync=%d, want an empty replay and head 9", len(frames3), sync3)
 	}
 }
 
