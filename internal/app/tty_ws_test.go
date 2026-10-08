@@ -542,7 +542,7 @@ func TestHandleInstanceTTYWS_ReconnectWithSinceDoesNotRedeliverSeenBytes(t *test
 	addr, _, instID, _ := ttyWSTestServer(t, k)
 	k.buf.WriteString("HELLO-TAIL") // 10 bytes
 
-	c1, replay1, sync1 := dialHandshake(t, addr, ttyWSPath(instID, ""))
+	c1, replay1, sync1 := dialHandshake(t, addr, ttyWSPath(instID, "caps=sync"))
 	if replay1 != "HELLO-TAIL" {
 		t.Fatalf("first handshake replay = %q, want HELLO-TAIL", replay1)
 	}
@@ -555,7 +555,7 @@ func TestHandleInstanceTTYWS_ReconnectWithSinceDoesNotRedeliverSeenBytes(t *test
 	_ = c1.WriteClose(ws.CloseMessage(1000, "bye"))
 	_ = c1.Close()
 
-	c2, replay2, sync2 := dialHandshake(t, addr, ttyWSPath(instID, "since=10"))
+	c2, replay2, sync2 := dialHandshake(t, addr, ttyWSPath(instID, "since=10&caps=sync"))
 	_ = c2.WriteClose(ws.CloseMessage(1000, "bye"))
 	_ = c2.Close()
 	if strings.Contains(replay2, "HELLO-TAIL") {
@@ -578,7 +578,7 @@ func TestHandleInstanceTTYWS_OmittedSinceReplaysTail(t *testing.T) {
 	addr, _, instID, _ := ttyWSTestServer(t, k)
 	k.buf.WriteString("tail-body") // 9 bytes
 
-	for _, query := range []string{"", "since=", "since=bogus"} {
+	for _, query := range []string{"caps=sync", "since=&caps=sync", "since=bogus&caps=sync"} {
 		replay, syncOffset := func() (string, int64) {
 			c, replay, off := dialHandshake(t, addr, ttyWSPath(instID, query))
 			_ = c.WriteClose(ws.CloseMessage(1000, "bye"))
@@ -610,7 +610,7 @@ func TestHandleInstanceTTYWS_StaleSinceClampsSilently(t *testing.T) {
 	k.buf.WriteString(full.String()) // head 100, oldest live byte at 36
 
 	replay, syncOffset := func() (string, int64) {
-		c, replay, off := dialHandshake(t, addr, ttyWSPath(instID, "since=10"))
+		c, replay, off := dialHandshake(t, addr, ttyWSPath(instID, "since=10&caps=sync"))
 		_ = c.WriteClose(ws.CloseMessage(1000, "bye"))
 		_ = c.Close()
 		return replay, off
@@ -646,7 +646,7 @@ func TestHandleInstanceTTYWS_LargeDeltaStreamsEveryByteSinceCursor(t *testing.T)
 	content := full.String()
 	k.buf.WriteString(content[:100])
 
-	c1, replay1, sync1 := dialHandshake(t, addr, ttyWSPath(instID, ""))
+	c1, replay1, sync1 := dialHandshake(t, addr, ttyWSPath(instID, "caps=sync"))
 	if replay1 != content[:100] || sync1 != 100 {
 		t.Fatalf("first handshake: replay %d bytes / sync %d, want 100/100", len(replay1), sync1)
 	}
@@ -656,7 +656,7 @@ func TestHandleInstanceTTYWS_LargeDeltaStreamsEveryByteSinceCursor(t *testing.T)
 	_ = c1.WriteClose(ws.CloseMessage(1000, "bye"))
 	_ = c1.Close()
 
-	c2, frames2, sync2 := dialHandshakeFrames(t, addr, ttyWSPath(instID, "since=100"))
+	c2, frames2, sync2 := dialHandshakeFrames(t, addr, ttyWSPath(instID, "since=100&caps=sync"))
 	_ = c2.WriteClose(ws.CloseMessage(1000, "bye"))
 	_ = c2.Close()
 
@@ -723,7 +723,7 @@ func TestHandleInstanceTTYWS_ReplayBudgetTruncatesAndPublishesLastWrittenOffset(
 	k.buf.Write(delta) // head = budget + 4 chunks
 	head := k.buf.Offset()
 
-	c, frames, syncOffset := dialHandshakeFrames(t, addr, ttyWSPath(instID, "since=0"))
+	c, frames, syncOffset := dialHandshakeFrames(t, addr, ttyWSPath(instID, "since=0&caps=sync"))
 	_ = c.WriteClose(ws.CloseMessage(1000, "bye"))
 	_ = c.Close()
 
@@ -759,7 +759,7 @@ func TestHandleInstanceTTYWS_ReplayBudgetTruncatesAndPublishesLastWrittenOffset(
 	// Self-healing: a reconnect from the published cursor re-requests the
 	// bytes the budget deferred — the last 4 chunks — and catches up to
 	// head, so nothing was lost, only deferred.
-	c2, replay2, sync2 := dialHandshake(t, addr, ttyWSPath(instID, "since="+strconv.FormatInt(syncOffset, 10)))
+	c2, replay2, sync2 := dialHandshake(t, addr, ttyWSPath(instID, "since="+strconv.FormatInt(syncOffset, 10)+"&caps=sync"))
 	_ = c2.WriteClose(ws.CloseMessage(1000, "bye"))
 	_ = c2.Close()
 	want2 := delta[ttyHandshakeReplayBudget:]
@@ -797,7 +797,7 @@ func TestHandleInstanceTTYWS_EmptyReadAfterConsultPublishesHeadNotZero(t *testin
 		scriptedRead{body: "", next: 16},
 	)
 
-	c, replay, syncOffset := dialHandshake(t, addr, ttyWSPath(instID, "since=10"))
+	c, replay, syncOffset := dialHandshake(t, addr, ttyWSPath(instID, "since=10&caps=sync"))
 	_ = c.WriteClose(ws.CloseMessage(1000, "bye"))
 	_ = c.Close()
 
@@ -821,7 +821,7 @@ func TestHandleInstanceTTYWS_SyncFrameCarriesEndOffset(t *testing.T) {
 	addr, _, instID, _ := ttyWSTestServer(t, k)
 
 	// Empty ring buffer: no binary frame, but still a sync with offset 0.
-	c, replay, syncOffset := dialHandshake(t, addr, ttyWSPath(instID, ""))
+	c, replay, syncOffset := dialHandshake(t, addr, ttyWSPath(instID, "caps=sync"))
 	if replay != "" {
 		t.Fatalf("replay on empty buffer = %q, want no bytes", replay)
 	}
@@ -862,7 +862,7 @@ func TestHandleInstanceTTYWS_SyncFrameCarriesEndOffset(t *testing.T) {
 	_ = c.WriteClose(ws.CloseMessage(1000, "bye"))
 	_ = c.Close()
 	replay2, sync2 := func() (string, int64) {
-		c2, replay, off := dialHandshake(t, addr, ttyWSPath(instID, "since=10"))
+		c2, replay, off := dialHandshake(t, addr, ttyWSPath(instID, "since=10&caps=sync"))
 		_ = c2.WriteClose(ws.CloseMessage(1000, "bye"))
 		_ = c2.Close()
 		return replay, off
@@ -872,6 +872,105 @@ func TestHandleInstanceTTYWS_SyncFrameCarriesEndOffset(t *testing.T) {
 	}
 	if sync2 != 10 {
 		t.Fatalf("sync offset = %d, want 10 (head unchanged)", sync2)
+	}
+}
+
+// TestHandleInstanceTTYWS_SyncFrameRequiresOptIn pins the caps=sync half of
+// the issue #98 contract: the {"type":"sync"} offset echo is sent ONLY to
+// clients whose handshake `caps` list carries "sync" as a whole,
+// case-sensitive token — or that present an explicit `since` cursor, the
+// INFERRED opt-in: the cursor parameter and the sync whitelist shipped in
+// the same fix (#87, v0.5.1), and v0.5.0 never puts `since` on this
+// endpoint at all, so a client presenting one provably parses the other.
+// Without that inference a pre-caps v0.5.1 page's cursor latch never sets
+// and every reconnect re-replays from the frozen cursor (review round 2).
+// The frame post-dates the v0.5.0 parseTTYControlMessage whitelist, so an
+// un-refreshed v0.5.0 page painted it into the terminal once per connect —
+// the same leak class as the every-10s TEXT ping. Caps gate only the
+// visible control frame: the binary replay flows regardless.
+func TestHandleInstanceTTYWS_SyncFrameRequiresOptIn(t *testing.T) {
+	t.Parallel()
+
+	// Negative cases: the replay still arrives, but no sync frame may ever
+	// appear — for a client with no caps at all, for one that declared
+	// only "ping" (one capability does not imply the other), and for a
+	// case-mismatched token ("SYNC" names no capability). The fast
+	// heartbeat tick keeps frames flowing through the window so the reads
+	// never stall.
+	for _, query := range []string{"", "caps=ping", "caps=SYNC"} {
+		k := newTTYHandshakeKind(1024)
+		addr, _, _, instID, _ := ttyWSTestServerWithLiveness(t, k, 100*time.Millisecond, 30*time.Second)
+		k.buf.WriteString("tail-body") // 9 bytes
+		c := dialTTY(t, addr, ttyWSPath(instID, query))
+		sendResize(t, c)
+
+		sawReplay := false
+		deadline := time.Now().Add(650 * time.Millisecond)
+		for time.Now().Before(deadline) {
+			op, p := readFrame(t, c, 2*time.Second)
+			switch op {
+			case wsOpBinary:
+				if string(p) == "tail-body" {
+					sawReplay = true
+				}
+			case wsOpPing:
+				// Protocol heartbeat: control frame, invisible to page JS.
+			case wsOpText:
+				var ctl struct {
+					Type string `json:"type"`
+				}
+				if err := json.Unmarshal(p, &ctl); err != nil {
+					t.Fatalf("query %q: control frame %q is not JSON: %v", query, p, err)
+				}
+				if ctl.Type == "sync" {
+					t.Fatalf("query %q: {\"type\":\"sync\"} reached a client that did not opt in — a pre-whitelist page would paint it into the terminal on every connect (issue #98)", query)
+				}
+				// Anything else (the resize echo, the opted-in text ping
+				// for the caps=ping case) is legitimate traffic here.
+			default:
+				t.Fatalf("query %q: unexpected opcode %d", query, op)
+			}
+		}
+		if !sawReplay {
+			t.Fatalf("query %q: no replay arrived — caps must gate only the sync control frame, never the binary output", query)
+		}
+		_ = c.WriteClose(ws.CloseMessage(1000, "bye"))
+		_ = c.Close()
+	}
+
+	// Positive cases: the exact caps token opts in — including from a
+	// REPEATED caps parameter (url.Values.Get would read only the first
+	// value) — and so does an explicit `since`, the inferred #87-era
+	// opt-in: incremental (`since=5`), follow-live-end (`since=-2`,
+	// where the echo IS the only cursor handoff), and even an
+	// unparsable value (presence, not parseability, is the proof —
+	// v0.5.0 never sends the parameter at all).
+	for _, tc := range []struct {
+		query      string
+		wantReplay string
+		wantOffset int64
+	}{
+		{"caps=sync", "tail-body", 9},
+		{"caps=pong&caps=sync", "tail-body", 9},
+		{"since=5", "body", 9},
+		{"since=-2", "", 9},
+		{"since=bogus", "tail-body", 9},
+	} {
+		k := newTTYHandshakeKind(1024)
+		addr, _, instID, _ := ttyWSTestServer(t, k)
+		k.buf.WriteString("tail-body")
+		replay, syncOffset := func() (string, int64) {
+			c, replay, off := dialHandshake(t, addr, ttyWSPath(instID, tc.query))
+			_ = c.WriteClose(ws.CloseMessage(1000, "bye"))
+			_ = c.Close()
+			return replay, off
+		}()
+		if replay != tc.wantReplay {
+			t.Fatalf("query %q: replay = %q, want %q", tc.query, replay, tc.wantReplay)
+		}
+		if syncOffset != tc.wantOffset {
+			t.Fatalf("query %q: sync offset = %d, want %d", tc.query, syncOffset, tc.wantOffset)
+		}
 	}
 }
 
@@ -887,9 +986,12 @@ func TestHandleInstanceTTYWS_ReplayReadFailureClosesConnection(t *testing.T) {
 	k.buf.WriteString("some-bytes")
 	k.failRead.Store(true)
 
-	// Both branches fail the same way: the tail branch (no since) and
-	// the catch-up loop (since=2) hit the error on their first read.
-	for _, query := range []string{"", "since=2"} {
+	// Both branches fail the same way: the tail branch (no since) and the
+	// catch-up loop (since=2) hit the error on their first read. caps=sync
+	// rides along so the "never a sync" assertion below keeps its teeth —
+	// without the opt-in the server withholds the frame regardless of the
+	// error path.
+	for _, query := range []string{"caps=sync", "since=2&caps=sync"} {
 		c := dialTTY(t, addr, ttyWSPath(instID, query))
 		sendResize(t, c)
 		// The resize that triggers the handshake also queues a shared-size
@@ -949,7 +1051,7 @@ func TestHandleInstanceTTYWS_NonRunningInstanceDegradesToFirstConnect(t *testing
 		t.Fatalf("Stop: %v", err)
 	}
 
-	c, replay, syncOffset := dialHandshake(t, addr, ttyWSPath(instID, "since=5"))
+	c, replay, syncOffset := dialHandshake(t, addr, ttyWSPath(instID, "since=5&caps=sync"))
 	if replay != "" {
 		t.Fatalf("replay on stopped instance = %q, want nothing", replay)
 	}
@@ -976,7 +1078,7 @@ func TestHandleInstanceTTYWS_CursorAheadOfHeadFallsBackToTail(t *testing.T) {
 	addr, _, instID, _ := ttyWSTestServer(t, k)
 	k.buf.WriteString("HELLO-RING") // head = 10
 
-	c, replay, syncOffset := dialHandshake(t, addr, ttyWSPath(instID, "since=999"))
+	c, replay, syncOffset := dialHandshake(t, addr, ttyWSPath(instID, "since=999&caps=sync"))
 	_ = c.WriteClose(ws.CloseMessage(1000, "bye"))
 	_ = c.Close()
 	if replay != "HELLO-RING" {
@@ -1024,7 +1126,7 @@ func TestHandleInstanceTTYWS_ConsultSeesNewBytesDeliversThem(t *testing.T) {
 		scriptedRead{body: "ABCDEF", next: 16},
 	)
 
-	c, replay, syncOffset := dialHandshake(t, addr, ttyWSPath(instID, "since=10"))
+	c, replay, syncOffset := dialHandshake(t, addr, ttyWSPath(instID, "since=10&caps=sync"))
 	_ = c.WriteClose(ws.CloseMessage(1000, "bye"))
 	_ = c.Close()
 	if replay != "ABCDEF" {
@@ -1147,7 +1249,7 @@ func TestHandleInstanceTTYWS_SubscriberOverflowClosesConnectionWith1013(t *testi
 	k := newTTYHandshakeKind(1024)
 	addr, _, instID, logOut := ttyWSTestServer(t, k)
 
-	c, _, _ := dialHandshake(t, addr, ttyWSPath(instID, ""))
+	c, _, _ := dialHandshake(t, addr, ttyWSPath(instID, "caps=sync"))
 	k.waitSubscribers(t, 5*time.Second)
 
 	// Outrun the queue: the client is not reading, so every chunk the
@@ -1283,7 +1385,11 @@ func TestHandleInstanceTTYWS_HeartbeatEmitsPingControlFrames(t *testing.T) {
 	k := newTTYHandshakeKind(1024)
 	addr, _, _, instID, _ := ttyWSTestServerWithLiveness(t, k, 100*time.Millisecond, 30*time.Second)
 
-	c, _, _ := dialHandshake(t, addr, ttyWSPath(instID, ""))
+	// caps=ping (issue #98): only a client that opts in via the handshake
+	// capability list is sent the TEXT {"type":"ping"} heartbeat — the
+	// RFC 6455 ping goes to everyone, the text frame is opt-in because a
+	// client without the parseTTYControlMessage whitelist would paint it.
+	c, _, _ := dialHandshake(t, addr, ttyWSPath(instID, "caps=ping,sync"))
 
 	sawRFCPing := false
 	deadline := time.Now().Add(3 * time.Second) // 30 × the test tick
@@ -1317,6 +1423,84 @@ func TestHandleInstanceTTYWS_HeartbeatEmitsPingControlFrames(t *testing.T) {
 	t.Fatal(`no {"type":"ping"} heartbeat frame within the deadline`)
 }
 
+// TestHandleInstanceTTYWS_HeartbeatTextPingRequiresOptIn pins the issue #98
+// contract: the TEXT {"type":"ping"} heartbeat is sent ONLY to clients whose
+// handshake `caps` list carries "ping" as a whole token. A page loaded before
+// the parseTTYControlMessage whitelist shipped (v0.5.0) connected to a
+// v0.5.1+ daemon painted the text frame into the terminal every 10s — the
+// server must never emit a visible control frame its client did not declare.
+// The RFC 6455 ping is unaffected: onmessage never fires for control frames,
+// so it is always safe and keeps flowing to every client.
+func TestHandleInstanceTTYWS_HeartbeatTextPingRequiresOptIn(t *testing.T) {
+	t.Parallel()
+
+	// expectNoTextPing runs one connection for ~6 ping ticks: RFC 6455
+	// pings MUST keep arriving (invisible to page JS, always safe), but no
+	// TEXT {"type":"ping"} may ever appear. The window is deliberately
+	// generous — 650ms against a 100ms tick with a >=3 threshold leaves
+	// ~350ms of scheduling slack, so a loaded CI runner cannot flake it
+	// (a 450ms window left only ~150ms over the third tick). dialTTY +
+	// sendResize rather than dialHandshake: these queries carry no "sync"
+	// capability, so no sync frame ever terminates a dialHandshake wait —
+	// the resize completes the handshake server-side on its own.
+	expectNoTextPing := func(t *testing.T, query string) {
+		t.Helper()
+		k := newTTYHandshakeKind(1024)
+		addr, _, _, instID, _ := ttyWSTestServerWithLiveness(t, k, 100*time.Millisecond, 30*time.Second)
+		c := dialTTY(t, addr, ttyWSPath(instID, query))
+		defer func() { _ = c.Close() }()
+		sendResize(t, c)
+
+		rfcPings := 0
+		deadline := time.Now().Add(650 * time.Millisecond) // > 6 ticks
+		for time.Now().Before(deadline) {
+			op, p := readFrame(t, c, 2*time.Second)
+			switch op {
+			case wsOpPing:
+				rfcPings++
+			case wsOpText:
+				if strings.Contains(string(p), `"type":"ping"`) {
+					t.Fatalf("query %q: TEXT {\"type\":\"ping\"} reached a client that did not opt in — it would be painted into the terminal every tick (issue #98)", query)
+				}
+				// Anything else (the post-handshake resize echo) is
+				// legitimate background traffic here.
+			}
+		}
+		if rfcPings < 3 {
+			t.Fatalf("query %q: only %d RFC 6455 pings in the window — the always-on heartbeat must flow regardless of caps", query, rfcPings)
+		}
+	}
+
+	expectNoTextPing(t, "")            // no caps parameter at all
+	expectNoTextPing(t, "caps=pong")   // a different capability is not ping
+	expectNoTextPing(t, "caps=pinger") // a substring is not a token match
+	expectNoTextPing(t, "caps=PING")   // the match is case-sensitive
+
+	// expectTextPing: the exact token anywhere in the comma-separated list
+	// opts in. (caps=sync rides along so dialHandshake's sync wait
+	// terminates; it does not bear on the ping gate.)
+	expectTextPing := func(t *testing.T, query string) {
+		t.Helper()
+		k := newTTYHandshakeKind(1024)
+		addr, _, _, instID, _ := ttyWSTestServerWithLiveness(t, k, 100*time.Millisecond, 30*time.Second)
+		c, _, _ := dialHandshake(t, addr, ttyWSPath(instID, query))
+		defer func() { _ = c.Close() }()
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) {
+			op, p := readFrame(t, c, 2*time.Second)
+			if op == wsOpText && strings.Contains(string(p), `"type":"ping"`) {
+				return // the opted-in client received the text heartbeat
+			}
+		}
+		t.Fatalf(`query %q: no {"type":"ping"} within the deadline — the whole-token capability must opt in`, query)
+	}
+
+	expectTextPing(t, "caps=resize,ping,sync")
+	// A REPEATED caps parameter is scanned too — url.Values.Get would
+	// return only the first value and miss the ping in the second.
+	expectTextPing(t, "caps=pong&caps=ping,sync")
+}
+
 // TestHandleInstanceTTYWS_PingProbeAnsweredAndNotTypedIntoShell pins the
 // client-probe round trip (issue #83): a client-sent {"type":"ping"} must
 // be answered with {"type":"pong"} AND must never reach SendInput — the
@@ -1336,7 +1520,7 @@ func TestHandleInstanceTTYWS_PingProbeAnsweredAndNotTypedIntoShell(t *testing.T)
 	// resize echo and the probe's own answer — zero interleaving noise.
 	addr, _, _, instID, _ := ttyWSTestServerWithLiveness(t, k, time.Hour, time.Hour)
 
-	c, _, _ := dialHandshake(t, addr, ttyWSPath(instID, ""))
+	c, _, _ := dialHandshake(t, addr, ttyWSPath(instID, "caps=sync"))
 
 	readAnswer := func(what string) {
 		t.Helper()
@@ -1398,7 +1582,7 @@ func TestHandleInstanceTTYWS_DeadPeerReapedByReadDeadline(t *testing.T) {
 	// loaded or -race'd runner breaks that assumption and flakes. Deriving
 	// the floor from the configured deadline keeps the bound honest.
 	start := time.Now()
-	c, _, _ := dialHandshake(t, addr, ttyWSPath(instID, ""))
+	c, _, _ := dialHandshake(t, addr, ttyWSPath(instID, "caps=sync"))
 
 	// Bound the wait so a never-reaping server fails the test instead of
 	// hanging it: the reap must land ~readDeadline after the dial, long
@@ -1448,7 +1632,9 @@ func TestHandleInstanceTTYWS_ResponsivePeerSurvivesReadDeadline(t *testing.T) {
 	const readDeadline = 300 * time.Millisecond
 	addr, srv, _, instID, _ := ttyWSTestServerWithLiveness(t, k, pingInterval, readDeadline)
 
-	c, _, _ := dialHandshake(t, addr, ttyWSPath(instID, ""))
+	// caps=ping opts into the TEXT heartbeat (issue #98), so both heartbeat
+	// frames are expected below.
+	c, _, _ := dialHandshake(t, addr, ttyWSPath(instID, "caps=ping,sync"))
 
 	windowStart := time.Now()
 	surviveUntil := windowStart.Add(3 * readDeadline)
@@ -1645,7 +1831,7 @@ func TestHandleInstanceTTYWS_FollowLiveEndReplaysNothing(t *testing.T) {
 	addr, _, instID, _ := ttyWSTestServer(t, k)
 	k.buf.WriteString("HELLO-TAIL") // head = 10
 
-	c, replay, syncOffset := dialHandshake(t, addr, ttyWSPath(instID, "since=-2"))
+	c, replay, syncOffset := dialHandshake(t, addr, ttyWSPath(instID, "since=-2&caps=sync"))
 	if replay != "" {
 		t.Fatalf("sentinel handshake replayed %q, want no binary frame at all — the client's screen already holds the tail", replay)
 	}
@@ -1686,7 +1872,7 @@ func TestHandleInstanceTTYWS_FollowLiveEndOnEmptyRingPublishesZero(t *testing.T)
 	k := newTTYHandshakeKind(1024)
 	addr, _, instID, _ := ttyWSTestServer(t, k)
 
-	c, replay, syncOffset := dialHandshake(t, addr, ttyWSPath(instID, "since=-2"))
+	c, replay, syncOffset := dialHandshake(t, addr, ttyWSPath(instID, "since=-2&caps=sync"))
 	if replay != "" {
 		t.Fatalf("replay on an empty ring = %q, want nothing", replay)
 	}
@@ -1726,7 +1912,7 @@ func TestHandleInstanceTTYWS_FollowLiveEndOnStoppedInstanceCloses(t *testing.T) 
 		t.Fatalf("Stop: %v", err)
 	}
 
-	c := dialTTY(t, addr, ttyWSPath(instID, "since=-2"))
+	c := dialTTY(t, addr, ttyWSPath(instID, "since=-2&caps=sync"))
 	sendResize(t, c)
 	for {
 		op, p := readFrame(t, c, 5*time.Second)
@@ -1769,7 +1955,7 @@ func TestHandleInstanceTTYWS_FollowLiveEndReadFailureClosesConnection(t *testing
 	k.buf.WriteString("some-bytes")
 	k.failRead.Store(true)
 
-	c := dialTTY(t, addr, ttyWSPath(instID, "since=-2"))
+	c := dialTTY(t, addr, ttyWSPath(instID, "since=-2&caps=sync"))
 	sendResize(t, c)
 	for {
 		op, p := readFrame(t, c, 5*time.Second)

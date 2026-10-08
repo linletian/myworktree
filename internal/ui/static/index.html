@@ -4492,6 +4492,20 @@
                 if (session.ttyOffset > 0) url += `&since=${session.ttyOffset}`;
                 else if (session.ttyOffset === CURSOR_FOLLOW_LIVE_END) url += `&since=${CURSOR_FOLLOW_LIVE_END}`;
 
+                // Capability opt-in (issue #98): this page's
+                // parseTTYControlMessage whitelists the TEXT
+                // {"type":"ping"} heartbeat and the {"type":"sync"}
+                // offset echo (issue #87), so declare both in caps and
+                // the server sends them; a v0.5.0 page that opts into
+                // neither is never sent either text frame, because it
+                // would paint them into the terminal. (Pre-caps pages
+                // that DO carry a `since` cursor still receive the sync
+                // echo — the parameter and the sync whitelist shipped
+                // together in #87, so presenting one proves parsing the
+                // other.) Older servers ignore the parameter, so this
+                // is safe against every daemon version.
+                url += `&caps=ping,sync`;
+
                 resetTTYOutputDecoder(session);
                 const ws = new WebSocket(url);
                 ws.binaryType = "arraybuffer";
