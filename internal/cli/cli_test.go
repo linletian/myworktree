@@ -314,6 +314,14 @@ func setupWorktreeDeleteCLI(t *testing.T) string {
 		t.Skip("git is required")
 	}
 	repo := t.TempDir()
+	// macOS: t.TempDir() lives under /var, a symlink to /private/var, while
+	// the CLI resolves the repo through `git rev-parse --show-toplevel`
+	// (which returns the REAL path) and keys the state dir off it — so the
+	// test must write state.json under the resolved path too, or the CLI
+	// looks up a different HashPath and never finds the worktree.
+	if resolved, err := filepath.EvalSymlinks(repo); err == nil {
+		repo = resolved
+	}
 	runGitCLI := func(args ...string) {
 		t.Helper()
 		cmd := exec.Command("git", args...)
@@ -330,7 +338,11 @@ func setupWorktreeDeleteCLI(t *testing.T) string {
 	}
 	runGitCLI("add", "README.md")
 	runGitCLI("commit", "-m", "init")
-	wtPath := filepath.Join(t.TempDir(), "wt")
+	wtDir := t.TempDir()
+	if resolved, err := filepath.EvalSymlinks(wtDir); err == nil {
+		wtDir = resolved
+	}
+	wtPath := filepath.Join(wtDir, "wt")
 	runGitCLI("worktree", "add", wtPath, "-b", "wt-branch")
 
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
