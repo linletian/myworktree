@@ -52,16 +52,16 @@ func TestSlugify(t *testing.T) {
 func TestDirtyWorktreeErrorSummarizePorcelain(t *testing.T) {
 	out := strings.Join([]string{
 		" D firmware/CMakeLists.txt", // worktree delete
-		"D  tools/gone.txt",         // staged delete
-		" M docs/changed.md",        // worktree modify
-		"M  staged.txt",             // staged modify
-		"MM both.txt",               // both columns — still ONE bucket
-		"T  typechange.txt",         // typechange counts as modify
-		"A  added.txt",              // staged add
-		"R  old.txt -> new.txt",     // rename (path field kept raw)
-		"C  src.txt -> copy.txt",    // copy counts as rename
-		"?? scratch.log",            // untracked
-		"!! debug.log",              // defensive: ignored lines are skipped
+		"D  tools/gone.txt",          // staged delete
+		" M docs/changed.md",         // worktree modify
+		"M  staged.txt",              // staged modify
+		"MM both.txt",                // both columns — still ONE bucket
+		"T  typechange.txt",          // typechange counts as modify
+		"A  added.txt",               // staged add
+		"R  old.txt -> new.txt",      // rename (path field kept raw)
+		"C  src.txt -> copy.txt",     // copy counts as rename
+		"?? scratch.log",             // untracked
+		"!! debug.log",               // defensive: ignored lines are skipped
 	}, "\n")
 
 	d := &DirtyWorktreeError{}

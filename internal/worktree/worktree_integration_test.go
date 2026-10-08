@@ -230,7 +230,6 @@ func TestDeleteForceRemovesDirtyWorktree(t *testing.T) {
 	}
 }
 
-
 func runGit(t *testing.T, dir string, args ...string) {
 	t.Helper()
 	cmd := exec.Command("git", args...)
