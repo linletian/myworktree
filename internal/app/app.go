@@ -1141,7 +1141,8 @@ func (s *Server) handleWorktreeDelete(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
-	if err := s.worktreeMgr.Delete(req.ID, req.Force); err != nil {
+	ignoredDestroyed, err := s.worktreeMgr.Delete(req.ID, req.Force)
+	if err != nil {
 		var dirty *worktree.DirtyWorktreeError
 		if errors.As(err, &dirty) {
 			writeWorktreeDirtyErr(w, dirty)
@@ -1150,7 +1151,7 @@ func (s *Server) handleWorktreeDelete(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "ignored_destroyed": ignoredDestroyed})
 }
 
 // writeWorktreeDirtyErr writes the structured 409 answer for a refused
@@ -3200,11 +3201,21 @@ func (s *Server) handleMCPCall(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusBadRequest, err)
 			return
 		}
-		if err := s.worktreeMgr.Delete(args.ID, args.Force); err != nil {
+		ignoredDestroyed, err := s.worktreeMgr.Delete(args.ID, args.Force)
+		if err != nil {
+			// Same structured refusal as /api/worktrees/delete (409 +
+			// worktree_dirty + breakdown), so MCP clients can recognize
+			// the dirty state programmatically instead of parsing a flat
+			// 400 message (issue #102 review).
+			var dirty *worktree.DirtyWorktreeError
+			if errors.As(err, &dirty) {
+				writeWorktreeDirtyErr(w, dirty)
+				return
+			}
 			writeErr(w, http.StatusBadRequest, err)
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"result": map[string]string{"status": "ok"}})
+		writeJSON(w, http.StatusOK, map[string]any{"result": map[string]any{"status": "ok", "ignored_destroyed": ignoredDestroyed}})
 	case "branch_list":
 		def, out, err := s.listTopBranches()
 		if err != nil {

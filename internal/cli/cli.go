@@ -209,16 +209,36 @@ func worktreeCmd(logger *log.Logger, args []string) error {
 		return nil
 
 	case "delete":
-		fs := flag.NewFlagSet("worktree delete", flag.ContinueOnError)
+		// Scan for --force manually: Go's flag package stops parsing at
+		// the first positional arg, so `worktree delete <id> --force`
+		// would silently drop the flag and the user would hit the same
+		// refusal the message just told them to retry with force
+		// (issue #102 review).
 		var force bool
-		fs.BoolVar(&force, "force", false, "delete even with uncommitted or untracked changes; gitignored files are destroyed unrecoverably (issue #102)")
-		if err := fs.Parse(args[1:]); err != nil {
-			return err
+		var positional []string
+		for _, a := range args[1:] {
+			if a == "--force" || a == "-force" {
+				force = true
+				continue
+			}
+			positional = append(positional, a)
 		}
-		if fs.NArg() < 1 {
+		if len(positional) != 1 {
 			return fmt.Errorf("usage: myworktree worktree delete [--force] <id>")
 		}
-		return mgr.Delete(fs.Arg(0), force)
+		ignoredDestroyed, err := mgr.Delete(positional[0], force)
+		if err != nil {
+			return err
+		}
+		if ignoredDestroyed > 0 {
+			word := "entries"
+			if ignoredDestroyed == 1 {
+				word = "entry"
+			}
+			fmt.Fprintf(os.Stderr, "note: the delete destroyed %d gitignored %s with the directory (build caches, logs, backups that existed only in this worktree)\n",
+				ignoredDestroyed, word)
+		}
+		return nil
 
 	default:
 		return fmt.Errorf("unknown worktree subcommand: %s", args[0])

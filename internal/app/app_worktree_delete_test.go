@@ -158,3 +158,62 @@ func TestHandleWorktreeDeleteForceDeletes(t *testing.T) {
 		t.Fatalf("force delete should drop the state record, got %#v", st.Worktrees)
 	}
 }
+
+// TestHandleWorktreeDeleteCleanReportsIgnoredDestroyed pins the issue #102
+// review follow-up: a worktree whose ONLY at-risk contents are gitignored
+// files deletes without a refusal (nothing blocks), but the success response
+// must carry the destroyed gitignored count so no client lets it pass
+// silently.
+func TestHandleWorktreeDeleteCleanReportsIgnoredDestroyed(t *testing.T) {
+	srv, _, wtPath := setupDeleteTestWorktree(t)
+	if err := os.WriteFile(filepath.Join(wtPath, ".gitignore"), []byte("*.log\n"), 0o600); err != nil {
+		t.Fatalf("write .gitignore: %v", err)
+	}
+	runGitDeleteTest(t, wtPath, "add", ".gitignore")
+	runGitDeleteTest(t, wtPath, "commit", "-m", "add gitignore")
+	if err := os.WriteFile(filepath.Join(wtPath, "debug.log"), []byte("log\n"), 0o600); err != nil {
+		t.Fatalf("write ignored: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/worktrees/delete", strings.NewReader(`{"id":"wt1"}`))
+	w := httptest.NewRecorder()
+	srv.handleWorktreeDelete(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", w.Code, w.Body.String())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("invalid JSON: %v (%s)", err, w.Body.String())
+	}
+	if n, _ := body["ignored_destroyed"].(float64); n != 1 {
+		t.Fatalf("ignored_destroyed = %v, want 1 (debug.log) — a clean delete must not erase gitignored files silently", body["ignored_destroyed"])
+	}
+}
+
+// TestHandleMCPWorktreeDeleteDirtyRefusalIsStructured pins the issue #102
+// review fix: the MCP worktree_delete verb answers a dirty refusal with the
+// SAME 409 + worktree_dirty + breakdown shape as /api/worktrees/delete, not
+// a flat 400 MCP clients cannot recognize programmatically.
+func TestHandleMCPWorktreeDeleteDirtyRefusalIsStructured(t *testing.T) {
+	srv, _, wtPath := setupDeleteTestWorktree(t)
+	makeDeleteTestWorktreeDirty(t, wtPath)
+
+	req := httptest.NewRequest(http.MethodPost, "/mcp/call", strings.NewReader(`{"tool":"worktree_delete","args":{"id":"wt1"}}`))
+	w := httptest.NewRecorder()
+	srv.handleMCPCall(w, req)
+
+	if w.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409 (same as the HTTP API): %s", w.Code, w.Body.String())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("invalid JSON: %v (%s)", err, w.Body.String())
+	}
+	if body["error"] != "worktree_dirty" {
+		t.Fatalf("error = %v, want worktree_dirty", body["error"])
+	}
+	if _, ok := body["dirty"].(map[string]any); !ok {
+		t.Fatalf("MCP refusal must carry the structured dirty breakdown: %s", w.Body.String())
+	}
+}

@@ -3359,9 +3359,17 @@
             ev.stopPropagation();
             if (!confirm("Delete worktree?")) return;
             try {
-                await api("/api/worktrees/delete", { method: "POST", body: JSON.stringify({ id }) });
+                const res = await api("/api/worktrees/delete", { method: "POST", body: JSON.stringify({ id }) });
                 if (state.activeWT === id) state.activeWT = null;
                 await refresh();
+                // Issue #102 review: a clean-looking delete still destroys
+                // every gitignored file with the directory — surface the
+                // count instead of letting it vanish silently.
+                if (res && res.ignored_destroyed > 0) {
+                    alert("Worktree deleted. Note: " + res.ignored_destroyed + " gitignored " +
+                        (res.ignored_destroyed === 1 ? "entry" : "entries") +
+                        " (build caches, logs, backups that existed only in this worktree) were destroyed with the directory.");
+                }
             } catch (e) {
                 // Issue #102: a dirty-worktree refusal is structured — open
                 // the details dialog (breakdown, full git status output,
@@ -3381,6 +3389,13 @@
         // server now sends the breakdown; this dialog renders it and
         // offers the force-delete exit behind a two-step confirm.
         let dirtyDeleteID = null;
+
+        // Esc closes a <dialog> natively without running
+        // closeWorktreeDirtyDialog — reset the dangling state the same way
+        // (issue #102 review).
+        document.getElementById('modal-wt-dirty').addEventListener('cancel', () => {
+            dirtyDeleteID = null;
+        });
 
         function showWorktreeDirtyDialog(id, body) {
             dirtyDeleteID = id;
@@ -3439,7 +3454,10 @@
                 btn.dataset.confirm = "";
                 btn.textContent = "Force delete";
                 errorEl.hidden = false;
-                errorEl.textContent = (e && e.message) || String(e);
+                // A structured refusal body carries the human summary in
+                // body.message — e.message alone is the raw error CODE
+                // ("worktree_dirty") for those (issue #102 review).
+                errorEl.textContent = (e && e.body && e.body.message) || (e && e.message) || String(e);
             }
         }
 

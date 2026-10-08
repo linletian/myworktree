@@ -459,6 +459,9 @@ func TestWorktreeDirtyDeleteDialog(t *testing.T) {
 		{"the gitignored force-risk warning is rendered", "wt-dirty-ignored"},
 		{"the force delete is a two-step confirm", "Confirm force delete?"},
 		{"the confirm state resets per open", `btn.dataset.confirm = ""`},
+		{"a failed force delete shows the human summary, not the raw error code", `(e && e.body && e.body.message) || (e && e.message)`},
+		{"Esc (cancel) resets the dangling dialog state", `.addEventListener('cancel', () => {`},
+		{"a clean delete surfaces the destroyed gitignored count", "res.ignored_destroyed > 0"},
 	}
 	for _, c := range checks {
 		if !strings.Contains(indexJS, c.anchor) {

@@ -105,8 +105,16 @@ Body:
 
 Response:
 ```json
-{ "status": "ok" }
+{ "status": "ok", "ignored_destroyed": 0 }
 ```
+`ignored_destroyed` counts the gitignored entries the delete destroyed with
+the directory (issue #102 review): a worktree whose ONLY at-risk contents are
+gitignored files deletes without a refusal — the blocking check never sees
+them — so the success response carries the count and the dashboard surfaces
+it after the delete. It is 0 on the force path, where the status probe is
+skipped entirely (a damaged worktree can fail `git status` while
+`git worktree remove --force` still succeeds — force must not gate on the
+probe).
 
 Refusal (409, dirty worktree and no force): the `error` code
 `"worktree_dirty"` is part of the API contract — the dashboard matches on it
@@ -133,9 +141,20 @@ beforehand-damaged workspace indistinguishable from a leftover scratch file):
 ```
 `ignored` counts `git status --porcelain --ignored` "!!" entries — gitignored
 files/dirs that do NOT block the delete (the blocking check runs without
-`--ignored`) but a force delete destroys unrecoverably. The same `force`
-flag exists on the MCP `worktree_delete` verb and as
-`myworktree worktree delete --force <id>` on the CLI.
+`--ignored`) but a force delete destroys unrecoverably. Both status probes
+run with `-uall` (untracked/ignored directories count file-by-file instead of
+collapsing to one entry) and `-c core.quotePath=false` (non-ASCII paths stay
+literal); the carried `porcelain` is capped at 200 lines with a truncation
+marker, while counts always reflect the full output. The MCP
+`worktree_delete` verb takes the same `force` flag and answers a dirty
+refusal with the SAME 409 + `worktree_dirty` + `dirty` breakdown shape
+(issue #102 review — it previously returned a flat 400 MCP clients could not
+recognize programmatically); its success result also carries
+`ignored_destroyed`. The CLI spelling is
+`myworktree worktree delete [--force] <id>` — `--force` may appear before or
+after the id (issue #102 review: Go's flag parsing would otherwise silently
+drop a trailing flag), and a clean delete prints the destroyed gitignored
+count to stderr.
 
 ### Open Terminal (host macOS)
 `POST /api/worktrees/open-terminal`
