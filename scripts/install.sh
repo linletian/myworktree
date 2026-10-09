@@ -3,7 +3,7 @@
 #
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/linletian/myworktree/main/scripts/install.sh | bash
-#   curl -fsSL .../install.sh | bash -s -- -v v0.5.1
+#   curl -fsSL .../install.sh | bash -s -- -v v0.5.2
 #   curl -fsSL .../install.sh | bash -s -- -v vX.Y.Z-beta.N   # pin a beta
 #   curl -fsSL .../install.sh | bash -s -- --beta             # latest beta
 #   curl -fsSL .../install.sh | bash -s -- --no-modify-path
@@ -50,7 +50,7 @@ Usage: install.sh [options]
 
 Options:
   -h, --help              show this help
-  -v, --version <ver>     install a specific version (e.g., v0.5.1, 0.5.0,
+  -v, --version <ver>     install a specific version (e.g., v0.5.2, 0.5.1,
                           or a beta like vX.Y.Z-beta.N)
       --beta              install the latest beta (prerelease) instead of
                           the latest stable release
@@ -65,7 +65,7 @@ Env vars:
 
 Examples:
   curl -fsSL https://raw.githubusercontent.com/${REPO}/main/scripts/install.sh | bash
-  curl -fsSL .../install.sh | bash -s -- -v v0.5.1
+  curl -fsSL .../install.sh | bash -s -- -v v0.5.2
   INSTALL_ALIAS=mwt bash install.sh     # avoid conflict with the Debian/Ubuntu 'mw' package
   INSTALL_DIR=~/bin bash install.sh     # install into a custom dir
 EOF
