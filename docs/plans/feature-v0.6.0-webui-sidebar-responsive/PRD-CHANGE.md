@@ -143,8 +143,8 @@ issue #99 与 #100 是同一产品问题的两个切面：**myworktree 的 Web U
 
 ### 5.1 PR1（#99）
 
-1. 折叠 / 展开过程中无内容溢出、`#main` 无抖动。
-2. 折叠态终端 iframe（xterm + xterm-addon-fit）重排后不出现滚动条或错位。
+1. 【人工过检】折叠 / 展开过程中无内容溢出、`#main` 无抖动（视觉 / 布局断言，自动化测试线覆盖不了，由 §6 人工清单兜底）。
+2. 【人工过检】折叠态终端 iframe（xterm + xterm-addon-fit）重排后不出现滚动条或错位（同上，人工过检；自动化侧只锁定「先切 class、下一帧再 fit」的时序）。
 3. 状态刷新后保持（localStorage 往返）；清掉 localStorage 后回到默认展开。
 4. `Ctrl/Cmd+B` 可切换，且在 input 内输入不触发。
 5. `toggleGitSection()` 的 staged/unstaged 折叠状态不受影响，两个状态互不覆盖。
@@ -182,7 +182,7 @@ issue #99 与 #100 是同一产品问题的两个切面：**myworktree 的 Web U
 
 - **Go 资源文本断言**（`internal/ui/ui_test.go` 既有写法）：通过 `httptest` 取到 served 的 `index.html` / `static/kinds/*.js`，用 `strings.Contains` 断言 DOM 锚点、class 名、函数名与**相对顺序**（参考 `TestWebRenderersStoppedSwitchHidesAllFrames`、`TestEmptyWorktreeSwitchHidesAllWebPanels` 的 slicing + position 断言风格）。
 - **node 行为测试**（`internal/ui/testdata/*.test.mjs`，`node --test`，由 `terminal_status_test.go` 的 `TestTerminalStatusHandling` 包进 `go test`）：需要真正执行逻辑的用例（localStorage 往返的状态读写、快捷键守卫、断点分派函数）走这条线——**从真实 served 源码切片、打桩浏览器状态**，不断言副本。
-- **CHANGELOG 房规**（issue #95）：若用 "Pinned by N `node --test` cases" 声明覆盖数，每一处出现的数字都必须等于 `grep -c '^test('` 的导出总数；子集计数必须换措辞（如 "四个 #99 场景"）。
+- **CHANGELOG 房规**（issue #95）：若用 "Pinned by N `node --test` cases" 声明覆盖数，每一处出现的数字都必须等于**该条目所声明测试文件（集合）**的 `grep -c '^test('` 总数——现行守卫 `TestTerminalStatusChangelogCount` 按单文件 `terminal_status.test.mjs` 推导（该短语语义 = "the file's total case count"，见 #95 条目原文）；子集计数必须换措辞（如 "四个 #99 场景"）。新增 testdata 文件时不得用该短语引用全量总数，除非先把守卫改成全量求和并同步修订历史条目。
 - **人工清单**（每期结束过一遍）：桌面宽屏 / 400px 窄窗；刷新持久化；清 localStorage 恢复默认（宽屏展开 / 窄屏 drawer 关闭，R14）；iframe 内焦点按 Ctrl+B（不应切换，注释解释）；git section 折叠互不覆盖。
 - **beta 渠道**：v0.6.0 发布前走 beta（v0.5.1 beta 曾抓出 3 个真实 bug 的先例），触屏相关问题主要靠该渠道收敛。
 
