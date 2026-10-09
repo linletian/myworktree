@@ -45,6 +45,8 @@ issue #99 与 #100 是同一产品问题的两个切面：**myworktree 的 Web U
 | Pointer/Touch 事件、`dvh`、`visualViewport`、`env(safe-area-inset-*)`：均 0 处 | 全文件检索确认 |
 | `body, html { overflow: hidden }`（页面本身不滚，软键盘遮挡无法靠滚动救回） | `index.html:144-152` |
 | `--term-ctrl-btn-size: 32px`；`.icon-btn { padding: 2px }` | `index.html:23`、`187-194` |
+| 终端键盘：pty 终端是同文档 xterm（非 iframe），按键由 xterm 在 `xterm-helper-textarea` 上自行截断（`_keyDown` → `cancel(e, true)` 无条件 `stopPropagation()`），document 监听器收不到终端按键 | vendored `internal/ui/static/vendor/xterm/xterm.js`（`_keyDown` / `cancel`） |
+| UA 显隐提示 `[hidden]{display:none}` 被 `@namespace` 限定在 HTML 命名空间，**对 `<svg>` 元素无效**（SVG 的显隐必须显式补 CSS 消费规则） | PR1 评审实测（headless Chrome：`svg[hidden]` computed display 仍为 inline） |
 
 > 注意：issue 中的行号是 2026-10-08 提交时快照，与当前 develop 有少量漂移（如 `SERVER_UPGRADED_FLAG` 1742≠1766、`startSidebarResize` 2355≠2324、唯一 keydown 已从 modal 内 Enter/Escape 变为 tab 重命名输入框）。**实施时以符号锚点为准，不追行号。**
 
@@ -61,7 +63,7 @@ issue #99 与 #100 是同一产品问题的两个切面：**myworktree 的 Web U
 | R1 | 桌面折叠态：`#app` 挂 collapsed CSS 类，`#sidebar` 宽度归零 + `overflow: hidden`，`#main` 因 `flex:1` 自动吃满；**JS 不做任何宽度计算** | #99 |
 | R2 | 开关按钮：chevron 图标按钮，**放在 `#header` 左侧**（折叠态常驻可见，不给侧栏留宽度） | #99 |
 | R3 | 持久化：`localStorage`，命名空间化 key `mw.ui.sidebarCollapsed`；文件首个 localStorage 用例；**宽屏默认展开**（窄屏 drawer 的默认值见 R14，同一 key 两端共享）；旧浏览器 / 隐私模式失败时降级为不持久化 | #99 |
-| R4 | 快捷键 `Ctrl/Cmd+B` 切换：首个全局 keydown；不在 input / textarea / contenteditable 内触发。**机制事实（PR1 评审订正）**：pty 终端是同文档 xterm（非 iframe），其键盘焦点落在 `xterm-helper-textarea`（`<textarea>`）上，按键会冒泡到 document——不触发靠的是 input/textarea 守卫命中 helper textarea；跨 frame 隔离只适用于 opencode / reasonix / dsh 的 web UI iframe（其内按键确实到不了父文档，不试图绕过） | #99 |
+| R4 | 快捷键 `Ctrl/Cmd+B` 切换：首个全局 keydown；不在 input / textarea / contenteditable 内触发。**机制事实（PR1 评审三轮订正的终稿）**：pty 终端是同文档 xterm（非 iframe），终端按键由 xterm 自己在 helper textarea 的 keydown 处理器截断（vendored `xterm.js` 的 `_keyDown` → `cancel(e, true)` 无条件 `preventDefault + stopPropagation`），document 监听器在终端场景根本不会被调用；input/textarea 守卫的真实职责是保护**不**自行截断的输入宿主（modal 表单字段等）；跨 frame 隔离只适用于 opencode / reasonix / dsh 的 web UI iframe（其内按键确实到不了父文档，不试图绕过） | #99 |
 | R5 | 视口与高度：`#app` 高度 `100dvh`（`@supports` 保留 `100vh` fallback）、宽度 `100%` 取代 `100vw`；viewport meta 补 `viewport-fit=cover`；容器用 `env(safe-area-inset-*)` 处理刘海与 Home Indicator | #100 L1 |
 | R6 | iOS 软键盘：监听 `visualViewport` 的 `resize` / `scroll`，键盘弹出时收窄终端可视高度，保证输入区可见 | #100 L1 |
 | R7 | 断点与形态（**768px 归窄屏**：窄屏 `max-width: 768px`，中间档 769–1024px，依据见 §3.6）：窄屏侧栏改覆盖式 drawer（`position: absolute` + `transform: translateX`，`#app` 补 `position: relative` 作定位包含块），打开带遮罩、点遮罩关闭；遮罩盖住 `#main` 与 tab 区，但 drawer 打开态下 `#header` 左侧开关按钮仍可点击关闭（z-index 分层）；宽屏维持并排；中间宽度侧栏收窄或限上限（如 `max-width: 200px`），并排仍可用 | #100 L2 |
@@ -73,7 +75,7 @@ issue #99 与 #100 是同一产品问题的两个切面：**myworktree 的 Web U
 | R13 | 与 `toggleGitSection()` 的侧栏内折叠**状态互不覆盖**（两个正交状态） | #99 |
 | R14 | 窄屏让位：窄屏（≤768px）使用 drawer 形态，不要求桌面折叠态在小屏生效；**窄屏首次加载（无持久化值）drawer 默认关闭**，避免首访即盖住 `#main`；持久化 key 两端共享——桌面收起过的用户窄屏 drawer 亦默认关闭，这是单一状态机默认值按视口分派的必然结果，**不是第二个状态** | #99+#100 |
 | R15 | 范围边界：只覆盖 myworktree 自己的 Web UI（`internal/ui/static/index.html`，含同文档的 vendored xterm）；reasonix / opencode / dsh 的 **iframe 内页面**（`internal/instance/*` 各内嵌 web UI）不在范围，但本 UI 必须保证 iframe 容器拿到正确的高 / 宽 | #100 |
-| R16 | 键盘语义隔离：`Ctrl/Cmd+B` 不会与 TUI 的 Ctrl+B 冲突——终端是同文档 xterm，按键经 `xterm-helper-textarea` 冒泡后被 input/textarea 守卫放行（R4），守卫是该隔离的承重机制，不得在后续 PR 收窄 | #99 |
+| R16 | 键盘语义隔离：`Ctrl/Cmd+B` 不会与 TUI 的 Ctrl+B 冲突——承重机制是 xterm 在 helper textarea 上自行 `stopPropagation()`（R4，vendored `xterm.js` 的 `_keyDown`/`cancel`），父文档监听器在终端场景不被调用 | #99 |
 
 ---
 
@@ -85,6 +87,7 @@ issue #99 与 #100 是同一产品问题的两个切面：**myworktree 的 Web U
 - 宽屏渲染：`width: 0` + `overflow: hidden`（R1）。
 - 窄屏渲染：drawer off-canvas（`translateX(-100%)`）+ 遮罩（R7）；`#app` 补 `position: relative` 作 drawer 定位包含块，遮罩盖住 `#main` 与 tab 区但不盖住 `#header` 左侧开关按钮（打开态点它关闭）。
 - 分派完全由 CSS 断点 + 同一个 class 完成，**JS 只有「读状态 → 挂/摘 class」一条路径**，没有第二处宽度计算。这是 issue #99「不与响应式宽度规则互相干扰」要求的落地方式。
+- **PR3 注意（PR1 落地后的规则叠加）**：PR1 的折叠规则 `#app.collapsed #sidebar` 含 `width: 0` + `overflow: hidden` + `visibility: hidden`。PR3 做窄屏 drawer 时必须按断点限定/覆盖这条规则（如把折叠规则限定在宽屏断点，或 drawer 打开态显式恢复 `visibility` / `width`）——否则窄屏 drawer 打开时是一条**不可见**的抽屉（`visibility: hidden` 比 `width: 0` 更隐蔽）。
 
 ### 3.2 按钮宿主：`#header` 左侧
 
@@ -99,7 +102,7 @@ issue #99 与 #100 是同一产品问题的两个切面：**myworktree 的 Web U
 ### 3.4 快捷键基础设施（首个全局 keydown）
 
 - `document` 级 keydown，`metaKey || ctrlKey` + `key.toLowerCase() === 'b'` 判定（Caps Lock 或 Ctrl/Cmd+Shift+B 时 `event.key` 为 `'B'`，`=== 'b'` 会静默不触发）；忽略 `event.repeat`（长按 B 会反复切换）；排除 `event.altKey`（Ctrl+Alt+B 在部分布局是 AltGr 组合）。
-- 输入守卫：`event.target` 落在 input / textarea / `[contenteditable]` 内直接 return（含 tab 重命名输入框）。**承重事实（PR1 评审订正）**：pty 终端是同文档 xterm，键盘焦点落在 `xterm-helper-textarea`（`<textarea>`）上，TUI 按键会冒泡到 document——终端内不触发靠的就是这条守卫命中 textarea，守卫不得收窄。
+- 输入守卫：`event.target` 落在 input / textarea / `[contenteditable]` 内直接 return（含 tab 重命名输入框）。**职责边界（PR1 评审三轮订正的终稿）**：pty 终端按键由 xterm 在 `xterm-helper-textarea` 上自行截断（vendored `xterm.js` `_keyDown` → `cancel(e, true)` 无条件 `stopPropagation()`），根本到不了本监听器；守卫保护的是**不**自行截断的输入宿主（modal 表单字段：worktree 名 / branch / base ref / LLM 设置）。
 - web UI iframe（opencode / reasonix / dsh）内焦点时父页面收不到按键——**写注释说明，不做 postMessage 之类的绕过**（跨 frame 限制是浏览器安全模型，绕过反而引入新攻击面）。
 
 ### 3.5 视口基线与软键盘方案（R5 / R6）
@@ -183,7 +186,8 @@ issue #99 与 #100 是同一产品问题的两个切面：**myworktree 的 Web U
 - **Go 资源文本断言**（`internal/ui/ui_test.go` 既有写法）：通过 `httptest` 取到 served 的 `index.html` / `static/kinds/*.js`，用 `strings.Contains` 断言 DOM 锚点、class 名、函数名与**相对顺序**（参考 `TestWebRenderersStoppedSwitchHidesAllFrames`、`TestEmptyWorktreeSwitchHidesAllWebPanels` 的 slicing + position 断言风格）。
 - **node 行为测试**（`internal/ui/testdata/*.test.mjs`，`node --test`，由 `terminal_status_test.go` 的 `TestTerminalStatusHandling` 包进 `go test`）：需要真正执行逻辑的用例（localStorage 往返的状态读写、快捷键守卫、断点分派函数）走这条线——**从真实 served 源码切片、打桩浏览器状态**，不断言副本。
 - **CHANGELOG 房规**（issue #95）：若用 "Pinned by N `node --test` cases" 声明覆盖数，每一处出现的数字都必须等于**该条目所声明测试文件（集合）**的 `grep -c '^test('` 总数——现行守卫 `TestTerminalStatusChangelogCount` 按单文件 `terminal_status.test.mjs` 推导（该短语语义 = "the file's total case count"，见 #95 条目原文）；子集计数必须换措辞（如 "四个 #99 场景"）。新增 testdata 文件时不得用该短语引用全量总数，除非先把守卫改成全量求和并同步修订历史条目。
-- **人工清单**（每期结束过一遍）：桌面宽屏 / 400px 窄窗；刷新持久化；清 localStorage 恢复默认（宽屏展开 / 窄屏 drawer 关闭，R14）；终端内焦点按 Ctrl+B（不应切换——同文档 xterm 的 helper textarea 经 input 守卫放行，R4/R16）；git section 折叠互不覆盖。
+- **人工清单**（每期结束过一遍）：桌面宽屏 / 400px 窄窗；刷新持久化；清 localStorage 恢复默认（宽屏展开 / 窄屏 drawer 关闭，R14）；终端内焦点按 Ctrl+B（不应切换——xterm 在 helper textarea 上自行 `stopPropagation()`，R4/R16）；git section 折叠互不覆盖。
+- **UA 显隐断言原则**（PR1 评审教训，blocker 实证）：任何依赖 UA 表现性提示（如 `[hidden]`）或 UA 样式的「显隐」实现，**属性层正确 ≠ 渲染层正确**——必须有真实浏览器度量断言或人工过检项兜底，不能只靠「字符串锚点 + 打桩行为测试」一条线。
 - **beta 渠道**：v0.6.0 发布前走 beta（v0.5.1 beta 曾抓出 3 个真实 bug 的先例），触屏相关问题主要靠该渠道收敛。
 
 ---
