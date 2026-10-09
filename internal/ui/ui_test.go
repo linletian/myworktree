@@ -470,6 +470,155 @@ func TestWorktreeDirtyDeleteDialog(t *testing.T) {
 	}
 }
 
+// TestSidebarCollapseAnchors pins the issue #99 desktop sidebar collapse
+// contract (PR1 of docs/plans/feature-v0.6.0-webui-sidebar-responsive/):
+// the collapsed state is a pure-CSS class on #app with zero JS width
+// math, the preference persists under the namespaced localStorage key, and
+// the toggle button lives inside #header BEFORE #tabs-container — the
+// header is the first child of #main, so the button must never drift into
+// the sidebar or after the tabs it is supposed to lead.
+func TestSidebarCollapseAnchors(t *testing.T) {
+	bodyText := fetchIndexHTML(t)
+
+	// R1: collapsed state renders through one class; #sidebar width goes to
+	// zero with overflow hidden and #main's flex:1 (untouched here) fills
+	// the space. JS must not measure or assign any pixel width. The three
+	// declarations are asserted INSIDE the collapsed rule block — a bare
+	// full-file Contains would keep passing on unrelated rules (index.html
+	// has other `width: 0;` hits), i.e. it would anchor nothing.
+	ruleStart := strings.Index(bodyText, "#app.collapsed #sidebar {")
+	if ruleStart < 0 {
+		t.Fatal("GET / lost the #app.collapsed #sidebar rule (issue #99 R1)")
+	}
+	ruleEnd := strings.Index(bodyText[ruleStart:], "\n        }")
+	if ruleEnd < 0 {
+		t.Fatal("GET / #app.collapsed #sidebar rule has no closing brace")
+	}
+	rule := bodyText[ruleStart : ruleStart+ruleEnd]
+	for _, decl := range []string{"width: 0;", "overflow: hidden;", "border-right: none;", "visibility: hidden;"} {
+		if !strings.Contains(rule, decl) {
+			t.Fatalf("GET / #app.collapsed #sidebar rule should declare %q (issue #99 R1)", decl)
+		}
+	}
+	// Minimal literal anchors: equivalent rewrites (computed styles, inline
+	// style objects, styleSheet.insertRule) can bypass every string below,
+	// so the semantic constraint — JS does no sidebar width math (plan
+	// §3.1) — is held by review discipline, not by this list.
+	for _, forbidden := range []string{
+		// The class is the single source of truth (§3.1 of the plan): any
+		// JS width read/write would re-introduce the dual-state the plan
+		// forbids.
+		"sidebar.style.width",
+		"sidebar.offsetWidth",
+		"getComputedStyle(document.getElementById(\"sidebar\"))",
+		// The chevron icons flip via toggleAttribute("hidden", …): a plain
+		// `.hidden = …` on an <svg> is an inert expando (SVGElement has no
+		// hidden IDL property), which shipped as a real bug in PR1 review.
+		`getElementById("sidebar-toggle-icon-left").hidden`,
+		`getElementById("sidebar-toggle-icon-right").hidden`,
+	} {
+		if strings.Contains(bodyText, forbidden) {
+			t.Fatalf("GET / must not use %q — see the comment above the forbidden list (issue #99 R1/R2)", forbidden)
+		}
+	}
+
+	// R3: namespaced persistence key — the file's first localStorage use.
+	if !strings.Contains(bodyText, `"mw.ui.sidebarCollapsed"`) {
+		t.Fatal("GET / should persist the sidebar state under the namespaced key \"mw.ui.sidebarCollapsed\" (issue #99 R3)")
+	}
+
+	// R2: the button is a child of #header sitting before #tabs-container.
+	// Position, not mere presence: the level hierarchy (#sidebar and #main
+	// as siblings under #app, header inside #main) is a hard design
+	// constraint of the plan (§3.2) — a button parked after the tabs, or
+	// inside the sidebar, would violate it while every Contains check
+	// still passed.
+	headerAt := strings.Index(bodyText, `<div id="header">`)
+	if headerAt < 0 {
+		t.Fatal("GET / lost the #header block")
+	}
+	btnAt := strings.Index(bodyText[headerAt:], `id="sidebar-toggle-btn"`)
+	tabsAt := strings.Index(bodyText[headerAt:], `id="tabs-container"`)
+	if btnAt < 0 {
+		t.Fatal("GET / should include the sidebar toggle button inside #header (issue #99 R2)")
+	}
+	if tabsAt < 0 || btnAt > tabsAt {
+		t.Fatal("GET / should place the sidebar toggle button BEFORE #tabs-container inside #header (issue #99 R2, §3.2 hierarchy)")
+	}
+	// Both chevron states live in the shipped DOM and flip via
+	// toggleAttribute("hidden") — the initial markup (left visible, right
+	// hidden) matches the expanded state. aria-hidden keeps both icons off
+	// the accessibility tree in either state. The hidden ATTRIBUTE has an
+	// explicit CSS consumer: the UA's [hidden] { display: none } hint is
+	// namespaced to HTML elements, so svg[hidden] would still render
+	// without this rule (head-Chrome-verified) and the attribute path would
+	// spin in place — anchor the rule so it cannot be deleted quietly.
+	for _, icon := range []string{`id="sidebar-toggle-icon-left"`, `id="sidebar-toggle-icon-right"`} {
+		if !strings.Contains(bodyText, icon) {
+			t.Fatalf("GET / should include both toggle chevron states, missing %q (issue #99 R2)", icon)
+		}
+	}
+	for _, check := range []string{
+		`aria-label="Toggle Sidebar"`,
+		`aria-controls="sidebar"`,
+		`aria-expanded="true"`,
+		"#sidebar-toggle-btn svg[hidden] { display: none !important; }",
+		"toggleAttribute(\"hidden\", collapsed)",
+		"toggleAttribute(\"hidden\", !collapsed)",
+		`setAttribute("aria-expanded", collapsed ? "false" : "true")`,
+	} {
+		if !strings.Contains(bodyText, check) {
+			t.Fatalf("GET / should include the toggle button a11y/attribute hook %q (issue #99 R2)", check)
+		}
+	}
+
+	// R4: the first document-level keydown with its input guard, repeat
+	// guard and case-insensitive match, registered once.
+	//
+	// The count check is an intentional tripwire, not an accident of this
+	// feature: the plan's fact table (PRD-CHANGE §1.4) records exactly one
+	// document-level keydown for this file. A future PR that adds an
+	// unrelated global shortcut will trip it — the right response is to
+	// update THIS test and the plan's fact table together, not to point
+	// the message at whatever issue happened to add the second listener.
+	if strings.Count(bodyText, `document.addEventListener("keydown"`) != 1 {
+		t.Fatal("GET / should register exactly one document-level keydown listener — intentional tripwire: the plan fact table (PRD-CHANGE §1.4) assumes a single global keydown; adding an unrelated one must update this test AND the plan document")
+	}
+	for _, check := range []string{
+		"function handleSidebarToggleKeydown(event)",
+		"if (event.repeat) return;",
+		"if (event.altKey) return;",
+		`if (!(event.metaKey || event.ctrlKey)) return;`,
+		`event.key.toLowerCase() !== "b"`,
+		`target.closest("input, textarea, [contenteditable]")`,
+	} {
+		if !strings.Contains(bodyText, check) {
+			t.Fatalf("GET / should include the sidebar shortcut guard %q (issue #99 R4)", check)
+		}
+	}
+
+	// R12: the fit re-runs after the class flip, on a rAF boundary, so the
+	// xterm measures its post-reflow box.
+	apply := sliceJSFunction(t, bodyText, "applySidebarCollapsed")
+	clsAt := strings.Index(apply, `classList.toggle("collapsed", collapsed)`)
+	fitAt := strings.Index(apply, "requestAnimationFrame(refitActiveTerminal);")
+	if clsAt < 0 || fitAt < 0 || clsAt > fitAt {
+		t.Fatal("applySidebarCollapsed must flip the .collapsed class BEFORE scheduling the terminal refit (issue #99 R12)")
+	}
+	if !strings.Contains(bodyText, "function refitActiveTerminal()") ||
+		!strings.Contains(bodyText, "session.fitAddon.fit();") {
+		t.Fatal("GET / should refit the active xterm via xterm-addon-fit after a collapse toggle (issue #99 R12)")
+	}
+
+	// R13: the two sidebar-local fold states must stay orthogonal — the
+	// collapse code path never touches the git accordion variable. The
+	// slice ends at the next same-indent declaration, so it spans exactly
+	// applySidebarCollapsed's body.
+	if strings.Contains(apply, "gitExpandedSection") {
+		t.Fatal("applySidebarCollapsed must not touch gitExpandedSection — the sidebar collapse and the staged/unstaged accordion are orthogonal states (issue #99 R13)")
+	}
+}
+
 func TestReasonixRendererKeepsFrameAlive(t *testing.T) {
 	mux := http.NewServeMux()
 	if err := Register(mux, "myworktree", nil); err != nil {

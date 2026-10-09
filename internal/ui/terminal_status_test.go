@@ -30,6 +30,30 @@ func TestTerminalStatusHandling(t *testing.T) {
 	t.Logf("%s", out)
 }
 
+// TestSidebarCollapseHandling runs the Node unit tests for the issue #99
+// desktop sidebar collapse semantics (testdata/sidebar_collapse.test.mjs):
+// localStorage round-trip and degradation defaults (R3), the class-only
+// collapse toggle with its two-state chevron button (R1/R2), the first
+// document-level Ctrl/Cmd+B keydown and its input/repeat/case guards (R4),
+// and the xterm refit scheduled after the class flip (R12).
+//
+// Same arrangement as TestTerminalStatusHandling: the cases slice the
+// shipped index.html and run against stubbed browser state, this wrapper
+// makes `go test` enforce them, and the file lives in testdata/ because
+// static/* is embedded and served to every browser. Skips when node is
+// absent.
+func TestSidebarCollapseHandling(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not on PATH; skipping sidebar collapse JS tests")
+	}
+	out, err := exec.Command(node, "--test", "testdata/sidebar_collapse.test.mjs").CombinedOutput()
+	if err != nil {
+		t.Fatalf("node --test testdata/sidebar_collapse.test.mjs: %v\n%s", err, out)
+	}
+	t.Logf("%s", out)
+}
+
 // TestTerminalStatusChangelogCount keeps the CHANGELOG's coverage claim honest.
 // The entry quotes the number of `node --test` cases, and that number drifted
 // wrong twice while the cases were still being added (17, then 22, then 26 for

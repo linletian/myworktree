@@ -170,6 +170,22 @@
             flex-direction: column;
         }
 
+        /* Sidebar collapse (issue #99): `.collapsed` on #app is the single
+           source of truth for the collapsed state. The sidebar drops to zero
+           width and its border is dropped with it (no 1px sliver survives);
+           #main's flex:1 automatically fills the freed space. JS never reads
+           or writes any width — collapsing is class-only. */
+        #app.collapsed #sidebar {
+            width: 0;
+            overflow: hidden;
+            border-right: none;
+            /* width:0 + overflow:hidden only CLIPS — the sidebar's buttons
+               would still sit in the Tab focus order with their focus ring
+               invisible. visibility lifts them out of focus/hit-testing
+               while collapsed and restores on expand, zero JS. */
+            visibility: hidden;
+        }
+
         .sidebar-title {
             padding: 12px;
             font-weight: 600;
@@ -197,6 +213,31 @@
                 background: var(--border-color);
                 color: var(--active-color);
             }
+
+        /* Sidebar collapse toggle (issue #99): hosted in #header so it stays
+           reachable in both states and reserves no sidebar width of its own. */
+        #sidebar-toggle-btn {
+            flex: 0 0 auto;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        /* The toggle's two chevrons flip via the hidden ATTRIBUTE (JS uses
+           toggleAttribute because <svg> owns no hidden IDL property), but
+           the attribute alone renders NOTHING: the UA presentational-hint
+           rule [hidden] { display: none } is namespaced to XHTML (its
+           selector means *[hidden] in the HTML namespace), so SVG-namespace
+           elements never match — verified in headless Chrome, svg[hidden]
+           computes to display: inline and still occupies its 16x16 box.
+           This rule is the consumer that makes the attribute do anything.
+           (Different mechanism from the web-ui panels' explicit
+           #opencode-panel[hidden] etc. overrides a few hundred lines below:
+           those are HTML elements the UA rule DOES cover, and they need
+           their override because an author-source display declaration —
+           e.g. #opencode-panel { display: flex } — outranks the UA
+           [hidden] rule in the cascade; namespace is not involved there.) */
+        #sidebar-toggle-btn svg[hidden] { display: none !important; }
 
         #wt-list {
             flex: 1;
@@ -1368,6 +1409,16 @@
         <!-- Main: Tabs + Terminal -->
         <div id="main">
             <div id="header">
+                <button id="sidebar-toggle-btn" class="icon-btn" onclick="toggleSidebarCollapse()" title="Toggle Sidebar (Ctrl/Cmd+B)" aria-label="Toggle Sidebar" aria-controls="sidebar" aria-expanded="true">
+                    <svg id="sidebar-toggle-icon-left" width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+                        <path d="M9 3.5L4.5 8L9 12.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+                        <path d="M14.5 3.5L10 8L14.5 12.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+                    </svg>
+                    <svg id="sidebar-toggle-icon-right" width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" hidden aria-hidden="true">
+                        <path d="M7 3.5L11.5 8L7 12.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+                        <path d="M1.5 3.5L6 8L1.5 12.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+                    </svg>
+                </button>
                 <div id="tabs-container"></div>
 
                 <div id="instance-actions">
@@ -1785,6 +1836,13 @@
         let sidebarResizeStartY = 0;
         let sidebarTopPanelStartHeight = 0;
 
+        // Sidebar collapse (issue #99). One boolean, rendered purely through
+        // the `.collapsed` class on #app (R1) — this is deliberately orthogonal
+        // to gitExpandedSection above (R13): collapsing the sidebar never
+        // touches the staged/unstaged accordion state and vice versa.
+        const SIDEBAR_COLLAPSED_KEY = "mw.ui.sidebarCollapsed";
+        let sidebarCollapsed = false;
+
         // API
         function rememberServerRevision(res) {
             const rev = (res.headers.get(SERVER_REV_HEADER) || "").trim();
@@ -2109,6 +2167,129 @@
             }
         }
 
+        // --- Sidebar collapse (issue #99) ---
+
+        // First localStorage use in this file (R3): the collapsed preference
+        // is a user preference (persisted), unlike the session-scoped
+        // SERVER_UPGRADED_FLAG above. Wide screens default to expanded; a
+        // missing key, unparseable value or throwing storage (private mode,
+        // old browsers) degrades to "expanded, not persisted" instead of
+        // breaking the page (try/catch on both directions).
+        function readSidebarCollapsed() {
+            try {
+                const raw = localStorage.getItem(SIDEBAR_COLLAPSED_KEY);
+                if (raw === null) return false;
+                return JSON.parse(raw) === true;
+            } catch (e) {
+                return false;
+            }
+        }
+
+        function persistSidebarCollapsed(value) {
+            try {
+                localStorage.setItem(SIDEBAR_COLLAPSED_KEY, JSON.stringify(value));
+            } catch (e) {
+                // Storage unavailable (private mode / old browser): the
+                // toggle keeps working for this page load, stateless.
+            }
+        }
+
+        // R12: re-fit the active xterm after the sidebar width changed, so
+        // the terminal reflows to its new columns instead of keeping a
+        // stale geometry (scrollbar / misaligned TUI). The fixed trigger
+        // order is: flip the `.collapsed` class FIRST, then fit inside one
+        // requestAnimationFrame — fitting reads the post-reflow box, and a
+        // frame boundary guarantees the flex row has settled. The embedded
+        // web-UI iframes (opencode / reasonix / dsh) need no counterpart:
+        // they are ordinary documents and reflow with their container.
+        function refitActiveTerminal() {
+            const session = getActiveTerminalSession();
+            if (!session || !session.term) return;
+            if (session.fitAddon) {
+                try { session.fitAddon.fit(); } catch (e) { console.error("xterm fit error:", e); }
+            }
+            if (session.term.cols > 0 && session.term.rows > 0) {
+                sendResize(session, session.term.cols, session.term.rows);
+                syncTerminalToAppliedSize(session);
+            }
+        }
+
+        function applySidebarCollapsed(collapsed) {
+            sidebarCollapsed = collapsed;
+            document.getElementById("app").classList.toggle("collapsed", collapsed);
+            // R2: two-state button. "<<" shows while expanded (click to push
+            // the sidebar away); ">>" shows while collapsed (click to bring
+            // it back). `hidden` MUST be flipped with toggleAttribute: an
+            // <svg> is an SVGElement, and the `hidden` IDL property exists
+            // only on HTMLElement — a plain `.hidden = x` assignment is an
+            // inert expando. And the attribute still needs its explicit
+            // consumer — #sidebar-toggle-btn svg[hidden] in the stylesheet:
+            // the UA's own [hidden] { display: none } hint is namespaced to
+            // HTML elements, so without that rule both icons would render
+            // stacked in every state.
+            document.getElementById("sidebar-toggle-icon-left").toggleAttribute("hidden", collapsed);
+            document.getElementById("sidebar-toggle-icon-right").toggleAttribute("hidden", !collapsed);
+            // a11y: aria-expanded on the toggle follows the conventional
+            // ARIA reading — it describes whether the controlled region
+            // (the sidebar) is expanded: "true" while the sidebar is
+            // visible, "false" while it is folded away.
+            const toggleBtn = document.getElementById("sidebar-toggle-btn");
+            if (toggleBtn) toggleBtn.setAttribute("aria-expanded", collapsed ? "false" : "true");
+            // See refitActiveTerminal for why the class flip precedes the fit.
+            requestAnimationFrame(refitActiveTerminal);
+        }
+
+        function toggleSidebarCollapse() {
+            applySidebarCollapsed(!sidebarCollapsed);
+            persistSidebarCollapsed(sidebarCollapsed);
+        }
+
+        // R4: first document-level keydown. Ctrl/Cmd+B toggles the sidebar.
+        // key.toLowerCase() covers Caps Lock and Ctrl/Cmd+Shift+B, where
+        // event.key is "B"; event.repeat (key held down) is ignored so a
+        // long press does not flap the sidebar back and forth.
+        //
+        // R16, stated against the real mechanism (verified in the vendored
+        // source, static/vendor/xterm/xterm.js): terminal keystrokes never
+        // reach this listener because xterm CANCELS them itself — its
+        // _keyDown handler on the helper textarea (xterm-helper-textarea)
+        // calls cancel(e, !0), which unconditionally preventDefaults AND
+        // stopPropagations, so the event dies inside xterm and is forwarded
+        // to the PTY (Ctrl+B arrives at the TUI as \u0002). The terminal is
+        // also same-document, not an iframe: the pty renderer draws xterm
+        // into a plain div (kinds/pty.js). The input/textarea/contenteditable
+        // target guard below is therefore a DEAD PATH for the terminal —
+        // its real job is protecting input hosts that do NOT cancel their
+        // own keydowns: the modal form fields (worktree name, branch, base
+        // ref, LLM settings) and the tab-rename input. True cross-frame
+        // isolation exists only for the opencode / reasonix / dsh web UIs:
+        // their iframes never deliver keydown to the parent document, a
+        // security-model boundary we deliberately do not route around with
+        // postMessage.
+        function handleSidebarToggleKeydown(event) {
+            if (event.repeat) return;
+            // Ctrl+Alt combinations are AltGr on several keyboard layouts —
+            // Ctrl+Alt+B must reach the layout, not fold the sidebar.
+            if (event.altKey) return;
+            if (!(event.metaKey || event.ctrlKey)) return;
+            if (event.key.toLowerCase() !== "b") return;
+            // Never hijack typing: events landing in an input / textarea /
+            // contenteditable host stay with the field. xterm cancels its
+            // own terminal keydowns (see R16 above), so this guard never
+            // actually sees those — it protects the hosts that DO bubble
+            // and don't cancel: the modal form fields (worktree name,
+            // branch, base ref, LLM settings). The tab-rename input already
+            // stops propagation at the target. The textarea branch stays as
+            // defensive coverage should xterm's cancellation ever change.
+            const target = event.target;
+            if (target && typeof target.closest === "function" &&
+                target.closest("input, textarea, [contenteditable]")) return;
+            event.preventDefault(); // keep Ctrl+B from toggling the browser's bookmarks bar
+            toggleSidebarCollapse();
+        }
+
+        document.addEventListener("keydown", handleSidebarToggleKeydown);
+
         function init() {
             if (sessionStorage.getItem(SERVER_UPGRADED_FLAG) === "1") {
                 sessionStorage.removeItem(SERVER_UPGRADED_FLAG);
@@ -2119,6 +2300,10 @@
                 const badge = document.getElementById("remote-badge");
                 if (badge) badge.classList.remove("hidden");
             }
+            // Restore the persisted sidebar preference (issue #99) before
+            // the first refresh paints, so a collapsed preference does not
+            // flash the expanded sidebar.
+            applySidebarCollapsed(readSidebarCollapsed());
             refresh();
             // Polling for status updates (2s)
             if (pollTimer) clearInterval(pollTimer);
