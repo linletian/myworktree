@@ -1070,6 +1070,55 @@ test("issue #87: binary frames move the cursor only after the sync latch (FIX-B)
   assert.equal(h.api.parseTTYControlMessage('{"type":"bogus"}'), null);
 });
 
+test("issue #94: the start sync lifts the latch at chunk 1, so a mid-replay drop resumes", () => {
+  const h = ttyWsHarness({ ttyOffset: 13 });
+  h.connect();
+  const ws = h.sockets[0];
+  assert.ok(ws.url.includes("&since=13"), "the reconnect carries the cursor");
+  ws.readyState = 1;
+  ws.onopen();
+  ws.onmessage({ data: '{"type":"ready"}' });
+
+  // A post-#94 server brackets a streaming replay with TWO sync frames: the
+  // start sync ahead of chunk 1 (the replay's real, possibly clamped, start
+  // offset — S and chunk 1 come from the same server-side read) and the
+  // closing sync after the last chunk. The "start" field is only a marker
+  // for consumers that must tell the two apart; the handler treats every
+  // sync as an absolute offset to adopt.
+  ws.onmessage({ data: '{"type":"sync","offset":13,"start":true}' });
+  assert.equal(h.session.ttyOffset, 13, "the start sync adopts the replay's real start offset");
+
+  // Replay chunks after the start sync are safe to count frame-by-frame:
+  // the base is truthful (never the raw, maybe-clamped `since`), unlike the
+  // pre-sync frames pinned by the FIX-B case above.
+  ws.onmessage({ data: h.enc.encode("chunk-1-").buffer }); // 8 bytes
+  ws.onmessage({ data: h.enc.encode("chunk-2").buffer }); // 7 bytes
+  assert.equal(h.session.ttyOffset, 28, "replay frames advance the cursor once the start offset is known");
+  assert.deepEqual(h.writes, ["chunk-1-", "chunk-2"], "the bytes still render in order");
+
+  // Die MID-REPLAY — before the closing sync. The cursor already stands at
+  // the rendered byte count, so the reconnect RESUMES from it instead of
+  // re-pulling the whole replay from 13 (the pre-#94 death window, up to
+  // ttyHandshakeReplayBudget under a degrading link).
+  ws.close();
+  h.fireTimers(5000);
+  assert.equal(h.sockets.length, 2, "the reconnect opened a new socket");
+  assert.ok(h.sockets[1].url.includes("&since=28"),
+    `a mid-replay drop must resume from the rendered cursor, got ${h.sockets[1].url}`);
+
+  // The resume's own replay is bracketed the same way, and its closing sync
+  // re-pins the absolute end — the same value the frames summed to.
+  const ws2 = h.sockets[1];
+  ws2.readyState = 1;
+  ws2.onopen();
+  ws2.onmessage({ data: '{"type":"ready"}' });
+  ws2.onmessage({ data: '{"type":"sync","offset":28,"start":true}' });
+  ws2.onmessage({ data: h.enc.encode("rest").buffer }); // 4 bytes
+  assert.equal(h.session.ttyOffset, 32, "the resume advances from its own start offset");
+  ws2.onmessage({ data: '{"type":"sync","offset":32}' });
+  assert.equal(h.session.ttyOffset, 32, "the closing sync republishes the value the frames already summed to");
+});
+
 test("issue #87: the cursor survives the drop and the reconnect resumes from it", () => {
   const h = ttyWsHarness();
   h.connect();

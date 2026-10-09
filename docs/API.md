@@ -88,18 +88,78 @@ Body:
 
 Response (201): same as create.
 
-### Delete (strict: refuses if dirty)
+### Delete (strict: refuses if dirty, unless forced)
 `POST /api/worktrees/delete`
 
 Body:
 ```json
-{ "id": "<worktreeId>" }
+{ "id": "<worktreeId>", "force": false }
 ```
+
+- `force` (optional, default `false`, issue #102): delete even with
+  uncommitted or untracked changes. The refusal response lists everything
+  force would destroy — including gitignored files the dirty check never
+  blocks on — so a client that resends with `force: true` has seen the cost.
+  Force delete is unrecoverable: tracked changes AND every gitignored file
+  vanish with the directory.
 
 Response:
 ```json
-{ "status": "ok" }
+{ "status": "ok", "ignored_destroyed": 0 }
 ```
+`ignored_destroyed` counts the gitignored entries the delete destroyed with
+the directory (issue #102 review): a worktree whose ONLY at-risk contents are
+gitignored files deletes without a refusal — the blocking check never sees
+them — so the success response carries the count and the dashboard surfaces
+it after the delete. **The field is present only when counted**: the force
+path skips the status probe (a damaged worktree can fail `git status` while
+`git worktree remove --force` still succeeds — force must not gate on the
+probe), so a forced success OMITS the field rather than answering a 0 that
+would read as "none destroyed" while really meaning "not counted" (second
+review round). Counting itself is best-effort: a probe failure (e.g. the
+10 s timeout on a pathologically large ignored tree) never blocks a clean
+delete and leaves the count at 0.
+
+Refusal (409, dirty worktree and no force): the `error` code
+`"worktree_dirty"` is part of the API contract — the dashboard matches on it
+to open the dirty-details dialog instead of a generic alert. `message`
+carries the one-line summary for text-only clients; `dirty` carries the full
+breakdown (issue #102: the old flat "delete is refused" message made a
+beforehand-damaged workspace indistinguishable from a leftover scratch file):
+```json
+{
+  "error": "worktree_dirty",
+  "message": "worktree has uncommitted or untracked changes; delete is refused: 3 entries (1 deleted, 0 modified, 2 untracked); first paths: .gitignore, README.md, scratch.txt; additionally 1 gitignored entry present, which a force delete would destroy unrecoverably; retry with force to delete anyway",
+  "dirty": {
+    "entries": 3,
+    "deleted": 1,
+    "modified": 0,
+    "added": 0,
+    "renamed": 0,
+    "untracked": 2,
+    "ignored": 1,
+    "first_paths": [".gitignore", "README.md", "scratch.txt"],
+    "porcelain": "?? .gitignore\n D README.md\n?? scratch.txt"
+  }
+}
+```
+`ignored` counts `git status --porcelain --ignored` "!!" entries — gitignored
+files/dirs that do NOT block the delete (the blocking check runs without
+`--ignored`) but a force delete destroys unrecoverably. Both status probes
+run with `-uall` (untracked/ignored directories count file-by-file instead of
+collapsing to one entry) and `-c core.quotePath=false` (non-ASCII paths stay
+literal); the carried `porcelain` is capped at 200 lines with a truncation
+marker, while counts always reflect the full output. The MCP
+`worktree_delete` verb takes the same `force` flag and answers a dirty
+refusal with the SAME 409 + `worktree_dirty` + `dirty` breakdown shape
+(issue #102 review — it previously returned a flat 400 MCP clients could not
+recognize programmatically); its success result carries `ignored_destroyed`
+under the same present-only-when-counted rule (omitted on force). The CLI
+spelling is `myworktree worktree delete [--force] <id>` — `--force` may
+appear before or after the id (issue #102 review: Go's flag parsing would
+otherwise silently drop a trailing flag), the `--force=<bool>` spelling and
+the `--` terminator work as in the flag-based subcommands, and a clean
+delete prints the destroyed gitignored count to stderr.
 
 ### Open Terminal (host macOS)
 `POST /api/worktrees/open-terminal`
@@ -443,7 +503,7 @@ Body:
 ```
 
 ### Web TTY stream (WebSocket)
-`GET /api/instances/tty/ws?id=<instanceId>[&since=<offset>]`
+`GET /api/instances/tty/ws?id=<instanceId>[&since=<offset>][&caps=<list>]`
 
 Bi-directional stream for terminal output/input with PTY support.
 
@@ -455,7 +515,9 @@ Bi-directional stream for terminal output/input with PTY support.
   holds the tail and only its end offset is unknown (a reverse proxy stripped
   `X-Log-Offset` off `GET /api/instances/log`). The handshake replays
   NOTHING — no binary frame at all — and answers with
-  `{"type":"sync","offset":<currentHead>}` and then live output only. Sending
+  `{"type":"sync","offset":<currentHead>}` (`since=-2` is itself an explicit
+  `since`, so any client in this mode receives the echo) and
+  then live output only. Sending
   the tail here would paint it a second time under the screen that already
   shows it, which was the bug. This is the browser's
   `CURSOR_FOLLOW_LIVE_END` (-2), mirrored by `sinceFollowLiveEnd` in
@@ -466,19 +528,57 @@ Bi-directional stream for terminal output/input with PTY support.
   OLDEST live byte (the #81 symptom); on this WS endpoint the catch-up
   loop reads forward from 0 and streams every chunk it reads straight to
   the socket, so the effect there is a replay of everything still live in
-  the ring — up to the 8 MB handshake budget — with `sync` at the end of
-  the last chunk actually written. The shipped UI never sends `0`;
+  the ring — up to the 8 MB handshake budget — with the closing `sync` at
+  the end of the last chunk actually written (the replay is bracketed by
+  the start/closing sync pair described below). The shipped UI never sends
+  `0`;
   it omits `since` entirely when its cursor is unknown (`CURSOR_UNKNOWN`)
   and sends `-2` when the screen is painted but the offset is not.
 - **`since>0`** → the server replays the bytes at or after that offset, in
   full, so a reconnecting client that still holds its rendered screen does
   not receive the tail a second time.
 
+`caps` is an optional, comma-separated capability list (issue #98), and the
+parameter may be **repeated** (`?caps=pong&caps=ping` — every value is
+scanned, not just the first). Matching is by whole, case-sensitive token:
+`caps=pinger` and `caps=PING` do NOT opt in. Two capabilities are defined:
+- **`ping`** — the client whitelists the TEXT `{"type":"ping"}` heartbeat
+  (stamps its liveness clock, never renders it), so the server may send that
+  frame. A client that does NOT opt in — a page loaded before the whitelist
+  shipped, any non-browser client that did not ask — is never sent the TEXT
+  heartbeat, because it would render it as terminal output every 10 s. The
+  RFC 6455 ping on the same tick is unaffected: control frames never reach
+  page JavaScript, so it is sent to every client.
+- **`sync`** — the client whitelists the `{"type":"sync"}` offset echo and
+  drives its reconnect cursor off it (issue #87), so the handshake sends it.
+  The echo is also sent to any client that presents an explicit `since`
+  parameter — the **inferred opt-in**: the cursor parameter and the sync
+  whitelist shipped in the same fix (#87, v0.5.1), and v0.5.0 never sends
+  `since` on this endpoint at all, so a client presenting one provably
+  parses the other. This keeps pre-caps v0.5.1 pages on the cursor contract:
+  without the echo their per-connection cursor latch never sets, the cursor
+  freezes, and every reconnect would re-replay from it. A client with
+  NEITHER — v0.5.0, a fresh non-browser probe — is never sent the frame,
+  because it would paint it into the terminal once per connect. Residual: a
+  pre-caps page whose cursor is still the unknown/zero sentinel sends no
+  `since` either, so it gets no echo and its reconnects re-replay the ≤64KB
+  tail until a loadLog re-pin or a refresh lands a cursor — the pre-#87
+  behaviour that page shipped with. In `since=-2` mode the echo is the ONLY
+  cursor handoff (the replay is empty by design) — which is exactly why the
+  explicit-`since` inference matters: a pre-caps page in that mode still
+  receives it.
+The rule is deliberately opt-IN rather than version-gated: the server can
+never again leak a future visible control frame to a client that did not
+declare it. Older servers ignore unknown query parameters, so a new client
+against an old daemon behaves exactly as before (the old daemon sends the
+TEXT ping unconditionally, and the new client whitelists it).
+
 Each replay read is capped at 64KB. When the delta since `since` exceeds
 64KB, the server loops reads until it is caught up and **streams each chunk
 to the socket as it reads it** instead of retaining one, so the whole delta
 is delivered and peak memory stays ~64KB (one chunk) regardless of the ring
-cap. The `sync` offset is the end of the **last chunk actually written** to
+cap. The closing `sync`'s offset is the end of the **last chunk actually
+written** to
 this socket — never an offset over bytes the client did not receive **and can
 still receive**, because a client cursor only moves forward and would never ask
 for them again. The two deliberate exceptions both publish the ring's real
@@ -509,6 +609,42 @@ still in the ring buffer is silently clamped to the oldest live byte; a
 tail (beyond head, defensive) — the client's own number is never echoed back
 as authoritative.
 
+On that streaming catch-up path the replay is bracketed by TWO sync frames
+(issue #94). Ahead of the FIRST binary chunk the server sends
+`{"type":"sync","offset":<S>,"start":true}`, where S is the replay's real
+start offset: the first chunk's end offset minus its length, so S and the
+first chunk come from the same read — the requested `since` when no clamp
+happened, the clamped oldest live byte when it did, never the raw request
+value. The closing sync after the last chunk is unchanged. A client that
+adopts S on arrival may advance its cursor by every replay frame's wire
+length from chunk 1 on, so a connection that dies mid-replay resumes from
+the bytes it already rendered instead of re-pulling the whole (up to 8 MB)
+replay from its old cursor — under sustained network degradation the pre-#94
+behaviour does not converge. The frame REUSES the `"sync"` type rather than
+inventing a new one: every client that receives it already provably parses
+`"sync"` (the caps token, or the inferred explicit-`since` opt-in above —
+any catch-up request presents `since` by definition), its existing handler —
+adopt the absolute offset, lift the per-connection latch — is exactly the
+wanted semantics, and a new frame type would have to fight the stale-page
+leak class (issue #98) with a new capability gate. The `"start":true` field
+exists for consumers that must know WHEN the replay ends (test harnesses,
+third-party clients); the shipped UI deliberately ignores it and treats both
+sync frames alike. S + Σ(replay frame bytes) equals the closing offset
+UNLESS the ring rolls a full cycle mid-replay and evicts past the loop's
+cursor between two reads — a later chunk then clamps to the new oldest live
+byte, the sum lands short, and the closing sync jumps the gap (truthfully:
+those bytes are undeliverable anyway, the same rule the read→subscribe
+window already lives by). The beyond-head tail degrade (`since` past head —
+defensive, unreachable through normal flows) announces its tail's start the
+same way, S = head − len(tail): the client presented a cursor, so EVERY
+replay addressed to one carries a start frame. The closing sync arrives
+ALONE only where there is no cursor to advance: the cursor-less
+first-connect tail replay (a single ≤64KB frame whose death window is the
+pre-#87 one — and a cursor-less client may not parse `sync` at all, which is
+why THAT path's `syncCap` is a genuine gate, not an inference), the
+`since=-2` handshake (zero binary frames by design) and the caught-up-at-head
+exit (nothing to announce).
+
 In `since=-2` mode the published offset comes from `Manager.EndOffset` —
 the head read with a zero-length body, because there is no replay to attach
 it to. Two windows surround that read and they behave differently, so do not
@@ -535,14 +671,30 @@ conflate them:
 1. Server sends `{"type":"ready"}` immediately after connection
 2. Client should wait for this message before sending resize
 3. Client sends `{"type":"resize","cols":80,"rows":24}` to start data flow
-4. Server sends initial log (the tail, or only the bytes after `since`) as binary frames — and in `since=-2` mode sends NO binary frame at all
-5. Server sends `{"type":"sync","offset":<int64>}` (text frame) — the end
+4. Server sends `{"type":"sync","offset":<S>,"start":true}` (text frame,
+   issue #94) announcing the replay's real start offset S — the requested
+   `since`, or the clamped oldest live byte when `since` predated it —
+   ahead of the FIRST binary frame. Sent on every replay addressed to a
+   cursor-bearing client (the streamed catch-up AND the beyond-head tail
+   degrade); skipped only by the cursor-less first-connect tail and by
+   empty replays. Same opt-in as the closing sync in step 6 — every client
+   that receives it provably parses `"sync"`, and a client that ignores
+   the `start` marker is merely back to the pre-#94 behaviour of waiting
+   for the closing sync
+5. Server sends the initial log (the tail, or only the bytes after
+   `since`) as binary frames — and in `since=-2` mode sends NO binary
+   frame at all
+6. Server sends `{"type":"sync","offset":<int64>}` (text frame, **only to
+   clients that opted in via `caps=sync` or presented an explicit `since`**
+   — issue #98) — the CLOSING sync: the end
    offset of that replay (in `since=-2` mode, the live head it refused to
    replay); the client stores it and sends it back as `since`
-   on its next reconnect
-6. Real-time output continues as binary frames
-7. Client receives first data and triggers second resize (50ms delay) for TUI redraw
-8. If the client stops draining the live stream, the server closes the
+   on its next reconnect. On the streaming catch-up path this is the
+   second sync frame — the start announcement of step 4 preceded the
+   replay; everywhere else it is the only one
+7. Real-time output continues as binary frames
+8. Client receives first data and triggers second resize (50ms delay) for TUI redraw
+9. If the client stops draining the live stream, the server closes the
    connection with **`1013` / reason `subscriber overflow: slow consumer`**
    (issue #82) instead of silently dropping output — see Close codes below;
    the client reconnects with the `since` cursor it already holds, exactly
@@ -563,8 +715,8 @@ conflate them:
 *Server → Client:*
 - Ready: `{"type":"ready"}` (text frame)
 - Output: binary frames (terminal output chunks)
-- Sync: `{"type":"sync","offset":<int64>}` (text frame, sent after the handshake replay — even when that replay was empty. The client latches it per connection: replay frames received BEFORE the sync never touch the cursor — the sync publishes the authoritative end of the whole replay in one step; binary frames received AFTER it advance the cursor by their wire byte count — every one of them is ring-buffer output, as the server closes the connection rather than writing diagnostics as binary)
-- Heartbeat: `{"type":"ping"}` (text frame, every 10 s, issue #83) — the application-level mirror of the RFC 6455 ping the server sends on the same tick. Browsers answer the protocol ping automatically from their network stack (which refreshes the server's 45 s read deadline); this text frame is the heartbeat browser JavaScript can observe, since `onmessage` never fires for control frames. Clients MUST whitelist `ping` (and `pong`) as control types and MUST NOT render them as terminal output.
+- Sync: `{"type":"sync","offset":<int64>}` (text frame, **opt-in via `caps=sync` — or inferred from an explicit `since` parameter — since issue #98**), the cursor handoff of the handshake, sent even when the replay was empty. Since issue #94 a replay addressed to a cursor-bearing client is bracketed by TWO of these: `{"type":"sync","offset":<S>,"start":true}` ahead of the FIRST replay chunk carries the replay's real (possibly clamped) start offset, and the closing sync after the last chunk carries its end offset — every other path (the cursor-less tail, `since=-2`, an empty replay) sends the closing sync alone. The client latches per connection: a replay frame advances the cursor by its wire byte count only once SOME sync has arrived — against a post-#94 server that is the start sync, so frames count from chunk 1 on (S and chunk 1 come from the same server-side read, so the base is truthful); against a pre-#94 server the latch lifts only at the closing sync, which publishes the end of the whole replay in one step. Either way the closing sync is the absolute authority — whenever the summed frames and it drift (a ring rollover mid-replay can evict unsent bytes, landing the sum short), it wins. Counting binary frames is sound at all because every one of them is ring-buffer output: the server closes the connection rather than writing diagnostics as binary. The `"start":true` marker exists for consumers that must know WHEN the replay ends; a client that ignores it and treats both syncs as absolute offsets to adopt implements the full contract)
+- Heartbeat: `{"type":"ping"}` (text frame, every 10 s, issue #83; **opt-in via `caps=ping` since issue #98**) — the application-level mirror of the RFC 6455 ping the server sends on the same tick. Browsers answer the protocol ping automatically from their network stack (which refreshes the server's 45 s read deadline); this text frame is the heartbeat browser JavaScript can observe, since `onmessage` never fires for control frames. Clients MUST whitelist `ping` (and `pong`) as control types and MUST NOT render them as terminal output — and the server only sends this frame to clients that declared `ping` in the handshake `caps` list, so a client without the whitelist never receives it.
 
 **Liveness (issue #83):** half-open TCP sockets (laptop sleep, NAT/proxy idle timeout) keep `readyState === OPEN` without ever firing `onclose`, so liveness rides on heartbeat traffic in both directions. Server: pings every 10 s; arms a 45 s read deadline before every read and reaps a peer that has sent nothing for that long (the browser's automatic Pong refreshes it). **Non-browser clients get no automatic Pong** — `internal/ws`'s own client returns `opPing` as an ordinary message and installs no responder — so any Go or embedded client of this endpoint MUST answer protocol pings with Pong and/or send `{"type":"ping"}` periodically, or it will be reaped at the 45 s deadline. Client: stamps the arrival of every frame, probes `{"type":"ping"}` every 5 s once READY, and reconnects after 30 s without heartbeat traffic (3 × the ping interval, under the server's 45 s backstop). The web UI's **primary detector is the 2 s poll** — `ensureTerminalLiveTransport()` notices the stale stamp on the active session at ~30 s and queues the reconnect (returning `false`: a queued reconnect is not yet a live transport); the 5 s watchdog is the fallback that also covers sessions the poll does not promote. Liveness is never inferred from the absence of program output — a prompt, `vim` or `top` emit zero bytes for hours and stay connected. A write deadline was deliberately **not** part of issue #83: normal-traffic writes on this socket carry none (the only bounded write here is the 5 s deadline on #82's overflow close-frame), so a handler blocked mid-write is reclaimed when that write fails or returns, not by the read deadline.
 
@@ -616,9 +768,17 @@ Client                    Server
    |-- {"type":"resize", --->|  Notify terminal size
    |    "cols":80,"rows":24} |
    |                         |
+   |<-- {"type":"sync", ----|  Start offset of the replay (issue #94):
+   |    "offset":1024,      |  only on a replay addressed to a cursor-
+   |    "start":true}       |  bearing client (streamed catch-up and the
+   |                         |  beyond-head tail degrade); S is the
+   |                         |  requested `since` or the clamped oldest
+   |                         |  live byte, never the raw request
    |<-- binary output -------|  Replay: tail, or bytes after `since`
-   |<-- {"type":"sync", ----|  End offset of that replay
-   |    "offset":4096}      |
+   |<-- {"type":"sync", ----|  CLOSING sync: end offset of that replay —
+   |    "offset":4096}      |    only when the client opted in via
+   |                         |    ?caps=sync or presented ?since
+   |                         |    (issue #98)
    |                         |
    |--- (50ms delay) -------|
    |                         |
@@ -628,9 +788,11 @@ Client                    Server
    |--- input bytes -------->|  User input
    |<-- binary output -------|  Process output
    |                         |
-   |<-- {"type":"ping"} -----|  Heartbeat every 10s (issue #83; the same
-   |                         |    tick also writes an RFC 6455 ping, which
-   |                         |    the browser answers invisibly to JS)
+   |<-- {"type":"ping"} -----|  Heartbeat every 10s (issue #83; only when
+   |                         |    the client opted in via ?caps=ping — issue
+   |                         |    #98. The same tick also writes an RFC 6455
+   |                         |    ping, which the browser answers invisibly
+   |                         |    to JS, caps or not)
    |-- {"type":"ping"} ------->|  Client probe every 5s once READY
    |<-- {"type":"pong"} ------|  Answered - never typed into the PTY
 ```

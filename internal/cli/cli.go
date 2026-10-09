@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -209,10 +210,53 @@ func worktreeCmd(logger *log.Logger, args []string) error {
 		return nil
 
 	case "delete":
-		if len(args) < 2 {
-			return fmt.Errorf("usage: myworktree worktree delete <id>")
+		// Scan for --force manually: Go's flag package stops parsing at
+		// the first positional arg, so `worktree delete <id> --force`
+		// would silently drop the flag and the user would hit the same
+		// refusal the message just told them to retry with force
+		// (issue #102 review). The --force=<bool> spelling and the --
+		// terminator keep this consistent with the flag-based
+		// subcommands (second review round).
+		var force bool
+		var positional []string
+		literal := false
+		for _, a := range args[1:] {
+			if literal {
+				positional = append(positional, a)
+				continue
+			}
+			switch {
+			case a == "--":
+				literal = true
+			case a == "--force" || a == "-force":
+				force = true
+			case strings.HasPrefix(a, "--force=") || strings.HasPrefix(a, "-force="):
+				v := a[strings.Index(a, "=")+1:]
+				b, err := strconv.ParseBool(v)
+				if err != nil {
+					return fmt.Errorf("invalid --force value %q (want true/false); usage: myworktree worktree delete [--force] <id>", v)
+				}
+				force = b
+			default:
+				positional = append(positional, a)
+			}
 		}
-		return mgr.Delete(args[1])
+		if len(positional) != 1 {
+			return fmt.Errorf("usage: myworktree worktree delete [--force] <id>")
+		}
+		ignoredDestroyed, err := mgr.Delete(positional[0], force)
+		if err != nil {
+			return err
+		}
+		if ignoredDestroyed > 0 {
+			word := "entries"
+			if ignoredDestroyed == 1 {
+				word = "entry"
+			}
+			fmt.Fprintf(os.Stderr, "note: the delete destroyed %d gitignored %s with the directory (build caches, logs, backups that existed only in this worktree)\n",
+				ignoredDestroyed, word)
+		}
+		return nil
 
 	default:
 		return fmt.Errorf("unknown worktree subcommand: %s", args[0])

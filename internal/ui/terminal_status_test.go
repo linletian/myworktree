@@ -36,6 +36,18 @@ func TestTerminalStatusHandling(t *testing.T) {
 // a file holding 27) — a hand-maintained count in prose is a claim nobody
 // checks. Derive it here instead: count the cases, then require the entry to
 // say the same thing.
+//
+// Issue #95: EVERY occurrence of the claim phrase must equal the derived
+// count, not just the first match. The previous first-match lookup silently
+// re-anchored the guard to whichever entry happened to sit highest in the
+// file (entries are prepended in reverse chronological order), so a new
+// entry quoting the phrase with a stale number would both hijack the
+// constraint and leave the real claim unchecked. Requiring every occurrence
+// to match makes the phrase position-independent — it now means "the file's
+// total case count" wherever it appears (subset counts use different
+// phrasing, e.g. #83's "fourteen new #83 cases"). Of the issue's two
+// proposals this was chosen over per-entry anchoring as the simpler
+// invariant to keep unambiguous as entries accumulate.
 func TestTerminalStatusChangelogCount(t *testing.T) {
 	src, err := os.ReadFile("testdata/terminal_status.test.mjs")
 	if err != nil {
@@ -50,13 +62,18 @@ func TestTerminalStatusChangelogCount(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read CHANGELOG.md: %v", err)
 	}
-	claimed := regexp.MustCompile(`Pinned by (\d+) ` + "`" + `node --test` + "`" + ` cases`).FindSubmatch(changelog)
-	if claimed == nil {
+	claims := regexp.MustCompile(`Pinned by (\d+) `+"`"+`node --test`+"`"+` cases`).FindAllSubmatchIndex(changelog, -1)
+	if len(claims) == 0 {
 		t.Fatal("CHANGELOG.md no longer says \"Pinned by N `node --test` cases\"")
 	}
-	if got, err := strconv.Atoi(string(claimed[1])); err != nil || got != cases {
-		t.Fatalf("CHANGELOG.md claims %s `node --test` cases but testdata/terminal_status.test.mjs has %d",
-			claimed[1], cases)
+	for _, loc := range claims {
+		num := changelog[loc[2]:loc[3]]
+		// Report the line so a multi-occurrence violation needs no grep.
+		line := 1 + strings.Count(string(changelog[:loc[0]]), "\n")
+		if got, err := strconv.Atoi(string(num)); err != nil || got != cases {
+			t.Errorf("CHANGELOG.md:%d claims %s `node --test` cases but testdata/terminal_status.test.mjs has %d — EVERY occurrence of the phrase must state the file's total (issue #95)",
+				line, num, cases)
+		}
 	}
 }
 
@@ -86,6 +103,26 @@ func TestTerminalStatusLivenessHeartbeatContract(t *testing.T) {
 	// returning null for either means that frame paints as literal text.
 	if !strings.Contains(index, `msg.type !== "ping" && msg.type !== "pong"`) {
 		t.Fatal(`parseTTYControlMessage must whitelist both "ping" and "pong" (issue #83)`)
+	}
+	// Issue #98: the TEXT ping heartbeat and the sync offset echo are
+	// opt-in on both halves of the wire — the client must DECLARE the
+	// capabilities and the server must GATE on them (a client without the
+	// whitelist would paint the ping frame every 10s and the sync frame
+	// once per connect).
+	if !strings.Contains(index, "&caps=ping,sync") {
+		t.Fatal(`connectTTY must declare caps=ping,sync so the server sends the TEXT ping heartbeat and the sync offset echo (issue #98)`)
+	}
+	if !strings.Contains(string(appSrc), `ttyClientHasCap(caps, "ping")`) {
+		t.Fatal("the server must gate the TEXT ping heartbeat on the client's caps opt-in (issue #98)")
+	}
+	if !strings.Contains(string(appSrc), `ttyClientHasCap(caps, "sync")`) {
+		t.Fatal("the server must gate the sync offset echo on the client's caps opt-in (issue #98)")
+	}
+	if !strings.Contains(string(appSrc), `r.URL.Query()["since"]`) {
+		t.Fatal("the sync echo must also flow to a client presenting an explicit since cursor — the inferred #87-era opt-in (issue #98 review round 2)")
+	}
+	if !strings.Contains(string(appSrc), `r.URL.Query()["caps"]`) {
+		t.Fatal(`caps must be scanned across ALL repeated parameter values (Query()["caps"]), not Get's first value only`)
 	}
 	// The stamp must be the FIRST thing ws.onmessage does - before any
 	// branch - so EVERY frame (control or binary) refreshes it. Anchoring on

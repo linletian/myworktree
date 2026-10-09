@@ -1131,16 +1131,59 @@ func (s *Server) handleWorktreeDelete(w http.ResponseWriter, r *http.Request) {
 	}
 	var req struct {
 		ID string `json:"id"`
+		// Force deletes even with uncommitted/untracked changes (issue
+		// #102). The refusal answer lists what force would destroy —
+		// including gitignored files the dirty check never blocks on —
+		// so a client that resends with force has seen the cost.
+		Force bool `json:"force"`
 	}
 	if err := readJSON(r.Body, &req); err != nil {
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
-	if err := s.worktreeMgr.Delete(req.ID); err != nil {
+	ignoredDestroyed, err := s.worktreeMgr.Delete(req.ID, req.Force)
+	if err != nil {
+		var dirty *worktree.DirtyWorktreeError
+		if errors.As(err, &dirty) {
+			writeWorktreeDirtyErr(w, dirty)
+			return
+		}
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	// ignored_destroyed is present only when the count is meaningful: the
+	// force path skips the status probe, so there a 0 would read as "none
+	// destroyed" while really meaning "not counted" (second review round).
+	resp := map[string]any{"status": "ok"}
+	if !req.Force {
+		resp["ignored_destroyed"] = ignoredDestroyed
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// writeWorktreeDirtyErr writes the structured 409 answer for a refused
+// worktree delete (issue #102). The "error" code "worktree_dirty" is part
+// of the API contract — the dashboard matches on it to open the
+// dirty-details dialog (summary, collapsible full git status output,
+// gitignored-file warning, and the force-delete exit) instead of a
+// generic alert. "message" carries the same one-line summary for clients
+// that only surface error text.
+func writeWorktreeDirtyErr(w http.ResponseWriter, dirty *worktree.DirtyWorktreeError) {
+	writeJSON(w, http.StatusConflict, map[string]any{
+		"error":   "worktree_dirty",
+		"message": dirty.Error(),
+		"dirty": map[string]any{
+			"entries":     dirty.Entries,
+			"deleted":     dirty.Deleted,
+			"modified":    dirty.Modified,
+			"added":       dirty.Added,
+			"renamed":     dirty.Renamed,
+			"untracked":   dirty.Untracked,
+			"ignored":     dirty.Ignored,
+			"first_paths": dirty.FirstPaths,
+			"porcelain":   dirty.Porcelain,
+		},
+	})
 }
 
 // resolveWorktreePath returns the filesystem path for a worktree id.
@@ -2359,6 +2402,43 @@ func (s *Server) handleInstanceTTYWSLiveness(w http.ResponseWriter, r *http.Requ
 	// OTHER unknown-cursor state — the screen IS painted, only its end
 	// offset is unknown — and is handled inside completeHandshake.
 	since := parseInt64Default(r.URL.Query().Get("since"), -1)
+	// Client capability flags (issue #98), a comma-separated list. The
+	// parameter may be REPEATED (?caps=pong&caps=ping) — url.Values.Get
+	// would return only the first value, so the raw slice is scanned.
+	// Defined flags:
+	//   "ping": the client whitelists the TEXT {"type":"ping"} heartbeat
+	//     in parseTTYControlMessage (stamps its liveness clock, never
+	//     paints it), so the server may send it. A client that does NOT
+	//     opt in — a page loaded before the whitelist shipped (v0.5.0),
+	//     any non-browser client — is never sent the text frame, because
+	//     such a client would paint it into the terminal as literal
+	//     output every ttyPingInterval. The RFC 6455 ping below is
+	//     unaffected: control frames never reach page JS, so it is
+	//     always safe.
+	//   "sync": the client whitelists the {"type":"sync"} offset echo
+	//     and drives its reconnect cursor off it (issue #87). The echo
+	//     has a second, INFERRED opt-in: an explicit `since` parameter.
+	//     The cursor parameter and the sync whitelist shipped in the
+	//     same fix (#87, v0.5.1) — v0.5.0 never puts `since` on this
+	//     endpoint at all — so a client presenting one provably parses
+	//     the other, and the inference costs exactly nothing against
+	//     the one population that would paint the frame. It keeps
+	//     pre-caps v0.5.1 pages on the cursor contract: without the
+	//     echo their handshakeSynced latch never sets, the cursor
+	//     freezes, and every reconnect re-replays from it — a
+	//     duplicate-paint regression strictly worse than the leak
+	//     (review round 2). Residual: a pre-caps page whose cursor is
+	//     still the unknown/zero sentinel sends no `since` either, so
+	//     it gets no echo and its reconnects re-replay the ≤64KB tail
+	//     until a loadLog re-pin or a refresh lands a cursor — the
+	//     pre-#87 behaviour that page shipped with.
+	// This is deliberately opt-IN, not version-gated: the server can
+	// never again leak a future visible control frame to a client that
+	// did not declare it understands it.
+	caps := r.URL.Query()["caps"]
+	textPingCap := ttyClientHasCap(caps, "ping")
+	_, sincePresent := r.URL.Query()["since"]
+	syncCap := ttyClientHasCap(caps, "sync") || sincePresent
 	conn, err := ws.Upgrade(w, r)
 	if err != nil {
 		return
@@ -2444,6 +2524,21 @@ func (s *Server) handleInstanceTTYWSLiveness(w http.ResponseWriter, r *http.Requ
 	// to the live output subscription. It reads the outer `since` (the
 	// cursor parsed from the query string) rather than taking a parameter;
 	// both call sites below pass that same variable.
+	//
+	// On the streaming catch-up path the replay is bracketed by TWO sync
+	// frames (issue #94): one carrying the replay's real start offset S
+	// ahead of the FIRST binary chunk — S = first chunk's next - len, the
+	// clamped value whenever ReadSince clamped a stale cursor, never the
+	// raw request — and the closing one carrying the end offset of the last
+	// chunk written. The start frame lifts the client's handshakeSynced
+	// latch at chunk 1, so a mid-replay drop resumes from the bytes already
+	// painted instead of re-pulling the whole replay; the closing frame
+	// keeps the #87 invariant below and corrects any drift absolutely. The
+	// beyond-head tail degrade (cursor > head) announces its tail's start
+	// the same way — the client presented a cursor, so every replay chunk
+	// addressed to one is preceded by a start frame; only the CURSOR-LESS
+	// first-connect tail goes without (its single ≤64KB frame has the
+	// pre-#87 death window, and such a client may not parse sync at all).
 	//
 	// Three cursors, three modes: a real `since >= 0` replays only [since,
 	// head); the -1 sentinel (nothing painted) replays the tail; and the
@@ -2547,6 +2642,45 @@ func (s *Server) handleInstanceTTYWSLiveness(w http.ResponseWriter, r *http.Requ
 			cursor := since
 			first := true
 			var streamed int64
+			// startPublished (issue #94) marks that the replay's real
+			// START offset has been announced to the client, so it can
+			// advance its cursor frame-by-frame from there instead of
+			// waiting for the closing sync frame. It is deliberately NOT
+			// `first`: the FIX-F consult below clears `first` before any
+			// chunk has been written, while the start offset must be
+			// published exactly once, ahead of the first CHUNK on the
+			// wire.
+			startPublished := false
+			// emitStartSync announces a replay's real START offset
+			// (issue #94) ahead of its first binary chunk, lifting the
+			// client's handshakeSynced latch at chunk 1 so a mid-replay
+			// drop resumes from the bytes already painted instead of
+			// re-pulling the whole (up to 8MB) replay. The frame REUSES
+			// the "sync" type rather than inventing a new one: the
+			// client's whitelist (parseTTYControlMessage) paints any
+			// unknown text frame into the terminal (the issue #98 leak
+			// class), and the existing handler — set cursor to the
+			// ABSOLUTE offset, lift the latch — is exactly the semantics
+			// wanted here. The "start":true marker lets a consumer that
+			// must know WHEN the replay ends (a test harness, a
+			// third-party client) tell this announcement apart from the
+			// closing echo; the in-repo client deliberately ignores it —
+			// every sync is an absolute offset to adopt.
+			//
+			// syncCap is PROVABLY true at both call sites — they sit in
+			// the catch-up branch, which requires since >= 0, i.e. an
+			// explicit `since` in the query, already the inferred opt-in
+			// half of syncCap (issue #98; review Minor-1). The guard
+			// stays so a future change to that inference can never leak
+			// the frame to a client that did not opt in — defensive
+			// depth, not an option any client has today.
+			emitStartSync := func(start int64) bool {
+				if !syncCap {
+					return true
+				}
+				payload := []byte(`{"type":"sync","offset":` + strconv.FormatInt(start, 10) + `,"start":true}`)
+				return conn.WriteText(payload) == nil
+			}
 			for {
 				if streamed >= ttyHandshakeReplayBudget {
 					// Budget exhausted — the ONE budget guard, checked
@@ -2614,8 +2748,19 @@ func (s *Server) handleInstanceTTYWSLiveness(w http.ResponseWriter, r *http.Requ
 						// ever appeared it must degrade to the
 						// first-connect tail, never to a cursor
 						// the ring never held. Write the tail
-						// before claiming head over it.
+						// before claiming head over it. Unlike
+						// the CURSOR-LESS tail replay above, this
+						// tail rides the issue #94 contract: the
+						// client presented a cursor, so announce
+						// the tail's real start S = head - len
+						// ahead of the chunk and let its latch
+						// lift at a truthful absolute base — the
+						// closing sync then republishes the same
+						// head the frames summed to.
 						if tail != "" {
+							if !emitStartSync(head - int64(len(tail))) {
+								return false
+							}
 							if err := conn.WriteBinary([]byte(tail)); err != nil {
 								return false
 							}
@@ -2657,6 +2802,32 @@ func (s *Server) handleInstanceTTYWSLiveness(w http.ResponseWriter, r *http.Requ
 				// Write as we read: the chunk is on the wire now, so the
 				// cursor published below is never ahead of it, and nothing
 				// older than the next read is retained in memory.
+				if !startPublished {
+					startPublished = true
+					// S = next - len(body) is the true start of THIS
+					// chunk — the requested `since` when no clamp
+					// happened, the clamped oldest live byte when it
+					// did — because S and the first chunk come from the
+					// SAME ReadSince call, so no new Manager surface is
+					// needed and a stale `since` can never be echoed
+					// raw. The closing sync below still arrives with
+					// the end offset, so a client that only understands
+					// sync-at-the-end is merely back to the pre-#94
+					// death window, and a misbehaving kind that returns
+					// a body without advancing the cursor (the
+					// defensive break below) is corrected by that same
+					// final absolute value. One corner on THAT
+					// defensive path (review Minor-2): next <= cursor
+					// there makes S = next - len(body) dip BELOW the
+					// client's own `since`, so a drop between this
+					// frame and the first chunk reconnects with a
+					// regressed cursor and re-renders [S, since) —
+					// bounded, self-healing, and still strictly better
+					// than the pre-#94 full re-pull it replaces.
+					if !emitStartSync(next - int64(len(body))) {
+						return false
+					}
+				}
 				if err := conn.WriteBinary([]byte(body)); err != nil {
 					return false
 				}
@@ -2683,9 +2854,20 @@ func (s *Server) handleInstanceTTYWSLiveness(w http.ResponseWriter, r *http.Requ
 		// and every other empty-replay path set a truthful head above.
 		// Built with strconv (not json.Marshal) so there is no
 		// unreachable error branch.
-		syncPayload := []byte(`{"type":"sync","offset":` + strconv.FormatInt(endOffset, 10) + `}`)
-		if err := conn.WriteText(syncPayload); err != nil {
-			return false
+		//
+		// OPT-IN (the issue #98 orientation): the echo is itself visible
+		// control traffic that post-dates the v0.5.0 whitelist, so an
+		// un-refreshed v0.5.0 page would paint it into the terminal on
+		// every connect — the same leak as the TEXT ping, once per
+		// connect instead of once per tick. It goes only to a client
+		// that declared "sync" in caps or presented an explicit `since`
+		// cursor (the two shipped together in #87 — see the handshake
+		// comment above); v0.5.0 does neither and never receives it.
+		if syncCap {
+			syncPayload := []byte(`{"type":"sync","offset":` + strconv.FormatInt(endOffset, 10) + `}`)
+			if err := conn.WriteText(syncPayload); err != nil {
+				return false
+			}
 		}
 
 		ch, cancelFn, err := s.instanceMgr.SubscribeOutput(id)
@@ -2771,15 +2953,23 @@ func (s *Server) handleInstanceTTYWSLiveness(w http.ResponseWriter, r *http.Requ
 			//     Invisible to page JS (onmessage never fires for control
 			//     frames), hence frame 2:
 			//  2. TEXT {"type":"ping"} — the heartbeat the client can
-			//     actually observe and stamp lastDataAt from.
+			//     actually observe and stamp lastDataAt from. OPT-IN ONLY
+			//     (issue #98): sent solely to clients whose `caps`
+			//     handshake parameter listed "ping" — a client without
+			//     the whitelist (a pre-refresh v0.5.0 page, any older or
+			//     non-browser client) would paint this frame into the
+			//     terminal every 10s, so it gets frame 1 only and
+			//     degrades to the pre-#83 behaviour it always had.
 			// A failed write means the peer is gone: return and let the
 			// existing defers unwind (same treatment as the binary output
 			// write below).
 			if err := conn.WritePing(nil); err != nil {
 				return
 			}
-			if err := conn.WriteText([]byte(`{"type":"ping"}`)); err != nil {
-				return
+			if textPingCap {
+				if err := conn.WriteText([]byte(`{"type":"ping"}`)); err != nil {
+					return
+				}
 			}
 
 		case <-handshakeTimer.C:
@@ -3101,16 +3291,35 @@ func (s *Server) handleMCPCall(w http.ResponseWriter, r *http.Request) {
 	case "worktree_delete":
 		var args struct {
 			ID string `json:"id"`
+			// Force: same semantics as /api/worktrees/delete (issue
+			// #102) — delete even with uncommitted/untracked changes.
+			Force bool `json:"force"`
 		}
 		if err := decodeArgs(req.Args, &args); err != nil {
 			writeErr(w, http.StatusBadRequest, err)
 			return
 		}
-		if err := s.worktreeMgr.Delete(args.ID); err != nil {
+		ignoredDestroyed, err := s.worktreeMgr.Delete(args.ID, args.Force)
+		if err != nil {
+			// Same structured refusal as /api/worktrees/delete (409 +
+			// worktree_dirty + breakdown), so MCP clients can recognize
+			// the dirty state programmatically instead of parsing a flat
+			// 400 message (issue #102 review).
+			var dirty *worktree.DirtyWorktreeError
+			if errors.As(err, &dirty) {
+				writeWorktreeDirtyErr(w, dirty)
+				return
+			}
 			writeErr(w, http.StatusBadRequest, err)
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"result": map[string]string{"status": "ok"}})
+		// As in the HTTP handler, ignored_destroyed is present only when
+		// counted (the force path skips the probe).
+		result := map[string]any{"status": "ok"}
+		if !args.Force {
+			result["ignored_destroyed"] = ignoredDestroyed
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"result": result})
 	case "branch_list":
 		def, out, err := s.listTopBranches()
 		if err != nil {
@@ -3406,6 +3615,23 @@ func parseInt64Default(s string, def int64) int64 {
 		return def
 	}
 	return v
+}
+
+// ttyClientHasCap reports whether the tty WS handshake's `caps` query
+// parameter — a comma-separated capability list (issue #98) that may be
+// REPEATED, ?caps=pong&caps=ping — contains name as a WHOLE,
+// case-sensitive token. Substring matching is deliberately not enough:
+// "pinger" must not opt a client into the TEXT {"type":"ping"} heartbeat,
+// and "PING" names no capability.
+func ttyClientHasCap(caps []string, name string) bool {
+	for _, v := range caps {
+		for _, tok := range strings.Split(v, ",") {
+			if strings.TrimSpace(tok) == name {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func decodeArgs(raw json.RawMessage, out any) error {

@@ -48,7 +48,7 @@ One commit, `chore(release): prepare vX.Y.Z`, touching **only**:
 
 | File | Change |
 |---|---|
-| `CHANGELOG.md` | Rename `## Unreleased` → `## vX.Y.Z (YYYY-MM-DD)` with a one-line release summary under it; keep an empty `## Unreleased` placeholder at the top. **Audit the delta for PRs that shipped without a CHANGELOG entry** (`git log --oneline <prev-tag>..develop` / merged PR list) and add the missing entries in house style (bold title — em-dash — detail — `Pinned by TestName`). |
+| `CHANGELOG.md` | Rename `## Unreleased` → `## vX.Y.Z (YYYY-MM-DD)` with a one-line release summary under it; keep an empty `## Unreleased` placeholder at the top. **Audit the delta for PRs that shipped without a CHANGELOG entry** (`git log --oneline <prev-tag>..develop` / merged PR list) and add the missing entries in house style (bold title — em-dash — detail — `Pinned by TestName`). House rule (issue #95, also in an HTML comment at the top of the file): the phrase "Pinned by N `node --test` cases" declares the TOTAL case count of `internal/ui/testdata/terminal_status.test.mjs` and EVERY occurrence must equal it — when the count grows, bump them all; use different phrasing for subset counts. |
 | `README.md` | Bump every `vA.B.C` string: download URLs, example tarball names, `-v` pin example, "current recommended public release" wording. |
 | `README.zh-CN.md` | Same sweep as `README.md`. |
 | `scripts/install.sh` | Bump the `-v` example version strings in the header/usage comments. |
