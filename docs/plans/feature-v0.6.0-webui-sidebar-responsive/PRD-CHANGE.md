@@ -61,7 +61,7 @@ issue #99 与 #100 是同一产品问题的两个切面：**myworktree 的 Web U
 | R1 | 桌面折叠态：`#app` 挂 collapsed CSS 类，`#sidebar` 宽度归零 + `overflow: hidden`，`#main` 因 `flex:1` 自动吃满；**JS 不做任何宽度计算** | #99 |
 | R2 | 开关按钮：chevron 图标按钮，**放在 `#header` 左侧**（折叠态常驻可见，不给侧栏留宽度） | #99 |
 | R3 | 持久化：`localStorage`，命名空间化 key `mw.ui.sidebarCollapsed`；文件首个 localStorage 用例；**宽屏默认展开**（窄屏 drawer 的默认值见 R14，同一 key 两端共享）；旧浏览器 / 隐私模式失败时降级为不持久化 | #99 |
-| R4 | 快捷键 `Ctrl/Cmd+B` 切换：首个全局 keydown；不在 input / textarea / contenteditable 内触发；焦点在终端 iframe 内时父页面捕获不到按键（跨 frame 限制，注释说明，不试图绕过） | #99 |
+| R4 | 快捷键 `Ctrl/Cmd+B` 切换：首个全局 keydown；不在 input / textarea / contenteditable 内触发。**机制事实（PR1 评审订正）**：pty 终端是同文档 xterm（非 iframe），其键盘焦点落在 `xterm-helper-textarea`（`<textarea>`）上，按键会冒泡到 document——不触发靠的是 input/textarea 守卫命中 helper textarea；跨 frame 隔离只适用于 opencode / reasonix / dsh 的 web UI iframe（其内按键确实到不了父文档，不试图绕过） | #99 |
 | R5 | 视口与高度：`#app` 高度 `100dvh`（`@supports` 保留 `100vh` fallback）、宽度 `100%` 取代 `100vw`；viewport meta 补 `viewport-fit=cover`；容器用 `env(safe-area-inset-*)` 处理刘海与 Home Indicator | #100 L1 |
 | R6 | iOS 软键盘：监听 `visualViewport` 的 `resize` / `scroll`，键盘弹出时收窄终端可视高度，保证输入区可见 | #100 L1 |
 | R7 | 断点与形态（**768px 归窄屏**：窄屏 `max-width: 768px`，中间档 769–1024px，依据见 §3.6）：窄屏侧栏改覆盖式 drawer（`position: absolute` + `transform: translateX`，`#app` 补 `position: relative` 作定位包含块），打开带遮罩、点遮罩关闭；遮罩盖住 `#main` 与 tab 区，但 drawer 打开态下 `#header` 左侧开关按钮仍可点击关闭（z-index 分层）；宽屏维持并排；中间宽度侧栏收窄或限上限（如 `max-width: 200px`），并排仍可用 | #100 L2 |
@@ -69,11 +69,11 @@ issue #99 与 #100 是同一产品问题的两个切面：**myworktree 的 Web U
 | R9 | 侧栏分栏拖拽从 mouse 事件迁到 **Pointer Events**（`pointerdown`/`pointermove`/`pointerup` + `setPointerCapture`）；拖拽时 handle `touch-action: none`，拖拽元素 `user-select: none` / `-webkit-touch-callout: none` | #100 L3 |
 | R10 | 触控目标：`.icon-btn` 与 `--term-ctrl-btn-size` 在 `@media (pointer: coarse)` 下放大到 ≥ 44×44 **CSS px**（Apple HIG 的 44pt 在 iOS Safari 即 44 CSS px；CSS 写 `px`，照写 `44pt` 会得到 ~58.7px），用 `min-width`/`min-height` 而非固定 width/height，避免撑破现有布局 | #100 L3 |
 | R11 | hover 样式用 `@media (hover: hover)` 包裹，纯触屏设备无粘滞高亮 | #100 L3 |
-| R12 | iframe 重排：折叠 / 展开 / 断点切换后，终端 iframe（xterm + xterm-addon-fit）与 reasonix / opencode / dsh 内嵌 iframe 不出现滚动条、错位、尺寸错误 | #99+#100 |
+| R12 | 重排：折叠 / 展开 / 断点切换后，同文档 xterm 终端（xterm + xterm-addon-fit，非 iframe）与 reasonix / opencode / dsh 内嵌 iframe 不出现滚动条、错位、尺寸错误 | #99+#100 |
 | R13 | 与 `toggleGitSection()` 的侧栏内折叠**状态互不覆盖**（两个正交状态） | #99 |
 | R14 | 窄屏让位：窄屏（≤768px）使用 drawer 形态，不要求桌面折叠态在小屏生效；**窄屏首次加载（无持久化值）drawer 默认关闭**，避免首访即盖住 `#main`；持久化 key 两端共享——桌面收起过的用户窄屏 drawer 亦默认关闭，这是单一状态机默认值按视口分派的必然结果，**不是第二个状态** | #99+#100 |
-| R15 | 范围边界：只覆盖 myworktree 自己的 Web UI（`internal/ui/static/index.html`）；iframe 内页面（vendor xterm、`internal/instance/*` 各内嵌 web UI）不在范围，但本 UI 必须保证 iframe 容器拿到正确的高 / 宽 | #100 |
-| R16 | 键盘语义隔离：`Ctrl/Cmd+B` 不会与 TUI 的 Ctrl+B 冲突（iframe 内按键到不了父文档） | #99 |
+| R15 | 范围边界：只覆盖 myworktree 自己的 Web UI（`internal/ui/static/index.html`，含同文档的 vendored xterm）；reasonix / opencode / dsh 的 **iframe 内页面**（`internal/instance/*` 各内嵌 web UI）不在范围，但本 UI 必须保证 iframe 容器拿到正确的高 / 宽 | #100 |
+| R16 | 键盘语义隔离：`Ctrl/Cmd+B` 不会与 TUI 的 Ctrl+B 冲突——终端是同文档 xterm，按键经 `xterm-helper-textarea` 冒泡后被 input/textarea 守卫放行（R4），守卫是该隔离的承重机制，不得在后续 PR 收窄 | #99 |
 
 ---
 
@@ -98,9 +98,9 @@ issue #99 与 #100 是同一产品问题的两个切面：**myworktree 的 Web U
 
 ### 3.4 快捷键基础设施（首个全局 keydown）
 
-- `document` 级 keydown，`metaKey || ctrlKey` + `key.toLowerCase() === 'b'` 判定（Caps Lock 或 Ctrl/Cmd+Shift+B 时 `event.key` 为 `'B'`，`=== 'b'` 会静默不触发）；忽略 `event.repeat`（长按 B 会反复切换）。
-- 输入守卫：`event.target` 落在 input / textarea / `[contenteditable]` 内直接 return（含 tab 重命名输入框）。
-- iframe 焦点时父页面收不到按键——**写注释说明，不做 postMessage 之类的绕过**（跨 frame 限制是浏览器安全模型，绕过反而引入新攻击面）。
+- `document` 级 keydown，`metaKey || ctrlKey` + `key.toLowerCase() === 'b'` 判定（Caps Lock 或 Ctrl/Cmd+Shift+B 时 `event.key` 为 `'B'`，`=== 'b'` 会静默不触发）；忽略 `event.repeat`（长按 B 会反复切换）；排除 `event.altKey`（Ctrl+Alt+B 在部分布局是 AltGr 组合）。
+- 输入守卫：`event.target` 落在 input / textarea / `[contenteditable]` 内直接 return（含 tab 重命名输入框）。**承重事实（PR1 评审订正）**：pty 终端是同文档 xterm，键盘焦点落在 `xterm-helper-textarea`（`<textarea>`）上，TUI 按键会冒泡到 document——终端内不触发靠的就是这条守卫命中 textarea，守卫不得收窄。
+- web UI iframe（opencode / reasonix / dsh）内焦点时父页面收不到按键——**写注释说明，不做 postMessage 之类的绕过**（跨 frame 限制是浏览器安全模型，绕过反而引入新攻击面）。
 
 ### 3.5 视口基线与软键盘方案（R5 / R6）
 
@@ -133,7 +133,7 @@ issue #99 与 #100 是同一产品问题的两个切面：**myworktree 的 Web U
 | PR3 | 断点与 drawer 形态 | R7、R8、R14、R2（窄屏复用）、R12 | #100 L2 | PR1（语义复用） |
 | PR4 | 触屏交互 | R9、R10、R11 | #100 L3 | PR2 |
 
-- 顺序依据：#99 独立且风险集中在 iframe 重排，先落地宽屏行为；#100 至少先做 L1。
+- 顺序依据：#99 独立且风险集中在终端重排，先落地宽屏行为；#100 至少先做 L1。
 - PR3 的 drawer 是 collapsed 语义的窄屏渲染，**不是新状态**——review 时重点检查有没有偷偷引入第二个状态变量。
 - 范围红线 R15 适用于全部 PR。
 
@@ -144,7 +144,7 @@ issue #99 与 #100 是同一产品问题的两个切面：**myworktree 的 Web U
 ### 5.1 PR1（#99）
 
 1. 【人工过检】折叠 / 展开过程中无内容溢出、`#main` 无抖动（视觉 / 布局断言，自动化测试线覆盖不了，由 §6 人工清单兜底）。
-2. 【人工过检】折叠态终端 iframe（xterm + xterm-addon-fit）重排后不出现滚动条或错位（同上，人工过检；自动化侧只锁定「先切 class、下一帧再 fit」的时序）。
+2. 【人工过检】折叠态终端（同文档 xterm + xterm-addon-fit）重排后不出现滚动条或错位（同上，人工过检；自动化侧只锁定「先切 class、下一帧再 fit」的时序）。
 3. 状态刷新后保持（localStorage 往返）；清掉 localStorage 后回到默认展开。
 4. `Ctrl/Cmd+B` 可切换，且在 input 内输入不触发。
 5. `toggleGitSection()` 的 staged/unstaged 折叠状态不受影响，两个状态互不覆盖。
@@ -183,7 +183,7 @@ issue #99 与 #100 是同一产品问题的两个切面：**myworktree 的 Web U
 - **Go 资源文本断言**（`internal/ui/ui_test.go` 既有写法）：通过 `httptest` 取到 served 的 `index.html` / `static/kinds/*.js`，用 `strings.Contains` 断言 DOM 锚点、class 名、函数名与**相对顺序**（参考 `TestWebRenderersStoppedSwitchHidesAllFrames`、`TestEmptyWorktreeSwitchHidesAllWebPanels` 的 slicing + position 断言风格）。
 - **node 行为测试**（`internal/ui/testdata/*.test.mjs`，`node --test`，由 `terminal_status_test.go` 的 `TestTerminalStatusHandling` 包进 `go test`）：需要真正执行逻辑的用例（localStorage 往返的状态读写、快捷键守卫、断点分派函数）走这条线——**从真实 served 源码切片、打桩浏览器状态**，不断言副本。
 - **CHANGELOG 房规**（issue #95）：若用 "Pinned by N `node --test` cases" 声明覆盖数，每一处出现的数字都必须等于**该条目所声明测试文件（集合）**的 `grep -c '^test('` 总数——现行守卫 `TestTerminalStatusChangelogCount` 按单文件 `terminal_status.test.mjs` 推导（该短语语义 = "the file's total case count"，见 #95 条目原文）；子集计数必须换措辞（如 "四个 #99 场景"）。新增 testdata 文件时不得用该短语引用全量总数，除非先把守卫改成全量求和并同步修订历史条目。
-- **人工清单**（每期结束过一遍）：桌面宽屏 / 400px 窄窗；刷新持久化；清 localStorage 恢复默认（宽屏展开 / 窄屏 drawer 关闭，R14）；iframe 内焦点按 Ctrl+B（不应切换，注释解释）；git section 折叠互不覆盖。
+- **人工清单**（每期结束过一遍）：桌面宽屏 / 400px 窄窗；刷新持久化；清 localStorage 恢复默认（宽屏展开 / 窄屏 drawer 关闭，R14）；终端内焦点按 Ctrl+B（不应切换——同文档 xterm 的 helper textarea 经 input 守卫放行，R4/R16）；git section 折叠互不覆盖。
 - **beta 渠道**：v0.6.0 发布前走 beta（v0.5.1 beta 曾抓出 3 个真实 bug 的先例），触屏相关问题主要靠该渠道收敛。
 
 ---
@@ -195,7 +195,7 @@ issue #99 与 #100 是同一产品问题的两个切面：**myworktree 的 Web U
 | 5562 行单文件，回归面大 | 桌面样式 / 终端重排被无意破坏 | 小步 PR + 资源文本断言锚定关键结构；每 PR 独立可回滚 |
 | 无真机触屏回归手段 | iOS/iPadOS 问题漏到发布 | 桌面窄窗 + `pointer: coarse` 模拟 + beta 渠道真机验证 |
 | collapsed flex 逻辑与响应式宽度规则干扰 | 抖动 / 双重状态 | 单一 class 真源、JS 零宽度计算（§3.1） |
-| iframe 重排 | 终端 / 各内嵌 web UI 滚动条、错位 | R12 列为每轮必验收项；折叠态 fit 触发顺序显式固定 |
+| 终端 / iframe 重排 | xterm 终端与各内嵌 web UI 滚动条、错位 | R12 列为每轮必验收项；折叠态 fit 触发顺序显式固定 |
 | 首次引入 localStorage | 隐私模式 / 旧浏览器抛异常 | try/catch 降级为不持久化，默认展开 |
 | `100dvh` 兼容 | 旧 Safari 高度塌陷 | `@supports (height: 100dvh)` 渐进增强 |
 | Ctrl/Cmd+B 与浏览器扩展 / 系统快捷键冲突 | 偶发不触发 | 属用户环境问题，不绕过；在注释与文档中说明 |
