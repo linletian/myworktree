@@ -1,7 +1,7 @@
 # PRD 变更文档：v0.6.0 — Web UI 侧栏折叠与响应式 / 触屏适配
 
-> **状态**：草案（待评审；本文档不构成实施指令，评审通过后按 §4 分期开工）
-> **日期**：2026-10-09
+> **状态**：草案（已经 PR #109 评审，评审意见逐条并入；本文档不构成实施指令，按 §4 分期开工）
+> **日期**：2026-10-09（同日按评审修订）
 > **目标版本**：v0.6.0（当前 `develop` = v0.5.2 release 合入 + 未发布变更）
 > **来源 issue**：#99（`ui(sidebar): 工作树侧栏支持折叠 / 展开（桌面端）`）、#100（`ui(responsive): Web UI 响应式布局 + 触屏交互（iOS / iPadOS）`）
 > **拟定分支名**：`feature/v0.6.0-webui-sidebar-responsive`
@@ -31,17 +31,17 @@ issue #99 与 #100 是同一产品问题的两个切面：**myworktree 的 Web U
 | 事实 | 锚点（当前 develop） |
 |---|---|
 | 单文件 vanilla JS + CSS，HTML/CSS/JS 全内联 | `internal/ui/static/index.html`（5562 行） |
-| `#app` 一层水平 flex，`100vh` / `100vw` | `index.html:158-162` |
+| `#app` 一层水平 flex，`100vh` / `100vw`；**无 `position`**（drawer 定位包含块需补 `position: relative`，见 R7 / §5.3） | `index.html:158-162` |
 | `#sidebar` 固定宽 `var(--sidebar-width)` = 240px，纯 CSS 常量无 JS 改写 | `index.html:9`、`165-171` |
 | `#main` `flex:1` + `min-width:0` | `index.html:539-545` |
-| `#header` / `#tabs-container`（已有 `overflow-x:auto`、隐藏滚动条） | `index.html:1370`、`548-574` |
+| `#header` / `#tabs-container`（已有 `overflow-x:auto`、隐藏滚动条规则族） | `index.html:1370`、`548-600`（滚动条规则族为 568-600） |
 | 新建 / 导入按钮 `.sidebar-actions`（chevron 按钮天然宿主） | `index.html:1335-1338` |
 | 侧栏垂直分栏拖拽 `#sidebar-resize-handle` → `startSidebarResize()`（mousedown/mousemove/mouseup，仅调 top/bottom 高度，与侧栏总宽无关） | `index.html:1343`、`2355-2392` |
 | git staged/unstaged 互锁折叠 `toggleGitSection()` | `index.html:2200`、`1344-1365` |
 | 全文件唯一 keydown：tab 重命名输入框 `handleRenameKeydown` | `index.html:2623`、`2565` |
 | **localStorage：0 处**；sessionStorage 仅 `SERVER_UPGRADED_FLAG` | `index.html:1742`、`1797`、`2113-2114` |
 | **宽度断点：0 个**（全文件仅 2 个 `@media`，均为 `prefers-color-scheme`） | `index.html:79`、`1208` |
-| viewport meta 缺 `viewport-fit=cover` / `interactive-widget` | `index.html:5` |
+| viewport meta 缺 `viewport-fit=cover`；`interactive-widget` 缺口经决策**不引入**（仅 Chromium/Android 支持，软键盘由 R6 的 `visualViewport` 方案覆盖，见 §3.5） | `index.html:5` |
 | Pointer/Touch 事件、`dvh`、`visualViewport`、`env(safe-area-inset-*)`：均 0 处 | 全文件检索确认 |
 | `body, html { overflow: hidden }`（页面本身不滚，软键盘遮挡无法靠滚动救回） | `index.html:144-152` |
 | `--term-ctrl-btn-size: 32px`；`.icon-btn { padding: 2px }` | `index.html:23`、`187-194` |
@@ -60,18 +60,18 @@ issue #99 与 #100 是同一产品问题的两个切面：**myworktree 的 Web U
 |---|---|---|
 | R1 | 桌面折叠态：`#app` 挂 collapsed CSS 类，`#sidebar` 宽度归零 + `overflow: hidden`，`#main` 因 `flex:1` 自动吃满；**JS 不做任何宽度计算** | #99 |
 | R2 | 开关按钮：chevron 图标按钮，**放在 `#header` 左侧**（折叠态常驻可见，不给侧栏留宽度） | #99 |
-| R3 | 持久化：`localStorage`，命名空间化 key `mw.ui.sidebarCollapsed`；文件首个 localStorage 用例，**默认展开**；旧浏览器 / 隐私模式失败时降级为不持久化 | #99 |
+| R3 | 持久化：`localStorage`，命名空间化 key `mw.ui.sidebarCollapsed`；文件首个 localStorage 用例；**宽屏默认展开**（窄屏 drawer 的默认值见 R14，同一 key 两端共享）；旧浏览器 / 隐私模式失败时降级为不持久化 | #99 |
 | R4 | 快捷键 `Ctrl/Cmd+B` 切换：首个全局 keydown；不在 input / textarea / contenteditable 内触发；焦点在终端 iframe 内时父页面捕获不到按键（跨 frame 限制，注释说明，不试图绕过） | #99 |
 | R5 | 视口与高度：`#app` 高度 `100dvh`（`@supports` 保留 `100vh` fallback）、宽度 `100%` 取代 `100vw`；viewport meta 补 `viewport-fit=cover`；容器用 `env(safe-area-inset-*)` 处理刘海与 Home Indicator | #100 L1 |
 | R6 | iOS 软键盘：监听 `visualViewport` 的 `resize` / `scroll`，键盘弹出时收窄终端可视高度，保证输入区可见 | #100 L1 |
-| R7 | 断点与形态（`max-width: 768px` 为界，对应 iPad 竖屏 768pt）：窄屏侧栏改覆盖式 drawer（`position: absolute` + `transform: translateX`），打开带遮罩、点遮罩关闭；宽屏维持并排；中间宽度（iPad Split View，768–1024）侧栏收窄或限上限（如 `max-width: 200px`），并排仍可用 | #100 L2 |
-| R8 | 窄屏 `#tabs-container` 补 `scroll-snap-type` 让 tab 吸附（滚动条继续隐藏，复用 568-574 既有实现） | #100 L2 |
+| R7 | 断点与形态（**768px 归窄屏**：窄屏 `max-width: 768px`，中间档 769–1024px，依据见 §3.6）：窄屏侧栏改覆盖式 drawer（`position: absolute` + `transform: translateX`，`#app` 补 `position: relative` 作定位包含块），打开带遮罩、点遮罩关闭；遮罩盖住 `#main` 与 tab 区，但 drawer 打开态下 `#header` 左侧开关按钮仍可点击关闭（z-index 分层）；宽屏维持并排；中间宽度侧栏收窄或限上限（如 `max-width: 200px`），并排仍可用 | #100 L2 |
+| R8 | 窄屏 `#tabs-container` 补 `scroll-snap-type` 让 tab 吸附（滚动条继续隐藏，复用 568-600 既有实现） | #100 L2 |
 | R9 | 侧栏分栏拖拽从 mouse 事件迁到 **Pointer Events**（`pointerdown`/`pointermove`/`pointerup` + `setPointerCapture`）；拖拽时 handle `touch-action: none`，拖拽元素 `user-select: none` / `-webkit-touch-callout: none` | #100 L3 |
-| R10 | 触控目标：`.icon-btn` 与 `--term-ctrl-btn-size` 在 `@media (pointer: coarse)` 下放大到 ≥ 44pt，用 `min-width`/`min-height` 而非固定 width/height，避免撑破现有布局 | #100 L3 |
+| R10 | 触控目标：`.icon-btn` 与 `--term-ctrl-btn-size` 在 `@media (pointer: coarse)` 下放大到 ≥ 44×44 **CSS px**（Apple HIG 的 44pt 在 iOS Safari 即 44 CSS px；CSS 写 `px`，照写 `44pt` 会得到 ~58.7px），用 `min-width`/`min-height` 而非固定 width/height，避免撑破现有布局 | #100 L3 |
 | R11 | hover 样式用 `@media (hover: hover)` 包裹，纯触屏设备无粘滞高亮 | #100 L3 |
 | R12 | iframe 重排：折叠 / 展开 / 断点切换后，终端 iframe（xterm + xterm-addon-fit）与 reasonix / opencode / dsh 内嵌 iframe 不出现滚动条、错位、尺寸错误 | #99+#100 |
 | R13 | 与 `toggleGitSection()` 的侧栏内折叠**状态互不覆盖**（两个正交状态） | #99 |
-| R14 | 窄屏让位：窄屏（≤768px）使用 drawer 形态，不要求桌面折叠态在小屏生效 | #99+#100 |
+| R14 | 窄屏让位：窄屏（≤768px）使用 drawer 形态，不要求桌面折叠态在小屏生效；**窄屏首次加载（无持久化值）drawer 默认关闭**，避免首访即盖住 `#main`；持久化 key 两端共享——桌面收起过的用户窄屏 drawer 亦默认关闭，这是单一状态机默认值按视口分派的必然结果，**不是第二个状态** | #99+#100 |
 | R15 | 范围边界：只覆盖 myworktree 自己的 Web UI（`internal/ui/static/index.html`）；iframe 内页面（vendor xterm、`internal/instance/*` 各内嵌 web UI）不在范围，但本 UI 必须保证 iframe 容器拿到正确的高 / 宽 | #100 |
 | R16 | 键盘语义隔离：`Ctrl/Cmd+B` 不会与 TUI 的 Ctrl+B 冲突（iframe 内按键到不了父文档） | #99 |
 
@@ -83,7 +83,7 @@ issue #99 与 #100 是同一产品问题的两个切面：**myworktree 的 Web U
 
 - 唯一真源：布尔态 `sidebarCollapsed`（R3 持久化）。
 - 宽屏渲染：`width: 0` + `overflow: hidden`（R1）。
-- 窄屏渲染：drawer off-canvas（`translateX(-100%)`）+ 遮罩（R7）。
+- 窄屏渲染：drawer off-canvas（`translateX(-100%)`）+ 遮罩（R7）；`#app` 补 `position: relative` 作 drawer 定位包含块，遮罩盖住 `#main` 与 tab 区但不盖住 `#header` 左侧开关按钮（打开态点它关闭）。
 - 分派完全由 CSS 断点 + 同一个 class 完成，**JS 只有「读状态 → 挂/摘 class」一条路径**，没有第二处宽度计算。这是 issue #99「不与响应式宽度规则互相干扰」要求的落地方式。
 
 ### 3.2 按钮宿主：`#header` 左侧
@@ -92,21 +92,28 @@ issue #99 与 #100 是同一产品问题的两个切面：**myworktree 的 Web U
 
 ### 3.3 持久化：首次引入 localStorage
 
-`mw.ui.sidebarCollapsed`，命名空间化与 issue 给的 key 一致。与既有 `sessionStorage` 的 `SERVER_UPGRADED_FLAG` 语义分工：后者是一次性升级标记（session 级），前者是用户偏好（持久级）。**默认展开**（key 缺失 / 解析失败 / 抛异常均视为展开）。
+`mw.ui.sidebarCollapsed`，命名空间化与 issue 给的 key 一致。与既有 `sessionStorage` 的 `SERVER_UPGRADED_FLAG` 语义分工：后者是一次性升级标记（session 级），前者是用户偏好（持久级）。**默认值按视口分派**：key 缺失时宽屏视为展开、窄屏（drawer）视为关闭（R14）；解析失败 / 抛异常降级为不持久化，默认值同样按视口分派。
 
 ### 3.4 快捷键基础设施（首个全局 keydown）
 
-- `document` 级 keydown，`metaKey || ctrlKey` + `key === 'b'` 判定。
+- `document` 级 keydown，`metaKey || ctrlKey` + `key.toLowerCase() === 'b'` 判定（Caps Lock 或 Ctrl/Cmd+Shift+B 时 `event.key` 为 `'B'`，`=== 'b'` 会静默不触发）；忽略 `event.repeat`（长按 B 会反复切换）。
 - 输入守卫：`event.target` 落在 input / textarea / `[contenteditable]` 内直接 return（含 tab 重命名输入框）。
 - iframe 焦点时父页面收不到按键——**写注释说明，不做 postMessage 之类的绕过**（跨 frame 限制是浏览器安全模型，绕过反而引入新攻击面）。
 
-### 3.5 dvh / 宽度基线与折叠逻辑解耦
+### 3.5 视口基线与软键盘方案（R5 / R6）
 
-R5 动的是 `#app` 的**高度与宽度基准**（100dvh、100% 宽），R1 动的是 `#sidebar` 在 flex 行里的**宽度占比**，两者互不依赖，但必须在同一轮验证（折叠 + 键盘弹出同时发生）。
+- R5 动的是 `#app` 的**高度与宽度基准**（100dvh、100% 宽），R1 动的是 `#sidebar` 在 flex 行里的**宽度占比**，两者互不依赖，但必须在同一轮验证（折叠 + 键盘弹出同时发生）。
+- **不引入 `interactive-widget=resizes-content`**：该 viewport meta 指令仅 Chromium/Android 支持，iOS Safari 忽略；本期目标平台为 iOS / iPadOS，软键盘遮挡由 R6 的 `visualViewport` 方案覆盖。§1.4 将 `interactive-widget` 列为现状缺口，由本条显式承接——对照 issue #100 阅读时不应视为 R5 静默缩窄了范围。
 
 ### 3.6 断点选取依据
 
-`768px` = iPad 竖屏宽度；`1024px` = iPad 横屏 / Split View 上边界。中间档收窄侧栏而非直接 drawer，因为 Split View 下半屏仍可容纳收窄侧栏 + 终端。
+三档均按视口宽度划分，**768px 归窄屏**（两档不得在 768px 同时命中）：
+
+- **窄屏 `max-width: 768px`（drawer）**：覆盖全部 iPhone、iPad mini 竖屏（744pt）、9.7″/10.2″ iPad 竖屏（768pt），以及 iPad Split View 的 1/3 与 1/2 档（约 320–683pt，全部 ≤768）。
+- **中间档 769–1024px（收窄侧栏并排）**：覆盖 10.9″/11″ iPad 竖屏（820/834pt）、12.9″ 竖屏与 9.7″ 全屏横屏（1024pt），以及 11″/12.9″ 横屏的 2/3 Split View 档（约 796/911pt）。
+- **宽屏 > 1024px**：全宽侧栏并排。
+
+注意 Split View 任何档位都到不了 1024pt（12.9″ 的 2/3 档约 911pt 已是上限），而 ≤768 的 Split View 档位全部走 drawer——**不要误以为「所有 Split View 都走中间档」**。中间档收窄侧栏而非直接 drawer，因为这些宽度下并排仍可用。
 
 ### 3.7 分期边界（每个 issue 的显式范围声明）
 
@@ -139,7 +146,8 @@ R5 动的是 `#app` 的**高度与宽度基准**（100dvh、100% 宽），R1 动
 3. 状态刷新后保持（localStorage 往返）；清掉 localStorage 后回到默认展开。
 4. `Ctrl/Cmd+B` 可切换，且在 input 内输入不触发。
 5. `toggleGitSection()` 的 staged/unstaged 折叠状态不受影响，两个状态互不覆盖。
-6. `internal/ui/ui_test.go` 增加 DOM 测试：collapsed 类能加到 `#app` 上、localStorage 往返正确（对齐现有 UI 测试写法，见 §6）。
+6. `internal/ui/ui_test.go` 增加 DOM 锚点**文本断言**：collapsed 类名、`mw.ui.sidebarCollapsed` key 名、挂/摘 class 的相对顺序（httptest + `strings.Contains`，不执行 JS，对齐现有 UI 测试写法，见 §6）。
+7. localStorage 往返、无 key / 解析失败时默认展开等**行为用例**走 node 线：`internal/ui/testdata/*.test.mjs` 从真实 served 源码切片 + 打桩 localStorage（见 §6）。
 
 ### 5.2 PR2（#100 L1）
 
@@ -151,12 +159,14 @@ R5 动的是 `#app` 的**高度与宽度基准**（100dvh、100% 宽），R1 动
 
 1. iPhone Safari 竖屏（375×667 / 390×844）与 iPad Safari（含 Split View 窄档）下，侧栏、tab 栏、终端区域均可达，无横向滚动条、无内容被裁掉。
 2. 窄屏 drawer 开合正常，点遮罩关闭；tab 滚动吸附生效。
-3. 中间宽度（768–1024）侧栏收窄后并排仍可用。
+3. 中间宽度（769–1024）侧栏收窄后并排仍可用；恰好 768px 时走窄屏 drawer（边界归属唯一，见 §3.6）。
+4. drawer 以 `#app` 为定位包含块（`#app` 补 `position: relative`）；遮罩盖住 `#main` 与 tab 区，且 drawer 打开态下 `#header` 左侧开关按钮仍可点击关闭（z-index 分层）。
+5. 窄屏首次加载（无持久化值）drawer 默认关闭，不遮挡终端；与桌面共享同一持久化 key——桌面收起过的用户窄屏 drawer 亦默认关闭（单一状态机的视口分派默认值，非新状态，R14）。
 
 ### 5.4 PR4（#100 L3）
 
 1. 侧栏上下分栏拖拽在 iOS / iPadOS 上可用，且拖拽过程中不触发页面滚动。
-2. 所有可点击控件在触屏下有效命中区 ≥ 44×44pt（`pointer: coarse` 下验证）。
+2. 所有可点击控件在触屏下有效命中区 ≥ 44×44 **CSS px**（`pointer: coarse` 下验证；对应 Apple HIG 44pt，CSS 写 `px` 不写 `pt`）。
 3. hover 样式不再粘滞。
 
 ### 5.5 全期通用（最大风险项）
@@ -171,7 +181,7 @@ R5 动的是 `#app` 的**高度与宽度基准**（100dvh、100% 宽），R1 动
 - **Go 资源文本断言**（`internal/ui/ui_test.go` 既有写法）：通过 `httptest` 取到 served 的 `index.html` / `static/kinds/*.js`，用 `strings.Contains` 断言 DOM 锚点、class 名、函数名与**相对顺序**（参考 `TestWebRenderersStoppedSwitchHidesAllFrames`、`TestEmptyWorktreeSwitchHidesAllWebPanels` 的 slicing + position 断言风格）。
 - **node 行为测试**（`internal/ui/testdata/*.test.mjs`，`node --test`，由 `terminal_status_test.go` 的 `TestTerminalStatusHandling` 包进 `go test`）：需要真正执行逻辑的用例（localStorage 往返的状态读写、快捷键守卫、断点分派函数）走这条线——**从真实 served 源码切片、打桩浏览器状态**，不断言副本。
 - **CHANGELOG 房规**（issue #95）：若用 "Pinned by N `node --test` cases" 声明覆盖数，每一处出现的数字都必须等于 `grep -c '^test('` 的导出总数；子集计数必须换措辞（如 "四个 #99 场景"）。
-- **人工清单**（每期结束过一遍）：桌面宽屏 / 400px 窄窗；刷新持久化；清 localStorage 恢复默认；iframe 内焦点按 Ctrl+B（不应切换，注释解释）；git section 折叠互不覆盖。
+- **人工清单**（每期结束过一遍）：桌面宽屏 / 400px 窄窗；刷新持久化；清 localStorage 恢复默认（宽屏展开 / 窄屏 drawer 关闭，R14）；iframe 内焦点按 Ctrl+B（不应切换，注释解释）；git section 折叠互不覆盖。
 - **beta 渠道**：v0.6.0 发布前走 beta（v0.5.1 beta 曾抓出 3 个真实 bug 的先例），触屏相关问题主要靠该渠道收敛。
 
 ---
@@ -193,6 +203,7 @@ R5 动的是 `#app` 的**高度与宽度基准**（100dvh、100% 宽），R1 动
 ## 8. 非目标（明确不做）
 
 - iframe 内页面（vendor xterm、reasonix / opencode / dsh 内嵌 web UI）的内部自适应——各自的问题，本 UI 只保证容器尺寸正确（R15）。
+- viewport meta 引入 `interactive-widget=resizes-content`（仅 Chromium/Android 支持，软键盘由 R6 的 `visualViewport` 覆盖；决策见 §3.5）。
 - 边缘滑出 drawer（#100 标注的加分项，后续评估）。
 - 任何后端 / WS / HTTP 协议变更。
 - PWA、安装、离线能力。
