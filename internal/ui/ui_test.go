@@ -619,6 +619,165 @@ func TestSidebarCollapseAnchors(t *testing.T) {
 	}
 }
 
+// TestViewportAndHeightAnchors pins the issue #100 L1 viewport/height
+// contract (PR2 of docs/plans/feature-v0.6.0-webui-sidebar-responsive/):
+// the viewport meta opts into cover fitting, #app's height basis is 100dvh
+// with a 100vh fallback that must be declared FIRST (old Safari progressive
+// enhancement), the width is 100% instead of 100vw, the notch / Home
+// Indicator safe areas are consumed via env(safe-area-inset-*), and the iOS
+// soft keyboard is handled by pinning #app to window.visualViewport with a
+// graceful no-op where the API does not exist. R12 with PR1: R5 owns #app's
+// height/width basis while PR1's collapse owns #sidebar's flex-row share —
+// two disjoint rule blocks on the same element, asserted here to coexist.
+func TestViewportAndHeightAnchors(t *testing.T) {
+	bodyText := fetchIndexHTML(t)
+
+	// R5: the viewport meta opts into cover fitting — the prerequisite for
+	// env(safe-area-inset-*) returning anything but 0. Anchored to the meta
+	// tag itself, not the bare string (a stray mention in a comment would
+	// satisfy a full-file Contains while the shipped meta stayed broken).
+	metaStart := strings.Index(bodyText, `<meta name="viewport" content="`)
+	if metaStart < 0 {
+		t.Fatal("GET / lost the viewport meta tag (issue #100 L1 R5)")
+	}
+	metaEnd := strings.Index(bodyText[metaStart:], "/>")
+	if metaEnd < 0 {
+		t.Fatal("GET / viewport meta tag is not closed")
+	}
+	meta := bodyText[metaStart : metaStart+metaEnd]
+	for _, want := range []string{"width=device-width", "initial-scale=1", "viewport-fit=cover"} {
+		if !strings.Contains(meta, want) {
+			t.Fatalf("GET / viewport meta should carry %q (issue #100 L1 R5)", want)
+		}
+	}
+
+	// R5: #app's height/width basis. The declarations are asserted INSIDE
+	// the #app rule — index.html holds other 100% hits (form inputs, tab
+	// containers), so a bare full-file Contains would anchor nothing.
+	ruleStart := strings.Index(bodyText, "#app {\n")
+	if ruleStart < 0 {
+		t.Fatal("GET / lost the #app rule (issue #100 L1 R5)")
+	}
+	ruleEnd := strings.Index(bodyText[ruleStart:], "\n        }")
+	if ruleEnd < 0 {
+		t.Fatal("GET / #app rule has no closing brace")
+	}
+	rule := bodyText[ruleStart : ruleStart+ruleEnd]
+	for _, decl := range []string{"height: 100vh;", "width: 100%;"} {
+		if !strings.Contains(rule, decl) {
+			t.Fatalf("GET / #app rule should declare %q (issue #100 L1 R5)", decl)
+		}
+	}
+	if strings.Contains(rule, "width: 100vw;") {
+		t.Fatal("GET / #app rule must not use width: 100vw — vw counts the scrollbar gutter and overflows horizontally (issue #100 L1 R5)")
+	}
+	// The safe-area padding is what the viewport-fit=cover meta above buys.
+	// All four insets, so both the notch (left/right in landscape) and the
+	// Home Indicator (bottom) are covered; desktop insets are all 0.
+	if !strings.Contains(rule, "env(safe-area-inset-") {
+		t.Fatal("GET / #app rule should consume env(safe-area-inset-*) for the notch / Home Indicator (issue #100 L1 R5)")
+	}
+	for _, inset := range []string{"safe-area-inset-top", "safe-area-inset-right", "safe-area-inset-bottom", "safe-area-inset-left"} {
+		if !strings.Contains(rule, inset) {
+			t.Fatalf("GET / #app rule should consume %s (issue #100 L1 R5)", inset)
+		}
+	}
+
+	// R5: the dvh upgrade lives in an @supports block and must come AFTER
+	// the 100vh fallback in the source. The mechanism is last-declaration-
+	// wins for same-origin equal-specificity declarations: browsers that
+	// understand dvh take the @supports block over the fallback, and
+	// browsers without dvh (old Safari) evaluate the condition to false
+	// and drop the WHOLE block, keeping the 100vh baseline. A swapped order
+	// would not strand old Safari — it would silently regress modern
+	// browsers to static 100vh, reviving the URL-bar jump this layer
+	// exists to kill.
+	supportsAt := strings.Index(bodyText, "@supports (height: 100dvh) {")
+	if supportsAt < 0 {
+		t.Fatal("GET / lost the @supports (height: 100dvh) block (issue #100 L1 R5)")
+	}
+	supportsEnd := strings.Index(bodyText[supportsAt:], "\n        }")
+	if supportsEnd < 0 {
+		t.Fatal("GET / @supports (height: 100dvh) block has no closing brace")
+	}
+	supports := bodyText[supportsAt : supportsAt+supportsEnd]
+	if !strings.Contains(supports, "height: 100dvh;") {
+		t.Fatal("GET / @supports block should upgrade #app to height: 100dvh (issue #100 L1 R5)")
+	}
+	fallbackAt := strings.Index(rule, "height: 100vh;")
+	if fallbackAt < 0 || ruleStart+fallbackAt > supportsAt {
+		t.Fatal("GET / should declare the 100vh fallback BEFORE the @supports (height: 100dvh) block — modern browsers resolve last-wins and take the dvh block, old Safari drops the whole @supports block; swapped, modern browsers would silently stay on static 100vh (issue #100 L1 R5)")
+	}
+	// R12 with PR1: the collapse mechanism (#app.collapsed #sidebar) is a
+	// different rule block on a different property — it must survive this
+	// PR untouched, and this PR must not have bolted a width/height onto
+	// the collapsed rule either.
+	collapsedStart := strings.Index(bodyText, "#app.collapsed #sidebar {")
+	if collapsedStart < 0 {
+		t.Fatal("GET / lost the PR1 #app.collapsed #sidebar rule (issue #99 R1)")
+	}
+	collapsedEnd := strings.Index(bodyText[collapsedStart:], "\n        }")
+	if collapsedEnd < 0 {
+		t.Fatal("GET / #app.collapsed #sidebar rule has no closing brace")
+	}
+	collapsed := bodyText[collapsedStart : collapsedStart+collapsedEnd]
+	if strings.Contains(collapsed, "100vh") || strings.Contains(collapsed, "100dvh") || strings.Contains(collapsed, "100%") {
+		t.Fatal("GET / #app.collapsed #sidebar rule must not carry viewport-height/width declarations — PR1 owns the flex-row share, PR2 owns the height basis; the two stay independent (R12)")
+	}
+
+	// §3.5/§8: interactive-widget=resizes-content stays OUT of the viewport
+	// meta — it is Chromium-only and the plan explicitly defers the soft
+	// keyboard to the visualViewport path below instead. (Scoped to the meta
+	// tag: the directive only means anything there, and the shipped JS
+	// comment that names the decision must not trip this.)
+	if strings.Contains(meta, "interactive-widget") {
+		t.Fatal("GET / viewport meta must not introduce interactive-widget=resizes-content — Chromium-only, deferred by plan §3.5/§8 (issue #100 L1)")
+	}
+
+	// R6: the visualViewport wiring, sliced to the shipped functions.
+	// Degradation is the contract: no API -> no listeners -> no-op. The
+	// occlusion sentinel is documentElement.clientHeight (not
+	// window.innerHeight — vv.height excludes scrollbars pinned to the
+	// visual viewport while innerHeight includes the classic gutter), and
+	// pinch/double-tap zoom opts out of pinning entirely: vv.height shrinks
+	// with the scale and fires resize, so without the short-circuit a pinch
+	// would collapse the whole UI toward half height.
+	apply := sliceJSFunction(t, bodyText, "applyVisualViewportHeight")
+	for _, check := range []string{
+		"window.visualViewport",
+		"document.documentElement.clientHeight",
+		"vv.offsetTop + vv.height",
+		"vv.scale && Math.abs(vv.scale - 1) > 0.01",
+		`app.style.height = ""`,
+	} {
+		if !strings.Contains(apply, check) {
+			t.Fatalf("GET / applyVisualViewportHeight should include %q (issue #100 L1 R6)", check)
+		}
+	}
+	// The scroll listener must gate on an existing pin: a pure pan never
+	// introduces one — that is what keeps an unpanned page on the pure-CSS
+	// sizing path.
+	reapply := sliceJSFunction(t, bodyText, "reapplyPinnedVisualViewportHeight")
+	if !strings.Contains(reapply, "if (!app || !app.style.height) return;") {
+		t.Fatal("GET / reapplyPinnedVisualViewportHeight must gate on an existing inline height — a pure pan must not introduce pinning (issue #100 L1 R6)")
+	}
+	init := sliceJSFunction(t, bodyText, "initVisualViewportHandling")
+	for _, check := range []string{
+		"if (!vv) return;",
+		`vv.addEventListener("resize", applyVisualViewportHeight)`,
+		`vv.addEventListener("scroll", reapplyPinnedVisualViewportHeight)`,
+	} {
+		if !strings.Contains(init, check) {
+			t.Fatalf("GET / initVisualViewportHandling should include %q (issue #100 L1 R6)", check)
+		}
+	}
+	// The wiring must actually run at startup, or the whole R6 path is dead
+	// code behind an unexported function.
+	if !strings.Contains(sliceJSFunction(t, bodyText, "init"), "initVisualViewportHandling();") {
+		t.Fatal("GET / init() must call initVisualViewportHandling() (issue #100 L1 R6)")
+	}
+}
+
 func TestReasonixRendererKeepsFrameAlive(t *testing.T) {
 	mux := http.NewServeMux()
 	if err := Register(mux, "myworktree", nil); err != nil {

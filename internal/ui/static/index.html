@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <title>myworktree</title>
     <style>
         :root {
@@ -157,8 +157,35 @@
 
         #app {
             display: flex;
+            /* R5 (issue #100 L1): height basis. 100vh is the legacy
+               fallback (old Safari); the @supports block below upgrades it
+               to the dynamic viewport height, which tracks the mobile URL
+               bar show/hide without any JS. Width is 100% of body, NOT
+               100vw: vw counts the scrollbar gutter, so a vertical
+               scrollbar would push this flex row into horizontal overflow. */
             height: 100vh;
-            width: 100vw;
+            width: 100%;
+            /* R5: keep the row inside the display notch / Home Indicator
+               safe areas (iPhone landscape, iPad). box-sizing is border-box
+               file-wide, so the insets inset the children instead of
+               growing the box; every desktop browser reports all four
+               insets as 0, which makes this a literal no-op there. */
+            padding: env(safe-area-inset-top, 0px) env(safe-area-inset-right, 0px) env(safe-area-inset-bottom, 0px) env(safe-area-inset-left, 0px);
+        }
+
+        /* R5: progressive enhancement — dvh tracks the dynamic toolbars
+           (mobile URL bar) so the layout does not jump when they slide.
+           The order works like this: same-origin declarations of equal
+           specificity resolve last-wins, so browsers that understand dvh
+           take this block over the 100vh fallback above; browsers that
+           don't (old Safari) evaluate the @supports condition to false and
+           drop the WHOLE block, keeping the 100vh baseline. Swapping the
+           two would not strand old Safari — it would silently regress
+           modern browsers to static 100vh and bring the URL-bar jump back. */
+        @supports (height: 100dvh) {
+            #app {
+                height: 100dvh;
+            }
         }
 
         /* Sidebar */
@@ -2290,6 +2317,90 @@
 
         document.addEventListener("keydown", handleSidebarToggleKeydown);
 
+        // --- Viewport height & the iOS soft keyboard (issue #100 L1) ---
+
+        // R6: iOS Safari does not resize the layout viewport when the soft
+        // keyboard opens, and we deliberately do NOT use the
+        // interactive-widget=resizes-content viewport directive (it is
+        // Chromium-only; see plan §3.5/§8) — so the keyboard parks over the
+        // bottom of the page. body/html are overflow:hidden: the page itself
+        // never scrolls, which means the covered strip cannot be scrolled
+        // back into view. The only remedy is to shrink the app to what is
+        // actually visible, and window.visualViewport is the one API that
+        // reports that rectangle. The RESIZE listener runs the full
+        // judgment (keyboard open AND close); the SCROLL listener only
+        // re-pins an existing pin — a pure pan must never introduce one.
+        // While anything is covered, #app's inline height is pinned to the
+        // visual viewport's bottom edge in layout coordinates; the narrowing
+        // walks down the flex column (#workspace is flex:1), the terminal
+        // host's ResizeObserver fires and xterm re-fits, so the input area
+        // stays above the keyboard. When nothing is covered the inline
+        // height is CLEARED, handing sizing back to the CSS cascade
+        // (100dvh, with the 100vh fallback).
+        function applyVisualViewportHeight() {
+            const vv = window.visualViewport;
+            const app = document.getElementById("app");
+            if (!vv || !app) return;
+            // Pinch / double-tap zoom opt-out, spec fact #1: vv.height is
+            // measured in layout-viewport pixels, so it SHRINKS as the scale
+            // grows (and a resize event fires on the change) — without this
+            // guard a pinch would pin #app to the zoomed rectangle and
+            // collapse the whole UI toward half height. The zoomed state
+            // owns no inline height; zooming back to 1 re-runs the full
+            // judgment on the resize event and re-pins if the keyboard is
+            // still up.
+            if (vv.scale && Math.abs(vv.scale - 1) > 0.01) {
+                app.style.height = "";
+                return;
+            }
+            // Visible bottom edge in layout-viewport coordinates. With the
+            // keyboard open this sits keyboardHeight above the layout
+            // bottom (offsetTop stays 0); at rest it equals the layout
+            // height. The sentinel is documentElement.clientHeight, spec
+            // fact #2: vv.height excludes scrollbars pinned to the visual
+            // viewport, while window.innerHeight INCLUDES the classic
+            // scrollbar gutter — comparing against innerHeight would pin
+            // spuriously by the gutter's size on desktops. The 1px slack
+            // absorbs sub-pixel rounding so a closed keyboard does not
+            // leave a 1px-short inline style behind.
+            const visibleBottom = vv.offsetTop + vv.height;
+            if (visibleBottom < document.documentElement.clientHeight - 1) {
+                app.style.height = Math.max(visibleBottom, 0) + "px";
+            } else {
+                app.style.height = "";
+            }
+        }
+
+        // R6: the visual viewport also pans (pinch-zoom, or iOS revealing
+        // the focused field above the keyboard) and fires scroll there.
+        // Scroll must never INTRODUCE a pin: while nothing is occluded the
+        // CSS cascade owns the height (a pan alone never proves occlusion),
+        // so an unpinned app gets a no-op. An EXISTING pin, by contrast,
+        // follows the visible bottom edge in BOTH directions — it is a
+        // re-application of the full judgment, bounded above by
+        // documentElement.clientHeight (the visual viewport cannot pan out
+        // of the layout viewport, and a pinch-zoomed scale already
+        // short-circuited to no pin).
+        function reapplyPinnedVisualViewportHeight() {
+            const app = document.getElementById("app");
+            if (!app || !app.style.height) return;
+            applyVisualViewportHeight();
+        }
+
+        // Desktop and legacy browsers may have no window.visualViewport at
+        // all: degrade to a no-op — no listeners are registered and the CSS
+        // dvh/fallback pair remains the whole story.
+        function initVisualViewportHandling() {
+            const vv = window.visualViewport;
+            if (!vv) return;
+            // resize: keyboard open/close, URL-bar show/hide, zoom change —
+            // the full judgment, in both directions.
+            vv.addEventListener("resize", applyVisualViewportHeight);
+            // scroll: visual-viewport pan — re-pin only what is pinned.
+            vv.addEventListener("scroll", reapplyPinnedVisualViewportHeight);
+            applyVisualViewportHeight();
+        }
+
         function init() {
             if (sessionStorage.getItem(SERVER_UPGRADED_FLAG) === "1") {
                 sessionStorage.removeItem(SERVER_UPGRADED_FLAG);
@@ -2304,6 +2415,10 @@
             // the first refresh paints, so a collapsed preference does not
             // flash the expanded sidebar.
             applySidebarCollapsed(readSidebarCollapsed());
+            // R6: pin #app to the visual viewport before the first paint that
+            // matters, so a reload with the keyboard already up (iOS Safari
+            // restores input focus) starts at the narrowed height.
+            initVisualViewportHandling();
             refresh();
             // Polling for status updates (2s)
             if (pollTimer) clearInterval(pollTimer);

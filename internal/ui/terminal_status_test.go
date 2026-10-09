@@ -54,6 +54,34 @@ func TestSidebarCollapseHandling(t *testing.T) {
 	t.Logf("%s", out)
 }
 
+// TestViewportHeightHandling runs the Node unit tests for the issue #100 L1
+// viewport & height layer (testdata/viewport_height.test.mjs): the iOS soft
+// keyboard is compensated by pinning #app's inline height to
+// window.visualViewport's visible bottom edge (sentinel:
+// documentElement.clientHeight), pinch / double-tap zoom opts out of
+// pinning, the scroll listener only re-pins an existing pin, the inline
+// height is cleared again when nothing is covered, environments without
+// visualViewport degrade to a no-op, and the collapse class (PR1) plus
+// keyboard narrowing (PR2) coexist without touching each other's state
+// (R12).
+//
+// Same arrangement as TestSidebarCollapseHandling: the cases slice the
+// shipped index.html and run against stubbed browser state, this wrapper
+// makes `go test` enforce them, and the file lives in testdata/ because
+// static/* is embedded and served to every browser. Skips when node is
+// absent.
+func TestViewportHeightHandling(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not on PATH; skipping viewport height JS tests")
+	}
+	out, err := exec.Command(node, "--test", "testdata/viewport_height.test.mjs").CombinedOutput()
+	if err != nil {
+		t.Fatalf("node --test testdata/viewport_height.test.mjs: %v\n%s", err, out)
+	}
+	t.Logf("%s", out)
+}
+
 // TestTerminalStatusChangelogCount keeps the CHANGELOG's coverage claim honest.
 // The entry quotes the number of `node --test` cases, and that number drifted
 // wrong twice while the cases were still being added (17, then 22, then 26 for
