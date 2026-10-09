@@ -1,5 +1,5 @@
 {
-  "version": "2.14",
+  "version": "2.21",
   "children": [
     {
       "type": "frame",
@@ -360,6 +360,7 @@
             "left": 3
           },
           "strokeAlignment": "inner",
+          "strokeLinejoin": "round",
           "padding": [
             7,
             12
@@ -506,92 +507,161 @@
         },
         {
           "type": "frame",
-          "id": "ZPdJw",
-          "name": "CHANGES 区",
+          "id": "n3pxU",
+          "name": "git 变更区（Staged/Unstaged 互锁手风琴，R13）",
           "width": "fill_container",
           "layout": "vertical",
-          "gap": 6,
+          "gap": 4,
           "padding": [
-            8,
+            6,
             12,
-            12,
+            10,
             12
           ],
           "children": [
             {
               "type": "frame",
-              "id": "fgd6v",
-              "name": "标题行",
+              "id": "tfQ0h",
+              "name": "Staged 段（折叠）",
               "width": "fill_container",
-              "justifyContent": "space_between",
+              "gap": 6,
+              "padding": [
+                4,
+                0
+              ],
               "alignItems": "center",
               "children": [
                 {
-                  "type": "text",
-                  "id": "K8LCi",
-                  "name": "CHANGES",
-                  "fill": "$text-muted",
-                  "content": "CHANGES",
-                  "fontFamily": "Inter",
-                  "fontSize": 10,
-                  "fontWeight": "600",
-                  "letterSpacing": 1
+                  "type": "icon",
+                  "id": "L3LPQl",
+                  "name": "chevron",
+                  "width": 10,
+                  "height": 10,
+                  "icon": "chevron-right",
+                  "library": "lucide",
+                  "fill": "$text-muted"
                 },
                 {
                   "type": "text",
-                  "id": "T1dQC1",
-                  "name": "统计",
-                  "fill": "$text-muted",
-                  "content": "+1 -1 1 file(s)",
+                  "id": "B8BK5z",
+                  "name": "标题",
+                  "fill": "$text-primary",
+                  "content": "Staged",
                   "fontFamily": "Inter",
-                  "fontSize": 10,
-                  "fontWeight": "normal"
+                  "fontSize": 12,
+                  "fontWeight": "500"
                 }
               ]
             },
             {
               "type": "frame",
-              "id": "ekzov",
-              "name": "文件行",
+              "id": "maiH5",
+              "name": "Unstaged 段（展开）",
               "width": "fill_container",
-              "justifyContent": "space_between",
-              "alignItems": "center",
+              "layout": "vertical",
+              "gap": 4,
               "children": [
                 {
-                  "type": "text",
-                  "id": "iGtrd",
-                  "name": "文件名",
-                  "fill": "$text-primary",
-                  "content": "README.md",
-                  "fontFamily": "Inter",
-                  "fontSize": 12,
-                  "fontWeight": "normal"
-                },
-                {
                   "type": "frame",
-                  "id": "TxJfT",
-                  "name": "差异",
-                  "gap": 4,
+                  "id": "pCkx4",
+                  "name": "头",
+                  "width": "fill_container",
+                  "padding": [
+                    4,
+                    0
+                  ],
+                  "alignItems": "center",
                   "children": [
                     {
-                      "type": "text",
-                      "id": "fGk8D",
-                      "name": "加",
-                      "fill": "$accent-green",
-                      "content": "+1",
-                      "fontFamily": "Inter",
-                      "fontSize": 11,
-                      "fontWeight": "normal"
+                      "type": "icon",
+                      "id": "P0IpDd",
+                      "name": "chevron",
+                      "width": 10,
+                      "height": 10,
+                      "icon": "chevron-down",
+                      "library": "lucide",
+                      "fill": "$text-muted"
                     },
                     {
                       "type": "text",
-                      "id": "D1FCi",
-                      "name": "减",
-                      "fill": "$danger",
-                      "content": "-1",
+                      "id": "VSpZY",
+                      "name": "标题",
+                      "fill": "$text-primary",
+                      "content": "Unstaged",
                       "fontFamily": "Inter",
-                      "fontSize": 11,
+                      "fontSize": 12,
+                      "fontWeight": "500"
+                    },
+                    {
+                      "type": "frame",
+                      "id": "ubkLq",
+                      "name": "弹簧",
+                      "width": "fill_container",
+                      "height": 1
+                    },
+                    {
+                      "type": "text",
+                      "id": "FC1ho",
+                      "name": "摘要",
+                      "fill": "$text-muted",
+                      "content": "+1 -1",
+                      "fontFamily": "Inter",
+                      "fontSize": 10,
                       "fontWeight": "normal"
+                    }
+                  ]
+                },
+                {
+                  "type": "frame",
+                  "id": "C63pvo",
+                  "name": "文件行",
+                  "width": "fill_container",
+                  "padding": [
+                    2,
+                    0,
+                    2,
+                    16
+                  ],
+                  "justifyContent": "space_between",
+                  "alignItems": "center",
+                  "children": [
+                    {
+                      "type": "text",
+                      "id": "PUtWh",
+                      "name": "文件名",
+                      "fill": "$text-primary",
+                      "content": "README.md",
+                      "fontFamily": "Inter",
+                      "fontSize": 12,
+                      "fontWeight": "normal"
+                    },
+                    {
+                      "type": "frame",
+                      "id": "h2PeZ",
+                      "name": "差异",
+                      "gap": 4,
+                      "children": [
+                        {
+                          "type": "text",
+                          "id": "B6VNXG",
+                          "name": "加",
+                          "fill": "$accent-green",
+                          "content": "+1",
+                          "fontFamily": "Inter",
+                          "fontSize": 11,
+                          "fontWeight": "normal"
+                        },
+                        {
+                          "type": "text",
+                          "id": "Pckph",
+                          "name": "减",
+                          "fill": "$danger",
+                          "content": "-1",
+                          "fontFamily": "Inter",
+                          "fontSize": 11,
+                          "fontWeight": "normal"
+                        }
+                      ]
                     }
                   ]
                 }
@@ -689,6 +759,7 @@
           "strokeWidth": {
             "top": 1
           },
+          "strokeLinejoin": "round",
           "padding": [
             6,
             14
@@ -775,6 +846,7 @@
               "strokeWidth": {
                 "bottom": 1
               },
+              "strokeLinejoin": "round",
               "gap": 4,
               "padding": [
                 0,
@@ -799,28 +871,6 @@
                       "width": 18,
                       "height": 18,
                       "icon": "chevrons-left",
-                      "library": "lucide",
-                      "fill": "$text-secondary"
-                    }
-                  ]
-                },
-                {
-                  "type": "frame",
-                  "id": "Ct9py",
-                  "name": "新建标签页",
-                  "width": 28,
-                  "height": 28,
-                  "cornerRadius": 6,
-                  "justifyContent": "center",
-                  "alignItems": "center",
-                  "children": [
-                    {
-                      "type": "icon",
-                      "id": "F8gW2",
-                      "name": "plus",
-                      "width": 16,
-                      "height": 16,
-                      "icon": "plus",
                       "library": "lucide",
                       "fill": "$text-secondary"
                     }
@@ -887,6 +937,7 @@
                       "strokeWidth": {
                         "top": 2
                       },
+                      "strokeLinejoin": "round",
                       "gap": 6,
                       "padding": [
                         6,
@@ -1051,56 +1102,6 @@
                 },
                 {
                   "type": "frame",
-                  "id": "m4JZUU",
-                  "name": "按钮 Archive",
-                  "fill": "#FFFFFF",
-                  "cornerRadius": 6,
-                  "stroke": "$border",
-                  "strokeWidth": 1,
-                  "padding": [
-                    5,
-                    12
-                  ],
-                  "children": [
-                    {
-                      "type": "text",
-                      "id": "kYjd6",
-                      "name": "文字",
-                      "fill": "$text-primary",
-                      "content": "Archive",
-                      "fontFamily": "Inter",
-                      "fontSize": 13,
-                      "fontWeight": "normal"
-                    }
-                  ]
-                },
-                {
-                  "type": "frame",
-                  "id": "FwWjW",
-                  "name": "按钮 Reconnect",
-                  "fill": "#FFFFFF",
-                  "cornerRadius": 6,
-                  "stroke": "$border",
-                  "strokeWidth": 1,
-                  "padding": [
-                    5,
-                    12
-                  ],
-                  "children": [
-                    {
-                      "type": "text",
-                      "id": "AZEbE",
-                      "name": "文字",
-                      "fill": "$text-primary",
-                      "content": "Reconnect",
-                      "fontFamily": "Inter",
-                      "fontSize": 13,
-                      "fontWeight": "normal"
-                    }
-                  ]
-                },
-                {
-                  "type": "frame",
                   "id": "moHSq",
                   "name": "按钮 Delete",
                   "fill": "#FFFFFF",
@@ -1118,65 +1119,6 @@
                       "name": "文字",
                       "fill": "$danger",
                       "content": "Delete",
-                      "fontFamily": "Inter",
-                      "fontSize": 13,
-                      "fontWeight": "normal"
-                    }
-                  ]
-                },
-                {
-                  "type": "frame",
-                  "id": "kEBZT",
-                  "name": "按钮 Purge",
-                  "fill": "#FFFFFF",
-                  "cornerRadius": 6,
-                  "stroke": "$danger",
-                  "strokeWidth": 1,
-                  "padding": [
-                    5,
-                    12
-                  ],
-                  "children": [
-                    {
-                      "type": "text",
-                      "id": "CbpIG",
-                      "name": "文字",
-                      "fill": "$danger",
-                      "content": "Purge",
-                      "fontFamily": "Inter",
-                      "fontSize": 13,
-                      "fontWeight": "normal"
-                    }
-                  ]
-                },
-                {
-                  "type": "frame",
-                  "id": "ybyK5",
-                  "name": "Show archived",
-                  "gap": 6,
-                  "padding": [
-                    0,
-                    4
-                  ],
-                  "alignItems": "center",
-                  "children": [
-                    {
-                      "type": "rectangle",
-                      "cornerRadius": 3,
-                      "id": "MHGBY",
-                      "name": "复选框",
-                      "fill": "#FFFFFF",
-                      "width": 14,
-                      "height": 14,
-                      "stroke": "$border",
-                      "strokeWidth": 1
-                    },
-                    {
-                      "type": "text",
-                      "id": "mpbh8",
-                      "name": "文字",
-                      "fill": "$text-secondary",
-                      "content": "Show archived",
                       "fontFamily": "Inter",
                       "fontSize": 13,
                       "fontWeight": "normal"
@@ -1273,6 +1215,7 @@
               "strokeWidth": {
                 "bottom": 1
               },
+              "strokeLinejoin": "round",
               "gap": 4,
               "padding": [
                 0,
@@ -1297,28 +1240,6 @@
                       "width": 18,
                       "height": 18,
                       "icon": "chevrons-right",
-                      "library": "lucide",
-                      "fill": "$text-secondary"
-                    }
-                  ]
-                },
-                {
-                  "type": "frame",
-                  "id": "i4np7W",
-                  "name": "新建标签页",
-                  "width": 28,
-                  "height": 28,
-                  "cornerRadius": 6,
-                  "justifyContent": "center",
-                  "alignItems": "center",
-                  "children": [
-                    {
-                      "type": "icon",
-                      "id": "QpIky",
-                      "name": "plus",
-                      "width": 16,
-                      "height": 16,
-                      "icon": "plus",
                       "library": "lucide",
                       "fill": "$text-secondary"
                     }
@@ -1385,6 +1306,7 @@
                       "strokeWidth": {
                         "top": 2
                       },
+                      "strokeLinejoin": "round",
                       "gap": 6,
                       "padding": [
                         6,
@@ -1549,56 +1471,6 @@
                 },
                 {
                   "type": "frame",
-                  "id": "fU3Jf",
-                  "name": "按钮 Archive",
-                  "fill": "#FFFFFF",
-                  "cornerRadius": 6,
-                  "stroke": "$border",
-                  "strokeWidth": 1,
-                  "padding": [
-                    5,
-                    12
-                  ],
-                  "children": [
-                    {
-                      "type": "text",
-                      "id": "Mwt5A",
-                      "name": "文字",
-                      "fill": "$text-primary",
-                      "content": "Archive",
-                      "fontFamily": "Inter",
-                      "fontSize": 13,
-                      "fontWeight": "normal"
-                    }
-                  ]
-                },
-                {
-                  "type": "frame",
-                  "id": "Fwyky",
-                  "name": "按钮 Reconnect",
-                  "fill": "#FFFFFF",
-                  "cornerRadius": 6,
-                  "stroke": "$border",
-                  "strokeWidth": 1,
-                  "padding": [
-                    5,
-                    12
-                  ],
-                  "children": [
-                    {
-                      "type": "text",
-                      "id": "fQfzw",
-                      "name": "文字",
-                      "fill": "$text-primary",
-                      "content": "Reconnect",
-                      "fontFamily": "Inter",
-                      "fontSize": 13,
-                      "fontWeight": "normal"
-                    }
-                  ]
-                },
-                {
-                  "type": "frame",
                   "id": "nFIut",
                   "name": "按钮 Delete",
                   "fill": "#FFFFFF",
@@ -1616,65 +1488,6 @@
                       "name": "文字",
                       "fill": "$danger",
                       "content": "Delete",
-                      "fontFamily": "Inter",
-                      "fontSize": 13,
-                      "fontWeight": "normal"
-                    }
-                  ]
-                },
-                {
-                  "type": "frame",
-                  "id": "z65JLt",
-                  "name": "按钮 Purge",
-                  "fill": "#FFFFFF",
-                  "cornerRadius": 6,
-                  "stroke": "$danger",
-                  "strokeWidth": 1,
-                  "padding": [
-                    5,
-                    12
-                  ],
-                  "children": [
-                    {
-                      "type": "text",
-                      "id": "JOn59",
-                      "name": "文字",
-                      "fill": "$danger",
-                      "content": "Purge",
-                      "fontFamily": "Inter",
-                      "fontSize": 13,
-                      "fontWeight": "normal"
-                    }
-                  ]
-                },
-                {
-                  "type": "frame",
-                  "id": "xepXs",
-                  "name": "Show archived",
-                  "gap": 6,
-                  "padding": [
-                    0,
-                    4
-                  ],
-                  "alignItems": "center",
-                  "children": [
-                    {
-                      "type": "rectangle",
-                      "cornerRadius": 3,
-                      "id": "b3FFf",
-                      "name": "复选框",
-                      "fill": "#FFFFFF",
-                      "width": 14,
-                      "height": 14,
-                      "stroke": "$border",
-                      "strokeWidth": 1
-                    },
-                    {
-                      "type": "text",
-                      "id": "xIVfi",
-                      "name": "文字",
-                      "fill": "$text-secondary",
-                      "content": "Show archived",
                       "fontFamily": "Inter",
                       "fontSize": 13,
                       "fontWeight": "normal"
@@ -1801,6 +1614,7 @@
               "strokeWidth": {
                 "bottom": 1
               },
+              "strokeLinejoin": "round",
               "gap": 6,
               "padding": [
                 0,
@@ -1855,6 +1669,7 @@
                       "strokeWidth": {
                         "top": 2
                       },
+                      "strokeLinejoin": "round",
                       "gap": 6,
                       "padding": [
                         6,
@@ -1957,6 +1772,81 @@
                           "fontWeight": "normal"
                         }
                       ]
+                    }
+                  ]
+                },
+                {
+                  "type": "frame",
+                  "id": "A4qRAN",
+                  "name": "按钮 Restart",
+                  "fill": "#FFFFFF",
+                  "cornerRadius": 6,
+                  "stroke": "$border",
+                  "strokeWidth": 1,
+                  "padding": [
+                    4,
+                    8
+                  ],
+                  "children": [
+                    {
+                      "type": "text",
+                      "id": "hmb5O",
+                      "name": "文字",
+                      "fill": "$text-primary",
+                      "content": "Restart",
+                      "fontFamily": "Inter",
+                      "fontSize": 12,
+                      "fontWeight": "normal"
+                    }
+                  ]
+                },
+                {
+                  "type": "frame",
+                  "id": "z2f8ic",
+                  "name": "按钮 Stop",
+                  "fill": "#FFFFFF",
+                  "cornerRadius": 6,
+                  "stroke": "$border",
+                  "strokeWidth": 1,
+                  "padding": [
+                    4,
+                    8
+                  ],
+                  "children": [
+                    {
+                      "type": "text",
+                      "id": "ZsSpk",
+                      "name": "文字",
+                      "fill": "$text-primary",
+                      "content": "Stop",
+                      "fontFamily": "Inter",
+                      "fontSize": 12,
+                      "fontWeight": "normal"
+                    }
+                  ]
+                },
+                {
+                  "type": "frame",
+                  "id": "Ntf8r",
+                  "name": "按钮 Delete",
+                  "fill": "#FFFFFF",
+                  "cornerRadius": 6,
+                  "stroke": "$danger",
+                  "strokeWidth": 1,
+                  "padding": [
+                    4,
+                    8
+                  ],
+                  "children": [
+                    {
+                      "type": "text",
+                      "id": "Pa1Qm",
+                      "name": "文字",
+                      "fill": "$danger",
+                      "content": "Delete",
+                      "fontFamily": "Inter",
+                      "fontSize": 12,
+                      "fontWeight": "normal"
                     }
                   ]
                 }
@@ -2132,6 +2022,7 @@
               "strokeWidth": {
                 "bottom": 1
               },
+              "strokeLinejoin": "round",
               "gap": 6,
               "padding": [
                 0,
@@ -2186,6 +2077,7 @@
                       "strokeWidth": {
                         "top": 2
                       },
+                      "strokeLinejoin": "round",
                       "gap": 6,
                       "padding": [
                         6,
@@ -2288,6 +2180,81 @@
                           "fontWeight": "normal"
                         }
                       ]
+                    }
+                  ]
+                },
+                {
+                  "type": "frame",
+                  "id": "Xl9Yt",
+                  "name": "按钮 Restart",
+                  "fill": "#FFFFFF",
+                  "cornerRadius": 6,
+                  "stroke": "$border",
+                  "strokeWidth": 1,
+                  "padding": [
+                    4,
+                    8
+                  ],
+                  "children": [
+                    {
+                      "type": "text",
+                      "id": "tvq22",
+                      "name": "文字",
+                      "fill": "$text-primary",
+                      "content": "Restart",
+                      "fontFamily": "Inter",
+                      "fontSize": 12,
+                      "fontWeight": "normal"
+                    }
+                  ]
+                },
+                {
+                  "type": "frame",
+                  "id": "m8BLdl",
+                  "name": "按钮 Stop",
+                  "fill": "#FFFFFF",
+                  "cornerRadius": 6,
+                  "stroke": "$border",
+                  "strokeWidth": 1,
+                  "padding": [
+                    4,
+                    8
+                  ],
+                  "children": [
+                    {
+                      "type": "text",
+                      "id": "lXSRE",
+                      "name": "文字",
+                      "fill": "$text-primary",
+                      "content": "Stop",
+                      "fontFamily": "Inter",
+                      "fontSize": 12,
+                      "fontWeight": "normal"
+                    }
+                  ]
+                },
+                {
+                  "type": "frame",
+                  "id": "vMbQa",
+                  "name": "按钮 Delete",
+                  "fill": "#FFFFFF",
+                  "cornerRadius": 6,
+                  "stroke": "$danger",
+                  "strokeWidth": 1,
+                  "padding": [
+                    4,
+                    8
+                  ],
+                  "children": [
+                    {
+                      "type": "text",
+                      "id": "smSY3",
+                      "name": "文字",
+                      "fill": "$danger",
+                      "content": "Delete",
+                      "fontFamily": "Inter",
+                      "fontSize": 12,
+                      "fontWeight": "normal"
                     }
                   ]
                 }
@@ -2467,6 +2434,7 @@
               "strokeWidth": {
                 "bottom": 1
               },
+              "strokeLinejoin": "round",
               "gap": 6,
               "padding": [
                 0,
@@ -2558,6 +2526,7 @@
                       "strokeWidth": {
                         "top": 2
                       },
+                      "strokeLinejoin": "round",
                       "gap": 6,
                       "padding": [
                         6,
@@ -2716,6 +2685,31 @@
                       "content": "Stop",
                       "fontFamily": "Inter",
                       "fontSize": 13,
+                      "fontWeight": "normal"
+                    }
+                  ]
+                },
+                {
+                  "type": "frame",
+                  "id": "Vu47V",
+                  "name": "按钮 Delete",
+                  "fill": "#FFFFFF",
+                  "cornerRadius": 6,
+                  "stroke": "$danger",
+                  "strokeWidth": 1,
+                  "padding": [
+                    4,
+                    8
+                  ],
+                  "children": [
+                    {
+                      "type": "text",
+                      "id": "Ty2OP",
+                      "name": "文字",
+                      "fill": "$danger",
+                      "content": "Delete",
+                      "fontFamily": "Inter",
+                      "fontSize": 12,
                       "fontWeight": "normal"
                     }
                   ]
