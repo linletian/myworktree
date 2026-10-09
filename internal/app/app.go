@@ -2525,6 +2525,21 @@ func (s *Server) handleInstanceTTYWSLiveness(w http.ResponseWriter, r *http.Requ
 	// cursor parsed from the query string) rather than taking a parameter;
 	// both call sites below pass that same variable.
 	//
+	// On the streaming catch-up path the replay is bracketed by TWO sync
+	// frames (issue #94): one carrying the replay's real start offset S
+	// ahead of the FIRST binary chunk — S = first chunk's next - len, the
+	// clamped value whenever ReadSince clamped a stale cursor, never the
+	// raw request — and the closing one carrying the end offset of the last
+	// chunk written. The start frame lifts the client's handshakeSynced
+	// latch at chunk 1, so a mid-replay drop resumes from the bytes already
+	// painted instead of re-pulling the whole replay; the closing frame
+	// keeps the #87 invariant below and corrects any drift absolutely. The
+	// beyond-head tail degrade (cursor > head) announces its tail's start
+	// the same way — the client presented a cursor, so every replay chunk
+	// addressed to one is preceded by a start frame; only the CURSOR-LESS
+	// first-connect tail goes without (its single ≤64KB frame has the
+	// pre-#87 death window, and such a client may not parse sync at all).
+	//
 	// Three cursors, three modes: a real `since >= 0` replays only [since,
 	// head); the -1 sentinel (nothing painted) replays the tail; and the
 	// sinceFollowLiveEnd sentinel (-2, painted but offset unknown) replays
@@ -2627,6 +2642,45 @@ func (s *Server) handleInstanceTTYWSLiveness(w http.ResponseWriter, r *http.Requ
 			cursor := since
 			first := true
 			var streamed int64
+			// startPublished (issue #94) marks that the replay's real
+			// START offset has been announced to the client, so it can
+			// advance its cursor frame-by-frame from there instead of
+			// waiting for the closing sync frame. It is deliberately NOT
+			// `first`: the FIX-F consult below clears `first` before any
+			// chunk has been written, while the start offset must be
+			// published exactly once, ahead of the first CHUNK on the
+			// wire.
+			startPublished := false
+			// emitStartSync announces a replay's real START offset
+			// (issue #94) ahead of its first binary chunk, lifting the
+			// client's handshakeSynced latch at chunk 1 so a mid-replay
+			// drop resumes from the bytes already painted instead of
+			// re-pulling the whole (up to 8MB) replay. The frame REUSES
+			// the "sync" type rather than inventing a new one: the
+			// client's whitelist (parseTTYControlMessage) paints any
+			// unknown text frame into the terminal (the issue #98 leak
+			// class), and the existing handler — set cursor to the
+			// ABSOLUTE offset, lift the latch — is exactly the semantics
+			// wanted here. The "start":true marker lets a consumer that
+			// must know WHEN the replay ends (a test harness, a
+			// third-party client) tell this announcement apart from the
+			// closing echo; the in-repo client deliberately ignores it —
+			// every sync is an absolute offset to adopt.
+			//
+			// syncCap is PROVABLY true at both call sites — they sit in
+			// the catch-up branch, which requires since >= 0, i.e. an
+			// explicit `since` in the query, already the inferred opt-in
+			// half of syncCap (issue #98; review Minor-1). The guard
+			// stays so a future change to that inference can never leak
+			// the frame to a client that did not opt in — defensive
+			// depth, not an option any client has today.
+			emitStartSync := func(start int64) bool {
+				if !syncCap {
+					return true
+				}
+				payload := []byte(`{"type":"sync","offset":` + strconv.FormatInt(start, 10) + `,"start":true}`)
+				return conn.WriteText(payload) == nil
+			}
 			for {
 				if streamed >= ttyHandshakeReplayBudget {
 					// Budget exhausted — the ONE budget guard, checked
@@ -2694,8 +2748,19 @@ func (s *Server) handleInstanceTTYWSLiveness(w http.ResponseWriter, r *http.Requ
 						// ever appeared it must degrade to the
 						// first-connect tail, never to a cursor
 						// the ring never held. Write the tail
-						// before claiming head over it.
+						// before claiming head over it. Unlike
+						// the CURSOR-LESS tail replay above, this
+						// tail rides the issue #94 contract: the
+						// client presented a cursor, so announce
+						// the tail's real start S = head - len
+						// ahead of the chunk and let its latch
+						// lift at a truthful absolute base — the
+						// closing sync then republishes the same
+						// head the frames summed to.
 						if tail != "" {
+							if !emitStartSync(head - int64(len(tail))) {
+								return false
+							}
 							if err := conn.WriteBinary([]byte(tail)); err != nil {
 								return false
 							}
@@ -2737,6 +2802,32 @@ func (s *Server) handleInstanceTTYWSLiveness(w http.ResponseWriter, r *http.Requ
 				// Write as we read: the chunk is on the wire now, so the
 				// cursor published below is never ahead of it, and nothing
 				// older than the next read is retained in memory.
+				if !startPublished {
+					startPublished = true
+					// S = next - len(body) is the true start of THIS
+					// chunk — the requested `since` when no clamp
+					// happened, the clamped oldest live byte when it
+					// did — because S and the first chunk come from the
+					// SAME ReadSince call, so no new Manager surface is
+					// needed and a stale `since` can never be echoed
+					// raw. The closing sync below still arrives with
+					// the end offset, so a client that only understands
+					// sync-at-the-end is merely back to the pre-#94
+					// death window, and a misbehaving kind that returns
+					// a body without advancing the cursor (the
+					// defensive break below) is corrected by that same
+					// final absolute value. One corner on THAT
+					// defensive path (review Minor-2): next <= cursor
+					// there makes S = next - len(body) dip BELOW the
+					// client's own `since`, so a drop between this
+					// frame and the first chunk reconnects with a
+					// regressed cursor and re-renders [S, since) —
+					// bounded, self-healing, and still strictly better
+					// than the pre-#94 full re-pull it replaces.
+					if !emitStartSync(next - int64(len(body))) {
+						return false
+					}
+				}
 				if err := conn.WriteBinary([]byte(body)); err != nil {
 					return false
 				}
