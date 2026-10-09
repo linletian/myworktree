@@ -90,6 +90,8 @@ issue #99 与 #100 是同一产品问题的两个切面：**myworktree 的 Web U
 
 采纳 #99 推荐方案（非备选的 24px 竖条把手）：折叠态常驻可见、不给侧栏留任何宽度；窄屏 drawer 形态下同一个按钮即 drawer 开关，无需第二套控件。备选方案（侧栏保留竖条）拒绝理由：与 drawer 形态重复，且仍占宽度。
 
+**层级前提（不可变）**：`#sidebar` 与 `#main` 是 `#app` 下的同级划分——侧栏全高，`#header`（实例 tab 栏 + 开关按钮）位于 `#main` 之内、随 worktree 切换。开关按钮在「`#header` 左侧」即 `#main` 顶栏的左侧，**不得**为了实现按钮而把 tab 栏提升为压住侧栏的全宽顶栏（那会把 worktree 列表视觉上降级为实例 tab 的子内容，违反产品层级）。
+
 ### 3.3 持久化：首次引入 localStorage
 
 `mw.ui.sidebarCollapsed`，命名空间化与 issue 给的 key 一致。与既有 `sessionStorage` 的 `SERVER_UPGRADED_FLAG` 语义分工：后者是一次性升级标记（session 级），前者是用户偏好（持久级）。**默认值按视口分派**：key 缺失时宽屏视为展开、窄屏（drawer）视为关闭（R14）；解析失败 / 抛异常降级为不持久化，默认值同样按视口分派。

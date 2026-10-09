@@ -105,6 +105,19 @@
           "fontFamily": "Inter",
           "fontSize": 12,
           "fontWeight": "normal"
+        },
+        {
+          "type": "text",
+          "id": "C1tnUb",
+          "name": "说明",
+          "fill": "$text-secondary",
+          "textGrowth": "fixed-width",
+          "width": "fill_container",
+          "content": "• 层级：worktree 侧栏与主工作区 #main 同级（侧栏全高）；实例 tab 栏在 #main 内、跟随 worktree 切换——tab 栏不是全宽顶栏",
+          "lineHeight": 1.45,
+          "fontFamily": "Inter",
+          "fontSize": 12,
+          "fontWeight": "normal"
         }
       ]
     },
@@ -833,299 +846,18 @@
           "fill": "$bg-app",
           "stroke": "$border",
           "strokeWidth": 1,
-          "layout": "vertical",
           "children": [
             {
-              "type": "frame",
-              "id": "J44lI",
-              "name": "#header",
-              "width": "fill_container",
-              "height": 42,
-              "fill": "$bg-header",
+              "id": "bqLxw",
+              "type": "ref",
+              "ref": "Lte2z",
+              "name": "#sidebar（240px）",
+              "width": 240,
+              "height": "fill_container",
               "stroke": "$border",
               "strokeWidth": {
-                "bottom": 1
-              },
-              "strokeLinejoin": "round",
-              "gap": 4,
-              "padding": [
-                0,
-                8
-              ],
-              "alignItems": "center",
-              "children": [
-                {
-                  "type": "frame",
-                  "id": "bjHJC",
-                  "name": "侧栏开关按钮（R2）",
-                  "width": 32,
-                  "height": 32,
-                  "cornerRadius": 6,
-                  "justifyContent": "center",
-                  "alignItems": "center",
-                  "children": [
-                    {
-                      "type": "icon",
-                      "id": "inc8f",
-                      "name": "chevrons-left",
-                      "width": 18,
-                      "height": 18,
-                      "icon": "chevrons-left",
-                      "library": "lucide",
-                      "fill": "$text-secondary"
-                    }
-                  ]
-                },
-                {
-                  "type": "frame",
-                  "id": "AiaNk",
-                  "name": "#tabs-container",
-                  "height": "fill_container",
-                  "gap": 4,
-                  "alignItems": "end",
-                  "children": [
-                    {
-                      "type": "frame",
-                      "id": "v3qMI1",
-                      "name": "Tab specs",
-                      "fill": "$tab-bg",
-                      "cornerRadius": [
-                        6,
-                        6,
-                        0,
-                        0
-                      ],
-                      "gap": 6,
-                      "padding": [
-                        6,
-                        10
-                      ],
-                      "alignItems": "center",
-                      "children": [
-                        {
-                          "type": "ellipse",
-                          "id": "Tgvuj",
-                          "name": "状态点",
-                          "fill": "$accent-green",
-                          "width": 8,
-                          "height": 8
-                        },
-                        {
-                          "type": "text",
-                          "id": "aRDtZ",
-                          "name": "标签",
-                          "fill": "$text-secondary",
-                          "content": "specs",
-                          "fontFamily": "Inter",
-                          "fontSize": 13,
-                          "fontWeight": "normal"
-                        }
-                      ]
-                    },
-                    {
-                      "type": "frame",
-                      "id": "GPWPc",
-                      "name": "Tab coding",
-                      "fill": "$bg-app",
-                      "cornerRadius": [
-                        6,
-                        6,
-                        0,
-                        0
-                      ],
-                      "stroke": "$selected-border",
-                      "strokeWidth": {
-                        "top": 2
-                      },
-                      "strokeLinejoin": "round",
-                      "gap": 6,
-                      "padding": [
-                        6,
-                        10
-                      ],
-                      "alignItems": "center",
-                      "children": [
-                        {
-                          "type": "ellipse",
-                          "id": "Qwf63",
-                          "name": "状态点",
-                          "fill": "$accent-green",
-                          "width": 8,
-                          "height": 8
-                        },
-                        {
-                          "type": "text",
-                          "id": "x3Zgs",
-                          "name": "标签",
-                          "fill": "$text-primary",
-                          "content": "coding",
-                          "fontFamily": "Inter",
-                          "fontSize": 13,
-                          "fontWeight": "normal"
-                        }
-                      ]
-                    },
-                    {
-                      "type": "frame",
-                      "id": "k2YLSO",
-                      "name": "Tab review-qwen",
-                      "fill": "$tab-bg",
-                      "cornerRadius": [
-                        6,
-                        6,
-                        0,
-                        0
-                      ],
-                      "gap": 6,
-                      "padding": [
-                        6,
-                        10
-                      ],
-                      "alignItems": "center",
-                      "children": [
-                        {
-                          "type": "ellipse",
-                          "id": "d4Mew",
-                          "name": "状态点",
-                          "fill": "$accent-green",
-                          "width": 8,
-                          "height": 8
-                        },
-                        {
-                          "type": "text",
-                          "id": "g4Ge4",
-                          "name": "标签",
-                          "fill": "$text-secondary",
-                          "content": "review-qwen",
-                          "fontFamily": "Inter",
-                          "fontSize": 13,
-                          "fontWeight": "normal"
-                        }
-                      ]
-                    },
-                    {
-                      "type": "frame",
-                      "id": "I2Dp9",
-                      "name": "Tab review2",
-                      "fill": "$tab-bg",
-                      "cornerRadius": [
-                        6,
-                        6,
-                        0,
-                        0
-                      ],
-                      "gap": 6,
-                      "padding": [
-                        6,
-                        10
-                      ],
-                      "alignItems": "center",
-                      "children": [
-                        {
-                          "type": "ellipse",
-                          "id": "Ed6br",
-                          "name": "状态点",
-                          "fill": "$accent-green",
-                          "width": 8,
-                          "height": 8
-                        },
-                        {
-                          "type": "text",
-                          "id": "nY95E",
-                          "name": "标签",
-                          "fill": "$text-secondary",
-                          "content": "review2",
-                          "fontFamily": "Inter",
-                          "fontSize": 13,
-                          "fontWeight": "normal"
-                        }
-                      ]
-                    }
-                  ]
-                },
-                {
-                  "type": "frame",
-                  "id": "sQVgb",
-                  "name": "弹簧",
-                  "width": "fill_container",
-                  "height": 1
-                },
-                {
-                  "type": "frame",
-                  "id": "ZkIwT",
-                  "name": "按钮 Restart",
-                  "fill": "#FFFFFF",
-                  "cornerRadius": 6,
-                  "stroke": "$border",
-                  "strokeWidth": 1,
-                  "padding": [
-                    5,
-                    12
-                  ],
-                  "children": [
-                    {
-                      "type": "text",
-                      "id": "Yt72z",
-                      "name": "文字",
-                      "fill": "$text-primary",
-                      "content": "Restart",
-                      "fontFamily": "Inter",
-                      "fontSize": 13,
-                      "fontWeight": "normal"
-                    }
-                  ]
-                },
-                {
-                  "type": "frame",
-                  "id": "fcLqy",
-                  "name": "按钮 Stop",
-                  "fill": "#FFFFFF",
-                  "cornerRadius": 6,
-                  "stroke": "$border",
-                  "strokeWidth": 1,
-                  "padding": [
-                    5,
-                    12
-                  ],
-                  "children": [
-                    {
-                      "type": "text",
-                      "id": "cDQxH",
-                      "name": "文字",
-                      "fill": "$text-primary",
-                      "content": "Stop",
-                      "fontFamily": "Inter",
-                      "fontSize": 13,
-                      "fontWeight": "normal"
-                    }
-                  ]
-                },
-                {
-                  "type": "frame",
-                  "id": "moHSq",
-                  "name": "按钮 Delete",
-                  "fill": "#FFFFFF",
-                  "cornerRadius": 6,
-                  "stroke": "$danger",
-                  "strokeWidth": 1,
-                  "padding": [
-                    5,
-                    12
-                  ],
-                  "children": [
-                    {
-                      "type": "text",
-                      "id": "MmNYR",
-                      "name": "文字",
-                      "fill": "$danger",
-                      "content": "Delete",
-                      "fontFamily": "Inter",
-                      "fontSize": 13,
-                      "fontWeight": "normal"
-                    }
-                  ]
-                }
-              ]
+                "right": 1
+              }
             },
             {
               "type": "frame",
@@ -1133,18 +865,299 @@
               "name": "Body",
               "width": "fill_container",
               "height": "fill_container",
+              "layout": "vertical",
               "children": [
                 {
-                  "id": "bqLxw",
-                  "type": "ref",
-                  "ref": "Lte2z",
-                  "name": "#sidebar（240px）",
-                  "width": 240,
-                  "height": "fill_container",
+                  "type": "frame",
+                  "id": "J44lI",
+                  "name": "#header",
+                  "width": "fill_container",
+                  "height": 42,
+                  "fill": "$bg-header",
                   "stroke": "$border",
                   "strokeWidth": {
-                    "right": 1
-                  }
+                    "bottom": 1
+                  },
+                  "strokeLinejoin": "round",
+                  "gap": 4,
+                  "padding": [
+                    0,
+                    8
+                  ],
+                  "alignItems": "center",
+                  "children": [
+                    {
+                      "type": "frame",
+                      "id": "bjHJC",
+                      "name": "侧栏开关按钮（R2）",
+                      "width": 32,
+                      "height": 32,
+                      "cornerRadius": 6,
+                      "justifyContent": "center",
+                      "alignItems": "center",
+                      "children": [
+                        {
+                          "type": "icon",
+                          "id": "inc8f",
+                          "name": "chevrons-left",
+                          "width": 18,
+                          "height": 18,
+                          "icon": "chevrons-left",
+                          "library": "lucide",
+                          "fill": "$text-secondary"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "frame",
+                      "id": "AiaNk",
+                      "name": "#tabs-container",
+                      "height": "fill_container",
+                      "gap": 4,
+                      "alignItems": "end",
+                      "children": [
+                        {
+                          "type": "frame",
+                          "id": "v3qMI1",
+                          "name": "Tab specs",
+                          "fill": "$tab-bg",
+                          "cornerRadius": [
+                            6,
+                            6,
+                            0,
+                            0
+                          ],
+                          "gap": 6,
+                          "padding": [
+                            6,
+                            10
+                          ],
+                          "alignItems": "center",
+                          "children": [
+                            {
+                              "type": "ellipse",
+                              "id": "Tgvuj",
+                              "name": "状态点",
+                              "fill": "$accent-green",
+                              "width": 8,
+                              "height": 8
+                            },
+                            {
+                              "type": "text",
+                              "id": "aRDtZ",
+                              "name": "标签",
+                              "fill": "$text-secondary",
+                              "content": "specs",
+                              "fontFamily": "Inter",
+                              "fontSize": 13,
+                              "fontWeight": "normal"
+                            }
+                          ]
+                        },
+                        {
+                          "type": "frame",
+                          "id": "GPWPc",
+                          "name": "Tab coding",
+                          "fill": "$bg-app",
+                          "cornerRadius": [
+                            6,
+                            6,
+                            0,
+                            0
+                          ],
+                          "stroke": "$selected-border",
+                          "strokeWidth": {
+                            "top": 2
+                          },
+                          "strokeLinejoin": "round",
+                          "gap": 6,
+                          "padding": [
+                            6,
+                            10
+                          ],
+                          "alignItems": "center",
+                          "children": [
+                            {
+                              "type": "ellipse",
+                              "id": "Qwf63",
+                              "name": "状态点",
+                              "fill": "$accent-green",
+                              "width": 8,
+                              "height": 8
+                            },
+                            {
+                              "type": "text",
+                              "id": "x3Zgs",
+                              "name": "标签",
+                              "fill": "$text-primary",
+                              "content": "coding",
+                              "fontFamily": "Inter",
+                              "fontSize": 13,
+                              "fontWeight": "normal"
+                            }
+                          ]
+                        },
+                        {
+                          "type": "frame",
+                          "id": "k2YLSO",
+                          "name": "Tab review-qwen",
+                          "fill": "$tab-bg",
+                          "cornerRadius": [
+                            6,
+                            6,
+                            0,
+                            0
+                          ],
+                          "gap": 6,
+                          "padding": [
+                            6,
+                            10
+                          ],
+                          "alignItems": "center",
+                          "children": [
+                            {
+                              "type": "ellipse",
+                              "id": "d4Mew",
+                              "name": "状态点",
+                              "fill": "$accent-green",
+                              "width": 8,
+                              "height": 8
+                            },
+                            {
+                              "type": "text",
+                              "id": "g4Ge4",
+                              "name": "标签",
+                              "fill": "$text-secondary",
+                              "content": "review-qwen",
+                              "fontFamily": "Inter",
+                              "fontSize": 13,
+                              "fontWeight": "normal"
+                            }
+                          ]
+                        },
+                        {
+                          "type": "frame",
+                          "id": "I2Dp9",
+                          "name": "Tab review2",
+                          "fill": "$tab-bg",
+                          "cornerRadius": [
+                            6,
+                            6,
+                            0,
+                            0
+                          ],
+                          "gap": 6,
+                          "padding": [
+                            6,
+                            10
+                          ],
+                          "alignItems": "center",
+                          "children": [
+                            {
+                              "type": "ellipse",
+                              "id": "Ed6br",
+                              "name": "状态点",
+                              "fill": "$accent-green",
+                              "width": 8,
+                              "height": 8
+                            },
+                            {
+                              "type": "text",
+                              "id": "nY95E",
+                              "name": "标签",
+                              "fill": "$text-secondary",
+                              "content": "review2",
+                              "fontFamily": "Inter",
+                              "fontSize": 13,
+                              "fontWeight": "normal"
+                            }
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "type": "frame",
+                      "id": "sQVgb",
+                      "name": "弹簧",
+                      "width": "fill_container",
+                      "height": 1
+                    },
+                    {
+                      "type": "frame",
+                      "id": "ZkIwT",
+                      "name": "按钮 Restart",
+                      "fill": "#FFFFFF",
+                      "cornerRadius": 6,
+                      "stroke": "$border",
+                      "strokeWidth": 1,
+                      "padding": [
+                        5,
+                        12
+                      ],
+                      "children": [
+                        {
+                          "type": "text",
+                          "id": "Yt72z",
+                          "name": "文字",
+                          "fill": "$text-primary",
+                          "content": "Restart",
+                          "fontFamily": "Inter",
+                          "fontSize": 13,
+                          "fontWeight": "normal"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "frame",
+                      "id": "fcLqy",
+                      "name": "按钮 Stop",
+                      "fill": "#FFFFFF",
+                      "cornerRadius": 6,
+                      "stroke": "$border",
+                      "strokeWidth": 1,
+                      "padding": [
+                        5,
+                        12
+                      ],
+                      "children": [
+                        {
+                          "type": "text",
+                          "id": "cDQxH",
+                          "name": "文字",
+                          "fill": "$text-primary",
+                          "content": "Stop",
+                          "fontFamily": "Inter",
+                          "fontSize": 13,
+                          "fontWeight": "normal"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "frame",
+                      "id": "moHSq",
+                      "name": "按钮 Delete",
+                      "fill": "#FFFFFF",
+                      "cornerRadius": 6,
+                      "stroke": "$danger",
+                      "strokeWidth": 1,
+                      "padding": [
+                        5,
+                        12
+                      ],
+                      "children": [
+                        {
+                          "type": "text",
+                          "id": "MmNYR",
+                          "name": "文字",
+                          "fill": "$danger",
+                          "content": "Delete",
+                          "fontFamily": "Inter",
+                          "fontSize": 13,
+                          "fontWeight": "normal"
+                        }
+                      ]
+                    }
+                  ]
                 },
                 {
                   "id": "aRtUN",
@@ -2421,300 +2434,18 @@
           "fill": "$bg-app",
           "stroke": "$border",
           "strokeWidth": 1,
-          "layout": "vertical",
           "children": [
             {
-              "type": "frame",
-              "id": "U2XHSN",
-              "name": "#header",
-              "width": "fill_container",
-              "height": 44,
-              "fill": "$bg-header",
+              "id": "PaOKJ",
+              "type": "ref",
+              "ref": "Lte2z",
+              "name": "#sidebar（收窄 200px）",
+              "width": 200,
+              "height": "fill_container",
               "stroke": "$border",
               "strokeWidth": {
-                "bottom": 1
-              },
-              "strokeLinejoin": "round",
-              "gap": 6,
-              "padding": [
-                0,
-                8
-              ],
-              "alignItems": "center",
-              "children": [
-                {
-                  "type": "frame",
-                  "id": "O3Dhqr",
-                  "name": "侧栏开关按钮",
-                  "width": 32,
-                  "height": 32,
-                  "cornerRadius": 6,
-                  "justifyContent": "center",
-                  "alignItems": "center",
-                  "children": [
-                    {
-                      "type": "icon",
-                      "id": "Gz2Rp",
-                      "name": "chevrons-left",
-                      "width": 18,
-                      "height": 18,
-                      "icon": "chevrons-left",
-                      "library": "lucide",
-                      "fill": "$text-secondary"
-                    }
-                  ]
-                },
-                {
-                  "type": "frame",
-                  "id": "Upw4T",
-                  "name": "#tabs-container",
-                  "clip": true,
-                  "height": "fill_container",
-                  "gap": 4,
-                  "alignItems": "end",
-                  "children": [
-                    {
-                      "type": "frame",
-                      "id": "X2WZlU",
-                      "name": "Tab specs",
-                      "fill": "$tab-bg",
-                      "cornerRadius": [
-                        6,
-                        6,
-                        0,
-                        0
-                      ],
-                      "gap": 6,
-                      "padding": [
-                        6,
-                        10
-                      ],
-                      "alignItems": "center",
-                      "children": [
-                        {
-                          "type": "ellipse",
-                          "id": "b1BYaL",
-                          "name": "状态点",
-                          "fill": "$accent-green",
-                          "width": 7,
-                          "height": 7
-                        },
-                        {
-                          "type": "text",
-                          "id": "Gb670",
-                          "name": "标签",
-                          "fill": "$text-secondary",
-                          "content": "specs",
-                          "fontFamily": "Inter",
-                          "fontSize": 12,
-                          "fontWeight": "normal"
-                        }
-                      ]
-                    },
-                    {
-                      "type": "frame",
-                      "id": "X8u7s",
-                      "name": "Tab coding",
-                      "fill": "$bg-app",
-                      "cornerRadius": [
-                        6,
-                        6,
-                        0,
-                        0
-                      ],
-                      "stroke": "$selected-border",
-                      "strokeWidth": {
-                        "top": 2
-                      },
-                      "strokeLinejoin": "round",
-                      "gap": 6,
-                      "padding": [
-                        6,
-                        10
-                      ],
-                      "alignItems": "center",
-                      "children": [
-                        {
-                          "type": "ellipse",
-                          "id": "M6Osm",
-                          "name": "状态点",
-                          "fill": "$accent-green",
-                          "width": 7,
-                          "height": 7
-                        },
-                        {
-                          "type": "text",
-                          "id": "DemxF",
-                          "name": "标签",
-                          "fill": "$text-primary",
-                          "content": "coding",
-                          "fontFamily": "Inter",
-                          "fontSize": 12,
-                          "fontWeight": "normal"
-                        }
-                      ]
-                    },
-                    {
-                      "type": "frame",
-                      "id": "wkg1f",
-                      "name": "Tab review-qwen",
-                      "fill": "$tab-bg",
-                      "cornerRadius": [
-                        6,
-                        6,
-                        0,
-                        0
-                      ],
-                      "gap": 6,
-                      "padding": [
-                        6,
-                        10
-                      ],
-                      "alignItems": "center",
-                      "children": [
-                        {
-                          "type": "ellipse",
-                          "id": "F11Jl",
-                          "name": "状态点",
-                          "fill": "$accent-green",
-                          "width": 7,
-                          "height": 7
-                        },
-                        {
-                          "type": "text",
-                          "id": "cSvxQ",
-                          "name": "标签",
-                          "fill": "$text-secondary",
-                          "content": "review-qwen",
-                          "fontFamily": "Inter",
-                          "fontSize": 12,
-                          "fontWeight": "normal"
-                        }
-                      ]
-                    },
-                    {
-                      "type": "frame",
-                      "id": "zJhHn",
-                      "name": "Tab review2",
-                      "fill": "$tab-bg",
-                      "cornerRadius": [
-                        6,
-                        6,
-                        0,
-                        0
-                      ],
-                      "gap": 6,
-                      "padding": [
-                        6,
-                        10
-                      ],
-                      "alignItems": "center",
-                      "children": [
-                        {
-                          "type": "ellipse",
-                          "id": "i7Xpu0",
-                          "name": "状态点",
-                          "fill": "$accent-green",
-                          "width": 7,
-                          "height": 7
-                        },
-                        {
-                          "type": "text",
-                          "id": "WOpqZ",
-                          "name": "标签",
-                          "fill": "$text-secondary",
-                          "content": "review2",
-                          "fontFamily": "Inter",
-                          "fontSize": 12,
-                          "fontWeight": "normal"
-                        }
-                      ]
-                    }
-                  ]
-                },
-                {
-                  "type": "frame",
-                  "id": "ztMju",
-                  "name": "弹簧",
-                  "width": "fill_container",
-                  "height": 1
-                },
-                {
-                  "type": "frame",
-                  "id": "bVNRe",
-                  "name": "按钮 Restart",
-                  "fill": "#FFFFFF",
-                  "cornerRadius": 6,
-                  "stroke": "$border",
-                  "strokeWidth": 1,
-                  "padding": [
-                    5,
-                    12
-                  ],
-                  "children": [
-                    {
-                      "type": "text",
-                      "id": "EGYGc",
-                      "name": "文字",
-                      "fill": "$text-primary",
-                      "content": "Restart",
-                      "fontFamily": "Inter",
-                      "fontSize": 13,
-                      "fontWeight": "normal"
-                    }
-                  ]
-                },
-                {
-                  "type": "frame",
-                  "id": "cErZu",
-                  "name": "按钮 Stop",
-                  "fill": "#FFFFFF",
-                  "cornerRadius": 6,
-                  "stroke": "$border",
-                  "strokeWidth": 1,
-                  "padding": [
-                    5,
-                    12
-                  ],
-                  "children": [
-                    {
-                      "type": "text",
-                      "id": "PZj7O",
-                      "name": "文字",
-                      "fill": "$text-primary",
-                      "content": "Stop",
-                      "fontFamily": "Inter",
-                      "fontSize": 13,
-                      "fontWeight": "normal"
-                    }
-                  ]
-                },
-                {
-                  "type": "frame",
-                  "id": "Vu47V",
-                  "name": "按钮 Delete",
-                  "fill": "#FFFFFF",
-                  "cornerRadius": 6,
-                  "stroke": "$danger",
-                  "strokeWidth": 1,
-                  "padding": [
-                    4,
-                    8
-                  ],
-                  "children": [
-                    {
-                      "type": "text",
-                      "id": "Ty2OP",
-                      "name": "文字",
-                      "fill": "$danger",
-                      "content": "Delete",
-                      "fontFamily": "Inter",
-                      "fontSize": 12,
-                      "fontWeight": "normal"
-                    }
-                  ]
-                }
-              ]
+                "right": 1
+              }
             },
             {
               "type": "frame",
@@ -2722,18 +2453,300 @@
               "name": "Body",
               "width": "fill_container",
               "height": "fill_container",
+              "layout": "vertical",
               "children": [
                 {
-                  "id": "PaOKJ",
-                  "type": "ref",
-                  "ref": "Lte2z",
-                  "name": "#sidebar（收窄 200px）",
-                  "width": 200,
-                  "height": "fill_container",
+                  "type": "frame",
+                  "id": "U2XHSN",
+                  "name": "#header",
+                  "width": "fill_container",
+                  "height": 44,
+                  "fill": "$bg-header",
                   "stroke": "$border",
                   "strokeWidth": {
-                    "right": 1
-                  }
+                    "bottom": 1
+                  },
+                  "strokeLinejoin": "round",
+                  "gap": 6,
+                  "padding": [
+                    0,
+                    8
+                  ],
+                  "alignItems": "center",
+                  "children": [
+                    {
+                      "type": "frame",
+                      "id": "O3Dhqr",
+                      "name": "侧栏开关按钮",
+                      "width": 32,
+                      "height": 32,
+                      "cornerRadius": 6,
+                      "justifyContent": "center",
+                      "alignItems": "center",
+                      "children": [
+                        {
+                          "type": "icon",
+                          "id": "Gz2Rp",
+                          "name": "chevrons-left",
+                          "width": 18,
+                          "height": 18,
+                          "icon": "chevrons-left",
+                          "library": "lucide",
+                          "fill": "$text-secondary"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "frame",
+                      "id": "Upw4T",
+                      "name": "#tabs-container",
+                      "clip": true,
+                      "height": "fill_container",
+                      "gap": 4,
+                      "alignItems": "end",
+                      "children": [
+                        {
+                          "type": "frame",
+                          "id": "X2WZlU",
+                          "name": "Tab specs",
+                          "fill": "$tab-bg",
+                          "cornerRadius": [
+                            6,
+                            6,
+                            0,
+                            0
+                          ],
+                          "gap": 6,
+                          "padding": [
+                            6,
+                            10
+                          ],
+                          "alignItems": "center",
+                          "children": [
+                            {
+                              "type": "ellipse",
+                              "id": "b1BYaL",
+                              "name": "状态点",
+                              "fill": "$accent-green",
+                              "width": 7,
+                              "height": 7
+                            },
+                            {
+                              "type": "text",
+                              "id": "Gb670",
+                              "name": "标签",
+                              "fill": "$text-secondary",
+                              "content": "specs",
+                              "fontFamily": "Inter",
+                              "fontSize": 12,
+                              "fontWeight": "normal"
+                            }
+                          ]
+                        },
+                        {
+                          "type": "frame",
+                          "id": "X8u7s",
+                          "name": "Tab coding",
+                          "fill": "$bg-app",
+                          "cornerRadius": [
+                            6,
+                            6,
+                            0,
+                            0
+                          ],
+                          "stroke": "$selected-border",
+                          "strokeWidth": {
+                            "top": 2
+                          },
+                          "strokeLinejoin": "round",
+                          "gap": 6,
+                          "padding": [
+                            6,
+                            10
+                          ],
+                          "alignItems": "center",
+                          "children": [
+                            {
+                              "type": "ellipse",
+                              "id": "M6Osm",
+                              "name": "状态点",
+                              "fill": "$accent-green",
+                              "width": 7,
+                              "height": 7
+                            },
+                            {
+                              "type": "text",
+                              "id": "DemxF",
+                              "name": "标签",
+                              "fill": "$text-primary",
+                              "content": "coding",
+                              "fontFamily": "Inter",
+                              "fontSize": 12,
+                              "fontWeight": "normal"
+                            }
+                          ]
+                        },
+                        {
+                          "type": "frame",
+                          "id": "wkg1f",
+                          "name": "Tab review-qwen",
+                          "fill": "$tab-bg",
+                          "cornerRadius": [
+                            6,
+                            6,
+                            0,
+                            0
+                          ],
+                          "gap": 6,
+                          "padding": [
+                            6,
+                            10
+                          ],
+                          "alignItems": "center",
+                          "children": [
+                            {
+                              "type": "ellipse",
+                              "id": "F11Jl",
+                              "name": "状态点",
+                              "fill": "$accent-green",
+                              "width": 7,
+                              "height": 7
+                            },
+                            {
+                              "type": "text",
+                              "id": "cSvxQ",
+                              "name": "标签",
+                              "fill": "$text-secondary",
+                              "content": "review-qwen",
+                              "fontFamily": "Inter",
+                              "fontSize": 12,
+                              "fontWeight": "normal"
+                            }
+                          ]
+                        },
+                        {
+                          "type": "frame",
+                          "id": "zJhHn",
+                          "name": "Tab review2",
+                          "fill": "$tab-bg",
+                          "cornerRadius": [
+                            6,
+                            6,
+                            0,
+                            0
+                          ],
+                          "gap": 6,
+                          "padding": [
+                            6,
+                            10
+                          ],
+                          "alignItems": "center",
+                          "children": [
+                            {
+                              "type": "ellipse",
+                              "id": "i7Xpu0",
+                              "name": "状态点",
+                              "fill": "$accent-green",
+                              "width": 7,
+                              "height": 7
+                            },
+                            {
+                              "type": "text",
+                              "id": "WOpqZ",
+                              "name": "标签",
+                              "fill": "$text-secondary",
+                              "content": "review2",
+                              "fontFamily": "Inter",
+                              "fontSize": 12,
+                              "fontWeight": "normal"
+                            }
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "type": "frame",
+                      "id": "ztMju",
+                      "name": "弹簧",
+                      "width": "fill_container",
+                      "height": 1
+                    },
+                    {
+                      "type": "frame",
+                      "id": "bVNRe",
+                      "name": "按钮 Restart",
+                      "fill": "#FFFFFF",
+                      "cornerRadius": 6,
+                      "stroke": "$border",
+                      "strokeWidth": 1,
+                      "padding": [
+                        5,
+                        12
+                      ],
+                      "children": [
+                        {
+                          "type": "text",
+                          "id": "EGYGc",
+                          "name": "文字",
+                          "fill": "$text-primary",
+                          "content": "Restart",
+                          "fontFamily": "Inter",
+                          "fontSize": 13,
+                          "fontWeight": "normal"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "frame",
+                      "id": "cErZu",
+                      "name": "按钮 Stop",
+                      "fill": "#FFFFFF",
+                      "cornerRadius": 6,
+                      "stroke": "$border",
+                      "strokeWidth": 1,
+                      "padding": [
+                        5,
+                        12
+                      ],
+                      "children": [
+                        {
+                          "type": "text",
+                          "id": "PZj7O",
+                          "name": "文字",
+                          "fill": "$text-primary",
+                          "content": "Stop",
+                          "fontFamily": "Inter",
+                          "fontSize": 13,
+                          "fontWeight": "normal"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "frame",
+                      "id": "Vu47V",
+                      "name": "按钮 Delete",
+                      "fill": "#FFFFFF",
+                      "cornerRadius": 6,
+                      "stroke": "$danger",
+                      "strokeWidth": 1,
+                      "padding": [
+                        4,
+                        8
+                      ],
+                      "children": [
+                        {
+                          "type": "text",
+                          "id": "Ty2OP",
+                          "name": "文字",
+                          "fill": "$danger",
+                          "content": "Delete",
+                          "fontFamily": "Inter",
+                          "fontSize": 12,
+                          "fontWeight": "normal"
+                        }
+                      ]
+                    }
+                  ]
                 },
                 {
                   "id": "i3eTJF",
