@@ -778,6 +778,259 @@ func TestViewportAndHeightAnchors(t *testing.T) {
 	}
 }
 
+// TestNarrowDrawerAnchors pins the issue #100 L2 breakpoint/drawer contract
+// (PR3 of docs/plans/feature-v0.6.0-webui-sidebar-responsive/): the narrow
+// tier (<=768px) renders the one PR1 .collapsed state as an off-canvas
+// overlay drawer with a tap-to-close mask over #main, the middle tier
+// (769–1024px) narrows the sidebar instead, R8 snaps the tab strip on the
+// narrow tier, and the R14 default dispatches by viewport — all on the
+// single PR1 state machine, never a second state variable (plan §3.1, the
+// PR3 review focus).
+func TestNarrowDrawerAnchors(t *testing.T) {
+	bodyText := fetchIndexHTML(t)
+
+	// R7: #app is the positioning containing block for the drawer and its
+	// mask. In-rule assertion, same style as TestViewportAndHeightAnchors —
+	// other rules in the file also set position and a bare Contains would
+	// anchor nothing.
+	appStart := strings.Index(bodyText, "#app {\n")
+	if appStart < 0 {
+		t.Fatal("GET / lost the #app rule (issue #100 L2 R7)")
+	}
+	appEnd := strings.Index(bodyText[appStart:], "\n        }")
+	if appEnd < 0 {
+		t.Fatal("GET / #app rule has no closing brace")
+	}
+	if !strings.Contains(bodyText[appStart:appStart+appEnd], "position: relative;") {
+		t.Fatal("GET / #app rule should declare position: relative — the drawer's positioning containing block (issue #100 L2 R7)")
+	}
+
+	// R7 + §3.1: PR1's zero-width collapse rule is scoped off the narrow
+	// tier by the SEAMLESS complement of the drawer's max-width: 768px
+	// block (`not all and` — a literal min-width: 769px would leave the
+	// (768, 769) fractional dead zone where the toggle button goes
+	// visually inert). If this rule leaked onto the narrow tier, the OPEN
+	// drawer would inherit width:0/visibility:hidden and render as an
+	// invisible strip (the §3.1 trap) — so the selector must live INSIDE
+	// the complement block's closing brace, and the narrow tier must carry
+	// its own off-canvas collapsed rule instead. A bare position check
+	// would NOT catch the rule hoisted to top level (still after the
+	// media TEXT, but outside the block — mutation-verified): slice the
+	// block and assert containment, plus an exact occurrence count
+	// (wide-tier zero-width rule + narrow-tier drawer rule, one each).
+	wideStart := strings.Index(bodyText, "@media not all and (max-width: 768px) {")
+	if wideStart < 0 {
+		t.Fatal(`GET / lost the "not all and (max-width: 768px)" tier scope around the PR1 collapse rule (issue #100 L2 R7)`)
+	}
+	wideEnd := strings.Index(bodyText[wideStart:], "\n        }")
+	if wideEnd < 0 {
+		t.Fatal("GET / collapse-rule tier scope has no closing brace")
+	}
+	wide := bodyText[wideStart : wideStart+wideEnd]
+	if !strings.Contains(wide, "#app.collapsed #sidebar {") {
+		t.Fatal("GET / must scope the PR1 #app.collapsed #sidebar zero-width rule inside the seamless complement of the narrow tier (its closing brace, not merely after its text) — on the narrow tier .collapsed renders the off-canvas drawer, not a zero-width strip (issue #100 L2, PRD-CHANGE §3.1)")
+	}
+	if n := strings.Count(bodyText, "#app.collapsed #sidebar {"); n != 2 {
+		t.Fatalf("GET / should have exactly two #app.collapsed #sidebar rules (the wide-tier zero-width collapse + the narrow-tier off-canvas drawer), found %d (issue #100 L2, PRD-CHANGE §3.1)", n)
+	}
+
+	// R7: the narrow tier block. Nested rule bodies close at 12 spaces, the
+	// media block itself at 8 — so this slice spans exactly the tier.
+	narrowStart := strings.Index(bodyText, "@media (max-width: 768px) {")
+	if narrowStart < 0 {
+		t.Fatal("GET / lost the max-width: 768px narrow-tier block (issue #100 L2 R7)")
+	}
+	narrowEnd := strings.Index(bodyText[narrowStart:], "\n        }")
+	if narrowEnd < 0 {
+		t.Fatal("GET / @media (max-width: 768px) block has no closing brace")
+	}
+	narrow := bodyText[narrowStart : narrowStart+narrowEnd]
+
+	// Drawer OPEN state: absolutely positioned over #main, above the mask.
+	// Deliberately NO width declaration — the open drawer must keep the
+	// base rule's var(--sidebar-width); a width:0 here would be the §3.1
+	// invisible-drawer trap in its open-state form.
+	drawerStart := strings.Index(narrow, "\n            #sidebar {\n")
+	if drawerStart < 0 {
+		t.Fatal("GET / narrow tier should restyle #sidebar as the drawer (issue #100 L2 R7)")
+	}
+	drawerEnd := strings.Index(narrow[drawerStart:], "\n            }")
+	drawer := narrow[drawerStart : drawerStart+drawerEnd]
+	for _, decl := range []string{"position: absolute;", "left: 0;", "top: 0;", "bottom: 0;", "z-index: 30;"} {
+		if !strings.Contains(drawer, decl) {
+			t.Fatalf("GET / narrow-tier #sidebar drawer rule should declare %q (issue #100 L2 R7)", decl)
+		}
+	}
+	if strings.Contains(drawer, "width:") {
+		t.Fatal("GET / narrow-tier #sidebar drawer rule must not declare a width — the open drawer keeps the base var(--sidebar-width); zeroing it here is the §3.1 invisible-drawer trap (issue #100 L2)")
+	}
+
+	// Drawer CLOSED state: off-canvas + focus-order lift, NOT zero-width.
+	closedStart := strings.Index(narrow, "#app.collapsed #sidebar {")
+	if closedStart < 0 {
+		t.Fatal("GET / narrow tier lost the drawer closed-state rule (issue #100 L2 R7)")
+	}
+	closedEnd := strings.Index(narrow[closedStart:], "\n            }")
+	closed := narrow[closedStart : closedStart+closedEnd]
+	for _, decl := range []string{"transform: translateX(-100%);", "visibility: hidden;"} {
+		if !strings.Contains(closed, decl) {
+			t.Fatalf("GET / narrow-tier drawer closed rule should declare %q (issue #100 L2 R7)", decl)
+		}
+	}
+	if strings.Contains(closed, "width: 0") {
+		t.Fatal("GET / narrow-tier drawer closed rule must not zero the width — the closed drawer slides off-canvas (translateX), it does not collapse; width:0 is the wide tier's rendering (issue #100 L2, PRD-CHANGE §3.1)")
+	}
+
+	// R7 mask: shown only while the drawer is open on this tier, covering
+	// #app (hence #main and the tab strip) and sitting under the drawer.
+	maskStart := strings.Index(narrow, "#app:not(.collapsed) #sidebar-mask {")
+	if maskStart < 0 {
+		t.Fatal("GET / narrow tier lost the drawer mask show-rule (issue #100 L2 R7)")
+	}
+	maskEnd := strings.Index(narrow[maskStart:], "\n            }")
+	mask := narrow[maskStart : maskStart+maskEnd]
+	for _, decl := range []string{"display: block;", "position: absolute;", "inset: 0;", "z-index: 25;"} {
+		if !strings.Contains(mask, decl) {
+			t.Fatalf("GET / narrow-tier mask rule should declare %q (issue #100 L2 R7)", decl)
+		}
+	}
+
+	// R7 z-index layering on the toggle button: it lives in #header (inside
+	// #main) and only this lift lets it stay clickable above the open
+	// drawer. The pinned ladder reads button 40 > drawer 30 > mask 25 >
+	// #main content, everything under the 9999 modal layer.
+	btnStart := strings.Index(narrow, "#sidebar-toggle-btn {")
+	if btnStart < 0 {
+		t.Fatal("GET / narrow tier lost the toggle-button z-index lift (issue #100 L2 R7)")
+	}
+	btnEnd := strings.Index(narrow[btnStart:], "\n            }")
+	btn := narrow[btnStart : btnStart+btnEnd]
+	for _, decl := range []string{"position: relative;", "z-index: 40;"} {
+		if !strings.Contains(btn, decl) {
+			t.Fatalf("GET / narrow-tier toggle-button rule should declare %q (issue #100 L2 R7)", decl)
+		}
+	}
+	// The lift must be narrow-tier ONLY: exactly two #sidebar-toggle-btn
+	// rules may exist (the PR1 base rule + this one) and the base rule must
+	// not carry position/z-index — on desktop the 9999 connection overlay's
+	// cover relation is pre-PR3 and must stay untouched.
+	if n := strings.Count(bodyText, "#sidebar-toggle-btn {"); n != 2 {
+		t.Fatalf("GET / should have exactly two #sidebar-toggle-btn rules (PR1 base + narrow-tier lift), found %d (issue #100 L2 R7)", n)
+	}
+	baseStart := strings.LastIndex(bodyText, "#sidebar-toggle-btn {")
+	baseEnd := strings.Index(bodyText[baseStart:], "\n        }")
+	base := bodyText[baseStart : baseStart+baseEnd]
+	if strings.Contains(base, "z-index") || strings.Contains(base, "position:") {
+		t.Fatal("GET / base #sidebar-toggle-btn rule must not carry position/z-index — the lift is narrow-tier only, desktop stacking (connection overlay 9999) must stay as shipped (issue #100 L2 R7)")
+	}
+
+	// Non-goal pin: no transition/animation anywhere in the narrow block —
+	// the drawer flips instantly like the desktop collapse (plan §8).
+	if strings.Contains(narrow, "transition") || strings.Contains(narrow, "animation") || strings.Contains(narrow, "@keyframes") {
+		t.Fatal("GET / narrow-tier block must not add transitions/animations — instant flip is the plan's explicit non-goal (issue #100 L2)")
+	}
+
+	// R8: tab snapping, narrow tier only; the hidden-scrollbar rule family
+	// is untouched (it lives outside every media query).
+	tabsStart := strings.Index(narrow, "#tabs-container {")
+	if tabsStart < 0 {
+		t.Fatal("GET / narrow tier lost the tabs-container snap rule (issue #100 L2 R8)")
+	}
+	tabsEnd := strings.Index(narrow[tabsStart:], "\n            }")
+	if !strings.Contains(narrow[tabsStart:tabsStart+tabsEnd], "scroll-snap-type: x proximity;") {
+		t.Fatal("GET / narrow-tier #tabs-container should declare scroll-snap-type: x proximity (issue #100 L2 R8)")
+	}
+	tabStart := strings.Index(narrow, ".tab {")
+	if tabStart < 0 {
+		t.Fatal("GET / narrow tier lost the .tab snap-align rule (issue #100 L2 R8)")
+	}
+	tabEnd := strings.Index(narrow[tabStart:], "\n            }")
+	if !strings.Contains(narrow[tabStart:tabStart+tabEnd], "scroll-snap-align:") {
+		t.Fatal("GET / narrow-tier .tab should declare a scroll-snap-align (issue #100 L2 R8)")
+	}
+
+	// R7 mask global state: display:none everywhere — without it the div
+	// would be a visible flex sibling swallowing the whole desktop layout.
+	maskGlobalStart := strings.Index(bodyText, "\n        #sidebar-mask {\n")
+	if maskGlobalStart < 0 {
+		t.Fatal("GET / lost the global #sidebar-mask display:none rule (issue #100 L2 R7)")
+	}
+	maskGlobalEnd := strings.Index(bodyText[maskGlobalStart:], "\n        }")
+	maskGlobal := bodyText[maskGlobalStart : maskGlobalStart+maskGlobalEnd]
+	if !strings.Contains(maskGlobal, "display: none;") {
+		t.Fatal("GET / global #sidebar-mask rule should declare display: none (issue #100 L2 R7)")
+	}
+	if strings.Contains(maskGlobal, "position:") || strings.Contains(maskGlobal, "inset:") {
+		t.Fatal("GET / global #sidebar-mask rule must stay a plain display:none — positioning it on desktop would create a hit-box over the app (issue #100 L2 R7)")
+	}
+
+	// R7 DOM: the mask is a child of #app, between #sidebar and #main, and
+	// its click runs the shipped close path.
+	appDomAt := strings.Index(bodyText, `<div id="app">`)
+	maskDomAt := strings.Index(bodyText, `id="sidebar-mask"`)
+	mainDomAt := strings.Index(bodyText, `<div id="main">`)
+	if appDomAt < 0 || maskDomAt < 0 || maskDomAt < appDomAt || maskDomAt > mainDomAt {
+		t.Fatal("GET / should place #sidebar-mask as a child of #app between #sidebar and #main (issue #100 L2 R7)")
+	}
+	if !strings.Contains(bodyText, `onclick="closeSidebarDrawer()"`) {
+		t.Fatal(`GET / mask should close the drawer via onclick="closeSidebarDrawer()" (issue #100 L2 R7)`)
+	}
+
+	// R14: the viewport-dispatched default. Both the missing-key path and
+	// the parse-failure/degraded path must dispatch (exactly two call
+	// sites); an explicit persisted value short-circuits before the
+	// dispatcher and never consults matchMedia.
+	read := sliceJSFunction(t, bodyText, "readSidebarCollapsed")
+	if got := strings.Count(read, "return defaultSidebarCollapsedByViewport();"); got != 2 {
+		t.Fatalf("GET / readSidebarCollapsed should dispatch the viewport default on BOTH the missing key and the failure path (exactly 2 call sites), found %d (issue #100 L2 R14)", got)
+	}
+	def := sliceJSFunction(t, bodyText, "defaultSidebarCollapsedByViewport")
+	for _, check := range []string{
+		`window.matchMedia("(max-width: 768px)").matches`,
+		`typeof window.matchMedia !== "function"`,
+		`typeof window === "undefined"`,
+	} {
+		if !strings.Contains(def, check) {
+			t.Fatalf("GET / defaultSidebarCollapsedByViewport should include %q (issue #100 L2 R14)", check)
+		}
+	}
+
+	// R7 JS: the mask's close path is the same single-state wiring as the
+	// toggle — apply(true) first, then persist(true), never a toggle of a
+	// second variable.
+	closers := sliceJSFunction(t, bodyText, "closeSidebarDrawer")
+	applyAt := strings.Index(closers, "applySidebarCollapsed(true);")
+	persistAt := strings.Index(closers, "persistSidebarCollapsed(true);")
+	if applyAt < 0 || persistAt < 0 || applyAt > persistAt {
+		t.Fatal("GET / closeSidebarDrawer must applySidebarCollapsed(true) then persistSidebarCollapsed(true) — the mask closes through the shared single-state path (issue #100 L2 R7)")
+	}
+
+	// Plan §3.1 review pin: no second drawer state variable anywhere in the
+	// file (the PR3 review focus). The drawer is a RENDERING of the one
+	// sidebarCollapsed boolean.
+	for _, forbidden := range []string{"drawerOpen", "drawerCollapsed", "drawerVisible", "drawerState"} {
+		if strings.Contains(bodyText, forbidden) {
+			t.Fatalf("GET / must not introduce a second drawer state variable — found %q (issue #100 L2, plan §3.1)", forbidden)
+		}
+	}
+
+	// R7 middle tier: 769–1024px narrows the sidebar to a 200px cap; 768
+	// belongs to the narrow tier (max-width:768px and min-width:769px must
+	// never both match at one width, PRD-CHANGE §3.6).
+	midStart := strings.Index(bodyText, "@media (min-width: 769px) and (max-width: 1024px) {")
+	if midStart < 0 {
+		t.Fatal("GET / lost the 769–1024px middle-tier block (issue #100 L2 R7, §3.6)")
+	}
+	midEnd := strings.Index(bodyText[midStart:], "\n        }")
+	if midEnd < 0 {
+		t.Fatal("GET / middle-tier block has no closing brace")
+	}
+	mid := bodyText[midStart : midStart+midEnd]
+	if !strings.Contains(mid, "#sidebar {") || !strings.Contains(mid, "max-width: 200px;") {
+		t.Fatal("GET / middle tier should cap #sidebar at max-width: 200px while keeping the side-by-side layout (issue #100 L2 R7)")
+	}
+}
+
 func TestReasonixRendererKeepsFrameAlive(t *testing.T) {
 	mux := http.NewServeMux()
 	if err := Register(mux, "myworktree", nil); err != nil {

@@ -157,6 +157,35 @@
 
         #app {
             display: flex;
+            /* R7 (issue #100 L2): the positioning containing block for the
+               narrow-tier drawer and its mask below — both are absolutely
+               positioned children of #app (the padding box, safe areas
+               included). Verified no-op against every pre-existing
+               ABSOLUTELY or FIXED positioned element, markup OR JS-created
+               — only those can have their containing block re-homed by an
+               ancestor gaining position:relative; a position:relative
+               element like .remote-badge offsets from its own normal-flow
+               position and is unaffected by definition, so it needs no
+               audit. Each audited element's ACTUAL containing block is
+               listed so this stays checkable: #connection-overlay is
+               position:fixed (its containing block is the viewport,
+               ancestors irrelevant); #status-bar, #terminal-controls and
+               #empty-state are direct children of #workspace
+               (position:relative — already their containing block; note
+               #empty-state is #terminal-container's SIBLING, not its
+               child); the JS-created #dsh-remote-mask (created in
+               kinds/dsh_web.js, styled by the rule a few hundred lines
+               below) sits inside #dsh-frames (position:relative); the
+               JS-created measurement span in truncatePath (a body-appended
+               span with position:fixed in its style.cssText) is
+               viewport-positioned like any fixed element, ancestors
+               irrelevant; and the two JS-created per-instance xterm host
+               divs — createTerminalHost in this file and
+               PtyRenderer._createSession in kinds/pty.js — (position:
+               absolute in their style.cssText) are appended to
+               #terminal-container (position:relative), already their
+               containing block. */
+            position: relative;
             /* R5 (issue #100 L1): height basis. 100vh is the legacy
                fallback (old Safari); the @supports block below upgrades it
                to the dynamic viewport height, which tracks the mobile URL
@@ -197,20 +226,142 @@
             flex-direction: column;
         }
 
-        /* Sidebar collapse (issue #99): `.collapsed` on #app is the single
-           source of truth for the collapsed state. The sidebar drops to zero
+        /* Sidebar collapse (issue #99), scoped OFF the narrow tier with the
+           SEAMLESS COMPLEMENT of the drawer's max-width: 768px block below
+           (PR3 / issue #100 L2): on the narrow tier the same .collapsed
+           class renders the off-canvas drawer instead of a zero-width
+           sibling. `.collapsed` on #app is the single source of truth for
+           the collapsed state in both forms. The sidebar drops to zero
            width and its border is dropped with it (no 1px sliver survives);
            #main's flex:1 automatically fills the freed space. JS never reads
-           or writes any width — collapsing is class-only. */
-        #app.collapsed #sidebar {
-            width: 0;
-            overflow: hidden;
-            border-right: none;
-            /* width:0 + overflow:hidden only CLIPS — the sidebar's buttons
-               would still sit in the Tab focus order with their focus ring
-               invisible. visibility lifts them out of focus/hit-testing
-               while collapsed and restores on expand, zero JS. */
-            visibility: hidden;
+           or writes any width — collapsing is class-only.
+           The scope is deliberately NOT written min-width: 769px: media
+           queries accept fractional widths, and in the (768, 769) gap
+           (e.g. 1537 physical px at 200% zoom = 768.5 CSS px — reachable on
+           desktop) NEITHER query would match: no drawer, no collapse rule,
+           so the toggle button would flip its class and aria-expanded while
+           the sidebar renders UNCHANGED — a visually inert toggle (a
+           regression PR3 would have introduced; PR1's rule was global).
+           The not-predicate (Media Queries Level 3, supported by every
+           target browser incl. old Safari) closes the seam: `all` matches
+           every media type, so `not all and (max-width: 768px)` is true
+           exactly when width > 768px, fractions included — the exact set
+           complement of the narrow tier. */
+        @media not all and (max-width: 768px) {
+            #app.collapsed #sidebar {
+                width: 0;
+                overflow: hidden;
+                border-right: none;
+                /* width:0 + overflow:hidden only CLIPS — the sidebar's buttons
+                   would still sit in the Tab focus order with their focus ring
+                   invisible. visibility lifts them out of focus/hit-testing
+                   while collapsed and restores on expand, zero JS. */
+                visibility: hidden;
+            }
+        }
+
+        /* R7 (issue #100 L2, PRD-CHANGE §3.6): narrow tier, <=768px — the
+           sidebar becomes an OVERLAY drawer instead of a flex sibling:
+           absolutely positioned across #main (so #main keeps the full
+           width underneath) and slid off-canvas with translateX when
+           .collapsed. The same single .collapsed class drives both forms
+           (plan §3.1): the desktop zero-width rule is scoped away above
+           (the seamless `not all and` complement of THIS block), so the
+           OPEN drawer computes its full var(--sidebar-width) width with
+           the initial visibility:visible — the §3.1 trap (inheriting
+           width:0/visibility:hidden would be an invisible drawer) is
+           closed by that scoping, not by overrides here. Closed,
+           translateX(-100%) parks the drawer off the left edge and
+           visibility:hidden lifts its buttons out of the Tab order, same
+           reasoning as the desktop rule. No transition/animation by plan
+           non-goal: both forms flip instantly, exactly like the desktop
+           collapse. */
+        @media (max-width: 768px) {
+            #sidebar {
+                /* No width declaration here on purpose: the drawer keeps
+                   the base rule's var(--sidebar-width). */
+                position: absolute;
+                left: 0;
+                top: 0;
+                bottom: 0;
+                /* Above the mask (25), below the header toggle (40); the
+                   whole ladder stays under the 9999 modal layer. */
+                z-index: 30;
+            }
+            /* Drawer closed: off-canvas, NOT zero-width (that is the wide
+               tier's rendering, scoped away from here). */
+            #app.collapsed #sidebar {
+                transform: translateX(-100%);
+                visibility: hidden;
+            }
+            /* R7 mask: shown only on this tier, only while the drawer is
+               open — covers #main (terminal) and the tab strip so a tap
+               outside the drawer closes it, while sitting UNDER the
+               drawer content (30) and the header toggle button (40), which
+               stays clickable to close the drawer it opened. */
+            #app:not(.collapsed) #sidebar-mask {
+                display: block;
+                position: absolute;
+                inset: 0;
+                z-index: 25;
+                background: var(--modal-backdrop);
+            }
+            /* R7 z-index layering, NARROW TIER ONLY (position+z-index on
+               the button is scoped here so the desktop stacking — e.g.
+               the 9999 connection overlay covering everything — stays
+               exactly as it shipped before PR3). The button lives in
+               #header, i.e. inside #main, and only this lift lets it sit
+               above the open drawer. */
+            #sidebar-toggle-btn {
+                position: relative;
+                z-index: 40;
+            }
+            /* R8: horizontal tab snapping on the narrow tier. `proximity`
+               snaps only when the scroll already rests near a snap point,
+               so a small flick past the last tab does not rubber-band;
+               `start` aligns each tab's leading edge with the scroll
+               container's, pulling a half-revealed tab fully into view.
+               The existing hidden-scrollbar rule family on #tabs-container
+               (`#tabs-container::-webkit-scrollbar` and its siblings) is
+               untouched — R8 reuses it, does not restyle it. */
+            #tabs-container {
+                scroll-snap-type: x proximity;
+            }
+            .tab {
+                scroll-snap-align: start;
+            }
+        }
+
+        /* R7 middle tier (issue #100 L2, PRD-CHANGE §3.6): 769–1024px —
+           side-by-side layout kept, sidebar capped at 200px (base width
+           stays var(--sidebar-width), so this is purely a cap). 768px
+           belongs to the narrow tier: max-width:768px and min-width:769px
+           never both match at one integer width.
+           The fractional gap between 768 and 769px is INTENTIONALLY left
+           open here (unlike the collapse rule above, which needed the
+           seamless `not all and` form because a dead toggle is a
+           functional regression): where neither tier matches, the wide
+           styles apply — 240px side-by-side — which is purely cosmetic
+           and functionally harmless.
+           Cascade note: width and max-width are DIFFERENT properties, so
+           there is no specificity contest with the collapse rule — the
+           used width is simply min(width, max-width). Collapsed, the
+           collapse rule's width:0 keeps applying (max-width never blocks a
+           width from going LOWER: min(0, 200px) = 0); uncollapsed, the
+           base 240px computes against the 200px cap. */
+        @media (min-width: 769px) and (max-width: 1024px) {
+            #sidebar {
+                max-width: 200px;
+            }
+        }
+
+        /* R7 mask, all tiers: display:none is the GLOBAL state — the mask
+           exists only on the narrow tier (its only display:block lives
+           inside the max-width:768px block above), and without this rule
+           the div would be a visible flex sibling swallowing the whole
+           layout on desktop. */
+        #sidebar-mask {
+            display: none;
         }
 
         .sidebar-title {
@@ -1433,6 +1584,13 @@
             </div>
         </div>
 
+        <!-- R7 (issue #100 L2): narrow-tier drawer mask, a child of #app
+             (sibling of #sidebar / #main). Covers #main and the tab strip
+             while the drawer is open; a tap closes the drawer through the
+             same single-state path as the toggle button. display:none on
+             every tier except narrow-and-open (see the stylesheet). -->
+        <div id="sidebar-mask" onclick="closeSidebarDrawer()"></div>
+
         <!-- Main: Tabs + Terminal -->
         <div id="main">
             <div id="header">
@@ -2198,15 +2356,42 @@
 
         // First localStorage use in this file (R3): the collapsed preference
         // is a user preference (persisted), unlike the session-scoped
-        // SERVER_UPGRADED_FLAG above. Wide screens default to expanded; a
-        // missing key, unparseable value or throwing storage (private mode,
-        // old browsers) degrades to "expanded, not persisted" instead of
-        // breaking the page (try/catch on both directions).
+        // SERVER_UPGRADED_FLAG above. The DEFAULT is dispatched by viewport
+        // (R14, plan §3.3): a missing key on a narrow screen (<=768px, the
+        // drawer form) defaults to CLOSED so a first visit does not cover
+        // the terminal; a missing key on a wide screen defaults to expanded.
+        // An EXPLICIT persisted value always wins over the viewport — the
+        // key is shared between the desktop form and the drawer form, so a
+        // user who collapsed the sidebar on desktop lands on the closed
+        // drawer on a phone with no special case (§5.3-5). A throwing
+        // storage (private mode, old browsers) or an unparseable stored
+        // value degrades to the same viewport-dispatched default,
+        // unpersisted, instead of breaking the page (try/catch on both
+        // directions).
         function readSidebarCollapsed() {
             try {
                 const raw = localStorage.getItem(SIDEBAR_COLLAPSED_KEY);
-                if (raw === null) return false;
+                if (raw === null) return defaultSidebarCollapsedByViewport();
                 return JSON.parse(raw) === true;
+            } catch (e) {
+                // Unreadable storage, or a stored value that does not
+                // parse: degrade exactly like a missing key.
+                return defaultSidebarCollapsedByViewport();
+            }
+        }
+
+        // R14: the viewport-dispatched default itself, in one guarded
+        // place. No window / no matchMedia (older browsers, non-browser
+        // hosts) and a throwing matchMedia all degrade to the wide-screen
+        // default (expanded). Deliberately NOT re-evaluated on breakpoint
+        // crossings mid-session: the default applies at FIRST LOAD only —
+        // afterwards the persisted value (or the current .collapsed class
+        // on #app) owns the state, and the two render forms follow the
+        // class at whatever breakpoint happens to match.
+        function defaultSidebarCollapsedByViewport() {
+            try {
+                if (typeof window === "undefined" || typeof window.matchMedia !== "function") return false;
+                return window.matchMedia("(max-width: 768px)").matches;
             } catch (e) {
                 return false;
             }
@@ -2269,6 +2454,19 @@
         function toggleSidebarCollapse() {
             applySidebarCollapsed(!sidebarCollapsed);
             persistSidebarCollapsed(sidebarCollapsed);
+        }
+
+        // R7 (issue #100 L2): the narrow-tier mask's click target. Closes
+        // the drawer through the SAME single-state path as the toggle
+        // button and Ctrl/Cmd+B — applySidebarCollapsed flips the one
+        // .collapsed class and the change persists under the one shared
+        // key. Deliberately an explicit close, not toggleSidebarCollapse():
+        // the mask is only clickable while the drawer is open, but an
+        // explicit apply keeps the state honest even if this handler ever
+        // races the toggle. No second state variable (plan §3.1).
+        function closeSidebarDrawer() {
+            applySidebarCollapsed(true);
+            persistSidebarCollapsed(true);
         }
 
         // R4: first document-level keydown. Ctrl/Cmd+B toggles the sidebar.

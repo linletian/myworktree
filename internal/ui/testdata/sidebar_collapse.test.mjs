@@ -80,6 +80,12 @@ const sidebarFactory = new Function("deps", `
   let gitExpandedSection = 'unstaged';
   ${[
     "function readSidebarCollapsed",
+    // PR3 (R14): readSidebarCollapsed delegates the missing/garbage default
+    // to this viewport dispatcher — sliced alongside so the shipped wiring
+    // is what runs. This harness passes no `window`, and the shipped
+    // guard (`typeof window === "undefined"`) degrades to the wide-screen
+    // default, which is what these #99 cases assert.
+    "function defaultSidebarCollapsedByViewport",
     "function persistSidebarCollapsed",
     "function refitActiveTerminal",
     "function applySidebarCollapsed",
@@ -231,16 +237,23 @@ test("issue #99 R3: collapse state round-trips through localStorage under the na
   assert.equal(reopened2.api.readSidebarCollapsed(), false, "a refresh must restore the expanded state too");
 });
 
-test("issue #99 R3: a missing key defaults to expanded (wide-screen default)", () => {
+test("issue #99 R3: a missing key defaults to expanded on the wide tier (R14 viewport dispatch)", () => {
   const h = sidebarHarness();
   assert.equal(h.api.readSidebarCollapsed(), false);
   assert.equal(h.localStorage.map.size, 0, "reading must not write");
 });
 
-test("issue #99 R3: an unparseable stored value degrades to expanded", () => {
-  for (const garbage of ["{not json", "1", "\"yes\"", "null"]) {
+test("issue #99 R3: an unparseable stored value degrades to the viewport-dispatched default (expanded here)", () => {
+  for (const garbage of ["{not json", "[broken"]) {
     const h = sidebarHarness({ storageMap: [["mw.ui.sidebarCollapsed", garbage]] });
-    assert.equal(h.api.readSidebarCollapsed(), false, `stored ${JSON.stringify(garbage)} must read as expanded`);
+    assert.equal(h.api.readSidebarCollapsed(), false, `stored ${JSON.stringify(garbage)} must read as expanded on a windowless host (the R14 guard's wide default)`);
+  }
+  // Values that parse but are not the boolean true stay the explicit
+  // "expanded" answer without consulting the viewport (PR3 keeps the
+  // JSON.parse === true shape).
+  for (const parsed of ["1", "null", "\"yes\""]) {
+    const h = sidebarHarness({ storageMap: [["mw.ui.sidebarCollapsed", parsed]] });
+    assert.equal(h.api.readSidebarCollapsed(), false, `stored ${JSON.stringify(parsed)} parses but is not true — expanded`);
   }
 });
 

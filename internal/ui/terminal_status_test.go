@@ -82,6 +82,33 @@ func TestViewportHeightHandling(t *testing.T) {
 	t.Logf("%s", out)
 }
 
+// TestNarrowDrawerHandling runs the Node unit tests for the issue #100 L2
+// breakpoint / drawer layer (testdata/narrow_drawer.test.mjs): the R14
+// viewport-dispatched default for a missing / unparseable persisted value
+// (narrow first-load defaults to the closed drawer, an explicit persisted
+// value always wins — the §5.3-5 desktop-collapsed-user case needs no
+// special case), the availability guards around matchMedia, and the R7
+// mask's close path running through the same single .collapsed class and
+// shared mw.ui.sidebarCollapsed key as the toggle button and Ctrl/Cmd+B
+// (no second state variable, plan §3.1).
+//
+// Same arrangement as TestViewportHeightHandling: the cases slice the
+// shipped index.html and run against stubbed browser state, this wrapper
+// makes `go test` enforce them, and the file lives in testdata/ because
+// static/* is embedded and served to every browser. Skips when node is
+// absent.
+func TestNarrowDrawerHandling(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not on PATH; skipping narrow drawer JS tests")
+	}
+	out, err := exec.Command(node, "--test", "testdata/narrow_drawer.test.mjs").CombinedOutput()
+	if err != nil {
+		t.Fatalf("node --test testdata/narrow_drawer.test.mjs: %v\n%s", err, out)
+	}
+	t.Logf("%s", out)
+}
+
 // TestTerminalStatusChangelogCount keeps the CHANGELOG's coverage claim honest.
 // The entry quotes the number of `node --test` cases, and that number drifted
 // wrong twice while the cases were still being added (17, then 22, then 26 for
