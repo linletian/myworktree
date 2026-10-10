@@ -67,7 +67,7 @@ issue #99 与 #100 是同一产品问题的两个切面：**myworktree 的 Web U
 | R5 | 视口与高度：`#app` 高度 `100dvh`（`@supports` 保留 `100vh` fallback）、宽度 `100%` 取代 `100vw`；viewport meta 补 `viewport-fit=cover`；容器用 `env(safe-area-inset-*)` 处理刘海与 Home Indicator | #100 L1 |
 | R6 | iOS 软键盘：监听 `visualViewport` 的 `resize` / `scroll`，键盘弹出时收窄终端可视高度，保证输入区可见 | #100 L1 |
 | R7 | 断点与形态（**768px 归窄屏**：窄屏 `max-width: 768px`，中间档 769–1024px，依据见 §3.6）：窄屏侧栏改覆盖式 drawer（`position: absolute` + `transform: translateX`，`#app` 补 `position: relative` 作定位包含块），打开带遮罩、点遮罩关闭；遮罩盖住 `#main` 与 tab 区，但 drawer 打开态下 `#header` 左侧开关按钮仍可点击关闭（z-index 分层）；宽屏维持并排；中间宽度侧栏收窄或限上限（如 `max-width: 200px`），并排仍可用 | #100 L2 |
-| R8 | 窄屏 `#tabs-container` 补 `scroll-snap-type` 让 tab 吸附（滚动条继续隐藏，复用 568-600 既有实现） | #100 L2 |
+| R8 | 窄屏 `#tabs-container` 补 `scroll-snap-type` 让 tab 吸附（滚动条继续隐藏，复用 `#tabs-container::-webkit-scrollbar` 规则族既有实现——按选择器锚定，行号随 PR 漂移） | #100 L2 |
 | R9 | 侧栏分栏拖拽从 mouse 事件迁到 **Pointer Events**（`pointerdown`/`pointermove`/`pointerup` + `setPointerCapture`）；拖拽时 handle `touch-action: none`，拖拽元素 `user-select: none` / `-webkit-touch-callout: none` | #100 L3 |
 | R10 | 触控目标：`.icon-btn` 与 `--term-ctrl-btn-size` 在 `@media (pointer: coarse)` 下放大到 ≥ 44×44 **CSS px**（Apple HIG 的 44pt 在 iOS Safari 即 44 CSS px；CSS 写 `px`，照写 `44pt` 会得到 ~58.7px），用 `min-width`/`min-height` 而非固定 width/height，避免撑破现有布局 | #100 L3 |
 | R11 | hover 样式用 `@media (hover: hover)` 包裹，纯触屏设备无粘滞高亮 | #100 L3 |
@@ -120,6 +120,10 @@ issue #99 与 #100 是同一产品问题的两个切面：**myworktree 的 Web U
 
 注意 Split View 任何档位都到不了 1024pt（12.9″ 的 2/3 档约 911pt 已是上限），而 ≤768 的 Split View 档位全部走 drawer——**不要误以为「所有 Split View 都走中间档」**。中间档收窄侧栏而非直接 drawer，因为这些宽度下并排仍可用。
 
+**分数宽度（PR3 评审裁定）**：三档按整数定义，但视口宽度可为分数（桌面浏览器缩放，如 200% 缩放下 1537px 物理宽 = 768.5 CSS px）。若「宽屏侧」媒体查询写作 `min-width: 769px`，(768, 769) 区间两档双双落空——drawer 不存在，且被包进宽档媒体查询的折叠规则一并失效，toggle 惰性（PR3 评审实证：这不是「等价于 PR3 之前」，PR1 的折叠规则原是全局的）。因此**承担功能分派的媒体作用域必须无缝互补**：窄屏 `max-width: 768px`，其互补侧写 `@media not all and (max-width: 768px)`（`all` 匹配全部媒体类型，取反后等价于 width > 768px；`not` 为 MQ L3，全目标浏览器支持），不写 `min-width: 769px`。中间档 `(min-width: 769px) and (max-width: 1024px)` 有意保留整数缝：缺席时落宽屏样式（240px 并排），纯外观差异、功能无损。
+
+**drawer 宽度上限（已评估，本期暂缓）**：窄屏档含 iPad Split View 1/3 档（约 320pt），240px drawer 打开时覆盖约 75% 视口；overlay drawer 语义仍成立（遮罩余约 80px 可点关）。是否引入 `min(240px, 85vw)` 之类上限属产品决策，本期不设；beta 反馈若需要再立项（PR3 评审意见，仲裁记录）。
+
 ### 3.7 分期边界（每个 issue 的显式范围声明）
 
 - #99：纯本地偏好，无后端改动、无 WS/HTTP 协议变更，可独立 PR。
@@ -148,25 +152,25 @@ issue #99 与 #100 是同一产品问题的两个切面：**myworktree 的 Web U
 
 1. 【人工过检】折叠 / 展开过程中无内容溢出、`#main` 无抖动（视觉 / 布局断言，自动化测试线覆盖不了，由 §6 人工清单兜底）。
 2. 【人工过检】折叠态终端（同文档 xterm + xterm-addon-fit）重排后不出现滚动条或错位（同上，人工过检；自动化侧只锁定「先切 class、下一帧再 fit」的时序）。
-3. 状态刷新后保持（localStorage 往返）；清掉 localStorage 后回到默认展开。
-4. `Ctrl/Cmd+B` 可切换，且在 input 内输入不触发。
-5. `toggleGitSection()` 的 staged/unstaged 折叠状态不受影响，两个状态互不覆盖。
+3. 状态刷新后保持（localStorage 往返）；清掉 localStorage 后回到默认展开——自动化：`sidebar_collapse.test.mjs`（localStorage 往返 / 缺 key 默认）。
+4. `Ctrl/Cmd+B` 可切换，且在 input 内输入不触发——自动化：`sidebar_collapse.test.mjs`（keydown 守卫全组：Ctrl/Cmd/大小写 / repeat / AltGr / input-host）。
+5. `toggleGitSection()` 的 staged/unstaged 折叠状态不受影响，两个状态互不覆盖——自动化：`sidebar_collapse.test.mjs`（accordion 正交 interleave）。
 6. `internal/ui/ui_test.go` 增加 DOM 锚点**文本断言**：collapsed 类名、`mw.ui.sidebarCollapsed` key 名、挂/摘 class 的相对顺序（httptest + `strings.Contains`，不执行 JS，对齐现有 UI 测试写法，见 §6）。
 7. localStorage 往返、无 key / 解析失败时默认展开等**行为用例**走 node 线：`internal/ui/testdata/*.test.mjs` 从真实 served 源码切片 + 打桩 localStorage（见 §6）。
 
 ### 5.2 PR2（#100 L1）
 
-1. `100dvh` + `@supports` fallback；`100%` 宽度取代 `100vw`，无竖向滚动条导致的横向溢出。
-2. viewport meta 含 `viewport-fit=cover`；safe-area inset 已处理。
-3. 地址栏展开 / 收起、软键盘弹出 / 收起时布局不跳动，终端输入区始终可见。
+1. `100dvh` + `@supports` fallback；`100%` 宽度取代 `100vw`，无竖向滚动条导致的横向溢出——自动化：`TestViewportAndHeightAnchors`（fallback 在前、`@supports` 块在后、`100%` 宽度声明）。
+2. viewport meta 含 `viewport-fit=cover`；safe-area inset 已处理——自动化：`TestViewportAndHeightAnchors`（meta 切片、`#app` safe-area padding 块内断言）。
+3. 【人工过检】地址栏展开 / 收起、软键盘弹出 / 收起时布局不跳动，终端输入区始终可见（对应 §6 人工清单软键盘项；行为侧 `viewport_height.test.mjs`：钉高 / 清除 / 缩放短路 / scroll 门控 / 折叠同场）。
 
 ### 5.3 PR3（#100 L2）
 
-1. iPhone Safari 竖屏（375×667 / 390×844）与 iPad Safari（含 Split View 窄档）下，侧栏、tab 栏、终端区域均可达，无横向滚动条、无内容被裁掉。
-2. 窄屏 drawer 开合正常，点遮罩关闭；tab 滚动吸附生效。
-3. 中间宽度（769–1024）侧栏收窄后并排仍可用；恰好 768px 时走窄屏 drawer（边界归属唯一，见 §3.6）。
-4. drawer 以 `#app` 为定位包含块（`#app` 补 `position: relative`）；遮罩盖住 `#main` 与 tab 区，且 drawer 打开态下 `#header` 左侧开关按钮仍可点击关闭（z-index 分层）。
-5. 窄屏首次加载（无持久化值）drawer 默认关闭，不遮挡终端；与桌面共享同一持久化 key——桌面收起过的用户窄屏 drawer 亦默认关闭（单一状态机的视口分派默认值，非新状态，R14）。
+1. 【人工过检】iPhone Safari 竖屏（375×667 / 390×844）与 iPad Safari（含 Split View 窄档）下，侧栏、tab 栏、终端区域均可达，无横向滚动条、无内容被裁掉（布局行为，UA 度量，对应 §6 人工清单窄屏项；结构侧由 `TestNarrowDrawerAnchors` 锚定媒体块 / drawer / 遮罩规则）。
+2. 窄屏 drawer 开合正常，点遮罩关闭；tab 滚动吸附生效——自动化：`TestNarrowDrawerAnchors`（scroll-snap 声明、遮罩窄屏显示规则、遮罩 DOM 位置）+ `narrow_drawer.test.mjs`（遮罩点击关闭、遮罩/按钮/Ctrl+B 三路径同态）；视觉开合【人工过检】（§6 人工清单窄屏项）。
+3. 中间宽度（769–1024）侧栏收窄后并排仍可用；恰好 768px 时走窄屏 drawer（边界归属唯一，见 §3.6）——自动化：`TestNarrowDrawerAnchors`（中间档块、两档媒体字面量）；【人工过检】§6 人工清单中间档项（PR3 评审后新增）。
+4. drawer 以 `#app` 为定位包含块（`#app` 补 `position: relative`）；遮罩盖住 `#main` 与 tab 区，且 drawer 打开态下 `#header` 左侧开关按钮仍可点击关闭（z-index 分层）——自动化：`TestNarrowDrawerAnchors`（`position: relative` 块内断言、40/30/25 z-index 阶梯、按钮提升仅窄屏块内）；真机点按【人工过检】（§6 人工清单窄屏项）。
+5. 窄屏首次加载（无持久化值）drawer 默认关闭，不遮挡终端；与桌面共享同一持久化 key——桌面收起过的用户窄屏 drawer 亦默认关闭（单一状态机的视口分派默认值，非新状态，R14）——自动化：`narrow_drawer.test.mjs`（窄 / 宽首访默认、显式值双方向优先、解析失败 / 抛异常分派、无 matchMedia / 抛异常 matchMedia 降级）+ `sidebar_collapse.test.mjs`（共享 key 往返）。
 
 ### 5.4 PR4（#100 L3）
 
@@ -176,7 +180,7 @@ issue #99 与 #100 是同一产品问题的两个切面：**myworktree 的 Web U
 
 ### 5.5 全期通用（最大风险项）
 
-1. **桌面行为零回归**：`index.html` 是 5562 行单文件、没有真机触屏回归手段，至少桌面 400px 窄窗口人工过检一轮 + `pointer: coarse` 模拟验证样式分支。
+1. **桌面行为零回归**：`index.html` 是 5562 行单文件、没有真机触屏回归手段，至少桌面 400px 窄窗口人工过检一轮；`pointer: coarse` 模拟验证样式分支**自 PR4 起适用**（PR3 及以前不存在任何 pointer 媒体规则可验，PR3 评审裁定）。
 2. 现有测试全绿：`internal/ui/ui_test.go`、`internal/ui/terminal_status_test.go`；CI 门（`gofmt`、`go test ./...`、双二进制 build）通过。
 
 ---
@@ -186,8 +190,8 @@ issue #99 与 #100 是同一产品问题的两个切面：**myworktree 的 Web U
 - **Go 资源文本断言**（`internal/ui/ui_test.go` 既有写法）：通过 `httptest` 取到 served 的 `index.html` / `static/kinds/*.js`，用 `strings.Contains` 断言 DOM 锚点、class 名、函数名与**相对顺序**（参考 `TestWebRenderersStoppedSwitchHidesAllFrames`、`TestEmptyWorktreeSwitchHidesAllWebPanels` 的 slicing + position 断言风格）。
 - **node 行为测试**（`internal/ui/testdata/*.test.mjs`，`node --test`，由 `terminal_status_test.go` 的 `TestTerminalStatusHandling` 包进 `go test`）：需要真正执行逻辑的用例（localStorage 往返的状态读写、快捷键守卫、断点分派函数）走这条线——**从真实 served 源码切片、打桩浏览器状态**，不断言副本。
 - **CHANGELOG 房规**（issue #95）：若用 "Pinned by N `node --test` cases" 声明覆盖数，每一处出现的数字都必须等于**该条目所声明测试文件（集合）**的 `grep -c '^test('` 总数——现行守卫 `TestTerminalStatusChangelogCount` 按单文件 `terminal_status.test.mjs` 推导（该短语语义 = "the file's total case count"，见 #95 条目原文）；子集计数必须换措辞（如 "四个 #99 场景"）。新增 testdata 文件时不得用该短语引用全量总数，除非先把守卫改成全量求和并同步修订历史条目。
-- **人工清单**（每期结束过一遍）：桌面宽屏 / 400px 窄窗；刷新持久化；清 localStorage 恢复默认（宽屏展开 / 窄屏 drawer 关闭，R14）；终端内焦点按 Ctrl+B（不应切换——xterm 在 helper textarea 上自行 `stopPropagation()`，R4/R16）；git section 折叠互不覆盖；折叠 / 展开两态下 chevron 图标各自正确显示（`<<` / `>>` 切换，UA 显隐断言原则）；真机捏合 / 双击缩放（布局不塌缩——`visualViewport.scale ≠ 1` 时 R6 不钉高）；iPhone 横屏刘海条带 / Home Indicator 条带的底色缝（已知外观 nit：双面板分色，padding 条带露画布底色，不影响内容可达性，如需消除再单独评估铺底方案）；iPhone Safari 真机软键盘：聚焦终端 / 输入框后键盘弹出时终端输入行仍在键盘上方、收起后回到 `100dvh` 全高不跳动（§5.2-3）；折叠态 + 键盘同时发生时终端无滚动条 / 错位（§3.5 同场要求）。
-- **验收-清单对应规则**（PR2 评审补立）：每条 §5.x 验收项必须在上方人工清单有对应项，或在该验收条上明确标注自动化覆盖断言（测试名）——不允许「验收写了、清单忘了」的结构性缺口。
+- **人工清单**（每期结束过一遍）：桌面宽屏 / 400px 窄窗；刷新持久化；清 localStorage 恢复默认（宽屏展开 / 窄屏 drawer 关闭，R14）；终端内焦点按 Ctrl+B（不应切换——xterm 在 helper textarea 上自行 `stopPropagation()`，R4/R16）；git section 折叠互不覆盖；折叠 / 展开两态下 chevron 图标各自正确显示（`<<` / `>>` 切换，UA 显隐断言原则）；真机捏合 / 双击缩放（布局不塌缩——`visualViewport.scale ≠ 1` 时 R6 不钉高）；iPhone 横屏刘海条带 / Home Indicator 条带的底色缝（已知外观 nit：双面板分色，padding 条带露画布底色，不影响内容可达性，如需消除再单独评估铺底方案）；iPhone Safari 真机软键盘：聚焦终端 / 输入框后键盘弹出时终端输入行仍在键盘上方、收起后回到 `100dvh` 全高不跳动（§5.2-3）；折叠态 + 键盘同时发生时终端无滚动条 / 错位（§3.5 同场要求）；中间档（约 800px 与 1024px 窗口）：侧栏收窄至 200px、并排仍可用，768px 整窗恰为窄屏 drawer（§5.3-3）；共享 key 跨端副作用（R14 预期行为，双方向过检）：窄屏点遮罩 / 开关关闭 drawer 会把 `true` 写入共享 key，同一浏览器 profile 的桌面端下次加载侧栏默认折叠，反向（桌面收起后窄屏首访 drawer 默认关）亦同；真机窄屏形态（§5.3-1/2/4 的 UA 度量落点，beta 渠道收敛）：iPhone Safari 竖屏（375×667 与 390×844）与 iPad Split View 1/3、1/2 档目视——侧栏 / tab 栏 / 终端均可达、无横向滚动条、无内容被裁掉，drawer 开合与点遮罩关闭、tab 吸附、打开态下开关按钮可点。
+- **验收-清单对应规则**（PR2 评审补立）：每条 §5.x 验收项必须在上方人工清单有对应项，或在该验收条上明确标注自动化覆盖断言（测试名）——不允许「验收写了、清单忘了」的结构性缺口。PR3 评审裁定后已回溯标注 §5.1–§5.3 全部条目；§5.4 随 PR4 落地时标注。
 - **UA 显隐断言原则**（PR1 评审教训，blocker 实证）：任何依赖 UA 表现性提示（如 `[hidden]`）或 UA 样式的「显隐」实现，**属性层正确 ≠ 渲染层正确**——必须有真实浏览器度量断言或人工过检项兜底，不能只靠「字符串锚点 + 打桩行为测试」一条线。
 - **beta 渠道**：v0.6.0 发布前走 beta（v0.5.1 beta 曾抓出 3 个真实 bug 的先例），触屏相关问题主要靠该渠道收敛。
 

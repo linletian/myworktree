@@ -94,7 +94,7 @@
 - **改动点**：
   - `@media (max-width: 768px)`：侧栏改覆盖式 drawer（`position: absolute` + `transform: translateX`），`#app` 补 `position: relative` 作定位包含块；遮罩盖住 `#main` 与 tab 区、点遮罩关闭；drawer 打开态 `#header` 左侧按钮仍可点击关闭（z-index 分层）（R7）。
   - 中间档 769–1024px 侧栏收窄（如 `max-width: 200px`），768px 归窄屏（§3.6）。
-  - `#tabs-container` 补 `scroll-snap-type`，滚动条继续隐藏（复用 `index.html:568-600` 规则族，R8）。
+  - `#tabs-container` 补 `scroll-snap-type`，滚动条继续隐藏（复用 `#tabs-container::-webkit-scrollbar` 规则族——按选择器锚定，行号随 PR 漂移，R8）。
   - 窄屏首次加载（无持久化值）drawer 默认关闭；与桌面共享同一 key，不引入第二个状态变量（R14）——**review 重点：有没有偷偷引入第二个状态变量**。
 - **验收**：§5.3 全部 5 条。
 - **测试**：ui_test.go 文本断言（断点块、drawer class、遮罩元素、`scroll-snap-type`）；node 行为用例（断点分派函数、窄屏默认值按视口分派、遮罩关闭）；人工清单过窄屏形态；D2 一条。
@@ -119,7 +119,7 @@
 | 人工清单 | 每期结束过一遍 | 桌面宽屏 / 400px 窄窗；刷新持久化；清 localStorage 恢复默认（宽屏展开 / 窄屏 drawer 关闭）；iframe 内焦点 Ctrl+B 不切换；git section 折叠互不覆盖 | 每个 PR 合并前 |
 | 真机验证 | beta 渠道 | iOS / iPadOS 触屏、软键盘、Split View | 发布前 beta tag（v0.5.1 beta 曾抓出 3 个真实 bug） |
 
-**全期通用门禁（§5.5）**：桌面行为零回归（400px 窄窗人工过检 + `pointer: coarse` 模拟）；`gofmt`、`go test ./...`、双二进制 build 全绿。
+**全期通用门禁（§5.5）**：桌面行为零回归（400px 窄窗人工过检；`pointer: coarse` 模拟自 PR4 起适用——此前无 pointer 媒体规则可验）；`gofmt`、`go test ./...`、双二进制 build 全绿。
 
 ---
 
@@ -130,7 +130,7 @@
 | M0 | Phase 0 设计稿确认 | §2.3 完成判据 |
 | M1 | PR1 合并（桌面折叠可用） | §5.1 全过 + D1 / D2 落位 |
 | M2 | PR2 合并（视口与高度） | §5.2 全过 |
-| M3 | PR3 合并（窄屏 drawer + 断点） | §5.3 全过 + 人工清单窄屏项 |
+| M3 | PR3 合并（窄屏 drawer + 断点） | §5.3 全过 + 人工清单窄屏 / 中间档 / 共享 key 跨端项 |
 | M4 | PR4 合并（触屏交互） | §5.4 全过 |
 | M5 | `develop` 出 beta tag，真机收敛 | beta 反馈清零或评估延期 |
 | M6 | 切 `main` 发布 v0.6.0 | 既有 release 流程 |
