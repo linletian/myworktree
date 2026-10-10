@@ -1,6 +1,6 @@
 # PRD 变更文档：v0.6.0 — Web UI 侧栏折叠与响应式 / 触屏适配
 
-> **状态**：草案（已经 PR #109 评审，评审意见逐条并入；本文档不构成实施指令，按 §4 分期开工）
+> **状态**：已实施（PR1–PR4 全部落地并经双外部评审多轮复核；PR #109 评审意见逐条并入，PR #110 评审修复同步合入；本文档不构成实施指令，按 §4 分期开工）
 > **日期**：2026-10-09（同日按评审修订）
 > **目标版本**：v0.6.0（当前 `develop` = v0.5.2 release 合入 + 未发布变更）
 > **来源 issue**：#99（`ui(sidebar): 工作树侧栏支持折叠 / 展开（桌面端）`）、#100（`ui(responsive): Web UI 响应式布局 + 触屏交互（iOS / iPadOS）`）
@@ -45,7 +45,7 @@ issue #99 与 #100 是同一产品问题的两个切面：**myworktree 的 Web U
 | Pointer/Touch 事件、`dvh`、`visualViewport`、`env(safe-area-inset-*)`：均 0 处 | 全文件检索确认 |
 | `body, html { overflow: hidden }`（页面本身不滚，软键盘遮挡无法靠滚动救回） | `index.html:144-152` |
 | `--term-ctrl-btn-size: 32px`；`.icon-btn { padding: 2px }` | `index.html:23`、`187-194` |
-| 终端键盘：pty 终端是同文档 xterm（非 iframe），按键由 xterm 在 `xterm-helper-textarea` 上自行截断（`_keyDown` → `cancel(e, true)` 无条件 `stopPropagation()`），document 监听器收不到终端按键 | vendored `internal/ui/static/vendor/xterm/xterm.js`（`_keyDown` / `cancel`） |
+| 终端键盘：pty 终端是同文档 xterm（非 iframe），产生数据的按键（如 Ctrl+B → `\x02`）由 xterm 在 `xterm-helper-textarea` 上自行截断（`_keyDown` 发送数据后 `cancel(e, true)` = preventDefault + stopPropagation），这些按键到不了 document 监听器；不产生数据的组合（Ctrl+Shift+B / Ctrl+Alt+B / macOS Cmd+B）不被取消，document 守卫兜底（PR #110 评审对 vendored 源码再核实） | vendored `internal/ui/static/vendor/xterm/xterm.js`（`_keyDown` / `evaluateKeyboardEvent` / `cancel`） |
 | UA 显隐提示 `[hidden]{display:none}` 被 `@namespace` 限定在 HTML 命名空间，**对 `<svg>` 元素无效**（SVG 的显隐必须显式补 CSS 消费规则） | PR1 评审实测（headless Chrome：`svg[hidden]` computed display 仍为 inline） |
 
 > 注意：issue 中的行号是 2026-10-08 提交时快照，与当前 develop 有少量漂移（如 `SERVER_UPGRADED_FLAG` 1742≠1766、`startSidebarResize` 2355≠2324、唯一 keydown 已从 modal 内 Enter/Escape 变为 tab 重命名输入框）。**实施时以符号锚点为准，不追行号。**
@@ -63,7 +63,7 @@ issue #99 与 #100 是同一产品问题的两个切面：**myworktree 的 Web U
 | R1 | 桌面折叠态：`#app` 挂 collapsed CSS 类，`#sidebar` 宽度归零 + `overflow: hidden`，`#main` 因 `flex:1` 自动吃满；**JS 不做任何宽度计算** | #99 |
 | R2 | 开关按钮：chevron 图标按钮，**放在 `#header` 左侧**（折叠态常驻可见，不给侧栏留宽度） | #99 |
 | R3 | 持久化：`localStorage`，命名空间化 key `mw.ui.sidebarCollapsed`；文件首个 localStorage 用例；**宽屏默认展开**（窄屏 drawer 的默认值见 R14，同一 key 两端共享）；旧浏览器 / 隐私模式失败时降级为不持久化 | #99 |
-| R4 | 快捷键 `Ctrl/Cmd+B` 切换：首个全局 keydown；不在 input / textarea / contenteditable 内触发。**机制事实（PR1 评审三轮订正的终稿）**：pty 终端是同文档 xterm（非 iframe），终端按键由 xterm 自己在 helper textarea 的 keydown 处理器截断（vendored `xterm.js` 的 `_keyDown` → `cancel(e, true)` 无条件 `preventDefault + stopPropagation`），document 监听器在终端场景根本不会被调用；input/textarea 守卫的真实职责是保护**不**自行截断的输入宿主（modal 表单字段等）；跨 frame 隔离只适用于 opencode / reasonix / dsh 的 web UI iframe（其内按键确实到不了父文档，不试图绕过） | #99 |
+| R4 | 快捷键 `Ctrl/Cmd+B` 切换：首个全局 keydown；不在 input / textarea / contenteditable 内触发，modal（`<dialog>`）前台不盲切后方侧栏（PR #110 B3 修复）。**机制事实（PR1 评审三轮订正、PR #110 评审再核 vendored 源码）**：pty 终端是同文档 xterm（非 iframe），终端侧产生数据的按键（如 Ctrl+B → `\x02`）由 xterm 自己在 helper textarea 的 keydown 处理器截断（`_keyDown` 在发送数据后 `cancel(e, true)` = preventDefault + stopPropagation——`cancel` 仅作用于产生数据或带 cancel 标志的按键如 Tab/Enter/Esc，非全量无条件），这些按键到不了 document 监听器；不产生数据的组合（Ctrl+Shift+B / Ctrl+Alt+B / macOS Cmd+B）不被取消、照常冒泡，父文档守卫是其兜底；input/textarea/dialog 守卫的真实职责是保护**不**自行截断的宿主与 modal 前台（modal 表单字段及其 `<select>` / 按钮宿主）；跨 frame 隔离只适用于 opencode / reasonix / dsh 的 web UI iframe（其内按键确实到不了父文档，不试图绕过） | #99 |
 | R5 | 视口与高度：`#app` 高度 `100dvh`（`@supports` 保留 `100vh` fallback）、宽度 `100%` 取代 `100vw`；viewport meta 补 `viewport-fit=cover`；容器用 `env(safe-area-inset-*)` 处理刘海与 Home Indicator | #100 L1 |
 | R6 | iOS 软键盘：监听 `visualViewport` 的 `resize` / `scroll`，键盘弹出时收窄终端可视高度，保证输入区可见 | #100 L1 |
 | R7 | 断点与形态（**768px 归窄屏**：窄屏 `max-width: 768px`，中间档 769–1024px，依据见 §3.6）：窄屏侧栏改覆盖式 drawer（`position: absolute` + `transform: translateX`，`#app` 补 `position: relative` 作定位包含块），打开带遮罩、点遮罩关闭；遮罩盖住 `#main` 与 tab 区，但 drawer 打开态下 `#header` 左侧开关按钮仍可点击关闭（z-index 分层）；宽屏维持并排；中间宽度侧栏收窄或限上限（如 `max-width: 200px`），并排仍可用 | #100 L2 |
@@ -102,7 +102,7 @@ issue #99 与 #100 是同一产品问题的两个切面：**myworktree 的 Web U
 ### 3.4 快捷键基础设施（首个全局 keydown）
 
 - `document` 级 keydown，`metaKey || ctrlKey` + `key.toLowerCase() === 'b'` 判定（Caps Lock 或 Ctrl/Cmd+Shift+B 时 `event.key` 为 `'B'`，`=== 'b'` 会静默不触发）；忽略 `event.repeat`（长按 B 会反复切换）；排除 `event.altKey`（Ctrl+Alt+B 在部分布局是 AltGr 组合）。
-- 输入守卫：`event.target` 落在 input / textarea / `[contenteditable]` 内直接 return（含 tab 重命名输入框）。**职责边界（PR1 评审三轮订正的终稿）**：pty 终端按键由 xterm 在 `xterm-helper-textarea` 上自行截断（vendored `xterm.js` `_keyDown` → `cancel(e, true)` 无条件 `stopPropagation()`），根本到不了本监听器；守卫保护的是**不**自行截断的输入宿主（modal 表单字段：worktree 名 / branch / base ref / LLM 设置）。
+- 输入守卫：`event.target` 落在 `<dialog>` 内（modal 前台不盲切后方侧栏，PR #110 B3 修复）或 input / textarea / `[contenteditable]` 内直接 return（含 tab 重命名输入框）。**职责边界（PR1 评审三轮订正、PR #110 评审再核 vendored 源码）**：终端侧产生数据的按键（如 Ctrl+B → `\x02`）由 xterm 在 `xterm-helper-textarea` 上自行截断（`_keyDown` 发送数据后 `cancel(e, true)`；不产生数据的组合不被取消，本监听器是其兜底）；守卫保护的是**不**自行截断的宿主（modal 表单字段：worktree 名 / branch / base ref / LLM 设置，及其 `<select>` 与按钮宿主）。
 - web UI iframe（opencode / reasonix / dsh）内焦点时父页面收不到按键——**写注释说明，不做 postMessage 之类的绕过**（跨 frame 限制是浏览器安全模型，绕过反而引入新攻击面）。
 
 ### 3.5 视口基线与软键盘方案（R5 / R6）
@@ -166,7 +166,7 @@ issue #99 与 #100 是同一产品问题的两个切面：**myworktree 的 Web U
 
 ### 5.3 PR3（#100 L2）
 
-1. 【人工过检】iPhone Safari 竖屏（375×667 / 390×844）与 iPad Safari（含 Split View 窄档）下，侧栏、tab 栏、终端区域均可达，无横向滚动条、无内容被裁掉（布局行为，UA 度量，对应 §6 人工清单窄屏项；结构侧由 `TestNarrowDrawerAnchors` 锚定媒体块 / drawer / 遮罩规则）。
+1. 【人工过检】iPhone Safari 竖屏（375×667 / 390×844）与 iPad Safari（含 Split View 窄档）下，侧栏、tab 栏、终端区域均可达，无横向滚动条、无内容被裁掉（布局行为，UA 度量，对应 §6 人工清单窄屏项；结构侧由 `TestNarrowDrawerAnchors` 锚定媒体块 / drawer / 遮罩规则，含 PR #110 B2 修复增补的 drawer `env(safe-area-inset-*)` padding 块内断言）。
 2. 窄屏 drawer 开合正常，点遮罩关闭；tab 滚动吸附生效——自动化：`TestNarrowDrawerAnchors`（scroll-snap 声明、遮罩窄屏显示规则、遮罩 DOM 位置）+ `narrow_drawer.test.mjs`（遮罩点击关闭、遮罩/按钮/Ctrl+B 三路径同态）；视觉开合【人工过检】（§6 人工清单窄屏项）。
 3. 中间宽度（769–1024）侧栏收窄后并排仍可用；恰好 768px 时走窄屏 drawer（边界归属唯一，见 §3.6）——自动化：`TestNarrowDrawerAnchors`（中间档块、两档媒体字面量）；【人工过检】§6 人工清单中间档项（PR3 评审后新增）。
 4. drawer 以 `#app` 为定位包含块（`#app` 补 `position: relative`）；遮罩盖住 `#main` 与 tab 区，且 drawer 打开态下 `#header` 左侧开关按钮仍可点击关闭（z-index 分层）——自动化：`TestNarrowDrawerAnchors`（`position: relative` 块内断言、40/30/25 z-index 阶梯、按钮提升仅窄屏块内）；真机点按【人工过检】（§6 人工清单窄屏项）。
@@ -189,9 +189,9 @@ issue #99 与 #100 是同一产品问题的两个切面：**myworktree 的 Web U
 
 - **Go 资源文本断言**（`internal/ui/ui_test.go` 既有写法）：通过 `httptest` 取到 served 的 `index.html` / `static/kinds/*.js`，用 `strings.Contains` 断言 DOM 锚点、class 名、函数名与**相对顺序**（参考 `TestWebRenderersStoppedSwitchHidesAllFrames`、`TestEmptyWorktreeSwitchHidesAllWebPanels` 的 slicing + position 断言风格）。
 - **node 行为测试**（`internal/ui/testdata/*.test.mjs`，`node --test`，由 `terminal_status_test.go` 的 `TestTerminalStatusHandling` 包进 `go test`）：需要真正执行逻辑的用例（localStorage 往返的状态读写、快捷键守卫、断点分派函数）走这条线——**从真实 served 源码切片、打桩浏览器状态**，不断言副本。
-- **扫描型断言辅助的输入假设**（PR4 r3 评审补立）：`stripCSSComments` 这类纯文本扫描 helper 对输入有隐含假设（只识别 `/*…*/`、假设注释配平、无 `//` 行注释内嵌 `/*`）——整文档输入下 JS 行注释里的 `kinds/*.js` 会把 `/*` 误判为块注释开启符、静默吞掉后文（PR4 r3 实证：全文输入静默过删 50.3%）。现行用法安全（44pt 禁词扫描目标域是 CSS、`<style>` 内注释全部配平；hover 包含性扫描走 `<style>` 切片），但 helper 复用到新输入域前必须先验证其假设或给 helper 自身补例行断言——一次静默截断会让整条守卫失去意义。
+- **扫描型断言辅助的输入假设**（PR4 r3 评审补立，PR #110 评审加固落地）：`stripCSSComments` 这类纯文本扫描 helper 对输入有隐含假设（只识别 `/*…*/`、假设注释配平、无 `//` 行注释内嵌 `/*`）——整文档输入下 JS 行注释里的 `kinds/*.js` 会把 `/*` 误判为块注释开启符、静默吞掉后文（双侧评审独立复算实证：全文输入静默过删 50.3% / 截断于 66.7% 处）。现行用法已加固为只传 `<style>` 切片（44pt 禁词与 hover 包含性扫描同域）；helper 复用到新输入域前必须先验证其假设或给 helper 自身补例行断言——一次静默截断会让整条守卫失去意义。
 - **CHANGELOG 房规**（issue #95）：若用 "Pinned by N `node --test` cases" 声明覆盖数，每一处出现的数字都必须等于**该条目所声明测试文件（集合）**的 `grep -c '^test('` 总数——现行守卫 `TestTerminalStatusChangelogCount` 按单文件 `terminal_status.test.mjs` 推导（该短语语义 = "the file's total case count"，见 #95 条目原文）；子集计数必须换措辞（如 "四个 #99 场景"）。新增 testdata 文件时不得用该短语引用全量总数，除非先把守卫改成全量求和并同步修订历史条目。
-- **人工清单**（每期结束过一遍）：桌面宽屏 / 400px 窄窗；刷新持久化；清 localStorage 恢复默认（宽屏展开 / 窄屏 drawer 关闭，R14）；终端内焦点按 Ctrl+B（不应切换——xterm 在 helper textarea 上自行 `stopPropagation()`，R4/R16）；git section 折叠互不覆盖；折叠 / 展开两态下 chevron 图标各自正确显示（`<<` / `>>` 切换，UA 显隐断言原则）；真机捏合 / 双击缩放（布局不塌缩——`visualViewport.scale ≠ 1` 时 R6 不钉高）；iPhone 横屏刘海条带 / Home Indicator 条带的底色缝（已知外观 nit：双面板分色，padding 条带露画布底色，不影响内容可达性，如需消除再单独评估铺底方案）；iPhone Safari 真机软键盘：聚焦终端 / 输入框后键盘弹出时终端输入行仍在键盘上方、收起后回到 `100dvh` 全高不跳动（§5.2-3）；折叠态 + 键盘同时发生时终端无滚动条 / 错位（§3.5 同场要求）；中间档（约 800px 与 1024px 窗口）：侧栏收窄至 200px、并排仍可用，768px 整窗恰为窄屏 drawer（§5.3-3）；共享 key 跨端副作用（R14 预期行为，双方向过检）：窄屏点遮罩 / 开关关闭 drawer 会把 `true` 写入共享 key，同一浏览器 profile 的桌面端下次加载侧栏默认折叠，反向（桌面收起后窄屏首访 drawer 默认关）亦同；真机窄屏形态（§5.3-1/2/4 的 UA 度量落点，beta 渠道收敛）：iPhone Safari 竖屏（375×667 与 390×844）与 iPad Split View 1/3、1/2 档目视——侧栏 / tab 栏 / 终端均可达、无横向滚动条、无内容被裁掉，drawer 开合与点遮罩关闭、tab 吸附、打开态下开关按钮可点；PR4 触屏项（§5.4 落点）：`pointer: coarse` 模拟（DevTools 设备模拟）验证 `.icon-btn` / `.term-ctrl-btn` 放大分支与 hover 不粘滞；真机拖拽侧栏分栏（全程不触发页面滚动）、44px 有效命中区抽查（含终端左上角 4.5px 命中压盖带的点击归属——`#header .icon-btn` `top: 3px` 偏移的接受后果，折叠态下该带内点击归 chevron 按钮而非终端，代码注释已如实记录，此处为唯一用户可感知落点）；已知豁免项过检——`.wt-action-btn` 纯触屏不可达（R11 接受后果）、4px 拖拽条带触控抓取困难（`pointer: coarse` 下单独 `min-height` 加宽为低风险候选，beta 真机评估后定，§8 暂缓项②）。
+- **人工清单**（每期结束过一遍）：桌面宽屏 / 400px 窄窗；刷新持久化；清 localStorage 恢复默认（宽屏展开 / 窄屏 drawer 关闭，R14）；终端内焦点按 Ctrl+B（不应切换——xterm 在 helper textarea 上自行 `stopPropagation()`，R4/R16）；git section 折叠互不覆盖；折叠 / 展开两态下 chevron 图标各自正确显示（`<<` / `>>` 切换，UA 显隐断言原则）；真机捏合 / 双击缩放（布局不塌缩——`visualViewport.scale ≠ 1` 时 R6 不钉高）；iPhone 横屏刘海条带 / Home Indicator 条带的底色缝（已知外观 nit：双面板分色，padding 条带露画布底色，不影响内容可达性，如需消除再单独评估铺底方案）；iPhone Safari 真机软键盘：聚焦终端 / 输入框后键盘弹出时终端输入行仍在键盘上方、收起后回到 `100dvh` 全高不跳动（§5.2-3）；折叠态 + 键盘同时发生时终端无滚动条 / 错位（§3.5 同场要求）；中间档（约 800px 与 1024px 窗口）：侧栏收窄至 200px、并排仍可用，768px 整窗恰为窄屏 drawer（§5.3-3）；共享 key 跨端副作用（R14 预期行为，双方向过检）：窄屏点遮罩 / 开关关闭 drawer 会把 `true` 写入共享 key，同一浏览器 profile 的桌面端下次加载侧栏默认折叠，反向（桌面收起后窄屏首访 drawer 默认关）亦同；真机窄屏形态（§5.3-1/2/4 的 UA 度量落点，beta 渠道收敛）：iPhone Safari 竖屏（375×667 与 390×844）与 iPad Split View 1/3、1/2 档目视——侧栏 / tab 栏 / 终端均可达、无横向滚动条、无内容被裁掉，drawer 开合与点遮罩关闭、tab 吸附、打开态下开关按钮可点；**drawer 顶/底安全区**（PR #110 B2 修复回归点）：刘海机竖屏 drawer 首行（`.sidebar-title` 的 New/Import 按钮）不被状态栏/刘海压盖、底部内容不被 Home Indicator 压盖、横屏左右 inset 同检——修复形态为 drawer 盒子全出血 + `env(safe-area-inset-*)` padding 内容内缩（绝对定位 drawer 的包含块是 `#app` 的 padding box，`#app` 的 padding 不会自动内缩它）；PR4 触屏项（§5.4 落点）：`pointer: coarse` 模拟（DevTools 设备模拟）验证 `.icon-btn` / `.term-ctrl-btn` 放大分支与 hover 不粘滞；真机拖拽侧栏分栏（全程不触发页面滚动）、44px 有效命中区抽查（含终端左上角 4.5px 命中压盖带的点击归属——`#header .icon-btn` `top: 3px` 偏移的接受后果，折叠态下该带内点击归 chevron 按钮而非终端，代码注释已如实记录，此处为唯一用户可感知落点）；已知豁免项过检——`.wt-action-btn` 纯触屏不可达（R11 接受后果）、4px 拖拽条带触控抓取困难（`pointer: coarse` 下单独 `min-height` 加宽为低风险候选，beta 真机评估后定，§8 暂缓项②）。
 - **验收-清单对应规则**（PR2 评审补立）：每条 §5.x 验收项必须在上方人工清单有对应项，或在该验收条上明确标注自动化覆盖断言（测试名）——不允许「验收写了、清单忘了」的结构性缺口。PR3 评审裁定后已回溯标注 §5.1–§5.3 全部条目；§5.4 随 PR4 落地时标注。
 - **评审与合并过程房规**（PR4 评审补立）：① 评审输入必须由工作树现场 `git diff`（含 `git add -N` 新文件）生成，不用缓存 diff 文件；② 评审结束后核对工作树与评审前逐字节一致——评审 agent 的变异实验必须还原，限额 / 崩溃中途死亡的 agent 可能留下未还原变异（PR4 实证一次：限额死亡的 mcode 把 `44px→44pt` 变异留在树内，后续评审把它误报为交付缺陷）；③ 合并前以工作树实跑 `go test ./...` 全绿（必须在最后一次改动之后跑，实现期改动与测试运行之间不得有时序缝）。
 - **UA 显隐断言原则**（PR1 评审教训，blocker 实证）：任何依赖 UA 表现性提示（如 `[hidden]`）或 UA 样式的「显隐」实现，**属性层正确 ≠ 渲染层正确**——必须有真实浏览器度量断言或人工过检项兜底，不能只靠「字符串锚点 + 打桩行为测试」一条线。
@@ -220,7 +220,7 @@ issue #99 与 #100 是同一产品问题的两个切面：**myworktree 的 Web U
 - 边缘滑出 drawer（#100 标注的加分项，后续评估）。
 - 任何后端 / WS / HTTP 协议变更。
 - PWA、安装、离线能力。
-- **本期暂缓、待 beta / 产品决策的四项**（PR4 评审仲裁立档，避免制度性遗忘）：① `.tab` / 通用 `button` / modal 族的 44px 触控放大——与 `--header-height: 40px` 存在可见溢出冲突，属 header 重新设计级决策（§5.4-2）；② 4px 拖拽条带的触控加宽——`@media (pointer: coarse)` 下单独 `min-height` 加宽是低风险候选方案，beta 真机评估后定（§5.4-1 人工清单项）；③ drawer 宽度上限 `min(240px, 85vw)`——320pt Split View 档覆盖约 75% 视口，遮罩语义仍成立，beta 反馈再立项（§3.6）；④ `.wt-action-btn` 纯触屏不可达——hover 门控显现的次级动作（删除 / 外链等）在纯触屏上消失，是 R11 移除粘滞 hover 的**功能性**后果而非外观取舍，恢复方案（如长按或常驻显示）属产品决策，beta 评估（§5.4-2）。
+- **本期暂缓、待 beta / 产品决策的四项**（PR4 评审仲裁立档，避免制度性遗忘）：① `.tab` / 通用 `button` / modal 族的 44px 触控放大——与 `--header-height: 40px` 存在可见溢出冲突，属 header 重新设计级决策（§5.4-2）；② 4px 拖拽条带的触控加宽——`@media (pointer: coarse)` 下单独 `min-height` 加宽是低风险候选方案，beta 真机评估后定（§5.4-1 人工清单项）；③ drawer 宽度上限 `min(240px, 85vw)`——320pt Split View 档覆盖约 75% 视口，遮罩语义仍成立，beta 反馈再立项（§3.6）；④ `.wt-action-btn` 纯触屏不可达——hover 门控显现的次级动作在桌面是既有形态，但在触屏上该显形原先经点按粘滞 hover（sticky hover）实现，R11 的包裹移除了这条路径，故不可达是 **PR4 新增**的功能性后果（此前「既有行为非 PR4 新增」的定性经 PR #110 评审订正）；其残留的「隐形但可点」命中区已用 `@media (hover: none) { .wt-actions { pointer-events: none } }` 关闭（opacity:0 不拦命中测试），恢复显形方案（如长按或常驻显示）仍属产品决策，beta 评估（§5.4-2）
 
 ---
 

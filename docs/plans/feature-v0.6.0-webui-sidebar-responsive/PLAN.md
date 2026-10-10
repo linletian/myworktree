@@ -102,7 +102,7 @@
 
 ### PR4：触屏交互（#100 L3）
 
-- **改动点**：侧栏分栏拖拽迁 Pointer Events（`pointerdown` / `pointermove` / `pointerup` + `setPointerCapture`），拖拽时 handle `touch-action: none`、拖拽元素 `user-select: none` / `-webkit-touch-callout: none`（R9）；`@media (pointer: coarse)` 下 `.icon-btn` 与 `--term-ctrl-btn-size` 用 `min-width` / `min-height` 放大到 ≥ 44×44 CSS px（R10）；hover 样式用 `@media (hover: hover)` 包裹（R11）。
+- **改动点**：侧栏分栏拖拽迁 Pointer Events（`pointerdown` / `pointermove` / `pointerup` + `setPointerCapture`），handle `touch-action: none` **常驻**（PRD-CHANGE R9 行仲裁终稿：手势起始即求值，`pointerdown` 才设已晚）、拖拽元素 `user-select: none` / `-webkit-touch-callout: none` 按**拖拽态**（`.dragging`）作用域（R9）；`@media (pointer: coarse)` 下 `.icon-btn` 与 `--term-ctrl-btn-size` 用 `min-width` / `min-height` 放大到 ≥ 44×44 CSS px（R10）；hover 样式用 `@media (hover: hover)` 包裹（R11）。
 - **验收**：§5.4 全部 3 条。
 - **测试**：ui_test.go 文本断言（pointer 事件绑定、`pointer: coarse` / `hover: hover` 媒体查询块）；桌面鼠标回归（拖拽、hover 不变）；`pointer: coarse` 模拟验证样式分支；D2 一条。
 - **依赖**：PR2（视口基线）。
