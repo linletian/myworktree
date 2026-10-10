@@ -1,0 +1,426 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>myworktree v0.6.0 侧栏折叠 + 响应式预览</title>
+<style>
+    :root {
+        --sidebar-width: 240px;
+        --header-height: 40px;
+        --bg-color: #0d1117;
+        --panel-bg: #161b22;
+        --border-color: #30363d;
+        --text-primary: #e6edf3;
+        --text-secondary: #8b949e;
+        --accent: #58a6ff;
+        --danger: #f85149;
+        --modal-backdrop: rgba(1, 4, 9, 0.6);
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body, html { margin: 0; padding: 0; height: 100%; overflow: hidden; }
+    body {
+        font: 13px/1.45 -apple-system, "Segoe UI", "Helvetica Neue", sans-serif;
+        background: var(--bg-color);
+        color: var(--text-primary);
+    }
+
+    /* ===== 布局骨架（PR2：100vh fallback + 100dvh + safe-area padding）===== */
+    #app {
+        display: flex;
+        height: 100vh;
+        width: 100%;
+        position: relative; /* drawer/mask 的定位包含块（PR3） */
+        padding: env(safe-area-inset-top, 0px) env(safe-area-inset-right, 0px)
+                 env(safe-area-inset-bottom, 0px) env(safe-area-inset-left, 0px);
+    }
+    @supports (height: 100dvh) {
+        #app { height: 100dvh; }
+    }
+
+    /* ===== 侧栏（PR3 B2 修复：窄屏 drawer 全出血 + env() padding 内容内缩）===== */
+    #sidebar {
+        width: var(--sidebar-width);
+        background: var(--panel-bg);
+        border-right: 1px solid var(--border-color);
+        display: flex;
+        flex-direction: column;
+    }
+    .sidebar-title {
+        padding: 12px;
+        font-weight: 600;
+        border-bottom: 1px solid var(--border-color);
+        display: flex;
+        align-items: center;
+        flex: none;
+    }
+    .sidebar-actions { margin-left: auto; display: flex; gap: 4px; }
+
+    /* PR1：折叠 = 宽屏补集块内的零宽规则（not all and… 与窄屏无缝互补，含分数宽度） */
+    @media not all and (max-width: 768px) {
+        #app.collapsed #sidebar { width: 0; overflow: hidden; visibility: hidden; }
+    }
+
+    /* PR3：窄屏 drawer 形态 */
+    @media (max-width: 768px) {
+        #sidebar {
+            position: absolute;
+            left: 0; top: 0; bottom: 0;
+            z-index: 30;
+            padding: env(safe-area-inset-top, 0px) env(safe-area-inset-right, 0px)
+                     env(safe-area-inset-bottom, 0px) env(safe-area-inset-left, 0px);
+        }
+        #app.collapsed #sidebar { transform: translateX(-100%); visibility: hidden; }
+        #app:not(.collapsed) #sidebar-mask {
+            display: block;
+            position: absolute;
+            inset: 0;
+            z-index: 25;
+            background: var(--modal-backdrop);
+        }
+        #sidebar-toggle-btn { position: relative; z-index: 40; }
+    }
+    #sidebar-mask { display: none; }
+
+    /* PR3：中间档收窄 */
+    @media (min-width: 769px) and (max-width: 1024px) {
+        #sidebar { max-width: 200px; }
+    }
+
+    /* ===== 侧栏内分栏（PR4：Pointer Events 拖拽，钳制 120/100）===== */
+    #sidebar-top-panel { flex: none; height: 220px; overflow-y: auto; min-height: 0; }
+    #sidebar-resize-handle {
+        flex: none;
+        height: 4px;
+        cursor: row-resize;
+        background: transparent;
+        touch-action: none; /* 常驻：手势起始即求值 */
+    }
+    #sidebar-resize-handle.dragging {
+        background: var(--accent);
+        user-select: none;
+        -webkit-user-select: none;
+        -webkit-touch-callout: none;
+    }
+    #sidebar-bottom-panel { flex: 1; overflow-y: auto; min-height: 0; }
+
+    /* ===== 主区 ===== */
+    #main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+    #header {
+        height: var(--header-height);
+        border-bottom: 1px solid var(--border-color);
+        display: flex;
+        align-items: center;
+        padding: 0 8px;
+        gap: 4px;
+        background: var(--panel-bg);
+        flex: none;
+    }
+    #tabs-container {
+        display: flex; gap: 2px; overflow-x: auto; flex: 1; min-width: 0;
+        scrollbar-width: none;
+    }
+    #tabs-container::-webkit-scrollbar { display: none; }
+    @media (max-width: 768px) {
+        #tabs-container { scroll-snap-type: x proximity; }
+        .tab { scroll-snap-align: start; }
+    }
+    .tab {
+        padding: 6px 12px; border-radius: 6px 6px 0 0; white-space: nowrap;
+        color: var(--text-secondary); cursor: pointer; border: 1px solid transparent;
+        border-bottom: none;
+    }
+    .tab.active { background: var(--bg-color); color: var(--text-primary); border-color: var(--border-color); }
+    #instance-actions { display: flex; gap: 6px; flex: none; }
+    #instance-actions button {
+        background: var(--panel-bg); color: var(--text-secondary);
+        border: 1px solid var(--border-color); border-radius: 4px;
+        padding: 4px 10px; cursor: pointer; font-size: 12px;
+    }
+    #instance-actions button.danger { color: var(--danger); }
+    #workspace { flex: 1; position: relative; min-height: 0; display: flex; }
+    #terminal {
+        flex: 1; margin: 8px; background: #010409; border: 1px solid var(--border-color);
+        border-radius: 6px; padding: 12px; font: 12px/1.5 "SF Mono", Menlo, Consolas, monospace;
+        color: #7ee787; overflow: hidden; white-space: pre-wrap;
+    }
+    #status-bar {
+        flex: none; height: 22px; border-top: 1px solid var(--border-color);
+        font-size: 11px; color: var(--text-secondary); display: flex;
+        align-items: center; padding: 0 8px; gap: 12px; background: var(--panel-bg);
+    }
+
+    /* ===== 控件 ===== */
+    .icon-btn {
+        border: none; background: none; color: var(--text-secondary);
+        padding: 2px; cursor: pointer; display: inline-flex;
+        align-items: center; justify-content: center;
+        border-radius: 4px; font-size: 16px; line-height: 1;
+    }
+    .icon-btn svg { width: 16px; height: 16px; fill: currentColor; }
+    /* PR1 评审实证：UA 的 [hidden] 提示规则仅限 HTML 命名空间，svg 需显式消费 */
+    #sidebar-toggle-btn svg[hidden] { display: none !important; }
+
+    /* PR4 R10：coarse 44px 命中目标（min-* 非固定；header 内 top:3px 修正 39px 内容盒几何） */
+    @media (pointer: coarse) {
+        .icon-btn { min-width: 44px; min-height: 44px; }
+        #header .icon-btn { position: relative; top: 3px; z-index: 40; }
+    }
+
+    /* PR4 R11：hover 全部包进 (hover: hover)，纯触屏无粘滞高亮 */
+    @media (hover: hover) {
+        .icon-btn:hover { background: rgba(110, 118, 129, 0.3); color: var(--text-primary); }
+        .wt-item:hover { background: rgba(110, 118, 129, 0.15); }
+        .wt-item:hover .wt-actions { opacity: 1; }
+        .tab:hover { color: var(--text-primary); }
+        #sidebar-resize-handle:hover { background: var(--accent); }
+    }
+    /* PR #110 M1 修复：触屏隐形命中区关闭（opacity:0 不拦命中） */
+    @media (hover: none) {
+        .wt-actions { pointer-events: none; }
+    }
+
+    /* worktree 行（hover 门控的次级动作，演示 R11 + M1） */
+    .wt-item {
+        padding: 8px 12px; cursor: pointer; display: flex; align-items: center;
+        gap: 6px; border-radius: 4px; margin: 2px 6px;
+    }
+    .wt-item.active { background: rgba(88, 166, 255, 0.15); }
+    .wt-item .dot { width: 6px; height: 6px; border-radius: 50%; background: #3fb950; flex: none; }
+    .wt-actions {
+        margin-left: auto; display: flex; gap: 4px;
+        opacity: 0; transition: opacity 0.2s;
+    }
+    .wt-action-btn {
+        border: 1px solid var(--border-color); background: var(--panel-bg);
+        color: var(--text-secondary); border-radius: 4px; padding: 1px 6px;
+        font-size: 11px; cursor: pointer;
+    }
+
+    .git-section-header {
+        padding: 8px 12px; font-weight: 600; color: var(--text-secondary);
+        cursor: pointer; display: flex; align-items: center; gap: 6px;
+    }
+    .git-change-item { padding: 4px 12px 4px 24px; color: var(--text-secondary); }
+
+    /* ===== 演示 modal（PR #110 B3：dialog 前台 Ctrl+B 不盲切）===== */
+    dialog {
+        background: var(--panel-bg); color: var(--text-primary);
+        border: 1px solid var(--border-color); border-radius: 8px; padding: 20px;
+        min-width: 300px;
+    }
+    dialog::backdrop { background: var(--modal-backdrop); }
+    dialog select, dialog button {
+        background: var(--bg-color); color: var(--text-primary);
+        border: 1px solid var(--border-color); border-radius: 4px; padding: 6px 10px;
+    }
+
+    /* 预览说明条（非产品内容） */
+    #hint {
+        position: fixed; right: 12px; bottom: 12px; z-index: 9999;
+        background: rgba(22, 27, 34, 0.95); border: 1px solid var(--border-color);
+        border-radius: 8px; padding: 10px 12px; max-width: 320px;
+        font-size: 12px; color: var(--text-secondary); line-height: 1.6;
+    }
+    #hint b { color: var(--text-primary); }
+    #hint-close { float: right; margin-left: 8px; }
+</style>
+</head>
+<body>
+<div id="app">
+    <div id="sidebar-mask" onclick="closeSidebarDrawer()"></div>
+    <div id="sidebar">
+        <div class="sidebar-title">
+            Worktrees
+            <span class="sidebar-actions">
+                <button class="icon-btn" title="New Worktree" onclick="alert('demo')">+</button>
+                <button class="icon-btn" title="Import Worktree" onclick="alert('demo')">↓</button>
+            </span>
+        </div>
+        <div id="sidebar-top-panel">
+            <div class="wt-item active" onclick="alert('demo：主操作=打开实例')">
+                <span class="dot"></span>myworktree
+                <span class="wt-actions">
+                    <button class="wt-action-btn" onclick="event.stopPropagation();alert('demo：Open Terminal')">⌘T</button>
+                    <button class="wt-action-btn" onclick="event.stopPropagation();alert('demo：Open Finder')">↗</button>
+                </span>
+            </div>
+            <div class="wt-item" onclick="alert('demo：主操作=打开实例')">
+                <span class="dot"></span>feature/auth
+                <span class="wt-actions">
+                    <button class="wt-action-btn" onclick="event.stopPropagation();alert('demo：Open Terminal')">⌘T</button>
+                    <button class="wt-action-btn" onclick="event.stopPropagation();alert('demo：Open Finder')">↗</button>
+                </span>
+            </div>
+            <div class="wt-item" onclick="alert('demo：主操作=打开实例')">
+                <span class="dot" style="background:#d29922"></span>bugfix/dirty-delete
+                <span class="wt-actions">
+                    <button class="wt-action-btn" onclick="event.stopPropagation();alert('demo：Open Terminal')">⌘T</button>
+                    <button class="wt-action-btn" onclick="event.stopPropagation();alert('demo：Open Finder')">↗</button>
+                </span>
+            </div>
+        </div>
+        <div id="sidebar-resize-handle" onpointerdown="startSidebarResize(event)"></div>
+        <div id="sidebar-bottom-panel">
+            <div class="git-section-header">▾ Staged (2)</div>
+            <div class="git-change-item">M internal/ui/static/index.html</div>
+            <div class="git-change-item">A testdata/touch_interaction.test.mjs</div>
+            <div class="git-section-header">▸ Unstaged (3)</div>
+        </div>
+    </div>
+    <div id="main">
+        <div id="header">
+            <button id="sidebar-toggle-btn" class="icon-btn" onclick="toggleSidebarCollapse()"
+                    aria-label="Toggle sidebar" aria-controls="sidebar" aria-expanded="true">
+                <svg id="icon-collapse" viewBox="0 0 16 16"><path d="M9.78 4.22a.75.75 0 0 1 0 1.06L7.06 8l2.72 2.72a.75.75 0 1 1-1.06 1.06L5.47 8.53a.75.75 0 0 1 0-1.06l3.25-3.25a.75.75 0 0 1 1.06 0Zm-4.5 0a.75.75 0 0 1 0 1.06L2.56 8l2.72 2.72a.75.75 0 0 1-1.06 1.06L.97 8.53a.75.75 0 0 1 0-1.06l3.25-3.25a.75.75 0 0 1 1.06 0Z"/></svg>
+                <svg id="icon-expand" hidden viewBox="0 0 16 16"><path d="M6.22 4.22a.75.75 0 0 0 0 1.06L8.94 8l-2.72 2.72a.75.75 0 1 0 1.06 1.06l3.25-3.25a.75.75 0 0 0 0-1.06L7.28 4.22a.75.75 0 0 0-1.06 0Zm4.5 0a.75.75 0 0 0 0 1.06L13.44 8l-2.72 2.72a.75.75 0 1 0 1.06 1.06l3.25-3.25a.75.75 0 0 0 0-1.06l-3.25-3.25a.75.75 0 0 0-1.06 0Z"/></svg>
+            </button>
+            <div id="tabs-container">
+                <div class="tab active">myworktree · kimi</div>
+                <div class="tab">feature/auth · opencode</div>
+                <div class="tab">bugfix/dirty · reasonix</div>
+            </div>
+            <div id="instance-actions">
+                <button onclick="alert('demo')">Restart</button>
+                <button onclick="alert('demo')">Stop</button>
+                <button class="danger" onclick="document.getElementById('demo-dialog').showModal()">Delete</button>
+            </div>
+        </div>
+        <div id="workspace">
+            <div id="terminal">$ myworktree v0.6.0 响应式预览
+$ ────────────────────────────────────
+  这是终端区域的 mock。试着调整浏览器窗口宽度：
+
+  · > 1024px   宽屏：侧栏 240px 并排，折叠 = 零宽
+  · 769–1024   中档：侧栏收窄至 200px，仍并排
+  · ≤ 768px    窄屏：侧栏变覆盖式 drawer（默认关闭），
+               点遮罩 / chevron / Ctrl+B 关闭
+
+  Ctrl/Cmd+B 随时切换侧栏（焦点在 modal 内时不切换）。
+  侧栏内 worktree 列表与 git 面板之间的 4px 分隔条可拖拽。
+▊</div>
+        </div>
+        <div id="status-bar">
+            <span>● connected</span><span>main +2/-0</span><span id="vp"></span>
+        </div>
+    </div>
+</div>
+
+<dialog id="demo-dialog">
+    <p><b>演示 modal（PR #110 B3）</b></p>
+    <p style="color:var(--text-secondary);margin:8px 0">焦点在下面的 select 或按钮上时按 Ctrl/Cmd+B —— 侧栏<b>不</b>应切换（dialog 前台守卫）。</p>
+    <p><select><option>main</option><option>develop</option></select></p>
+    <p style="margin-top:12px"><button onclick="document.getElementById('demo-dialog').close()">关闭</button></p>
+</dialog>
+
+<div id="hint">
+    <button id="hint-close" class="icon-btn" onclick="document.getElementById('hint').remove()">✕</button>
+    <b>试试这些交互：</b><br>
+    ① 拖窗口宽度跨过 1024 / 768 两档<br>
+    ② 点 chevron 或按 <b>Ctrl/Cmd+B</b> 折叠侧栏（刷新后状态保留）<br>
+    ③ ≤768px：drawer 默认关闭；打开后点遮罩关闭<br>
+    ④ 拖侧栏内的 4px 分隔条（Pointer Events，钳制 120/100）<br>
+    ⑤ 悬停 worktree 行看次级动作显形（R11 hover 门控）<br>
+    ⑥ DevTools 设备模拟（touch）：图标按钮 44px、hover 不粘滞、行尾无隐形按钮<br>
+    ⑦ 点 Delete 打开 modal，焦点在 select 上按 Ctrl+B —— 不切换
+</div>
+
+<script>
+    // ===== 单一状态机（PR1/PR3：class 驱动，localStorage 单 key）=====
+    const STORAGE_KEY = "mw.ui.sidebarCollapsed";
+    const app = document.getElementById("app");
+    const toggleBtn = document.getElementById("sidebar-toggle-btn");
+
+    function applySidebarCollapsed(collapsed, persist) {
+        app.classList.toggle("collapsed", collapsed);
+        toggleBtn.setAttribute("aria-expanded", String(!collapsed));
+        document.getElementById("icon-collapse").toggleAttribute("hidden", collapsed);
+        document.getElementById("icon-expand").toggleAttribute("hidden", !collapsed);
+        if (persist) {
+            try { localStorage.setItem(STORAGE_KEY, JSON.stringify(collapsed)); } catch (e) { /* 降级不持久化 */ }
+        }
+    }
+    function toggleSidebarCollapse() {
+        applySidebarCollapsed(!app.classList.contains("collapsed"), true);
+    }
+    function closeSidebarDrawer() { applySidebarCollapsed(true, true); }
+
+    // R14：默认值按视口分派——窄屏首访默认关闭 drawer，宽屏默认展开；显式持久化值永远优先
+    function defaultSidebarCollapsedByViewport() {
+        try {
+            if (typeof window.matchMedia !== "function") return false;
+            return window.matchMedia("(max-width: 768px)").matches;
+        } catch (e) { return false; }
+    }
+    (function initSidebarState() {
+        let stored = null;
+        try { stored = localStorage.getItem(STORAGE_KEY); } catch (e) { /* 隐私模式等 */ }
+        let collapsed;
+        if (stored === null) collapsed = defaultSidebarCollapsedByViewport();
+        else { try { collapsed = JSON.parse(stored) === true; } catch (e) { collapsed = defaultSidebarCollapsedByViewport(); } }
+        applySidebarCollapsed(collapsed, false);
+    })();
+
+    // ===== Ctrl/Cmd+B（PR1 + PR#110 B3：dialog 前台不盲切）=====
+    function handleSidebarToggleKeydown(event) {
+        if (event.repeat) return;
+        if (event.altKey) return;               // AltGr 布局
+        if (!(event.metaKey || event.ctrlKey)) return;
+        if (event.key.toLowerCase() !== "b") return;
+        const target = event.target;
+        if (target && typeof target.closest === "function" &&
+            target.closest("dialog")) return;   // modal 前台不盲切后方侧栏
+        if (target && typeof target.closest === "function" &&
+            target.closest("input, textarea, [contenteditable]")) return;
+        event.preventDefault();
+        toggleSidebarCollapse();
+    }
+    document.addEventListener("keydown", handleSidebarToggleKeydown);
+
+    // ===== 侧栏分栏拖拽（PR4 R9：Pointer Events + capture + 重入守卫 + 钳制）=====
+    const handle = document.getElementById("sidebar-resize-handle");
+    const topPanel = document.getElementById("sidebar-top-panel");
+    let isResizingSidebar = false;
+    let sidebarResizeStartY = 0;
+    let sidebarTopPanelStartHeight = 0;
+
+    function startSidebarResize(e) {
+        if (isResizingSidebar) return;          // 重入守卫：基线劫持 / 双指针争用
+        isResizingSidebar = true;
+        sidebarResizeStartY = e.clientY;
+        sidebarTopPanelStartHeight = topPanel.getBoundingClientRect().height;
+        handle.classList.add("dragging");
+        try { handle.setPointerCapture(e.pointerId); } catch (err) { /* 非活动指针 NotFoundError */ }
+        document.addEventListener("pointermove", handleSidebarResize);
+        document.addEventListener("pointerup", stopSidebarResize);
+        document.addEventListener("pointercancel", stopSidebarResize);
+        e.preventDefault();
+    }
+    function handleSidebarResize(e) {
+        if (!isResizingSidebar) return;
+        const sidebarContentHeight = document.getElementById("sidebar").clientHeight;
+        const minTop = 120, minBottom = 100;
+        const newTopHeight = sidebarTopPanelStartHeight + (e.clientY - sidebarResizeStartY);
+        topPanel.style.height = Math.max(minTop, Math.min(sidebarContentHeight - minBottom, newTopHeight)) + "px";
+    }
+    function stopSidebarResize(e) {
+        if (!isResizingSidebar) return;
+        isResizingSidebar = false;
+        handle.classList.remove("dragging");
+        try { if (e.pointerId !== undefined && handle.hasPointerCapture(e.pointerId)) handle.releasePointerCapture(e.pointerId); } catch (err) { /* 同上 */ }
+        document.removeEventListener("pointermove", handleSidebarResize);
+        document.removeEventListener("pointerup", stopSidebarResize);
+        document.removeEventListener("pointercancel", stopSidebarResize);
+    }
+
+    // 状态栏视口读数（预览辅助）
+    const vp = document.getElementById("vp");
+    function updVp() {
+        const w = window.innerWidth;
+        vp.textContent = w + "px · " + (w <= 768 ? "窄屏 drawer" : w <= 1024 ? "中档 200px" : "宽屏 240px");
+    }
+    window.addEventListener("resize", updVp);
+    updVp();
+</script>
+</body>
+</html>
