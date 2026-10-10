@@ -287,6 +287,22 @@
                 /* Above the mask (25), below the header toggle (40); the
                    whole ladder stays under the 9999 modal layer. */
                 z-index: 30;
+                /* PR #110 review (B2): the drawer's containing block is
+                   #app's PADDING box, so top:0/bottom:0 bleed across the
+                   safe-area bands — on a notched iPhone the drawer's first
+                   content (the sidebar title with the New/Import buttons)
+                   sat inside the status-bar band, invisible and untappable,
+                   and the bottom panel pressed into the Home Indicator.
+                   The box itself stays full-bleed (the iOS convention for a
+                   drawer: its background runs edge to edge) and these four
+                   insets inset only the CONTENT — the same padding
+                   declaration #app consumes, so landscape left/right insets
+                   are covered too; border-box keeps the drawer's width at
+                   var(--sidebar-width). The mask deliberately gets NO such
+                   padding: it has no content to protect and must stay
+                   full-bleed so a tap anywhere outside the drawer closes
+                   it. */
+                padding: env(safe-area-inset-top, 0px) env(safe-area-inset-right, 0px) env(safe-area-inset-bottom, 0px) env(safe-area-inset-left, 0px);
             }
             /* Drawer closed: off-canvas, NOT zero-width (that is the wide
                tier's rendering, scoped away from here). */
@@ -822,6 +838,23 @@
             gap: 4px;
             opacity: 0;
             transition: opacity 0.2s;
+        }
+
+        /* PR #110 review (M1): before R11, a tap on the worktree row
+           LATCHED :hover (sticky hover) and these actions appeared — so on
+           touch they used to be reachable through the hover path. R11
+           gates the reveal on hover capability, which pure-touch devices
+           never match: the actions can never appear there now. opacity: 0
+           does NOT block hit-testing, so without the rule below the row's
+           right end would be two permanently INVISIBLE yet tappable
+           buttons — an errant tap would open a terminal / Finder with no
+           visual hint. Restoring the reveal on touch (persistent display,
+           long-press) is the §8 ④ product decision, deliberately deferred;
+           this rule only closes the invisible-hit-area trap. */
+        @media (hover: none) {
+            .wt-actions {
+                pointer-events: none;
+            }
         }
 
         @media (hover: hover) {
@@ -2628,22 +2661,20 @@
         // long press does not flap the sidebar back and forth.
         //
         // R16, stated against the real mechanism (verified in the vendored
-        // source, static/vendor/xterm/xterm.js): terminal keystrokes never
-        // reach this listener because xterm CANCELS them itself — its
-        // _keyDown handler on the helper textarea (xterm-helper-textarea)
-        // calls cancel(e, !0), which unconditionally preventDefaults AND
-        // stopPropagations, so the event dies inside xterm and is forwarded
-        // to the PTY (Ctrl+B arrives at the TUI as \u0002). The terminal is
-        // also same-document, not an iframe: the pty renderer draws xterm
-        // into a plain div (kinds/pty.js). The input/textarea/contenteditable
-        // target guard below is therefore a DEAD PATH for the terminal —
-        // its real job is protecting input hosts that do NOT cancel their
-        // own keydowns: the modal form fields (worktree name, branch, base
-        // ref, LLM settings) and the tab-rename input. True cross-frame
-        // isolation exists only for the opencode / reasonix / dsh web UIs:
-        // their iframes never deliver keydown to the parent document, a
-        // security-model boundary we deliberately do not route around with
-        // postMessage.
+        // source, static/vendor/xterm/xterm.js): xterm's _keyDown runs
+        // evaluateKeyboardEvent and then cancel(e, !0) — unconditional
+        // preventDefault + stopPropagation — on the paths that SEND DATA
+        // (Ctrl+B arrives at the TUI as \u0002) or that set the result's
+        // cancel flag (Tab/Enter/Escape). Those keydowns die inside xterm
+        // and never reach this listener. Combos that produce NO data and no
+        // cancel flag (Ctrl+Shift+B, Ctrl+Alt+B, macOS Cmd+B) are NOT
+        // cancelled and DO bubble here — by design, since Ctrl/Cmd+Shift+B
+        // is an intended toggle (Caps Lock). The terminal is also
+        // same-document, not an iframe: the pty renderer draws xterm into a
+        // plain div (kinds/pty.js). True cross-frame isolation exists only
+        // for the opencode / reasonix / dsh web UIs: their iframes never
+        // deliver keydown to the parent document, a security-model boundary
+        // we deliberately do not route around with postMessage.
         function handleSidebarToggleKeydown(event) {
             if (event.repeat) return;
             // Ctrl+Alt combinations are AltGr on several keyboard layouts —
@@ -2651,15 +2682,21 @@
             if (event.altKey) return;
             if (!(event.metaKey || event.ctrlKey)) return;
             if (event.key.toLowerCase() !== "b") return;
-            // Never hijack typing: events landing in an input / textarea /
-            // contenteditable host stay with the field. xterm cancels its
-            // own terminal keydowns (see R16 above), so this guard never
-            // actually sees those — it protects the hosts that DO bubble
-            // and don't cancel: the modal form fields (worktree name,
-            // branch, base ref, LLM settings). The tab-rename input already
-            // stops propagation at the target. The textarea branch stays as
-            // defensive coverage should xterm's cancellation ever change.
+            // Never hijack the foreground UI or typing:
+            // 1. PR #110 review (B3): modals are native <dialog> + showModal
+            //    (15 of them). While one is up front, focus sits on ITS
+            //    controls — selects and buttons that the old
+            //    input/textarea/contenteditable guard did not cover — and
+            //    Ctrl/Cmd+B would toggle the sidebar BEHIND the modal,
+            //    invisible and persisted with no feedback. A dialog
+            //    ancestor yields to the modal entirely.
+            // 2. The input/textarea/contenteditable guard stays as defence
+            //    in depth for editable hosts outside any dialog. xterm
+            //    cancels its own terminal keydowns (see R16 above), so
+            //    neither guard is on the terminal path.
             const target = event.target;
+            if (target && typeof target.closest === "function" &&
+                target.closest("dialog")) return;
             if (target && typeof target.closest === "function" &&
                 target.closest("input, textarea, [contenteditable]")) return;
             event.preventDefault(); // keep Ctrl+B from toggling the browser's bookmarks bar

@@ -615,6 +615,10 @@ func TestSidebarCollapseAnchors(t *testing.T) {
 		"if (event.altKey) return;",
 		`if (!(event.metaKey || event.ctrlKey)) return;`,
 		`event.key.toLowerCase() !== "b"`,
+		// PR #110 review (B3): dialog-ancestor guard first — a modal up
+		// front must not have the sidebar toggled (invisibly, persisted)
+		// behind it.
+		`target.closest("dialog")`,
 		`target.closest("input, textarea, [contenteditable]")`,
 	} {
 		if !strings.Contains(bodyText, check) {
@@ -665,7 +669,7 @@ func TestViewportAndHeightAnchors(t *testing.T) {
 	if metaStart < 0 {
 		t.Fatal("GET / lost the viewport meta tag (issue #100 L1 R5)")
 	}
-	metaEnd := strings.Index(bodyText[metaStart:], "/>")
+	metaEnd := strings.IndexByte(bodyText[metaStart:], '>')
 	if metaEnd < 0 {
 		t.Fatal("GET / viewport meta tag is not closed")
 	}
@@ -858,6 +862,15 @@ func TestNarrowDrawerAnchors(t *testing.T) {
 	if n := strings.Count(bodyText, "#app.collapsed #sidebar {"); n != 2 {
 		t.Fatalf("GET / should have exactly two #app.collapsed #sidebar rules (the wide-tier zero-width collapse + the narrow-tier off-canvas drawer), found %d (issue #100 L2, PRD-CHANGE §3.1)", n)
 	}
+	// Negative pins (PR #110 review, Fix D3): the complement block must carry
+	// ONLY the zero-width collapse rule — none of the narrow-tier drawer
+	// machinery (absolute positioning, the off-canvas transform, or the
+	// mask's inset coverage) may leak into it.
+	for _, forbidden := range []string{"position: absolute", "translateX", "inset: 0"} {
+		if strings.Contains(wide, forbidden) {
+			t.Fatalf("GET / wide-tier complement block must not contain %q — that is drawer machinery and belongs only in the narrow tier (issue #100 L2 R7)", forbidden)
+		}
+	}
 
 	// R7: the narrow tier block. Nested rule bodies close at 12 spaces, the
 	// media block itself at 8 — so this slice spans exactly the tier.
@@ -888,6 +901,16 @@ func TestNarrowDrawerAnchors(t *testing.T) {
 	}
 	if strings.Contains(drawer, "width:") {
 		t.Fatal("GET / narrow-tier #sidebar drawer rule must not declare a width — the open drawer keeps the base var(--sidebar-width); zeroing it here is the §3.1 invisible-drawer trap (issue #100 L2)")
+	}
+	// PR #110 review (B2): the drawer's containing block is #app's padding
+	// box, so top:0/bottom:0 bleed across the safe-area bands; the rule must
+	// consume the four env(safe-area-inset-*) insets as content padding —
+	// asserted in-rule so the box stays full-bleed while only the content
+	// insets (a padding on #main or the mask would be the wrong element).
+	if !strings.Contains(drawer, "env(safe-area-inset-top") ||
+		!strings.Contains(drawer, "env(safe-area-inset-bottom") ||
+		!strings.Contains(drawer, "env(safe-area-inset-left") {
+		t.Fatal("GET / narrow-tier #sidebar drawer rule should consume env(safe-area-inset-*) as padding — the drawer's padding-box containing block bleeds across the notch / Home Indicator bands (PR #110 review, issue #100 L2)")
 	}
 
 	// Drawer CLOSED state: off-canvas + focus-order lift, NOT zero-width.
@@ -938,11 +961,17 @@ func TestNarrowDrawerAnchors(t *testing.T) {
 	// The lift must be narrow-tier ONLY: exactly two #sidebar-toggle-btn
 	// rules may exist (the PR1 base rule + this one) and the base rule must
 	// not carry position/z-index — on desktop the 9999 connection overlay's
-	// cover relation is pre-PR3 and must stay untouched.
+	// cover relation is pre-PR3 and must stay untouched. The base rule is
+	// anchored by its 8-space indentation: the narrow-tier lift is 12-space
+	// indented inside its media block, so a bare LastIndex could silently
+	// slice the wrong rule (PR #110 review, Fix D5).
 	if n := strings.Count(bodyText, "#sidebar-toggle-btn {"); n != 2 {
 		t.Fatalf("GET / should have exactly two #sidebar-toggle-btn rules (PR1 base + narrow-tier lift), found %d (issue #100 L2 R7)", n)
 	}
-	baseStart := strings.LastIndex(bodyText, "#sidebar-toggle-btn {")
+	baseStart := strings.Index(bodyText, "\n        #sidebar-toggle-btn {\n")
+	if baseStart < 0 {
+		t.Fatal("GET / lost the 8-space-indented base #sidebar-toggle-btn rule (issue #100 L2 R7)")
+	}
 	baseEnd := strings.Index(bodyText[baseStart:], "\n        }")
 	base := bodyText[baseStart : baseStart+baseEnd]
 	if strings.Contains(base, "z-index") || strings.Contains(base, "position:") {
@@ -1051,8 +1080,20 @@ func TestNarrowDrawerAnchors(t *testing.T) {
 		t.Fatal("GET / middle-tier block has no closing brace")
 	}
 	mid := bodyText[midStart : midStart+midEnd]
-	if !strings.Contains(mid, "#sidebar {") || !strings.Contains(mid, "max-width: 200px;") {
-		t.Fatal("GET / middle tier should cap #sidebar at max-width: 200px while keeping the side-by-side layout (issue #100 L2 R7)")
+	// In-rule assertion (PR #110 review, Fix D2): the cap must be a
+	// declaration of the #sidebar rule inside this block, not two unrelated
+	// strings somewhere in the slice.
+	midRuleStart := strings.Index(mid, "\n            #sidebar {\n")
+	if midRuleStart < 0 {
+		t.Fatal("GET / middle tier should restyle #sidebar (issue #100 L2 R7, §3.6)")
+	}
+	midRuleEnd := strings.Index(mid[midRuleStart:], "\n            }")
+	if midRuleEnd < 0 {
+		t.Fatal("GET / middle-tier #sidebar rule has no closing brace")
+	}
+	midRule := mid[midRuleStart : midRuleStart+midRuleEnd]
+	if !strings.Contains(midRule, "max-width: 200px;") {
+		t.Fatal("GET / middle tier should cap #sidebar at max-width: 200px inside the #sidebar rule while keeping the side-by-side layout (issue #100 L2 R7)")
 	}
 }
 
@@ -1223,36 +1264,84 @@ func TestTouchInteractionAnchors(t *testing.T) {
 			t.Fatalf("GET / coarse-pointer #header .icon-btn rule should declare %q — the clip/spill geometry needs both (issue #100 L3 R10)", decl)
 		}
 	}
-	// (Checked on comment-stripped text: the R10 comment names the wrong
-	// unit while explaining the ban.)
-	if strings.Contains(stripCSSComments(bodyText), "44pt") {
-		t.Fatal("GET / must not use 44pt — Apple HIG 44pt IS 44 CSS px in iOS Safari; pt computes to ~58.7px (issue #100 L3 R10)")
-	}
 	// The variable keeps driving the base size (min-* only raises the floor).
 	if !strings.Contains(bodyText, "width: var(--term-ctrl-btn-size);") || !strings.Contains(bodyText, "height: var(--term-ctrl-btn-size);") {
 		t.Fatal("GET / .term-ctrl-btn base size must stay driven by --term-ctrl-btn-size (issue #100 L3 R10)")
+	}
+	// 44pt ban. Scoped to the <style> slice (PR #110 review, Fix D6): the
+	// previous full-body scan stripped comments across the WHOLE document,
+	// where a JS line comment containing /* (in the kinds/*.js sources
+	// inlined below the style block) silently truncated the scan ~2/3 in —
+	// anything after that point was never checked. The unit only matters in
+	// CSS, and the <style> slice contains no such hazard.
+	styleStart := strings.Index(bodyText, "<style>")
+	styleEnd := strings.Index(bodyText, "</style>")
+	if styleStart < 0 || styleEnd < 0 {
+		t.Fatal("GET / lost the inline <style> block")
+	}
+	style := bodyText[styleStart:styleEnd]
+	if strings.Contains(stripCSSComments(style), "44pt") {
+		t.Fatal("GET / must not use 44pt — Apple HIG 44pt IS 44 CSS px in iOS Safari; pt computes to ~58.7px (issue #100 L3 R10)")
+	}
+
+	// PR #110 review (M1): with R11 gating the .wt-actions reveal on hover
+	// capability, pure-touch devices can never show the row actions, and
+	// opacity: 0 does NOT block hit-testing — without this block the row's
+	// right end would be two permanently invisible yet tappable buttons.
+	// (Restoring the reveal on touch is the §8 ④ product decision, deferred;
+	// this block only closes the invisible-hit-area trap.)
+	noneStart := strings.Index(bodyText, "@media (hover: none) {")
+	if noneStart < 0 {
+		t.Fatal("GET / lost the @media (hover: none) block that closes the .wt-actions invisible hit area (PR #110 review, issue #100 L3)")
+	}
+	noneEnd := strings.Index(bodyText[noneStart:], "\n        }")
+	if noneEnd < 0 {
+		t.Fatal("GET / @media (hover: none) block has no closing brace")
+	}
+	none := bodyText[noneStart : noneStart+noneEnd]
+	noneRuleStart := strings.Index(none, ".wt-actions {")
+	if noneRuleStart < 0 {
+		t.Fatal("GET / @media (hover: none) block should scope .wt-actions (PR #110 review, issue #100 L3)")
+	}
+	noneRuleEnd := strings.Index(none[noneRuleStart:], "\n            }")
+	if noneRuleEnd < 0 {
+		t.Fatal("GET / @media (hover: none) .wt-actions rule has no closing brace")
+	}
+	if !strings.Contains(none[noneRuleStart:noneRuleStart+noneRuleEnd], "pointer-events: none;") {
+		t.Fatal("GET / @media (hover: none) .wt-actions rule should declare pointer-events: none — the actions can never appear on pure-touch devices, and opacity:0 alone would leave an invisible tappable area (PR #110 review, issue #100 L3)")
 	}
 
 	// R11: containment scan over the stylesheet — with comments stripped,
 	// every :hover selector must sit inside an open @media (hover: hover)
 	// block. The non-hover interaction states stay global: the resize
 	// handle's .dragging half and the scrollbar thumb's :active half were
-	// split out of their old combined selectors and must survive.
-	styleStart := strings.Index(bodyText, "<style>")
-	styleEnd := strings.Index(bodyText, "</style>")
-	if styleStart < 0 || styleEnd < 0 {
-		t.Fatal("GET / lost the inline <style> block")
-	}
-	css := stripCSSComments(bodyText[styleStart:styleEnd])
+	// split out of their old combined selectors — the scan now proves they
+	// sit at hover-block depth 0, not merely that they exist (PR #110
+	// review, Fix D4).
+	css := stripCSSComments(style)
 	depth := 0
 	var hoverDepths []int
 	hovers := 0
+	globalRules := map[string]bool{
+		"#sidebar-resize-handle.dragging":                 false,
+		"#tabs-container::-webkit-scrollbar-thumb:active": false,
+	}
 	for i := 0; i < len(css); {
 		switch css[i] {
 		case '{':
 			depth++
-			if strings.HasSuffix(strings.TrimRight(css[:i], " \t\r\n"), "@media (hover: hover)") {
+			prefix := strings.TrimRight(css[:i], " \t\r\n")
+			if strings.HasSuffix(prefix, "@media (hover: hover)") {
 				hoverDepths = append(hoverDepths, depth)
+			}
+			for selector := range globalRules {
+				if strings.HasSuffix(prefix, selector) {
+					if len(hoverDepths) != 0 {
+						line := 1 + strings.Count(css[:i], "\n")
+						t.Fatalf("GET / non-hover interaction rule %q at stylesheet line %d must stay GLOBAL — it sits inside a hover-capability block (issue #100 L3 R11)", selector, line)
+					}
+					globalRules[selector] = true
+				}
 			}
 			i++
 		case '}':
@@ -1277,12 +1366,9 @@ func TestTouchInteractionAnchors(t *testing.T) {
 	if hovers != 22 {
 		t.Fatalf("GET / should carry the 22 known :hover selectors inside hover-capability blocks, found %d — an added or removed hover rule must update this test (issue #100 L3 R11)", hovers)
 	}
-	for _, global := range []string{
-		"#sidebar-resize-handle.dragging {",
-		"#tabs-container::-webkit-scrollbar-thumb:active {",
-	} {
-		if !strings.Contains(css, global) {
-			t.Fatalf("GET / must keep the non-hover interaction state %q global — it was split out of a combined :hover selector (issue #100 L3 R11)", global)
+	for selector, found := range globalRules {
+		if !found {
+			t.Fatalf("GET / must keep the non-hover interaction state %q global — it was split out of a combined :hover selector (issue #100 L3 R11)", selector)
 		}
 	}
 }

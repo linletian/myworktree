@@ -133,6 +133,66 @@ func TestTouchInteractionHandling(t *testing.T) {
 	t.Logf("%s", out)
 }
 
+// TestResponsiveLayerChangelogCounts extends the issue #95 guard
+// (TestTerminalStatusChangelogCount) to the four behavioral files behind
+// the v0.6.0 responsive plan: each CHANGELOG entry quotes its file's
+// scenario count in English number words ("seventeen #99 scenarios",
+// "seven new issue #100 L1 scenarios", ...), and a hand-maintained word in
+// prose drifts silently. Derive each count from `grep -c '^test('` and
+// require every occurrence of that entry's phrase to say the same number.
+// Unlike the terminal-status phrase (whose fixed "Pinned by N" wording the
+// #95 guard owns), these entries use distinct per-layer phrasing, so the
+// guard is per-file: a wrong or missing word fails here.
+func TestResponsiveLayerChangelogCounts(t *testing.T) {
+	// English number words the scenario counts can currently spell (extend
+	// as files grow).
+	words := map[string]int{
+		"one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+		"six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
+		"eleven": 11, "twelve": 12, "thirteen": 13, "fourteen": 14,
+		"fifteen": 15, "sixteen": 16, "seventeen": 17, "eighteen": 18,
+		"nineteen": 19, "twenty": 20,
+	}
+	changelog, err := os.ReadFile("../../CHANGELOG.md")
+	if err != nil {
+		t.Fatalf("read CHANGELOG.md: %v", err)
+	}
+	for _, tc := range []struct {
+		file string
+		// one capture group: the English number word preceding the phrase
+		phrase string
+	}{
+		{"testdata/sidebar_collapse.test.mjs", `#99 scenarios`},
+		{"testdata/viewport_height.test.mjs", `new issue #100 L1 scenarios`},
+		{"testdata/narrow_drawer.test.mjs", `new issue #100 L2 scenarios`},
+		{"testdata/touch_interaction.test.mjs", `new issue #100 L3 scenarios`},
+	} {
+		src, err := os.ReadFile(tc.file)
+		if err != nil {
+			t.Fatalf("read %s: %v", tc.file, err)
+		}
+		cases := len(regexp.MustCompile(`(?m)^test\(`).FindAll(src, -1))
+		if cases == 0 {
+			t.Fatalf("no node --test cases found in %s — the slice anchors probably moved", tc.file)
+		}
+		re := regexp.MustCompile(`(\w+) ` + regexp.QuoteMeta(tc.phrase))
+		matches := re.FindAllSubmatch(changelog, -1)
+		if len(matches) == 0 {
+			t.Fatalf("CHANGELOG.md no longer quotes a count for %q — add the phrase or update this guard", tc.phrase)
+		}
+		for _, m := range matches {
+			word := strings.ToLower(string(m[1]))
+			got, ok := words[word]
+			if !ok {
+				t.Fatalf("CHANGELOG.md spells the %q count as %q — extend the word map in this guard", tc.phrase, word)
+			}
+			if got != cases {
+				t.Errorf("CHANGELOG.md says %s %q but %s has %d cases — keep the wording and the guard in sync (issue #95)", word, tc.phrase, tc.file, cases)
+			}
+		}
+	}
+}
+
 // TestTerminalStatusChangelogCount keeps the CHANGELOG's coverage claim honest.
 // The entry quotes the number of `node --test` cases, and that number drifted
 // wrong twice while the cases were still being added (17, then 22, then 26 for

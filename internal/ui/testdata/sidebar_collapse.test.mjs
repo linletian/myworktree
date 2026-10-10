@@ -367,6 +367,22 @@ test("issue #99 R4: keydown landing in an input / textarea / contenteditable is 
   }
 });
 
+test("issue #99 R4 / PR #110 B3: Ctrl+B whose target sits inside a <dialog> does not toggle behind the modal", () => {
+  // Modals are native <dialog> + showModal(); while one is up front, focus
+  // sits on ITS controls. The dialog-ancestor guard must yield before any
+  // toggle happens, for button hosts AND select hosts (the old
+  // input/textarea/contenteditable guard covered neither).
+  for (const kind of ["button", "select"]) {
+    const h = sidebarHarness();
+    const dialogHost = { closest: (sel) => (sel === "dialog" ? {} : null) };
+    const ev = keydownEvent({ key: "b", ctrlKey: true, target: dialogHost });
+    h.api.handleSidebarToggleKeydown(ev);
+    assert.equal(h.api.isCollapsed(), false, `Ctrl+B with focus on a ${kind} inside a dialog must not fold the sidebar behind the modal`);
+    assert.equal(ev.prevented, false, "the modal keeps the keystroke");
+    assert.equal(h.localStorage.map.size, 0, "nothing is persisted");
+  }
+});
+
 // --- R12: refit after the class flip -----------------------------------------
 
 test("issue #99 R12: the class flip lands first, the xterm fit runs on the next frame", () => {
