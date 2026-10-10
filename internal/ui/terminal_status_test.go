@@ -109,6 +109,30 @@ func TestNarrowDrawerHandling(t *testing.T) {
 	t.Logf("%s", out)
 }
 
+// TestTouchInteractionHandling runs the Node unit tests for the issue #100
+// L3 touch-interaction layer (testdata/touch_interaction.test.mjs): the
+// sidebar split-panel drag on Pointer Events — pointerdown captures the
+// pointer (setPointerCapture), move/up/cancel listeners register and clean
+// up, pointercancel ends the drag like pointerup, touch/pen/mouse share one
+// path, the clamp math (minTop 120 / minBottom 100) is unchanged, and a
+// throwing setPointerCapture degrades to the listener-based drag.
+//
+// Same arrangement as TestNarrowDrawerHandling: the cases slice the shipped
+// index.html and run against stubbed browser state, this wrapper makes
+// `go test` enforce them, and the file lives in testdata/ because static/*
+// is embedded and served to every browser. Skips when node is absent.
+func TestTouchInteractionHandling(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not on PATH; skipping touch interaction JS tests")
+	}
+	out, err := exec.Command(node, "--test", "testdata/touch_interaction.test.mjs").CombinedOutput()
+	if err != nil {
+		t.Fatalf("node --test testdata/touch_interaction.test.mjs: %v\n%s", err, out)
+	}
+	t.Logf("%s", out)
+}
+
 // TestTerminalStatusChangelogCount keeps the CHANGELOG's coverage claim honest.
 // The entry quotes the number of `node --test` cases, and that number drifted
 // wrong twice while the cases were still being added (17, then 22, then 26 for

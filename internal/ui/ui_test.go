@@ -331,6 +331,31 @@ func sliceJSFunction(t *testing.T, js, name string) string {
 	return rest[:end]
 }
 
+// stripCSSComments removes /* */ comments so selector scans see only real
+// rules. index.html's comments mention selectors like :hover verbatim (the
+// R11 notes do), and a containment scan must not mistake comment text for a
+// rule outside its media block.
+func stripCSSComments(css string) string {
+	var b strings.Builder
+	b.Grow(len(css))
+	for {
+		open := strings.Index(css, "/*")
+		if open < 0 {
+			b.WriteString(css)
+			return b.String()
+		}
+		b.WriteString(css[:open])
+		css = css[open:]
+		close := strings.Index(css, "*/")
+		if close < 0 {
+			// Unterminated comment: drop the rest rather than scanning
+			// comment text as rules.
+			return b.String()
+		}
+		css = css[close+2:]
+	}
+}
+
 // TestEmptyWorktreeSwitchHidesAllWebPanels pins the issue #101 fix: switching
 // to a worktree with ZERO instances must not leave the previous worktree's
 // dsh-web iframe on screen. Three defects combined: (A) renderWorkspace's
@@ -1028,6 +1053,237 @@ func TestNarrowDrawerAnchors(t *testing.T) {
 	mid := bodyText[midStart : midStart+midEnd]
 	if !strings.Contains(mid, "#sidebar {") || !strings.Contains(mid, "max-width: 200px;") {
 		t.Fatal("GET / middle tier should cap #sidebar at max-width: 200px while keeping the side-by-side layout (issue #100 L2 R7)")
+	}
+}
+
+// TestTouchInteractionAnchors pins the issue #100 L3 touch-interaction
+// contract (PR4 of docs/plans/feature-v0.6.0-webui-sidebar-responsive/):
+// the sidebar split drag runs on Pointer Events with pointer capture (R9),
+// the handle carries touch-action:none and drag-scoped user-select /
+// -webkit-touch-callout, coarse pointers get 44px minimum hit targets via
+// min-width/min-height (R10), and EVERY :hover selector in the stylesheet
+// sits inside a @media (hover: hover) block — pure-touch devices get no
+// sticky hover highlights (R11). The hover check is a containment scan,
+// not an ordering check (PR3's M1 lesson): each :hover occurrence must lie
+// within the closing brace of some open hover-capability media block.
+func TestTouchInteractionAnchors(t *testing.T) {
+	bodyText := fetchIndexHTML(t)
+
+	// R9 DOM: the drag starts from pointerdown, and the mouse-only inline
+	// handler is gone.
+	if !strings.Contains(bodyText, `onpointerdown="startSidebarResize(event)"`) {
+		t.Fatal(`GET / should start the sidebar resize from onpointerdown="startSidebarResize(event)" (issue #100 L3 R9)`)
+	}
+	if strings.Contains(bodyText, `onmousedown="startSidebarResize`) {
+		t.Fatal(`GET / must not keep the mouse-only onmousedown="startSidebarResize" handler (issue #100 L3 R9)`)
+	}
+	for _, forbidden := range []string{`addEventListener("mousedown"`, `addEventListener("mousemove"`, `addEventListener("mouseup"`} {
+		if strings.Contains(bodyText, forbidden) {
+			t.Fatalf("GET / must not register mouse-event listeners for the drag — found %q (issue #100 L3 R9)", forbidden)
+		}
+	}
+
+	// R9 JS, sliced to the shipped functions: pointer capture, the three
+	// pointer listeners, preventDefault, the re-entry guard, and the
+	// UNCHANGED clamp math.
+	start := sliceJSFunction(t, bodyText, "startSidebarResize")
+	for _, check := range []string{
+		"if (isResizingSidebar) return;",
+		"handle.setPointerCapture(e.pointerId)",
+		`document.addEventListener("pointermove", handleSidebarResize)`,
+		`document.addEventListener("pointerup", stopSidebarResize)`,
+		`document.addEventListener("pointercancel", stopSidebarResize)`,
+		"e.preventDefault();",
+		`handle.classList.add("dragging")`,
+	} {
+		if !strings.Contains(start, check) {
+			t.Fatalf("GET / startSidebarResize should include %q (issue #100 L3 R9)", check)
+		}
+	}
+	stop := sliceJSFunction(t, bodyText, "stopSidebarResize")
+	for _, check := range []string{
+		`document.removeEventListener("pointermove", handleSidebarResize)`,
+		`document.removeEventListener("pointerup", stopSidebarResize)`,
+		`document.removeEventListener("pointercancel", stopSidebarResize)`,
+		"handle.releasePointerCapture(e.pointerId)",
+		`handle.classList.remove("dragging")`,
+	} {
+		if !strings.Contains(stop, check) {
+			t.Fatalf("GET / stopSidebarResize should include %q (issue #100 L3 R9)", check)
+		}
+	}
+	drag := sliceJSFunction(t, bodyText, "handleSidebarResize")
+	for _, check := range []string{
+		"const minTop = 120;",
+		"const minBottom = 100;",
+		"Math.max(minTop, Math.min(sidebarContentHeight - minBottom, newTopHeight))",
+	} {
+		if !strings.Contains(drag, check) {
+			t.Fatalf("GET / handleSidebarResize clamp math must stay verbatim — missing %q (issue #100 L3 R9)", check)
+		}
+	}
+
+	// R9 CSS: touch-action:none lives on the handle rule (in-rule), and the
+	// drag-scoped selection/callout suppression sits with the .dragging
+	// half — which must stay global (a drag is not a hover state).
+	handleStart := strings.Index(bodyText, "#sidebar-resize-handle {")
+	if handleStart < 0 {
+		t.Fatal("GET / lost the #sidebar-resize-handle rule (issue #100 L3 R9)")
+	}
+	handleEnd := strings.Index(bodyText[handleStart:], "\n        }")
+	if handleEnd < 0 {
+		t.Fatal("GET / #sidebar-resize-handle rule has no closing brace")
+	}
+	handleRule := bodyText[handleStart : handleStart+handleEnd]
+	if !strings.Contains(handleRule, "touch-action: none;") {
+		t.Fatal("GET / #sidebar-resize-handle should declare touch-action: none — evaluated at gesture start, so it must be permanent, not drag-scoped (issue #100 L3 R9)")
+	}
+	draggingStart := strings.Index(bodyText, "#sidebar-resize-handle.dragging {")
+	if draggingStart < 0 {
+		t.Fatal("GET / lost the #sidebar-resize-handle.dragging rule (issue #100 L3 R9)")
+	}
+	draggingEnd := strings.Index(bodyText[draggingStart:], "\n        }")
+	draggingRule := bodyText[draggingStart : draggingStart+draggingEnd]
+	for _, decl := range []string{"user-select: none;", "-webkit-touch-callout: none;", "background: var(--active-color);"} {
+		if !strings.Contains(draggingRule, decl) {
+			t.Fatalf("GET / #sidebar-resize-handle.dragging should declare %q (issue #100 L3 R9)", decl)
+		}
+	}
+
+	// R10: coarse-pointer hit targets. min-width/min-height inside the
+	// media block — fixed width/height 44 would defeat the "never force
+	// smaller" contract, and pt is the wrong unit (~58.7px).
+	coarseStart := strings.Index(bodyText, "@media (pointer: coarse) {")
+	if coarseStart < 0 {
+		t.Fatal("GET / lost the @media (pointer: coarse) touch-target block (issue #100 L3 R10)")
+	}
+	coarseEnd := strings.Index(bodyText[coarseStart:], "\n        }")
+	if coarseEnd < 0 {
+		t.Fatal("GET / @media (pointer: coarse) block has no closing brace")
+	}
+	coarse := bodyText[coarseStart : coarseStart+coarseEnd]
+	for _, sel := range []string{".icon-btn {", ".term-ctrl-btn {"} {
+		selAt := strings.Index(coarse, sel)
+		if selAt < 0 {
+			t.Fatalf("GET / coarse-pointer block should include a %s rule (issue #100 L3 R10)", sel)
+		}
+		ruleEnd := strings.Index(coarse[selAt:], "\n            }")
+		if ruleEnd < 0 {
+			t.Fatalf("GET / coarse-pointer %s rule has no closing brace", sel)
+		}
+		rule := coarse[selAt : selAt+ruleEnd]
+		for _, decl := range []string{"min-width: 44px;", "min-height: 44px;"} {
+			if !strings.Contains(rule, decl) {
+				t.Fatalf("GET / coarse-pointer %s rule should declare %q (issue #100 L3 R10)", sel, decl)
+			}
+		}
+		for _, line := range strings.Split(rule, "\n") {
+			trimmed := strings.TrimSpace(line)
+			if strings.HasPrefix(trimmed, "width: 44px") || strings.HasPrefix(trimmed, "height: 44px") {
+				t.Fatalf("GET / coarse-pointer %s rule must use min-width/min-height, not fixed width/height — found %q (issue #100 L3 R10)", sel, trimmed)
+			}
+		}
+	}
+	// R10 residual-gap guard (review round 1): the coarse block only RAISES
+	// the floor — the .icon-btn BASE rule must stay free of fixed
+	// width/height declarations (it is padding-driven today; a future fixed
+	// 44px there would silently defeat the min-* contract, and this is the
+	// only assertion that would turn red).
+	iconBaseStart := strings.Index(bodyText, "\n        .icon-btn {\n")
+	if iconBaseStart < 0 {
+		t.Fatal("GET / lost the .icon-btn base rule (issue #100 L3 R10)")
+	}
+	iconBaseEnd := strings.Index(bodyText[iconBaseStart:], "\n        }")
+	if iconBaseEnd < 0 {
+		t.Fatal("GET / .icon-btn base rule has no closing brace")
+	}
+	iconBase := bodyText[iconBaseStart : iconBaseStart+iconBaseEnd]
+	for _, line := range strings.Split(iconBase, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "width:") || strings.HasPrefix(trimmed, "height:") {
+			t.Fatalf("GET / .icon-btn base rule must not declare a fixed %q — R10's min-* only raises the floor (issue #100 L3 R10)", trimmed)
+		}
+	}
+	// R10 safe-area refinement (review round 1): inside the 40px header on
+	// inset-top:0 devices, the centered 44px box would lose its top 2.5px to
+	// the body/html overflow:hidden clip (clipped area does not hit-test);
+	// the block shifts the header's icon button down 3px and lifts it above
+	// #workspace's top strip so the full 44px hit-tests.
+	headerBtnAt := strings.Index(coarse, "#header .icon-btn {")
+	if headerBtnAt < 0 {
+		t.Fatal("GET / coarse-pointer block lost the #header .icon-btn safe-area rule (issue #100 L3 R10)")
+	}
+	headerBtnEnd := strings.Index(coarse[headerBtnAt:], "\n            }")
+	if headerBtnEnd < 0 {
+		t.Fatal("GET / coarse-pointer #header .icon-btn rule has no closing brace")
+	}
+	headerBtnRule := coarse[headerBtnAt : headerBtnAt+headerBtnEnd]
+	for _, decl := range []string{"top: 3px;", "z-index: 40;"} {
+		if !strings.Contains(headerBtnRule, decl) {
+			t.Fatalf("GET / coarse-pointer #header .icon-btn rule should declare %q — the clip/spill geometry needs both (issue #100 L3 R10)", decl)
+		}
+	}
+	// (Checked on comment-stripped text: the R10 comment names the wrong
+	// unit while explaining the ban.)
+	if strings.Contains(stripCSSComments(bodyText), "44pt") {
+		t.Fatal("GET / must not use 44pt — Apple HIG 44pt IS 44 CSS px in iOS Safari; pt computes to ~58.7px (issue #100 L3 R10)")
+	}
+	// The variable keeps driving the base size (min-* only raises the floor).
+	if !strings.Contains(bodyText, "width: var(--term-ctrl-btn-size);") || !strings.Contains(bodyText, "height: var(--term-ctrl-btn-size);") {
+		t.Fatal("GET / .term-ctrl-btn base size must stay driven by --term-ctrl-btn-size (issue #100 L3 R10)")
+	}
+
+	// R11: containment scan over the stylesheet — with comments stripped,
+	// every :hover selector must sit inside an open @media (hover: hover)
+	// block. The non-hover interaction states stay global: the resize
+	// handle's .dragging half and the scrollbar thumb's :active half were
+	// split out of their old combined selectors and must survive.
+	styleStart := strings.Index(bodyText, "<style>")
+	styleEnd := strings.Index(bodyText, "</style>")
+	if styleStart < 0 || styleEnd < 0 {
+		t.Fatal("GET / lost the inline <style> block")
+	}
+	css := stripCSSComments(bodyText[styleStart:styleEnd])
+	depth := 0
+	var hoverDepths []int
+	hovers := 0
+	for i := 0; i < len(css); {
+		switch css[i] {
+		case '{':
+			depth++
+			if strings.HasSuffix(strings.TrimRight(css[:i], " \t\r\n"), "@media (hover: hover)") {
+				hoverDepths = append(hoverDepths, depth)
+			}
+			i++
+		case '}':
+			depth--
+			for len(hoverDepths) > 0 && hoverDepths[len(hoverDepths)-1] > depth {
+				hoverDepths = hoverDepths[:len(hoverDepths)-1]
+			}
+			i++
+		default:
+			if strings.HasPrefix(css[i:], ":hover") {
+				hovers++
+				if len(hoverDepths) == 0 {
+					line := 1 + strings.Count(css[:i], "\n")
+					t.Fatalf("GET / :hover selector at stylesheet line %d sits OUTSIDE every @media (hover: hover) block — R11 requires the hover-capability gate (issue #100 L3)", line)
+				}
+				i += len(":hover")
+			} else {
+				i++
+			}
+		}
+	}
+	if hovers != 22 {
+		t.Fatalf("GET / should carry the 22 known :hover selectors inside hover-capability blocks, found %d — an added or removed hover rule must update this test (issue #100 L3 R11)", hovers)
+	}
+	for _, global := range []string{
+		"#sidebar-resize-handle.dragging {",
+		"#tabs-container::-webkit-scrollbar-thumb:active {",
+	} {
+		if !strings.Contains(css, global) {
+			t.Fatalf("GET / must keep the non-hover interaction state %q global — it was split out of a combined :hover selector (issue #100 L3 R11)", global)
+		}
 	}
 }
 

@@ -364,6 +364,69 @@
             display: none;
         }
 
+        /* R10 (issue #100 L3): touch-target size on coarse pointers (finger
+           — Apple HIG's 44pt IS 44 CSS px in iOS Safari, so CSS says px;
+           44pt would compute to ~58.7px). min-width/min-height, never
+           fixed width/height: the used size is max(content, min-*), so the
+           existing padding and flex layout keep working and nothing is
+           forced smaller.
+           Layout note for the header case: box-sizing is border-box
+           file-wide, so #header's 40px height minus its 1px border-bottom
+           leaves a 39px content box; a 44px .icon-btn centered in it spans
+           [-2.5, 41.5] relative to the header top. That overflow is
+           INVISIBLE on touch — .icon-btn has border:none + background:none,
+           and R11 keeps hover backgrounds off pure-touch devices — while
+           the 16px glyph stays nearly centered, so the visual header is
+           unchanged. Two refinements in the #header .icon-btn rule below
+           are what keep the hit area a GENUINE 44px: body/html
+           overflow:hidden clips anything above viewport y=0 on
+           safe-area-inset-top:0 devices (clipped area does not hit-test,
+           which would lose the top 2.5px), and the part extending past the
+           header bottom must outrank #workspace for its hits to land.
+           Desktop is untouched (fine pointer: the media query does not
+           match). */
+        @media (pointer: coarse) {
+            .icon-btn {
+                min-width: 44px;
+                min-height: 44px;
+            }
+            .term-ctrl-btn {
+                min-width: 44px;
+                min-height: 44px;
+            }
+            /* Safe-area refinement (issue #100 L3 review): with the box
+               centered in the 39px content box its top sits at y=-2.5
+               relative to the header, and #header does not clip — but
+               body/html DO (overflow: hidden), and clipped area does not
+               hit-test. On devices with env(safe-area-inset-top) = 0
+               (iPad, Android, notchless iPhones, desktop touch screens)
+               the header top IS viewport y=0, so anything above it leaves
+               the hit area (failing the ≥44 acceptance). Notched iPhones
+               are unaffected — the safe-area padding pushes #app below
+               y=0. top: 3px moves the box to [0.5, 44.5], fully inside the
+               viewport; the 4.5px then extending past the header's bottom
+               edge overlap #workspace's top strip, so z-index lifts the
+               button above it (a transparent box steals only hit priority
+               there, no pixels).
+               Specificity: `#header .icon-btn` (1,1,0) outranks the narrow
+               tier's `#sidebar-toggle-btn` (1,0,0), so where BOTH apply
+               (narrow screen + coarse pointer) this rule's declarations
+               win — z-index therefore uses the SAME value 40 the narrow
+               rule sets, keeping the drawer layering (button above the
+               open drawer at 30) byte-identical; position agrees (both
+               relative), top and z-index come from here.
+               The selector is deliberately the class-level "any icon
+               button inside #header", not a chevron-specific special case:
+               any icon button a future header adds inherits the same 3px
+               shift and z-index automatically — same geometry problem,
+               same fix, by design rather than by oversight. */
+            #header .icon-btn {
+                position: relative;
+                top: 3px;
+                z-index: 40;
+            }
+        }
+
         .sidebar-title {
             padding: 12px;
             font-weight: 600;
@@ -387,9 +450,11 @@
             border-radius: 4px;
         }
 
+            @media (hover: hover) {
             .icon-btn:hover {
                 background: var(--border-color);
                 color: var(--active-color);
+            }
             }
 
         /* Sidebar collapse toggle (issue #99): hosted in #header so it stays
@@ -444,12 +509,40 @@
             cursor: ns-resize;
             background: var(--border-color);
             flex-shrink: 0;
+            /* R9 (issue #100 L3): touch-action is evaluated when the GESTURE
+               STARTS, so applying it only once the drag begins (e.g. via the
+               .dragging class) is too late for the current gesture — the UA
+               has already decided whether the touch is a scroll. It must
+               live on the handle permanently for the drag to win over page
+               scroll on the very first touchmove. The handle is a 4px
+               strip; nothing scrollable sits under it, so a standing
+               touch-action:none costs no scrollability anywhere. */
+            touch-action: none;
             transition: background 0.15s;
         }
 
-        #sidebar-resize-handle:hover,
+        /* Drag highlight, .dragging half — split out of the old
+           `:hover, .dragging` combination for R11 (issue #100 L3): a drag
+           in progress is not a hover state (on touch there is no hover at
+           all), so this half stays global; only the :hover half moves into
+           the hover-capability media query. user-select /
+           -webkit-touch-callout are scoped to the drag state per R9's
+           "while dragging" wording — e.preventDefault() on pointerdown is
+           the primary selection guard; this is the belt under that
+           suspender. */
         #sidebar-resize-handle.dragging {
             background: var(--active-color);
+            user-select: none;
+            -webkit-touch-callout: none;
+        }
+
+        /* The :hover half of the old combination, R11-wrapped (issue #100
+           L3): pure-touch devices never see it; the .dragging half above
+           stays global. */
+        @media (hover: hover) {
+        #sidebar-resize-handle:hover {
+            background: var(--active-color);
+        }
         }
 
         #sidebar-bottom-panel {
@@ -484,8 +577,10 @@
             user-select: none;
         }
 
+        @media (hover: hover) {
         .git-section-header:hover {
             background: var(--hover-bg);
+        }
         }
 
         .git-section-chevron {
@@ -537,8 +632,10 @@
             gap: 6px;
         }
 
+        @media (hover: hover) {
         .git-change-item:hover {
             background: var(--hover-bg);
+        }
         }
 
         .git-change-path {
@@ -595,8 +692,10 @@
             gap: 2px;
         }
 
+            @media (hover: hover) {
             .wt-item:hover {
                 background: var(--hover-bg);
+            }
             }
 
             .wt-item.active {
@@ -616,8 +715,10 @@
                 border-left-color: var(--main-accent);
             }
 
+            @media (hover: hover) {
             .wt-item-main:hover {
                 background: var(--main-accent-hover);
+            }
             }
 
             .wt-item-main .wt-branch {
@@ -665,9 +766,11 @@
             transition: color 0.15s, background 0.15s;
         }
 
+        @media (hover: hover) {
         .wt-github-link:hover {
             color: var(--text-primary);
             background: var(--hover-bg);
+        }
         }
 
         .wt-github-link:focus-visible {
@@ -721,8 +824,10 @@
             transition: opacity 0.2s;
         }
 
+        @media (hover: hover) {
         .wt-item:hover .wt-actions {
             opacity: 1;
+        }
         }
 
         .wt-action-btn {
@@ -735,9 +840,11 @@
             justify-content: center;
         }
 
+        @media (hover: hover) {
         .wt-action-btn:hover {
             background: var(--hover-bg);
             color: var(--text-primary);
+        }
         }
 
         .wt-action-btn.loading {
@@ -805,9 +912,18 @@
             border: none;
         }
 
-        #tabs-container::-webkit-scrollbar-thumb:hover,
+        /* R11 split (issue #100 L3): the :active half of this combination
+           is not a hover state — it stays global (like the resize handle's
+           .dragging half); only the :hover half moves into the media
+           query. */
         #tabs-container::-webkit-scrollbar-thumb:active {
             background: var(--text-secondary);
+        }
+
+        @media (hover: hover) {
+        #tabs-container::-webkit-scrollbar-thumb:hover {
+            background: var(--text-secondary);
+        }
         }
 
         #tabs-container::-webkit-scrollbar-button,
@@ -845,8 +961,10 @@
             background: var(--active-bg);
         }
 
+        @media (hover: hover) {
         .tab:hover {
             background: var(--hover-bg);
+        }
         }
 
         .tab.active {
@@ -990,9 +1108,11 @@
             margin-bottom: 2px;
         }
 
+            @media (hover: hover) {
             .new-tab-btn:hover {
                 background: var(--border-color);
                 color: var(--active-color);
+            }
             }
 
         /* Actions Toolbar (Hidden by default, shown when instance active) */
@@ -1048,9 +1168,11 @@
             cursor: pointer;
             border-top-left-radius: 4px;
         }
+        @media (hover: hover) {
         #status-bar:hover {
             background: var(--hover-bg);
             color: var(--text-primary);
+        }
         }
 
         /* Resource Monitor Modal */
@@ -1156,8 +1278,10 @@
             align-items: center;
             gap: 4px;
         }
+        @media (hover: hover) {
         #modal-monitor .monitor-licenses-toggle:hover {
             color: var(--text-primary);
+        }
         }
         #modal-monitor .monitor-licenses-toggle svg {
             transition: transform 0.2s;
@@ -1327,9 +1451,11 @@
             white-space: nowrap;
             transition: color 0.15s, border-color 0.15s, background 0.15s;
         }
+        @media (hover: hover) {
         .modal-tab:hover {
             color: var(--text-primary);
             background: var(--hover-bg);
+        }
         }
         .modal-tab.active {
             background: var(--main-bg);
@@ -1359,9 +1485,11 @@
             flex-shrink: 0;
             transition: background 0.15s, color 0.15s;
         }
+        @media (hover: hover) {
         .modal-close-btn:hover {
             background: var(--border-color);
             color: var(--danger-text);
+        }
         }
         .modal-close-btn:active {
             opacity: 0.7;
@@ -1419,14 +1547,21 @@
             color: var(--remote-title-icon);
         }
 
+        @media (hover: hover) {
         .remote-access .sidebar-title .icon-btn:hover {
             background: rgba(0,0,0,0.1);
             color: var(--remote-title-text);
         }
+        }
 
         @media (prefers-color-scheme: dark) {
+            /* Nested per R11 (issue #100 L3): media queries nest; this
+               dark-scheme hover override is gated on hover capability
+               exactly like every other :hover rule. */
+            @media (hover: hover) {
             .remote-access .sidebar-title .icon-btn:hover {
                 background: rgba(255,255,255,0.1);
+            }
             }
         }
 
@@ -1464,9 +1599,11 @@
             border-radius: 4px;
         }
 
+            @media (hover: hover) {
             button:hover {
                 background: var(--button-hover-bg);
                 border-color: var(--button-border);
+            }
             }
 
             button.primary {
@@ -1475,18 +1612,22 @@
                 border: 1px solid var(--button-border);
             }
 
+            @media (hover: hover) {
                 button.primary:hover {
                     background: var(--primary-button-hover-bg);
                 }
+            }
 
             button.danger {
                 color: var(--danger-text);
             }
 
+            @media (hover: hover) {
                 button.danger:hover {
                     background: var(--danger-hover-bg);
                     border-color: var(--danger-text);
                 }
+            }
 
             #btnAIGenerate.muted {
                 opacity: 0.5;
@@ -1524,9 +1665,21 @@
                 transition: background 0.2s, color 0.2s;
             }
 
+            /* R11 (issue #100 L3): every :hover rule in this stylesheet is
+               wrapped in a hover-capability media query so pure-touch
+               devices (no hover) never show STICKY hover highlights — a
+               tap would otherwise latch the :hover styles until another
+               tap lands somewhere else. Desktop rendering is unchanged
+               (hover-capable devices match the query and the rules apply
+               exactly where they did, in the same source order — each
+               rule is wrapped in place). Browsers too old to parse the
+               hover media query drop the whole block: acceptable graceful
+               degradation — they simply get no hover styling. */
+            @media (hover: hover) {
             .term-ctrl-btn:hover {
                 background: rgba(255,255,255,0.2);
                 color: #fff;
+            }
             }
 
             .term-ctrl-btn svg {
@@ -1559,7 +1712,7 @@
             <div id="sidebar-top-panel">
                 <ul id="wt-list"></ul>
             </div>
-            <div id="sidebar-resize-handle" onmousedown="startSidebarResize(event)"></div>
+            <div id="sidebar-resize-handle" onpointerdown="startSidebarResize(event)"></div>
             <div id="sidebar-bottom-panel">
                 <div id="git-staged-section" class="git-section">
                     <div class="git-section-header" onclick="toggleGitSection('staged')">
@@ -2850,15 +3003,45 @@
         }
 
         // --- Sidebar Resize ---
+        // R9 (issue #100 L3): Pointer Events instead of mouse events — one
+        // code path serves mouse (pointerType "mouse"), touch ("touch") and
+        // pen. setPointerCapture retargets every subsequent event of this
+        // pointer to the handle until pointerup/pointercancel, so the
+        // document-level move/up listeners below keep firing even when the
+        // pointer slides off the element or out of the window mid-drag (the
+        // old mouse-only path silently lost drags outside the document).
+        // pointercancel is registered as a stop condition because iOS fires
+        // it when the UA takes over a gesture (system gesture, scroll
+        // decision) — a drag that simply ends is better than one half-
+        // applied. The clamp math in handleSidebarResize is unchanged.
         function startSidebarResize(e) {
+            // Re-entry guard: a second pointerdown mid-drag (desktop
+            // secondary button, a second finger on the strip) would
+            // re-baseline sidebarResizeStartY / sidebarTopPanelStartHeight
+            // (the drag lurches to the new baseline) and fight the first
+            // pointer for setPointerCapture. Listeners are NOT the leak
+            // risk — addEventListener dedupes identical type/callback/
+            // capture per the DOM spec — the hazards are the baseline
+            // hijack and the dual-pointer contention.
+            if (isResizingSidebar) return;
             isResizingSidebar = true;
             sidebarResizeStartY = e.clientY;
             const topPanel = document.getElementById("sidebar-top-panel");
             sidebarTopPanelStartHeight = topPanel ? topPanel.offsetHeight : 0;
-            document.addEventListener("mousemove", handleSidebarResize);
-            document.addEventListener("mouseup", stopSidebarResize);
             const handle = document.getElementById("sidebar-resize-handle");
-            if (handle) handle.classList.add("dragging");
+            if (handle) {
+                handle.classList.add("dragging");
+                // Guarded against NotFoundError: setPointerCapture throws
+                // when the pointerId is NOT an active pointer (synthetic
+                // events, timing edges). "Engines without Pointer Capture"
+                // is not the real hazard — capture ships in the same spec
+                // generation as pointerdown itself. On a throw the document
+                // listeners still cover the in-window drag.
+                try { handle.setPointerCapture(e.pointerId); } catch (err) { /* inactive-pointer NotFoundError */ }
+            }
+            document.addEventListener("pointermove", handleSidebarResize);
+            document.addEventListener("pointerup", stopSidebarResize);
+            document.addEventListener("pointercancel", stopSidebarResize);
             e.preventDefault();
         }
 
@@ -2881,12 +3064,23 @@
             bottomPanel.style.flex = "1";
         }
 
-        function stopSidebarResize() {
+        function stopSidebarResize(e) {
             isResizingSidebar = false;
-            document.removeEventListener("mousemove", handleSidebarResize);
-            document.removeEventListener("mouseup", stopSidebarResize);
+            document.removeEventListener("pointermove", handleSidebarResize);
+            document.removeEventListener("pointerup", stopSidebarResize);
+            document.removeEventListener("pointercancel", stopSidebarResize);
             const handle = document.getElementById("sidebar-resize-handle");
-            if (handle) handle.classList.remove("dragging");
+            if (handle) {
+                handle.classList.remove("dragging");
+                // Explicit release: implicit capture ends with pointerup, but
+                // a cancel edge can leave it held on some engines. Guarded —
+                // releasing an inactive pointer throws.
+                try {
+                    if (e && typeof handle.hasPointerCapture === "function" && handle.hasPointerCapture(e.pointerId)) {
+                        handle.releasePointerCapture(e.pointerId);
+                    }
+                } catch (err) { /* pointer already inactive */ }
+            }
         }
 
         // Render
