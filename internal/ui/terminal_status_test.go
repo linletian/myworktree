@@ -30,6 +30,169 @@ func TestTerminalStatusHandling(t *testing.T) {
 	t.Logf("%s", out)
 }
 
+// TestSidebarCollapseHandling runs the Node unit tests for the issue #99
+// desktop sidebar collapse semantics (testdata/sidebar_collapse.test.mjs):
+// localStorage round-trip and degradation defaults (R3), the class-only
+// collapse toggle with its two-state chevron button (R1/R2), the first
+// document-level Ctrl/Cmd+B keydown and its input/repeat/case guards (R4),
+// and the xterm refit scheduled after the class flip (R12).
+//
+// Same arrangement as TestTerminalStatusHandling: the cases slice the
+// shipped index.html and run against stubbed browser state, this wrapper
+// makes `go test` enforce them, and the file lives in testdata/ because
+// static/* is embedded and served to every browser. Skips when node is
+// absent.
+func TestSidebarCollapseHandling(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not on PATH; skipping sidebar collapse JS tests")
+	}
+	out, err := exec.Command(node, "--test", "testdata/sidebar_collapse.test.mjs").CombinedOutput()
+	if err != nil {
+		t.Fatalf("node --test testdata/sidebar_collapse.test.mjs: %v\n%s", err, out)
+	}
+	t.Logf("%s", out)
+}
+
+// TestViewportHeightHandling runs the Node unit tests for the issue #100 L1
+// viewport & height layer (testdata/viewport_height.test.mjs): the iOS soft
+// keyboard is compensated by pinning #app's inline height to
+// window.visualViewport's visible bottom edge (sentinel:
+// documentElement.clientHeight), pinch / double-tap zoom opts out of
+// pinning, the scroll listener only re-pins an existing pin, the inline
+// height is cleared again when nothing is covered, environments without
+// visualViewport degrade to a no-op, and the collapse class (PR1) plus
+// keyboard narrowing (PR2) coexist without touching each other's state
+// (R12).
+//
+// Same arrangement as TestSidebarCollapseHandling: the cases slice the
+// shipped index.html and run against stubbed browser state, this wrapper
+// makes `go test` enforce them, and the file lives in testdata/ because
+// static/* is embedded and served to every browser. Skips when node is
+// absent.
+func TestViewportHeightHandling(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not on PATH; skipping viewport height JS tests")
+	}
+	out, err := exec.Command(node, "--test", "testdata/viewport_height.test.mjs").CombinedOutput()
+	if err != nil {
+		t.Fatalf("node --test testdata/viewport_height.test.mjs: %v\n%s", err, out)
+	}
+	t.Logf("%s", out)
+}
+
+// TestNarrowDrawerHandling runs the Node unit tests for the issue #100 L2
+// breakpoint / drawer layer (testdata/narrow_drawer.test.mjs): the R14
+// viewport-dispatched default for a missing / unparseable persisted value
+// (narrow first-load defaults to the closed drawer, an explicit persisted
+// value always wins — the §5.3-5 desktop-collapsed-user case needs no
+// special case), the availability guards around matchMedia, and the R7
+// mask's close path running through the same single .collapsed class and
+// shared mw.ui.sidebarCollapsed key as the toggle button and Ctrl/Cmd+B
+// (no second state variable, plan §3.1).
+//
+// Same arrangement as TestViewportHeightHandling: the cases slice the
+// shipped index.html and run against stubbed browser state, this wrapper
+// makes `go test` enforce them, and the file lives in testdata/ because
+// static/* is embedded and served to every browser. Skips when node is
+// absent.
+func TestNarrowDrawerHandling(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not on PATH; skipping narrow drawer JS tests")
+	}
+	out, err := exec.Command(node, "--test", "testdata/narrow_drawer.test.mjs").CombinedOutput()
+	if err != nil {
+		t.Fatalf("node --test testdata/narrow_drawer.test.mjs: %v\n%s", err, out)
+	}
+	t.Logf("%s", out)
+}
+
+// TestTouchInteractionHandling runs the Node unit tests for the issue #100
+// L3 touch-interaction layer (testdata/touch_interaction.test.mjs): the
+// sidebar split-panel drag on Pointer Events — pointerdown captures the
+// pointer (setPointerCapture), move/up/cancel listeners register and clean
+// up, pointercancel ends the drag like pointerup, touch/pen/mouse share one
+// path, the clamp math (minTop 120 / minBottom 100) is unchanged, and a
+// throwing setPointerCapture degrades to the listener-based drag.
+//
+// Same arrangement as TestNarrowDrawerHandling: the cases slice the shipped
+// index.html and run against stubbed browser state, this wrapper makes
+// `go test` enforce them, and the file lives in testdata/ because static/*
+// is embedded and served to every browser. Skips when node is absent.
+func TestTouchInteractionHandling(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not on PATH; skipping touch interaction JS tests")
+	}
+	out, err := exec.Command(node, "--test", "testdata/touch_interaction.test.mjs").CombinedOutput()
+	if err != nil {
+		t.Fatalf("node --test testdata/touch_interaction.test.mjs: %v\n%s", err, out)
+	}
+	t.Logf("%s", out)
+}
+
+// TestResponsiveLayerChangelogCounts extends the issue #95 guard
+// (TestTerminalStatusChangelogCount) to the four behavioral files behind
+// the v0.6.0 responsive plan: each CHANGELOG entry quotes its file's
+// scenario count in English number words ("seventeen #99 scenarios",
+// "seven new issue #100 L1 scenarios", ...), and a hand-maintained word in
+// prose drifts silently. Derive each count from `grep -c '^test('` and
+// require every occurrence of that entry's phrase to say the same number.
+// Unlike the terminal-status phrase (whose fixed "Pinned by N" wording the
+// #95 guard owns), these entries use distinct per-layer phrasing, so the
+// guard is per-file: a wrong or missing word fails here.
+func TestResponsiveLayerChangelogCounts(t *testing.T) {
+	// English number words the scenario counts can currently spell (extend
+	// as files grow).
+	words := map[string]int{
+		"one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+		"six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
+		"eleven": 11, "twelve": 12, "thirteen": 13, "fourteen": 14,
+		"fifteen": 15, "sixteen": 16, "seventeen": 17, "eighteen": 18,
+		"nineteen": 19, "twenty": 20,
+	}
+	changelog, err := os.ReadFile("../../CHANGELOG.md")
+	if err != nil {
+		t.Fatalf("read CHANGELOG.md: %v", err)
+	}
+	for _, tc := range []struct {
+		file string
+		// one capture group: the English number word preceding the phrase
+		phrase string
+	}{
+		{"testdata/sidebar_collapse.test.mjs", `#99 scenarios`},
+		{"testdata/viewport_height.test.mjs", `new issue #100 L1 scenarios`},
+		{"testdata/narrow_drawer.test.mjs", `new issue #100 L2 scenarios`},
+		{"testdata/touch_interaction.test.mjs", `new issue #100 L3 scenarios`},
+	} {
+		src, err := os.ReadFile(tc.file)
+		if err != nil {
+			t.Fatalf("read %s: %v", tc.file, err)
+		}
+		cases := len(regexp.MustCompile(`(?m)^test\(`).FindAll(src, -1))
+		if cases == 0 {
+			t.Fatalf("no node --test cases found in %s — the slice anchors probably moved", tc.file)
+		}
+		re := regexp.MustCompile(`(\w+) ` + regexp.QuoteMeta(tc.phrase))
+		matches := re.FindAllSubmatch(changelog, -1)
+		if len(matches) == 0 {
+			t.Fatalf("CHANGELOG.md no longer quotes a count for %q — add the phrase or update this guard", tc.phrase)
+		}
+		for _, m := range matches {
+			word := strings.ToLower(string(m[1]))
+			got, ok := words[word]
+			if !ok {
+				t.Fatalf("CHANGELOG.md spells the %q count as %q — extend the word map in this guard", tc.phrase, word)
+			}
+			if got != cases {
+				t.Errorf("CHANGELOG.md says %s %q but %s has %d cases — keep the wording and the guard in sync (issue #95)", word, tc.phrase, tc.file, cases)
+			}
+		}
+	}
+}
+
 // TestTerminalStatusChangelogCount keeps the CHANGELOG's coverage claim honest.
 // The entry quotes the number of `node --test` cases, and that number drifted
 // wrong twice while the cases were still being added (17, then 22, then 26 for

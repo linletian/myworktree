@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <title>myworktree</title>
     <style>
         :root {
@@ -157,8 +157,64 @@
 
         #app {
             display: flex;
+            /* R7 (issue #100 L2): the positioning containing block for the
+               narrow-tier drawer and its mask below — both are absolutely
+               positioned children of #app (the padding box, safe areas
+               included). Verified no-op against every pre-existing
+               ABSOLUTELY or FIXED positioned element, markup OR JS-created
+               — only those can have their containing block re-homed by an
+               ancestor gaining position:relative; a position:relative
+               element like .remote-badge offsets from its own normal-flow
+               position and is unaffected by definition, so it needs no
+               audit. Each audited element's ACTUAL containing block is
+               listed so this stays checkable: #connection-overlay is
+               position:fixed (its containing block is the viewport,
+               ancestors irrelevant); #status-bar, #terminal-controls and
+               #empty-state are direct children of #workspace
+               (position:relative — already their containing block; note
+               #empty-state is #terminal-container's SIBLING, not its
+               child); the JS-created #dsh-remote-mask (created in
+               kinds/dsh_web.js, styled by the rule a few hundred lines
+               below) sits inside #dsh-frames (position:relative); the
+               JS-created measurement span in truncatePath (a body-appended
+               span with position:fixed in its style.cssText) is
+               viewport-positioned like any fixed element, ancestors
+               irrelevant; and the two JS-created per-instance xterm host
+               divs — createTerminalHost in this file and
+               PtyRenderer._createSession in kinds/pty.js — (position:
+               absolute in their style.cssText) are appended to
+               #terminal-container (position:relative), already their
+               containing block. */
+            position: relative;
+            /* R5 (issue #100 L1): height basis. 100vh is the legacy
+               fallback (old Safari); the @supports block below upgrades it
+               to the dynamic viewport height, which tracks the mobile URL
+               bar show/hide without any JS. Width is 100% of body, NOT
+               100vw: vw counts the scrollbar gutter, so a vertical
+               scrollbar would push this flex row into horizontal overflow. */
             height: 100vh;
-            width: 100vw;
+            width: 100%;
+            /* R5: keep the row inside the display notch / Home Indicator
+               safe areas (iPhone landscape, iPad). box-sizing is border-box
+               file-wide, so the insets inset the children instead of
+               growing the box; every desktop browser reports all four
+               insets as 0, which makes this a literal no-op there. */
+            padding: env(safe-area-inset-top, 0px) env(safe-area-inset-right, 0px) env(safe-area-inset-bottom, 0px) env(safe-area-inset-left, 0px);
+        }
+
+        /* R5: progressive enhancement — dvh tracks the dynamic toolbars
+           (mobile URL bar) so the layout does not jump when they slide.
+           The order works like this: same-origin declarations of equal
+           specificity resolve last-wins, so browsers that understand dvh
+           take this block over the 100vh fallback above; browsers that
+           don't (old Safari) evaluate the @supports condition to false and
+           drop the WHOLE block, keeping the 100vh baseline. Swapping the
+           two would not strand old Safari — it would silently regress
+           modern browsers to static 100vh and bring the URL-bar jump back. */
+        @supports (height: 100dvh) {
+            #app {
+                height: 100dvh;
+            }
         }
 
         /* Sidebar */
@@ -168,6 +224,223 @@
             border-right: 1px solid var(--border-color);
             display: flex;
             flex-direction: column;
+        }
+
+        /* Sidebar collapse (issue #99), scoped OFF the narrow tier with the
+           SEAMLESS COMPLEMENT of the drawer's max-width: 768px block below
+           (PR3 / issue #100 L2): on the narrow tier the same .collapsed
+           class renders the off-canvas drawer instead of a zero-width
+           sibling. `.collapsed` on #app is the single source of truth for
+           the collapsed state in both forms. The sidebar drops to zero
+           width and its border is dropped with it (no 1px sliver survives);
+           #main's flex:1 automatically fills the freed space. JS never reads
+           or writes any width — collapsing is class-only.
+           The scope is deliberately NOT written min-width: 769px: media
+           queries accept fractional widths, and in the (768, 769) gap
+           (e.g. 1537 physical px at 200% zoom = 768.5 CSS px — reachable on
+           desktop) NEITHER query would match: no drawer, no collapse rule,
+           so the toggle button would flip its class and aria-expanded while
+           the sidebar renders UNCHANGED — a visually inert toggle (a
+           regression PR3 would have introduced; PR1's rule was global).
+           The not-predicate (Media Queries Level 3, supported by every
+           target browser incl. old Safari) closes the seam: `all` matches
+           every media type, so `not all and (max-width: 768px)` is true
+           exactly when width > 768px, fractions included — the exact set
+           complement of the narrow tier. */
+        @media not all and (max-width: 768px) {
+            #app.collapsed #sidebar {
+                width: 0;
+                overflow: hidden;
+                border-right: none;
+                /* width:0 + overflow:hidden only CLIPS — the sidebar's buttons
+                   would still sit in the Tab focus order with their focus ring
+                   invisible. visibility lifts them out of focus/hit-testing
+                   while collapsed and restores on expand, zero JS. */
+                visibility: hidden;
+            }
+        }
+
+        /* R7 (issue #100 L2, PRD-CHANGE §3.6): narrow tier, <=768px — the
+           sidebar becomes an OVERLAY drawer instead of a flex sibling:
+           absolutely positioned across #main (so #main keeps the full
+           width underneath) and slid off-canvas with translateX when
+           .collapsed. The same single .collapsed class drives both forms
+           (plan §3.1): the desktop zero-width rule is scoped away above
+           (the seamless `not all and` complement of THIS block), so the
+           OPEN drawer computes its full var(--sidebar-width) width with
+           the initial visibility:visible — the §3.1 trap (inheriting
+           width:0/visibility:hidden would be an invisible drawer) is
+           closed by that scoping, not by overrides here. Closed,
+           translateX(-100%) parks the drawer off the left edge and
+           visibility:hidden lifts its buttons out of the Tab order, same
+           reasoning as the desktop rule. No transition/animation by plan
+           non-goal: both forms flip instantly, exactly like the desktop
+           collapse. */
+        @media (max-width: 768px) {
+            #sidebar {
+                /* No width declaration here on purpose: the drawer keeps
+                   the base rule's var(--sidebar-width). */
+                position: absolute;
+                left: 0;
+                top: 0;
+                bottom: 0;
+                /* Above the mask (25), below the header toggle (40); the
+                   whole ladder stays under the 9999 modal layer. */
+                z-index: 30;
+                /* PR #110 review (B2): the drawer's containing block is
+                   #app's PADDING box, so top:0/bottom:0 bleed across the
+                   safe-area bands — on a notched iPhone the drawer's first
+                   content (the sidebar title with the New/Import buttons)
+                   sat inside the status-bar band, invisible and untappable,
+                   and the bottom panel pressed into the Home Indicator.
+                   The box itself stays full-bleed (the iOS convention for a
+                   drawer: its background runs edge to edge) and these four
+                   insets inset only the CONTENT — the same padding
+                   declaration #app consumes, so landscape left/right insets
+                   are covered too; border-box keeps the drawer's width at
+                   var(--sidebar-width). The mask deliberately gets NO such
+                   padding: it has no content to protect and must stay
+                   full-bleed so a tap anywhere outside the drawer closes
+                   it. */
+                padding: env(safe-area-inset-top, 0px) env(safe-area-inset-right, 0px) env(safe-area-inset-bottom, 0px) env(safe-area-inset-left, 0px);
+            }
+            /* Drawer closed: off-canvas, NOT zero-width (that is the wide
+               tier's rendering, scoped away from here). */
+            #app.collapsed #sidebar {
+                transform: translateX(-100%);
+                visibility: hidden;
+            }
+            /* R7 mask: shown only on this tier, only while the drawer is
+               open — covers #main (terminal) and the tab strip so a tap
+               outside the drawer closes it, while sitting UNDER the
+               drawer content (30) and the header toggle button (40), which
+               stays clickable to close the drawer it opened. */
+            #app:not(.collapsed) #sidebar-mask {
+                display: block;
+                position: absolute;
+                inset: 0;
+                z-index: 25;
+                background: var(--modal-backdrop);
+            }
+            /* R7 z-index layering, NARROW TIER ONLY (position+z-index on
+               the button is scoped here so the desktop stacking — e.g.
+               the 9999 connection overlay covering everything — stays
+               exactly as it shipped before PR3). The button lives in
+               #header, i.e. inside #main, and only this lift lets it sit
+               above the open drawer. */
+            #sidebar-toggle-btn {
+                position: relative;
+                z-index: 40;
+            }
+            /* R8: horizontal tab snapping on the narrow tier. `proximity`
+               snaps only when the scroll already rests near a snap point,
+               so a small flick past the last tab does not rubber-band;
+               `start` aligns each tab's leading edge with the scroll
+               container's, pulling a half-revealed tab fully into view.
+               The existing hidden-scrollbar rule family on #tabs-container
+               (`#tabs-container::-webkit-scrollbar` and its siblings) is
+               untouched — R8 reuses it, does not restyle it. */
+            #tabs-container {
+                scroll-snap-type: x proximity;
+            }
+            .tab {
+                scroll-snap-align: start;
+            }
+        }
+
+        /* R7 middle tier (issue #100 L2, PRD-CHANGE §3.6): 769–1024px —
+           side-by-side layout kept, sidebar capped at 200px (base width
+           stays var(--sidebar-width), so this is purely a cap). 768px
+           belongs to the narrow tier: max-width:768px and min-width:769px
+           never both match at one integer width.
+           The fractional gap between 768 and 769px is INTENTIONALLY left
+           open here (unlike the collapse rule above, which needed the
+           seamless `not all and` form because a dead toggle is a
+           functional regression): where neither tier matches, the wide
+           styles apply — 240px side-by-side — which is purely cosmetic
+           and functionally harmless.
+           Cascade note: width and max-width are DIFFERENT properties, so
+           there is no specificity contest with the collapse rule — the
+           used width is simply min(width, max-width). Collapsed, the
+           collapse rule's width:0 keeps applying (max-width never blocks a
+           width from going LOWER: min(0, 200px) = 0); uncollapsed, the
+           base 240px computes against the 200px cap. */
+        @media (min-width: 769px) and (max-width: 1024px) {
+            #sidebar {
+                max-width: 200px;
+            }
+        }
+
+        /* R7 mask, all tiers: display:none is the GLOBAL state — the mask
+           exists only on the narrow tier (its only display:block lives
+           inside the max-width:768px block above), and without this rule
+           the div would be a visible flex sibling swallowing the whole
+           layout on desktop. */
+        #sidebar-mask {
+            display: none;
+        }
+
+        /* R10 (issue #100 L3): touch-target size on coarse pointers (finger
+           — Apple HIG's 44pt IS 44 CSS px in iOS Safari, so CSS says px;
+           44pt would compute to ~58.7px). min-width/min-height, never
+           fixed width/height: the used size is max(content, min-*), so the
+           existing padding and flex layout keep working and nothing is
+           forced smaller.
+           Layout note for the header case: box-sizing is border-box
+           file-wide, so #header's 40px height minus its 1px border-bottom
+           leaves a 39px content box; a 44px .icon-btn centered in it spans
+           [-2.5, 41.5] relative to the header top. That overflow is
+           INVISIBLE on touch — .icon-btn has border:none + background:none,
+           and R11 keeps hover backgrounds off pure-touch devices — while
+           the 16px glyph stays nearly centered, so the visual header is
+           unchanged. Two refinements in the #header .icon-btn rule below
+           are what keep the hit area a GENUINE 44px: body/html
+           overflow:hidden clips anything above viewport y=0 on
+           safe-area-inset-top:0 devices (clipped area does not hit-test,
+           which would lose the top 2.5px), and the part extending past the
+           header bottom must outrank #workspace for its hits to land.
+           Desktop is untouched (fine pointer: the media query does not
+           match). */
+        @media (pointer: coarse) {
+            .icon-btn {
+                min-width: 44px;
+                min-height: 44px;
+            }
+            .term-ctrl-btn {
+                min-width: 44px;
+                min-height: 44px;
+            }
+            /* Safe-area refinement (issue #100 L3 review): with the box
+               centered in the 39px content box its top sits at y=-2.5
+               relative to the header, and #header does not clip — but
+               body/html DO (overflow: hidden), and clipped area does not
+               hit-test. On devices with env(safe-area-inset-top) = 0
+               (iPad, Android, notchless iPhones, desktop touch screens)
+               the header top IS viewport y=0, so anything above it leaves
+               the hit area (failing the ≥44 acceptance). Notched iPhones
+               are unaffected — the safe-area padding pushes #app below
+               y=0. top: 3px moves the box to [0.5, 44.5], fully inside the
+               viewport; the 4.5px then extending past the header's bottom
+               edge overlap #workspace's top strip, so z-index lifts the
+               button above it (a transparent box steals only hit priority
+               there, no pixels).
+               Specificity: `#header .icon-btn` (1,1,0) outranks the narrow
+               tier's `#sidebar-toggle-btn` (1,0,0), so where BOTH apply
+               (narrow screen + coarse pointer) this rule's declarations
+               win — z-index therefore uses the SAME value 40 the narrow
+               rule sets, keeping the drawer layering (button above the
+               open drawer at 30) byte-identical; position agrees (both
+               relative), top and z-index come from here.
+               The selector is deliberately the class-level "any icon
+               button inside #header", not a chevron-specific special case:
+               any icon button a future header adds inherits the same 3px
+               shift and z-index automatically — same geometry problem,
+               same fix, by design rather than by oversight. */
+            #header .icon-btn {
+                position: relative;
+                top: 3px;
+                z-index: 40;
+            }
         }
 
         .sidebar-title {
@@ -193,10 +466,37 @@
             border-radius: 4px;
         }
 
+            @media (hover: hover) {
             .icon-btn:hover {
                 background: var(--border-color);
                 color: var(--active-color);
             }
+            }
+
+        /* Sidebar collapse toggle (issue #99): hosted in #header so it stays
+           reachable in both states and reserves no sidebar width of its own. */
+        #sidebar-toggle-btn {
+            flex: 0 0 auto;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        /* The toggle's two chevrons flip via the hidden ATTRIBUTE (JS uses
+           toggleAttribute because <svg> owns no hidden IDL property), but
+           the attribute alone renders NOTHING: the UA presentational-hint
+           rule [hidden] { display: none } is namespaced to XHTML (its
+           selector means *[hidden] in the HTML namespace), so SVG-namespace
+           elements never match — verified in headless Chrome, svg[hidden]
+           computes to display: inline and still occupies its 16x16 box.
+           This rule is the consumer that makes the attribute do anything.
+           (Different mechanism from the web-ui panels' explicit
+           #opencode-panel[hidden] etc. overrides a few hundred lines below:
+           those are HTML elements the UA rule DOES cover, and they need
+           their override because an author-source display declaration —
+           e.g. #opencode-panel { display: flex } — outranks the UA
+           [hidden] rule in the cascade; namespace is not involved there.) */
+        #sidebar-toggle-btn svg[hidden] { display: none !important; }
 
         #wt-list {
             flex: 1;
@@ -225,12 +525,40 @@
             cursor: ns-resize;
             background: var(--border-color);
             flex-shrink: 0;
+            /* R9 (issue #100 L3): touch-action is evaluated when the GESTURE
+               STARTS, so applying it only once the drag begins (e.g. via the
+               .dragging class) is too late for the current gesture — the UA
+               has already decided whether the touch is a scroll. It must
+               live on the handle permanently for the drag to win over page
+               scroll on the very first touchmove. The handle is a 4px
+               strip; nothing scrollable sits under it, so a standing
+               touch-action:none costs no scrollability anywhere. */
+            touch-action: none;
             transition: background 0.15s;
         }
 
-        #sidebar-resize-handle:hover,
+        /* Drag highlight, .dragging half — split out of the old
+           `:hover, .dragging` combination for R11 (issue #100 L3): a drag
+           in progress is not a hover state (on touch there is no hover at
+           all), so this half stays global; only the :hover half moves into
+           the hover-capability media query. user-select /
+           -webkit-touch-callout are scoped to the drag state per R9's
+           "while dragging" wording — e.preventDefault() on pointerdown is
+           the primary selection guard; this is the belt under that
+           suspender. */
         #sidebar-resize-handle.dragging {
             background: var(--active-color);
+            user-select: none;
+            -webkit-touch-callout: none;
+        }
+
+        /* The :hover half of the old combination, R11-wrapped (issue #100
+           L3): pure-touch devices never see it; the .dragging half above
+           stays global. */
+        @media (hover: hover) {
+        #sidebar-resize-handle:hover {
+            background: var(--active-color);
+        }
         }
 
         #sidebar-bottom-panel {
@@ -265,8 +593,10 @@
             user-select: none;
         }
 
+        @media (hover: hover) {
         .git-section-header:hover {
             background: var(--hover-bg);
+        }
         }
 
         .git-section-chevron {
@@ -318,8 +648,10 @@
             gap: 6px;
         }
 
+        @media (hover: hover) {
         .git-change-item:hover {
             background: var(--hover-bg);
+        }
         }
 
         .git-change-path {
@@ -376,8 +708,10 @@
             gap: 2px;
         }
 
+            @media (hover: hover) {
             .wt-item:hover {
                 background: var(--hover-bg);
+            }
             }
 
             .wt-item.active {
@@ -397,8 +731,10 @@
                 border-left-color: var(--main-accent);
             }
 
+            @media (hover: hover) {
             .wt-item-main:hover {
                 background: var(--main-accent-hover);
+            }
             }
 
             .wt-item-main .wt-branch {
@@ -446,9 +782,11 @@
             transition: color 0.15s, background 0.15s;
         }
 
+        @media (hover: hover) {
         .wt-github-link:hover {
             color: var(--text-primary);
             background: var(--hover-bg);
+        }
         }
 
         .wt-github-link:focus-visible {
@@ -502,8 +840,27 @@
             transition: opacity 0.2s;
         }
 
+        /* PR #110 review (M1): before R11, a tap on the worktree row
+           LATCHED :hover (sticky hover) and these actions appeared — so on
+           touch they used to be reachable through the hover path. R11
+           gates the reveal on hover capability, which pure-touch devices
+           never match: the actions can never appear there now. opacity: 0
+           does NOT block hit-testing, so without the rule below the row's
+           right end would be two permanently INVISIBLE yet tappable
+           buttons — an errant tap would open a terminal / Finder with no
+           visual hint. Restoring the reveal on touch (persistent display,
+           long-press) is the §8 ④ product decision, deliberately deferred;
+           this rule only closes the invisible-hit-area trap. */
+        @media (hover: none) {
+            .wt-actions {
+                pointer-events: none;
+            }
+        }
+
+        @media (hover: hover) {
         .wt-item:hover .wt-actions {
             opacity: 1;
+        }
         }
 
         .wt-action-btn {
@@ -516,9 +873,11 @@
             justify-content: center;
         }
 
+        @media (hover: hover) {
         .wt-action-btn:hover {
             background: var(--hover-bg);
             color: var(--text-primary);
+        }
         }
 
         .wt-action-btn.loading {
@@ -586,9 +945,18 @@
             border: none;
         }
 
-        #tabs-container::-webkit-scrollbar-thumb:hover,
+        /* R11 split (issue #100 L3): the :active half of this combination
+           is not a hover state — it stays global (like the resize handle's
+           .dragging half); only the :hover half moves into the media
+           query. */
         #tabs-container::-webkit-scrollbar-thumb:active {
             background: var(--text-secondary);
+        }
+
+        @media (hover: hover) {
+        #tabs-container::-webkit-scrollbar-thumb:hover {
+            background: var(--text-secondary);
+        }
         }
 
         #tabs-container::-webkit-scrollbar-button,
@@ -626,8 +994,10 @@
             background: var(--active-bg);
         }
 
+        @media (hover: hover) {
         .tab:hover {
             background: var(--hover-bg);
+        }
         }
 
         .tab.active {
@@ -771,9 +1141,11 @@
             margin-bottom: 2px;
         }
 
+            @media (hover: hover) {
             .new-tab-btn:hover {
                 background: var(--border-color);
                 color: var(--active-color);
+            }
             }
 
         /* Actions Toolbar (Hidden by default, shown when instance active) */
@@ -829,9 +1201,11 @@
             cursor: pointer;
             border-top-left-radius: 4px;
         }
+        @media (hover: hover) {
         #status-bar:hover {
             background: var(--hover-bg);
             color: var(--text-primary);
+        }
         }
 
         /* Resource Monitor Modal */
@@ -937,8 +1311,10 @@
             align-items: center;
             gap: 4px;
         }
+        @media (hover: hover) {
         #modal-monitor .monitor-licenses-toggle:hover {
             color: var(--text-primary);
+        }
         }
         #modal-monitor .monitor-licenses-toggle svg {
             transition: transform 0.2s;
@@ -1108,9 +1484,11 @@
             white-space: nowrap;
             transition: color 0.15s, border-color 0.15s, background 0.15s;
         }
+        @media (hover: hover) {
         .modal-tab:hover {
             color: var(--text-primary);
             background: var(--hover-bg);
+        }
         }
         .modal-tab.active {
             background: var(--main-bg);
@@ -1140,9 +1518,11 @@
             flex-shrink: 0;
             transition: background 0.15s, color 0.15s;
         }
+        @media (hover: hover) {
         .modal-close-btn:hover {
             background: var(--border-color);
             color: var(--danger-text);
+        }
         }
         .modal-close-btn:active {
             opacity: 0.7;
@@ -1200,14 +1580,21 @@
             color: var(--remote-title-icon);
         }
 
+        @media (hover: hover) {
         .remote-access .sidebar-title .icon-btn:hover {
             background: rgba(0,0,0,0.1);
             color: var(--remote-title-text);
         }
+        }
 
         @media (prefers-color-scheme: dark) {
+            /* Nested per R11 (issue #100 L3): media queries nest; this
+               dark-scheme hover override is gated on hover capability
+               exactly like every other :hover rule. */
+            @media (hover: hover) {
             .remote-access .sidebar-title .icon-btn:hover {
                 background: rgba(255,255,255,0.1);
+            }
             }
         }
 
@@ -1245,9 +1632,11 @@
             border-radius: 4px;
         }
 
+            @media (hover: hover) {
             button:hover {
                 background: var(--button-hover-bg);
                 border-color: var(--button-border);
+            }
             }
 
             button.primary {
@@ -1256,18 +1645,22 @@
                 border: 1px solid var(--button-border);
             }
 
+            @media (hover: hover) {
                 button.primary:hover {
                     background: var(--primary-button-hover-bg);
                 }
+            }
 
             button.danger {
                 color: var(--danger-text);
             }
 
+            @media (hover: hover) {
                 button.danger:hover {
                     background: var(--danger-hover-bg);
                     border-color: var(--danger-text);
                 }
+            }
 
             #btnAIGenerate.muted {
                 opacity: 0.5;
@@ -1305,9 +1698,21 @@
                 transition: background 0.2s, color 0.2s;
             }
 
+            /* R11 (issue #100 L3): every :hover rule in this stylesheet is
+               wrapped in a hover-capability media query so pure-touch
+               devices (no hover) never show STICKY hover highlights — a
+               tap would otherwise latch the :hover styles until another
+               tap lands somewhere else. Desktop rendering is unchanged
+               (hover-capable devices match the query and the rules apply
+               exactly where they did, in the same source order — each
+               rule is wrapped in place). Browsers too old to parse the
+               hover media query drop the whole block: acceptable graceful
+               degradation — they simply get no hover styling. */
+            @media (hover: hover) {
             .term-ctrl-btn:hover {
                 background: rgba(255,255,255,0.2);
                 color: #fff;
+            }
             }
 
             .term-ctrl-btn svg {
@@ -1340,7 +1745,7 @@
             <div id="sidebar-top-panel">
                 <ul id="wt-list"></ul>
             </div>
-            <div id="sidebar-resize-handle" onmousedown="startSidebarResize(event)"></div>
+            <div id="sidebar-resize-handle" onpointerdown="startSidebarResize(event)"></div>
             <div id="sidebar-bottom-panel">
                 <div id="git-staged-section" class="git-section">
                     <div class="git-section-header" onclick="toggleGitSection('staged')">
@@ -1365,9 +1770,26 @@
             </div>
         </div>
 
+        <!-- R7 (issue #100 L2): narrow-tier drawer mask, a child of #app
+             (sibling of #sidebar / #main). Covers #main and the tab strip
+             while the drawer is open; a tap closes the drawer through the
+             same single-state path as the toggle button. display:none on
+             every tier except narrow-and-open (see the stylesheet). -->
+        <div id="sidebar-mask" onclick="closeSidebarDrawer()"></div>
+
         <!-- Main: Tabs + Terminal -->
         <div id="main">
             <div id="header">
+                <button id="sidebar-toggle-btn" class="icon-btn" onclick="toggleSidebarCollapse()" title="Toggle Sidebar (Ctrl/Cmd+B)" aria-label="Toggle Sidebar" aria-controls="sidebar" aria-expanded="true">
+                    <svg id="sidebar-toggle-icon-left" width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+                        <path d="M9 3.5L4.5 8L9 12.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+                        <path d="M14.5 3.5L10 8L14.5 12.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+                    </svg>
+                    <svg id="sidebar-toggle-icon-right" width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" hidden aria-hidden="true">
+                        <path d="M7 3.5L11.5 8L7 12.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+                        <path d="M1.5 3.5L6 8L1.5 12.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+                    </svg>
+                </button>
                 <div id="tabs-container"></div>
 
                 <div id="instance-actions">
@@ -1785,6 +2207,13 @@
         let sidebarResizeStartY = 0;
         let sidebarTopPanelStartHeight = 0;
 
+        // Sidebar collapse (issue #99). One boolean, rendered purely through
+        // the `.collapsed` class on #app (R1) — this is deliberately orthogonal
+        // to gitExpandedSection above (R13): collapsing the sidebar never
+        // touches the staged/unstaged accordion state and vice versa.
+        const SIDEBAR_COLLAPSED_KEY = "mw.ui.sidebarCollapsed";
+        let sidebarCollapsed = false;
+
         // API
         function rememberServerRevision(res) {
             const rev = (res.headers.get(SERVER_REV_HEADER) || "").trim();
@@ -2109,6 +2538,257 @@
             }
         }
 
+        // --- Sidebar collapse (issue #99) ---
+
+        // First localStorage use in this file (R3): the collapsed preference
+        // is a user preference (persisted), unlike the session-scoped
+        // SERVER_UPGRADED_FLAG above. The DEFAULT is dispatched by viewport
+        // (R14, plan §3.3): a missing key on a narrow screen (<=768px, the
+        // drawer form) defaults to CLOSED so a first visit does not cover
+        // the terminal; a missing key on a wide screen defaults to expanded.
+        // An EXPLICIT persisted value always wins over the viewport — the
+        // key is shared between the desktop form and the drawer form, so a
+        // user who collapsed the sidebar on desktop lands on the closed
+        // drawer on a phone with no special case (§5.3-5). A throwing
+        // storage (private mode, old browsers) or an unparseable stored
+        // value degrades to the same viewport-dispatched default,
+        // unpersisted, instead of breaking the page (try/catch on both
+        // directions).
+        function readSidebarCollapsed() {
+            try {
+                const raw = localStorage.getItem(SIDEBAR_COLLAPSED_KEY);
+                if (raw === null) return defaultSidebarCollapsedByViewport();
+                return JSON.parse(raw) === true;
+            } catch (e) {
+                // Unreadable storage, or a stored value that does not
+                // parse: degrade exactly like a missing key.
+                return defaultSidebarCollapsedByViewport();
+            }
+        }
+
+        // R14: the viewport-dispatched default itself, in one guarded
+        // place. No window / no matchMedia (older browsers, non-browser
+        // hosts) and a throwing matchMedia all degrade to the wide-screen
+        // default (expanded). Deliberately NOT re-evaluated on breakpoint
+        // crossings mid-session: the default applies at FIRST LOAD only —
+        // afterwards the persisted value (or the current .collapsed class
+        // on #app) owns the state, and the two render forms follow the
+        // class at whatever breakpoint happens to match.
+        function defaultSidebarCollapsedByViewport() {
+            try {
+                if (typeof window === "undefined" || typeof window.matchMedia !== "function") return false;
+                return window.matchMedia("(max-width: 768px)").matches;
+            } catch (e) {
+                return false;
+            }
+        }
+
+        function persistSidebarCollapsed(value) {
+            try {
+                localStorage.setItem(SIDEBAR_COLLAPSED_KEY, JSON.stringify(value));
+            } catch (e) {
+                // Storage unavailable (private mode / old browser): the
+                // toggle keeps working for this page load, stateless.
+            }
+        }
+
+        // R12: re-fit the active xterm after the sidebar width changed, so
+        // the terminal reflows to its new columns instead of keeping a
+        // stale geometry (scrollbar / misaligned TUI). The fixed trigger
+        // order is: flip the `.collapsed` class FIRST, then fit inside one
+        // requestAnimationFrame — fitting reads the post-reflow box, and a
+        // frame boundary guarantees the flex row has settled. The embedded
+        // web-UI iframes (opencode / reasonix / dsh) need no counterpart:
+        // they are ordinary documents and reflow with their container.
+        function refitActiveTerminal() {
+            const session = getActiveTerminalSession();
+            if (!session || !session.term) return;
+            if (session.fitAddon) {
+                try { session.fitAddon.fit(); } catch (e) { console.error("xterm fit error:", e); }
+            }
+            if (session.term.cols > 0 && session.term.rows > 0) {
+                sendResize(session, session.term.cols, session.term.rows);
+                syncTerminalToAppliedSize(session);
+            }
+        }
+
+        function applySidebarCollapsed(collapsed) {
+            sidebarCollapsed = collapsed;
+            document.getElementById("app").classList.toggle("collapsed", collapsed);
+            // R2: two-state button. "<<" shows while expanded (click to push
+            // the sidebar away); ">>" shows while collapsed (click to bring
+            // it back). `hidden` MUST be flipped with toggleAttribute: an
+            // <svg> is an SVGElement, and the `hidden` IDL property exists
+            // only on HTMLElement — a plain `.hidden = x` assignment is an
+            // inert expando. And the attribute still needs its explicit
+            // consumer — #sidebar-toggle-btn svg[hidden] in the stylesheet:
+            // the UA's own [hidden] { display: none } hint is namespaced to
+            // HTML elements, so without that rule both icons would render
+            // stacked in every state.
+            document.getElementById("sidebar-toggle-icon-left").toggleAttribute("hidden", collapsed);
+            document.getElementById("sidebar-toggle-icon-right").toggleAttribute("hidden", !collapsed);
+            // a11y: aria-expanded on the toggle follows the conventional
+            // ARIA reading — it describes whether the controlled region
+            // (the sidebar) is expanded: "true" while the sidebar is
+            // visible, "false" while it is folded away.
+            const toggleBtn = document.getElementById("sidebar-toggle-btn");
+            if (toggleBtn) toggleBtn.setAttribute("aria-expanded", collapsed ? "false" : "true");
+            // See refitActiveTerminal for why the class flip precedes the fit.
+            requestAnimationFrame(refitActiveTerminal);
+        }
+
+        function toggleSidebarCollapse() {
+            applySidebarCollapsed(!sidebarCollapsed);
+            persistSidebarCollapsed(sidebarCollapsed);
+        }
+
+        // R7 (issue #100 L2): the narrow-tier mask's click target. Closes
+        // the drawer through the SAME single-state path as the toggle
+        // button and Ctrl/Cmd+B — applySidebarCollapsed flips the one
+        // .collapsed class and the change persists under the one shared
+        // key. Deliberately an explicit close, not toggleSidebarCollapse():
+        // the mask is only clickable while the drawer is open, but an
+        // explicit apply keeps the state honest even if this handler ever
+        // races the toggle. No second state variable (plan §3.1).
+        function closeSidebarDrawer() {
+            applySidebarCollapsed(true);
+            persistSidebarCollapsed(true);
+        }
+
+        // R4: first document-level keydown. Ctrl/Cmd+B toggles the sidebar.
+        // key.toLowerCase() covers Caps Lock and Ctrl/Cmd+Shift+B, where
+        // event.key is "B"; event.repeat (key held down) is ignored so a
+        // long press does not flap the sidebar back and forth.
+        //
+        // R16, stated against the real mechanism (verified in the vendored
+        // source, static/vendor/xterm/xterm.js): xterm's _keyDown runs
+        // evaluateKeyboardEvent and then cancel(e, !0) — unconditional
+        // preventDefault + stopPropagation — on the paths that SEND DATA
+        // (Ctrl+B arrives at the TUI as \u0002) or that set the result's
+        // cancel flag (Tab/Enter/Escape). Those keydowns die inside xterm
+        // and never reach this listener. Combos that produce NO data and no
+        // cancel flag (Ctrl+Shift+B, Ctrl+Alt+B, macOS Cmd+B) are NOT
+        // cancelled and DO bubble here — by design, since Ctrl/Cmd+Shift+B
+        // is an intended toggle (Caps Lock). The terminal is also
+        // same-document, not an iframe: the pty renderer draws xterm into a
+        // plain div (kinds/pty.js). True cross-frame isolation exists only
+        // for the opencode / reasonix / dsh web UIs: their iframes never
+        // deliver keydown to the parent document, a security-model boundary
+        // we deliberately do not route around with postMessage.
+        function handleSidebarToggleKeydown(event) {
+            if (event.repeat) return;
+            // Ctrl+Alt combinations are AltGr on several keyboard layouts —
+            // Ctrl+Alt+B must reach the layout, not fold the sidebar.
+            if (event.altKey) return;
+            if (!(event.metaKey || event.ctrlKey)) return;
+            if (event.key.toLowerCase() !== "b") return;
+            // Never hijack the foreground UI or typing:
+            // 1. PR #110 review (B3): modals are native <dialog> + showModal
+            //    (15 of them). While one is up front, focus sits on ITS
+            //    controls — selects and buttons that the old
+            //    input/textarea/contenteditable guard did not cover — and
+            //    Ctrl/Cmd+B would toggle the sidebar BEHIND the modal,
+            //    invisible and persisted with no feedback. A dialog
+            //    ancestor yields to the modal entirely.
+            // 2. The input/textarea/contenteditable guard stays as defence
+            //    in depth for editable hosts outside any dialog. xterm
+            //    cancels its own terminal keydowns (see R16 above), so
+            //    neither guard is on the terminal path.
+            const target = event.target;
+            if (target && typeof target.closest === "function" &&
+                target.closest("dialog")) return;
+            if (target && typeof target.closest === "function" &&
+                target.closest("input, textarea, [contenteditable]")) return;
+            event.preventDefault(); // keep Ctrl+B from toggling the browser's bookmarks bar
+            toggleSidebarCollapse();
+        }
+
+        document.addEventListener("keydown", handleSidebarToggleKeydown);
+
+        // --- Viewport height & the iOS soft keyboard (issue #100 L1) ---
+
+        // R6: iOS Safari does not resize the layout viewport when the soft
+        // keyboard opens, and we deliberately do NOT use the
+        // interactive-widget=resizes-content viewport directive (it is
+        // Chromium-only; see plan §3.5/§8) — so the keyboard parks over the
+        // bottom of the page. body/html are overflow:hidden: the page itself
+        // never scrolls, which means the covered strip cannot be scrolled
+        // back into view. The only remedy is to shrink the app to what is
+        // actually visible, and window.visualViewport is the one API that
+        // reports that rectangle. The RESIZE listener runs the full
+        // judgment (keyboard open AND close); the SCROLL listener only
+        // re-pins an existing pin — a pure pan must never introduce one.
+        // While anything is covered, #app's inline height is pinned to the
+        // visual viewport's bottom edge in layout coordinates; the narrowing
+        // walks down the flex column (#workspace is flex:1), the terminal
+        // host's ResizeObserver fires and xterm re-fits, so the input area
+        // stays above the keyboard. When nothing is covered the inline
+        // height is CLEARED, handing sizing back to the CSS cascade
+        // (100dvh, with the 100vh fallback).
+        function applyVisualViewportHeight() {
+            const vv = window.visualViewport;
+            const app = document.getElementById("app");
+            if (!vv || !app) return;
+            // Pinch / double-tap zoom opt-out, spec fact #1: vv.height is
+            // measured in layout-viewport pixels, so it SHRINKS as the scale
+            // grows (and a resize event fires on the change) — without this
+            // guard a pinch would pin #app to the zoomed rectangle and
+            // collapse the whole UI toward half height. The zoomed state
+            // owns no inline height; zooming back to 1 re-runs the full
+            // judgment on the resize event and re-pins if the keyboard is
+            // still up.
+            if (vv.scale && Math.abs(vv.scale - 1) > 0.01) {
+                app.style.height = "";
+                return;
+            }
+            // Visible bottom edge in layout-viewport coordinates. With the
+            // keyboard open this sits keyboardHeight above the layout
+            // bottom (offsetTop stays 0); at rest it equals the layout
+            // height. The sentinel is documentElement.clientHeight, spec
+            // fact #2: vv.height excludes scrollbars pinned to the visual
+            // viewport, while window.innerHeight INCLUDES the classic
+            // scrollbar gutter — comparing against innerHeight would pin
+            // spuriously by the gutter's size on desktops. The 1px slack
+            // absorbs sub-pixel rounding so a closed keyboard does not
+            // leave a 1px-short inline style behind.
+            const visibleBottom = vv.offsetTop + vv.height;
+            if (visibleBottom < document.documentElement.clientHeight - 1) {
+                app.style.height = Math.max(visibleBottom, 0) + "px";
+            } else {
+                app.style.height = "";
+            }
+        }
+
+        // R6: the visual viewport also pans (pinch-zoom, or iOS revealing
+        // the focused field above the keyboard) and fires scroll there.
+        // Scroll must never INTRODUCE a pin: while nothing is occluded the
+        // CSS cascade owns the height (a pan alone never proves occlusion),
+        // so an unpinned app gets a no-op. An EXISTING pin, by contrast,
+        // follows the visible bottom edge in BOTH directions — it is a
+        // re-application of the full judgment, bounded above by
+        // documentElement.clientHeight (the visual viewport cannot pan out
+        // of the layout viewport, and a pinch-zoomed scale already
+        // short-circuited to no pin).
+        function reapplyPinnedVisualViewportHeight() {
+            const app = document.getElementById("app");
+            if (!app || !app.style.height) return;
+            applyVisualViewportHeight();
+        }
+
+        // Desktop and legacy browsers may have no window.visualViewport at
+        // all: degrade to a no-op — no listeners are registered and the CSS
+        // dvh/fallback pair remains the whole story.
+        function initVisualViewportHandling() {
+            const vv = window.visualViewport;
+            if (!vv) return;
+            // resize: keyboard open/close, URL-bar show/hide, zoom change —
+            // the full judgment, in both directions.
+            vv.addEventListener("resize", applyVisualViewportHeight);
+            // scroll: visual-viewport pan — re-pin only what is pinned.
+            vv.addEventListener("scroll", reapplyPinnedVisualViewportHeight);
+            applyVisualViewportHeight();
+        }
+
         function init() {
             if (sessionStorage.getItem(SERVER_UPGRADED_FLAG) === "1") {
                 sessionStorage.removeItem(SERVER_UPGRADED_FLAG);
@@ -2119,6 +2799,14 @@
                 const badge = document.getElementById("remote-badge");
                 if (badge) badge.classList.remove("hidden");
             }
+            // Restore the persisted sidebar preference (issue #99) before
+            // the first refresh paints, so a collapsed preference does not
+            // flash the expanded sidebar.
+            applySidebarCollapsed(readSidebarCollapsed());
+            // R6: pin #app to the visual viewport before the first paint that
+            // matters, so a reload with the keyboard already up (iOS Safari
+            // restores input focus) starts at the narrowed height.
+            initVisualViewportHandling();
             refresh();
             // Polling for status updates (2s)
             if (pollTimer) clearInterval(pollTimer);
@@ -2352,15 +3040,45 @@
         }
 
         // --- Sidebar Resize ---
+        // R9 (issue #100 L3): Pointer Events instead of mouse events — one
+        // code path serves mouse (pointerType "mouse"), touch ("touch") and
+        // pen. setPointerCapture retargets every subsequent event of this
+        // pointer to the handle until pointerup/pointercancel, so the
+        // document-level move/up listeners below keep firing even when the
+        // pointer slides off the element or out of the window mid-drag (the
+        // old mouse-only path silently lost drags outside the document).
+        // pointercancel is registered as a stop condition because iOS fires
+        // it when the UA takes over a gesture (system gesture, scroll
+        // decision) — a drag that simply ends is better than one half-
+        // applied. The clamp math in handleSidebarResize is unchanged.
         function startSidebarResize(e) {
+            // Re-entry guard: a second pointerdown mid-drag (desktop
+            // secondary button, a second finger on the strip) would
+            // re-baseline sidebarResizeStartY / sidebarTopPanelStartHeight
+            // (the drag lurches to the new baseline) and fight the first
+            // pointer for setPointerCapture. Listeners are NOT the leak
+            // risk — addEventListener dedupes identical type/callback/
+            // capture per the DOM spec — the hazards are the baseline
+            // hijack and the dual-pointer contention.
+            if (isResizingSidebar) return;
             isResizingSidebar = true;
             sidebarResizeStartY = e.clientY;
             const topPanel = document.getElementById("sidebar-top-panel");
             sidebarTopPanelStartHeight = topPanel ? topPanel.offsetHeight : 0;
-            document.addEventListener("mousemove", handleSidebarResize);
-            document.addEventListener("mouseup", stopSidebarResize);
             const handle = document.getElementById("sidebar-resize-handle");
-            if (handle) handle.classList.add("dragging");
+            if (handle) {
+                handle.classList.add("dragging");
+                // Guarded against NotFoundError: setPointerCapture throws
+                // when the pointerId is NOT an active pointer (synthetic
+                // events, timing edges). "Engines without Pointer Capture"
+                // is not the real hazard — capture ships in the same spec
+                // generation as pointerdown itself. On a throw the document
+                // listeners still cover the in-window drag.
+                try { handle.setPointerCapture(e.pointerId); } catch (err) { /* inactive-pointer NotFoundError */ }
+            }
+            document.addEventListener("pointermove", handleSidebarResize);
+            document.addEventListener("pointerup", stopSidebarResize);
+            document.addEventListener("pointercancel", stopSidebarResize);
             e.preventDefault();
         }
 
@@ -2383,12 +3101,23 @@
             bottomPanel.style.flex = "1";
         }
 
-        function stopSidebarResize() {
+        function stopSidebarResize(e) {
             isResizingSidebar = false;
-            document.removeEventListener("mousemove", handleSidebarResize);
-            document.removeEventListener("mouseup", stopSidebarResize);
+            document.removeEventListener("pointermove", handleSidebarResize);
+            document.removeEventListener("pointerup", stopSidebarResize);
+            document.removeEventListener("pointercancel", stopSidebarResize);
             const handle = document.getElementById("sidebar-resize-handle");
-            if (handle) handle.classList.remove("dragging");
+            if (handle) {
+                handle.classList.remove("dragging");
+                // Explicit release: implicit capture ends with pointerup, but
+                // a cancel edge can leave it held on some engines. Guarded —
+                // releasing an inactive pointer throws.
+                try {
+                    if (e && typeof handle.hasPointerCapture === "function" && handle.hasPointerCapture(e.pointerId)) {
+                        handle.releasePointerCapture(e.pointerId);
+                    }
+                } catch (err) { /* pointer already inactive */ }
+            }
         }
 
         // Render

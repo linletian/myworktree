@@ -60,6 +60,8 @@ It does **not** analyze project code or prevent concurrent write conflicts insid
 
 ### 3.3 Main workspace (sidebar)
 
+> **Layout hierarchy（UI 设计原则，不可变）**：`#app` 之下的顶层划分是两个**同级**区域——全高的 `#sidebar`（主仓库 + worktree 列表 + git 变更面板）与 `#main` 主工作区；`#header`（实例 tab 栏 + 实例操作按钮）位于 `#main` **之内**，实例 tab 跟随 worktree 列表的选择切换。产品层级是 worktree 在上、实例 tab 在下。任何 UI 变更（新增按钮、侧栏折叠、响应式 drawer 等）都**不得**把 tab 栏提升为压住侧栏的全宽顶栏，也不得让侧栏在视觉上从属于 tab 栏——那会把 worktree 列表降级为实例 tab 的子内容。本条已两次在评审中踩坑（最近一次：v0.6.0 侧栏折叠设计稿初版把开关按钮画进全宽顶栏）；正确做法以该例为鉴：开关按钮放 `#header` 左侧（即 `#main` 顶栏左侧），侧栏保持全高。窄屏 drawer 不违反本条——drawer 是侧栏的覆盖式渲染形态，保留自己的全高顶栏。
+
 The sidebar shows a pinned **Main Workspace** item at the top (purple accent), followed by a "Worktrees" divider and the managed worktree list.
 
 - **Main repo**: `GET /api/main` returns `{name, branch, github_url}`. The branch is live — queried via `git rev-parse --abbrev-ref HEAD` (via `gitx.CurrentBranch`). Returns empty string for `branch` on detached HEAD (e.g., CI shallow clones), otherwise returns the current branch name.

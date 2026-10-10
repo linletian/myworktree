@@ -331,6 +331,31 @@ func sliceJSFunction(t *testing.T, js, name string) string {
 	return rest[:end]
 }
 
+// stripCSSComments removes /* */ comments so selector scans see only real
+// rules. index.html's comments mention selectors like :hover verbatim (the
+// R11 notes do), and a containment scan must not mistake comment text for a
+// rule outside its media block.
+func stripCSSComments(css string) string {
+	var b strings.Builder
+	b.Grow(len(css))
+	for {
+		open := strings.Index(css, "/*")
+		if open < 0 {
+			b.WriteString(css)
+			return b.String()
+		}
+		b.WriteString(css[:open])
+		css = css[open:]
+		close := strings.Index(css, "*/")
+		if close < 0 {
+			// Unterminated comment: drop the rest rather than scanning
+			// comment text as rules.
+			return b.String()
+		}
+		css = css[close+2:]
+	}
+}
+
 // TestEmptyWorktreeSwitchHidesAllWebPanels pins the issue #101 fix: switching
 // to a worktree with ZERO instances must not leave the previous worktree's
 // dsh-web iframe on screen. Three defects combined: (A) renderWorkspace's
@@ -466,6 +491,884 @@ func TestWorktreeDirtyDeleteDialog(t *testing.T) {
 	for _, c := range checks {
 		if !strings.Contains(indexJS, c.anchor) {
 			t.Fatalf("index.html: %s — anchor %q not found (issue #102)", c.what, c.anchor)
+		}
+	}
+}
+
+// TestSidebarCollapseAnchors pins the issue #99 desktop sidebar collapse
+// contract (PR1 of docs/plans/feature-v0.6.0-webui-sidebar-responsive/):
+// the collapsed state is a pure-CSS class on #app with zero JS width
+// math, the preference persists under the namespaced localStorage key, and
+// the toggle button lives inside #header BEFORE #tabs-container — the
+// header is the first child of #main, so the button must never drift into
+// the sidebar or after the tabs it is supposed to lead.
+func TestSidebarCollapseAnchors(t *testing.T) {
+	bodyText := fetchIndexHTML(t)
+
+	// R1: collapsed state renders through one class; #sidebar width goes to
+	// zero with overflow hidden and #main's flex:1 (untouched here) fills
+	// the space. JS must not measure or assign any pixel width. The three
+	// declarations are asserted INSIDE the collapsed rule block — a bare
+	// full-file Contains would keep passing on unrelated rules (index.html
+	// has other `width: 0;` hits), i.e. it would anchor nothing.
+	ruleStart := strings.Index(bodyText, "#app.collapsed #sidebar {")
+	if ruleStart < 0 {
+		t.Fatal("GET / lost the #app.collapsed #sidebar rule (issue #99 R1)")
+	}
+	ruleEnd := strings.Index(bodyText[ruleStart:], "\n        }")
+	if ruleEnd < 0 {
+		t.Fatal("GET / #app.collapsed #sidebar rule has no closing brace")
+	}
+	rule := bodyText[ruleStart : ruleStart+ruleEnd]
+	for _, decl := range []string{"width: 0;", "overflow: hidden;", "border-right: none;", "visibility: hidden;"} {
+		if !strings.Contains(rule, decl) {
+			t.Fatalf("GET / #app.collapsed #sidebar rule should declare %q (issue #99 R1)", decl)
+		}
+	}
+	// Minimal literal anchors: equivalent rewrites (computed styles, inline
+	// style objects, styleSheet.insertRule) can bypass every string below,
+	// so the semantic constraint — JS does no sidebar width math (plan
+	// §3.1) — is held by review discipline, not by this list.
+	for _, forbidden := range []string{
+		// The class is the single source of truth (§3.1 of the plan): any
+		// JS width read/write would re-introduce the dual-state the plan
+		// forbids.
+		"sidebar.style.width",
+		"sidebar.offsetWidth",
+		"getComputedStyle(document.getElementById(\"sidebar\"))",
+		// The chevron icons flip via toggleAttribute("hidden", …): a plain
+		// `.hidden = …` on an <svg> is an inert expando (SVGElement has no
+		// hidden IDL property), which shipped as a real bug in PR1 review.
+		`getElementById("sidebar-toggle-icon-left").hidden`,
+		`getElementById("sidebar-toggle-icon-right").hidden`,
+	} {
+		if strings.Contains(bodyText, forbidden) {
+			t.Fatalf("GET / must not use %q — see the comment above the forbidden list (issue #99 R1/R2)", forbidden)
+		}
+	}
+
+	// R3: namespaced persistence key — the file's first localStorage use.
+	if !strings.Contains(bodyText, `"mw.ui.sidebarCollapsed"`) {
+		t.Fatal("GET / should persist the sidebar state under the namespaced key \"mw.ui.sidebarCollapsed\" (issue #99 R3)")
+	}
+
+	// R2: the button is a child of #header sitting before #tabs-container.
+	// Position, not mere presence: the level hierarchy (#sidebar and #main
+	// as siblings under #app, header inside #main) is a hard design
+	// constraint of the plan (§3.2) — a button parked after the tabs, or
+	// inside the sidebar, would violate it while every Contains check
+	// still passed.
+	headerAt := strings.Index(bodyText, `<div id="header">`)
+	if headerAt < 0 {
+		t.Fatal("GET / lost the #header block")
+	}
+	btnAt := strings.Index(bodyText[headerAt:], `id="sidebar-toggle-btn"`)
+	tabsAt := strings.Index(bodyText[headerAt:], `id="tabs-container"`)
+	if btnAt < 0 {
+		t.Fatal("GET / should include the sidebar toggle button inside #header (issue #99 R2)")
+	}
+	if tabsAt < 0 || btnAt > tabsAt {
+		t.Fatal("GET / should place the sidebar toggle button BEFORE #tabs-container inside #header (issue #99 R2, §3.2 hierarchy)")
+	}
+	// Both chevron states live in the shipped DOM and flip via
+	// toggleAttribute("hidden") — the initial markup (left visible, right
+	// hidden) matches the expanded state. aria-hidden keeps both icons off
+	// the accessibility tree in either state. The hidden ATTRIBUTE has an
+	// explicit CSS consumer: the UA's [hidden] { display: none } hint is
+	// namespaced to HTML elements, so svg[hidden] would still render
+	// without this rule (head-Chrome-verified) and the attribute path would
+	// spin in place — anchor the rule so it cannot be deleted quietly.
+	for _, icon := range []string{`id="sidebar-toggle-icon-left"`, `id="sidebar-toggle-icon-right"`} {
+		if !strings.Contains(bodyText, icon) {
+			t.Fatalf("GET / should include both toggle chevron states, missing %q (issue #99 R2)", icon)
+		}
+	}
+	for _, check := range []string{
+		`aria-label="Toggle Sidebar"`,
+		`aria-controls="sidebar"`,
+		`aria-expanded="true"`,
+		"#sidebar-toggle-btn svg[hidden] { display: none !important; }",
+		"toggleAttribute(\"hidden\", collapsed)",
+		"toggleAttribute(\"hidden\", !collapsed)",
+		`setAttribute("aria-expanded", collapsed ? "false" : "true")`,
+	} {
+		if !strings.Contains(bodyText, check) {
+			t.Fatalf("GET / should include the toggle button a11y/attribute hook %q (issue #99 R2)", check)
+		}
+	}
+
+	// R4: the first document-level keydown with its input guard, repeat
+	// guard and case-insensitive match, registered once.
+	//
+	// The count check is an intentional tripwire, not an accident of this
+	// feature: the plan's fact table (PRD-CHANGE §1.4) records exactly one
+	// document-level keydown for this file. A future PR that adds an
+	// unrelated global shortcut will trip it — the right response is to
+	// update THIS test and the plan's fact table together, not to point
+	// the message at whatever issue happened to add the second listener.
+	if strings.Count(bodyText, `document.addEventListener("keydown"`) != 1 {
+		t.Fatal("GET / should register exactly one document-level keydown listener — intentional tripwire: the plan fact table (PRD-CHANGE §1.4) assumes a single global keydown; adding an unrelated one must update this test AND the plan document")
+	}
+	for _, check := range []string{
+		"function handleSidebarToggleKeydown(event)",
+		"if (event.repeat) return;",
+		"if (event.altKey) return;",
+		`if (!(event.metaKey || event.ctrlKey)) return;`,
+		`event.key.toLowerCase() !== "b"`,
+		// PR #110 review (B3): dialog-ancestor guard first — a modal up
+		// front must not have the sidebar toggled (invisibly, persisted)
+		// behind it.
+		`target.closest("dialog")`,
+		`target.closest("input, textarea, [contenteditable]")`,
+	} {
+		if !strings.Contains(bodyText, check) {
+			t.Fatalf("GET / should include the sidebar shortcut guard %q (issue #99 R4)", check)
+		}
+	}
+
+	// R12: the fit re-runs after the class flip, on a rAF boundary, so the
+	// xterm measures its post-reflow box.
+	apply := sliceJSFunction(t, bodyText, "applySidebarCollapsed")
+	clsAt := strings.Index(apply, `classList.toggle("collapsed", collapsed)`)
+	fitAt := strings.Index(apply, "requestAnimationFrame(refitActiveTerminal);")
+	if clsAt < 0 || fitAt < 0 || clsAt > fitAt {
+		t.Fatal("applySidebarCollapsed must flip the .collapsed class BEFORE scheduling the terminal refit (issue #99 R12)")
+	}
+	if !strings.Contains(bodyText, "function refitActiveTerminal()") ||
+		!strings.Contains(bodyText, "session.fitAddon.fit();") {
+		t.Fatal("GET / should refit the active xterm via xterm-addon-fit after a collapse toggle (issue #99 R12)")
+	}
+
+	// R13: the two sidebar-local fold states must stay orthogonal — the
+	// collapse code path never touches the git accordion variable. The
+	// slice ends at the next same-indent declaration, so it spans exactly
+	// applySidebarCollapsed's body.
+	if strings.Contains(apply, "gitExpandedSection") {
+		t.Fatal("applySidebarCollapsed must not touch gitExpandedSection — the sidebar collapse and the staged/unstaged accordion are orthogonal states (issue #99 R13)")
+	}
+}
+
+// TestViewportAndHeightAnchors pins the issue #100 L1 viewport/height
+// contract (PR2 of docs/plans/feature-v0.6.0-webui-sidebar-responsive/):
+// the viewport meta opts into cover fitting, #app's height basis is 100dvh
+// with a 100vh fallback that must be declared FIRST (old Safari progressive
+// enhancement), the width is 100% instead of 100vw, the notch / Home
+// Indicator safe areas are consumed via env(safe-area-inset-*), and the iOS
+// soft keyboard is handled by pinning #app to window.visualViewport with a
+// graceful no-op where the API does not exist. R12 with PR1: R5 owns #app's
+// height/width basis while PR1's collapse owns #sidebar's flex-row share —
+// two disjoint rule blocks on the same element, asserted here to coexist.
+func TestViewportAndHeightAnchors(t *testing.T) {
+	bodyText := fetchIndexHTML(t)
+
+	// R5: the viewport meta opts into cover fitting — the prerequisite for
+	// env(safe-area-inset-*) returning anything but 0. Anchored to the meta
+	// tag itself, not the bare string (a stray mention in a comment would
+	// satisfy a full-file Contains while the shipped meta stayed broken).
+	metaStart := strings.Index(bodyText, `<meta name="viewport" content="`)
+	if metaStart < 0 {
+		t.Fatal("GET / lost the viewport meta tag (issue #100 L1 R5)")
+	}
+	metaEnd := strings.IndexByte(bodyText[metaStart:], '>')
+	if metaEnd < 0 {
+		t.Fatal("GET / viewport meta tag is not closed")
+	}
+	meta := bodyText[metaStart : metaStart+metaEnd]
+	for _, want := range []string{"width=device-width", "initial-scale=1", "viewport-fit=cover"} {
+		if !strings.Contains(meta, want) {
+			t.Fatalf("GET / viewport meta should carry %q (issue #100 L1 R5)", want)
+		}
+	}
+
+	// R5: #app's height/width basis. The declarations are asserted INSIDE
+	// the #app rule — index.html holds other 100% hits (form inputs, tab
+	// containers), so a bare full-file Contains would anchor nothing.
+	ruleStart := strings.Index(bodyText, "#app {\n")
+	if ruleStart < 0 {
+		t.Fatal("GET / lost the #app rule (issue #100 L1 R5)")
+	}
+	ruleEnd := strings.Index(bodyText[ruleStart:], "\n        }")
+	if ruleEnd < 0 {
+		t.Fatal("GET / #app rule has no closing brace")
+	}
+	rule := bodyText[ruleStart : ruleStart+ruleEnd]
+	for _, decl := range []string{"height: 100vh;", "width: 100%;"} {
+		if !strings.Contains(rule, decl) {
+			t.Fatalf("GET / #app rule should declare %q (issue #100 L1 R5)", decl)
+		}
+	}
+	if strings.Contains(rule, "width: 100vw;") {
+		t.Fatal("GET / #app rule must not use width: 100vw — vw counts the scrollbar gutter and overflows horizontally (issue #100 L1 R5)")
+	}
+	// The safe-area padding is what the viewport-fit=cover meta above buys.
+	// All four insets, so both the notch (left/right in landscape) and the
+	// Home Indicator (bottom) are covered; desktop insets are all 0.
+	if !strings.Contains(rule, "env(safe-area-inset-") {
+		t.Fatal("GET / #app rule should consume env(safe-area-inset-*) for the notch / Home Indicator (issue #100 L1 R5)")
+	}
+	for _, inset := range []string{"safe-area-inset-top", "safe-area-inset-right", "safe-area-inset-bottom", "safe-area-inset-left"} {
+		if !strings.Contains(rule, inset) {
+			t.Fatalf("GET / #app rule should consume %s (issue #100 L1 R5)", inset)
+		}
+	}
+
+	// R5: the dvh upgrade lives in an @supports block and must come AFTER
+	// the 100vh fallback in the source. The mechanism is last-declaration-
+	// wins for same-origin equal-specificity declarations: browsers that
+	// understand dvh take the @supports block over the fallback, and
+	// browsers without dvh (old Safari) evaluate the condition to false
+	// and drop the WHOLE block, keeping the 100vh baseline. A swapped order
+	// would not strand old Safari — it would silently regress modern
+	// browsers to static 100vh, reviving the URL-bar jump this layer
+	// exists to kill.
+	supportsAt := strings.Index(bodyText, "@supports (height: 100dvh) {")
+	if supportsAt < 0 {
+		t.Fatal("GET / lost the @supports (height: 100dvh) block (issue #100 L1 R5)")
+	}
+	supportsEnd := strings.Index(bodyText[supportsAt:], "\n        }")
+	if supportsEnd < 0 {
+		t.Fatal("GET / @supports (height: 100dvh) block has no closing brace")
+	}
+	supports := bodyText[supportsAt : supportsAt+supportsEnd]
+	if !strings.Contains(supports, "height: 100dvh;") {
+		t.Fatal("GET / @supports block should upgrade #app to height: 100dvh (issue #100 L1 R5)")
+	}
+	fallbackAt := strings.Index(rule, "height: 100vh;")
+	if fallbackAt < 0 || ruleStart+fallbackAt > supportsAt {
+		t.Fatal("GET / should declare the 100vh fallback BEFORE the @supports (height: 100dvh) block — modern browsers resolve last-wins and take the dvh block, old Safari drops the whole @supports block; swapped, modern browsers would silently stay on static 100vh (issue #100 L1 R5)")
+	}
+	// R12 with PR1: the collapse mechanism (#app.collapsed #sidebar) is a
+	// different rule block on a different property — it must survive this
+	// PR untouched, and this PR must not have bolted a width/height onto
+	// the collapsed rule either.
+	collapsedStart := strings.Index(bodyText, "#app.collapsed #sidebar {")
+	if collapsedStart < 0 {
+		t.Fatal("GET / lost the PR1 #app.collapsed #sidebar rule (issue #99 R1)")
+	}
+	collapsedEnd := strings.Index(bodyText[collapsedStart:], "\n        }")
+	if collapsedEnd < 0 {
+		t.Fatal("GET / #app.collapsed #sidebar rule has no closing brace")
+	}
+	collapsed := bodyText[collapsedStart : collapsedStart+collapsedEnd]
+	if strings.Contains(collapsed, "100vh") || strings.Contains(collapsed, "100dvh") || strings.Contains(collapsed, "100%") {
+		t.Fatal("GET / #app.collapsed #sidebar rule must not carry viewport-height/width declarations — PR1 owns the flex-row share, PR2 owns the height basis; the two stay independent (R12)")
+	}
+
+	// §3.5/§8: interactive-widget=resizes-content stays OUT of the viewport
+	// meta — it is Chromium-only and the plan explicitly defers the soft
+	// keyboard to the visualViewport path below instead. (Scoped to the meta
+	// tag: the directive only means anything there, and the shipped JS
+	// comment that names the decision must not trip this.)
+	if strings.Contains(meta, "interactive-widget") {
+		t.Fatal("GET / viewport meta must not introduce interactive-widget=resizes-content — Chromium-only, deferred by plan §3.5/§8 (issue #100 L1)")
+	}
+
+	// R6: the visualViewport wiring, sliced to the shipped functions.
+	// Degradation is the contract: no API -> no listeners -> no-op. The
+	// occlusion sentinel is documentElement.clientHeight (not
+	// window.innerHeight — vv.height excludes scrollbars pinned to the
+	// visual viewport while innerHeight includes the classic gutter), and
+	// pinch/double-tap zoom opts out of pinning entirely: vv.height shrinks
+	// with the scale and fires resize, so without the short-circuit a pinch
+	// would collapse the whole UI toward half height.
+	apply := sliceJSFunction(t, bodyText, "applyVisualViewportHeight")
+	for _, check := range []string{
+		"window.visualViewport",
+		"document.documentElement.clientHeight",
+		"vv.offsetTop + vv.height",
+		"vv.scale && Math.abs(vv.scale - 1) > 0.01",
+		`app.style.height = ""`,
+	} {
+		if !strings.Contains(apply, check) {
+			t.Fatalf("GET / applyVisualViewportHeight should include %q (issue #100 L1 R6)", check)
+		}
+	}
+	// The scroll listener must gate on an existing pin: a pure pan never
+	// introduces one — that is what keeps an unpanned page on the pure-CSS
+	// sizing path.
+	reapply := sliceJSFunction(t, bodyText, "reapplyPinnedVisualViewportHeight")
+	if !strings.Contains(reapply, "if (!app || !app.style.height) return;") {
+		t.Fatal("GET / reapplyPinnedVisualViewportHeight must gate on an existing inline height — a pure pan must not introduce pinning (issue #100 L1 R6)")
+	}
+	init := sliceJSFunction(t, bodyText, "initVisualViewportHandling")
+	for _, check := range []string{
+		"if (!vv) return;",
+		`vv.addEventListener("resize", applyVisualViewportHeight)`,
+		`vv.addEventListener("scroll", reapplyPinnedVisualViewportHeight)`,
+	} {
+		if !strings.Contains(init, check) {
+			t.Fatalf("GET / initVisualViewportHandling should include %q (issue #100 L1 R6)", check)
+		}
+	}
+	// The wiring must actually run at startup, or the whole R6 path is dead
+	// code behind an unexported function.
+	if !strings.Contains(sliceJSFunction(t, bodyText, "init"), "initVisualViewportHandling();") {
+		t.Fatal("GET / init() must call initVisualViewportHandling() (issue #100 L1 R6)")
+	}
+}
+
+// TestNarrowDrawerAnchors pins the issue #100 L2 breakpoint/drawer contract
+// (PR3 of docs/plans/feature-v0.6.0-webui-sidebar-responsive/): the narrow
+// tier (<=768px) renders the one PR1 .collapsed state as an off-canvas
+// overlay drawer with a tap-to-close mask over #main, the middle tier
+// (769–1024px) narrows the sidebar instead, R8 snaps the tab strip on the
+// narrow tier, and the R14 default dispatches by viewport — all on the
+// single PR1 state machine, never a second state variable (plan §3.1, the
+// PR3 review focus).
+func TestNarrowDrawerAnchors(t *testing.T) {
+	bodyText := fetchIndexHTML(t)
+
+	// R7: #app is the positioning containing block for the drawer and its
+	// mask. In-rule assertion, same style as TestViewportAndHeightAnchors —
+	// other rules in the file also set position and a bare Contains would
+	// anchor nothing.
+	appStart := strings.Index(bodyText, "#app {\n")
+	if appStart < 0 {
+		t.Fatal("GET / lost the #app rule (issue #100 L2 R7)")
+	}
+	appEnd := strings.Index(bodyText[appStart:], "\n        }")
+	if appEnd < 0 {
+		t.Fatal("GET / #app rule has no closing brace")
+	}
+	if !strings.Contains(bodyText[appStart:appStart+appEnd], "position: relative;") {
+		t.Fatal("GET / #app rule should declare position: relative — the drawer's positioning containing block (issue #100 L2 R7)")
+	}
+
+	// R7 + §3.1: PR1's zero-width collapse rule is scoped off the narrow
+	// tier by the SEAMLESS complement of the drawer's max-width: 768px
+	// block (`not all and` — a literal min-width: 769px would leave the
+	// (768, 769) fractional dead zone where the toggle button goes
+	// visually inert). If this rule leaked onto the narrow tier, the OPEN
+	// drawer would inherit width:0/visibility:hidden and render as an
+	// invisible strip (the §3.1 trap) — so the selector must live INSIDE
+	// the complement block's closing brace, and the narrow tier must carry
+	// its own off-canvas collapsed rule instead. A bare position check
+	// would NOT catch the rule hoisted to top level (still after the
+	// media TEXT, but outside the block — mutation-verified): slice the
+	// block and assert containment, plus an exact occurrence count
+	// (wide-tier zero-width rule + narrow-tier drawer rule, one each).
+	wideStart := strings.Index(bodyText, "@media not all and (max-width: 768px) {")
+	if wideStart < 0 {
+		t.Fatal(`GET / lost the "not all and (max-width: 768px)" tier scope around the PR1 collapse rule (issue #100 L2 R7)`)
+	}
+	wideEnd := strings.Index(bodyText[wideStart:], "\n        }")
+	if wideEnd < 0 {
+		t.Fatal("GET / collapse-rule tier scope has no closing brace")
+	}
+	wide := bodyText[wideStart : wideStart+wideEnd]
+	if !strings.Contains(wide, "#app.collapsed #sidebar {") {
+		t.Fatal("GET / must scope the PR1 #app.collapsed #sidebar zero-width rule inside the seamless complement of the narrow tier (its closing brace, not merely after its text) — on the narrow tier .collapsed renders the off-canvas drawer, not a zero-width strip (issue #100 L2, PRD-CHANGE §3.1)")
+	}
+	if n := strings.Count(bodyText, "#app.collapsed #sidebar {"); n != 2 {
+		t.Fatalf("GET / should have exactly two #app.collapsed #sidebar rules (the wide-tier zero-width collapse + the narrow-tier off-canvas drawer), found %d (issue #100 L2, PRD-CHANGE §3.1)", n)
+	}
+	// Negative pins (PR #110 review, Fix D3): the complement block must carry
+	// ONLY the zero-width collapse rule — none of the narrow-tier drawer
+	// machinery (absolute positioning, the off-canvas transform, or the
+	// mask's inset coverage) may leak into it.
+	for _, forbidden := range []string{"position: absolute", "translateX", "inset: 0"} {
+		if strings.Contains(wide, forbidden) {
+			t.Fatalf("GET / wide-tier complement block must not contain %q — that is drawer machinery and belongs only in the narrow tier (issue #100 L2 R7)", forbidden)
+		}
+	}
+
+	// R7: the narrow tier block. Nested rule bodies close at 12 spaces, the
+	// media block itself at 8 — so this slice spans exactly the tier.
+	narrowStart := strings.Index(bodyText, "@media (max-width: 768px) {")
+	if narrowStart < 0 {
+		t.Fatal("GET / lost the max-width: 768px narrow-tier block (issue #100 L2 R7)")
+	}
+	narrowEnd := strings.Index(bodyText[narrowStart:], "\n        }")
+	if narrowEnd < 0 {
+		t.Fatal("GET / @media (max-width: 768px) block has no closing brace")
+	}
+	narrow := bodyText[narrowStart : narrowStart+narrowEnd]
+
+	// Drawer OPEN state: absolutely positioned over #main, above the mask.
+	// Deliberately NO width declaration — the open drawer must keep the
+	// base rule's var(--sidebar-width); a width:0 here would be the §3.1
+	// invisible-drawer trap in its open-state form.
+	drawerStart := strings.Index(narrow, "\n            #sidebar {\n")
+	if drawerStart < 0 {
+		t.Fatal("GET / narrow tier should restyle #sidebar as the drawer (issue #100 L2 R7)")
+	}
+	drawerEnd := strings.Index(narrow[drawerStart:], "\n            }")
+	drawer := narrow[drawerStart : drawerStart+drawerEnd]
+	for _, decl := range []string{"position: absolute;", "left: 0;", "top: 0;", "bottom: 0;", "z-index: 30;"} {
+		if !strings.Contains(drawer, decl) {
+			t.Fatalf("GET / narrow-tier #sidebar drawer rule should declare %q (issue #100 L2 R7)", decl)
+		}
+	}
+	if strings.Contains(drawer, "width:") {
+		t.Fatal("GET / narrow-tier #sidebar drawer rule must not declare a width — the open drawer keeps the base var(--sidebar-width); zeroing it here is the §3.1 invisible-drawer trap (issue #100 L2)")
+	}
+	// PR #110 review (B2): the drawer's containing block is #app's padding
+	// box, so top:0/bottom:0 bleed across the safe-area bands; the rule must
+	// consume the four env(safe-area-inset-*) insets as content padding —
+	// asserted in-rule so the box stays full-bleed while only the content
+	// insets (a padding on #main or the mask would be the wrong element).
+	if !strings.Contains(drawer, "env(safe-area-inset-top") ||
+		!strings.Contains(drawer, "env(safe-area-inset-bottom") ||
+		!strings.Contains(drawer, "env(safe-area-inset-left") {
+		t.Fatal("GET / narrow-tier #sidebar drawer rule should consume env(safe-area-inset-*) as padding — the drawer's padding-box containing block bleeds across the notch / Home Indicator bands (PR #110 review, issue #100 L2)")
+	}
+
+	// Drawer CLOSED state: off-canvas + focus-order lift, NOT zero-width.
+	closedStart := strings.Index(narrow, "#app.collapsed #sidebar {")
+	if closedStart < 0 {
+		t.Fatal("GET / narrow tier lost the drawer closed-state rule (issue #100 L2 R7)")
+	}
+	closedEnd := strings.Index(narrow[closedStart:], "\n            }")
+	closed := narrow[closedStart : closedStart+closedEnd]
+	for _, decl := range []string{"transform: translateX(-100%);", "visibility: hidden;"} {
+		if !strings.Contains(closed, decl) {
+			t.Fatalf("GET / narrow-tier drawer closed rule should declare %q (issue #100 L2 R7)", decl)
+		}
+	}
+	if strings.Contains(closed, "width: 0") {
+		t.Fatal("GET / narrow-tier drawer closed rule must not zero the width — the closed drawer slides off-canvas (translateX), it does not collapse; width:0 is the wide tier's rendering (issue #100 L2, PRD-CHANGE §3.1)")
+	}
+
+	// R7 mask: shown only while the drawer is open on this tier, covering
+	// #app (hence #main and the tab strip) and sitting under the drawer.
+	maskStart := strings.Index(narrow, "#app:not(.collapsed) #sidebar-mask {")
+	if maskStart < 0 {
+		t.Fatal("GET / narrow tier lost the drawer mask show-rule (issue #100 L2 R7)")
+	}
+	maskEnd := strings.Index(narrow[maskStart:], "\n            }")
+	mask := narrow[maskStart : maskStart+maskEnd]
+	for _, decl := range []string{"display: block;", "position: absolute;", "inset: 0;", "z-index: 25;"} {
+		if !strings.Contains(mask, decl) {
+			t.Fatalf("GET / narrow-tier mask rule should declare %q (issue #100 L2 R7)", decl)
+		}
+	}
+
+	// R7 z-index layering on the toggle button: it lives in #header (inside
+	// #main) and only this lift lets it stay clickable above the open
+	// drawer. The pinned ladder reads button 40 > drawer 30 > mask 25 >
+	// #main content, everything under the 9999 modal layer.
+	btnStart := strings.Index(narrow, "#sidebar-toggle-btn {")
+	if btnStart < 0 {
+		t.Fatal("GET / narrow tier lost the toggle-button z-index lift (issue #100 L2 R7)")
+	}
+	btnEnd := strings.Index(narrow[btnStart:], "\n            }")
+	btn := narrow[btnStart : btnStart+btnEnd]
+	for _, decl := range []string{"position: relative;", "z-index: 40;"} {
+		if !strings.Contains(btn, decl) {
+			t.Fatalf("GET / narrow-tier toggle-button rule should declare %q (issue #100 L2 R7)", decl)
+		}
+	}
+	// The lift must be narrow-tier ONLY: exactly two #sidebar-toggle-btn
+	// rules may exist (the PR1 base rule + this one) and the base rule must
+	// not carry position/z-index — on desktop the 9999 connection overlay's
+	// cover relation is pre-PR3 and must stay untouched. The base rule is
+	// anchored by its 8-space indentation: the narrow-tier lift is 12-space
+	// indented inside its media block, so a bare LastIndex could silently
+	// slice the wrong rule (PR #110 review, Fix D5).
+	if n := strings.Count(bodyText, "#sidebar-toggle-btn {"); n != 2 {
+		t.Fatalf("GET / should have exactly two #sidebar-toggle-btn rules (PR1 base + narrow-tier lift), found %d (issue #100 L2 R7)", n)
+	}
+	baseStart := strings.Index(bodyText, "\n        #sidebar-toggle-btn {\n")
+	if baseStart < 0 {
+		t.Fatal("GET / lost the 8-space-indented base #sidebar-toggle-btn rule (issue #100 L2 R7)")
+	}
+	baseEnd := strings.Index(bodyText[baseStart:], "\n        }")
+	base := bodyText[baseStart : baseStart+baseEnd]
+	if strings.Contains(base, "z-index") || strings.Contains(base, "position:") {
+		t.Fatal("GET / base #sidebar-toggle-btn rule must not carry position/z-index — the lift is narrow-tier only, desktop stacking (connection overlay 9999) must stay as shipped (issue #100 L2 R7)")
+	}
+
+	// Non-goal pin: no transition/animation anywhere in the narrow block —
+	// the drawer flips instantly like the desktop collapse (plan §8).
+	if strings.Contains(narrow, "transition") || strings.Contains(narrow, "animation") || strings.Contains(narrow, "@keyframes") {
+		t.Fatal("GET / narrow-tier block must not add transitions/animations — instant flip is the plan's explicit non-goal (issue #100 L2)")
+	}
+
+	// R8: tab snapping, narrow tier only; the hidden-scrollbar rule family
+	// is untouched (it lives outside every media query).
+	tabsStart := strings.Index(narrow, "#tabs-container {")
+	if tabsStart < 0 {
+		t.Fatal("GET / narrow tier lost the tabs-container snap rule (issue #100 L2 R8)")
+	}
+	tabsEnd := strings.Index(narrow[tabsStart:], "\n            }")
+	if !strings.Contains(narrow[tabsStart:tabsStart+tabsEnd], "scroll-snap-type: x proximity;") {
+		t.Fatal("GET / narrow-tier #tabs-container should declare scroll-snap-type: x proximity (issue #100 L2 R8)")
+	}
+	tabStart := strings.Index(narrow, ".tab {")
+	if tabStart < 0 {
+		t.Fatal("GET / narrow tier lost the .tab snap-align rule (issue #100 L2 R8)")
+	}
+	tabEnd := strings.Index(narrow[tabStart:], "\n            }")
+	if !strings.Contains(narrow[tabStart:tabStart+tabEnd], "scroll-snap-align:") {
+		t.Fatal("GET / narrow-tier .tab should declare a scroll-snap-align (issue #100 L2 R8)")
+	}
+
+	// R7 mask global state: display:none everywhere — without it the div
+	// would be a visible flex sibling swallowing the whole desktop layout.
+	maskGlobalStart := strings.Index(bodyText, "\n        #sidebar-mask {\n")
+	if maskGlobalStart < 0 {
+		t.Fatal("GET / lost the global #sidebar-mask display:none rule (issue #100 L2 R7)")
+	}
+	maskGlobalEnd := strings.Index(bodyText[maskGlobalStart:], "\n        }")
+	maskGlobal := bodyText[maskGlobalStart : maskGlobalStart+maskGlobalEnd]
+	if !strings.Contains(maskGlobal, "display: none;") {
+		t.Fatal("GET / global #sidebar-mask rule should declare display: none (issue #100 L2 R7)")
+	}
+	if strings.Contains(maskGlobal, "position:") || strings.Contains(maskGlobal, "inset:") {
+		t.Fatal("GET / global #sidebar-mask rule must stay a plain display:none — positioning it on desktop would create a hit-box over the app (issue #100 L2 R7)")
+	}
+
+	// R7 DOM: the mask is a child of #app, between #sidebar and #main, and
+	// its click runs the shipped close path.
+	appDomAt := strings.Index(bodyText, `<div id="app">`)
+	maskDomAt := strings.Index(bodyText, `id="sidebar-mask"`)
+	mainDomAt := strings.Index(bodyText, `<div id="main">`)
+	if appDomAt < 0 || maskDomAt < 0 || maskDomAt < appDomAt || maskDomAt > mainDomAt {
+		t.Fatal("GET / should place #sidebar-mask as a child of #app between #sidebar and #main (issue #100 L2 R7)")
+	}
+	if !strings.Contains(bodyText, `onclick="closeSidebarDrawer()"`) {
+		t.Fatal(`GET / mask should close the drawer via onclick="closeSidebarDrawer()" (issue #100 L2 R7)`)
+	}
+
+	// R14: the viewport-dispatched default. Both the missing-key path and
+	// the parse-failure/degraded path must dispatch (exactly two call
+	// sites); an explicit persisted value short-circuits before the
+	// dispatcher and never consults matchMedia.
+	read := sliceJSFunction(t, bodyText, "readSidebarCollapsed")
+	if got := strings.Count(read, "return defaultSidebarCollapsedByViewport();"); got != 2 {
+		t.Fatalf("GET / readSidebarCollapsed should dispatch the viewport default on BOTH the missing key and the failure path (exactly 2 call sites), found %d (issue #100 L2 R14)", got)
+	}
+	def := sliceJSFunction(t, bodyText, "defaultSidebarCollapsedByViewport")
+	for _, check := range []string{
+		`window.matchMedia("(max-width: 768px)").matches`,
+		`typeof window.matchMedia !== "function"`,
+		`typeof window === "undefined"`,
+	} {
+		if !strings.Contains(def, check) {
+			t.Fatalf("GET / defaultSidebarCollapsedByViewport should include %q (issue #100 L2 R14)", check)
+		}
+	}
+
+	// R7 JS: the mask's close path is the same single-state wiring as the
+	// toggle — apply(true) first, then persist(true), never a toggle of a
+	// second variable.
+	closers := sliceJSFunction(t, bodyText, "closeSidebarDrawer")
+	applyAt := strings.Index(closers, "applySidebarCollapsed(true);")
+	persistAt := strings.Index(closers, "persistSidebarCollapsed(true);")
+	if applyAt < 0 || persistAt < 0 || applyAt > persistAt {
+		t.Fatal("GET / closeSidebarDrawer must applySidebarCollapsed(true) then persistSidebarCollapsed(true) — the mask closes through the shared single-state path (issue #100 L2 R7)")
+	}
+
+	// Plan §3.1 review pin: no second drawer state variable anywhere in the
+	// file (the PR3 review focus). The drawer is a RENDERING of the one
+	// sidebarCollapsed boolean.
+	for _, forbidden := range []string{"drawerOpen", "drawerCollapsed", "drawerVisible", "drawerState"} {
+		if strings.Contains(bodyText, forbidden) {
+			t.Fatalf("GET / must not introduce a second drawer state variable — found %q (issue #100 L2, plan §3.1)", forbidden)
+		}
+	}
+
+	// R7 middle tier: 769–1024px narrows the sidebar to a 200px cap; 768
+	// belongs to the narrow tier (max-width:768px and min-width:769px must
+	// never both match at one width, PRD-CHANGE §3.6).
+	midStart := strings.Index(bodyText, "@media (min-width: 769px) and (max-width: 1024px) {")
+	if midStart < 0 {
+		t.Fatal("GET / lost the 769–1024px middle-tier block (issue #100 L2 R7, §3.6)")
+	}
+	midEnd := strings.Index(bodyText[midStart:], "\n        }")
+	if midEnd < 0 {
+		t.Fatal("GET / middle-tier block has no closing brace")
+	}
+	mid := bodyText[midStart : midStart+midEnd]
+	// In-rule assertion (PR #110 review, Fix D2): the cap must be a
+	// declaration of the #sidebar rule inside this block, not two unrelated
+	// strings somewhere in the slice.
+	midRuleStart := strings.Index(mid, "\n            #sidebar {\n")
+	if midRuleStart < 0 {
+		t.Fatal("GET / middle tier should restyle #sidebar (issue #100 L2 R7, §3.6)")
+	}
+	midRuleEnd := strings.Index(mid[midRuleStart:], "\n            }")
+	if midRuleEnd < 0 {
+		t.Fatal("GET / middle-tier #sidebar rule has no closing brace")
+	}
+	midRule := mid[midRuleStart : midRuleStart+midRuleEnd]
+	if !strings.Contains(midRule, "max-width: 200px;") {
+		t.Fatal("GET / middle tier should cap #sidebar at max-width: 200px inside the #sidebar rule while keeping the side-by-side layout (issue #100 L2 R7)")
+	}
+}
+
+// TestTouchInteractionAnchors pins the issue #100 L3 touch-interaction
+// contract (PR4 of docs/plans/feature-v0.6.0-webui-sidebar-responsive/):
+// the sidebar split drag runs on Pointer Events with pointer capture (R9),
+// the handle carries touch-action:none and drag-scoped user-select /
+// -webkit-touch-callout, coarse pointers get 44px minimum hit targets via
+// min-width/min-height (R10), and EVERY :hover selector in the stylesheet
+// sits inside a @media (hover: hover) block — pure-touch devices get no
+// sticky hover highlights (R11). The hover check is a containment scan,
+// not an ordering check (PR3's M1 lesson): each :hover occurrence must lie
+// within the closing brace of some open hover-capability media block.
+func TestTouchInteractionAnchors(t *testing.T) {
+	bodyText := fetchIndexHTML(t)
+
+	// R9 DOM: the drag starts from pointerdown, and the mouse-only inline
+	// handler is gone.
+	if !strings.Contains(bodyText, `onpointerdown="startSidebarResize(event)"`) {
+		t.Fatal(`GET / should start the sidebar resize from onpointerdown="startSidebarResize(event)" (issue #100 L3 R9)`)
+	}
+	if strings.Contains(bodyText, `onmousedown="startSidebarResize`) {
+		t.Fatal(`GET / must not keep the mouse-only onmousedown="startSidebarResize" handler (issue #100 L3 R9)`)
+	}
+	for _, forbidden := range []string{`addEventListener("mousedown"`, `addEventListener("mousemove"`, `addEventListener("mouseup"`} {
+		if strings.Contains(bodyText, forbidden) {
+			t.Fatalf("GET / must not register mouse-event listeners for the drag — found %q (issue #100 L3 R9)", forbidden)
+		}
+	}
+
+	// R9 JS, sliced to the shipped functions: pointer capture, the three
+	// pointer listeners, preventDefault, the re-entry guard, and the
+	// UNCHANGED clamp math.
+	start := sliceJSFunction(t, bodyText, "startSidebarResize")
+	for _, check := range []string{
+		"if (isResizingSidebar) return;",
+		"handle.setPointerCapture(e.pointerId)",
+		`document.addEventListener("pointermove", handleSidebarResize)`,
+		`document.addEventListener("pointerup", stopSidebarResize)`,
+		`document.addEventListener("pointercancel", stopSidebarResize)`,
+		"e.preventDefault();",
+		`handle.classList.add("dragging")`,
+	} {
+		if !strings.Contains(start, check) {
+			t.Fatalf("GET / startSidebarResize should include %q (issue #100 L3 R9)", check)
+		}
+	}
+	stop := sliceJSFunction(t, bodyText, "stopSidebarResize")
+	for _, check := range []string{
+		`document.removeEventListener("pointermove", handleSidebarResize)`,
+		`document.removeEventListener("pointerup", stopSidebarResize)`,
+		`document.removeEventListener("pointercancel", stopSidebarResize)`,
+		"handle.releasePointerCapture(e.pointerId)",
+		`handle.classList.remove("dragging")`,
+	} {
+		if !strings.Contains(stop, check) {
+			t.Fatalf("GET / stopSidebarResize should include %q (issue #100 L3 R9)", check)
+		}
+	}
+	drag := sliceJSFunction(t, bodyText, "handleSidebarResize")
+	for _, check := range []string{
+		"const minTop = 120;",
+		"const minBottom = 100;",
+		"Math.max(minTop, Math.min(sidebarContentHeight - minBottom, newTopHeight))",
+	} {
+		if !strings.Contains(drag, check) {
+			t.Fatalf("GET / handleSidebarResize clamp math must stay verbatim — missing %q (issue #100 L3 R9)", check)
+		}
+	}
+
+	// R9 CSS: touch-action:none lives on the handle rule (in-rule), and the
+	// drag-scoped selection/callout suppression sits with the .dragging
+	// half — which must stay global (a drag is not a hover state).
+	handleStart := strings.Index(bodyText, "#sidebar-resize-handle {")
+	if handleStart < 0 {
+		t.Fatal("GET / lost the #sidebar-resize-handle rule (issue #100 L3 R9)")
+	}
+	handleEnd := strings.Index(bodyText[handleStart:], "\n        }")
+	if handleEnd < 0 {
+		t.Fatal("GET / #sidebar-resize-handle rule has no closing brace")
+	}
+	handleRule := bodyText[handleStart : handleStart+handleEnd]
+	if !strings.Contains(handleRule, "touch-action: none;") {
+		t.Fatal("GET / #sidebar-resize-handle should declare touch-action: none — evaluated at gesture start, so it must be permanent, not drag-scoped (issue #100 L3 R9)")
+	}
+	draggingStart := strings.Index(bodyText, "#sidebar-resize-handle.dragging {")
+	if draggingStart < 0 {
+		t.Fatal("GET / lost the #sidebar-resize-handle.dragging rule (issue #100 L3 R9)")
+	}
+	draggingEnd := strings.Index(bodyText[draggingStart:], "\n        }")
+	draggingRule := bodyText[draggingStart : draggingStart+draggingEnd]
+	for _, decl := range []string{"user-select: none;", "-webkit-touch-callout: none;", "background: var(--active-color);"} {
+		if !strings.Contains(draggingRule, decl) {
+			t.Fatalf("GET / #sidebar-resize-handle.dragging should declare %q (issue #100 L3 R9)", decl)
+		}
+	}
+
+	// R10: coarse-pointer hit targets. min-width/min-height inside the
+	// media block — fixed width/height 44 would defeat the "never force
+	// smaller" contract, and pt is the wrong unit (~58.7px).
+	coarseStart := strings.Index(bodyText, "@media (pointer: coarse) {")
+	if coarseStart < 0 {
+		t.Fatal("GET / lost the @media (pointer: coarse) touch-target block (issue #100 L3 R10)")
+	}
+	coarseEnd := strings.Index(bodyText[coarseStart:], "\n        }")
+	if coarseEnd < 0 {
+		t.Fatal("GET / @media (pointer: coarse) block has no closing brace")
+	}
+	coarse := bodyText[coarseStart : coarseStart+coarseEnd]
+	for _, sel := range []string{".icon-btn {", ".term-ctrl-btn {"} {
+		selAt := strings.Index(coarse, sel)
+		if selAt < 0 {
+			t.Fatalf("GET / coarse-pointer block should include a %s rule (issue #100 L3 R10)", sel)
+		}
+		ruleEnd := strings.Index(coarse[selAt:], "\n            }")
+		if ruleEnd < 0 {
+			t.Fatalf("GET / coarse-pointer %s rule has no closing brace", sel)
+		}
+		rule := coarse[selAt : selAt+ruleEnd]
+		for _, decl := range []string{"min-width: 44px;", "min-height: 44px;"} {
+			if !strings.Contains(rule, decl) {
+				t.Fatalf("GET / coarse-pointer %s rule should declare %q (issue #100 L3 R10)", sel, decl)
+			}
+		}
+		for _, line := range strings.Split(rule, "\n") {
+			trimmed := strings.TrimSpace(line)
+			if strings.HasPrefix(trimmed, "width: 44px") || strings.HasPrefix(trimmed, "height: 44px") {
+				t.Fatalf("GET / coarse-pointer %s rule must use min-width/min-height, not fixed width/height — found %q (issue #100 L3 R10)", sel, trimmed)
+			}
+		}
+	}
+	// R10 residual-gap guard (review round 1): the coarse block only RAISES
+	// the floor — the .icon-btn BASE rule must stay free of fixed
+	// width/height declarations (it is padding-driven today; a future fixed
+	// 44px there would silently defeat the min-* contract, and this is the
+	// only assertion that would turn red).
+	iconBaseStart := strings.Index(bodyText, "\n        .icon-btn {\n")
+	if iconBaseStart < 0 {
+		t.Fatal("GET / lost the .icon-btn base rule (issue #100 L3 R10)")
+	}
+	iconBaseEnd := strings.Index(bodyText[iconBaseStart:], "\n        }")
+	if iconBaseEnd < 0 {
+		t.Fatal("GET / .icon-btn base rule has no closing brace")
+	}
+	iconBase := bodyText[iconBaseStart : iconBaseStart+iconBaseEnd]
+	for _, line := range strings.Split(iconBase, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "width:") || strings.HasPrefix(trimmed, "height:") {
+			t.Fatalf("GET / .icon-btn base rule must not declare a fixed %q — R10's min-* only raises the floor (issue #100 L3 R10)", trimmed)
+		}
+	}
+	// R10 safe-area refinement (review round 1): inside the 40px header on
+	// inset-top:0 devices, the centered 44px box would lose its top 2.5px to
+	// the body/html overflow:hidden clip (clipped area does not hit-test);
+	// the block shifts the header's icon button down 3px and lifts it above
+	// #workspace's top strip so the full 44px hit-tests.
+	headerBtnAt := strings.Index(coarse, "#header .icon-btn {")
+	if headerBtnAt < 0 {
+		t.Fatal("GET / coarse-pointer block lost the #header .icon-btn safe-area rule (issue #100 L3 R10)")
+	}
+	headerBtnEnd := strings.Index(coarse[headerBtnAt:], "\n            }")
+	if headerBtnEnd < 0 {
+		t.Fatal("GET / coarse-pointer #header .icon-btn rule has no closing brace")
+	}
+	headerBtnRule := coarse[headerBtnAt : headerBtnAt+headerBtnEnd]
+	for _, decl := range []string{"top: 3px;", "z-index: 40;"} {
+		if !strings.Contains(headerBtnRule, decl) {
+			t.Fatalf("GET / coarse-pointer #header .icon-btn rule should declare %q — the clip/spill geometry needs both (issue #100 L3 R10)", decl)
+		}
+	}
+	// The variable keeps driving the base size (min-* only raises the floor).
+	if !strings.Contains(bodyText, "width: var(--term-ctrl-btn-size);") || !strings.Contains(bodyText, "height: var(--term-ctrl-btn-size);") {
+		t.Fatal("GET / .term-ctrl-btn base size must stay driven by --term-ctrl-btn-size (issue #100 L3 R10)")
+	}
+	// 44pt ban. Scoped to the <style> slice (PR #110 review, Fix D6): the
+	// previous full-body scan stripped comments across the WHOLE document,
+	// where a JS line comment containing /* (in the kinds/*.js sources
+	// inlined below the style block) silently truncated the scan ~2/3 in —
+	// anything after that point was never checked. The unit only matters in
+	// CSS, and the <style> slice contains no such hazard.
+	styleStart := strings.Index(bodyText, "<style>")
+	styleEnd := strings.Index(bodyText, "</style>")
+	if styleStart < 0 || styleEnd < 0 {
+		t.Fatal("GET / lost the inline <style> block")
+	}
+	style := bodyText[styleStart:styleEnd]
+	if strings.Contains(stripCSSComments(style), "44pt") {
+		t.Fatal("GET / must not use 44pt — Apple HIG 44pt IS 44 CSS px in iOS Safari; pt computes to ~58.7px (issue #100 L3 R10)")
+	}
+
+	// PR #110 review (M1): with R11 gating the .wt-actions reveal on hover
+	// capability, pure-touch devices can never show the row actions, and
+	// opacity: 0 does NOT block hit-testing — without this block the row's
+	// right end would be two permanently invisible yet tappable buttons.
+	// (Restoring the reveal on touch is the §8 ④ product decision, deferred;
+	// this block only closes the invisible-hit-area trap.)
+	noneStart := strings.Index(bodyText, "@media (hover: none) {")
+	if noneStart < 0 {
+		t.Fatal("GET / lost the @media (hover: none) block that closes the .wt-actions invisible hit area (PR #110 review, issue #100 L3)")
+	}
+	noneEnd := strings.Index(bodyText[noneStart:], "\n        }")
+	if noneEnd < 0 {
+		t.Fatal("GET / @media (hover: none) block has no closing brace")
+	}
+	none := bodyText[noneStart : noneStart+noneEnd]
+	noneRuleStart := strings.Index(none, ".wt-actions {")
+	if noneRuleStart < 0 {
+		t.Fatal("GET / @media (hover: none) block should scope .wt-actions (PR #110 review, issue #100 L3)")
+	}
+	noneRuleEnd := strings.Index(none[noneRuleStart:], "\n            }")
+	if noneRuleEnd < 0 {
+		t.Fatal("GET / @media (hover: none) .wt-actions rule has no closing brace")
+	}
+	if !strings.Contains(none[noneRuleStart:noneRuleStart+noneRuleEnd], "pointer-events: none;") {
+		t.Fatal("GET / @media (hover: none) .wt-actions rule should declare pointer-events: none — the actions can never appear on pure-touch devices, and opacity:0 alone would leave an invisible tappable area (PR #110 review, issue #100 L3)")
+	}
+
+	// R11: containment scan over the stylesheet — with comments stripped,
+	// every :hover selector must sit inside an open @media (hover: hover)
+	// block. The non-hover interaction states stay global: the resize
+	// handle's .dragging half and the scrollbar thumb's :active half were
+	// split out of their old combined selectors — the scan now proves they
+	// sit at hover-block depth 0, not merely that they exist (PR #110
+	// review, Fix D4).
+	css := stripCSSComments(style)
+	depth := 0
+	var hoverDepths []int
+	hovers := 0
+	globalRules := map[string]bool{
+		"#sidebar-resize-handle.dragging":                 false,
+		"#tabs-container::-webkit-scrollbar-thumb:active": false,
+	}
+	for i := 0; i < len(css); {
+		switch css[i] {
+		case '{':
+			depth++
+			prefix := strings.TrimRight(css[:i], " \t\r\n")
+			if strings.HasSuffix(prefix, "@media (hover: hover)") {
+				hoverDepths = append(hoverDepths, depth)
+			}
+			for selector := range globalRules {
+				if strings.HasSuffix(prefix, selector) {
+					if len(hoverDepths) != 0 {
+						line := 1 + strings.Count(css[:i], "\n")
+						t.Fatalf("GET / non-hover interaction rule %q at stylesheet line %d must stay GLOBAL — it sits inside a hover-capability block (issue #100 L3 R11)", selector, line)
+					}
+					globalRules[selector] = true
+				}
+			}
+			i++
+		case '}':
+			depth--
+			for len(hoverDepths) > 0 && hoverDepths[len(hoverDepths)-1] > depth {
+				hoverDepths = hoverDepths[:len(hoverDepths)-1]
+			}
+			i++
+		default:
+			if strings.HasPrefix(css[i:], ":hover") {
+				hovers++
+				if len(hoverDepths) == 0 {
+					line := 1 + strings.Count(css[:i], "\n")
+					t.Fatalf("GET / :hover selector at stylesheet line %d sits OUTSIDE every @media (hover: hover) block — R11 requires the hover-capability gate (issue #100 L3)", line)
+				}
+				i += len(":hover")
+			} else {
+				i++
+			}
+		}
+	}
+	if hovers != 22 {
+		t.Fatalf("GET / should carry the 22 known :hover selectors inside hover-capability blocks, found %d — an added or removed hover rule must update this test (issue #100 L3 R11)", hovers)
+	}
+	for selector, found := range globalRules {
+		if !found {
+			t.Fatalf("GET / must keep the non-hover interaction state %q global — it was split out of a combined :hover selector (issue #100 L3 R11)", selector)
 		}
 	}
 }
