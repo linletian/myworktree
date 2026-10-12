@@ -284,7 +284,7 @@
                 left: 0;
                 top: 0;
                 bottom: 0;
-                /* Above the mask (25), below the header toggle (40); the
+                /* Above the mask (25), below the sidebar toggle tab (40); the
                    whole ladder stays under the 9999 modal layer. */
                 z-index: 30;
                 /* PR #110 review (B2): the drawer's containing block is
@@ -331,6 +331,77 @@
             #sidebar-toggle-btn {
                 position: relative;
                 z-index: 40;
+            }
+            /* PR #110 design change: while the drawer is OPEN on the narrow
+               tier, the toggle leaves its #header seat and becomes a TAB
+               on the drawer's right edge — floating at #header's left it
+               overlapped the drawer's title row (".sidebar-title",
+               "Worktrees"), which users hit and reported. DOM, JS, the
+               chevron flip and the single state machine are untouched;
+               this is CSS-only.
+               1. Why position:fixed is SAFE here (the usual trap: fixed
+               resolves against the nearest transformed/filtered/
+               perspective ancestor instead of the viewport): the button's
+               ancestor chain is #header -> #main -> #app -> body, and none
+               of them carries transform, filter, perspective, will-change
+               or an animated property (verified rule by rule — the transforms in
+               this stylesheet live on the closed drawer (a SIBLING of
+               #main, never an ancestor of the button), chevrons, .spinner,
+               #empty-state and JS-set terminal-container filters). So
+               fixed positions against the VIEWPORT: the full-bleed drawer's
+               left edge is viewport x=0 (its containing block is #app's
+               PADDING box, whose left edge sits at x=0 — the safe-area
+               padding only insets its CONTENT) and its width is exactly
+               var(--sidebar-width) border-box, so the right edge lands
+               at viewport x=240 and `left: calc(var(--sidebar-width) - 1px)`
+               tucks the tab over the drawer's 1px right border, seam-free.
+               2. Specificity (ID, class, type): this rule (2,1,0) —
+                  #app + #sidebar-toggle-btn, plus the class inside :not() —
+                  outranks both the narrow-tier closed-state lift (1,0,0)
+                  and the coarse-pointer `#header .icon-btn` rule (1,1,0),
+                  so where ALL apply (narrow + coarse + open) position and
+                  top come from here. The closed state, the middle tier and
+                  desktop are untouched — this selector needs
+                  #app:not(.collapsed).
+               3. Out-of-flow consequence: fixed pulls the button out of the
+                  #header flex row, so the tab strip shifts left to fill the
+                  seat — while the drawer is open that strip is covered by
+                  the mask anyway (invisible, harmless). Closing the drawer
+                  removes this rule and the button drops back into its
+                  header seat, same geometry as before.
+               4. On coarse pointers the 44x44 min-* hit area from the
+                  existing rules still applies — the tab box IS the hit
+                  box.
+               5. `+ 6px` in `top` is a hand-tuned visual-alignment
+                  constant, not math: the .sidebar-title row height varies
+                  by pointer type (44px target on coarse vs ~31px on fine),
+                  so no single constant centers the tab against both —
+                  6px sits ~6px above the coarse row's center and ~5px
+                  above the fine one, a compromise matching the design
+                  spec's y:6; exact per-pointer centering would need a
+                  pointer-typed value and is not worth it. */
+            #app:not(.collapsed) #sidebar-toggle-btn {
+                position: fixed;
+                left: calc(var(--sidebar-width) - 1px);
+                top: calc(env(safe-area-inset-top, 0px) + 6px);
+                z-index: 40;
+                background: var(--bg-color);
+                border: 1px solid var(--border-color);
+                border-left: none;
+                border-radius: 0 6px 6px 0;
+            }
+            /* PR #110 review: the tab rule's background: var(--bg-color)
+               (2,1,0) permanently outranks .icon-btn:hover's background
+               (0,2,0) — without this restore, hovering the open tab on a
+               desktop narrow window would show only the color half of the
+               icon button's background+color feedback. Same token as
+               .icon-btn:hover, restated inside a rule the tab's background
+               cannot beat; nested in the hover-capability media like every
+               other :hover rule. */
+            @media (hover: hover) {
+            #app:not(.collapsed) #sidebar-toggle-btn:hover {
+                background: var(--border-color);
+            }
             }
             /* R8: horizontal tab snapping on the narrow tier. `proximity`
                snaps only when the scroll already rests near a snap point,
@@ -425,12 +496,16 @@
                button above it (a transparent box steals only hit priority
                there, no pixels).
                Specificity: `#header .icon-btn` (1,1,0) outranks the narrow
-               tier's `#sidebar-toggle-btn` (1,0,0), so where BOTH apply
-               (narrow screen + coarse pointer) this rule's declarations
-               win — z-index therefore uses the SAME value 40 the narrow
-               rule sets, keeping the drawer layering (button above the
-               open drawer at 30) byte-identical; position agrees (both
-               relative), top and z-index come from here.
+               tier's closed-state `#sidebar-toggle-btn` (1,0,0), so where
+               BOTH apply — narrow screen + coarse pointer + CLOSED drawer —
+               this rule's declarations win: position relative and
+               top: 3px shift the seated button clear of the body/html
+               clip, and z-index uses the SAME value 40 the narrow rule
+               sets, keeping the layering byte-identical. With the drawer
+               OPEN the (2,1,0) tab rule outranks THIS one: position and
+               top there come from the tab rule (fixed, below the notch),
+               and this rule's z-index: 40 merely agrees with the tab
+               rule's — two sources, one value, no conflict either way.
                The selector is deliberately the class-level "any icon
                button inside #header", not a chevron-specific special case:
                any icon button a future header adds inherits the same 3px

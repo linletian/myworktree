@@ -79,6 +79,19 @@
             background: var(--modal-backdrop);
         }
         #sidebar-toggle-btn { position: relative; z-index: 40; }
+        /* PR #110 设计变更：打开态下开关按钮脱离 header 流，fixed 定位于 drawer 右缘外侧 tab
+           （机制与 index.html 相同：按钮祖先链无 transform/filter，fixed 相对视口；drawer 全出血
+           左缘即视口 x=0、宽 var(--sidebar-width)，右缘处 left 压住 1px 右边框贴合） */
+        #app:not(.collapsed) #sidebar-toggle-btn {
+            position: fixed;
+            left: calc(var(--sidebar-width) - 1px);
+            top: calc(env(safe-area-inset-top, 0px) + 6px);
+            z-index: 40;
+            background: var(--panel-bg);
+            border: 1px solid var(--border-color);
+            border-left: none;
+            border-radius: 0 6px 6px 0;
+        }
     }
     #sidebar-mask { display: none; }
 
@@ -318,7 +331,7 @@ $ ──────────────────────────
     <b>试试这些交互：</b><br>
     ① 拖窗口宽度跨过 1024 / 768 两档<br>
     ② 点 chevron 或按 <b>Ctrl/Cmd+B</b> 折叠侧栏（刷新后状态保留）<br>
-    ③ ≤768px：drawer 默认关闭；打开后点遮罩关闭<br>
+    ③ ≤768px：drawer 默认关闭；打开后点遮罩或 drawer 右缘的 tab 按钮关闭<br>
     ④ 拖侧栏内的 4px 分隔条（Pointer Events，钳制 120/100）<br>
     ⑤ 悬停 worktree 行看次级动作显形（R11 hover 门控）<br>
     ⑥ DevTools 设备模拟（touch）：图标按钮 44px、hover 不粘滞、行尾无隐形按钮<br>

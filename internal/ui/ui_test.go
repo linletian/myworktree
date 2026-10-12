@@ -947,7 +947,10 @@ func TestNarrowDrawerAnchors(t *testing.T) {
 	// #main) and only this lift lets it stay clickable above the open
 	// drawer. The pinned ladder reads button 40 > drawer 30 > mask 25 >
 	// #main content, everything under the 9999 modal layer.
-	btnStart := strings.Index(narrow, "#sidebar-toggle-btn {")
+	// (anchored by its 12-space indentation — the open-state tab selector
+	// ends with the same literal, so a bare Index could slice the wrong
+	// rule by source order; same discipline as Fix D5).
+	btnStart := strings.Index(narrow, "\n            #sidebar-toggle-btn {\n")
 	if btnStart < 0 {
 		t.Fatal("GET / narrow tier lost the toggle-button z-index lift (issue #100 L2 R7)")
 	}
@@ -958,15 +961,18 @@ func TestNarrowDrawerAnchors(t *testing.T) {
 			t.Fatalf("GET / narrow-tier toggle-button rule should declare %q (issue #100 L2 R7)", decl)
 		}
 	}
-	// The lift must be narrow-tier ONLY: exactly two #sidebar-toggle-btn
-	// rules may exist (the PR1 base rule + this one) and the base rule must
-	// not carry position/z-index — on desktop the 9999 connection overlay's
-	// cover relation is pre-PR3 and must stay untouched. The base rule is
-	// anchored by its 8-space indentation: the narrow-tier lift is 12-space
-	// indented inside its media block, so a bare LastIndex could silently
-	// slice the wrong rule (PR #110 review, Fix D5).
-	if n := strings.Count(bodyText, "#sidebar-toggle-btn {"); n != 2 {
-		t.Fatalf("GET / should have exactly two #sidebar-toggle-btn rules (PR1 base + narrow-tier lift), found %d (issue #100 L2 R7)", n)
+	// The lift must be narrow-tier ONLY: exactly THREE #sidebar-toggle-btn
+	// rules may exist — the PR1 base rule (global), the narrow-tier
+	// closed-state lift, and the PR #110 design change's narrow-tier
+	// OPEN-state tab rule (#app:not(.collapsed) #sidebar-toggle-btn) — and
+	// the base rule must not carry position/z-index: on desktop the 9999
+	// connection overlay's cover relation is pre-PR3 and must stay
+	// untouched. The base rule is anchored by its 8-space indentation: both
+	// narrow-tier rules are 12-space indented inside the media block, so a
+	// bare LastIndex could silently slice the wrong rule (PR #110 review,
+	// Fix D5).
+	if n := strings.Count(bodyText, "#sidebar-toggle-btn {"); n != 3 {
+		t.Fatalf("GET / should have exactly three #sidebar-toggle-btn rules (PR1 base + narrow-tier closed-state lift + narrow-tier open-state tab), found %d (issues #99, #100 L2)", n)
 	}
 	baseStart := strings.Index(bodyText, "\n        #sidebar-toggle-btn {\n")
 	if baseStart < 0 {
@@ -976,6 +982,49 @@ func TestNarrowDrawerAnchors(t *testing.T) {
 	base := bodyText[baseStart : baseStart+baseEnd]
 	if strings.Contains(base, "z-index") || strings.Contains(base, "position:") {
 		t.Fatal("GET / base #sidebar-toggle-btn rule must not carry position/z-index — the lift is narrow-tier only, desktop stacking (connection overlay 9999) must stay as shipped (issue #100 L2 R7)")
+	}
+	// PR #110 design change: with the drawer OPEN on the narrow tier the
+	// toggle becomes a fixed tab on the drawer's right edge (it used to
+	// float at #header's left and overlap the drawer's title row).
+	// In-rule slice: the selector, the fixed positioning, the drawer-edge
+	// geometry, the retained z-index, and the tab shaping.
+	tabRuleStart := strings.Index(narrow, "#app:not(.collapsed) #sidebar-toggle-btn {")
+	if tabRuleStart < 0 {
+		t.Fatal("GET / narrow tier lost the open-state tab rule for the toggle button (PR #110 design change, issue #100 L2)")
+	}
+	tabRuleEnd := strings.Index(narrow[tabRuleStart:], "\n            }")
+	if tabRuleEnd < 0 {
+		t.Fatal("GET / narrow-tier open-state tab rule has no closing brace")
+	}
+	tabRule := narrow[tabRuleStart : tabRuleStart+tabRuleEnd]
+	for _, decl := range []string{
+		"position: fixed;",
+		"left: calc(var(--sidebar-width) - 1px)",
+		"top: calc(env(safe-area-inset-top, 0px) + 6px)",
+		"z-index: 40;",
+		"background: var(--bg-color);",
+		"border: 1px solid var(--border-color);",
+		"border-left: none;",
+		"border-radius: 0 6px 6px 0;",
+	} {
+		if !strings.Contains(tabRule, decl) {
+			t.Fatalf("GET / narrow-tier open-state tab rule should declare %q (PR #110 design change, issue #100 L2)", decl)
+		}
+	}
+	// PR #110 review: the tab rule's own background (2,1,0) would
+	// permanently outrank .icon-btn:hover's (0,2,0) — the hover restore
+	// rule (nested in the hover-capability media, like every other :hover)
+	// must exist and repeat the same border-color token.
+	hoverRestore := strings.Index(narrow, "#app:not(.collapsed) #sidebar-toggle-btn:hover {")
+	if hoverRestore < 0 {
+		t.Fatal("GET / narrow tier lost the open-state tab hover-background restore (PR #110 review, issue #100 L2)")
+	}
+	hoverRestoreEnd := strings.Index(narrow[hoverRestore:], "\n            }")
+	if hoverRestoreEnd < 0 {
+		t.Fatal("GET / narrow-tier tab hover restore rule has no closing brace")
+	}
+	if !strings.Contains(narrow[hoverRestore:hoverRestore+hoverRestoreEnd], "background: var(--border-color);") {
+		t.Fatal("GET / narrow-tier tab hover restore should re-declare the .icon-btn:hover background token — the tab rule's own background would otherwise outrank it (PR #110 review, issue #100 L2)")
 	}
 
 	// Non-goal pin: no transition/animation anywhere in the narrow block —
@@ -1363,8 +1412,8 @@ func TestTouchInteractionAnchors(t *testing.T) {
 			}
 		}
 	}
-	if hovers != 22 {
-		t.Fatalf("GET / should carry the 22 known :hover selectors inside hover-capability blocks, found %d — an added or removed hover rule must update this test (issue #100 L3 R11)", hovers)
+	if hovers != 23 {
+		t.Fatalf("GET / should carry the 23 known :hover selectors inside hover-capability blocks (22 from R11 plus the PR #110 tab hover-background restore), found %d — an added or removed hover rule must update this test (issues #100 L3 R11, #110)", hovers)
 	}
 	for selector, found := range globalRules {
 		if !found {
