@@ -146,6 +146,15 @@
             padding: 0;
             height: 100%;
             overflow: hidden;
+            /* R17 (issue #100 padOS②/common①, PR #110 beta): overflow:hidden
+               never chained Safari's document rubber-band — it has been on
+               this rule since 2026-05 and the page still bounced on iOS
+               (Chrome honors it, which is why headless Chrome showed
+               nothing). overscroll-behavior:none is the iOS 16+ root-
+               scroller lock. Accepted consequence: Android pull-to-refresh
+               is disabled too — this UI is a software surface, not a
+               document, and its own scrollers are listed below. */
+            overscroll-behavior: none;
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji";
             font-size: 13px;
             color: var(--text-primary);
@@ -579,6 +588,15 @@
             list-style: none;
             padding: 0;
             margin: 0;
+            /* R17 (issue #100 common①, PR #110 beta): the worktree list is
+               a legitimate inner scroller — contain stops its scroll edges
+               from chaining into the page (the root itself is locked by
+               body/html's overscroll-behavior:none, but a chained
+               overscroll from an inner scroller can still propagate before
+               the root gets a say; contain ends it AT the scroller). Same
+               rationale, same declaration on .git-section-list, dialog and
+               #tabs-container below. */
+            overscroll-behavior: contain;
         }
 
         /* Sidebar split panels */
@@ -703,6 +721,8 @@
             overflow-y: auto;
             padding: 0;
             margin: 0;
+            /* R17: same edge-chain stop as #wt-list (see its comment). */
+            overscroll-behavior: contain;
         }
 
         .git-section.expanded .git-section-list {
@@ -997,6 +1017,10 @@
             height: 100%;
             align-items: flex-end;
             gap: 4px;
+            /* R17: same edge-chain stop as #wt-list (see its comment) —
+               the horizontal tab strip chains at BOTH ends when it
+               overflows. */
+            overscroll-behavior: contain;
         }
 
         #tabs-container::-webkit-scrollbar,
@@ -1251,6 +1275,23 @@
             width: 100%;
             height: 100%;
             position: relative;
+            /* R17 (issue #100 padOS②, PR #110 beta): measured on the
+               vendored xterm v6 — touches land on .xterm-screen, the
+               .xterm-viewport has no scrollable content (scrollHeight ==
+               clientHeight; v6 scrolling is a VIRTUAL scrollTop living in
+               the ScrollableElement state — Viewport._handleScroll converts
+               it to whole lines; the DOM renderer's rows are normal-flow
+               divs re-rendered in place as ydisp changes, and the
+               scrollbar is a custom-drawn slider — the only
+               style.top-positioned part of the scroll machinery — and the
+               viewport div itself holds nothing scrollable),
+               so NO touch path inside xterm consumes a drag and the UA
+               promotes the gesture into the page rubber-band. This
+               declaration keeps the whole gesture to ourselves; the
+               delegated JS listener (initTerminalTouchScroll) maps a
+               one-finger drag to terminal scrolling. Desktop mouse/wheel
+               paths are untouched — touch-action governs touch only. */
+            touch-action: none;
         }
 
         #empty-state {
@@ -1439,6 +1480,8 @@
             color: var(--text-primary);
             max-height: 90vh;
             overflow-y: auto;
+            /* R17: same edge-chain stop as #wt-list (see its comment). */
+            overscroll-behavior: contain;
             width: 400px;
         }
 
@@ -2864,6 +2907,131 @@
             applyVisualViewportHeight();
         }
 
+        // R17 touch-scroll state (issue #100 padOS②, PR #110 beta). Module
+        // level so a session switch never carries half a gesture: touchend/
+        // touchcancel reset all three before the next touchstart.
+        let activeTouchId = null;
+        let activeTouchLastY = 0;
+        let touchScrollRemainderPx = 0;
+
+        // R17 (issue #100 padOS②/common①, PR #110 beta): vendored xterm v6
+        // has NO working touch scroll — measured: .xterm-viewport's
+        // scrollHeight == clientHeight (v6 scrolling is a VIRTUAL scrollTop
+        // living in the ScrollableElement state — Viewport._handleScroll
+        // converts it to whole lines; the DOM renderer's rows are
+        // normal-flow divs re-rendered in place as ydisp changes, and the
+        // scrollbar is a custom-drawn slider — the only style.top-positioned
+        // part of the scroll machinery — the viewport div itself holds no
+        // scrollable content),
+        // touches land on .xterm-screen which is not inside the viewport so
+        // no native scroll chain exists, and the package's touch machinery
+        // (the Gesture singleton) is inert in this build (see below). CDP
+        // trusted swipes moved neither scrollTop nor buffer.viewportY. So
+        // we map it ourselves, delegated on #terminal-container (the host
+        // div is rebuilt per session; the delegation survives rebuilds,
+        // and the container hosts only xterm):
+        //   - ONE finger = scroll the buffer. touchstart is passive and
+        //     never preventDefaults, so a tap keeps its default path
+        //     (focus the terminal / raise the keyboard).
+        //   - TWO+ fingers = abort (activeTouchId cleared): we invent no
+        //     pinch semantics.
+        //   - No gesture layer competes with this mapping — and NOT
+        //     because of listener ordering or anyone's interception: in
+        //     THIS vendored build the Gesture singleton is never even
+        //     CONSTRUCTED. Verified in the bundle: BOTH registration entry
+        //     points — addTarget and its sister ignoreTarget (exposed as
+        //     Widget.ignoreGesture) — appear only as their own definitions,
+        //     with ZERO call sites, and each guards its lazy
+        //     `INSTANCE ||= new Gesture` behind being called — so the
+        //     singleton never exists, the document-level listeners in its
+        //     constructor are never installed, no target ever registers,
+        //     dispatchEvent iterates empty lists, dispatched stays false,
+        //     and Gesture never preventDefaults anything. (The <30px
+        //     constant one might go looking for exists only on the
+        //     onTouchEnd path — a tap-vs-contextmenu displacement check
+        //     beside HOLD_DELAY; and the onTouchEnd single-touch-remaining
+        //     branch IS a real inertia/fling path driving a
+        //     requestAnimationFrame loop off the SCROLL_FRICTION constant —
+        //     it EXISTS, it just has no consumer while the target list
+        //     stays empty.) Stated plainly: on this build there IS no
+        //     long-press word-select on touch, so there is nothing to
+        //     conflict with. FORWARD WARNING: if an xterm upgrade ever
+        //     wires Gesture up to the SelectionService (a target gets
+        //     registered), the "one-finger drag = scroll" coexistence
+        //     conclusion must be revisited.
+        //   - touchmove is registered {passive:false} and preventDefaults
+        //     UNCONDITIONALLY: the terminal area is the one place the page
+        //     rubber-band must die on EVERY iOS version (the CSS
+        //     touch-action lock alone only covers modern engines), and the
+        //     lock must hold even with no active session — the mapping then
+        //     simply does nothing.
+        // Steps: pixels accumulate into WHOLE lines via
+        // (term.options.fontSize || 13) x lineHeight — xterm exposes no
+        // public cellHeight API and the vendored v6 has no scrollPixels,
+        // hence scrollLines (measured in the vendored v6: a NEGATIVE count
+        // walks toward OLDER content). Direction follows the FINGER, the
+        // iOS/macOS content-follows-finger convention: an UPWARD finger
+        // (dy > 0) passes a POSITIVE count and reveals NEWER content; a
+        // DOWNWARD finger reveals OLDER content. (The wheel-style inversion
+        // was the first cut and was rejected in PR #110 review — the issue
+        // asked for scroll ABILITY, and the platform convention wins.)
+        // The signed remainder carries across events so sub-line drifts
+        // never lose steps or jump; the line-height approximation only
+        // affects scroll SPEED, never direction or destination.
+        function initTerminalTouchScroll() {
+            const container = document.getElementById("terminal-container");
+            if (!container) return;
+            container.addEventListener("touchstart", (e) => {
+                if (e.touches.length === 1) {
+                    activeTouchId = e.touches[0].identifier;
+                    activeTouchLastY = e.touches[0].clientY;
+                    touchScrollRemainderPx = 0;
+                } else {
+                    // Multi-finger: abort the mapping (no pinch semantics).
+                    activeTouchId = null;
+                }
+            }, { passive: true });
+            container.addEventListener("touchmove", (e) => {
+                e.preventDefault(); // hard page lock — all iOS, session or not
+                if (activeTouchId === null) return;
+                let touch = null;
+                for (let i = 0; i < e.touches.length; i++) {
+                    if (e.touches[i].identifier === activeTouchId) { touch = e.touches[i]; break; }
+                }
+                if (!touch) return;
+                const dy = activeTouchLastY - touch.clientY;
+                activeTouchLastY = touch.clientY;
+                if (dy === 0) return;
+                const session = getActiveTerminalSession();
+                if (!session || !session.term) return;
+                const term = session.term;
+                // (fontSize || 13): WITHOUT the fallback, fontSize 0 gives
+                // linePx 0 — the division yields Infinity (unbounded
+                // scrolling) and the remainder then turns NaN; undefined
+                // gives NaN directly. The || 13 fallback covers both.
+                const linePx = (term.options.fontSize || 13) * (term.options.lineHeight || 1);
+                touchScrollRemainderPx += dy;
+                const lines = Math.trunc(touchScrollRemainderPx / linePx);
+                if (lines !== 0) {
+                    term.scrollLines(lines); // content follows the finger
+                    touchScrollRemainderPx -= lines * linePx;
+                }
+            }, { passive: false });
+            const endTouchScroll = (e) => {
+                if (activeTouchId === null) return;
+                for (let i = 0; i < e.changedTouches.length; i++) {
+                    if (e.changedTouches[i].identifier === activeTouchId) {
+                        activeTouchId = null;
+                        activeTouchLastY = 0;
+                        touchScrollRemainderPx = 0;
+                        break;
+                    }
+                }
+            };
+            container.addEventListener("touchend", endTouchScroll, { passive: true });
+            container.addEventListener("touchcancel", endTouchScroll, { passive: true });
+        }
+
         function init() {
             if (sessionStorage.getItem(SERVER_UPGRADED_FLAG) === "1") {
                 sessionStorage.removeItem(SERVER_UPGRADED_FLAG);
@@ -2882,6 +3050,8 @@
             // matters, so a reload with the keyboard already up (iOS Safari
             // restores input focus) starts at the narrowed height.
             initVisualViewportHandling();
+            // R17: terminal touch-scroll mapping + the touchmove page lock.
+            initTerminalTouchScroll();
             refresh();
             // Polling for status updates (2s)
             if (pollTimer) clearInterval(pollTimer);

@@ -1422,6 +1422,81 @@ func TestTouchInteractionAnchors(t *testing.T) {
 	}
 }
 
+// TestTerminalTouchScrollAnchors pins the R17 contract (issue #100 padOS② /
+// common①, PR #110 beta): the page rubber-band lock (root
+// overscroll-behavior:none plus overscroll-behavior:contain on the four
+// legitimate inner scrollers), the terminal container's touch-action:none,
+// and the initTerminalTouchScroll wiring — delegated touch listeners with
+// the passive split, the unconditional touchmove preventDefault (the page
+// lock must hold even with no active session), and the scrollLines mapping
+// with the signed remainder accumulator. Every CSS declaration is asserted
+// INSIDE its rule (anchored at 8-space indentation so a substring hit inside
+// a compound selector cannot satisfy the wrong rule), and stripCSSComments
+// takes only the <style> slice per the §6 house rule.
+func TestTerminalTouchScrollAnchors(t *testing.T) {
+	bodyText := fetchIndexHTML(t)
+
+	styleStart := strings.Index(bodyText, "<style>")
+	styleEnd := strings.Index(bodyText, "</style>")
+	if styleStart < 0 || styleEnd < 0 {
+		t.Fatal("GET / lost the inline <style> block")
+	}
+	css := stripCSSComments(bodyText[styleStart:styleEnd])
+
+	assertRuleDecl := func(name, ruleAnchor, decl string) {
+		t.Helper()
+		start := strings.Index(css, ruleAnchor)
+		if start < 0 {
+			t.Fatalf("GET / lost the %s rule (issue #100 R17)", name)
+		}
+		end := strings.Index(css[start:], "\n        }")
+		if end < 0 {
+			t.Fatalf("GET / %s rule has no closing brace", name)
+		}
+		if !strings.Contains(css[start:start+end], decl) {
+			t.Fatalf("GET / %s rule should declare %q (issue #100 R17)", name, decl)
+		}
+	}
+
+	assertRuleDecl("body/html", "\n        body, html {\n", "overscroll-behavior: none;")
+	assertRuleDecl("#terminal-container", "\n        #terminal-container {\n", "touch-action: none;")
+	assertRuleDecl("#wt-list", "\n        #wt-list {\n", "overscroll-behavior: contain;")
+	assertRuleDecl(".git-section-list", "\n        .git-section-list {\n", "overscroll-behavior: contain;")
+	assertRuleDecl("dialog", "\n        dialog {\n", "overscroll-behavior: contain;")
+	assertRuleDecl("#tabs-container", "\n        #tabs-container {\n", "overscroll-behavior: contain;")
+
+	// JS wiring, sliced to the shipped function.
+	ts := sliceJSFunction(t, bodyText, "initTerminalTouchScroll")
+	for _, check := range []string{
+		`addEventListener("touchstart"`,
+		`addEventListener("touchmove"`,
+		`addEventListener("touchend"`,
+		`addEventListener("touchcancel"`,
+		"{ passive: true }",
+		"{ passive: false }",
+		"e.preventDefault();",
+		"getActiveTerminalSession()",
+		"(term.options.fontSize || 13) * (term.options.lineHeight || 1)",
+		"term.scrollLines(lines)",
+		"touchScrollRemainderPx -= lines * linePx",
+	} {
+		if !strings.Contains(ts, check) {
+			t.Fatalf("GET / initTerminalTouchScroll should include %q (issue #100 R17)", check)
+		}
+	}
+	// The hard lock must fire even with no active session: preventDefault
+	// precedes the session lookup in the touchmove handler.
+	pdAt := strings.Index(ts, "e.preventDefault();")
+	sessAt := strings.Index(ts, "const session = getActiveTerminalSession();")
+	if pdAt < 0 || sessAt < 0 || pdAt > sessAt {
+		t.Fatal("GET / initTerminalTouchScroll must preventDefault BEFORE the session lookup — the page lock holds with no session (issue #100 R17)")
+	}
+	// Wired at startup.
+	if !strings.Contains(sliceJSFunction(t, bodyText, "init"), "initTerminalTouchScroll();") {
+		t.Fatal("GET / init() must call initTerminalTouchScroll() (issue #100 R17)")
+	}
+}
+
 func TestReasonixRendererKeepsFrameAlive(t *testing.T) {
 	mux := http.NewServeMux()
 	if err := Register(mux, "myworktree", nil); err != nil {

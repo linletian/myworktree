@@ -133,6 +133,30 @@ func TestTouchInteractionHandling(t *testing.T) {
 	t.Logf("%s", out)
 }
 
+// TestTerminalTouchScrollHandling runs the Node unit tests for the issue
+// #100 R17 terminal touch-scroll mapping (testdata/terminal_touch_scroll.test.mjs):
+// the natural-direction scrollLines mapping (negative count toward old
+// content), the signed remainder accumulator across events, multi-finger
+// abort, the unconditional non-passive preventDefault page lock that holds
+// even with no active session, and the touchend/touchcancel full reset.
+//
+// Same arrangement as TestTouchInteractionHandling: the cases slice the
+// shipped index.html and run against stubbed browser state, this wrapper
+// makes `go test` enforce them, and the file lives in testdata/ because
+// static/* is embedded and served to every browser. Skips when node is
+// absent.
+func TestTerminalTouchScrollHandling(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not on PATH; skipping terminal touch scroll JS tests")
+	}
+	out, err := exec.Command(node, "--test", "testdata/terminal_touch_scroll.test.mjs").CombinedOutput()
+	if err != nil {
+		t.Fatalf("node --test testdata/terminal_touch_scroll.test.mjs: %v\n%s", err, out)
+	}
+	t.Logf("%s", out)
+}
+
 // TestResponsiveLayerChangelogCounts extends the issue #95 guard
 // (TestTerminalStatusChangelogCount) to the four behavioral files behind
 // the v0.6.0 responsive plan: each CHANGELOG entry quotes its file's
@@ -166,6 +190,7 @@ func TestResponsiveLayerChangelogCounts(t *testing.T) {
 		{"testdata/viewport_height.test.mjs", `new issue #100 L1 scenarios`},
 		{"testdata/narrow_drawer.test.mjs", `new issue #100 L2 scenarios`},
 		{"testdata/touch_interaction.test.mjs", `new issue #100 L3 scenarios`},
+		{"testdata/terminal_touch_scroll.test.mjs", `new issue #100 R17 scenarios`},
 	} {
 		src, err := os.ReadFile(tc.file)
 		if err != nil {
