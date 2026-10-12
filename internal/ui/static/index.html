@@ -426,6 +426,23 @@
             .tab {
                 scroll-snap-align: start;
             }
+            /* R8 inline correction (PR #110 beta, measured): the "+" is the
+               container's FIRST child (renderTabs puts .new-tab-btn ahead
+               of the first instance tab), not a snap point. On a narrow
+               screen + coarse pointer the 44px targets squeeze the strip
+               until it overflows; snap then auto-scrolls right by 18px on
+               relayout (headless Chrome 390x844 coarse: scrollLeft=18),
+               clipping "+" to a 7.3px sliver — and that clipped strip sits
+               exactly under the toggle button's 44px TRANSPARENT hit area,
+               which is what users reported as "+ hidden behind the sidebar
+               button". Making "+" the FIRST snap point makes the rest
+               position (0) a legal snap position — measured scrollLeft=0
+               with "+" fully visible; fine pointer at the same width does
+               not overflow and never reproduces. The tabs' own snapping is
+               unchanged (every .tab still aligns start). */
+            .new-tab-btn {
+                scroll-snap-align: start;
+            }
         }
 
         /* R7 middle tier (issue #100 L2, PRD-CHANGE §3.6): 769–1024px —

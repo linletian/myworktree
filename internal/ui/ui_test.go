@@ -1051,6 +1051,21 @@ func TestNarrowDrawerAnchors(t *testing.T) {
 	if !strings.Contains(narrow[tabStart:tabStart+tabEnd], "scroll-snap-align:") {
 		t.Fatal("GET / narrow-tier .tab should declare a scroll-snap-align (issue #100 L2 R8)")
 	}
+	// R8 inline correction (PR #110 beta, §5.6-2): the "+" (.new-tab-btn)
+	// is the strip's first child and must be the first snap point — without
+	// it, snap auto-scrolls right on overflow and clips "+" under the
+	// toggle's transparent hit area.
+	newTabStart := strings.Index(narrow, ".new-tab-btn {")
+	if newTabStart < 0 {
+		t.Fatal("GET / narrow tier lost the .new-tab-btn snap-align rule (issue #100 L2 R8 inline correction, §5.6-2)")
+	}
+	newTabEnd := strings.Index(narrow[newTabStart:], "\n            }")
+	if newTabEnd < 0 {
+		t.Fatal("GET / narrow-tier .new-tab-btn snap-align rule has no closing brace")
+	}
+	if !strings.Contains(narrow[newTabStart:newTabStart+newTabEnd], "scroll-snap-align: start;") {
+		t.Fatal("GET / narrow-tier .new-tab-btn should declare scroll-snap-align: start — the strip's first child must anchor the rest position (issue #100 L2 R8 inline correction)")
+	}
 
 	// R7 mask global state: display:none everywhere — without it the div
 	// would be a visible flex sibling swallowing the whole desktop layout.
