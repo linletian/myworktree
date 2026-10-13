@@ -2101,8 +2101,14 @@
                          title only, no aria — deliberately matching the two
                          existing column buttons (they carry titles only). The
                          action binds pointerdown (NOT click) so the terminal
-                         keeps focus and iOS keeps the keyboard up (§3.3). -->
-                    <button class="term-ctrl-btn" id="quick-keys-toggle" title="Quick keys" onpointerdown="toggleQuickKeysPanel(event)">
+                         keeps focus and iOS keeps the keyboard up (§3.3).
+                         tabindex="-1" removes it from the Tab order:
+                         keyboard-unreachable is deliberate (R18 is a touch
+                         compensation, redundant on desktop) — this keeps the
+                         a11y statement "not focusable" consistent with that
+                         positioning instead of a focusable no-response
+                         control. -->
+                    <button class="term-ctrl-btn" id="quick-keys-toggle" title="Quick keys" tabindex="-1" onpointerdown="toggleQuickKeysPanel(event)">
                         <svg viewBox="0 0 24 24"><rect x="2" y="6" width="20" height="12" rx="2"></rect><path d="M6 10h.01"></path><path d="M10 10h.01"></path><path d="M14 10h.01"></path><path d="18 10h.01"></path><path d="M6 14h.01"></path><path d="18 14h.01"></path><path d="M9 14h6"></path></svg>
                     </button>
                     <!-- R19 panel shell: single DOM, two content states (key
@@ -3333,6 +3339,17 @@
                 session.composing = false;
                 flushQuickKeysQueue(session);
             });
+            // Third failsafe: if the engine never fires compositionend
+            // (focus migration / a UA gesture takeover aborting the
+            // composition), the flag would stick TRUE and later key taps
+            // would queue silently forever. blur clears it and flushes —
+            // the flush ownership (this session) is unchanged, and
+            // flushQuickKeysQueue already tolerates an empty queue and a
+            // dead session.
+            textarea.addEventListener("blur", () => {
+                session.composing = false;
+                flushQuickKeysQueue(session);
+            });
         }
 
         // Flush goes to the SESSION THAT PRODUCED THE COMPOSITION — never
@@ -3589,20 +3606,41 @@
         }
 
         // Path B capture: the user's long-press → system Paste lands as a
-        // paste event; take the text, flip back to the key grid (auto),
-        // deliver to the fallback's OWNER session. The cancel button flips
+        // paste event. Two engine shapes:
+        //   - clipboardData present: preventDefault INSIDE the synchronous
+        //     gesture chain (the default insert would land in the
+        //     display-switched textarea and keep the keyboard choreography
+        //     alive), read getData("text"), finish.
+        //   - clipboardData ABSENT (old WebKit / synthetic events): do NOT
+        //     preventDefault — swallowing it would eat a paste the user
+        //     actually made. Let the default insert land in the paste
+        //     textarea and harvest the value on the NEXT TASK TICK
+        //     (setTimeout, not queueMicrotask — the default action runs
+        //     after dispatch, and a microtask could beat it), then clear
+        //     the value and finish.
+        // Session ownership is captured SYNCHRONOUSLY at event time —
+        // never re-fetched asynchronously (§3.3). The cancel button flips
         // back WITHOUT closing the panel and WITHOUT delivering (§3.2
         // collapse-path list).
         function quickKeysPasteCaptured(event) {
-            // No default insert: it would land in the (display-switched)
-            // textarea and keep the keyboard choreography alive.
-            if (event) event.preventDefault();
-            const text = event && event.clipboardData ? event.clipboardData.getData("text") : "";
-            const panel = document.getElementById("quick-keys-panel");
-            if (panel) panel.classList.remove("paste-mode");
             const session = quickKeysPasteSession || getActiveTerminalSession();
             quickKeysPasteSession = null;
-            deliverQuickKeysPaste(text, session);
+            const finish = (text) => {
+                const panel = document.getElementById("quick-keys-panel");
+                if (panel) panel.classList.remove("paste-mode");
+                deliverQuickKeysPaste(text, session);
+            };
+            if (event && event.clipboardData) {
+                event.preventDefault();
+                finish(event.clipboardData.getData("text"));
+                return;
+            }
+            const target = event ? event.target : null;
+            setTimeout(() => {
+                const text = target && typeof target.value === "string" ? target.value : "";
+                if (target) target.value = "";
+                finish(text);
+            }, 0);
         }
 
         function cancelQuickKeysPaste(event) {
@@ -3644,7 +3682,13 @@
         // writeText in a secure context; execCommand('copy') otherwise
         // (deprecated but working on iOS Safari — PRD §3.5, beta item). A
         // writeText rejection falls through to the same fallback rather
-        // than failing silently.
+        // than failing silently — but whether that rescue lands INSIDE
+        // the user-activation window depends on the engine: time-windowed
+        // activation (Chrome's seconds-long transient activation) carries
+        // into the rejection callback, while a strict task-level model may
+        // not, and execCommand then returns false. The failure is NOT
+        // silent either way — the user sees "Copy failed" (retryable);
+        // registered as an accepted residual (PRD-CHANGE §7, PR #112 M-1).
         function writeQuickKeysClipboard(text) {
             if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
                 let result;

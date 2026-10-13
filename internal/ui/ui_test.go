@@ -1543,6 +1543,7 @@ func TestQuickKeysAnchors(t *testing.T) {
 	}
 	for _, check := range []string{
 		`title="Quick keys"`,
+		`tabindex="-1"`, // keyboard-unreachable is deliberate (R18 touch compensation) — no focusable no-response control
 		`onpointerdown="toggleQuickKeysPanel(event)"`,
 		`onpointerdown="sendQuickKey('esc', event)"`,
 		`onpointerdown="sendQuickKey('ctrl-c', event)"`,
@@ -1787,6 +1788,18 @@ func TestQuickKeysAnchors(t *testing.T) {
 	dispatchAt := strings.Index(pasteFn, "navigator.clipboard")
 	if noTermAt < 0 || dispatchAt < 0 || noTermAt > dispatchAt {
 		t.Fatal("GET / quickKeyPaste must refuse a missing terminal BEFORE the clipboard dispatch — no permission prompt for a no-op (issue #100 R21)")
+	}
+	// PR #112: capture without clipboardData harvests on the next TASK
+	// tick (setTimeout — a microtask could beat the default action), and
+	// the IME binding carries a blur failsafe for engines that never fire
+	// compositionend.
+	capturedFn := sliceJSFunction(t, bodyText, "quickKeysPasteCaptured")
+	if !strings.Contains(capturedFn, "setTimeout") {
+		t.Fatal("GET / quickKeysPasteCaptured must harvest a clipboardData-less paste on the next task tick (PR #112 M-2)")
+	}
+	imeFn := sliceJSFunction(t, bodyText, "ensureQuickKeysImeBinding")
+	if !strings.Contains(imeFn, `"blur"`) {
+		t.Fatal("GET / ensureQuickKeysImeBinding must carry the blur failsafe for abandoned compositions (PR #112 M-3)")
 	}
 	copyFn := sliceJSFunction(t, bodyText, "quickKeyCopy")
 	if !strings.Contains(copyFn, "term.hasSelection()") || !strings.Contains(copyFn, "extractViewportText(term)") {

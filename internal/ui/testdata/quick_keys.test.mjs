@@ -277,7 +277,7 @@ test("quick keys R19: sync flips the panel class and resets the paste-fallback c
   a.quickKeysOpen = true;
   h.api.syncQuickKeysPanel();
   assert.ok(h.panel.classes.has("open"), "flag on -> panel open");
-  assert.equal(a.imeBound(), 2, "an open panel binds the IME composition listeners on its session");
+  assert.equal(a.imeBound(), 3, "an open panel binds the IME composition listeners + the blur failsafe on its session");
 
   // The paste fallback state is transient: a hide must reset it, and the
   // hide paths are many (instance switch / delete / worktree / web kind) —
@@ -346,11 +346,11 @@ test("quick keys R20: IME binding is per-session lazy and guards a missing texta
   const a = makeSession("a");
   const b = makeSession("b");
   h.api.ensureQuickKeysImeBinding(a);
-  assert.equal(a.imeBound(), 2, "first bind installs compositionstart + compositionend");
+  assert.equal(a.imeBound(), 3, "first bind installs compositionstart + compositionend + blur");
   h.api.ensureQuickKeysImeBinding(a);
-  assert.equal(a.imeBound(), 2, "re-binding is a no-op");
+  assert.equal(a.imeBound(), 3, "re-binding is a no-op");
   h.api.ensureQuickKeysImeBinding(b);
-  assert.equal(b.imeBound(), 2, "each session gets its own listeners");
+  assert.equal(b.imeBound(), 3, "each session gets its own listeners");
   assert.doesNotThrow(() => h.api.ensureQuickKeysImeBinding({ term: {} }), "a session without a textarea binds nothing, not an exception");
 });
 
@@ -636,5 +636,53 @@ test("quick keys R20/R21: a paste payload arriving mid-composition queues and fl
 
   s.fireIme("compositionend");
   assert.deepEqual(s.inputCalls, ["pasted\rtext"], "compositionend flushes the queued paste");
+  assert.equal(s.quickKeysQueue.length, 0, "the queue drains");
+});
+
+test("quick keys R22: a writeText rejection still attempts the execCommand fallback — the rescue path runs", async () => {
+  const h = quickKeysHarness({
+    navigatorStub: { clipboard: { writeText: () => Promise.reject(new Error("denied")) } },
+  });
+  const s = makeSession("a");
+  s.quickKeysOpen = true;
+  h.setActive(s);
+  s.term.hasSelection = () => true;
+  s.term.getSelection = () => "rescued text";
+  h.api.quickKeyCopy({ preventDefault() {} });
+  await new Promise((r) => setTimeout(r, 0));
+  await new Promise((r) => setTimeout(r, 0)); // rejection callback → fallback
+  assert.deepEqual(h.execCalls, ["copy"], "execCommand('copy') is attempted after the writeText rejection");
+  assert.equal(h.created.length, 1, "the temporary textarea is created for the fallback");
+  assert.equal(h.created[0].value, "rescued text", "the fallback carries the same text");
+});
+
+test("quick keys R21: capture WITHOUT clipboardData lets the default insert happen and harvests it on the next task tick", async () => {
+  const h = quickKeysHarness({ navigatorStub: {} });
+  const s = makeSession("a");
+  s.quickKeysOpen = true;
+  h.setActive(s);
+  h.api.quickKeyPaste({ preventDefault() {} }); // enters the fallback, owner = s
+  h.pasteTextarea.value = "default-inserted\ntext";
+  const ev = { prevented: false, preventDefault() { this.prevented = true; }, target: h.pasteTextarea };
+  h.api.quickKeysPasteCaptured(ev);
+  assert.equal(ev.prevented, false, "no clipboardData -> the default insert is NOT prevented");
+  assert.deepEqual(s.inputCalls, [], "nothing is delivered synchronously");
+  await new Promise((r) => setTimeout(r, 0)); // the harvest tick
+  assert.deepEqual(s.inputCalls, ["default-inserted\rtext"], "the harvested textarea value is delivered to the owner session");
+  assert.equal(h.pasteTextarea.value, "", "the harvested value is cleared");
+});
+
+test("quick keys R20: blur is the third failsafe — a composition abandoned without compositionend clears the flag and flushes", () => {
+  const h = quickKeysHarness();
+  const s = makeSession("a");
+  h.setActive(s);
+  h.api.ensureQuickKeysImeBinding(s);
+  s.fireIme("compositionstart");
+  h.api.sendQuickKeyBytes(s, "\x1b");
+  assert.equal(s.composing, true, "composition started");
+  assert.deepEqual(s.inputCalls, [], "the byte queued");
+  s.fireIme("blur"); // engine never sent compositionend (focus migration)
+  assert.equal(s.composing, false, "blur clears the flag");
+  assert.deepEqual(s.inputCalls, ["\x1b"], "blur flushes the queue to the owner session");
   assert.equal(s.quickKeysQueue.length, 0, "the queue drains");
 });
