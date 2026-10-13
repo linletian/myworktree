@@ -1,7 +1,8 @@
 # PRD 变更文档：v0.6.0 — 终端快捷按键输入面板（padOS / iOS 触屏输入补偿）
 
-> **状态**：草案（需求分析完成，待评审；本文档不构成实施指令，按 §4 分期开工）
+> **状态**：需求评审三轮闭环（2026-10-13）；Phase 0 设计评审中；本文档不构成实施指令，按 §4 分期开工
 > **日期**：2026-10-13（同日按用户补充修订：remote 访问的剪贴板系统归属契约——读写对象恒为**浏览器所在客户端系统**，见 §1.3 / R21 / R22 / §3.4）
+> **设计评审修订（2026-10-13，Phase 0 设计稿用户评审）**：① 面板由「落在按钮列下方」改为**贴按钮列左侧展开、顶缘对齐入口按钮**（iPhone 窄屏可见性由宽度上限纪律承接）；② 明示**收起路径**（再点入口按钮 toggle 为唯一手动收起，不引入面板内 × 或点面板外关闭）——见 R19 / §3.1 / §3.2 / §5.1
 > **目标版本**：v0.6.0（并入**未发布**的 v0.6.0 批次——侧栏响应式 PR1–PR4 与本面板同属一个版本；需求编号 R18–R22 接续该批次 PRD-CHANGE 的 R1–R17，编号不变）
 > **来源**：issue #100 首个评论的共性输入缺口（padOS/iOS 软键盘无 Esc / Ctrl 组合键；终端无真实输入框与光标，长按无系统粘贴气泡）+ 用户立项指令（2026-10-13，PR #110 合并后）+ `docs/ORCA_MOBILE_TERMINAL_INPUT_RESEARCH.md`（2026-10-12）「四、建议立项方向」的正式承接——**编号注记**：该草案原称「R17」，已被 PR #110 beta 追加的终端触摸滚动占用；本文档自 **R18** 起接续编号（v0.6.0 PRD-CHANGE 末号为 R17，编号全局连续、不跨文档复用）
 > **拟定分支名**：`feature/v0.6.0-terminal-quick-keys`
@@ -60,7 +61,7 @@ issue #100 首评指出两类触屏缺口。v0.6.0（PR1–PR4 + PR #110 beta �
 | # | 需求 | 来源 |
 |---|---|---|
 | R18 | **入口按钮**：`#terminal-controls` 新增首子元素按钮（DOM 序在 Refresh 之上 = 视觉最上方），复用 `.term-ctrl-btn` 全部样式约定（32px / coarse 44px / `rgba(0,0,0,0.5)` 底 / hover 包 `@media (hover: hover)`），键盘类 SVG 图标，title 与既有按钮同为英文；显隐零新逻辑——随 `#terminal-controls` 的 `oc-hidden` 对 web kinds 与无实例态自动隐藏。**两个明示取向**（评审 N-3/N-5 补立）：① 桌面端同样显示、功能等价（鼠标可点）——`oc-hidden` 分支只对 web kinds / 无实例态隐藏（`index.html:3833/3868`），桌面 pty 恒显示为预期行为，不引入 coarse-only 显隐（那与「显隐零新逻辑」直接冲突）；② 无障碍延续 `.term-ctrl-btn` 既有约定仅 `title`（刻意与同列按钮一致——aria 三件套是 `#sidebar-toggle-btn` 一类全局控件的约定，不适用于此）；动作绑 `pointerdown` 意味着桌面纯键盘（Enter/Space → click）无法触发入口——刻意接受：面板仅服务触屏补偿，桌面用户有实体键盘与鼠标，面板对其冗余 | 用户指令② |
-| R19 | **浮层面板壳 + 实例绑定状态机**：面板为浮于终端上层的绝对定位浮层（DOM 作为 `#terminal-controls` 的子节点——免费获得 web-kind 隐藏同步与顶右锚定），承载按键按钮网格；**可见性 = 活动会话对象的 `quickKeysOpen` 布尔旗标**（单一面板 DOM、每会话一旗标），同步函数在 `renderWorkspace`（每次 render 含 2s 轮询，幂等 classList.toggle）与开关处理器两处调用：切实例 A→B 时 A 的面板随会话隐藏（旗标留存、回切 A 时恢复展开——「绑定」的完整语义：面板既不会停在错误实例上，也不丢用户的展开状态）；删实例（会话销毁 → 旗标随之不可达 → 隐藏）、切 worktree（`activeInst` 置 null → 隐藏）、web kind（无 pty 会话 → 隐藏）三个边界由同一条「无活动会话即隐藏」规则覆盖；面板在 `#terminal-container` 之外，与 R17 触摸滚动映射零交互；顶锚定 + R6 钉高 → 软键盘弹起时面板顶部保持可见——**「保持可用」以 §3.1 尺寸纪律（高度上限 + 面板内部滚动）为前提**（评审 M-1 补立） | 用户指令③ |
+| R19 | **浮层面板壳 + 实例绑定状态机**：面板为浮于终端上层的浮层（DOM 作为 `#terminal-controls` 的子节点——免费获得 web-kind 隐藏同步与顶右锚定），承载按键按钮网格；**展开形态**（设计评审修订①）：面板 `absolute` 出 flex 流，**贴按钮列左侧展开、顶缘与入口按钮对齐**（`top:0; right:calc(100% + 8px)`），不再落按钮列下方；iPhone 窄屏可见性由 §3.1 宽度上限纪律承接；**收起路径明示**（设计评审修订②，清单见 §3.2）：手动收起唯一入口 = 再点一次入口按钮（toggle，左展形态下入口恒在面板右侧外可见），不引入面板内 × 或点面板外关闭；**可见性 = 活动会话对象的 `quickKeysOpen` 布尔旗标**（单一面板 DOM、每会话一旗标），同步函数在 `renderWorkspace`（每次 render 含 2s 轮询，幂等 classList.toggle）与开关处理器两处调用：切实例 A→B 时 A 的面板随会话隐藏（旗标留存、回切 A 时恢复展开——「绑定」的完整语义：面板既不会停在错误实例上，也不丢用户的展开状态）；删实例（会话销毁 → 旗标随之不可达 → 隐藏）、切 worktree（`activeInst` 置 null → 隐藏）、web kind（无 pty 会话 → 隐藏）三个边界由同一条「无活动会话即隐藏」规则覆盖；面板在 `#terminal-container` 之外，与 R17 触摸滚动映射零交互；顶锚定 + R6 钉高 → 软键盘弹起时面板顶部保持可见——**「保持可用」以 §3.1 尺寸纪律（高度上限 + 宽度上限 + 面板内部滚动）为前提**（评审 M-1 补立，设计评审修订①改写） | 用户指令③ + 设计评审①② |
 | R20 | **字节键集与发送契约**：内置键 v1 = `Esc` `\x1b`、`Tab` `\t`、`Shift+Tab` `\x1b[Z`（同 Orca 内置键表；备注：若干 agent TUI 以 Shift+Tab 作模式切换——经验性备注，非本文档锚定事实，评审 N-2 修订）、方向四键（发送时读 `term.modes.applicationCursorKeysMode`：on 发 SS3 `\x1bOA-D`，off 发 CSI `\x1b[A-D`）、`^C` `\x03`、`^D` `\x04`；**发送一律 `term.input(bytes)`**——触发 `onData` 走与键盘完全相同的闸门（终态拒发 / 查询应答过滤 / WS-HTTP 传输），两套会话工厂无关、零新传输代码；载荷族对 `isTerminalQueryResponse` 的安全性已逐类核验（§3.3）；按钮动作绑定 **`pointerdown`（非 click）并 `preventDefault()`**——压制兼容鼠标事件族与 mousedown 默认聚焦行为，终端焦点不转移、软键盘不收起（§3.3 契约）；IME 组合态期间的字节排队至 `compositionend` 后发送（§3.3）；不做长按连发（v1 简化，Orca 的 400ms/45ms 连发留 §8） | 用户指令①④ + ORCA §2.2/§三 |
 | R21 | **粘贴（真剪贴板，双路径）**：主路径 `navigator.clipboard.readText()`（瞬态用户激活内调用；安全上下文）；**兜底路径（不安全上下文 = iPad 局域网裸 HTTP 主场景）**：**复用同一面板 DOM 切换为「粘贴兜底态」**——在屏可见的真实 `<textarea>` + 提示 + 取消（评审 M-2 裁定选型 (a)，不新增第二浮层 DOM、不引入第二条显隐路径，详见 §3.4），提示长按→系统「粘贴」callout，监听 `paste` 事件取文本——iOS 上不存在第二个程序化读剪贴板路径（无 `execCommand('paste')`），两拍式是唯一全域可用方案；取到文本后：换行规范化镜像 vendored xterm 自带粘贴（`/\r?\n/g`→`\r`，孤立 `\r` 不动）→ 剥离载荷内嵌的 `\x1b[200~` / `\x1b[201~`（注入防护，Orca 纪律，xterm 自身未做）→ `term.modes.bracketedPasteMode` 为真时包 `\x1b[200~…\x1b[201~`（与 vendored xterm 自带粘贴同规则，**不按 Orca 多加 alt buffer 排除**，理由 §3.4）→ `term.input()` 同闸门发送；256KiB 上限（Orca 实证值）；**系统归属契约**（用户补充 2026-10-13）：读取对象恒为浏览器所在**客户端系统**的剪贴板——remote 访问（`isRemoteAccess()`，浏览器与守护进程异机）时粘贴的正是客户端机器上的内容，而非 myworktree 进程所在机器；不引入任何后端剪贴板通道；空剪贴板 / 超限 / API 拒绝均为带反馈的无操作（`updateStatus` 行） | 用户指令⑤ + ORCA §2.4 |
 | R22 | **复制（选区优先 / 视口兜底，pty 与 TUI 分态正确）**：`term.hasSelection()` 为真 → 复制 `term.getSelection()`（桌面鼠标选区路径；TUI 鼠标上报态下桌面选区惯例为 Shift+drag，xterm 惯例不变）；否则 → 复制**当前视口文本**：`term.buffer.active` 的 `[viewportY, viewportY+rows)` 行逐行 `translateToString(true)`（行尾trim）、`\n` 连接、丢弃尾部空行——`buffer.active` 自动指向活跃缓冲，**pty 普通缓冲（shell）与 TUI alt screen 同一套代码、行为分态自动正确**（TUI 态复制到的是当前帧文本，对拷贝 TUI 报错 / 路径有用）；写入主路径 `navigator.clipboard.writeText()`（写入对象同为浏览器所在**客户端系统**剪贴板——复制的内容可直接粘进客户端本地应用，remote 访问下与粘贴语义对称），不安全上下文兜底 `execCommand('copy')`（临时 textarea + select，iOS Safari 支持，deprecated 但可用【beta 实测项】）；**触屏拖选不做**——三条结构性证据 + Orca 旁证，结论与理由记录于 §3.5，非目标登记于 §8 | 用户指令⑥ |
@@ -72,16 +73,17 @@ issue #100 首评指出两类触屏缺口。v0.6.0（PR1–PR4 + PR #110 beta �
 ### 3.1 入口与面板形态（用户指令②的落地 + 被否方案）
 
 - **入口**：`#terminal-controls` 首子元素。该容器已是顶右绝对定位浮层（`top:20px; right:20px`），「放在刷新上面」= DOM 序首位，零定位新增。
-- **面板 DOM 作为 `#terminal-controls` 的子节点**：容器 `flex-direction: column`，面板落在按钮列下方、随容器顶右锚定；`renderWorkspace` 对 web kinds 挂的 `oc-hidden` 把入口与面板一起隐藏——显隐正确性免费获得，不新增第二条显隐路径（§3.2 的会话绑定只管 pty 场景内的开关）。**实现警戒**：容器当前无 `align-items`（默认 `stretch`，1808-1816 实证）——两个按钮因自带固定 width 不受影响，而宽度 auto 的面板会被拉伸钳制到容器宽（= 按钮宽）；落地时必须补 `align-items: flex-end`（按钮有显式宽度不受影响）或给面板 `align-self: flex-end`。
+- **面板 DOM 作为 `#terminal-controls` 的子节点，`absolute` 贴按钮列左侧展开**（设计评审修订①）：`position: absolute; top: 0; right: calc(100% + 8px)`——面板出 flex 流，顶缘与入口按钮（容器首子元素）对齐、右缘贴按钮列左缘留 8px 间隙，向左覆盖终端区（浮层语义）；`renderWorkspace` 对 web kinds 挂的 `oc-hidden` 把入口与面板一起隐藏——显隐正确性免费获得，不新增第二条显隐路径（§3.2 的会话绑定只管 pty 场景内的开关）。**实现警戒**：① 出流后面板不受容器 flex 约束——此前「容器补 `align-items: flex-end` 防面板被 stretch 钳宽」的警戒**作废**（stretch 只对 in-flow 子元素生效）；② 左展出流后，容器高度若维持 auto（= 按钮栈高），面板的百分比 `max-height` 不解析（CSS 2.1 §10.5/§10.7：包含块高度依赖内容时，百分比按 `none`/`auto` 处理）——高度上限必须改由「容器双向偏移获得确定高」承接，见下条尺寸纪律；③ 键网格列数不得用 `repeat(auto-fit/auto-fill, minmax(...))` 依赖面板 shrink-to-fit 宽度（列数 ↔ 宽度循环依赖，宽度会按 max-content 摊成一行直抵 `max-width` 上限）——列数用媒体查询显式分档（默认 3 列 / 窄屏 2 列，断点 PR1 实施时随按钮实测宽度定）。
 - **被否方案：键盘上方附件条（Orca `MobileSessionCommandDock` 形态）**。Orca 的附件条依赖 RN 原生层拿到键盘几何与 `Keyboard.dismiss` 等价物；浏览器侧无法程序化升降 iOS 软键盘（报告 §三「不可移植」第 4 条），附件条只能钉在终端底缘并常驻吃纵向空间，与 R6 钉高争夺可视区。用户已明确指定「右上角入口 + 浮层」形态，附件条形态不采用；其键表 / 连发参数 / 粘贴纪律等**机制层**成果照常吸收（R20/R21）。
 - 面板自身样式复用控制层视觉语言（深色半透明底、圆角、coarse 下按键 ≥44px，R10/R11 约定同样适用于面板内按钮）。
-- **面板尺寸纪律（评审 M-1 补立，R2-1/R2-2 修订）**：`#workspace` 为 `overflow: hidden`（`index.html:1281-1288`），顶锚定只保证面板**顶部**可见——R6 钉高在软键盘弹起时压缩 `#workspace` 可视高度，键集 v1 = 9 字节键 + Copy/Paste 共 11 个按钮（coarse 每个 ≥44px）总高可超可视区，溢出的下方按键会被静默裁切、且无任何补救路径。契约：`#terminal-controls` 补 `max-height: calc(100% - 20px - 20px)`（对 `#workspace` 高度解析——容器 `top:20px` 绝对定位的包含块即 `#workspace`，R6 钉高后随其收缩；两个减项 = 顶部偏移 20px + **状态行高度带取 20px 保守常数**——`#status-bar` 为 `position:absolute; bottom:0; right:0`、11px 字号（无自身 line-height，经 UA normal ≈ 13px 行盒）+ 2×2px padding 实带 ≈ 17px、`z-index:10` 且 `pointer-events: auto`（`index.html:1324-1337`）；扣除量 20px ≥ 实带，面板底缘恒高于状态行顶缘（评审 R2-2/R3-1 复算余量约 3px，保守方向正确）——容器 `z-index:20` 若不扣除该带，面板满高时底缘与 `#workspace` 底缘齐平、盖住状态行右端点击区）、三按钮 `flex-shrink: 0`；面板 `min-height: 0; overflow-y: auto`——超高时**面板内部滚动**而非被裁，全部按键恒可达。键网格 ≥2 列排布压低常态总高。面板滚动在 `#terminal-container` 之外，与 R17 触摸映射无交互。
+- **面板尺寸纪律（评审 M-1 补立，R2-1/R2-2 修订，设计评审修订①改写）**：`#workspace` 为 `overflow: hidden`（`index.html:1281-1288`），顶锚定只保证面板**顶部**可见——R6 钉高在软键盘弹起时压缩 `#workspace` 可视高度，键集 v1 = 9 字节键 + Copy/Paste 共 11 个按钮（coarse 每个 ≥44px）总高可超可视区，溢出的下方按键会被静默裁切、且无任何补救路径；左展形态下超宽同理（iPhone 窄屏主战场）。契约（替换原「容器 `max-height` + 面板作 flex 子元素 `min-height:0`」方案——面板出流后原方案不再约束面板，警戒②）：**容器** `#terminal-controls` 补 `bottom: 20px` 与 `pointer-events: none`（三个按钮与面板各自 `pointer-events: auto`）——`top:20px`/`bottom:20px` 双向偏移使容器高度确定（= `#workspace` 高 − 顶部偏移 20 − 底部**状态行高度带 20px 保守常数**：`#status-bar` 为 `position:absolute; bottom:0; right:0`、11px 字号（无自身 line-height，经 UA normal ≈ 13px 行盒）+ 2×2px padding 实带 ≈ 17px、`z-index:10` 且 `pointer-events: auto`（`index.html:1324-1337`）；扣除量 20px ≥ 实带，面板底缘恒高于状态行顶缘，评审 R2-2/R3-1 复算余量约 3px，保守方向正确），且整列空档不吞终端右侧的点击/滚动/选区（原 auto 高容器只覆盖按钮带，`pointer-events: none/auto` 组合保持该语义等价）；**面板** `max-height: 100%; overflow-y: auto`——对确定高容器解析，R6 钉高经「JS 钉 `#workspace` 高 → 容器双向偏移收缩 → 面板上限」链传导，超高时**面板内部滚动**而非被裁，全部按键恒可达；**面板宽度** shrink-to-fit + `max-width: calc(100vw - 88px)`（保守常数推导：容器 `right:20px` + coarse 按钮列 44px + 面板-按钮间隙 8px + 视口左安全边距 16px；iPhone SE 320px 下 ≤232px，网格退 2 列全键可达——iPhone 窄屏可见性的硬承接）。键网格列数媒体查询分档（警戒③）压低常态总高。面板滚动在 `#terminal-container` 之外，与 R17 触摸映射无交互。
 
 ### 3.2 面板-实例绑定状态机（R19）
 
 - **单一面板 DOM + 每会话布尔旗标**：旗标挂在会话对象上（`session.quickKeysOpen`）——会话对象是两个工厂各自创建的普通对象，挂属性与工厂无关；不引入第二个面板 DOM，也不引入全局「面板开着」变量（那正是用户报障过的「浮层停在错误实例上」类缺陷的结构来源）。
 - **派生可见性**：`可见 = 活动pty会话存在 && session.quickKeysOpen`。同步函数 `syncQuickKeysPanel()` 的职责 = 读旗标 + `classList.toggle` + **隐藏时联动复位内容态**（粘贴兜底态 → 键网格，§3.4 瞬态性——隐藏路径不止开关处理器一条，切实例 / 删实例 / 切 worktree / web kind 全经 `renderWorkspace → sync`，复位必须落在 sync 路径上才普遍成立；评审 R2-3 补立），幂等，可从 `renderWorkspace`（每次 render，含 2s 轮询）反复调用而无副作用——沿用 v0.6.0 §3.1「JS 只有读状态→挂/摘 class 一条路径」的纪律。
 - **恢复语义**：切实例只隐藏、不改旗标；回切时 `renderWorkspace → sync` 自然恢复展开。删除实例销毁会话对象，旗标随对象不可达，等价于关闭。
+- **收起路径清单**（设计评审修订②，2026-10-13）：① **手动收起唯一入口 = 再点一次入口按钮（toggle）**——左展形态下面板不遮按钮列，入口恒在面板右侧外可见可点；**不引入**面板内 × 控件或「点击面板外区域关闭」——后者需全局监听 = 第二条显隐路径（违 §3.1 纪律），且终端区点击/选区是高频操作，误触收起是更大的可用性伤害；② **派生隐藏** = 切实例 / 删实例 / 切 worktree / web kind（下条边界清单，旗标语义不变）；③ 明示**不**触发收起的动作：字节键发送后 / 粘贴发送后保持展开（连击 Esc、连续粘贴是主场景）；面板内 Esc 键 = 发送 `\x1b`，永不关面板；粘贴兜底态「取消」只切回键网格（§3.4）。
 - **边界清单**（全部由同一条派生规则覆盖，无特判）：web kind 激活（无 pty 会话）；无实例 / 空 worktree；实例删除；实例停止（面板仍可开——复制可用，字节键与粘贴由 R20 闸门的终态拒发兜底，面板不额外置灰）。
 
 ### 3.3 发送路径契约（R20 的机制核心）
@@ -152,11 +154,11 @@ issue #100 首评指出两类触屏缺口。v0.6.0（PR1–PR4 + PR #110 beta �
 ### 5.1 PR1
 
 1. 实例窗口右上角出现键盘图标入口按钮，位于 Refresh 之上，视觉风格与 Refresh / Scroll to Bottom 一致；coarse 指针下 ≥44px——自动化：Go 资源锚点断言（按钮 DOM 序、`term-ctrl-btn` class、面板容器锚点与相对顺序）。
-2. 点击入口展开 / 收起浮层面板；面板展开时切实例 A→B 面板随 A 隐藏，回切 A 恢复展开；删实例 / 切 worktree / 切 web kind 后面板不可见——自动化：node 行为测试（从真实源码切片的同步函数 + 打桩会话/state）。
+2. 点击入口展开、再点收起（toggle——左展形态下入口不被面板遮挡，§3.2 收起路径清单）；面板展开时切实例 A→B 面板随 A 隐藏，回切 A 恢复展开；删实例 / 切 worktree / 切 web kind 后面板不可见——自动化：node 行为测试（从真实源码切片的同步函数 + 打桩会话/state）。
 3. 面板各键发送字节正确（含方向键两模式分支），经 `term.input` 到达 onData 闸门；终态实例拒发——自动化：node 行为测试（字节表纯函数切片 + 模式桩）。
 4. 面板点按不转移终端焦点（pointerdown + preventDefault 契约锚点断言）；IME 组合态排队逻辑——自动化锚点 + node 切片。
-5. 软键盘弹起时面板顶部保持可见（全部按键的可达性由第 6 条尺寸纪律承接）【人工过检 / beta】；iPhone 窄屏与 iPad 上入口不被 drawer tab / tab 条遮挡【人工过检】。
-6. 软键盘弹起 + 矮屏（iPhone 横屏）组合下面板超高时**内部滚动**、全部按键可达，不被 `#workspace` 裁切（§3.1 尺寸纪律）【人工过检 / beta】——自动化：Go 锚点断言（`#terminal-controls` 的 `max-height`、按钮 `flex-shrink: 0`、面板 `min-height: 0` / `overflow-y: auto`、容器 `align-items: flex-end`（或面板 `align-self: flex-end`，§3.1 实现警戒）锚点）。
+5. 软键盘弹起时面板顶部保持可见（全部按键的可达性由第 6 条尺寸纪律承接）【人工过检 / beta】；iPhone 窄屏与 iPad 上入口不被 drawer tab / tab 条遮挡、面板左展后完整可见不被 `#workspace` 左缘裁切（§3.1 宽度上限纪律）【人工过检】。
+6. 软键盘弹起 + 矮屏（iPhone 横屏）组合下面板超高时**内部滚动**、全部按键可达，不被 `#workspace` 裁切（§3.1 尺寸纪律）【人工过检 / beta】——自动化：Go 锚点断言（`#terminal-controls` 的 `bottom: 20px` 与 `pointer-events: none`、按钮与面板 `pointer-events: auto`、面板 `position: absolute` / `top: 0` / `right: calc(100% + 8px)` / `max-height: 100%` / `overflow-y: auto` / `max-width: calc(100vw - 88px)` 锚点）。
 
 ### 5.2 PR2
 
@@ -192,7 +194,7 @@ issue #100 首评指出两类触屏缺口。v0.6.0（PR1–PR4 + PR #110 beta �
 | 6553 行单文件回归面 | 既有控制层 / 终端行为被无意破坏 | 面板为纯增量 DOM + 新监听器，不改既有行；Go 锚点断言钉住相对顺序 |
 | `pointerdown` 与 `click` 的引擎差异 | 个别浏览器动作双发或不发 | 动作只绑 pointerdown、不监听 click，与差异绝缘；beta 抽查 |
 | IME 排队窗口内终端已断开 | 排队字节落到死会话 | flush 时仍过 onData 闸门（终态拒发 / 传输兜底），无新风险；队列随会话销毁丢弃（§3.3 归属条款） |
-| 面板与 R17 手势 / R6 钉高交互 | 滚动锁止被旁路，或面板在键盘弹起 + 矮屏下被 `#workspace` 裁切 | 面板在 `#terminal-container` 作用域外 + 顶锚定 + §3.1 尺寸纪律（容器 `max-height` + 面板内部滚动）；beta 同场验证 |
+| 面板与 R17 手势 / R6 钉高交互 | 滚动锁止被旁路，或面板在键盘弹起 + 矮屏下被 `#workspace` 裁切 | 面板在 `#terminal-container` 作用域外 + 顶锚定 + §3.1 尺寸纪律（容器双向偏移确定高 + 面板 `max-height:100%` 内部滚动 + `max-width` 上限）；容器整列 `pointer-events: none` 防吞终端右侧交互；beta 同场验证 |
 
 ---
 
