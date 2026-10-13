@@ -1,0 +1,225 @@
+# PRD 变更文档：v0.6.0 — 终端快捷按键输入面板（padOS / iOS 触屏输入补偿）
+
+> **状态**：草案（需求分析完成，待评审；本文档不构成实施指令，按 §4 分期开工）
+> **日期**：2026-10-13（同日按用户补充修订：remote 访问的剪贴板系统归属契约——读写对象恒为**浏览器所在客户端系统**，见 §1.3 / R21 / R22 / §3.4）
+> **目标版本**：v0.6.0（并入**未发布**的 v0.6.0 批次——侧栏响应式 PR1–PR4 与本面板同属一个版本；需求编号 R18–R22 接续该批次 PRD-CHANGE 的 R1–R17，编号不变）
+> **来源**：issue #100 首个评论的共性输入缺口（padOS/iOS 软键盘无 Esc / Ctrl 组合键；终端无真实输入框与光标，长按无系统粘贴气泡）+ 用户立项指令（2026-10-13，PR #110 合并后）+ `docs/ORCA_MOBILE_TERMINAL_INPUT_RESEARCH.md`（2026-10-12）「四、建议立项方向」的正式承接——**编号注记**：该草案原称「R17」，已被 PR #110 beta 追加的终端触摸滚动占用；本文档自 **R18** 起接续编号（v0.6.0 PRD-CHANGE 末号为 R17，编号全局连续、不跨文档复用）
+> **拟定分支名**：`feature/v0.6.0-terminal-quick-keys`
+> **本文档位置**：`docs/plans/feature-v0.6.0-terminal-quick-keys/PRD-CHANGE.md`
+> **主文档边界**：`docs/PRD.md`、`docs/API.md`、`docs/ARCHITECTURE.md` **本次不改**；本文档登记拟变更点，落地时由各实施 PR 按 §9 清单同步。
+
+---
+
+## 1. 背景与问题陈述
+
+### 1.1 缺口回顾（issue #100 的输入半边，至今未愈）
+
+issue #100 首评指出两类触屏缺口。v0.6.0（PR1–PR4 + PR #110 beta 追加）已修复**布局与滚动**半边（视口高度、软键盘钉高、drawer、触控目标、R17 触摸滚动与页面锁止），但**输入**半边原样存在：
+
+- **缺口① 软键盘无 Esc / Ctrl**：iPadOS/iOS 软键盘不产生 Esc 键与 Ctrl 组合键事件；xterm 的 Ctrl/Esc 依赖真实 keydown 的修饰键标志位（vendored `evaluateKeyboardEvent`），软键盘不产生这类事件。纯触屏下 Esc、Ctrl+C/D 均无法发送——无法退出 TUI 模式、无法中断进程。
+- **缺口② 无系统粘贴气泡**：终端的真实输入宿主是隐藏的 helper textarea（`xterm.css:61`，`left: -9999em` 离屏），屏幕上的光标是渲染回显而非原生 caret；终端画面不是原生可编辑元素，长按不触发系统选择/粘贴 callout。触屏上没有 summon paste 事件的手段。
+
+证据与机理详见 `docs/ORCA_MOBILE_TERMINAL_INPUT_RESEARCH.md` 第一节（本节为其结论的引用，不重复论证）。
+
+### 1.2 用户立项指令（2026-10-13，产品决策原文要点）
+
+1. 在终端实例窗口增加常用按键快捷输入，重点包含 ESC 等 padOS/iOS 软键盘缺失能力；
+2. 入口沿用实例窗口右上角「刷新」「快速到底」按钮风格，**新入口按钮放在刷新上面**，点击展开一个**浮在上层**的快捷按键输入窗；
+3. 输入窗展开时切换实例，输入窗应被同时切换掉——**输入窗状态与实例窗口绑定**；
+4. 快捷键应有独立 **ESC、复制、粘贴**；
+5. 粘贴必须从系统剪贴板取内容**实际粘贴**，而不是输入一个 `^V` 字符到终端内；
+6. 复制尽量做到 xterm 内选区后复制；做不到要给理由；**分别照顾 pty 终端状态与 TUI 状态**。
+
+### 1.3 代码现状（已对 `develop` @ PR #110 合并后核实）
+
+| 事实 | 锚点 |
+|---|---|
+| 终端控制浮层 `#terminal-controls`：`position:absolute; top:20px; right:20px; flex-direction:column; z-index:20`，现有两个 `.term-ctrl-btn`（Refresh & Scroll to Bottom / Scroll to Bottom） | `internal/ui/static/index.html:1808-1816`、`1951-1958` |
+| 控制层显隐单源：`renderWorkspace()` 对 web kinds（opencode-web/reasonix/dsh-web）与无实例态挂 `oc-hidden`；pty kind 恒显示 | `index.html:3812-3869`（`oc-hidden` 切换在 3833/3868） |
+| `.term-ctrl-btn` 32px（`--term-ctrl-btn-size`），`@media (pointer: coarse)` 下 `min-width/min-height: 44px`（R10 约定：CSS px 即 Apple HIG 的 44pt 落点） | `index.html:23`、`1822-1834`、`506-509` |
+| 活动终端会话访问器 `getActiveTerminalSession()`（经 `__ptyRenderer.getSession` / 遗留 `terminalSessions` 双通道） | `index.html:2405-2415` |
+| 键盘输入唯一闸门：`term.onData` 处理器——终态实例拒发（`isInstanceTerminalStatus`）→ 终端查询应答过滤（`isTerminalQueryResponse`）→ WS 直发 / HTTP 缓冲兜底；pty.js 工厂与 index.html 遗留工厂两套镜像实现 | `internal/ui/static/kinds/pty.js:324-394`、`index.html:4753` 附近 |
+| 查询应答过滤器全貌：`MIN_RESPONSE_LENGTH=2`；非 ESC 开头只匹配裸 `;n;nR` / `?...$y` / `rgb:`；ESC 开头匹配 `ESC]`、`ESCP`、`ESC[?...$y/c/R`、`ESC[n;nR` 收尾 | `index.html:5183-5201` |
+| vendored xterm v6 公开 API 实测在位：`getSelection()` / `hasSelection()` / `clearSelection()` / `onSelectionChange`；`modes` getter 暴露 `applicationCursorKeysMode` / `applicationKeypadMode` / `bracketedPasteMode` / `mouseTrackingMode`（`none`/`x10`/`vt200`/`drag`/`any`）等；`buffer.active`（BufferApiView，与 `buffer.normal` / `buffer.alternate` 可做恒等比较判定 alt screen）、`viewportY`、`getLine(i).translateToString(true)`；`input(e,t=!0){ this.coreService.triggerDataEvent(e,t) }`——程序化输入触发 `onData`，与键盘同路径 | vendored `internal/ui/static/vendor/xterm/xterm.js`（逐处 grep 实证） |
+| vendored xterm 自带粘贴处理器（桌面 Cmd/Ctrl+V 路径）的语义：换行规范化 `e.replace(/\r?\n/g,"\r")`；bracketed 包装条件 = `decPrivateModes.bracketedPasteMode && !ignoreBracketedPasteMode`，**不含 alt buffer 判定** | vendored `xterm.js`（`i()` / `s()` 函数体，minified） |
+| 触屏选区三证据（R17 评审终版机理 + 本次复核）：① vendored v6 的 Gesture 单例整体惰性（`addTarget`/`ignoreTarget` 零调用方，单例从不构造），xterm 自身在触屏上无任何手势路径；② R17 在 `#terminal-container` 的非 passive `touchmove preventDefault` 阻断触摸→兼容鼠标事件合成，拖动手势不会变成 mousedown/mousemove；③ 自绘选区由 SelectionService 驱动，其监听为 mouse 事件族 | v0.6.0 PRD-CHANGE §3.8；vendored `xterm.js` |
+| 剪贴板 API 硬约束：`navigator.clipboard.readText()` / `writeText()` 要求**安全上下文**（HTTPS 或 localhost）；iPad 经局域网裸 HTTP（`http://<mac-ip>:<port>`）访问时 `navigator.clipboard` 整体不存在——**这是本项目触屏主场景，兜底路径是一等公民而非边缘** | ORCA 调研报告 §一（MDN 背书）；myworktree 无 TLS 能力 |
+| Remote 访问判定 `isRemoteAccess()`：hostname 非 loopback 即 remote（issue #72 单源），此时**浏览器所在系统 ≠ myworktree 进程所在系统**。剪贴板 API 是浏览器侧能力，读写恒为浏览器所在客户端系统的剪贴板——本设计不经后端取剪贴板（§8 锁死无协议变更），remote 场景下该区分**自动正确**；且 remote + 裸 HTTP 恰是不安全上下文，路径 B 即 remote 主路径 | `internal/ui/static/framework.js:43-52` |
+| R17 触摸滚动映射委托挂载在 `#terminal-container`；`#terminal-controls` 是 `#workspace` 下的平级兄弟，不在其作用域内 | `index.html`（R17 实现，PR #110） |
+| R6 软键盘钉高把 `#app` 高度钉在可视底缘；顶锚定的浮层在键盘弹起时保持可见 | v0.6.0 PRD-CHANGE §3.5 |
+| 实例切换主路径：`selectInstance()`（tab 切换）、`deactivateInstanceRenderer()`（worktree 切换先行调用）、`PtyRenderer.deactivate()`（隐藏全部宿主、保留会话）、`cleanup()`/`destroySession()`（实例删除时销毁会话对象） | `index.html:3982`、`3918-3926`；`pty.js:205-229` |
+
+---
+
+## 2. 需求综合
+
+**统一产品需求：纯触屏（无实体键盘）下，终端实例可输入 Esc / Tab / 方向 / Ctrl 组合等软键盘缺失按键，可复制终端文本、可从系统剪贴板真实粘贴——全部收进一个与实例绑定的浮层快捷按键面板。**
+
+### 2.1 需求条目（编号接续 v0.6.0，供验收 / PR 引用）
+
+| # | 需求 | 来源 |
+|---|---|---|
+| R18 | **入口按钮**：`#terminal-controls` 新增首子元素按钮（DOM 序在 Refresh 之上 = 视觉最上方），复用 `.term-ctrl-btn` 全部样式约定（32px / coarse 44px / `rgba(0,0,0,0.5)` 底 / hover 包 `@media (hover: hover)`），键盘类 SVG 图标，title 与既有按钮同为英文；显隐零新逻辑——随 `#terminal-controls` 的 `oc-hidden` 对 web kinds 与无实例态自动隐藏 | 用户指令② |
+| R19 | **浮层面板壳 + 实例绑定状态机**：面板为浮于终端上层的绝对定位浮层（DOM 作为 `#terminal-controls` 的子节点——免费获得 web-kind 隐藏同步与顶右锚定），承载按键按钮网格；**可见性 = 活动会话对象的 `quickKeysOpen` 布尔旗标**（单一面板 DOM、每会话一旗标），同步函数在 `renderWorkspace`（每次 render 含 2s 轮询，幂等 classList.toggle）与开关处理器两处调用：切实例 A→B 时 A 的面板随会话隐藏（旗标留存、回切 A 时恢复展开——「绑定」的完整语义：面板既不会停在错误实例上，也不丢用户的展开状态）；删实例（会话销毁 → 旗标随之不可达 → 隐藏）、切 worktree（`activeInst` 置 null → 隐藏）、web kind（无 pty 会话 → 隐藏）三个边界由同一条「无活动会话即隐藏」规则覆盖；面板在 `#terminal-container` 之外，与 R17 触摸滚动映射零交互；顶锚定 + R6 钉高 → 软键盘弹起时面板保持可见可用 | 用户指令③ |
+| R20 | **字节键集与发送契约**：内置键 v1 = `Esc` `\x1b`、`Tab` `\t`、`Shift+Tab` `\x1b[Z`（agent TUI 的模式切换惯例键，opencode/kimi-code 系均用）、方向四键（发送时读 `term.modes.applicationCursorKeysMode`：on 发 SS3 `\x1bOA-D`，off 发 CSI `\x1b[A-D`）、`^C` `\x03`、`^D` `\x04`；**发送一律 `term.input(bytes)`**——触发 `onData` 走与键盘完全相同的闸门（终态拒发 / 查询应答过滤 / WS-HTTP 传输），两套会话工厂无关、零新传输代码；载荷族对 `isTerminalQueryResponse` 的安全性已逐类核验（§3.3）；按钮动作绑定 **`pointerdown`（非 click）并 `preventDefault()`**——压制兼容鼠标事件族与 mousedown 默认聚焦行为，终端焦点不转移、软键盘不收起（§3.3 契约）；IME 组合态期间的字节排队至 `compositionend` 后发送（§3.3）；不做长按连发（v1 简化，Orca 的 400ms/45ms 连发留 §8） | 用户指令①④ + ORCA §2.2/§三 |
+| R21 | **粘贴（真剪贴板，双路径）**：主路径 `navigator.clipboard.readText()`（瞬态用户激活内调用；安全上下文）；**兜底路径（不安全上下文 = iPad 局域网裸 HTTP 主场景）**：弹出含真实 `<textarea>` 的小型浮层，提示长按→系统「粘贴」callout，监听 `paste` 事件取文本——iOS 上不存在第二个程序化读剪贴板路径（无 `execCommand('paste')`），两拍式是唯一全域可用方案；取到文本后：换行规范化镜像 vendored xterm 自带粘贴（`/\r?\n/g`→`\r`，孤立 `\r` 不动）→ 剥离载荷内嵌的 `\x1b[200~` / `\x1b[201~`（注入防护，Orca 纪律，xterm 自身未做）→ `term.modes.bracketedPasteMode` 为真时包 `\x1b[200~…\x1b[201~`（与 vendored xterm 自带粘贴同规则，**不按 Orca 多加 alt buffer 排除**，理由 §3.4）→ `term.input()` 同闸门发送；256KiB 上限（Orca 实证值）；**系统归属契约**（用户补充 2026-10-13）：读取对象恒为浏览器所在**客户端系统**的剪贴板——remote 访问（`isRemoteAccess()`，浏览器与守护进程异机）时粘贴的正是客户端机器上的内容，而非 myworktree 进程所在机器；不引入任何后端剪贴板通道；空剪贴板 / 超限 / API 拒绝均为带反馈的无操作（`updateStatus` 行） | 用户指令⑤ + ORCA §2.4 |
+| R22 | **复制（选区优先 / 视口兜底，pty 与 TUI 分态正确）**：`term.hasSelection()` 为真 → 复制 `term.getSelection()`（桌面鼠标选区路径；TUI 鼠标上报态下桌面选区惯例为 Shift+drag，xterm 惯例不变）；否则 → 复制**当前视口文本**：`term.buffer.active` 的 `[viewportY, viewportY+rows)` 行逐行 `translateToString(true)`（行尾trim）、`\n` 连接、丢弃尾部空行——`buffer.active` 自动指向活跃缓冲，**pty 普通缓冲（shell）与 TUI alt screen 同一套代码、行为分态自动正确**（TUI 态复制到的是当前帧文本，对拷贝 TUI 报错 / 路径有用）；写入主路径 `navigator.clipboard.writeText()`（写入对象同为浏览器所在**客户端系统**剪贴板——复制的内容可直接粘进客户端本地应用，remote 访问下与粘贴语义对称），不安全上下文兜底 `execCommand('copy')`（临时 textarea + select，iOS Safari 支持，deprecated 但可用【beta 实测项】）；**触屏拖选不做**——三条结构性证据 + Orca 旁证，结论与理由记录于 §3.5，非目标登记于 §8 | 用户指令⑥ |
+
+---
+
+## 3. 关键设计决策
+
+### 3.1 入口与面板形态（用户指令②的落地 + 被否方案）
+
+- **入口**：`#terminal-controls` 首子元素。该容器已是顶右绝对定位浮层（`top:20px; right:20px`），「放在刷新上面」= DOM 序首位，零定位新增。
+- **面板 DOM 作为 `#terminal-controls` 的子节点**：容器 `flex-direction: column`，面板落在按钮列下方、随容器顶右锚定；`renderWorkspace` 对 web kinds 挂的 `oc-hidden` 把入口与面板一起隐藏——显隐正确性免费获得，不新增第二条显隐路径（§3.2 的会话绑定只管 pty 场景内的开关）。**实现警戒**：容器当前无 `align-items`（默认 `stretch`，1808-1816 实证）——两个按钮因自带固定 width 不受影响，而宽度 auto 的面板会被拉伸钳制到容器宽（= 按钮宽）；落地时必须补 `align-items: flex-end`（按钮有显式宽度不受影响）或给面板 `align-self: flex-end`。
+- **被否方案：键盘上方附件条（Orca `MobileSessionCommandDock` 形态）**。Orca 的附件条依赖 RN 原生层拿到键盘几何与 `Keyboard.dismiss` 等价物；浏览器侧无法程序化升降 iOS 软键盘（报告 §三「不可移植」第 4 条），附件条只能钉在终端底缘并常驻吃纵向空间，与 R6 钉高争夺可视区。用户已明确指定「右上角入口 + 浮层」形态，附件条形态不采用；其键表 / 连发参数 / 粘贴纪律等**机制层**成果照常吸收（R20/R21）。
+- 面板自身样式复用控制层视觉语言（深色半透明底、圆角、coarse 下按键 ≥44px，R10/R11 约定同样适用于面板内按钮）。
+
+### 3.2 面板-实例绑定状态机（R19）
+
+- **单一面板 DOM + 每会话布尔旗标**：旗标挂在会话对象上（`session.quickKeysOpen`）——会话对象是两个工厂各自创建的普通对象，挂属性与工厂无关；不引入第二个面板 DOM，也不引入全局「面板开着」变量（那正是用户报障过的「浮层停在错误实例上」类缺陷的结构来源）。
+- **派生可见性**：`可见 = 活动pty会话存在 && session.quickKeysOpen`。同步函数 `syncQuickKeysPanel()` 只做读旗标 + `classList.toggle`，幂等，可从 `renderWorkspace`（每次 render，含 2s 轮询）反复调用而无副作用——沿用 v0.6.0 §3.1「JS 只有读状态→挂/摘 class 一条路径」的纪律。
+- **恢复语义**：切实例只隐藏、不改旗标；回切时 `renderWorkspace → sync` 自然恢复展开。删除实例销毁会话对象，旗标随对象不可达，等价于关闭。
+- **边界清单**（全部由同一条派生规则覆盖，无特判）：web kind 激活（无 pty 会话）；无实例 / 空 worktree；实例删除；实例停止（面板仍可开——复制可用，字节键与粘贴由 R20 闸门的终态拒发兜底，面板不额外置灰）。
+
+### 3.3 发送路径契约（R20 的机制核心）
+
+- **`term.input(bytes)` 是唯一发送口**。vendored v6 实测 `input(e,t=!0){ this.coreService.triggerDataEvent(e,t) }`——直接触发 `onData`，于是终态拒发、查询应答过滤、WS/HTTP 传输选择全部复用键盘路径；对 pty.js 工厂与 index.html 遗留工厂同样成立（`onData` 绑在各自 term 上，`input` 与工厂无关）。绕过 xterm 直发 WS 的被否理由：复制一份闸门逻辑，两套工厂漂移风险（§1.3 已记录两工厂「drifted before」的前科）。
+- **查询应答过滤器安全性（逐类核验，§1.3 正则全貌）**：`Esc` 长 1 < `MIN_RESPONSE_LENGTH=2`；`Tab`/`^C`/`^D` 非 ESC 开头且不匹配裸应答式；方向键 / Shift+Tab 为 `ESC[` 开头但第二字符非 `?`、不以 `n;nR` 收尾；bracketed 包装后的粘贴载荷以 `ESC[200~` 起、`ESC[201~` 收，两端均不命中任何应答式。**唯一已知边缘**：未包装粘贴载荷若以 `ESC]` 或 `ESCP` 开头会被过滤器整个吞掉（过滤器对 OSC/DCS 应答的一刀切）——发生条件 = 剪贴板首字符为 ESC 且次字符 `]`/`P`，概率近零，立档不处理（§7 风险表）。
+- **保焦点契约**：按键动作绑定 `pointerdown` 而非 `click`，handler 内 `preventDefault()`。依据：W3C Pointer Events——取消 `pointerdown` 压制兼容鼠标事件族（含 mousedown，其默认行为是焦点转移），终端的 helper textarea 保住焦点、iOS 软键盘不收起；`click` 是否仍触发属引擎差异，实现**不监听 click** 而与其绝缘（动作已在 pointerdown 完成）。反面方案（click + 事后 `term.focus()` 回补）在 iOS 上造成键盘可见的收起-弹起抖动，否决。
+- **IME 组合态纪律**（ORCA §2.3 时序纪律的浏览器对应物）：监听 helper textarea 的 `compositionstart`/`compositionend` 维护组合态旗标；组合态期间到达的快捷键字节与粘贴载荷**排队**，`compositionend` 后按序 flush——避免注入字节与滞留 preedit 文本交错（保焦点契约使组合态在点键时仍存活，该窗口真实存在）。组合是秒级暂态，排队无感。
+
+### 3.4 粘贴双路径（R21）
+
+- **分派条件**：`navigator.clipboard && navigator.clipboard.readText` 存在（=安全上下文）走路径 A；否则路径 B。不做 UA 嗅探，按能力分派。
+- **Remote 访问矩阵（用户补充 2026-10-13）**：`isRemoteAccess()` 为真 = 浏览器与守护进程异机。剪贴板读写是浏览器侧 API，归属恒为**客户端系统**，与守护进程所在机器无关——契约上**不需要也不允许**后端剪贴板通道（§8 非目标同锁）。路径分派与访问形态的组合：本机 loopback + 裸 HTTP = 安全上下文（localhost 可信源）→ 路径 A；remote + 裸 HTTP（局域网 IP 直连）= 不安全上下文 → 路径 B（两拍式浮层，remote 触屏主路径）；remote + HTTPS 反代 / 隧道 = 安全上下文 → 路径 A。判定无需调用 `isRemoteAccess()`——能力分派（`navigator.clipboard` 存在性）已天然覆盖三种组合。
+- **路径 A**：`readText()` 在 `pointerdown` 的瞬态用户激活内调用。平台差异如实立档为【beta 实测项】：iOS Safari 对程序化读剪贴板可能弹系统「粘贴」确认（iOS 16+ 粘贴隐私），Chrome 桌面首次调用触发 `clipboard-read` 权限提示——均为平台正当行为，不试图绕过。
+- **路径 B（不安全上下文 = 主场景）**：浮层内真实 `<textarea>` + 提示文案，用户长按选系统「粘贴」，`paste` 事件捕获文本后自动关闭并发送。这是 iOS 裸 HTTP 下唯一可行路径（`execCommand('paste')` 在 iOS 不存在；离屏 textarea 的 callout 锚在屏幕外不可用——缺口②的同一结构原因，所以浮层 textarea 必须**在屏可见**）。取消按钮显式提供。
+- **取文本之后的处理管线**（两路径共用）：① 换行规范化 `replace(/\r?\n/g, "\r")`——与 vendored xterm 自带粘贴处理器 `i()` 逐字符一致（孤立 `\r` 不翻倍）；② 剥离载荷内嵌的 `\x1b[200~`/`\x1b[201~`（Orca 注入防护纪律；vendored xterm 未剥离，属我们相对桌面路径的加固，记录差异）；③ bracketed 包装条件 = `term.modes.bracketedPasteMode` 为真——**与 vendored xterm 自带粘贴同规则**；Orca 额外排除 altScreen 是其 RN 侧的保守选择，xterm 自身无此判定（`s()` 函数体实证），且 TUI（如开了 mouse 的 vim）开 bracketedPasteMode 正是期待包装，跟随 xterm 语义；④ 256KiB 上限（Orca 实证值），超限截断并反馈；⑤ `term.input()` 发送（§3.3 契约，含 IME 排队与过滤器核验）。
+- **pty/TUI 分态**：粘贴发送本身不分态（字节进 PTY，应用自理）；唯一分态点是 ③ 的 bracketed 判定，由 `modes` 实时读取，自动正确。
+
+### 3.5 复制分态与触屏拖选结论（R22）
+
+**分态矩阵**（`buffer.active` 自动指向活跃缓冲，同一套实现两态自动正确）：
+
+| | pty 普通缓冲（shell） | TUI（alt screen，常伴 mouse tracking） |
+|---|---|---|
+| 桌面选区 | 鼠标拖选 → `hasSelection()` → `getSelection()` | 鼠标上报被应用接管，需 Shift+drag 强制选区（xterm 惯例）；选区在 alt buffer 上同样有效 |
+| 触屏 | 无选区机制（见下）→ 视口兜底 | 同左 → 视口兜底（复制到 TUI 当前帧文本） |
+| 视口兜底语义 | 当前可见屏文本；用户可用 R17 触摸滚动定位后再复制 | 当前帧文本 |
+
+**触屏拖选不做的理由（用户指令⑥要求的论证，三条结构性证据 + 一条旁证）**：
+
+1. vendored xterm v6 的触摸手势层**整体惰性**（Gesture 单例从不构造，R17 评审终版机理）——xterm 自身在触屏上不存在任何选区路径，不是被谁挡住，是根本没有；
+2. R17 的非 passive `touchmove preventDefault`（页面锁止的必要件）按规范阻断触摸→兼容鼠标事件合成，触屏拖动不会变成 SelectionService 监听的 mousedown/mousemove——**滚动与拖选在同一手势上互斥**，单指拖曳已分配给滚动（R17 手势分工，用户显式诉求）；
+3. 可用触屏拖选 = 自建命中测试 + 选择手柄 + 边缘自动滚动 + 与 R17 滚动手势的仲裁，是独立大特性，远超本期范围；
+4. 旁证：Orca（以 RN 原生 TextInput 接管输入的重度移动端实现）附件条同样只有 Paste 没有 Copy——移动端终端复制是行业级难点，视口复制是务实的 80% 方案。
+
+**写入路径**：`writeText()`（安全上下文）→ 兜底 `execCommand('copy')`（临时在屏外但 `display` 可见的 textarea + `select()` + 同步执行，用户手势链内）；复制结果为空的视口（全空行）视为无操作并反馈。所有反馈走既有 `updateStatus` 状态行，不引入 toast 体系。
+
+### 3.6 键集与字节表（R20 的表）
+
+| 键 | 字节 | 备注 |
+|---|---|---|
+| Esc | `\x1b` | 独立发送；与键盘 Esc 完全同路径 |
+| Tab | `\t` | |
+| Shift+Tab | `\x1b[Z` | agent TUI 模式切换惯例键 |
+| ↑ ↓ ← → | `applicationCursorKeysMode` on：`\x1bOA/B/C/D`；off：`\x1b[A/B/C/D` | 发送时实时读 `term.modes` |
+| ^C | `\x03` | 中断——触屏下此前完全无法发送 |
+| ^D | `\x04` | EOF / 退出 shell |
+| Copy / Paste | 非字节键，走 R22 / R21 管线 | |
+
+不收通用 Ctrl/Alt **锁存修饰态**（iSH/Termius 式两态锁存）：Orca 同样未覆盖（预烘焙组合之外靠自定义宏），锁存态与 R4/R16 的 `Ctrl/Cmd+B` 侧栏快捷键存在优先级交叉，需单独设计——登记 §8 非目标 / 未来方向。
+
+---
+
+## 4. 分期实施计划（每期可独立合并、独立回滚）
+
+| PR | 内容 | 覆盖需求 | 依赖 |
+|---|---|---|---|
+| PR1 | 入口按钮 + 浮层面板壳 + 实例绑定状态机 + 字节键（Esc/Tab/Shift+Tab/方向/^C/^D） | R18、R19、R20 | 无 |
+| PR2 | 复制（选区优先 / 视口兜底）+ 粘贴（双路径） | R21、R22 | PR1（面板壳） |
+
+- 顺序依据：PR1 纯字节发送、无浏览器 API 方差，风险最低先落地；PR2 的剪贴板行为跨平台方差大（安全上下文分派、iOS 粘贴确认、execCommand 兜底），独立成 PR 独立评审。
+- 编码 / 评审流程沿用 v0.6.0 既定约定（编码 sub-agent + mcode / opencode 双外部评审 + 仲裁 + 原子提交），评审输入为工作树现场 `git diff`。
+
+---
+
+## 5. 验收标准
+
+### 5.1 PR1
+
+1. 实例窗口右上角出现键盘图标入口按钮，位于 Refresh 之上，视觉风格与 Refresh / Scroll to Bottom 一致；coarse 指针下 ≥44px——自动化：Go 资源锚点断言（按钮 DOM 序、`term-ctrl-btn` class、面板容器锚点与相对顺序）。
+2. 点击入口展开 / 收起浮层面板；面板展开时切实例 A→B 面板随 A 隐藏，回切 A 恢复展开；删实例 / 切 worktree / 切 web kind 后面板不可见——自动化：node 行为测试（从真实源码切片的同步函数 + 打桩会话/state）。
+3. 面板各键发送字节正确（含方向键两模式分支），经 `term.input` 到达 onData 闸门；终态实例拒发——自动化：node 行为测试（字节表纯函数切片 + 模式桩）。
+4. 面板点按不转移终端焦点（pointerdown + preventDefault 契约锚点断言）；IME 组合态排队逻辑——自动化锚点 + node 切片。
+5. 软键盘弹起时面板保持可见可用【人工过检 / beta】；iPhone 窄屏与 iPad 上入口不被 drawer tab / tab 条遮挡【人工过检】。
+
+### 5.2 PR2
+
+1. 安全上下文（localhost / HTTPS）下 Paste 读系统剪贴板真实内容入终端；bracketed 模式开时包装、关时裸发；载荷内嵌 200~/201~ 被剥离；`\n`/`\r\n` 统一为 `\r`；超限截断反馈——自动化：node 行为测试（管线纯函数切片 + modes 桩）。
+2. 不安全上下文（局域网 IP 访问）下 Paste 弹两拍式浮层，textarea 长按系统粘贴后自动发送并关闭【人工过检 / beta：iPad→Mac 裸 HTTP 主场景】。
+3. 桌面鼠标选区后 Copy 复制选区文本；无选区时 Copy 复制当前视口文本；pty 与 TUI（alt screen）两态结果分别正确【自动化切片 + 人工过检：opencode TUI 内复制当前帧】。
+4. 不安全上下文下 Copy 走 execCommand 兜底成功【beta 实测】；iOS 路径 A 的系统粘贴确认行为如实记录【beta 实测】。
+5. Remote 访问（浏览器与守护进程异机）下：粘贴取到的是**客户端系统**剪贴板内容而非守护进程所在机器；复制的内容落入客户端系统剪贴板、可粘进客户端本地应用【人工过检：双机实测，记入 §6 人工清单】。
+
+### 5.3 全期通用
+
+桌面端（fine 指针）既有行为零回归：键盘输入、鼠标选区复制（浏览器既有路径）、Refresh / Scroll to Bottom、R17 触摸滚动、R6 钉高。面板不监听 click、不改任何既有监听器。
+
+---
+
+## 6. 测试策略（对齐仓库现有约定）
+
+- **Go 资源文本断言**（`internal/ui/ui_test.go` 既有写法）：DOM 锚点、class 名、函数名与相对顺序（入口按钮在 Refresh 之前的 DOM 序、面板容器在 `#terminal-controls` 内、pointerdown 绑定锚点）。
+- **node 行为测试**（`internal/ui/testdata/*.test.mjs`，`node --test`，包进 `go test`）：字节表 / 方向键模式分支、粘贴管线（规范化 / 剥离 / 包装 / 上限）、视口文本提取（打桩 buffer）、同步函数派生可见性、IME 排队——**从真实 served 源码切片、打桩浏览器状态**，不断言副本。
+- **CHANGELOG 房规**（issue #95）：计数短语语义同前；新增 testdata 文件不得用 "Pinned by N `node --test` cases" 短语引用全量总数（守卫按 `terminal_status.test.mjs` 单文件推导）。
+- **评审与合并过程房规**（沿用 v0.6.0 §6）：评审输入现场 `git diff`；评审后工作树逐字节核对；合并前最后一次改动之后实跑 `go test ./...` 全绿。
+- **人工清单（beta 渠道收敛，触屏主战场）**：iPad 局域网裸 HTTP 的两拍式粘贴全流程；remote 访问双机实测——粘贴取自客户端（浏览器所在）系统剪贴板、复制落入客户端剪贴板可粘进本地应用（§5.2-5）；iOS 路径 A 粘贴确认弹窗行为记录；面板点键时软键盘不收起、终端焦点不丢；拼音 IME 组合中点 Esc/^C 的排队 flush；opencode TUI 内 Shift+Tab / 方向键 / 视口复制 / bracketed 粘贴；窄屏下入口与面板不被 drawer tab、tab 条、「+」按钮遮挡；面板展开切实例 / 删实例 / 切 worktree 三路径。
+- **验收-清单对应规则**（沿用）：每条 §5.x 验收项在本节人工清单有对应项，或标注自动化断言名。
+
+---
+
+## 7. 风险
+
+| 风险 | 影响 | 缓解 |
+|---|---|---|
+| iOS 剪贴板行为跨版本方差（粘贴确认弹窗、瞬态激活窗口） | 路径 A 在部分系统多一次确认或失败 | 双路径分派 + beta 真机实测立档；失败降级路径 B |
+| 未包装粘贴载荷以 `ESC]`/`ESCP` 开头被查询应答过滤器吞没 | 极端边缘下粘贴丢失（需剪贴板首两字符为 ESC+`]`/`P`） | 立档不处理；若真实出现，评估在粘贴管线前置转义 |
+| 6553 行单文件回归面 | 既有控制层 / 终端行为被无意破坏 | 面板为纯增量 DOM + 新监听器，不改既有行；Go 锚点断言钉住相对顺序 |
+| `pointerdown` 与 `click` 的引擎差异 | 个别浏览器动作双发或不发 | 动作只绑 pointerdown、不监听 click，与差异绝缘；beta 抽查 |
+| IME 排队窗口内终端已断开 | 排队字节落到死会话 | flush 时仍过 onData 闸门（终态拒发 / 传输兜底），无新风险 |
+| 面板与 R17 手势 / R6 钉高交互 | 滚动锁止被旁路或面板被键盘遮住 | 面板在 `#terminal-container` 作用域外 + 顶锚定；beta 同场验证 |
+
+---
+
+## 8. 非目标（明确不做）
+
+- **触屏拖选复制**——结构性不可行（三条证据见 §3.5），自建触摸选区是独立大特性，且与 R17 单指滚动在同一手势上互斥；如未来立项需先解决手势仲裁。
+- 通用 Ctrl / Alt 锁存修饰态（iSH/Termius 式；与 R4/R16 快捷键优先级交叉，需单独设计）。
+- 键集自定义（排序 / 显隐 / 宏）与持久化（Orca `TerminalShortcutSettings` 形态）——本期键表内置固定。
+- 长按连发（Orca 400ms/45ms）——v1 单击单发，手感反馈后再评估。
+- Orca 的键盘避让锚点行 translateY 增强（§2.5 调研项）——R6 钉高之上增量，单独评估。
+- 剪贴板图片 / RTF 等非文本粘贴（浏览器侧本就只能文本）。
+- web kinds（opencode-web / reasonix / dsh-web）iframe 内的等价能力——各自页面的事，入口随 `oc-hidden` 对它们隐藏。
+- 任何后端 / WS / HTTP 协议变更。
+
+---
+
+## 9. 落地时对主文档的同步清单（**本 PR 之外，实施期执行**）
+
+- `docs/PRD.md` §7「当前实现状态」：并入 v0.6.0 条目（终端快捷按键输入面板，注明来源 issue #100 输入缺口与 `docs/plans/feature-v0.6.0-terminal-quick-keys/`）。
+- `CHANGELOG.md` `## Unreleased`：每 PR 一条，遵守 §6 房规。
+- `README.md` / `README.zh-CN.md` Features：可选，触屏输入补偿值得一句。
+- `docs/ORCA_MOBILE_TERMINAL_INPUT_RESEARCH.md`：其「建议立项方向」的立项落点指针注记**已随本 PR 一并补入**（实施期无需再动）。
+- `docs/API.md`、`docs/ARCHITECTURE.md`：**预计不动**（无协议 / 架构变更）。
+
+---
+
+## 10. 分支与版本
+
+- **分支名**：`feature/v0.6.0-terminal-quick-keys`（承载 R18–R22 的完整开发，非仅文档分支）。
+- **版本**：并入未发布的 v0.6.0 批次（与该版本一并走 beta → release；纯增量 UI 功能、无协议变更）。
+- **基线**：`develop`（PR #110 已合入）。
+- **发布**：随 v0.6.x beta 渠道真机收敛（触屏问题主要靠 beta，v0.5.1/v0.6.0 先例）。
