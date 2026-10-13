@@ -75,12 +75,12 @@ issue #100 首评指出两类触屏缺口。v0.6.0（PR1–PR4 + PR #110 beta �
 - **面板 DOM 作为 `#terminal-controls` 的子节点**：容器 `flex-direction: column`，面板落在按钮列下方、随容器顶右锚定；`renderWorkspace` 对 web kinds 挂的 `oc-hidden` 把入口与面板一起隐藏——显隐正确性免费获得，不新增第二条显隐路径（§3.2 的会话绑定只管 pty 场景内的开关）。**实现警戒**：容器当前无 `align-items`（默认 `stretch`，1808-1816 实证）——两个按钮因自带固定 width 不受影响，而宽度 auto 的面板会被拉伸钳制到容器宽（= 按钮宽）；落地时必须补 `align-items: flex-end`（按钮有显式宽度不受影响）或给面板 `align-self: flex-end`。
 - **被否方案：键盘上方附件条（Orca `MobileSessionCommandDock` 形态）**。Orca 的附件条依赖 RN 原生层拿到键盘几何与 `Keyboard.dismiss` 等价物；浏览器侧无法程序化升降 iOS 软键盘（报告 §三「不可移植」第 4 条），附件条只能钉在终端底缘并常驻吃纵向空间，与 R6 钉高争夺可视区。用户已明确指定「右上角入口 + 浮层」形态，附件条形态不采用；其键表 / 连发参数 / 粘贴纪律等**机制层**成果照常吸收（R20/R21）。
 - 面板自身样式复用控制层视觉语言（深色半透明底、圆角、coarse 下按键 ≥44px，R10/R11 约定同样适用于面板内按钮）。
-- **面板尺寸纪律（评审 M-1 补立）**：`#workspace` 为 `overflow: hidden`（`index.html:1281-1288`），顶锚定只保证面板**顶部**可见——R6 钉高在软键盘弹起时压缩 `#workspace` 可视高度，键集 v1 共 10 键（coarse 每个 ≥44px）总高可超可视区，溢出的下方按键会被静默裁切、且无任何补救路径。契约：`#terminal-controls` 补 `max-height: calc(100% - 20px)`（对 `#workspace` 高度解析——容器 `top:20px` 绝对定位的包含块即 `#workspace`，R6 钉高后随其收缩）、三按钮 `flex-shrink: 0`；面板 `min-height: 0; overflow-y: auto`——超高时**面板内部滚动**而非被裁，全部按键恒可达。键网格 ≥2 列排布压低常态总高。面板滚动在 `#terminal-container` 之外，与 R17 触摸映射无交互。
+- **面板尺寸纪律（评审 M-1 补立，R2-1/R2-2 修订）**：`#workspace` 为 `overflow: hidden`（`index.html:1281-1288`），顶锚定只保证面板**顶部**可见——R6 钉高在软键盘弹起时压缩 `#workspace` 可视高度，键集 v1 = 9 字节键 + Copy/Paste 共 11 个按钮（coarse 每个 ≥44px）总高可超可视区，溢出的下方按键会被静默裁切、且无任何补救路径。契约：`#terminal-controls` 补 `max-height: calc(100% - 20px - 20px)`（对 `#workspace` 高度解析——容器 `top:20px` 绝对定位的包含块即 `#workspace`，R6 钉高后随其收缩；两个减项 = 顶部偏移 20px + **状态行高度带约 20px**——`#status-bar` 为 `position:absolute; bottom:0; right:0`、11px 字号 + 2×2px padding ≈ 20px、`z-index:10` 且 `pointer-events: auto`（`index.html:1324-1337`），容器 `z-index:20` 若不扣除该带，面板满高时底缘与 `#workspace` 底缘齐平、盖住状态行右端点击区——评审 R2-2 实证几何）、三按钮 `flex-shrink: 0`；面板 `min-height: 0; overflow-y: auto`——超高时**面板内部滚动**而非被裁，全部按键恒可达。键网格 ≥2 列排布压低常态总高。面板滚动在 `#terminal-container` 之外，与 R17 触摸映射无交互。
 
 ### 3.2 面板-实例绑定状态机（R19）
 
 - **单一面板 DOM + 每会话布尔旗标**：旗标挂在会话对象上（`session.quickKeysOpen`）——会话对象是两个工厂各自创建的普通对象，挂属性与工厂无关；不引入第二个面板 DOM，也不引入全局「面板开着」变量（那正是用户报障过的「浮层停在错误实例上」类缺陷的结构来源）。
-- **派生可见性**：`可见 = 活动pty会话存在 && session.quickKeysOpen`。同步函数 `syncQuickKeysPanel()` 只做读旗标 + `classList.toggle`，幂等，可从 `renderWorkspace`（每次 render，含 2s 轮询）反复调用而无副作用——沿用 v0.6.0 §3.1「JS 只有读状态→挂/摘 class 一条路径」的纪律。
+- **派生可见性**：`可见 = 活动pty会话存在 && session.quickKeysOpen`。同步函数 `syncQuickKeysPanel()` 的职责 = 读旗标 + `classList.toggle` + **隐藏时联动复位内容态**（粘贴兜底态 → 键网格，§3.4 瞬态性——隐藏路径不止开关处理器一条，切实例 / 删实例 / 切 worktree / web kind 全经 `renderWorkspace → sync`，复位必须落在 sync 路径上才普遍成立；评审 R2-3 补立），幂等，可从 `renderWorkspace`（每次 render，含 2s 轮询）反复调用而无副作用——沿用 v0.6.0 §3.1「JS 只有读状态→挂/摘 class 一条路径」的纪律。
 - **恢复语义**：切实例只隐藏、不改旗标；回切时 `renderWorkspace → sync` 自然恢复展开。删除实例销毁会话对象，旗标随对象不可达，等价于关闭。
 - **边界清单**（全部由同一条派生规则覆盖，无特判）：web kind 激活（无 pty 会话）；无实例 / 空 worktree；实例删除；实例停止（面板仍可开——复制可用，字节键与粘贴由 R20 闸门的终态拒发兜底，面板不额外置灰）。
 
@@ -155,7 +155,7 @@ issue #100 首评指出两类触屏缺口。v0.6.0（PR1–PR4 + PR #110 beta �
 2. 点击入口展开 / 收起浮层面板；面板展开时切实例 A→B 面板随 A 隐藏，回切 A 恢复展开；删实例 / 切 worktree / 切 web kind 后面板不可见——自动化：node 行为测试（从真实源码切片的同步函数 + 打桩会话/state）。
 3. 面板各键发送字节正确（含方向键两模式分支），经 `term.input` 到达 onData 闸门；终态实例拒发——自动化：node 行为测试（字节表纯函数切片 + 模式桩）。
 4. 面板点按不转移终端焦点（pointerdown + preventDefault 契约锚点断言）；IME 组合态排队逻辑——自动化锚点 + node 切片。
-5. 软键盘弹起时面板保持可见可用【人工过检 / beta】；iPhone 窄屏与 iPad 上入口不被 drawer tab / tab 条遮挡【人工过检】。
+5. 软键盘弹起时面板顶部保持可见（全部按键的可达性由第 6 条尺寸纪律承接）【人工过检 / beta】；iPhone 窄屏与 iPad 上入口不被 drawer tab / tab 条遮挡【人工过检】。
 6. 软键盘弹起 + 矮屏（iPhone 横屏）组合下面板超高时**内部滚动**、全部按键可达，不被 `#workspace` 裁切（§3.1 尺寸纪律）【人工过检 / beta】——自动化：Go 锚点断言（`#terminal-controls` 的 `max-height`、按钮 `flex-shrink: 0`、面板 `min-height: 0` / `overflow-y: auto` 锚点）。
 
 ### 5.2 PR2
@@ -191,7 +191,7 @@ issue #100 首评指出两类触屏缺口。v0.6.0（PR1–PR4 + PR #110 beta �
 | 未包装粘贴载荷以 `ESC]`/`ESCP` 开头被查询应答过滤器吞没 | 极端边缘下粘贴丢失（需剪贴板首两字符为 ESC+`]`/`P`） | 立档不处理；若真实出现，评估在粘贴管线前置转义 |
 | 6553 行单文件回归面 | 既有控制层 / 终端行为被无意破坏 | 面板为纯增量 DOM + 新监听器，不改既有行；Go 锚点断言钉住相对顺序 |
 | `pointerdown` 与 `click` 的引擎差异 | 个别浏览器动作双发或不发 | 动作只绑 pointerdown、不监听 click，与差异绝缘；beta 抽查 |
-| IME 排队窗口内终端已断开 | 排队字节落到死会话 | flush 时仍过 onData 闸门（终态拒发 / 传输兜底），无新风险 |
+| IME 排队窗口内终端已断开 | 排队字节落到死会话 | flush 时仍过 onData 闸门（终态拒发 / 传输兜底），无新风险；队列随会话销毁丢弃（§3.3 归属条款） |
 | 面板与 R17 手势 / R6 钉高交互 | 滚动锁止被旁路，或面板在键盘弹起 + 矮屏下被 `#workspace` 裁切 | 面板在 `#terminal-container` 作用域外 + 顶锚定 + §3.1 尺寸纪律（容器 `max-height` + 面板内部滚动）；beta 同场验证 |
 
 ---
