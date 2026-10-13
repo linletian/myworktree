@@ -1546,10 +1546,11 @@ func TestQuickKeysAnchors(t *testing.T) {
 		`onpointerdown="toggleQuickKeysPanel(event)"`,
 		`onpointerdown="sendQuickKey('esc', event)"`,
 		`onpointerdown="sendQuickKey('ctrl-c', event)"`,
-		// Copy/Paste are PR1 disabled placeholders (arbitration ruling).
-		`title="Copy" disabled`,
-		`title="Paste" disabled`,
-		// Paste fallback state shell (PR2 takes over the logic).
+		// Copy/Paste keys (live since PR2; the PR1 disabled-placeholder
+		// state is asserted removed in the PR2 section below).
+		`onpointerdown="quickKeyCopy(event)"`,
+		`onpointerdown="quickKeyPaste(event)"`,
+		// Paste fallback state shell (PR2 wired the interaction).
 		`id="quick-keys-paste-fallback"`,
 		`id="quick-keys-paste-textarea"`,
 		`id="quick-keys-paste-cancel"`,
@@ -1558,10 +1559,15 @@ func TestQuickKeysAnchors(t *testing.T) {
 			t.Fatalf("GET / should include the quick-keys DOM anchor %q (issue #100 R18/R19)", check)
 		}
 	}
-	// R20: pointerdown-only — no click binding anywhere on the panel actions.
+	// R20: pointerdown-only — no click binding anywhere on the panel actions
+	// (§5.3 whole-period gate: the panel never listens to click).
 	for _, forbidden := range []string{
 		`onclick="toggleQuickKeysPanel`,
 		`onclick="sendQuickKey`,
+		`onclick="quickKeyCopy`,
+		`onclick="quickKeyPaste`,
+		`onclick="cancelQuickKeysPaste`,
+		`onclick="quickKeysPasteCaptured`,
 		`id="quick-keys-toggle" title="Quick keys" onclick`,
 	} {
 		if strings.Contains(bodyText, forbidden) {
@@ -1665,6 +1671,140 @@ func TestQuickKeysAnchors(t *testing.T) {
 	workspace := sliceJSFunction(t, bodyText, "renderWorkspace")
 	if !strings.Contains(workspace, "syncQuickKeysPanel();") {
 		t.Fatal("GET / renderWorkspace must call syncQuickKeysPanel() — instance binding derives on every render (issue #100 R19)")
+	}
+
+	// --- PR2: copy & paste (R21/R22) ---
+	// The disabled placeholders are gone — both keys are live and bound.
+	for _, forbidden := range []string{`title="Copy" disabled`, `title="Paste" disabled`} {
+		if strings.Contains(bodyText, forbidden) {
+			t.Fatalf("GET / PR2 must un-disable the Copy/Paste keys — still found %q (issue #100 R21/R22)", forbidden)
+		}
+	}
+	for _, check := range []string{
+		`onpointerdown="quickKeyCopy(event)"`,
+		`onpointerdown="quickKeyPaste(event)"`,
+		// Path B wiring on the PR1 shell.
+		`onpaste="quickKeysPasteCaptured(event)"`,
+		`onpointerdown="cancelQuickKeysPaste(event)"`,
+	} {
+		if !strings.Contains(bodyText, check) {
+			t.Fatalf("GET / should include the PR2 clipboard DOM anchor %q (issue #100 R21/R22)", check)
+		}
+	}
+	for _, check := range []string{
+		"const QUICK_KEYS_PASTE_MAX_CHARS = 256 * 1024;",
+		"let quickKeysPasteSession = null;",
+		"function normalizePasteNewlines(text)",
+		"function stripBracketedPasteMarkers(text)",
+		"function maybeWrapBracketedPaste(text, bracketedPasteMode)",
+		"function extractViewportText(term)",
+		"function deliverQuickKeysPaste(text, session)",
+		"function quickKeyPaste(event)",
+		"function enterQuickKeysPasteFallback(session)",
+		"function quickKeysPasteCaptured(event)",
+		"function cancelQuickKeysPaste(event)",
+		"function quickKeyCopy(event)",
+		"function writeQuickKeysClipboard(text)",
+		"function fallbackExecCommandCopy(text)",
+	} {
+		if !strings.Contains(bodyText, check) {
+			t.Fatalf("GET / should include the PR2 clipboard function anchor %q (issue #100 R21/R22)", check)
+		}
+	}
+	// Pipeline order inside the delivery function: normalize -> strip ->
+	// CAP -> WRAP -> the shared input gate. The cap runs on the pre-wrap
+	// text so the closing \x1b[201~ can never be truncated away.
+	deliver := sliceJSFunction(t, bodyText, "deliverQuickKeysPaste")
+	// The two guards the onData gate cannot provide (review round 2): a
+	// disposed-but-non-null term (pty.js disposes without nulling) throws
+	// before the gate — caught and fed back; a cap cut must not leave a
+	// lone high surrogate; and a marker-only clipboard must not become an
+	// empty frame (post-strip empty re-check).
+	for _, guard := range []string{
+		`updateStatus("Paste failed: session closed")`,
+		`/[\uD800-\uDBFF]/`,
+		`if (payload === "")`,
+	} {
+		if !strings.Contains(deliver, guard) {
+			t.Fatalf("GET / deliverQuickKeysPaste should include the guard %q (issue #100 R21)", guard)
+		}
+	}
+	normAt := strings.Index(deliver, "normalizePasteNewlines(text)")
+	stripAt := strings.Index(deliver, "stripBracketedPasteMarkers(payload)")
+	capAt := strings.Index(deliver, "QUICK_KEYS_PASTE_MAX_CHARS")
+	wrapAt := strings.Index(deliver, "maybeWrapBracketedPaste(payload, bracketed)")
+	gateAt := strings.Index(deliver, "sendQuickKeyBytes(session, payload)")
+	if normAt < 0 || stripAt < 0 || wrapAt < 0 || capAt < 0 || gateAt < 0 ||
+		normAt > stripAt || stripAt > capAt || capAt > wrapAt || wrapAt > gateAt {
+		t.Fatal("GET / deliverQuickKeysPaste must run normalize -> strip -> cap -> wrap -> sendQuickKeyBytes in that order (issue #100 R21)")
+	}
+	// The delivery takes its session from the CALLER (captured at
+	// pointerdown) — it must not re-fetch the active one (§3.3 ownership).
+	if strings.Contains(deliver, "getActiveTerminalSession") {
+		t.Fatal("GET / deliverQuickKeysPaste must receive the session from its caller — re-fetching the active one misdelivers across an instance switch (issue #100 R21)")
+	}
+	// The bracketed wrap reads modes live; no alt-screen special case.
+	if strings.Contains(deliver, "buffer.active === buffer.alternate") || strings.Contains(deliver, "isAltScreen") {
+		t.Fatal("GET / deliverQuickKeysPaste must NOT special-case the alt screen — the wrap rule mirrors the vendored xterm (issue #100 R21)")
+	}
+	// Path dispatch is capability-based; no remote/backend branch anywhere
+	// near the clipboard code.
+	pasteFn := sliceJSFunction(t, bodyText, "quickKeyPaste")
+	if !strings.Contains(pasteFn, "navigator.clipboard") || !strings.Contains(pasteFn, "readText") {
+		t.Fatal("GET / quickKeyPaste must dispatch on navigator.clipboard.readText (issue #100 R21)")
+	}
+	if !strings.Contains(pasteFn, "enterQuickKeysPasteFallback(session)") {
+		t.Fatal("GET / quickKeyPaste must drop to the fallback on refusal AND absence (issue #100 R21, §7 risk mitigation)")
+	}
+	for _, fn := range []string{
+		"quickKeyPaste", "quickKeyCopy", "writeQuickKeysClipboard", "deliverQuickKeysPaste",
+		"quickKeysPasteCaptured", "cancelQuickKeysPaste", "fallbackExecCommandCopy", "extractViewportText",
+	} {
+		if strings.Contains(sliceJSFunction(t, bodyText, fn), "isRemoteAccess") {
+			t.Fatalf("GET / %s must not branch on isRemoteAccess — the clipboard API is browser-side, the client-system attribution is automatic (issue #100 R21)", fn)
+		}
+	}
+	// The fallback state is owned by its session: sync resets the content
+	// when the active session changes mid-fallback.
+	syncFn2 := sliceJSFunction(t, bodyText, "syncQuickKeysPanel")
+	if !strings.Contains(syncFn2, "quickKeysPasteSession && quickKeysPasteSession !== session") {
+		t.Fatal("GET / syncQuickKeysPanel must reset the paste fallback content when the active session no longer owns it (issue #100 R19/R21)")
+	}
+	// Review-round-3 guards: the queue flush tolerates a disposed term
+	// (same root cause as the delivery catch, drops the remainder), the
+	// fallback entry checks the panel is actually open, and the paste
+	// entry refuses BEFORE the clipboard dispatch when there is no
+	// terminal to paste into.
+	flushFn := sliceJSFunction(t, bodyText, "flushQuickKeysQueue")
+	if !strings.Contains(flushFn, "catch") || !strings.Contains(flushFn, "Same root cause as deliverQuickKeysPaste") {
+		t.Fatal("GET / flushQuickKeysQueue must tolerate a disposed term and drop the remainder silently (issue #100 R20)")
+	}
+	fallbackFn2 := sliceJSFunction(t, bodyText, "enterQuickKeysPasteFallback")
+	if !strings.Contains(fallbackFn2, "deriveQuickKeysVisibility(session)") {
+		t.Fatal("GET / enterQuickKeysPasteFallback must not flip a hidden panel into paste-mode (issue #100 R21)")
+	}
+	noTermAt := strings.Index(pasteFn, `updateStatus("Paste failed: no active terminal")`)
+	dispatchAt := strings.Index(pasteFn, "navigator.clipboard")
+	if noTermAt < 0 || dispatchAt < 0 || noTermAt > dispatchAt {
+		t.Fatal("GET / quickKeyPaste must refuse a missing terminal BEFORE the clipboard dispatch — no permission prompt for a no-op (issue #100 R21)")
+	}
+	copyFn := sliceJSFunction(t, bodyText, "quickKeyCopy")
+	if !strings.Contains(copyFn, "term.hasSelection()") || !strings.Contains(copyFn, "extractViewportText(term)") {
+		t.Fatal("GET / quickKeyCopy must prefer a live selection and fall back to the viewport text (issue #100 R22)")
+	}
+	writeFn := sliceJSFunction(t, bodyText, "writeQuickKeysClipboard")
+	if !strings.Contains(writeFn, "navigator.clipboard.writeText") || !strings.Contains(writeFn, "fallbackExecCommandCopy(text)") {
+		t.Fatal("GET / writeQuickKeysClipboard must write via writeText with the execCommand fallback (issue #100 R22)")
+	}
+	fallbackFn := sliceJSFunction(t, bodyText, "fallbackExecCommandCopy")
+	if !strings.Contains(fallbackFn, `document.execCommand("copy")`) {
+		t.Fatal("GET / fallbackExecCommandCopy must drive execCommand('copy') (issue #100 R22)")
+	}
+	// The viewport extractor reads buffer.active — the pty/TUI split is
+	// automatic, never special-cased.
+	viewportFn := sliceJSFunction(t, bodyText, "extractViewportText")
+	if !strings.Contains(viewportFn, "term.buffer.active") || !strings.Contains(viewportFn, "translateToString(true)") {
+		t.Fatal("GET / extractViewportText must read term.buffer.active and translateToString(true) (issue #100 R22)")
 	}
 }
 

@@ -158,10 +158,15 @@ func TestTerminalTouchScrollHandling(t *testing.T) {
 }
 
 // TestQuickKeysHandling runs the Node unit tests for the terminal quick-keys
-// panel PR1 (testdata/quick_keys.test.mjs): the byte table with its
-// application-cursor-keys branch, the derived panel visibility with the
-// hide-path content reset, the instance-binding round trip, and the IME
-// composition queue flushing to the composing session.
+// panel (testdata/quick_keys.test.mjs) — the full R18–R22 surface: the byte
+// table with its application-cursor-keys branch, the derived panel
+// visibility with the hide-path content reset, the instance-binding round
+// trip, the pointerdown toggle/send handlers, the IME composition queue
+// flushing to the composing session (the delivery path tolerating a disposed
+// term), the
+// paste pipeline with its cap-before-wrap order and session attribution,
+// the two clipboard paths with the on-screen fallback state, the viewport
+// extractor, and the selection-first / viewport-fallback copy matrix.
 //
 // Same arrangement as TestTerminalTouchScrollHandling: the cases slice the
 // shipped index.html and run against stubbed browser state, this wrapper
@@ -212,7 +217,7 @@ func TestResponsiveLayerChangelogCounts(t *testing.T) {
 		{"testdata/narrow_drawer.test.mjs", `new issue #100 L2 scenarios`},
 		{"testdata/touch_interaction.test.mjs", `new issue #100 L3 scenarios`},
 		{"testdata/terminal_touch_scroll.test.mjs", `new issue #100 R17 scenarios`},
-		{"testdata/quick_keys.test.mjs", `new issue #100 quick-keys PR1 scenarios`},
+		{"testdata/quick_keys.test.mjs", `issue #100 quick-keys scenarios`}, // the file's TOTAL (PR1 subset uses unguarded wording per the house rule)
 	} {
 		src, err := os.ReadFile(tc.file)
 		if err != nil {
@@ -230,6 +235,14 @@ func TestResponsiveLayerChangelogCounts(t *testing.T) {
 		for _, m := range matches {
 			word := strings.ToLower(string(m[1]))
 			got, ok := words[word]
+			if !ok {
+				// Digits are allowed too — compound totals past twenty have
+				// no single English word (and hyphenated forms would make
+				// (\w+) capture only the last segment).
+				if n, err := strconv.Atoi(word); err == nil {
+					got, ok = n, true
+				}
+			}
 			if !ok {
 				t.Fatalf("CHANGELOG.md spells the %q count as %q — extend the word map in this guard", tc.phrase, word)
 			}

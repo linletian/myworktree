@@ -1956,8 +1956,8 @@
                 color: #fff;
             }
             }
-            /* Copy/Paste are disabled placeholders in PR1 (PR2 takes over
-               the clipboard logic); greyed per the platform convention. */
+            /* Copy/Paste disabled-state styling — kept for any future
+               re-disable; both keys are live since PR2 (R21/R22). */
             .quick-key-btn:disabled {
                 opacity: 0.35;
                 cursor: default;
@@ -2120,15 +2120,21 @@
                             <button class="quick-key-btn" title="Right" onpointerdown="sendQuickKey('right', event)">→</button>
                             <button class="quick-key-btn" title="Ctrl+C" onpointerdown="sendQuickKey('ctrl-c', event)">^C</button>
                             <button class="quick-key-btn" title="Ctrl+D" onpointerdown="sendQuickKey('ctrl-d', event)">^D</button>
-                            <button class="quick-key-btn" title="Copy" disabled>Copy</button>
-                            <button class="quick-key-btn" title="Paste" disabled>Paste</button>
+                            <button class="quick-key-btn" title="Copy" onpointerdown="quickKeyCopy(event)">Copy</button>
+                            <button class="quick-key-btn" title="Paste" onpointerdown="quickKeyPaste(event)">Paste</button>
                         </div>
-                        <!-- Paste fallback state shell (PR2 takes over the
-                             interaction; PR1 ships the visible DOM only). -->
+                        <!-- Paste fallback state (PRD-CHANGE §3.4 path B):
+                             same panel DOM, content switched by the
+                             paste-mode class. The textarea must stay
+                             on-screen-visible — an off-screen textarea
+                             anchors the iOS paste callout off-screen (the
+                             same structural reason the terminal itself
+                             cannot summon paste). Long-press → system
+                             Paste → the paste event delivers the text. -->
                         <div class="quick-keys-paste-fallback" id="quick-keys-paste-fallback">
-                            <textarea id="quick-keys-paste-textarea" placeholder=""></textarea>
+                            <textarea id="quick-keys-paste-textarea" onpaste="quickKeysPasteCaptured(event)"></textarea>
                             <p class="quick-keys-paste-hint">Long-press the box, then choose Paste.</p>
-                            <button type="button" id="quick-keys-paste-cancel">Cancel</button>
+                            <button type="button" id="quick-keys-paste-cancel" onpointerdown="cancelQuickKeysPaste(event)">Cancel</button>
                         </div>
                     </div>
                     <button class="term-ctrl-btn" onclick="refreshCurrentInstance()" title="Refresh & Scroll to Bottom">
@@ -3261,12 +3267,14 @@
         }
 
         // The paste fallback state is transient (§3.4): every hide resets
-        // the panel content to the key grid. This runs on the sync path —
+        // the panel content to the key grid, and the reset also clears the
+        // fallback state's session ownership. This runs on the sync path —
         // the ONLY path — because hides happen from many places (toggle,
         // instance switch, renderWorkspace polling), not just the toggle.
         function resetQuickKeysPanelContent(panel) {
             if (!panel) return;
             panel.classList.remove("paste-mode");
+            quickKeysPasteSession = null;
         }
 
         // R19 sync (PRD-CHANGE §3.2): read the flag, flip the class, reset
@@ -3289,7 +3297,15 @@
             // (select-instance + 2s poll), so a session is bound the first
             // time a render sees it. Idempotent via quickKeysImeBound.
             if (session) ensureQuickKeysImeBinding(session);
-            if (!visible) resetQuickKeysPanelContent(panel);
+            if (!visible) {
+                resetQuickKeysPanelContent(panel);
+            } else if (quickKeysPasteSession && quickKeysPasteSession !== session) {
+                // The fallback state belongs to a DIFFERENT session (an
+                // instance switch landed while the panel was in paste
+                // mode): the content state follows the binding — reset to
+                // the key grid even though the panel stays visible.
+                resetQuickKeysPanelContent(panel);
+            }
         }
 
         // R20 IME discipline (PRD-CHANGE §3.3): the composition flag lives
@@ -3328,7 +3344,16 @@
             if (!queue || queue.length === 0) return;
             session.quickKeysQueue = [];
             for (const bytes of queue) {
-                if (session.term) session.term.input(bytes);
+                try {
+                    if (session.term) session.term.input(bytes);
+                } catch (e) {
+                    // Same root cause as deliverQuickKeysPaste: pty.js
+                    // disposes a dead session's term without nulling it, so
+                    // input() throws before the onData gate. The bytes were
+                    // bound for a dead session — drop the remainder silently
+                    // (no user-feedback context at flush time).
+                    break;
+                }
             }
         }
 
@@ -3367,6 +3392,301 @@
             ensureQuickKeysImeBinding(session);
             session.quickKeysOpen = !session.quickKeysOpen;
             syncQuickKeysPanel();
+        }
+
+        // --- Quick-keys copy & paste (R21/R22, PR2) ---
+
+        // 256 Ki code-unit paste cap (Orca-empiric value; PRD-CHANGE §3.4
+        // ③). Counted
+        // in JS string code units (UTF-16) — the same semantics as Orca's
+        // string-length cap; a CJK-heavy payload runs ~3x in bytes, which
+        // is fine: the cap is a sanity bound, not an exact byte quota.
+        const QUICK_KEYS_PASTE_MAX_CHARS = 256 * 1024;
+        // R21 fallback-state ownership (review fix): the session the
+        // paste-mode state BELONGS to. Set on entering the fallback,
+        // cleared on capture / cancel / content reset. An instance switch
+        // mid-fallback keeps the state bound to this session until a sync
+        // sees a different active session — which resets the content.
+        let quickKeysPasteSession = null;
+
+        // Paste pipeline, stage 1 (§3.4): newline normalization mirroring
+        // the vendored xterm's own paste handler — /\r?\n/ -> \r, a LONE
+        // \r is left alone (never doubled).
+        function normalizePasteNewlines(text) {
+            return text.replace(/\r?\n/g, "\r");
+        }
+
+        // Stage 2: strip bracketed-paste markers EMBEDDED in the payload
+        // (injection hardening, Orca discipline — the vendored xterm does
+        // not strip them itself; recorded difference from the desktop
+        // path). Wrapping is re-applied afterwards iff the mode is on.
+        function stripBracketedPasteMarkers(text) {
+            return text.split("\x1b[200~").join("").split("\x1b[201~").join("");
+        }
+
+        // Stage 3: wrap iff the terminal reports bracketedPasteMode — the
+        // SAME rule as the vendored xterm's own paste (no alt-screen
+        // exclusion: a TUI that enabled bracketed paste wants the wrap).
+        function maybeWrapBracketedPaste(text, bracketedPasteMode) {
+            return bracketedPasteMode ? "\x1b[200~" + text + "\x1b[201~" : text;
+        }
+
+        // R22 viewport fallback: copy what is on screen. buffer.active
+        // points at the live buffer automatically — the SAME code covers
+        // the pty normal buffer (shell) and the TUI alt screen (the
+        // current frame — useful for copying TUI errors/paths), no state
+        // special-casing. translateToString(true) trims each line's tail;
+        // trailing empty lines are dropped so an all-blank tail does not
+        // pollute the clipboard.
+        function extractViewportText(term) {
+            const buffer = term.buffer.active;
+            const start = buffer.viewportY;
+            const end = Math.min(start + term.rows, buffer.length);
+            const lines = [];
+            for (let i = start; i < end; i++) {
+                const line = buffer.getLine(i);
+                lines.push(line ? line.translateToString(true) : "");
+            }
+            while (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
+            return lines.join("\n");
+        }
+
+        // Both paste paths converge here (§3.4): normalize -> strip ->
+        // CAP -> WRAP -> send through the shared gate (term.input via
+        // sendQuickKeyBytes, so the IME queue and the terminal gate apply
+        // to pastes exactly like byte keys). The cap runs on the PRE-WRAP
+        // text so the bracket markers never count against it and the
+        // closing \x1b[201~ can never be cut off (review fix). SESSION
+        // ARRIVAL: the caller passes the session captured at pointerdown
+        // time — this function NEVER re-fetches the active one, so an
+        // instance switch inside the readText promise window cannot
+        // misdeliver the payload (§3.3 ownership, same discipline as the
+        // IME queue). Two guards the gate cannot provide: a session
+        // destroyed inside the promise window arrives with a DISPOSED-but-
+        // non-null term (pty.js _destroySession disposes without nulling),
+        // whose term.input throws before the onData gate — caught and fed
+        // back; and a marker-only clipboard strips down to an empty
+        // payload, which must not become an empty frame. Empty clipboard
+        // and API rejections are no-ops WITH feedback; overflow truncates
+        // (and says so).
+        function deliverQuickKeysPaste(text, session) {
+            if (!session || !session.term) {
+                updateStatus("Paste failed: no active terminal");
+                return;
+            }
+            if (typeof text !== "string" || text.length === 0) {
+                updateStatus("Paste skipped: clipboard empty");
+                return;
+            }
+            let payload = normalizePasteNewlines(text);
+            payload = stripBracketedPasteMarkers(payload);
+            if (payload === "") {
+                // The clipboard held nothing but bracketed-paste markers —
+                // after stripping there is nothing to send.
+                updateStatus("Paste skipped: clipboard empty");
+                return;
+            }
+            if (payload.length > QUICK_KEYS_PASTE_MAX_CHARS) {
+                payload = payload.slice(0, QUICK_KEYS_PASTE_MAX_CHARS);
+                // A cap cut can split a surrogate pair — drop a trailing
+                // HIGH surrogate so the terminal never receives a half
+                // pair (it would render U+FFFD).
+                if (/[\uD800-\uDBFF]/.test(payload.charAt(payload.length - 1))) {
+                    payload = payload.slice(0, -1);
+                }
+                updateStatus("Paste truncated (256 Ki character cap)");
+            }
+            const bracketed = !!(session.term.modes && session.term.modes.bracketedPasteMode);
+            payload = maybeWrapBracketedPaste(payload, bracketed);
+            try {
+                sendQuickKeyBytes(session, payload);
+            } catch (e) {
+                // pty.js disposes a destroyed session's term WITHOUT
+                // nulling it (kinds/pty.js _destroySession), so input() on
+                // the dead emitter throws before the onData gate can
+                // refuse — surface it, do not let it escape.
+                updateStatus("Paste failed: session closed");
+            }
+        }
+
+        // R21 paste entry (§3.4 dispatch): capability-based, NO UA sniffing
+        // — navigator.clipboard.readText existing means a secure context
+        // (path A); its absence means plain-http (path B, the iPad-on-LAN
+        // main scenario). The clipboard API is browser-side, so reads and
+        // writes always hit the CLIENT system's clipboard — remote access
+        // needs no branch and no backend channel.
+        function quickKeyPaste(event) {
+            if (event) event.preventDefault();
+            // Capture the session AT POINTERDOWN: the readText promise may
+            // resolve after an instance switch, and the payload must land
+            // in the terminal that was active when the user asked (§3.3
+            // ownership — the same discipline as the IME queue).
+            const session = getActiveTerminalSession();
+            if (!session || !session.term) {
+                // Before the clipboard dispatch: a desktop permission
+                // prompt must not fire when there is no terminal to paste
+                // into anyway.
+                updateStatus("Paste failed: no active terminal");
+                return;
+            }
+            if (navigator.clipboard && typeof navigator.clipboard.readText === "function") {
+                let result;
+                try {
+                    // Inside the pointerdown transient user activation —
+                    // a programmatic read outside it may be refused.
+                    result = navigator.clipboard.readText();
+                } catch (e) {
+                    updateStatus("Paste failed: " + (e && e.message ? e.message : e));
+                    enterQuickKeysPasteFallback(session);
+                    return;
+                }
+                Promise.resolve(result).then((text) => {
+                    if (typeof text !== "string" || text.length === 0) {
+                        // Empty clipboard: a fed-back no-op — NOT a fallback
+                        // trigger (there is nothing to paste either way).
+                        updateStatus("Paste skipped: clipboard empty");
+                        return;
+                    }
+                    deliverQuickKeysPaste(text, session);
+                }).catch((e) => {
+                    updateStatus("Paste failed: " + (e && e.message ? e.message : e));
+                    // PRD §7 risk-table mitigation: a refused read drops to
+                    // the two-beat fallback instead of dead-ending.
+                    enterQuickKeysPasteFallback(session);
+                });
+                return;
+            }
+            enterQuickKeysPasteFallback(session);
+        }
+
+        // Path B (§3.4): the same panel DOM flips to the paste fallback
+        // state — on-screen textarea (an off-screen one anchors the iOS
+        // paste callout off-screen), cleared and focused; the terminal
+        // losing focus meanwhile is expected (review §4-2 confirmation
+        // item, PRD-CHANGE §3.4). The session is
+        // recorded as the state's OWNER: capture delivers to it even if
+        // the active instance changed meanwhile, and a sync that sees a
+        // different active session resets the content state.
+        function enterQuickKeysPasteFallback(session) {
+            // Visibility guard: a refused read arriving after the user
+            // closed the panel (a millisecond window) must not flip the
+            // HIDDEN panel into paste-mode. The check reads the CAPTURED
+            // session's flag — an instance switch inside the rejection
+            // window can still flash the fallback on the other instance's
+            // open panel for at most one render poll, until sync's
+            // owner-mismatch reset heals it (review-noted, accepted
+            // transient).
+            if (!deriveQuickKeysVisibility(session)) return;
+            quickKeysPasteSession = session || null;
+            const panel = document.getElementById("quick-keys-panel");
+            if (!panel) return;
+            panel.classList.add("paste-mode");
+            const textarea = document.getElementById("quick-keys-paste-textarea");
+            if (textarea) {
+                textarea.value = "";
+                textarea.focus();
+            }
+        }
+
+        // Path B capture: the user's long-press → system Paste lands as a
+        // paste event; take the text, flip back to the key grid (auto),
+        // deliver to the fallback's OWNER session. The cancel button flips
+        // back WITHOUT closing the panel and WITHOUT delivering (§3.2
+        // collapse-path list).
+        function quickKeysPasteCaptured(event) {
+            // No default insert: it would land in the (display-switched)
+            // textarea and keep the keyboard choreography alive.
+            if (event) event.preventDefault();
+            const text = event && event.clipboardData ? event.clipboardData.getData("text") : "";
+            const panel = document.getElementById("quick-keys-panel");
+            if (panel) panel.classList.remove("paste-mode");
+            const session = quickKeysPasteSession || getActiveTerminalSession();
+            quickKeysPasteSession = null;
+            deliverQuickKeysPaste(text, session);
+        }
+
+        function cancelQuickKeysPaste(event) {
+            if (event) event.preventDefault();
+            quickKeysPasteSession = null;
+            const panel = document.getElementById("quick-keys-panel");
+            if (panel) panel.classList.remove("paste-mode");
+        }
+
+        // R22 copy (§3.5): selection first (desktop mouse path; TUI mouse-
+        // reporting keeps the Shift+drag convention, an xterm matter), the
+        // viewport fallback otherwise — one code path, pty/TUI split
+        // automatic via buffer.active. NOT routed through the IME queue:
+        // copy is not terminal input.
+        function quickKeyCopy(event) {
+            if (event) event.preventDefault();
+            const session = getActiveTerminalSession();
+            if (!session || !session.term) {
+                updateStatus("Copy failed: no active terminal");
+                return;
+            }
+            const term = session.term;
+            let text = "";
+            let fromSelection = false;
+            if (typeof term.hasSelection === "function" && term.hasSelection()) {
+                text = term.getSelection() || "";
+                fromSelection = text.length > 0;
+            }
+            if (!fromSelection) {
+                text = extractViewportText(term);
+            }
+            if (!text) {
+                updateStatus("Copy skipped: nothing to copy");
+                return;
+            }
+            writeQuickKeysClipboard(text);
+        }
+
+        // writeText in a secure context; execCommand('copy') otherwise
+        // (deprecated but working on iOS Safari — PRD §3.5, beta item). A
+        // writeText rejection falls through to the same fallback rather
+        // than failing silently.
+        function writeQuickKeysClipboard(text) {
+            if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
+                let result;
+                try {
+                    result = navigator.clipboard.writeText(text);
+                } catch (e) {
+                    fallbackExecCommandCopy(text);
+                    return;
+                }
+                Promise.resolve(result).then(() => {
+                    updateStatus("Copied");
+                }).catch(() => {
+                    fallbackExecCommandCopy(text);
+                });
+                return;
+            }
+            fallbackExecCommandCopy(text);
+        }
+
+        // The temporary textarea is off-screen but DISPLAY-visible (an
+        // actually-hidden box carries no selection), focused and selected
+        // before the synchronous copy — focus() is an iOS Safari defensive
+        // (a selection without focus can be ignored there); the terminal
+        // losing focus during the fallback is expected, same as path B.
+        function fallbackExecCommandCopy(text) {
+            const textarea = document.createElement("textarea");
+            textarea.value = text;
+            textarea.setAttribute("readonly", "");
+            textarea.style.position = "fixed";
+            textarea.style.left = "-9999em";
+            textarea.style.top = "0";
+            document.body.appendChild(textarea);
+            textarea.focus();
+            textarea.select();
+            let ok = false;
+            try {
+                ok = document.execCommand("copy");
+            } catch (e) {
+                ok = false;
+            }
+            document.body.removeChild(textarea);
+            updateStatus(ok ? "Copied" : "Copy failed");
         }
 
         function init() {
