@@ -157,6 +157,27 @@ func TestTerminalTouchScrollHandling(t *testing.T) {
 	t.Logf("%s", out)
 }
 
+// TestQuickKeysHandling runs the Node unit tests for the terminal quick-keys
+// panel PR1 (testdata/quick_keys.test.mjs): the byte table with its
+// application-cursor-keys branch, the derived panel visibility with the
+// hide-path content reset, the instance-binding round trip, and the IME
+// composition queue flushing to the composing session.
+//
+// Same arrangement as TestTerminalTouchScrollHandling: the cases slice the
+// shipped index.html and run against stubbed browser state, this wrapper
+// makes `go test` enforce them. Skips when node is absent.
+func TestQuickKeysHandling(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not on PATH; skipping quick keys JS tests")
+	}
+	out, err := exec.Command(node, "--test", "testdata/quick_keys.test.mjs").CombinedOutput()
+	if err != nil {
+		t.Fatalf("node --test testdata/quick_keys.test.mjs: %v\n%s", err, out)
+	}
+	t.Logf("%s", out)
+}
+
 // TestResponsiveLayerChangelogCounts extends the issue #95 guard
 // (TestTerminalStatusChangelogCount) to the four behavioral files behind
 // the v0.6.0 responsive plan: each CHANGELOG entry quotes its file's
@@ -191,6 +212,7 @@ func TestResponsiveLayerChangelogCounts(t *testing.T) {
 		{"testdata/narrow_drawer.test.mjs", `new issue #100 L2 scenarios`},
 		{"testdata/touch_interaction.test.mjs", `new issue #100 L3 scenarios`},
 		{"testdata/terminal_touch_scroll.test.mjs", `new issue #100 R17 scenarios`},
+		{"testdata/quick_keys.test.mjs", `new issue #100 quick-keys PR1 scenarios`},
 	} {
 		src, err := os.ReadFile(tc.file)
 		if err != nil {

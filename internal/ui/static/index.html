@@ -1809,6 +1809,20 @@
                 position: absolute;
                 top: 20px;
                 right: 20px;
+                /* R19 sizing contract (PRD-CHANGE §3.1, design review ①):
+                   the bottom offset pairs with top:20px so the column's
+                   height is DETERMINED (workspace height minus the two
+                   offsets) — the quick-keys panel's percentage max-height
+                   only resolves against a definite containing block
+                   (CSS 2.1: a percentage against an auto-height box is
+                   treated as none). The 20px bottom margin conservatively
+                   clears the transport status strip (~17px real band).
+                   pointer-events:none keeps the empty stretches of the
+                   now-taller column from swallowing terminal clicks /
+                   drags / selections on the right edge; the buttons and
+                   the panel re-enable their own below. */
+                bottom: 20px;
+                pointer-events: none;
                 display: flex;
                 flex-direction: column;
                 gap: var(--term-ctrl-btn-gap);
@@ -1830,6 +1844,9 @@
                 display: flex;
                 align-items: center;
                 justify-content: center;
+                /* R19: the column is pointer-events:none (see its rule);
+                   each clickable part re-enables its own. */
+                pointer-events: auto;
                 transition: background 0.2s, color 0.2s;
             }
 
@@ -1858,6 +1875,135 @@
                 stroke-width: 2;
                 stroke-linecap: round;
                 stroke-linejoin: round;
+            }
+
+            /* R19 (issue #100 input gap, PRD-CHANGE §3.1/§3.2): the quick-
+               keys panel — a SINGLE floating DOM, child of #terminal-
+               controls (inherits the oc-hidden web-kind hiding and the top-
+               right anchoring for free). It pops out of the flex column to
+               the LEFT of the button stack, top edge aligned with the entry
+               button (design review revision ①). Visibility is derived
+               ONLY from syncQuickKeysPanel() flipping .open on the active
+               session's quickKeysOpen flag — no second panel DOM, no second
+               show/hide path. max-height:100% resolves against the column's
+               now-determined height (see the container rule); overflow-y
+               scrolls the panel ITSELF when the keyboard eats the viewport
+               (review M-1). max-width leaves 88px of viewport on the right
+               (20px column offset + 44px coarse column + 8px gap + 16px
+               left margin), so on a 320px iPhone SE the panel caps at 232px
+               and the 2-column narrow tier keeps every key reachable. */
+            #quick-keys-panel {
+                position: absolute;
+                top: 0;
+                right: calc(100% + 8px);
+                max-height: 100%;
+                overflow-y: auto;
+                max-width: calc(100vw - 88px);
+                display: none;
+                pointer-events: auto;
+                padding: 8px;
+                background: rgba(13, 17, 23, 0.92);
+                border: 1px solid rgba(255, 255, 255, 0.12);
+                border-radius: 8px;
+                box-sizing: border-box;
+            }
+            #quick-keys-panel.open {
+                display: block;
+            }
+            /* Key grid: EXPLICIT column tiers — repeat(auto-fit/auto-fill,
+               minmax(...)) is forbidden (PRD-CHANGE §3.1 guard-rail 3): the
+               column count would depend on the panel's shrink-to-fit width
+               while the width depends on the columns, resolving max-content-
+               wide and pinning the max-width ceiling. 480px covers every
+               portrait phone (320-430px); phones in landscape and tablets
+               keep 3. */
+            .quick-keys-grid {
+                display: grid;
+                grid-template-columns: repeat(3, 1fr);
+                gap: 6px;
+            }
+            @media (max-width: 480px) {
+                .quick-keys-grid {
+                    grid-template-columns: repeat(2, 1fr);
+                }
+            }
+            .quick-key-btn {
+                min-width: 36px;
+                min-height: 36px;
+                padding: 0 8px;
+                border-radius: 6px;
+                background: rgba(255, 255, 255, 0.08);
+                border: 1px solid rgba(255, 255, 255, 0.15);
+                color: #ccc;
+                font-size: 13px;
+                font-family: inherit;
+                cursor: pointer;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                /* Same hover-capability discipline as every other :hover
+                   (R11): wrapped, never sticky on touch screens. */
+            }
+            @media (pointer: coarse) {
+                .quick-key-btn {
+                    min-width: 44px;
+                    min-height: 44px;
+                }
+            }
+            @media (hover: hover) {
+            .quick-key-btn:hover {
+                background: rgba(255, 255, 255, 0.2);
+                color: #fff;
+            }
+            }
+            /* Copy/Paste are disabled placeholders in PR1 (PR2 takes over
+               the clipboard logic); greyed per the platform convention. */
+            .quick-key-btn:disabled {
+                opacity: 0.35;
+                cursor: default;
+            }
+            /* Paste fallback state shell (PRD-CHANGE §3.4, PR2 wires the
+               logic; PR1 ships the container only). The textarea must stay
+               on-screen-visible — an off-screen textarea anchors the iOS
+               paste callout off-screen (the same structural reason the
+               terminal itself cannot summon paste). */
+            .quick-keys-paste-fallback {
+                display: none;
+            }
+            #quick-keys-panel.paste-mode .quick-keys-grid {
+                display: none;
+            }
+            #quick-keys-panel.paste-mode .quick-keys-paste-fallback {
+                display: block;
+            }
+            .quick-keys-paste-fallback textarea {
+                width: 100%;
+                min-height: 72px;
+                resize: none;
+                box-sizing: border-box;
+                background: rgba(255, 255, 255, 0.08);
+                border: 1px solid rgba(255, 255, 255, 0.15);
+                border-radius: 6px;
+                color: #ccc;
+                font-family: inherit;
+                font-size: 13px;
+                padding: 6px;
+            }
+            .quick-keys-paste-fallback .quick-keys-paste-hint {
+                margin: 6px 0;
+                font-size: 12px;
+                color: var(--text-secondary);
+            }
+            .quick-keys-paste-fallback button {
+                pointer-events: auto;
+                padding: 6px 12px;
+                border-radius: 6px;
+                background: rgba(255, 255, 255, 0.08);
+                border: 1px solid rgba(255, 255, 255, 0.15);
+                color: #ccc;
+                font-family: inherit;
+                font-size: 13px;
+                cursor: pointer;
             }
     </style>
 </head>
@@ -1949,6 +2095,42 @@
                     <div id="reasonix-frames"></div>
                 </div>
                 <div id="terminal-controls">
+                    <!-- R18 entry button: FIRST child (DOM order above the
+                         Refresh button = visually topmost, per the product
+                         directive). Reuses .term-ctrl-btn wholesale; English
+                         title only, no aria — deliberately matching the two
+                         existing column buttons (they carry titles only). The
+                         action binds pointerdown (NOT click) so the terminal
+                         keeps focus and iOS keeps the keyboard up (§3.3). -->
+                    <button class="term-ctrl-btn" id="quick-keys-toggle" title="Quick keys" onpointerdown="toggleQuickKeysPanel(event)">
+                        <svg viewBox="0 0 24 24"><rect x="2" y="6" width="20" height="12" rx="2"></rect><path d="M6 10h.01"></path><path d="M10 10h.01"></path><path d="M14 10h.01"></path><path d="18 10h.01"></path><path d="M6 14h.01"></path><path d="18 14h.01"></path><path d="M9 14h6"></path></svg>
+                    </button>
+                    <!-- R19 panel shell: single DOM, two content states (key
+                         grid / paste fallback). Visibility derives solely
+                         from the active session's quickKeysOpen flag via
+                         syncQuickKeysPanel(). -->
+                    <div id="quick-keys-panel">
+                        <div class="quick-keys-grid">
+                            <button class="quick-key-btn" title="Esc" onpointerdown="sendQuickKey('esc', event)">Esc</button>
+                            <button class="quick-key-btn" title="Tab" onpointerdown="sendQuickKey('tab', event)">Tab</button>
+                            <button class="quick-key-btn" title="Shift+Tab" onpointerdown="sendQuickKey('shift-tab', event)">⇧Tab</button>
+                            <button class="quick-key-btn" title="Up" onpointerdown="sendQuickKey('up', event)">↑</button>
+                            <button class="quick-key-btn" title="Down" onpointerdown="sendQuickKey('down', event)">↓</button>
+                            <button class="quick-key-btn" title="Left" onpointerdown="sendQuickKey('left', event)">←</button>
+                            <button class="quick-key-btn" title="Right" onpointerdown="sendQuickKey('right', event)">→</button>
+                            <button class="quick-key-btn" title="Ctrl+C" onpointerdown="sendQuickKey('ctrl-c', event)">^C</button>
+                            <button class="quick-key-btn" title="Ctrl+D" onpointerdown="sendQuickKey('ctrl-d', event)">^D</button>
+                            <button class="quick-key-btn" title="Copy" disabled>Copy</button>
+                            <button class="quick-key-btn" title="Paste" disabled>Paste</button>
+                        </div>
+                        <!-- Paste fallback state shell (PR2 takes over the
+                             interaction; PR1 ships the visible DOM only). -->
+                        <div class="quick-keys-paste-fallback" id="quick-keys-paste-fallback">
+                            <textarea id="quick-keys-paste-textarea" placeholder=""></textarea>
+                            <p class="quick-keys-paste-hint">Long-press the box, then choose Paste.</p>
+                            <button type="button" id="quick-keys-paste-cancel">Cancel</button>
+                        </div>
+                    </div>
                     <button class="term-ctrl-btn" onclick="refreshCurrentInstance()" title="Refresh & Scroll to Bottom">
                         <svg viewBox="0 0 24 24"><path d="M23 4v6h-6"></path><path d="M1 20v-6h6"></path><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg>
                     </button>
@@ -3049,6 +3231,144 @@
             container.addEventListener("touchcancel", endTouchScroll, { passive: true });
         }
 
+        // --- Terminal quick-keys panel (issue #100 input gap, R18–R20) ---
+
+        // R20 byte table (PRD-CHANGE §3.6): the built-in key set v1. The
+        // arrow keys branch on the terminal's application-cursor-keys mode
+        // at SEND time (SS3 \x1bOA-D vs CSI \x1b[A-D) — read live from
+        // term.modes, never cached. Pure function: no DOM, no session.
+        function quickKeyBytes(key, applicationCursorKeysMode) {
+            switch (key) {
+                case "esc": return "\x1b";
+                case "tab": return "\t";
+                case "shift-tab": return "\x1b[Z";
+                case "up": return applicationCursorKeysMode ? "\x1bOA" : "\x1b[A";
+                case "down": return applicationCursorKeysMode ? "\x1bOB" : "\x1b[B";
+                case "right": return applicationCursorKeysMode ? "\x1bOC" : "\x1b[C";
+                case "left": return applicationCursorKeysMode ? "\x1bOD" : "\x1b[D";
+                case "ctrl-c": return "\x03";
+                case "ctrl-d": return "\x04";
+                default: return null;
+            }
+        }
+
+        // R19 derived visibility (PRD-CHANGE §3.2): visible = an active pty
+        // session exists AND its quickKeysOpen flag is set. Every boundary
+        // (switch instance / delete instance / switch worktree / web kind)
+        // funnels through the same rule — no special cases.
+        function deriveQuickKeysVisibility(session) {
+            return !!(session && session.quickKeysOpen);
+        }
+
+        // The paste fallback state is transient (§3.4): every hide resets
+        // the panel content to the key grid. This runs on the sync path —
+        // the ONLY path — because hides happen from many places (toggle,
+        // instance switch, renderWorkspace polling), not just the toggle.
+        function resetQuickKeysPanelContent(panel) {
+            if (!panel) return;
+            panel.classList.remove("paste-mode");
+        }
+
+        // R19 sync (PRD-CHANGE §3.2): read the flag, flip the class, reset
+        // content on hide. Idempotent — renderWorkspace calls it on every
+        // render (including the 2s poll). This and the toggle handler are
+        // the ONLY two callers of the visibility decision: one JS path,
+        // per the v0.6.0 §3.1 discipline.
+        function syncQuickKeysPanel() {
+            const panel = document.getElementById("quick-keys-panel");
+            if (!panel) return;
+            const session = getActiveTerminalSession();
+            const visible = deriveQuickKeysVisibility(session);
+            panel.classList.toggle("open", visible);
+            // Bind UNCONDITIONALLY (not only when the panel is open):
+            // whether a composition happens depends on the session being
+            // focused/active, not on the panel — a pinyin composition
+            // started while the panel is CLOSED (user taps Esc/^C
+            // mid-composition) must still be tracked, or the §3.3 queue
+            // contract silently dies. sync runs on every renderWorkspace
+            // (select-instance + 2s poll), so a session is bound the first
+            // time a render sees it. Idempotent via quickKeysImeBound.
+            if (session) ensureQuickKeysImeBinding(session);
+            if (!visible) resetQuickKeysPanelContent(panel);
+        }
+
+        // R20 IME discipline (PRD-CHANGE §3.3): the composition flag lives
+        // on the SESSION (composition happens in that session's helper
+        // textarea), and so does the byte queue. Binding is per session and
+        // lazy — the factories live in two places (kinds/pty.js and the
+        // legacy factory below) and neither may be touched by this PR, so
+        // the listeners are attached from here on first encounter. Coverage
+        // argument: a session only composes when focused (i.e. active), and
+        // syncQuickKeysPanel binds EVERY session a render sees — visible or
+        // not — on every renderWorkspace call (the earlier bind-only-when-
+        // open version left panel-closed compositions unmonitored; review
+        // finding, fixed). Residual window (registered in PRD-CHANGE §7):
+        // a brand-new session object is created by activate() AFTER the
+        // render that made the instance active (selectInstance order), so
+        // binding lands on the NEXT render (≤2s poll) — a composition that
+        // starts inside that window is unmonitored. No JS API can query an
+        // in-flight composition, and the two factories are off-limits.
+        function ensureQuickKeysImeBinding(session) {
+            if (!session || session.quickKeysImeBound || !session.term || !session.term.textarea) return;
+            session.quickKeysImeBound = true;
+            const textarea = session.term.textarea;
+            textarea.addEventListener("compositionstart", () => { session.composing = true; });
+            textarea.addEventListener("compositionend", () => {
+                session.composing = false;
+                flushQuickKeysQueue(session);
+            });
+        }
+
+        // Flush goes to the SESSION THAT PRODUCED THE COMPOSITION — never
+        // re-fetching the active one (an instance switch inside the queue
+        // window must not deliver this session's bytes elsewhere). A
+        // destroyed session takes its queue down with it.
+        function flushQuickKeysQueue(session) {
+            const queue = session.quickKeysQueue;
+            if (!queue || queue.length === 0) return;
+            session.quickKeysQueue = [];
+            for (const bytes of queue) {
+                if (session.term) session.term.input(bytes);
+            }
+        }
+
+        // R20 send contract (PRD-CHANGE §3.3): term.input() is the ONLY
+        // send port — it triggers onData, so the terminal gate (terminal-
+        // status refusal, query-response filtering, WS/HTTP transport) is
+        // reused wholesale with zero new transport code.
+        function sendQuickKeyBytes(session, bytes) {
+            if (session.composing) {
+                (session.quickKeysQueue || (session.quickKeysQueue = [])).push(bytes);
+                return;
+            }
+            session.term.input(bytes);
+        }
+
+        function sendQuickKey(key, event) {
+            if (event) event.preventDefault();
+            const session = getActiveTerminalSession();
+            if (!session || !session.term) return;
+            const bytes = quickKeyBytes(key, !!(session.term.modes && session.term.modes.applicationCursorKeysMode));
+            if (!bytes) return;
+            sendQuickKeyBytes(session, bytes);
+        }
+
+        // R19 toggle (PRD-CHANGE §3.2 collapse-path list): the ONLY manual
+        // collapse is tapping the entry again. No panel-internal X, no
+        // tap-outside-to-close (that would be a second visibility path).
+        // Sending keys keeps the panel open (rapid Esc / Ctrl+C taps are
+        // the main scenario); the panel's own Esc key sends \x1b and never
+        // closes it. pointerdown + preventDefault keeps the terminal focus
+        // and the soft keyboard (§3.3).
+        function toggleQuickKeysPanel(event) {
+            if (event) event.preventDefault();
+            const session = getActiveTerminalSession();
+            if (!session) return; // nothing to toggle: the panel derives hidden
+            ensureQuickKeysImeBinding(session);
+            session.quickKeysOpen = !session.quickKeysOpen;
+            syncQuickKeysPanel();
+        }
+
         function init() {
             if (sessionStorage.getItem(SERVER_UPGRADED_FLAG) === "1") {
                 sessionStorage.removeItem(SERVER_UPGRADED_FLAG);
@@ -3869,6 +4189,10 @@
                 actions.classList.remove("visible");
             }
             renderTerminalSessions();
+            // R19: derived panel visibility follows every render (instance
+            // switch / delete / worktree switch / web kind / 2s poll all
+            // land here); the toggle handler is the other sync caller.
+            syncQuickKeysPanel();
         }
 
         function renderModals() {

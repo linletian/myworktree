@@ -1427,8 +1427,8 @@ func TestTouchInteractionAnchors(t *testing.T) {
 			}
 		}
 	}
-	if hovers != 23 {
-		t.Fatalf("GET / should carry the 23 known :hover selectors inside hover-capability blocks (22 from R11 plus the PR #110 tab hover-background restore), found %d — an added or removed hover rule must update this test (issues #100 L3 R11, #110)", hovers)
+	if hovers != 24 {
+		t.Fatalf("GET / should carry the 24 known :hover selectors inside hover-capability blocks (22 from R11, the PR #110 tab restore, and the quick-keys key hover), found %d — an added or removed hover rule must update this test (issues #100 L3 R11, #110, quick keys)", hovers)
 	}
 	for selector, found := range globalRules {
 		if !found {
@@ -1509,6 +1509,162 @@ func TestTerminalTouchScrollAnchors(t *testing.T) {
 	// Wired at startup.
 	if !strings.Contains(sliceJSFunction(t, bodyText, "init"), "initTerminalTouchScroll();") {
 		t.Fatal("GET / init() must call initTerminalTouchScroll() (issue #100 R17)")
+	}
+}
+
+// TestQuickKeysAnchors pins the PR1 contract of the terminal quick-keys
+// panel (issue #100 input gap; docs/plans/feature-v0.6.0-terminal-quick-keys/):
+// the entry button is the FIRST child of #terminal-controls (DOM order
+// above Refresh), the single panel DOM lives inside the column, the column
+// gained the bottom offset + pointer-events:none contract with clickable
+// parts re-enabling their own, the panel carries the left-expansion
+// geometry and size discipline, every action binds pointerdown (never
+// click), and the grid uses explicit column tiers (no auto-fit/auto-fill).
+func TestQuickKeysAnchors(t *testing.T) {
+	bodyText := fetchIndexHTML(t)
+
+	// R18 DOM order: entry button FIRST (above the Refresh button), panel
+	// second — position, not mere presence.
+	controlsAt := strings.Index(bodyText, `<div id="terminal-controls">`)
+	if controlsAt < 0 {
+		t.Fatal("GET / lost the #terminal-controls block (quick keys R18)")
+	}
+	toggleAt := strings.Index(bodyText[controlsAt:], `id="quick-keys-toggle"`)
+	panelAt := strings.Index(bodyText[controlsAt:], `id="quick-keys-panel"`)
+	refreshAt := strings.Index(bodyText[controlsAt:], `onclick="refreshCurrentInstance()"`)
+	if toggleAt < 0 {
+		t.Fatal("GET / should include the quick-keys entry button inside #terminal-controls (issue #100 R18)")
+	}
+	if panelAt < 0 || toggleAt > panelAt {
+		t.Fatal("GET / should place the quick-keys panel after the entry button inside #terminal-controls (issue #100 R19)")
+	}
+	if refreshAt < 0 || panelAt > refreshAt {
+		t.Fatal("GET / should keep the quick-keys entry and panel BEFORE the Refresh button — entry is the first child (issue #100 R18)")
+	}
+	for _, check := range []string{
+		`title="Quick keys"`,
+		`onpointerdown="toggleQuickKeysPanel(event)"`,
+		`onpointerdown="sendQuickKey('esc', event)"`,
+		`onpointerdown="sendQuickKey('ctrl-c', event)"`,
+		// Copy/Paste are PR1 disabled placeholders (arbitration ruling).
+		`title="Copy" disabled`,
+		`title="Paste" disabled`,
+		// Paste fallback state shell (PR2 takes over the logic).
+		`id="quick-keys-paste-fallback"`,
+		`id="quick-keys-paste-textarea"`,
+		`id="quick-keys-paste-cancel"`,
+	} {
+		if !strings.Contains(bodyText, check) {
+			t.Fatalf("GET / should include the quick-keys DOM anchor %q (issue #100 R18/R19)", check)
+		}
+	}
+	// R20: pointerdown-only — no click binding anywhere on the panel actions.
+	for _, forbidden := range []string{
+		`onclick="toggleQuickKeysPanel`,
+		`onclick="sendQuickKey`,
+		`id="quick-keys-toggle" title="Quick keys" onclick`,
+	} {
+		if strings.Contains(bodyText, forbidden) {
+			t.Fatalf("GET / quick-keys actions must bind pointerdown, not click — found %q (issue #100 R20)", forbidden)
+		}
+	}
+
+	// Container contract: bottom offset (determinate height for the panel's
+	// percentage max-height) + pointer-events none, children re-enabled.
+	styleStart := strings.Index(bodyText, "<style>")
+	styleEnd := strings.Index(bodyText, "</style>")
+	if styleStart < 0 || styleEnd < 0 {
+		t.Fatal("GET / lost the inline <style> block")
+	}
+	css := stripCSSComments(bodyText[styleStart:styleEnd])
+	assertRuleDecl := func(name, ruleAnchor, decl string) {
+		t.Helper()
+		start := strings.Index(css, ruleAnchor)
+		if start < 0 {
+			t.Fatalf("GET / lost the %s rule (quick keys)", name)
+		}
+		end := strings.Index(css[start:], "\n            }")
+		if end < 0 {
+			t.Fatalf("GET / %s rule has no closing brace", name)
+		}
+		if !strings.Contains(css[start:start+end], decl) {
+			t.Fatalf("GET / %s rule should declare %q (quick keys)", name, decl)
+		}
+	}
+	assertRuleDecl("#terminal-controls", "\n            #terminal-controls {\n", "bottom: 20px;")
+	assertRuleDecl("#terminal-controls", "\n            #terminal-controls {\n", "pointer-events: none;")
+	assertRuleDecl(".term-ctrl-btn", "\n            .term-ctrl-btn {\n                width: var(--term-ctrl-btn-size);", "pointer-events: auto;")
+
+	// Panel geometry + size discipline (left expansion, per §3.1).
+	assertRuleDecl("#quick-keys-panel", "\n            #quick-keys-panel {\n", "position: absolute;")
+	assertRuleDecl("#quick-keys-panel", "\n            #quick-keys-panel {\n", "top: 0;")
+	assertRuleDecl("#quick-keys-panel", "\n            #quick-keys-panel {\n", "right: calc(100% + 8px);")
+	assertRuleDecl("#quick-keys-panel", "\n            #quick-keys-panel {\n", "max-height: 100%;")
+	assertRuleDecl("#quick-keys-panel", "\n            #quick-keys-panel {\n", "overflow-y: auto;")
+	assertRuleDecl("#quick-keys-panel", "\n            #quick-keys-panel {\n", "max-width: calc(100vw - 88px);")
+	assertRuleDecl("#quick-keys-panel", "\n            #quick-keys-panel {\n", "pointer-events: auto;")
+	// Visibility derives from the .open class only.
+	assertRuleDecl("#quick-keys-panel.open", "#quick-keys-panel.open {", "display: block;")
+
+	// Grid tiers: explicit 3, narrow 2 — auto-fit/auto-fill forbidden
+	// (§3.1 警戒③).
+	assertRuleDecl(".quick-keys-grid", "\n            .quick-keys-grid {\n", "grid-template-columns: repeat(3, 1fr);")
+	narrowAt := strings.Index(css, "@media (max-width: 480px) {")
+	if narrowAt < 0 {
+		t.Fatal("GET / lost the narrow-tier quick-keys grid block (quick keys)")
+	}
+	narrowEnd := strings.Index(css[narrowAt:], "\n            }")
+	if !strings.Contains(css[narrowAt:narrowAt+narrowEnd], "repeat(2, 1fr)") {
+		t.Fatal("GET / narrow tier should drop the quick-keys grid to 2 columns (quick keys)")
+	}
+	for _, forbidden := range []string{"auto-fit", "auto-fill"} {
+		if strings.Contains(css, forbidden) {
+			t.Fatalf("GET / quick-keys grid must not use %q — column count is tiered by media query (§3.1 警戒③)", forbidden)
+		}
+	}
+	// Coarse pointers get the ≥44px keys (R10 convention). Anchored to the
+	// quick-keys block itself — a bare "@media (pointer: coarse) {" would
+	// first match the header-icon block (:501), a false positive.
+	coarseAnchor := "@media (pointer: coarse) {\n                .quick-key-btn {"
+	assertRuleDecl("coarse quick keys", coarseAnchor, "min-width: 44px;")
+	assertRuleDecl("coarse quick keys", coarseAnchor, "min-height: 44px;")
+
+	// JS wiring: byte table, derived visibility, single sync path.
+	for _, check := range []string{
+		"function quickKeyBytes(key, applicationCursorKeysMode)",
+		`case "esc": return "\x1b";`,
+		`case "ctrl-c": return "\x03";`,
+		"function deriveQuickKeysVisibility(session)",
+		"function syncQuickKeysPanel()",
+		"function ensureQuickKeysImeBinding(session)",
+		"function flushQuickKeysQueue(session)",
+	} {
+		if !strings.Contains(bodyText, check) {
+			t.Fatalf("GET / should include the quick-keys JS anchor %q (issue #100 R19/R20)", check)
+		}
+	}
+	send := sliceJSFunction(t, bodyText, "sendQuickKeyBytes")
+	if !strings.Contains(send, "session.term.input(bytes)") {
+		t.Fatal("GET / sendQuickKeyBytes must send via term.input(bytes) — the sole onData gate (issue #100 R20)")
+	}
+	syncFn := sliceJSFunction(t, bodyText, "syncQuickKeysPanel")
+	toggleAtFn := strings.Index(syncFn, `classList.toggle("open", visible)`)
+	resetAt := strings.Index(syncFn, "resetQuickKeysPanelContent(panel)")
+	if toggleAtFn < 0 || resetAt < 0 || toggleAtFn > resetAt {
+		t.Fatal("GET / syncQuickKeysPanel must toggle .open BEFORE the hide-reset — content resets on every hide path (issue #100 R19)")
+	}
+	if !strings.Contains(syncFn, "if (session) ensureQuickKeysImeBinding(session);") {
+		t.Fatal("GET / syncQuickKeysPanel must bind IME listeners for EVERY session a render sees — not only when the panel is visible (review-found defect, issue #100 R20)")
+	}
+	// The toggle handler drives the same single sync — the flag flip and
+	// the visibility sync are one indivisible step there.
+	toggleFn := sliceJSFunction(t, bodyText, "toggleQuickKeysPanel")
+	if !strings.Contains(toggleFn, "syncQuickKeysPanel();") {
+		t.Fatal("GET / toggleQuickKeysPanel must call syncQuickKeysPanel() after flipping the flag (issue #100 R19)")
+	}
+	workspace := sliceJSFunction(t, bodyText, "renderWorkspace")
+	if !strings.Contains(workspace, "syncQuickKeysPanel();") {
+		t.Fatal("GET / renderWorkspace must call syncQuickKeysPanel() — instance binding derives on every render (issue #100 R19)")
 	}
 }
 
