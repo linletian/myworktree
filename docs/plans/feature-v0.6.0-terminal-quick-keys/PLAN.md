@@ -91,7 +91,7 @@
 ### PR2：复制 + 粘贴（R21、R22）
 
 - **改动点**（`internal/ui/static/index.html`，承接 PR1 面板壳）：
-  - 粘贴：能力分派（`navigator.clipboard.readText` 存在 → 路径 A，瞬态用户激活内调用；否则路径 B = 面板切换粘贴兜底态，textarea `paste` 事件捕获）；管线纯函数 `normalizePasteNewlines`（`/\r?\n/g`→`\r`）→ `stripBracketedPasteMarkers`（剥离内嵌 200~/201~）→ `maybeWrapBracketedPaste`（iff `bracketedPasteMode`）→ 256KiB 上限截断 → `term.input()`；空 / 超限 / 拒绝均 `updateStatus` 反馈（R21/§3.4）。
+  - 粘贴：能力分派（`navigator.clipboard.readText` 存在 → 路径 A，瞬态用户激活内调用；**API 拒绝（throw/reject）→ 反馈 + 自动落路径 B**——PR2 评审修订；否则路径 B = 面板切换粘贴兜底态，textarea `paste` 事件捕获）；管线纯函数 `normalizePasteNewlines`（`/\r?\n/g`→`\r`）→ `stripBracketedPasteMarkers`（剥离内嵌 200~/201~）→ 256Ki 码元上限截断（**先于包装**，PR2 评审修订）→ `maybeWrapBracketedPaste`（iff `bracketedPasteMode`）→ `term.input()`；**投递会话在 Paste 键入口捕获，异步兑现不重取活动会话**（PR2 评审 major 修复）；兜底态记归属会话、sync 检测活动会话变化即复位内容态（PR2 评审修订）；空 / 超限均 `updateStatus` 反馈（R21/§3.4）。
   - 复制：`term.hasSelection()` → `getSelection()`；否则 `extractViewportText`（`buffer.active` 的 `[viewportY, viewportY+rows)`，逐行 `translateToString(true)`，`\n` 连接，丢弃尾部空行）；写入 `navigator.clipboard.writeText()`，不安全上下文兜底 `execCommand('copy')`（临时 textarea + select）；空结果无操作并反馈（R22/§3.5）。
   - 粘贴兜底态交互：进入 / 取消切回键网格（不关面板）、发送后自动切回；面板每次隐藏经 sync 复位（PR1 已落）；兜底态期间终端失焦为预期。
 - **验收**：PRD-CHANGE §5.2 全部 5 条。
@@ -133,7 +133,7 @@
 
 继承 PRD-CHANGE §7 风险表，计划层面的缓解：
 
-- **6553 行单文件回归面大** → 纯增量 DOM + 新监听器 + 文本断言锚定；每 PR 独立可回滚。
+- **7000+ 行单文件回归面大** → 纯增量 DOM + 新监听器 + 文本断言锚定；每 PR 独立可回滚。
 - **iOS 剪贴板行为方差** → 双路径分派 + beta 真机实测立档；路径 A 失败降级路径 B。
 - **设计稿与实施漂移** → Phase 0 门禁 + PR review 对照设计稿。
 - **无真机触屏回归手段** → 模拟验证前置到每个 PR，真机靠 M3 beta 收敛，不在合并门禁内。
@@ -159,21 +159,21 @@
 - [x] D1 建立 + D2 一条
 - [x] 双外部评审 APPROVE（mcode 两轮 + opencode 一轮；major 1 / minor 3 修复复审通过，nit 级仲裁自修）→ 原子提交
 
-### PR2（R21–R22）
+### PR2（R21–R22）— 已完成（2026-10-13，四轮双评审后双 APPROVE 提交）
 
-- [ ] 粘贴路径 A（`readText()`）+ 路径分派
-- [ ] 粘贴兜底态逻辑（textarea paste 捕获 / 取消切回 / 发送自动切回）
-- [ ] 管线三函数 + 256KiB 上限 + `updateStatus` 反馈
-- [ ] 复制（选区优先 / `extractViewportText` 视口兜底）+ `writeText()` / `execCommand` 兜底
-- [ ] `quick_keys.test.mjs` 扩充（管线 / 分派 / 视口两态）+ `ui_test.go` 锚点
-- [ ] 人工清单 beta 项全过（含 remote 双机实测）
-- [ ] D1 更新 + D2 一条
-- [ ] 双外部评审 APPROVE → 原子提交
+- [x] 粘贴路径 A（`readText()`）+ 路径分派（含拒绝自动降级路径 B——评审修订④）
+- [x] 粘贴兜底态逻辑（textarea paste 捕获 / 取消切回 / 发送自动切回 / 归属会话复位）
+- [x] 管线四函数 + 256Ki 码元上限（cap 先于 wrap——评审修订②）+ `updateStatus` 反馈 + 投递会话入口捕获（评审 major ①）
+- [x] 复制（选区优先 / `extractViewportText` 视口兜底）+ `writeText()` / `execCommand` 兜底
+- [x] `quick_keys.test.mjs` 扩充至 24 例（管线 / 分派 / 视口两态 / 兜底交互 / 归属与守卫）+ `ui_test.go` 锚点
+- [ ] 人工清单 beta 项全过（含 remote 双机实测）——**真机人工项，随 v0.6.0 beta 渠道收敛**
+- [x] D1 更新 + D2 一条
+- [x] 双外部评审 APPROVE（mcode×4 轮 + opencode×4 轮；major 2 / minor 6 修复复审通过，nit 级仲裁自修）→ 原子提交
 
 ### 全期
 
-- [ ] 桌面既有行为零回归核对（§5 门禁）
-- [ ] 评审后工作树逐字节核对（每轮）
-- [ ] 合并前最后一次改动后实跑 `go test ./...` 全绿
-- [ ] D3（README 双语一句）评估
-- [ ] 并入 v0.6.0 beta 真机收敛
+- [x] 桌面既有行为零回归核对（§5 门禁）——双评审逐轮核验 + `git diff` 删除行穷举均为计划内
+- [x] 评审后工作树逐字节核对（每轮）——四轮评审后均 `git status` 核对无评审外污染
+- [x] 合并前最后一次改动后实跑 `go test ./...` 全绿——21 包 ok；`node --test` 139/139
+- [ ] D3（README 双语一句）评估——按 PLAN §3 时机为「PR2 合并后评估」，分支合并时执行
+- [ ] 并入 v0.6.0 beta 真机收敛——人工项（§6 人工清单）
