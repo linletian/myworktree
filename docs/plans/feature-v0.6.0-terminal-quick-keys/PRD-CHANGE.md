@@ -75,7 +75,7 @@ issue #100 首评指出两类触屏缺口。v0.6.0（PR1–PR4 + PR #110 beta �
 - **面板 DOM 作为 `#terminal-controls` 的子节点**：容器 `flex-direction: column`，面板落在按钮列下方、随容器顶右锚定；`renderWorkspace` 对 web kinds 挂的 `oc-hidden` 把入口与面板一起隐藏——显隐正确性免费获得，不新增第二条显隐路径（§3.2 的会话绑定只管 pty 场景内的开关）。**实现警戒**：容器当前无 `align-items`（默认 `stretch`，1808-1816 实证）——两个按钮因自带固定 width 不受影响，而宽度 auto 的面板会被拉伸钳制到容器宽（= 按钮宽）；落地时必须补 `align-items: flex-end`（按钮有显式宽度不受影响）或给面板 `align-self: flex-end`。
 - **被否方案：键盘上方附件条（Orca `MobileSessionCommandDock` 形态）**。Orca 的附件条依赖 RN 原生层拿到键盘几何与 `Keyboard.dismiss` 等价物；浏览器侧无法程序化升降 iOS 软键盘（报告 §三「不可移植」第 4 条），附件条只能钉在终端底缘并常驻吃纵向空间，与 R6 钉高争夺可视区。用户已明确指定「右上角入口 + 浮层」形态，附件条形态不采用；其键表 / 连发参数 / 粘贴纪律等**机制层**成果照常吸收（R20/R21）。
 - 面板自身样式复用控制层视觉语言（深色半透明底、圆角、coarse 下按键 ≥44px，R10/R11 约定同样适用于面板内按钮）。
-- **面板尺寸纪律（评审 M-1 补立，R2-1/R2-2 修订）**：`#workspace` 为 `overflow: hidden`（`index.html:1281-1288`），顶锚定只保证面板**顶部**可见——R6 钉高在软键盘弹起时压缩 `#workspace` 可视高度，键集 v1 = 9 字节键 + Copy/Paste 共 11 个按钮（coarse 每个 ≥44px）总高可超可视区，溢出的下方按键会被静默裁切、且无任何补救路径。契约：`#terminal-controls` 补 `max-height: calc(100% - 20px - 20px)`（对 `#workspace` 高度解析——容器 `top:20px` 绝对定位的包含块即 `#workspace`，R6 钉高后随其收缩；两个减项 = 顶部偏移 20px + **状态行高度带约 20px**——`#status-bar` 为 `position:absolute; bottom:0; right:0`、11px 字号 + 2×2px padding ≈ 20px、`z-index:10` 且 `pointer-events: auto`（`index.html:1324-1337`），容器 `z-index:20` 若不扣除该带，面板满高时底缘与 `#workspace` 底缘齐平、盖住状态行右端点击区——评审 R2-2 实证几何）、三按钮 `flex-shrink: 0`；面板 `min-height: 0; overflow-y: auto`——超高时**面板内部滚动**而非被裁，全部按键恒可达。键网格 ≥2 列排布压低常态总高。面板滚动在 `#terminal-container` 之外，与 R17 触摸映射无交互。
+- **面板尺寸纪律（评审 M-1 补立，R2-1/R2-2 修订）**：`#workspace` 为 `overflow: hidden`（`index.html:1281-1288`），顶锚定只保证面板**顶部**可见——R6 钉高在软键盘弹起时压缩 `#workspace` 可视高度，键集 v1 = 9 字节键 + Copy/Paste 共 11 个按钮（coarse 每个 ≥44px）总高可超可视区，溢出的下方按键会被静默裁切、且无任何补救路径。契约：`#terminal-controls` 补 `max-height: calc(100% - 20px - 20px)`（对 `#workspace` 高度解析——容器 `top:20px` 绝对定位的包含块即 `#workspace`，R6 钉高后随其收缩；两个减项 = 顶部偏移 20px + **状态行高度带取 20px 保守常数**——`#status-bar` 为 `position:absolute; bottom:0; right:0`、11px 字号（无自身 line-height，经 UA normal ≈ 13px 行盒）+ 2×2px padding 实带 ≈ 17px、`z-index:10` 且 `pointer-events: auto`（`index.html:1324-1337`）；扣除量 20px ≥ 实带，面板底缘恒高于状态行顶缘（评审 R2-2/R3-1 复算余量约 3px，保守方向正确）——容器 `z-index:20` 若不扣除该带，面板满高时底缘与 `#workspace` 底缘齐平、盖住状态行右端点击区）、三按钮 `flex-shrink: 0`；面板 `min-height: 0; overflow-y: auto`——超高时**面板内部滚动**而非被裁，全部按键恒可达。键网格 ≥2 列排布压低常态总高。面板滚动在 `#terminal-container` 之外，与 R17 触摸映射无交互。
 
 ### 3.2 面板-实例绑定状态机（R19）
 
@@ -156,7 +156,7 @@ issue #100 首评指出两类触屏缺口。v0.6.0（PR1–PR4 + PR #110 beta �
 3. 面板各键发送字节正确（含方向键两模式分支），经 `term.input` 到达 onData 闸门；终态实例拒发——自动化：node 行为测试（字节表纯函数切片 + 模式桩）。
 4. 面板点按不转移终端焦点（pointerdown + preventDefault 契约锚点断言）；IME 组合态排队逻辑——自动化锚点 + node 切片。
 5. 软键盘弹起时面板顶部保持可见（全部按键的可达性由第 6 条尺寸纪律承接）【人工过检 / beta】；iPhone 窄屏与 iPad 上入口不被 drawer tab / tab 条遮挡【人工过检】。
-6. 软键盘弹起 + 矮屏（iPhone 横屏）组合下面板超高时**内部滚动**、全部按键可达，不被 `#workspace` 裁切（§3.1 尺寸纪律）【人工过检 / beta】——自动化：Go 锚点断言（`#terminal-controls` 的 `max-height`、按钮 `flex-shrink: 0`、面板 `min-height: 0` / `overflow-y: auto` 锚点）。
+6. 软键盘弹起 + 矮屏（iPhone 横屏）组合下面板超高时**内部滚动**、全部按键可达，不被 `#workspace` 裁切（§3.1 尺寸纪律）【人工过检 / beta】——自动化：Go 锚点断言（`#terminal-controls` 的 `max-height`、按钮 `flex-shrink: 0`、面板 `min-height: 0` / `overflow-y: auto`、容器 `align-items: flex-end`（或面板 `align-self: flex-end`，§3.1 实现警戒）锚点）。
 
 ### 5.2 PR2
 
