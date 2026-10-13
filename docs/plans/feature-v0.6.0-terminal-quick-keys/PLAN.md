@@ -34,16 +34,16 @@
 - 导出画面：
   1. `notes-decisions.png` — 设计稿说明（R18–R22 决策摘要，对照 PRD 阅读）。
   2. `component-control-column.png` — 终端控制列收起态：新入口（键盘图标）在 Refresh 之上（R18）；fine 32px / coarse 44px。
-  3. `component-panel-keys.png` — 面板键网格态：9 字节键 + Copy/Paste = 11 键、≥2 列、键 ≥44px（coarse）；`min-height:0 + overflow-y:auto` 与 `align-items: flex-end` 标注。
+  3. `component-panel-keys.png` — 面板键网格态：9 字节键 + Copy/Paste = 11 键、列数媒体查询分档（默认 3 列 / 窄屏 2 列）、键 ≥44px（coarse）；左展锚定与 `max-height:100% + overflow-y:auto`、`max-width: calc(100vw - 88px)` 标注。
   4. `component-panel-paste-fallback.png` — 面板粘贴兜底态：同一 DOM 内容切换（M-2 选型 a）、在屏可见 textarea、取消切回不关面板、瞬态复位。
-  5. `scene-desktop-panel-open.png` — 桌面宽屏展开：顶右锚定 top:20/right:20、状态行带扣除（R2-2/R3-1）。
-  6. `scene-iphone-keyboard-panel.png` — iPhone 窄屏软键盘弹起：R6 钉高 + 面板超高内部滚动（M-1）、入口不被 drawer tab 遮挡。
+  5. `scene-desktop-panel-open.png` — 桌面宽屏展开：顶右锚定 + **面板贴按钮列左侧展开、顶缘对齐入口**（设计评审修订①）、容器 `bottom:20px` 状态行带扣除（R2-2/R3-1）。
+  6. `scene-iphone-keyboard-panel.png` — iPhone 窄屏软键盘弹起：R6 钉高 + 面板超高内部滚动（M-1）+ 左展 `max-width` 上限约束全键可见、入口不被 drawer tab 遮挡且不被面板遮挡（再点 = 收起）。
   7. `scene-instance-binding.png` — 实例绑定行为 A→B→A 三态（R19）+ 删实例/切 worktree/web kind 边界。
 
 ### 2.2 确认流程
 
 1. 设计稿随本目录提交，由用户评审（可对照 PRD-CHANGE 与 PNG 逐画面过）。
-2. 评审重点：与 PRD-CHANGE 决策一致性——入口 DOM 序（R18）、单一面板 DOM 与实例绑定（R19/§3.2）、尺寸纪律与状态行避让（§3.1 M-1/R2-2）、粘贴兜底态同一 DOM 切换（M-2/§3.4）、键集与字节表（§3.6）。
+2. 评审重点：与 PRD-CHANGE 决策一致性——入口 DOM 序（R18）、面板左展锚定与收起路径（设计评审修订①②，R19/§3.1/§3.2）、单一面板 DOM 与实例绑定（R19/§3.2）、尺寸纪律与状态行避让（§3.1 M-1/R2-2 + 宽度上限）、粘贴兜底态同一 DOM 切换（M-2/§3.4）、键集与字节表（§3.6）。
 3. **确认通过前，PR1 不开工**；PR2 的纯函数管线（与 DOM 形态无关的部分）可并行准备测试用例骨架。
 4. 设计稿与 PRD 冲突时：先回改 PRD-CHANGE 或设计稿之一并记录原因，再实施。
 
@@ -75,14 +75,15 @@
 
 - **改动点**（`internal/ui/static/index.html`，纯增量 DOM + 新监听器，不改既有行）：
   - 入口按钮：`#terminal-controls` 首子元素（DOM 序在 Refresh 之上），复用 `.term-ctrl-btn`，键盘 SVG 图标，英文 title（R18；仅 title 无 aria，N-3 取向；桌面同显，N-5 取向）。
-  - 容器契约：`#terminal-controls` 补 `align-items: flex-end`（§3.1 实现警戒，否则面板被 stretch 钳宽）+ `max-height: calc(100% - 20px - 20px)`（顶部偏移 + 状态行带 20px 保守常数）；三个按钮 `flex-shrink: 0`。
-  - 面板 DOM（`#terminal-controls` 子节点，单一 DOM 两内容态）：键网格态 = 11 键（Esc/Tab/⇧Tab/←↑↓→/^C/^D/Copy/Paste，≥2 列，coarse 键 ≥44px）；面板 `min-height: 0; overflow-y: auto`；粘贴兜底态 DOM（textarea + 提示 + 取消）本期先建壳、PR2 接管逻辑。
+  - 容器契约（设计评审修订①改写）：`#terminal-controls` 补 `bottom: 20px`（top/bottom 双向偏移 → 高度确定，底部扣除状态行带 20px 保守常数）+ `pointer-events: none`（三个按钮与面板各自 `pointer-events: auto`，整列空档不吞终端右侧点击/滚动/选区）。
+  - 面板 DOM（`#terminal-controls` 子节点，单一 DOM 两内容态）：`position: absolute; top: 0; right: calc(100% + 8px)` 贴按钮列左展、顶缘对齐入口；`max-height: 100%; overflow-y: auto`；`max-width: calc(100vw - 88px)`；键网格态 = 11 键（Esc/Tab/⇧Tab/←↑↓→/^C/^D/Copy/Paste，列数媒体查询分档：默认 3 列 / 窄屏 2 列——禁 `auto-fit` + shrink-to-fit 循环依赖，§3.1 警戒③；coarse 键 ≥44px）；粘贴兜底态 DOM（textarea + 提示 + 取消）本期先建壳、PR2 接管逻辑。
   - 绑定状态机：每会话 `quickKeysOpen` 旗标 + `syncQuickKeysPanel()`（读旗标 + `classList.toggle` + **隐藏时联动复位内容态**，挂 `renderWorkspace` 与开关处理器两处；幂等）（R19/§3.2、R2-3）。
+  - 收起路径（§3.2 清单）：手动收起唯一入口 = 再点入口按钮 toggle；不引入面板内 × 或点面板外关闭；字节键/粘贴发送后保持展开；面板内 Esc 只发 `\x1b` 不关面板。
   - 发送契约：`quickKeyBytes()` 纯函数（键→字节，方向键读 `term.modes.applicationCursorKeysMode` 选 SS3/CSI）；发送一律 `term.input(bytes)` 走既有 onData 闸门；按钮绑 `pointerdown`（非 click）+ `preventDefault()` 保焦点（§3.3）。
   - IME 纪律：helper textarea `compositionstart`/`compositionend` 旗标 + 按会话挂载的字节队列，`compositionend` 后向**产生组合的那个会话** flush（不重取活动会话；会话销毁随弃）（§3.3）。
 - **验收**：PRD-CHANGE §5.1 全部 6 条。
 - **测试**：
-  - `internal/ui/ui_test.go`：入口按钮 DOM 序（Refresh 之前）、面板容器在 `#terminal-controls` 内、`align-items: flex-end`、`max-height`、按钮 `flex-shrink: 0`、面板 `min-height: 0` / `overflow-y: auto`、`pointerdown` 绑定锚点与相对顺序。
+  - `internal/ui/ui_test.go`：入口按钮 DOM 序（Refresh 之前）、面板容器在 `#terminal-controls` 内、容器 `bottom: 20px` / `pointer-events: none`、按钮与面板 `pointer-events: auto`、面板 `position: absolute` / `top: 0` / `right: calc(100% + 8px)` / `max-height: 100%` / `overflow-y: auto` / `max-width: calc(100vw - 88px)`、`pointerdown` 绑定锚点与相对顺序。
   - 新 `internal/ui/testdata/quick_keys.test.mjs`（node `--test`，由 `terminal_status_test.go` 风格包装进 `go test`）：`quickKeyBytes`（两模式分支）、`deriveQuickKeysVisibility`（派生可见性 + 隐藏复位内容态）、IME 队列 flush 归属——**从真实 served 源码切片、打桩**，不断言副本。
   - 文档：D1 建立条目 + D2 一条。
 - **可独立回滚**：纯增量；Copy/Paste 两键本期为占位（点击无操作或暂隐藏，实施时定，评审确认）。
@@ -149,8 +150,8 @@
 ### PR1（R18–R20）
 
 - [ ] 入口按钮（DOM 序首位、键盘图标、英文 title）
-- [ ] `#terminal-controls` 容器契约（`align-items: flex-end`、`max-height: calc(100% - 20px - 20px)`、按钮 `flex-shrink: 0`）
-- [ ] 面板 DOM 两态壳（键网格 11 键 ≥2 列；粘贴兜底态壳）+ `min-height: 0` / `overflow-y: auto`
+- [ ] `#terminal-controls` 容器契约（`bottom: 20px`、`pointer-events: none` / 子元素 `auto`）
+- [ ] 面板 DOM 两态壳（键网格 11 键，列数媒体查询分档 3/2 列；粘贴兜底态壳）+ `position:absolute; top:0; right:calc(100% + 8px)` 左展锚定 + `max-height: 100%` / `overflow-y: auto` / `max-width: calc(100vw - 88px)`
 - [ ] `quickKeysOpen` 每会话旗标 + `syncQuickKeysPanel()`（含隐藏复位内容态，挂 `renderWorkspace` + 开关处理器）
 - [ ] `quickKeyBytes()` + `term.input()` 发送 + `pointerdown` 保焦点绑定
 - [ ] IME 组合态旗标 + 按会话队列 flush
