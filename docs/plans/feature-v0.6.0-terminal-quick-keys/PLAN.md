@@ -147,17 +147,17 @@
 - [x] pencil 设计稿（`design/quick-keys-panel.pen`，schema 校验通过）+ 7 张导出 PNG
 - [x] 用户评审设计稿并确认（**2026-10-13 确认通过**；评审中提出修订①面板贴按钮列左展、②收起路径明示，已回改 PRD-CHANGE / 本计划 / .pen 并重出 PNG 复审）——Phase 0 关闭，PR1 可开工
 
-### PR1（R18–R20）
+### PR1（R18–R20）— 已完成（2026-10-13，双评审 APPROVE 后提交）
 
-- [ ] 入口按钮（DOM 序首位、键盘图标、英文 title）
-- [ ] `#terminal-controls` 容器契约（`bottom: 20px`、`pointer-events: none` / 子元素 `auto`）
-- [ ] 面板 DOM 两态壳（键网格 11 键，列数媒体查询分档 3/2 列；粘贴兜底态壳）+ `position:absolute; top:0; right:calc(100% + 8px)` 左展锚定 + `max-height: 100%` / `overflow-y: auto` / `max-width: calc(100vw - 88px)`
-- [ ] `quickKeysOpen` 每会话旗标 + `syncQuickKeysPanel()`（含隐藏复位内容态，挂 `renderWorkspace` + 开关处理器）
-- [ ] `quickKeyBytes()` + `term.input()` 发送 + `pointerdown` 保焦点绑定
-- [ ] IME 组合态旗标 + 按会话队列 flush
-- [ ] `ui_test.go` 锚点断言 + `quick_keys.test.mjs`（字节表 / 派生可见性 / IME 队列）
-- [ ] D1 建立 + D2 一条
-- [ ] 双外部评审 APPROVE → 原子提交
+- [x] 入口按钮（DOM 序首位、键盘图标、英文 title）
+- [x] `#terminal-controls` 容器契约（`bottom: 20px`、`pointer-events: none` / 子元素 `auto`）
+- [x] 面板 DOM 两态壳（键网格 11 键，列数媒体查询分档 3/2 列；粘贴兜底态壳）+ `position:absolute; top:0; right:calc(100% + 8px)` 左展锚定 + `max-height: 100%` / `overflow-y: auto` / `max-width: calc(100vw - 88px)`
+- [x] `quickKeysOpen` 每会话旗标 + `syncQuickKeysPanel()`（含隐藏复位内容态，挂 `renderWorkspace` + 开关处理器）
+- [x] `quickKeyBytes()` + `term.input()` 发送 + `pointerdown` 保焦点绑定
+- [x] IME 组合态旗标 + 按会话队列 flush（评审修复：绑定改无条件；残差窗口登记 PRD-CHANGE §7）
+- [x] `ui_test.go` 锚点断言 + `quick_keys.test.mjs`（字节表 / 派生可见性 / IME 队列 / toggle / sendQuickKey）
+- [x] D1 建立 + D2 一条
+- [x] 双外部评审 APPROVE（mcode 两轮 + opencode 一轮；major 1 / minor 3 修复复审通过，nit 级仲裁自修）→ 原子提交
 
 ### PR2（R21–R22）
 
