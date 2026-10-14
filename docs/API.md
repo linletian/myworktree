@@ -834,7 +834,7 @@ Response: `text/plain`
 ### Instance resource stats
 `GET /api/instances/stats`
 
-Returns per-instance resource consumption and connection status, grouped by worktree.
+Returns per-instance resource consumption and connection status, grouped by worktree, plus the alert block and system-level section (issue #111 P2).
 
 **Note**: This endpoint performs real-time process stat collection (via `gopsutil`). It only yields meaningful CPU% values after at least 1-2 seconds of server runtime, as CPU% requires a delta calculation from the previous measurement.
 
@@ -853,9 +853,17 @@ Response:
       "memory_rss_bytes": 52428800,
       "memory_buffer_bytes": 5242880,
       "memory_buffer_cap_bytes": 33554432,
-      "connection_type": "websocket"
+      "connection_type": "websocket",
+      "child_count": 2,
+      "subtree_rss_bytes": 71303168,
+      "children": [
+        {"pid": 12346, "ppid": 12345, "name": "node", "rss_bytes": 16777216, "cpu_percent": 1.2, "created_at_ms": 1760000000000},
+        {"pid": 12347, "ppid": 12346, "name": "fake-serve.py", "rss_bytes": 2097152, "cpu_percent": 0.0, "created_at_ms": 1760000001000}
+      ],
+      "children_truncated": false,
+      "tree_unavailable": false
     }
-  ],
+   ],
   "worktrees": [
     {
       "worktree_id": "wt-xyz",
@@ -871,6 +879,30 @@ Response:
     "instance_count": 3,
     "daemon_cpu_percent": 1.2,
     "daemon_memory_bytes": 67108864
+  },
+  "alerts": [
+    {
+      "id": "psi-memory",
+      "severity": "amber",
+      "signal": "PSI memory some avg10",
+      "threshold": "≥ 30.0%",
+      "current": "47.4%",
+      "advice": "memory reclaim is stalling tasks — see docs/PLAYBOOK-memory-alerts.md#psi-memory"
+    },
+    {
+      "id": "available-ram",
+      "severity": "amber",
+      "signal": "system available RAM",
+      "threshold": "< 15.0%",
+      "current": "9.5% (2.20 GB of 23.19 GB)",
+      "advice": "free memory before the reclaim wall — see docs/PLAYBOOK-memory-alerts.md#available-ram"
+    }
+  ],
+  "system": {
+    "psi_memory_some_avg10": 47.4,
+    "psi_available": true,
+    "available_bytes": 2361393152,
+    "total_bytes": 24901148672
   }
 }
 ```
@@ -883,6 +915,38 @@ Fields:
 - `connection_type`: `"websocket"` if the instance has an active WebSocket TTY connection, `"sse"` if using the SSE fallback, `"none"` otherwise.
 - Worktree subtotals aggregate only `running` instances (instance RSS only, not buffer memory).
 - Global totals include both all running instances and the daemon process itself (`daemon_cpu_percent`, `daemon_memory_bytes`).
+- **issue #111 P2 (additive — no existing field changed semantics):**
+  - `child_count`: number of DESCENDANT processes of the instance main PID (main PID excluded; walk bounded by depth 8 / 512 descendants per instance, `visited`-deduped against pid-reuse cycles). READ-ONLY aggregation — the monitor never signals, waits, or reaps anything it walks.
+  - `subtree_rss_bytes`: main PID RSS + all collected descendants' RSS.
+   - `children`: top-10 descendants by RSS (may be fewer). `cpu_percent` on these rows is the LIFETIME average (total CPU time / uptime), not a windowed delta like the instance row. `created_at_ms` is the process start time in Unix milliseconds. (omitted from the payload when the instance collected no descendants)
+  - `children_truncated`: `true` ONLY when the walk hit a depth/count cap — `child_count` is then a floor (a lower bound), not a census. The top-N display cut (fewer `children` than `child_count`) is NOT truncation: the undisplayed tail reaches the UI as "and M more" (`child_count - len(children)`) and `child_count` stays the exact census.
+  - `tree_unavailable`: `true` when the instance's tree could not be read at all — the /proc enumeration failed or the main PID was absent from it. The row's numbers are then UNKNOWN, not measured zeros (a `child_count` of 0 on an unreadable tree does NOT mean "no children"); the UI renders "unavailable" instead of digits. Unreadable ≠ measured zero.
+  - Stopped instances carry zeros (not-running ≠ no-children).
+  - `alerts`: the FRESH (computed-per-request) full alert set — system signals AND per-instance subtree signals. Thresholds (issue #111 comment #4; detection only, disposal is the user's — `docs/PLAYBOOK-memory-alerts.md`): PSI memory some avg10 ≥30% amber / ≥50% red (red mirrors systemd-oomd's own kill line, same source, so the warning is always first); system available RAM <15% amber; one instance's subtree RSS >40% of total RAM amber; one instance's descendant count >50 amber; daemon RSS >1 GiB amber. One entry per signal at the highest severity crossed; reds ordered first. Per-instance alerts carry the instance id in the alert `id`: the subtree-RSS signal is `subtree-rss:<instance-id>` and the child-count signal is `child-count:<instance-id>` (e.g. `subtree-rss:inst-abc123`); the system signals use the bare ids `psi-memory` / `available-ram` / `daemon-rss`.
+  - `system`: this request's system-level sample. `psi_available=false` (non-Linux / PSI unreadable) means `psi_memory_some_avg10` must be ignored — the available-RAM signal stands on its own (issue #111: a kernel global OOM happened WITHOUT oomd acting).
+
+### Lightweight alerts (status-bar channel)
+`GET /api/monitor/alerts`
+
+The cached, system-level alert channel the status bar polls every ~10 s (issue #111 P2 layered polling). Zero-intervention: this loop reads PSI + available RAM + daemon RSS only — it never walks instance trees, and it never acts on what it sees.
+
+Response:
+```json
+{
+  "alerts": [
+    {"id": "available-ram", "severity": "amber", "signal": "system available RAM", "threshold": "< 15.0%", "current": "9.5% (2.20 GB of 23.19 GB)", "advice": "free memory before the reclaim wall — see docs/PLAYBOOK-memory-alerts.md#available-ram"}
+  ],
+  "system": {"psi_memory_some_avg10": 12.3, "psi_available": true, "available_bytes": 2361393152, "total_bytes": 24901148672},
+  "sampled_at_ms": 1760000000000
+}
+```
+
+Cache-coherence rule between the two endpoints (stated once, honored by both):
+- **Everything in `GET /api/instances/stats` is live** — PSI, available RAM, daemon RSS, every subtree, computed per request. Its system numbers are also published into the sampler cache, so the status bar never contradicts a fresher modal.
+- **Everything in `GET /api/monitor/alerts` is cached** — refreshed by the background loop at most every ~10 s, and no older than the last full stats poll.
+- Scope: system-level signals only (PSI / available RAM / daemon RSS). Subtree and child-count alerts need a tree walk this loop deliberately never does — they appear in the full response while the Resource Monitor is open. The status bar showing fewer lights than the modal is by design, not by oversight.
+- `sampled_at_ms=0` means "never sampled yet" (daemon just started, or the pre-first-tick window); the UI reads zero as no-data and shows no alerts rather than dressing up silence as an all-clear.
+- `alerts` is always an array, never `null`.
 
 ### 5.9 Instance lifecycle (frontend)
 

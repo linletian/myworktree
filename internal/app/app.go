@@ -97,6 +97,11 @@ type Server struct {
 	dshInstallMu sync.Mutex
 	mcpAdapter   mcp.Adapter
 	monitor      monitor.Collector
+	// alertSampler is the background system-level alert cache feeding
+	// GET /api/monitor/alerts (issue #111 P2). Started in Start, stopped
+	// in Shutdown — see internal/monitor/sampler.go for the layered-
+	// polling contract (system signals only, never a tree walk).
+	alertSampler *monitor.AlertSampler
 	authMu       sync.Mutex
 	// authFails is keyed by client IP; authFailsNextSweep is the wall-clock
 	// instant at which the next piggybacked eviction of closed windows is
@@ -130,6 +135,14 @@ type ttyClientState struct {
 }
 
 const maxTTYClientsPerInstance = 8
+
+// alertSampleEvery is the background system-level sampling cadence for the
+// status-bar alert channel (issue #111 P2). ~10s is the design number from
+// issue #111 comment #2; it is deliberately slower than the modal's 2s full
+// poll because the status bar is a glance channel, not a dashboard — and
+// each tick costs two /proc reads (PSI + meminfo) plus one process stat,
+// never a tree walk.
+const alertSampleEvery = 10 * time.Second
 
 // ttyHandshakeReplayBudget bounds how many bytes ONE TTY WebSocket
 // handshake replays before handing the connection to the live output
@@ -379,8 +392,11 @@ func New(cfg Config, logger *log.Logger) (*Server, error) {
 			Worktrees: worktreeMgr,
 			Instances: instanceMgr,
 		},
-		authFails: map[string]authFail{},
-		isSecure:  isSecure,
+		// ~10s background system-level sampling (issue #111 P2); the
+		// goroutine starts in Start() and is reaped by Shutdown().
+		alertSampler: monitor.NewAlertSampler(alertSampleEvery),
+		authFails:    map[string]authFail{},
+		isSecure:     isSecure,
 	}
 	s.registerAPIs(mux)
 	if err := ui.Register(mux, filepath.Base(filepath.Clean(s.root)), func(r *http.Request) bool {
@@ -654,6 +670,14 @@ func (s *Server) Start() (string, error) {
 	h := s.withServerRevision(s.withAuth(s.mux))
 	s.httpSrv = &http.Server{Handler: h}
 
+	// Background alert sampler (issue #111 P2): starts with the HTTP server
+	// so /api/monitor/alerts answers real data the moment the UI loads,
+	// and is joined by Shutdown() — the goroutine's done channel is the
+	// exit proof, no leak.
+	if s.alertSampler != nil {
+		s.alertSampler.Start()
+	}
+
 	go func() {
 		if s.cfg.TLSCert != "" || s.cfg.TLSKey != "" {
 			_ = s.httpSrv.ServeTLS(ln, s.cfg.TLSCert, s.cfg.TLSKey)
@@ -715,6 +739,12 @@ func (s *Server) Shutdown() {
 	}
 	if s.dshWatch != nil {
 		s.dshWatch.Stop()
+	}
+	// Stop the alert sampler and WAIT for its goroutine to exit (Stop
+	// joins the loop's done channel — issue #111 P2; a sampler ticking
+	// past Shutdown would read procfs from a dying daemon for no reader).
+	if s.alertSampler != nil {
+		s.alertSampler.Stop()
 	}
 	if s.rxSrv != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -822,6 +852,7 @@ func (s *Server) registerAPIs(mux *http.ServeMux) {
 	mux.HandleFunc("/api/instances/log", s.handleInstanceLog)
 	mux.HandleFunc("/api/instances/log/stream", s.handleInstanceLogStream)
 	mux.HandleFunc("/api/instances/stats", s.handleInstanceStats)
+	mux.HandleFunc("/api/monitor/alerts", s.handleMonitorAlerts)
 	mux.HandleFunc("/api/instances/opencode", s.handleInstanceOpencodeInfo)
 	mux.HandleFunc("/api/instances/opencode/scope", s.handleInstanceOpencodeScope)
 	mux.HandleFunc("/api/instances/dsh", s.handleInstanceDshInfo)
@@ -3365,7 +3396,54 @@ func (s *Server) handleInstanceStats(w http.ResponseWriter, r *http.Request) {
 	connTypes := s.instanceMgr.AllConnectionTypes()
 	stats := s.monitor.Collect(flat, connTypes)
 
+	// Cache coherence (issue #111 P2): this response is FRESH — PSI,
+	// available RAM, daemon RSS, every subtree — computed per request. Its
+	// system numbers are also published to the background sampler's cache
+	// so the status bar's cached view never contradicts what the modal
+	// just showed (the modal's 2s poll is fresher than the ≤10s tick;
+	// publishing keeps the cache at least as fresh). Instance-level
+	// subtree alerts are NOT published — they belong to this response and
+	// would go stale the moment the modal closes; GET /api/monitor/alerts
+	// documents the cached side of the same rule.
+	if s.alertSampler != nil {
+		s.alertSampler.PublishSystem(stats.System)
+	}
+
 	writeJSON(w, http.StatusOK, stats)
+}
+
+// handleMonitorAlerts serves the lightweight, cached alert channel that the
+// status bar polls every ~10s (issue #111 P2).
+//
+// Freshness contract, stated once and honored by both endpoints:
+//   - everything in THIS response is cached — sampled by the background
+//     loop at most alertSampleEvery ago, and no older than the last full
+//     stats poll (the modal's 2s poll republishes through PublishSystem);
+//   - everything in GET /api/instances/stats is live, per-request.
+//
+// Scope: system-level signals only (PSI / available RAM / daemon RSS).
+// Subtree and child-count alerts need a tree walk, which this loop
+// deliberately never does — those alerts appear in the full response while
+// the modal is open. The status bar shows fewer lights than the modal by
+// design, not by oversight.
+//
+// A cold cache (daemon just started, first tick not done — or the sampler
+// never started, as in hand-built test servers) answers an EMPTY alert set
+// with sampled_at_ms=0; the UI reads zero as "no data yet" and shows no
+// alerts rather than dressing up silence as an all-clear.
+func (s *Server) handleMonitorAlerts(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var snap monitor.AlertsSnapshot
+	if s.alertSampler != nil {
+		snap, _ = s.alertSampler.Snapshot()
+	}
+	if snap.Alerts == nil {
+		snap.Alerts = []monitor.Alert{}
+	}
+	writeJSON(w, http.StatusOK, snap)
 }
 
 func (s *Server) handleMCPTools(w http.ResponseWriter, r *http.Request) {

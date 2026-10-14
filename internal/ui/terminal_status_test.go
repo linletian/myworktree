@@ -183,6 +183,30 @@ func TestQuickKeysHandling(t *testing.T) {
 	t.Logf("%s", out)
 }
 
+// TestMonitorAlertsHandling runs the Node unit tests for the issue #111 P2
+// Resource Monitor enhancement (testdata/monitor_alerts.test.mjs): the
+// status-bar alert badge (worst-severity class + count text, Transport text
+// untouched), the modal alerts strip rendered verbatim from the server's
+// display triple with escaping, the expandable subtree detail (top-N +
+// "and M more" arithmetic + the walk-capped note), the measured footnote
+// that replaced the "children not counted" disclaimer (its boundary
+// sentence is the visibility contract), and the ~10s alert-poll lifecycle.
+//
+// Same arrangement as TestQuickKeysHandling: the cases slice the shipped
+// index.html and run against stubbed browser state, this wrapper makes
+// `go test` enforce them. Skips when node is absent.
+func TestMonitorAlertsHandling(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not on PATH; skipping monitor alerts JS tests")
+	}
+	out, err := exec.Command(node, "--test", "testdata/monitor_alerts.test.mjs").CombinedOutput()
+	if err != nil {
+		t.Fatalf("node --test testdata/monitor_alerts.test.mjs: %v\n%s", err, out)
+	}
+	t.Logf("%s", out)
+}
+
 // TestResponsiveLayerChangelogCounts extends the issue #95 guard
 // (TestTerminalStatusChangelogCount) to the four behavioral files behind
 // the v0.6.0 responsive plan: each CHANGELOG entry quotes its file's
@@ -218,6 +242,7 @@ func TestResponsiveLayerChangelogCounts(t *testing.T) {
 		{"testdata/touch_interaction.test.mjs", `new issue #100 L3 scenarios`},
 		{"testdata/terminal_touch_scroll.test.mjs", `new issue #100 R17 scenarios`},
 		{"testdata/quick_keys.test.mjs", `issue #100 quick-keys scenarios`}, // the file's TOTAL (PR1 subset uses unguarded wording per the house rule)
+		{"testdata/monitor_alerts.test.mjs", `cases — that file's total`},   // #111 P2 entry's total claim (issue #95: a count in prose must be pinned)
 	} {
 		src, err := os.ReadFile(tc.file)
 		if err != nil {
