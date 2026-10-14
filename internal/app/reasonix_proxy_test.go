@@ -105,6 +105,15 @@ func newProxyTestEnv(t *testing.T) (*reasonixProxy, *framework.Manager, *reasoni
 	reg.Register(reasonix.NewKind(drv))
 	m := framework.NewManager(reg, fs, nil)
 	m.DataDir = dataDir
+	// Backstop (issue #113), symmetric with the framework-side helper in
+	// internal/framework/manager_reasonix_test.go: the fake serve fixtures
+	// serve forever until explicitly killed and `go test` exit does not take
+	// them down, so a forgotten Stop leaks a python process per test.
+	// StopAllKind is the production shutdown path (Server.Shutdown parity),
+	// reused rather than a test-only API. Tests keep their own explicit
+	// Stop — deferred teardown runs before t.Cleanup, and Stop is idempotent
+	// — this only catches the ones that forget (or fail before reaching it).
+	t.Cleanup(func() { m.StopAllKind(reasonix.KindName) })
 	return &reasonixProxy{manager: m, driver: drv}, m, drv, fs
 }
 
