@@ -98,11 +98,17 @@ type Server struct {
 	mcpAdapter   mcp.Adapter
 	monitor      monitor.Collector
 	authMu       sync.Mutex
-	authFails    map[string]authFail
-	ttyMu        sync.Mutex
-	ttyClients   map[string]map[string]*ttyClientState
-	ttyApplied   map[string]ttySize
-	ttyNextID    uint64
+	// authFails is keyed by client IP; authFailsNextSweep is the wall-clock
+	// instant at which the next piggybacked eviction of closed windows is
+	// due (see sweepExpiredAuthFailsLocked). Both are guarded by authMu, and
+	// the zero value of authFailsNextSweep means "due now", so the first
+	// attempt sweeps an empty map and arms the cadence.
+	authFails          map[string]authFail
+	authFailsNextSweep time.Time
+	ttyMu              sync.Mutex
+	ttyClients         map[string]map[string]*ttyClientState
+	ttyApplied         map[string]ttySize
+	ttyNextID          uint64
 
 	gitRunner func(timeout time.Duration, gitRoot string, args ...string) ([]byte, error)
 }
@@ -2188,6 +2194,68 @@ func (s *Server) requireDshInstance(id string) (store.ManagedInstance, error) {
 	return inst, nil
 }
 
+// dropScopeState wipes the recorded out-of-scope state of one instance from
+// BOTH web-UI trackers (issue #111 P3). ScopeTracker.Reset had always
+// documented "used on instance stop" and had never been called from
+// production, so the states maps only ever grew: one permanent entry per
+// instance id the reverse proxy ever served, for the life of the daemon.
+//
+// Why an entry is dead once the instance is torn down, and why wiping it
+// therefore loses nothing: the trackers are keyed by instance id, and the
+// framework never runs an id again after teardown — Manager.Restart migrates
+// onto a fresh id (Start allocates one via newID), Manager.Stop leaves the
+// record stopped with no path back to running except that Restart, and
+// Manager.Delete removes the record. The scope endpoints 404 once the record
+// is gone, and while it merely reads stopped the warning is already gone from
+// the screen: both renderers' `status === 'stopped'` branches hide the bar
+// and stop polling, each clearing its scope state by its own mechanism —
+// kinds/opencode_web.js calls an explicit _resetScopeState() beside
+// _stopScopeMonitoring(), while kinds/dsh_web.js folds the equivalent reset
+// into _stopMonitoring(), which aborts the poll and clears _scope/_scopeDir
+// itself (same effect, different machinery). Server side and client side
+// therefore agree that a stopped instance has no scope to report. A Restart is a
+// brand-new session, so it must NOT inherit the previous session's warning —
+// which is why the Restart wiring wipes the OLD id and never the new one.
+//
+// Wiring lives on the SUCCESS path of each teardown at the app layer rather
+// than inside framework.Manager: the trackers are app-level Server fields
+// the framework must not know about, Manager already drops everything it
+// owns (ring buffer, subscribers, conns, the kind's state dir through
+// cleanupKind), and wiring after the call keeps the warning intact when a
+// teardown is REFUSED (Delete on a running instance, Restart on a running or
+// unknown one) — the instance stays live, so its warning must too.
+//
+// The id is wiped raw, not TrimSpace'd: it is the same key the proxy
+// recorded from the request path (framework ids are hex, so the two forms
+// cannot differ in practice, and raw is the one that is certainly right).
+//
+// Known residue, deliberately NOT closed here: a process that dies on its own
+// never passes through any of these handlers (runLifecycle marks the record
+// terminal in the framework), so such an instance's entry survives until a
+// later teardown runs INSIDE this daemon for that id. That residue is bounded
+// by the number of records in the store, unlike the unbounded proxy-keyed
+// growth this closes; reclaiming it needs a framework→app teardown callback,
+// a wider contract change than the leak it would fix.
+//
+// The same bound covers the one door this function CANNOT reach, which also
+// states its scope: this wiring covers the IN-PROCESS teardown doors — the
+// app.Server HTTP stop/restart/delete handlers and the MCP instance_stop /
+// instance_delete verbs, all running inside the daemon against this Server.
+// The CLI's `myworktree instance stop` is a CROSS-PROCESS door: instanceCmd
+// builds its own framework.NewManager (cli.go:315) and calls mgr.Stop in a
+// separate short-lived process (cli.go:368), where there is no Server, no
+// trackers and no dropScopeState to call — structurally unreachable from
+// here, not a missed wiring. The entry it leaves behind in a live daemon is
+// the same bounded residue as a process that died on its own (one entry per
+// historical record in the store, and any later in-daemon door for that id
+// reclaims it), and delegating CLI instance teardown to the daemon's HTTP
+// API is recorded as a follow-up, the same shape as #113's startup-sweep
+// follow-up.
+func (s *Server) dropScopeState(id string) {
+	s.ocScope.Reset(id)
+	s.dshScope.Reset(id)
+}
+
 func (s *Server) handleInstanceStop(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -2204,6 +2272,7 @@ func (s *Server) handleInstanceStop(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
+	s.dropScopeState(req.ID)
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
@@ -2224,6 +2293,9 @@ func (s *Server) handleInstanceRestart(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
+	// Old id only: Restart allocated a fresh one (item.ID) and that session
+	// has not been observed doing anything yet. See dropScopeState.
+	s.dropScopeState(req.ID)
 	writeJSON(w, http.StatusCreated, s.instanceView(item))
 }
 
@@ -2243,6 +2315,11 @@ func (s *Server) handleInstanceDelete(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
+	// Delete is also the backstop for the crash residue named in
+	// dropScopeState: a process that died on its own is already in a terminal
+	// state, so Delete accepts it and this is the last point where its
+	// recorded scope can be reclaimed.
+	s.dropScopeState(req.ID)
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
@@ -3445,6 +3522,12 @@ func (s *Server) handleMCPCall(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusBadRequest, err)
 			return
 		}
+		// Same teardown as POST /api/instances/stop — the second IN-DAEMON
+		// door to the same Manager.Stop, so it wipes the scope state too
+		// (leaving it here would keep the leak alive for every client that
+		// stops over MCP; the CLI's instance stop is a cross-process door
+		// that structurally cannot reach this — see dropScopeState).
+		s.dropScopeState(args.ID)
 		writeJSON(w, http.StatusOK, map[string]any{"result": map[string]string{"status": "ok"}})
 	case "instance_input":
 		var args struct {
@@ -3472,6 +3555,7 @@ func (s *Server) handleMCPCall(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusBadRequest, err)
 			return
 		}
+		s.dropScopeState(args.ID) // see instance_stop above
 		writeJSON(w, http.StatusOK, map[string]any{"result": map[string]string{"status": "ok"}})
 	case "instance_log_tail":
 		var args struct {
@@ -3789,19 +3873,113 @@ func isLoopbackRequest(r *http.Request) bool {
 	return isLoopbackHost(clientIP(r.RemoteAddr))
 }
 
+// Rate-limit knobs for the non-loopback auth path.
+//
+// authFailWindow / authFailLimit are the sliding window itself, named so the
+// eviction code below can talk about the same window the limiter uses instead
+// of re-spelling time.Minute and 20. The values are the ones this function has
+// always used — naming them changed nothing.
+const (
+	authFailWindow = time.Minute
+	authFailLimit  = 20
+
+	// authFailsSweepEvery is how long a CLOSED window may linger in authFails
+	// before a sweep removes it. The map is keyed by client IP and an entry
+	// was only ever removed by that same IP coming back (which resets the
+	// window) or by a successful login (resetAuthAttempts), so an IP that
+	// failed once and never returned left its entry for the life of the
+	// daemon — an unbounded map in a long-lived process.
+	//
+	// Sweeping is piggybacked on the auth path instead of running in a
+	// dedicated goroutine, and the trade-off is stated whole: a janitor
+	// goroutine needs its own shutdown signal and would tick forever on a
+	// daemon whose map is empty (the normal case — loopback clients never
+	// reach this path, and every successful login deletes its own key), while
+	// a piggybacked sweep costs one time comparison per attempt and nothing
+	// at all when there is no auth traffic. The honest price of that choice:
+	// with NO traffic there is no sweep, so whatever the map held when
+	// traffic stopped is held until the next attempt. It cannot grow there,
+	// because nothing is arriving to grow it.
+	authFailsSweepEvery = time.Minute
+
+	// authFailsSweepBusy shortens that interval while the map is STILL over
+	// authFailsSoftCap after a sweep, i.e. while distinct failing IPs arrive
+	// faster than one window per minute. Without it the soft cap would be
+	// decoration — a flood could grow the map for a full minute between
+	// sweeps. With it the map is bounded by roughly the flood's IP count per
+	// 5 s, and the cadence stays the throttle in both directions: a sweep is
+	// never a per-request O(n) walk.
+	authFailsSweepBusy = 5 * time.Second
+
+	// authFailsSoftCap is the size above which the cadence tightens to
+	// authFailsSweepBusy. It is a trigger, never a truncation: entries leave
+	// only because their window closed (see sweepExpiredAuthFailsLocked), so a
+	// flood of live entries is allowed to sit over the cap rather than have a
+	// block lifted to pay for shrinking the map.
+	authFailsSoftCap = 1024
+)
+
+// allowAuthAttempt is the sliding-window limiter for failed auth attempts:
+// 20 per authFailWindow per IP.
+//
+// The sweep runs AFTER this IP's entry is written, which is what keeps it
+// invisible to the caller — the entry just written has a WindowEnd in the
+// future, so it can never be a victim of the sweep it triggered.
 func (s *Server) allowAuthAttempt(ip string) bool {
 	s.authMu.Lock()
 	defer s.authMu.Unlock()
 	now := time.Now()
 	v := s.authFails[ip]
 	if now.After(v.WindowEnd) {
-		v = authFail{Count: 0, WindowEnd: now.Add(time.Minute)}
+		v = authFail{Count: 0, WindowEnd: now.Add(authFailWindow)}
 	}
 	v.Count++
 	s.authFails[ip] = v
-	return v.Count <= 20
+	if !now.Before(s.authFailsNextSweep) {
+		s.sweepExpiredAuthFailsLocked(now)
+	}
+	return v.Count <= authFailLimit
 }
 
+// sweepExpiredAuthFailsLocked evicts entries whose window has closed and
+// schedules the next sweep (busy cadence while the map is still over its soft
+// cap, normal cadence otherwise). The caller holds authMu: the sweep is not a
+// second writer but the same critical section, so no new lock and no new lock
+// ordering appears anywhere on this path.
+//
+// WHY DELETION CANNOT CHANGE A VERDICT — the property the design rests on: an
+// entry is removed only when now.After(v.WindowEnd), the EXACT comparison the
+// read path uses to decide a window is over. An evicted key and a surviving
+// expired key therefore answer the next attempt identically: present-but-expired
+// hits that same branch, absent reads the zero value whose zero WindowEnd is
+// also in the past, and both come back as Count 1. Eviction is a no-op on
+// behaviour, always, and the 20-per-window-per-IP answer is untouched. That is
+// also why the predicate is now.After and not !now.Before — at the exact
+// instant a window ends the limiter KEEPS counting, and an eviction disagreeing
+// by one nanosecond would be a real, if tiny, semantic change.
+//
+// A blocked IP is never freed early: at Count 20 its WindowEnd is in the
+// future, so the predicate stays false until the window closes, which is the
+// moment the limiter releases it anyway.
+func (s *Server) sweepExpiredAuthFailsLocked(now time.Time) {
+	for ip, v := range s.authFails {
+		if now.After(v.WindowEnd) {
+			delete(s.authFails, ip)
+		}
+	}
+	// Deleting while ranging a map is specified behaviour in Go (an entry
+	// removed before it is reached is simply never produced), so this needs no
+	// staging buffer of keys to delete afterwards.
+	s.authFailsNextSweep = now.Add(authFailsSweepEvery)
+	if len(s.authFails) > authFailsSoftCap {
+		s.authFailsNextSweep = now.Add(authFailsSweepBusy)
+	}
+}
+
+// resetAuthAttempts clears an IP's counter on a successful login. Deliberately
+// NOT extended to sweep: this runs on every authenticated non-loopback
+// request, so sweeping here would make the cadence of a full map walk a
+// function of login volume, and allowAuthAttempt already sweeps on this clock.
 func (s *Server) resetAuthAttempts(ip string) {
 	s.authMu.Lock()
 	defer s.authMu.Unlock()

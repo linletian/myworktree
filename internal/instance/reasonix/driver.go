@@ -7,6 +7,8 @@
 //	port             actual bound address (written by --port-file)
 //	pid              serve main process PID (written by --pid-file)
 //	serve.log        subprocess stdout/stderr
+//	serve.log.1      the previous serve.log, kept by Start's rotation (one
+//	                 backup, no more — see serveLogMaxBytes)
 //
 // The serve runs WITHOUT a REASONIX_HOME override: it uses the user's real
 // ~/.reasonix exactly like a terminal-run reasonix, so sessions, history,
@@ -123,6 +125,19 @@ type Driver struct {
 // --pid-file/--no-open plus the reasonix_token cookie name (proxy side).
 // Verified against v1.22.0 (issue #45).
 const defaultMinVersion = "1.22.0"
+
+// serveLogMaxBytes is the size serve.log is allowed to reach before the next
+// Start rotates it to serve.log.1 (issue #111 P3). serve.log is opened
+// O_APPEND and had no rotation at all, so the file only ever grew for as long
+// as an instance's management dir survived.
+//
+// 10 MiB, deliberately: serve's own output is a few KB per boot (startup
+// banner, session events, the occasional error), so 10 MiB is many days of a
+// busy instance — the threshold is there to catch a serve that turns its
+// verbosity on or runs for months, not to rotate a healthy log every other
+// restart. One backup, never more: the point is a bound, not a history, and
+// a single .1 keeps the state dir at two files of known size.
+const serveLogMaxBytes = 10 << 20 // 10 MiB
 
 // cachedAddr is a cached {port, token} for one instance, valid until
 // Stop/Cleanup or the next successful Start overwrites it (no TTL — see the
@@ -312,6 +327,15 @@ func (d *Driver) Start(in StartInput) (Info, error) {
 	cmd.Env = RemoveEnv(os.Environ(), "REASONIX_HOME", "REASONIX_STATE_HOME")
 	cmd.Env = append(cmd.Env, in.Env...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	// Rotate before opening, so the fd this Start hands to serve always
+	// belongs to a log that starts at zero when it was over the cap. This is
+	// START-time rotation only: a serve that is already running keeps its own
+	// fd, and renaming under it would leave every byte it writes landing in
+	// the renamed inode (POSIX renames the name, not the open file), so
+	// in-run rotation needs the child to reopen — a serve-side change, out of
+	// scope here. The bound this does buy is that a management dir never holds
+	// more than the current run plus one previous run of serve.log.
+	d.rotateServeLog(in.InstanceID, logFile)
 	f, err := os.OpenFile(logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return Info{}, fmt.Errorf("reasonix: open serve.log: %w", err)
@@ -422,9 +446,59 @@ func (d *Driver) waitReady(instanceID string, done <-chan error, portFile, pidFi
 	return Info{}, fmt.Errorf("reasonix: serve did not become ready within %v for instance %s\nserve.log tail:\n%s", timeout, instanceID, d.serveLogTail(instanceID, 10))
 }
 
+// rotateServeLog renames an over-cap serve.log to serve.log.1 ahead of a
+// fresh Start, so the log the new serve writes into begins empty and the
+// previous run is kept as a single backup (issue #111 P3). os.Rename is
+// atomic and replaces an existing destination on POSIX, so "overwrite the old
+// .1" needs no unlink-first dance, and the inode keeps the 0o600 it was
+// created with — the backup is never more readable than the live log.
+//
+// Best-effort, and that is the deliberate trade-off: a rename that fails (a
+// read-only mount, or a serve.log.1 left as a directory by something outside
+// this driver) does not make serve itself broken, so refusing to start the
+// user's chat over log bookkeeping is the worse failure. It is logged, not
+// swallowed — an oversized log that did not rotate is exactly the kind of
+// thing that must not go quiet.
+//
+// Rotation runs under the per-instance Start lock (lockStart is taken at the
+// top of Start), so no concurrent Start can be holding the log open while the
+// name moves.
+func (d *Driver) rotateServeLog(instanceID, logFile string) {
+	// Lstat, not Stat: Stat follows a symlink, so the size compared below
+	// would be the TARGET's while the rename moves the link itself — the
+	// check and the move would be about different objects and rotation would
+	// silently stop working. Lstat judges the very entry rename moves, and
+	// keeps the IsRegular branch honest (a symlink is not a plain file).
+	fi, err := os.Lstat(logFile)
+	if err != nil || !fi.Mode().IsRegular() {
+		// Absent (a first Start, or Stop/Cleanup took the dir down) or not a
+		// plain file: nothing to rotate. Any real problem with this path still
+		// surfaces from the OpenFile in Start, whose error shape is unchanged.
+		return
+	}
+	if fi.Size() <= serveLogMaxBytes {
+		return
+	}
+	backup := logFile + ".1"
+	if err := os.Rename(logFile, backup); err != nil {
+		d.logf("rotate serve.log for instance %s (%d bytes > %d): %v — appending to the oversized log instead", instanceID, fi.Size(), int64(serveLogMaxBytes), err)
+		return
+	}
+	// "(before start)" is load-bearing: the rename runs ahead of OpenFile
+	// and cmd.Start, so when this Start then fails the line describes a
+	// rotation with no run behind it. The rotate stays before the open —
+	// moving it after Start would break the over-cap judgement — so the log
+	// says what it is.
+	d.logf("rotated previous serve.log (before start) for instance %s (%d bytes > %d) to %s", instanceID, fi.Size(), int64(serveLogMaxBytes), filepath.Base(backup))
+}
+
 // serveLogTail returns the last n non-empty lines of the instance's serve.log
 // (or "" when absent/empty), so readiness failures carry reasonix's own error
 // text instead of a bare "did not become ready".
+//
+// It reads serve.log, never the .1 backup, which is the right half after
+// rotation: a readiness failure describes the run that just started, and the
+// rotated file is the previous run.
 func (d *Driver) serveLogTail(instanceID string, n int) string {
 	b, err := os.ReadFile(filepath.Join(d.dir(instanceID), "serve.log"))
 	if err != nil {
