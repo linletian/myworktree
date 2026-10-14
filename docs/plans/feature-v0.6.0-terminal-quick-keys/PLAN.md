@@ -169,6 +169,7 @@
 - [ ] 人工清单 beta 项全过（含 remote 双机实测）——**真机人工项，随 v0.6.0 beta 渠道收敛**
 - [x] D1 更新 + D2 一条
 - [x] 双外部评审 APPROVE（mcode×4 轮 + opencode×4 轮；major 2 / minor 6 修复复审通过，nit 级仲裁自修）→ 原子提交
+- [x] PR #112 评审两轮闭环：第一轮 mcode minor 1（writeText 拒绝兜底激活窗口——仲裁登记 PRD-CHANGE §7）+ Sisyphus minor 2（粘贴捕获 preventDefault 先行、composing 无兜底清除）/ nit 2（toggle tabindex、测试 seam）→ 修复 `5dc6057`（quick_keys 24→27 例）；第二轮 Sisyphus 复核 0 新问题、一审意见全部闭环 APPROVE
 
 ### 全期
 
