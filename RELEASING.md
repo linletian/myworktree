@@ -156,6 +156,14 @@ Rules:
   `prerelease: true`. `release.yml`'s jobs are guarded with
   `!contains(github.ref_name, '-')`, so a beta tag never fires the stable
   pipeline (its `v*` pattern would otherwise match).
+- **Beta builds compile with `-tags ttymetrics`** (both `go build` lines in
+  `release-beta.yml`): the issue #114 `[tty-metrics]` instrumentation
+  (`internal/app/tty_metrics_*.go` + the gated client half in `index.html`)
+  ships in every beta and stays long-term, while stable builds compile the
+  passthrough stubs and never emit the `mw_tty_metrics` cookie that arms the
+  browser side. Building a beta-equivalent binary locally takes the same
+  flag: `go build -tags ttymetrics ./cmd/myworktree`. `go-ci.yml` tests and
+  builds both variants, so neither can bit-rot.
 - **`/releases/latest` ignores prereleases**, so the default one-line install
   keeps serving the latest stable; betas are strictly opt-in.
 

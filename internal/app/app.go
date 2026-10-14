@@ -2592,10 +2592,14 @@ func (s *Server) handleInstanceTTYWSLiveness(w http.ResponseWriter, r *http.Requ
 		// demand even when the 8MB budget truncates it. EndOffset is a
 		// cheap read; its error (stopped instance) only degrades the
 		// metric to -1, and the branches below keep their own error
-		// handling untouched.
-		conn.m.handshakeStart = time.Now()
-		if head, herr := s.instanceMgr.EndOffset(id); herr == nil {
-			conn.m.headAtStart = head
+		// handling untouched. The whole probe is const-gated: stable
+		// builds (no ttymetrics tag) compile this block away entirely,
+		// so the manager read happens only where the data is collected.
+		if ttyMetricsBuild {
+			conn.m.handshakeStart = time.Now()
+			if head, herr := s.instanceMgr.EndOffset(id); herr == nil {
+				conn.m.headAtStart = head
+			}
 		}
 		if since == sinceFollowLiveEnd {
 			conn.m.mode = "follow-live-end"
@@ -2899,11 +2903,14 @@ func (s *Server) handleInstanceTTYWSLiveness(w http.ResponseWriter, r *http.Requ
 		// Issue #114 diagnostics: snapshot the replay counters off the
 		// binary counter — every binary frame so far was handshake replay,
 		// so this is exact for all three modes with no per-branch
-		// accounting — then log the handshake line.
-		conn.m.publishedOffset = endOffset
-		conn.m.replayBytes = conn.m.binBytes
-		conn.m.replayDur = time.Since(conn.m.handshakeStart)
-		conn.m.subscribedAt = time.Now()
+		// accounting. Const-gated like the entry probe: stable builds
+		// compile the block away, and logHandshake is a no-op there.
+		if ttyMetricsBuild {
+			conn.m.publishedOffset = endOffset
+			conn.m.replayBytes = conn.m.binBytes
+			conn.m.replayDur = time.Since(conn.m.handshakeStart)
+			conn.m.subscribedAt = time.Now()
+		}
 		conn.m.logHandshake(s.logger, id, since)
 		return true
 	}
@@ -3075,10 +3082,14 @@ func (s *Server) handleInstanceTTYWSLiveness(w http.ResponseWriter, r *http.Requ
 					// Issue #114 diagnostics: subscription age, live bytes
 					// delivered, and the ring head right now. headNow minus
 					// the client's cursor (its close line) is the backlog
-					// the next reconnect will replay.
-					headNow, herr := s.instanceMgr.EndOffset(id)
-					if herr != nil {
-						headNow = -1
+					// the next reconnect will replay. The EndOffset probe is
+					// const-gated: stable builds skip the manager read and
+					// logOverflow is a no-op there.
+					headNow := int64(-1)
+					if ttyMetricsBuild {
+						if h, herr := s.instanceMgr.EndOffset(id); herr == nil {
+							headNow = h
+						}
 					}
 					conn.m.logOverflow(s.logger, id, headNow)
 				}
@@ -3586,6 +3597,37 @@ func (s *Server) withServerRevision(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if s.serverRev != "" {
 			w.Header().Set("X-Myworktree-Server-Rev", s.serverRev)
+		}
+		// Issue #114 diagnostics: ttyMetricsBuild is true only in builds
+		// compiled with -tags ttymetrics (the beta release workflow). This
+		// cookie is the synchronous server→page signal that switches the
+		// client half of the instrumentation on; stable builds never send
+		// it and the page's [tty-metrics] logging stays silent. Set only
+		// when absent so the cost is one cookie per browser, not per
+		// response; deliberately NOT HttpOnly (page JS must read it) and
+		// NOT Secure (the UI is routinely served over plain http on LANs).
+		if ttyMetricsBuild {
+			if _, err := r.Cookie("mw_tty_metrics"); err != nil {
+				http.SetCookie(w, &http.Cookie{
+					Name:     "mw_tty_metrics",
+					Value:    "1",
+					Path:     "/",
+					SameSite: http.SameSiteLaxMode,
+				})
+			}
+		} else if _, err := r.Cookie("mw_tty_metrics"); err == nil {
+			// Stable build holding a stale cookie: it was planted by a beta
+			// daemon on this origin earlier in the same browser session
+			// (session-scoped, so it survives a daemon restart), and leaving
+			// it would arm the page's [tty-metrics] half with no server-side
+			// counterpart — console noise with zero data value. Clear it.
+			http.SetCookie(w, &http.Cookie{
+				Name:     "mw_tty_metrics",
+				Value:    "",
+				Path:     "/",
+				MaxAge:   -1,
+				SameSite: http.SameSiteLaxMode,
+			})
 		}
 		next.ServeHTTP(w, r)
 	})

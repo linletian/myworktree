@@ -2656,17 +2656,32 @@
         // --- [tty-metrics] diagnostics (issue #114) ---
         // Passive collection for the subscriber-overflow reconnect loop,
         // sharing the server side's "[tty-metrics]" log prefix
-        // (internal/app/tty_metrics.go). Module-level on purpose: the node
-        // tests slice named blocks out of this script and never execute
-        // top-level statements, and the typeof guards additionally keep a
-        // partial environment from throwing at load.
-        if (typeof document !== "undefined" && document.addEventListener) {
+        // (internal/app/tty_metrics.go). ACTIVE ONLY ON BETA BUILDS: the
+        // server hands out a mw_tty_metrics=1 cookie only when compiled
+        // with -tags ttymetrics (release-beta.yml), so on stable builds
+        // ttyMetricsEnabled() is false and every piece below stays inert.
+        // Module-level on purpose: the node tests slice named blocks out
+        // of this script and never execute top-level statements, and the
+        // typeof guards additionally keep a partial environment from
+        // throwing at load. connectTTY CANNOT call ttyMetricsEnabled()
+        // (it is sliced into node tests with a fixed dependency list, so
+        // no new free identifier may appear there) and reads the cookie
+        // through its own typeof-guarded local instead.
+        function ttyMetricsEnabled() {
+            // Boundary-bracketed match: document.cookie joins entries with
+            // "; ", so wrapping the string makes every entry look like
+            // "; name=value;" and a suffix-named lookalike
+            // (x_mw_tty_metrics=1) cannot false-positive the gate.
+            return typeof document !== "undefined"
+                && ("; " + (document.cookie || "") + ";").indexOf("; mw_tty_metrics=1;") !== -1;
+        }
+        if (ttyMetricsEnabled()) {
             document.addEventListener("visibilitychange", () => {
                 console.log("[tty-metrics] visibility=" + document.visibilityState
                     + " activeInst=" + (typeof state !== "undefined" ? state.activeInst : "?"));
             });
         }
-        if (typeof window !== "undefined") {
+        if (ttyMetricsEnabled() && typeof window !== "undefined") {
             // Console entry point for manual capture:
             //   copy(JSON.stringify(__ttyMetrics(), null, 2))
             window.__ttyMetrics = function () {
@@ -5842,13 +5857,18 @@
             if (!session || !session.term) return 0;
             text = sanitizeTerminalOutput(text);
             if (!text) return 0;
-            // [tty-metrics] (issue #114 diagnostics): the write callback
-            // fires when xterm.js has PARSED the chunk, so Date.now()-t0
-            // measures the terminal's real consumption backlog - the
-            // browser-side half of "slow consumer". Counters accumulate
-            // cumulatively on the session and are read by the [tty-metrics]
-            // close line and __ttyMetrics(). node tests stub this whole
-            // function, so none of this runs there.
+            // [tty-metrics] (issue #114 diagnostics, beta builds only): the
+            // write callback fires when xterm.js has PARSED the chunk, so
+            // Date.now()-t0 measures the terminal's real consumption backlog
+            // - the browser-side half of "slow consumer". Counters accumulate
+            // on the session and are read by the [tty-metrics] close line and
+            // __ttyMetrics(). node tests stub this whole function, so none of
+            // this runs there; on stable builds ttyMetricsEnabled() is false
+            // and the write keeps its plain, callback-free form.
+            if (!ttyMetricsEnabled()) {
+                session.term.write(text);
+                return text.length;
+            }
             const m = session.ttyMetrics || (session.ttyMetrics = { writeCalls: 0, writeWaitTotalMs: 0, writeWaitMaxMs: 0 });
             const t0 = Date.now();
             m.writeCalls++;
@@ -6370,10 +6390,15 @@
                 // counters read by the ready/close log lines. Everything
                 // stays closure-local or goes through console - connectTTY
                 // is sliced into node tests with a FIXED dependency list,
-                // so no new free identifier may appear in this scope
-                // (document is reached only behind a typeof guard, which
-                // the test scope evaluates as "unknown").
-                const connStats = { connectedAt: Date.now(), openedAt: 0, readyAt: 0, rxBytes: 0, rxFrames: 0, replayMark: -1, replayBytes: -1 };
+                // so no new free identifier may appear in this scope. That
+                // is why the beta-build switch (the mw_tty_metrics cookie,
+                // set only by -tags ttymetrics builds) is read through this
+                // typeof-guarded LOCAL instead of the module-level
+                // ttyMetricsEnabled() helper; in the test scope it
+                // evaluates to false, which also keeps the tests' console
+                // quiet. Same boundary-bracketed match as the helper.
+                const ttyMetricsOn = (typeof document !== "undefined" && ("; " + (document.cookie || "") + ";").indexOf("; mw_tty_metrics=1;") !== -1);
+                const connStats = { connectedAt: Date.now(), openedAt: 0, readyAt: 0, rxBytes: 0, rxFrames: 0, replayMark: -1, replayBytes: -1, wCalls0: session.ttyMetrics ? session.ttyMetrics.writeCalls : 0, wWait0: session.ttyMetrics ? session.ttyMetrics.writeWaitTotalMs : 0 };
 
                 let isFirstData = true;
                 // Per-connection latch (issue #87 review): true once this
@@ -6472,7 +6497,7 @@
                     if (controlMsg && controlMsg.type === 'ready') {
                         session.ttyState = 'READY';
                         connStats.readyAt = Date.now();
-                        console.log("[tty-metrics] ready id=" + id
+                        if (ttyMetricsOn) console.log("[tty-metrics] ready id=" + id
                             + " connectMs=" + (connStats.readyAt - connStats.connectedAt)
                             + " openMs=" + (connStats.openedAt ? connStats.readyAt - connStats.openedAt : -1)
                             + " since=" + session.ttyOffset);
@@ -6696,11 +6721,17 @@
                     // connection death carrying what the server side cannot
                     // see - the close code/reason as the browser reports it,
                     // received volume, whether the replay completed, tab
-                    // visibility, and the session's cumulative xterm.js parse
-                    // backlog. ev is absent when a synthetic close fires this
-                    // handler (and in the node-test fake socket).
+                    // visibility, and the xterm.js parse backlog in BOTH
+                    // scopes: writeCalls/writeWait* are session-cumulative
+                    // (never reset across reconnects), connWriteCalls/
+                    // connWriteWaitMs are THIS connection's deltas against
+                    // the connStats.w*0 baseline taken at connect, so
+                    // per-connection drain-rate analysis needs no
+                    // subtraction by hand. ev is absent when a synthetic
+                    // close fires this handler (and in the node-test fake
+                    // socket).
                     const ttyMetricsM = session.ttyMetrics;
-                    console.log("[tty-metrics] close id=" + id
+                    if (ttyMetricsOn) console.log("[tty-metrics] close id=" + id
                         + " code=" + (ev && ev.code)
                         + " reason=" + ((ev && ev.reason) || "")
                         + " aliveMs=" + (Date.now() - (connStats.openedAt || connStats.connectedAt))
@@ -6711,7 +6742,9 @@
                         + " visibility=" + ((typeof document !== "undefined" && document && document.visibilityState) || "unknown")
                         + (ttyMetricsM ? " writeCalls=" + ttyMetricsM.writeCalls
                             + " writeWaitTotalMs=" + ttyMetricsM.writeWaitTotalMs
-                            + " writeWaitMaxMs=" + ttyMetricsM.writeWaitMaxMs : ""));
+                            + " writeWaitMaxMs=" + ttyMetricsM.writeWaitMaxMs
+                            + " connWriteCalls=" + (ttyMetricsM.writeCalls - connStats.wCalls0)
+                            + " connWriteWaitMs=" + (ttyMetricsM.writeWaitTotalMs - connStats.wWait0) : ""));
                     // This socket is gone, so its watchdog is too (issue
                     // #83): clearing here (and in disconnectTTY, which
                     // detaches this handler before closing) is what keeps a

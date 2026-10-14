@@ -73,7 +73,15 @@ jobs:
       - name: Verify reasonix upstream contract (SKIPs when reasonix is absent)
         run: REASONIX_CONTRACT=1 go test ./internal/instance/reasonix/ -run TestReasonixUpstreamContract -v
 
+      # The ttymetrics build tag (beta releases carry it; stable does not)
+      # switches internal/app/tty_metrics_*.go between the real
+      # instrumentation and passthrough stubs, so both variants must stay
+      # compilable and green: tests run untagged above, tagged here.
+      - name: Run tests with ttymetrics tag (app + ws)
+        run: go test -tags ttymetrics ./internal/app/ ./internal/ws/
+
       - name: Build binaries
         run: |
           go build -v -o /tmp/myworktree ./cmd/myworktree
           go build -v -o /tmp/mw ./cmd/mw
+          go build -v -tags ttymetrics -o /tmp/myworktree-ttymetrics ./cmd/myworktree

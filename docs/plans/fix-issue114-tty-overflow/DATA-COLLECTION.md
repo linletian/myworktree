@@ -1,12 +1,25 @@
 # Issue #114 数据采集手册（tty subscriber overflow → 1013 重连循环）
 
-诊断埋点已随 `fix/fix-issue114` 分支落地，统一日志前缀 `[tty-metrics]`。
+诊断埋点随 `fix/fix-issue114` 分支落地，统一日志前缀 `[tty-metrics]`，
+**按构建渠道门控**：
+
+- **beta 构建**（`release-beta.yml`，`-tags ttymetrics`）：埋点编译进
+  二进制，长期保留；服务端输出 `[tty-metrics]` 日志，并通过响应下发
+  `mw_tty_metrics=1` cookie 点亮浏览器侧的客户端埋点。
+- **正式版构建**（`release.yml`，无 tag）：Go 侧编译为 passthrough 空实现
+  （`tty_metrics_off.go`，计时/日志全部内联消除，二进制内不含任何
+  埋点格式串，EndOffset 探针也被 const 门控消除），且**主动清除**
+  浏览器里可能残留的 `mw_tty_metrics` cookie（同一浏览器会话先跑过
+  beta 守护进程的场景），页面 JS 埋点整体惰性（无日志、无
+  `term.write` 回调开销）。本地等价构建：`go build -tags ttymetrics ./cmd/myworktree`。
+- 两种变体都由 `go-ci.yml` 编译 + 测试，防止任一变体腐化。
+
 目的：在修复方案选型（带内 resync / 退避重连 / write deadline / 回放限速 /
 后台标签页暂停推流）之前，用真实复现场景回答一个核心问题——
 **消费者为什么慢**（后台标签页节流 / 网络带宽 / 浏览器 CPU 饥饿，后者与 #111 耦合）。
 
-埋点是**临时**的：只计时、计数、打日志，不改变任何线上行为；
-修复落地后整份埋点应移除或收口。
+埋点只计时、计数、打日志，不改变任何线上行为；待修复落地且数据
+回答上述问题后，再评估移除或继续保留。
 
 ## 一、埋点清单
 
@@ -33,7 +46,7 @@
 | 日志行 | 触发时机 | 关键字段 |
 | --- | --- | --- |
 | `[tty-metrics] ready` | 收到服务端 ready | `connectMs`、`openMs`、`since` |
-| `[tty-metrics] close` | 每次 WS 关闭（onclose） | `code`、`reason`、`aliveMs`、`rxBytes`/`rxFrames`、`replayBytes`（#94 start/end sync 括号内的回放量，-1 = 无括号回放）、`replayIncomplete`（死于回放途中）、`visibility`（标签页可见性）、`writeCalls`/`writeWaitTotalMs`/`writeWaitMaxMs`（xterm.js 解析积压的会话累计值） |
+| `[tty-metrics] close` | 每次 WS 关闭（onclose） | `code`、`reason`、`aliveMs`、`rxBytes`/`rxFrames`、`replayBytes`（#94 start/end sync 括号内的回放量，-1 = 无括号回放）、`replayIncomplete`（死于回放途中）、`visibility`（标签页可见性）、`writeCalls`/`writeWaitTotalMs`/`writeWaitMaxMs`（xterm.js 解析积压的**会话累计值**，重连不清零）、`connWriteCalls`/`connWriteWaitMs`（**本连接**的解析积压增量——跨重连的 drain-rate 分析用这组，无需手工减基线） |
 | `[tty-metrics] visibility=...` | 标签页切换前后台 | `visibilitychange` 事件直通 |
 
 控制台手动快照（DevTools 执行）：
@@ -62,9 +75,12 @@ done | tee /tmp/headrate.log
 ## 二、部署与复现步骤
 
 1. 构建并重启守护进程（用你日常运行的二进制，如 mwbeta）：
-   `go build ./cmd/myworktree`（或对应 mwbeta 构建方式），重启。
+   **必须带 tag** —— `go build -tags ttymetrics ./cmd/myworktree`
+   （beta 发布工作流已自动带此 tag，beta 包开箱即有埋点）。
 2. 浏览器**硬刷新**（Ctrl/Cmd+Shift+R）拿到新 `index.html`；
-   确认控制台里能看到 `[tty-metrics] ready ...`。
+   服务端响应会种下 `mw_tty_metrics=1` cookie（DevTools → Application →
+   Cookies 可见），确认控制台里能看到 `[tty-metrics] ready ...`。
+   若 cookie 在旧守护进程时代已缓存为不存在，刷新一次页面即可。
 3. 打开那个跑长任务的大缓存实例的终端，保持复现条件（切后台标签页等）。
 4. 让复现持续足够久（覆盖若干次 `ws closed, retrying...` 周期）。
 
