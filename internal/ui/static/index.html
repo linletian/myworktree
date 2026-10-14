@@ -2653,6 +2653,42 @@
         // because the watchdog schedules the same retry.
         const TTY_RECONNECT_DELAY_MS = 5000;
 
+        // --- [tty-metrics] diagnostics (issue #114) ---
+        // Passive collection for the subscriber-overflow reconnect loop,
+        // sharing the server side's "[tty-metrics]" log prefix
+        // (internal/app/tty_metrics.go). Module-level on purpose: the node
+        // tests slice named blocks out of this script and never execute
+        // top-level statements, and the typeof guards additionally keep a
+        // partial environment from throwing at load.
+        if (typeof document !== "undefined" && document.addEventListener) {
+            document.addEventListener("visibilitychange", () => {
+                console.log("[tty-metrics] visibility=" + document.visibilityState
+                    + " activeInst=" + (typeof state !== "undefined" ? state.activeInst : "?"));
+            });
+        }
+        if (typeof window !== "undefined") {
+            // Console entry point for manual capture:
+            //   copy(JSON.stringify(__ttyMetrics(), null, 2))
+            window.__ttyMetrics = function () {
+                const out = { now: new Date().toISOString(), sessions: {} };
+                if (typeof terminalSessions !== "undefined") {
+                    for (const sid of Object.keys(terminalSessions)) {
+                        const s = terminalSessions[sid];
+                        if (!s) continue;
+                        out.sessions[sid] = {
+                            ttyState: s.ttyState,
+                            ttyOffset: s.ttyOffset,
+                            lastDataAgoMs: s.lastDataAt ? Date.now() - s.lastDataAt : null,
+                            writeCalls: s.ttyMetrics ? s.ttyMetrics.writeCalls : 0,
+                            writeWaitTotalMs: s.ttyMetrics ? s.ttyMetrics.writeWaitTotalMs : 0,
+                            writeWaitMaxMs: s.ttyMetrics ? s.ttyMetrics.writeWaitMaxMs : 0,
+                        };
+                    }
+                }
+                return out;
+            };
+        }
+
         // True when a NOMINALLY LIVE connection (READY, socket OPEN) has
         // heard no heartbeat traffic for TTY_LIVENESS_STALE_MS. Handshake
         // states never count: a socket that has not reached READY has no
@@ -5806,7 +5842,21 @@
             if (!session || !session.term) return 0;
             text = sanitizeTerminalOutput(text);
             if (!text) return 0;
-            session.term.write(text);
+            // [tty-metrics] (issue #114 diagnostics): the write callback
+            // fires when xterm.js has PARSED the chunk, so Date.now()-t0
+            // measures the terminal's real consumption backlog - the
+            // browser-side half of "slow consumer". Counters accumulate
+            // cumulatively on the session and are read by the [tty-metrics]
+            // close line and __ttyMetrics(). node tests stub this whole
+            // function, so none of this runs there.
+            const m = session.ttyMetrics || (session.ttyMetrics = { writeCalls: 0, writeWaitTotalMs: 0, writeWaitMaxMs: 0 });
+            const t0 = Date.now();
+            m.writeCalls++;
+            session.term.write(text, () => {
+                const w = Date.now() - t0;
+                m.writeWaitTotalMs += w;
+                if (w > m.writeWaitMaxMs) m.writeWaitMaxMs = w;
+            });
             return text.length;
         }
 
@@ -6316,6 +6366,15 @@
                 const ws = new WebSocket(url);
                 ws.binaryType = "arraybuffer";
 
+                // [tty-metrics] (issue #114 diagnostics): per-connection
+                // counters read by the ready/close log lines. Everything
+                // stays closure-local or goes through console - connectTTY
+                // is sliced into node tests with a FIXED dependency list,
+                // so no new free identifier may appear in this scope
+                // (document is reached only behind a typeof guard, which
+                // the test scope evaluates as "unknown").
+                const connStats = { connectedAt: Date.now(), openedAt: 0, readyAt: 0, rxBytes: 0, rxFrames: 0, replayMark: -1, replayBytes: -1 };
+
                 let isFirstData = true;
                 // Per-connection latch (issue #87 review): true once this
                 // connection's `sync` frame has been handled. Binary frames
@@ -6365,6 +6424,7 @@
 
                 ws.onopen = () => {
                     if (connectTimeout) { clearTimeout(connectTimeout); connectTimeout = null; }
+                    connStats.openedAt = Date.now();
                     session.ttyState = 'HANDSHAKING';
                     handshakeTimeout = setTimeout(() => {
                         if (session.ttyState !== 'READY' && ws === session.ttySocket) {
@@ -6411,6 +6471,11 @@
                     const controlMsg = parseTTYControlMessage(ev.data);
                     if (controlMsg && controlMsg.type === 'ready') {
                         session.ttyState = 'READY';
+                        connStats.readyAt = Date.now();
+                        console.log("[tty-metrics] ready id=" + id
+                            + " connectMs=" + (connStats.readyAt - connStats.connectedAt)
+                            + " openMs=" + (connStats.openedAt ? connStats.readyAt - connStats.openedAt : -1)
+                            + " since=" + session.ttyOffset);
                         if (handshakeTimeout) {
                             clearTimeout(handshakeTimeout);
                             handshakeTimeout = null;
@@ -6549,6 +6614,19 @@
                         // already lives by.
                         if (Number.isFinite(controlMsg.offset) && controlMsg.offset >= 0) session.ttyOffset = controlMsg.offset;
                         handshakeSynced = true;
+                        // [tty-metrics]: the #94 START sync opens the replay
+                        // window and the closing sync closes it, so the
+                        // rxBytes delta between them is this connection's
+                        // replay volume. replayBytes stays -1 when no
+                        // bracketed replay was observed (fresh connect,
+                        // pre-#94 server), and replayMark >= 0 at onclose
+                        // means the socket died mid-replay.
+                        if (controlMsg.start === true) {
+                            connStats.replayMark = connStats.rxBytes;
+                        } else if (connStats.replayMark >= 0) {
+                            connStats.replayBytes = connStats.rxBytes - connStats.replayMark;
+                            connStats.replayMark = -1;
+                        }
                         return;
                     }
 
@@ -6563,6 +6641,8 @@
 
                     if (ev.data instanceof ArrayBuffer) {
                         const u8 = new Uint8Array(ev.data);
+                        connStats.rxBytes += u8.length;
+                        connStats.rxFrames++;
                         if (u8.length && session.term) {
                             writeSanitizedTerminalOutput(session, decodeTTYOutputChunk(session, u8));
                             // Every binary frame is ring-buffer output: the
@@ -6612,6 +6692,26 @@
                     if (ev && ev.code && ev.code !== 1000) {
                         console.warn("tty ws closed:", ev.code, ev.reason || "");
                     }
+                    // [tty-metrics] (issue #114 diagnostics): one line per
+                    // connection death carrying what the server side cannot
+                    // see - the close code/reason as the browser reports it,
+                    // received volume, whether the replay completed, tab
+                    // visibility, and the session's cumulative xterm.js parse
+                    // backlog. ev is absent when a synthetic close fires this
+                    // handler (and in the node-test fake socket).
+                    const ttyMetricsM = session.ttyMetrics;
+                    console.log("[tty-metrics] close id=" + id
+                        + " code=" + (ev && ev.code)
+                        + " reason=" + ((ev && ev.reason) || "")
+                        + " aliveMs=" + (Date.now() - (connStats.openedAt || connStats.connectedAt))
+                        + " rxBytes=" + connStats.rxBytes
+                        + " rxFrames=" + connStats.rxFrames
+                        + " replayBytes=" + connStats.replayBytes
+                        + " replayIncomplete=" + (connStats.replayMark >= 0)
+                        + " visibility=" + ((typeof document !== "undefined" && document && document.visibilityState) || "unknown")
+                        + (ttyMetricsM ? " writeCalls=" + ttyMetricsM.writeCalls
+                            + " writeWaitTotalMs=" + ttyMetricsM.writeWaitTotalMs
+                            + " writeWaitMaxMs=" + ttyMetricsM.writeWaitMaxMs : ""));
                     // This socket is gone, so its watchdog is too (issue
                     // #83): clearing here (and in disconnectTTY, which
                     // detaches this handler before closing) is what keeps a

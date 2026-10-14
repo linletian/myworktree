@@ -2439,10 +2439,14 @@ func (s *Server) handleInstanceTTYWSLiveness(w http.ResponseWriter, r *http.Requ
 	textPingCap := ttyClientHasCap(caps, "ping")
 	_, sincePresent := r.URL.Query()["since"]
 	syncCap := ttyClientHasCap(caps, "sync") || sincePresent
-	conn, err := ws.Upgrade(w, r)
+	rawConn, err := ws.Upgrade(w, r)
 	if err != nil {
 		return
 	}
+	// Issue #114 diagnostics: every write on this handler is timed and
+	// counted through the metered wrapper (tty_metrics.go). Method set is
+	// identical to *ws.Conn, so nothing below changes shape.
+	conn := newTTYMeteredConn(rawConn, s.logger, id)
 	clientHandle, resizeUpdates, err := s.newTTYClientHandle(id)
 	if err != nil {
 		_ = conn.WriteClose(ws.CloseMessage(1013, err.Error()))
@@ -2450,6 +2454,7 @@ func (s *Server) handleInstanceTTYWSLiveness(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	defer func() {
+		conn.m.logSummary(s.logger, id)
 		clientHandle.Close()
 		_ = conn.Close()
 		if rec := recover(); rec != nil {
@@ -2582,7 +2587,18 @@ func (s *Server) handleInstanceTTYWSLiveness(w http.ResponseWriter, r *http.Requ
 		// write's own end offset; every path that writes nothing sets it
 		// from the ring's real head (or leaves the 0 of a fresh instance).
 		var endOffset int64
+		// Issue #114 diagnostics: time the replay and record the ring's
+		// head at handshake start, so headAtStart-since sizes the replay
+		// demand even when the 8MB budget truncates it. EndOffset is a
+		// cheap read; its error (stopped instance) only degrades the
+		// metric to -1, and the branches below keep their own error
+		// handling untouched.
+		conn.m.handshakeStart = time.Now()
+		if head, herr := s.instanceMgr.EndOffset(id); herr == nil {
+			conn.m.headAtStart = head
+		}
 		if since == sinceFollowLiveEnd {
+			conn.m.mode = "follow-live-end"
 			// Follow from the live end (issue #86): the client's screen
 			// already holds the tail and ONLY its end offset is unknown (a
 			// proxy stripped X-Log-Offset), so replay nothing — any byte
@@ -2621,6 +2637,7 @@ func (s *Server) handleInstanceTTYWSLiveness(w http.ResponseWriter, r *http.Requ
 			}
 			endOffset = off
 		} else if since < 0 {
+			conn.m.mode = "tail"
 			// No cursor (first connect): replay the newest bytes (AC2).
 			body, off, err := s.instanceMgr.Tail(id, 64*1024)
 			if err != nil {
@@ -2639,6 +2656,7 @@ func (s *Server) handleInstanceTTYWSLiveness(w http.ResponseWriter, r *http.Requ
 			}
 			endOffset = off
 		} else {
+			conn.m.mode = "catchup"
 			cursor := since
 			first := true
 			var streamed int64
@@ -2700,6 +2718,7 @@ func (s *Server) handleInstanceTTYWSLiveness(w http.ResponseWriter, r *http.Requ
 					// the remainder: both routes produce the same truncation
 					// point, and the second one would silently leave this
 					// stop unexercised by every test.
+					conn.m.budgetExhausted = true
 					break
 				}
 				// RingBuffer.ReadSince silently clamps a stale cursor to
@@ -2877,6 +2896,15 @@ func (s *Server) handleInstanceTTYWSLiveness(w http.ResponseWriter, r *http.Requ
 		}
 		cancel = cancelFn
 		outputChan = ch
+		// Issue #114 diagnostics: snapshot the replay counters off the
+		// binary counter — every binary frame so far was handshake replay,
+		// so this is exact for all three modes with no per-branch
+		// accounting — then log the handshake line.
+		conn.m.publishedOffset = endOffset
+		conn.m.replayBytes = conn.m.binBytes
+		conn.m.replayDur = time.Since(conn.m.handshakeStart)
+		conn.m.subscribedAt = time.Now()
+		conn.m.logHandshake(s.logger, id, since)
 		return true
 	}
 
@@ -3044,6 +3072,15 @@ func (s *Server) handleInstanceTTYWSLiveness(w http.ResponseWriter, r *http.Requ
 				// asserts this line actually fired.
 				if s.logger != nil {
 					s.logger.Printf("tty output subscriber overflow for %s: consumer fell behind, closing with 1013 for cursor resync", id)
+					// Issue #114 diagnostics: subscription age, live bytes
+					// delivered, and the ring head right now. headNow minus
+					// the client's cursor (its close line) is the backlog
+					// the next reconnect will replay.
+					headNow, herr := s.instanceMgr.EndOffset(id)
+					if herr != nil {
+						headNow = -1
+					}
+					conn.m.logOverflow(s.logger, id, headNow)
 				}
 				_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 				_ = conn.WriteClose(ws.CloseMessage(1013, "subscriber overflow: slow consumer"))
