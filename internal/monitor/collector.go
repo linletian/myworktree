@@ -5,6 +5,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/shirou/gopsutil/v4/mem"
 	"github.com/shirou/gopsutil/v4/process"
 )
 
@@ -128,6 +129,35 @@ func (c *Collector) Collect(instances []InputInstance, connTypes map[string]stri
 	var globalTotalMem uint64
 	var globalCount int
 
+	// ONE process enumeration for the whole collect (review G5): every
+	// instance's subtree walk reads the same ppid index instead of paying
+	// a gopsutil Children() full /proc scan per node per instance. A
+	// failed enumeration is not fatal — it marks every tree unavailable
+	// (review G3), which is the truth the UI renders as "unavailable".
+	//
+	// Skip it entirely when no running instance carries a live PID
+	// (ARB-F10): the walk below runs only for those, so building the index
+	// no one reads is a wasted /proc glob-scan on a fully-stopped set.
+	var procIx *procIndex
+	if anyRunningInstance(instances) {
+		procIx = buildProcIndex()
+	}
+
+	// System-level signals for the alerts block and the System section.
+	// Sampled once per collect; failures leave the zero value, which the
+	// alert evaluator skips (never fabricates).
+	var system SystemStat
+	if content, err := readPSIMemory(); err == nil {
+		if v, ok := parsePSIsomeAvg10(content); ok {
+			system.PSIsSomeAvg10 = v
+			system.HasPSI = true
+		}
+	}
+	if vm, err := readVirtualMemory(); err == nil {
+		system.AvailableBytes = vm.Available
+		system.TotalBytes = vm.Total
+	}
+
 	for _, inst := range instances {
 		connType := connTypes[inst.ID]
 		if connType == "" {
@@ -136,6 +166,11 @@ func (c *Collector) Collect(instances []InputInstance, connTypes map[string]stri
 
 		cpuPercent := 0.0
 		memRSS := uint64(0)
+		childCount := 0
+		subtreeRSS := uint64(0)
+		var children []ChildProc
+		childrenTrunc := false
+		treeUnavailable := false
 		if inst.Status == "running" && inst.PID > 0 {
 			if sample, ok := instanceSamples[inst.PID]; ok {
 				memRSS = sample.rss
@@ -143,6 +178,18 @@ func (c *Collector) Collect(instances []InputInstance, connTypes map[string]stri
 					cpuPercent = cp
 				}
 			}
+			// Subtree walk (read-only, best-effort — see tree.go) over the
+			// collect's single procIndex. The main PID's own RSS enters the
+			// subtree total here; the walk itself collects descendants only.
+			// When the walk cannot read the tree at all, treeUnavailable
+			// rides the row (review G3) so the zero below reads as
+			// "unknown", never as a measured all-clear.
+			tree := walkSubtree(inst.PID, procIx)
+			childCount = tree.ChildCount
+			subtreeRSS = memRSS + tree.SubtreeRSSBytes
+			children = tree.Children
+			childrenTrunc = tree.Truncated
+			treeUnavailable = tree.Unavailable
 		}
 
 		if inst.Status == "running" {
@@ -163,6 +210,11 @@ func (c *Collector) Collect(instances []InputInstance, connTypes map[string]stri
 			MemoryBufferBytes:    inst.BufferUsedBytes,
 			MemoryBufferCapBytes: inst.BufferCapBytes,
 			ConnectionType:       connType,
+			ChildCount:           childCount,
+			SubtreeRSSBytes:      subtreeRSS,
+			Children:             children,
+			ChildrenTruncated:    childrenTrunc,
+			TreeUnavailable:      treeUnavailable,
 		})
 
 		if inst.Status == "running" {
@@ -186,6 +238,52 @@ func (c *Collector) Collect(instances []InputInstance, connTypes map[string]stri
 		worktreesOut = append(worktreesOut, *ws)
 	}
 
+	// Fresh full alert evaluation: system signals AND per-instance subtree
+	// signals (the tree walk above is what makes the subtree signals
+	// possible — this is the ONLY place they are computed; the background
+	// sampler deliberately does not walk trees, see sampler.go).
+	instTrees := make([]InstanceTree, 0, len(instancesOut))
+	for _, is := range instancesOut {
+		if is.Status != "running" {
+			continue
+		}
+		// F-A2m1 + F-N6: an UNREADABLE tree is UNKNOWN for its DESCENDANTS
+		// (child_count stays 0 and the child-count signal never fires) —
+		// but its main-PID RSS is a MEASURED number: memRSS comes from
+		// sampleProcess(inst.PID) in Phase 1, INDEPENDENT of the
+		// enumeration, so SubtreeRSS = memRSS + 0 = memRSS is a LOWER
+		// BOUND on the real subtree (true subtree RSS = memRSS +
+		// descendants >= memRSS). memRSS > 40% of RAM therefore PROVES
+		// the real subtree crosses 40%: the alert is provable, not
+		// fabricated, and skipping the row would silence the one signal
+		// that reveals the blind spot eating RAM.
+		//
+		// A walk-CAPPED row is the same principle from the other side
+		// (F-N6): the cap dropped descendants, so both child_count and
+		// subtree_rss are floors, and the evaluator renders them "≥"
+		// rather than as censuses. Feed both markers and let the
+		// evaluator render the bounds.
+		instTrees = append(instTrees, InstanceTree{
+			ID:         is.ID,
+			Name:       is.Name,
+			ChildCount: is.ChildCount,
+			SubtreeRSS: is.SubtreeRSSBytes,
+			Unreadable: is.TreeUnavailable,
+			Capped:     is.ChildrenTruncated,
+		})
+	}
+	alerts := EvaluateAlerts(AlertInput{
+		PSIsSomeAvg10:  system.PSIsSomeAvg10,
+		HasPSI:         system.HasPSI,
+		AvailableBytes: system.AvailableBytes,
+		TotalBytes:     system.TotalBytes,
+		DaemonRSSBytes: daemonSample.rss,
+		Instances:      instTrees,
+	})
+	if alerts == nil {
+		alerts = []Alert{} // JSON contract: alerts is [] , never null
+	}
+
 	return Stats{
 		Instances: instancesOut,
 		Worktrees: worktreesOut,
@@ -196,5 +294,27 @@ func (c *Collector) Collect(instances []InputInstance, connTypes map[string]stri
 			DaemonCPUPercent:  daemonCPU,
 			DaemonMemoryBytes: daemonSample.rss,
 		},
+		Alerts: alerts,
+		System: system,
 	}
+}
+
+// anyRunningInstance reports whether at least one instance is running with a
+// live PID (>0) — i.e. whether any subtree walk will actually run. The
+// collect skips the /proc ppid index build when this is false (ARB-F10), so
+// this predicate MUST mirror the walk's own guard exactly
+// (`inst.Status == "running" && inst.PID > 0`).
+func anyRunningInstance(instances []InputInstance) bool {
+	for _, inst := range instances {
+		if inst.Status == "running" && inst.PID > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// readVirtualMemory is the system-RAM access seam (gopsutil VirtualMemory).
+// Injectable so tests pin the alert ratios without touching real memory.
+var readVirtualMemory = func() (*mem.VirtualMemoryStat, error) {
+	return mem.VirtualMemory()
 }
