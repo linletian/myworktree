@@ -528,14 +528,22 @@ func TestWalkSubtreeNilIndexIsUnavailable(t *testing.T) {
 	}
 }
 
-// TestCollectSkipsUnavailableTreeRowsForAlerts pins F-m3: an instance whose
-// tree could not be READ must not feed the subtree / child-count evaluator.
-// Such a row carries SubtreeRSS = main-PID-only (the one process that could
-// be sampled) and ChildCount=0, so before the fix a huge main RSS tripped
-// "subtree > 40% of RAM" — a measured claim about an unreadable tree, in a
-// UI that renders the very same row as "unavailable". The tree is UNKNOWN,
-// not small. Removing the `continue` on TreeUnavailable turns this RED.
-func TestCollectSkipsUnavailableTreeRowsForAlerts(t *testing.T) {
+// TestCollectUnavailableTreeFiresLowerBoundSubtreeAlert pins F-A2m1: an
+// UNREADABLE tree is UNKNOWN for its descendants (child_count stays 0 and
+// the child-count signal stays silent), but its main-PID RSS is a MEASURED
+// number — memRSS comes from sampleProcess(inst.PID) in Phase 1,
+// INDEPENDENT of the enumeration — so SubtreeRSS = memRSS + 0 = memRSS is a
+// LOWER BOUND. memRSS > 40% of total RAM therefore PROVES the real subtree
+// crosses 40%, and the alert must fire, rendered as a "≥" bound rather than
+// an exact figure.
+//
+// Non-vacuity is structural: the readable control proves the same row's
+// numbers CAN cross the threshold on this machine, the unavailable row
+// proves they DO cross it when the descendants are unenumerated, and the
+// under-threshold control proves the alert is not unconditionally emitted.
+// Re-introducing the `if is.TreeUnavailable { continue }` skip (round-2 m3)
+// or dropping the Partial "≥" branch turns this RED.
+func TestCollectUnavailableTreeFiresLowerBoundSubtreeAlert(t *testing.T) {
 	oldPSI, oldMem := readPSIMemory, readVirtualMemory
 	t.Cleanup(func() { readPSIMemory, readVirtualMemory = oldPSI, oldMem })
 	readPSIMemory = func() (string, error) { return "some avg10=0 avg60=0 avg300=0 total=0\n", nil }
@@ -549,9 +557,10 @@ func TestCollectSkipsUnavailableTreeRowsForAlerts(t *testing.T) {
 	self := os.Getpid() // a live main PID: sampleProcess returns real RSS
 	instances := []InputInstance{{ID: "inst-x", Name: "x", PID: self, Status: "running"}}
 
-	// CONTROL first: the SAME instance with a READABLE tree must fire. That
-	// is what keeps the assertion below non-vacuous — it proves the numbers
-	// on this row can cross the threshold at all.
+	// CONTROL first: the SAME instance with a READABLE tree must fire, in
+	// the EXACT (non-≥) form. That is what keeps the assertions below
+	// non-vacuous — it proves the numbers on this row can cross the
+	// threshold at all, and that the readable path is unchanged.
 	installFakeTree(t, fakeTree{
 		kids:  map[int][]int{},
 		infos: map[int]procInfo{self: info(0, "test-bin", 1)},
@@ -564,11 +573,22 @@ func TestCollectSkipsUnavailableTreeRowsForAlerts(t *testing.T) {
 	if row.SubtreeRSSBytes == 0 {
 		t.Skip("control precondition: this process sampled 0 RSS — the threshold cannot be crossed here")
 	}
-	if fired := subtreeAlertIDs(st.Alerts); len(fired) == 0 {
+	readable := subtreeAlert(st.Alerts)
+	if readable == nil {
 		t.Fatalf("control: a readable tree with %d bytes of subtree RSS fired nothing — the numbers cannot cross the threshold on this machine", row.SubtreeRSSBytes)
+	}
+	if strings.HasPrefix(readable.Current, "≥") {
+		t.Errorf("a READABLE tree must render the exact form, got %q", readable.Current)
+	}
+	if !strings.Contains(readable.Current, "("+formatBytes(row.SubtreeRSSBytes)+")") {
+		t.Errorf("readable row must carry the plain bytes paren, got %q", readable.Current)
+	}
+	if strings.Contains(readable.Current, "unenumerated") {
+		t.Errorf("readable row must not claim unenumerated children: %q", readable.Current)
 	}
 
 	// Now the tree is UNREADABLE: the enumeration does not know the root.
+	// The row keeps its MEASURED main-PID RSS and fires as a lower bound.
 	installFakeTree(t, fakeTree{
 		kids:   map[int][]int{},
 		infos:  map[int]procInfo{self: info(0, "test-bin", 1)},
@@ -582,9 +602,50 @@ func TestCollectSkipsUnavailableTreeRowsForAlerts(t *testing.T) {
 	if row.SubtreeRSSBytes == 0 {
 		t.Fatal("precondition: the unavailable row carries no RSS — this test would pass vacuously")
 	}
-	if fired := subtreeAlertIDs(st.Alerts); len(fired) != 0 {
-		t.Errorf("an unreadable tree fed the subtree/child-count evaluator: %v (F-m3)", fired)
+	if row.ChildCount != 0 {
+		t.Errorf("unavailable row must not claim children: %+v", row)
 	}
+	partial := subtreeAlert(st.Alerts)
+	if partial == nil {
+		t.Fatalf("an unreadable tree with %d bytes of measured main-PID RSS fired nothing — the lower-bound alert was silenced (F-A2m1)", row.SubtreeRSSBytes)
+	}
+	if !strings.HasPrefix(partial.Current, "≥") {
+		t.Errorf("unavailable row must render a LOWER BOUND, got %q", partial.Current)
+	}
+	if !strings.Contains(partial.Current, "≥ "+formatBytes(row.SubtreeRSSBytes)) {
+		t.Errorf("the bytes themselves must carry the ≥ bound, got %q", partial.Current)
+	}
+	if !strings.Contains(partial.Current, "children unenumerated") {
+		t.Errorf("the bound must say WHY it is a bound: %q", partial.Current)
+	}
+	// Child-count stays silent on an unreadable tree — the descendants are
+	// unknown, and 0 must never be reported as a measured census.
+	for _, a := range st.Alerts {
+		if strings.HasPrefix(a.ID, "child-count:") {
+			t.Errorf("child-count fired on an unenumerated tree: %q", a.ID)
+		}
+	}
+
+	// UNDER-THRESHOLD control: the same measurable main-PID RSS against a
+	// system total it cannot cross fires nothing — the alert above is the
+	// ratio's doing, not an unconditional emission for unavailable rows.
+	readVirtualMemory = func() (*mem.VirtualMemoryStat, error) {
+		return &mem.VirtualMemoryStat{Total: 256 << 30, Available: 256 << 30}, nil
+	}
+	st = (&Collector{}).Collect(instances, map[string]string{})
+	if fired := subtreeAlertIDs(st.Alerts); len(fired) != 0 {
+		t.Errorf("under-threshold control fired %v — the alert must be the 40%% ratio's doing", fired)
+	}
+}
+
+// subtreeAlert returns the single subtree-rss alert in the set, or nil.
+func subtreeAlert(alerts []Alert) *Alert {
+	for i := range alerts {
+		if strings.HasPrefix(alerts[i].ID, "subtree-rss:") {
+			return &alerts[i]
+		}
+	}
+	return nil
 }
 
 func subtreeAlertIDs(alerts []Alert) []string {

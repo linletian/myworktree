@@ -2287,6 +2287,16 @@ func (s *Server) dropScopeState(id string) {
 	s.dshScope.Reset(id)
 }
 
+// scopeDropHook is the teardown-wipe seam (the managerStop pattern): every
+// dropScopeState call site routes through it, and a test can wrap it to
+// RECORD the set of ids a handler asked to wipe. It exists because the
+// tracker's own contents cannot see the Restart mistake this pins — the
+// fresh id Restart allocated has no recorded state yet, so wiping it is a
+// silent no-op for every Get/len assertion. Only the requested id SET
+// distinguishes "old id" from "old + fresh". The default body is production
+// verbatim, so shipping is unaffected.
+var scopeDropHook = func(s *Server, id string) { s.dropScopeState(id) }
+
 // managerStop is the framework teardown verb handleInstanceStop drives.
 // Indirected as a seam (the same pattern as monitor's readVirtualMemory) so
 // a test can force its error path: framework.Manager.Stop deliberately
@@ -2317,7 +2327,7 @@ func (s *Server) handleInstanceStop(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
-	s.dropScopeState(req.ID)
+	scopeDropHook(s, req.ID)
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
@@ -2340,7 +2350,7 @@ func (s *Server) handleInstanceRestart(w http.ResponseWriter, r *http.Request) {
 	}
 	// Old id only: Restart allocated a fresh one (item.ID) and that session
 	// has not been observed doing anything yet. See dropScopeState.
-	s.dropScopeState(req.ID)
+	scopeDropHook(s, req.ID)
 	writeJSON(w, http.StatusCreated, s.instanceView(item))
 }
 
@@ -2364,7 +2374,7 @@ func (s *Server) handleInstanceDelete(w http.ResponseWriter, r *http.Request) {
 	// dropScopeState: a process that died on its own is already in a terminal
 	// state, so Delete accepts it and this is the last point where its
 	// recorded scope can be reclaimed.
-	s.dropScopeState(req.ID)
+	scopeDropHook(s, req.ID)
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
@@ -3623,7 +3633,7 @@ func (s *Server) handleMCPCall(w http.ResponseWriter, r *http.Request) {
 		// (leaving it here would keep the leak alive for every client that
 		// stops over MCP; the CLI's instance stop is a cross-process door
 		// that structurally cannot reach this — see dropScopeState).
-		s.dropScopeState(args.ID)
+		scopeDropHook(s, args.ID)
 		writeJSON(w, http.StatusOK, map[string]any{"result": map[string]string{"status": "ok"}})
 	case "instance_input":
 		var args struct {
@@ -3651,7 +3661,7 @@ func (s *Server) handleMCPCall(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusBadRequest, err)
 			return
 		}
-		s.dropScopeState(args.ID) // see instance_stop above
+		scopeDropHook(s, args.ID) // see instance_stop above
 		writeJSON(w, http.StatusOK, map[string]any{"result": map[string]string{"status": "ok"}})
 	case "instance_log_tail":
 		var args struct {

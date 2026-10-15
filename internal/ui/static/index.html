@@ -3906,6 +3906,14 @@
             // review named).
             document.getElementById("monitor-tbody").addEventListener("click", handleMonitorTbodyClick);
 
+            // Resource Monitor close, ONE listener for every door (F-N1):
+            // a native <dialog> fires 'close' for the button's
+            // closeMonitorModal() AND for ESC (cancel -> close), which
+            // never runs closeMonitorModal. Binding the cleanup to the
+            // event instead of the button is what stops the 2s poll and
+            // converges the badge on both paths alike.
+            document.getElementById("modal-monitor").addEventListener("close", handleMonitorDialogClose);
+
             // Initial focus attempt after a short delay
             setTimeout(() => focusTerminalIfPossible(), 100);
         }
@@ -7292,26 +7300,40 @@
         }
 
         function closeMonitorModal() {
+            // Deliberately ONLY the close (F-N1). A native <dialog> fires
+            // 'close' for EVERY door that closes it — this button,
+            // ESC (cancel -> close), requestClose() — and the one-time
+            // listener bound at init (handleMonitorDialogClose) owns the
+            // timer clear and the badge convergence. Doing that work here
+            // instead would (a) miss ESC entirely, leaking monitorTimer so
+            // fetchMonitorStats kept enumerating /proc and repainting a
+            // closed dialog forever, and (b) double it on the button path.
+            document.getElementById("modal-monitor").close();
+        }
+
+        // F-N1: the ONE close handler for the Resource Monitor, driven by
+        // the dialog's 'close' event rather than by any single button.
+        // closeMonitorModal() used to own this work, but ESC reaches the
+        // dialog's cancel->close path without ever running it — so the 2s
+        // poll's interval outlived the modal and the modal's FULL alert set
+        // stayed painted on the status-bar badge for up to one ~10s light
+        // poll (and flickered against it in the meantime).
+        function handleMonitorDialogClose() {
             if (monitorTimer) {
                 clearInterval(monitorTimer);
                 monitorTimer = null;
             }
-            const dlg = document.getElementById("modal-monitor");
-            if (dlg.open) {
-                dlg.close();
-                // The modal's 2s full poll painted the FULL alert set on the
-                // badge while it was open, and the ~10s light poll stood down
-                // for exactly that reason (ARB-F8) \u2014 so without a repaint
-                // HERE the badge would keep showing that full set for up to one
-                // light-poll interval after the modal closed, behaving as if
-                // the problem were still the one the modal last saw.
-                // dialog.open is false again, so the light poll's guard passes:
-                // repaint now and the badge converges to the cache-only system
-                // set immediately (F-R1n1). Only on an ACTUAL close \u2014 a
-                // second click on an already-closed dialog must not kick a
-                // needless fetch.
-                fetchMonitorAlerts();
-            }
+            // The modal's 2s full poll painted the FULL alert set on the
+            // badge while it was open, and the ~10s light poll stood down
+            // for exactly that reason (ARB-F8) — so without a repaint HERE
+            // the badge would keep showing that full set after the modal
+            // closed, behaving as if the problem were still the one the
+            // modal last saw. dialog.open is false again, so the light
+            // poll's guard passes: repaint now and the badge converges to
+            // the cache-only system set immediately (F-R1n1). The event
+            // fires once per ACTUAL close, so a second click on an
+            // already-closed dialog cannot kick a needless fetch.
+            fetchMonitorAlerts();
         }
 
         function toggleMonitorLicenses() {
@@ -7322,6 +7344,13 @@
         }
 
         async function fetchMonitorStats() {
+            // Defense in depth (F-N1): a stray or leaked tick must be a
+            // no-op. The 'close' handler owns clearing monitorTimer — this
+            // is the backstop for a tick already in flight when the dialog
+            // closed, so no full /proc enumeration and no repaint of a
+            // dialog nobody is looking at.
+            const dlg = document.getElementById("modal-monitor");
+            if (dlg && !dlg.open) return;
             try {
                 const data = await api("/api/instances/stats");
                 renderMonitorStats(data);

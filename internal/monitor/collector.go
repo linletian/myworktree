@@ -247,21 +247,23 @@ func (c *Collector) Collect(instances []InputInstance, connTypes map[string]stri
 		if is.Status != "running" {
 			continue
 		}
-		// F-m3: an UNREADABLE tree is UNKNOWN, not a small one. The row
-		// carries SubtreeRSS=main-PID-only (the one process we could
-		// sample) and ChildCount=0, so feeding it to the subtree/child-count
-		// evaluator would fire "subtree > 40% of RAM" off an unreadable
-		// tree — a measured claim about a measurement that never happened,
-		// in a UI that already renders the row as "unavailable". Skip it:
-		// the tree must be READ before its numbers may alert.
-		if is.TreeUnavailable {
-			continue
-		}
+		// F-A2m1: an UNREADABLE tree is UNKNOWN for its DESCENDANTS
+		// (child_count stays 0 and the child-count signal never fires) —
+		// but its main-PID RSS is a MEASURED number: memRSS comes from
+		// sampleProcess(inst.PID) in Phase 1, INDEPENDENT of the
+		// enumeration, so SubtreeRSS = memRSS + 0 = memRSS is a LOWER
+		// BOUND on the real subtree (true subtree RSS = memRSS +
+		// descendants >= memRSS). memRSS > 40% of RAM therefore PROVES
+		// the real subtree crosses 40%: the alert is provable, not
+		// fabricated, and skipping the row would silence the one signal
+		// that reveals the blind spot eating RAM. Feed it with Partial =
+		// is.TreeUnavailable and let the evaluator render the bound.
 		instTrees = append(instTrees, InstanceTree{
 			ID:         is.ID,
 			Name:       is.Name,
 			ChildCount: is.ChildCount,
 			SubtreeRSS: is.SubtreeRSSBytes,
+			Partial:    is.TreeUnavailable,
 		})
 	}
 	alerts := EvaluateAlerts(AlertInput{

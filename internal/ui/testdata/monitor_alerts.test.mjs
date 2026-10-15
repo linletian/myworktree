@@ -8,14 +8,18 @@
 // poll's start/stop lifecycle — plus its two refresh-truthfulness guards:
 // a cold cache (sampled_at_ms=0) paints no badge, and the light poll stands
 // down entirely while the monitor modal is open so the modal's 2s full poll
-// owns the badge without flicker.
+// owns the badge without flicker — and the modal's own close path, which is
+// ONE dialog 'close' event shared by the close button and the Esc key: it
+// stops that 2s poll and hands the badge back to the light poll (F-N1).
 //
 // Same arrangement as narrow_drawer.test.mjs: every function is SLICED from
 // the shipped index.html and evaluated against stubbed browser state — no
 // copies (§6 discipline), so a drift between the slice anchors and the
 // served source fails loudly at slice time. Pure display helpers take all
 // input as parameters; DOM-touching functions guard `document` behind
-// `typeof`. Run:
+// `typeof`, and the Resource Monitor dialog is a stub that captures its
+// 'close' listeners so the ESC-shaped path can be driven directly.
+// Run:
 //   node --test testdata/monitor_alerts.test.mjs
 // (also wired into terminal_status_test.go for `go test`).
 import test from "node:test";
@@ -64,10 +68,14 @@ const script = inlineScript(indexSource);
 // monitorFactory: the shipped functions, sliced whole. escapeHTML/formatBytes
 // ride along because the render helpers call them (shared source of truth —
 // the tests exercise THE escaping/formatting the page ships, not a copy).
-// monitorAlertsTimer / monitorExpandedTrees mirror the module-level
-// declarations in index.html; the getters expose them below.
+// monitorAlertsTimer / monitorTimer / monitorExpandedTrees mirror the
+// module-level declarations in index.html; the getters expose them below.
+// renderMonitorStats is NOT sliced (it paints a wide DOM surface the cases
+// here do not touch); it arrives as an injected dependency — the same seam
+// style as `api` — so fetchMonitorStats's own guard can be pinned without
+// the renderer in scope.
 const monitorFactory = new Function("deps", `
-  const { api, console, document, setInterval, clearInterval } = deps;
+  const { api, console, document, setInterval, clearInterval, renderMonitorStats } = deps;
   ${sliceStatement(script, "const MONITOR_ALERTS_POLL_MS")}
   let monitorAlertsTimer = null;
   let monitorTimer = null;
@@ -95,6 +103,9 @@ const monitorFactory = new Function("deps", `
     "function toggleMonitorTree",
     "function handleMonitorTbodyClick",
     "function closeMonitorModal",
+    "function handleMonitorDialogClose",
+    "function openModalMonitor",
+    "async function fetchMonitorStats",
   ].map(h => sliceBlock(script, h)).join("\n\n")}
   return {
     MONITOR_ALERTS_POLL_MS,
@@ -113,7 +124,11 @@ const monitorFactory = new Function("deps", `
     toggleMonitorTree,
     handleMonitorTbodyClick,
     closeMonitorModal,
+    handleMonitorDialogClose,
+    openModalMonitor,
+    fetchMonitorStats,
     isPolling: () => monitorAlertsTimer !== null,
+    monitorTimerActive: () => monitorTimer !== null,
     expandedIds: () => Array.from(monitorExpandedTrees),
   };
 `);
@@ -150,7 +165,25 @@ function makeBar({ withAlerts = true, withTransport = true } = {}) {
   };
 }
 
-function harness(doc) {
+// A <dialog> stub for #modal-monitor that captures its 'close' listeners
+// the way the real element does, so a case can drive the event directly
+// (ESC reaches cancel -> close without ever running closeMonitorModal).
+// close() mirrors the real contract: it flips `open` and fires 'close' ONCE
+// per actual close — a second close on an already-closed dialog does
+// nothing, which is what keeps a repeat button click from re-fetching.
+function dialogStub({ open = true } = {}) {
+  const listeners = {};
+  return {
+    open,
+    listeners,
+    addEventListener(type, fn) { (listeners[type] ??= []).push(fn); },
+    dispatch(type) { for (const fn of listeners[type] || []) fn(); },
+    showModal() { this.open = true; },
+    close() { if (this.open) { this.open = false; this.dispatch("close"); } },
+  };
+}
+
+function harness(doc, { render = () => {} } = {}) {
   const intervals = [];
   let nextHandle = 1;
   const apiCalls = [];
@@ -163,6 +196,7 @@ function harness(doc) {
     document,
     setInterval: (fn, ms) => { intervals.push({ fn, ms, handle: nextHandle }); return nextHandle++; },
     clearInterval: (h) => { const i = intervals.findIndex(x => x.handle === h); if (i >= 0) intervals.splice(i, 1); },
+    renderMonitorStats: render,
   });
   return { m, intervals, apiCalls, document };
 }
@@ -413,10 +447,13 @@ test("light poll does NOT repaint the badge while the monitor modal is open (ARB
 
 test("closeMonitorModal repaints the badge from the cache-only set (F-R1n1)", async () => {
   const doc = makeBar();
-  // A stubbed <dialog>: open flips false on close() the way the real one does.
-  const dlg = { open: true, close() { this.open = false; } };
+  // A stubbed <dialog>: open flips false on close() and the 'close' event
+  // fires, the way the real one does.
+  const dlg = dialogStub({ open: true });
   doc.els["modal-monitor"] = dlg;
   const h = harness(doc);
+  // The shipped init wiring: one one-time 'close' listener (F-N1).
+  doc.els["modal-monitor"].addEventListener("close", h.m.handleMonitorDialogClose);
   // While open, the modal's 2s full poll owns the badge — the fuller set.
   doc.els["status-bar-alerts"].textContent = "\u26A0 4 alerts";
   // The light poll's endpoint answers the CACHE-ONLY system set: one amber
@@ -447,6 +484,88 @@ test("closeMonitorModal repaints the badge from the cache-only set (F-R1n1)", as
   // is gated on an ACTUAL close, not on the click.
   h.m.closeMonitorModal();
   assert.equal(h.apiCalls.length, 1, "a close on an already-closed dialog must not fetch again");
+});
+
+// --- Resource Monitor close: ONE event, every door (F-N1) ---
+//
+// A native <dialog> fires 'close' for the button's closeMonitorModal() AND
+// for ESC (cancel -> close), which never runs closeMonitorModal. The timer
+// clear and the badge convergence therefore live in handleMonitorDialogClose
+// and are driven by the event — so the ESC path, which the button-shaped
+// wiring could never reach, stops the 2s full poll too.
+
+test("dialog 'close' clears the 2s poll timer and kicks the light poll (F-N1)", async () => {
+  const doc = makeBar();
+  const dlg = dialogStub({ open: true });
+  doc.els["modal-monitor"] = dlg;
+  const h = harness(doc);
+  doc.els["modal-monitor"].addEventListener("close", h.m.handleMonitorDialogClose);
+  // While open, the modal's 2s full poll owns the badge — the fuller set.
+  doc.els["status-bar-alerts"].textContent = "\u26A0 4 alerts";
+  harness._apiReply = { alerts: [A("amber", "available-ram")], sampled_at_ms: 1700000000000 };
+
+  h.m.openModalMonitor();
+  assert.equal(h.m.monitorTimerActive(), true, "the modal's 2s poll runs while it is open");
+  assert.equal(h.intervals.length, 1, "exactly one stats interval while open");
+
+  // The ESC-shaped door: the UA closes the dialog FIRST (open flips false)
+  // and then fires 'close' — no click handler anywhere in the path.
+  dlg.open = false;
+  dlg.dispatch("close");
+  assert.equal(h.m.monitorTimerActive(), false, "the 2s poll's timer is cleared on close");
+  assert.equal(h.intervals.length, 0, "no interval survives the close — no forever-poll of a closed dialog");
+  assert.ok(h.apiCalls.some(p => p === "/api/monitor/alerts"), "the close kicks the light poll");
+
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(doc.els["status-bar-alerts"].textContent, "\u26A0 1 alert",
+    "the badge converges to the cache-only set the moment the modal closes (F-R1n1 + F-N1)");
+  assert.equal(doc.els["status-bar"]._classes.has("status-alert-red"), false,
+    "the modal's full set is gone from the badge — the light poll owns it again");
+});
+
+test("closeMonitorModal only closes the dialog; the event owns the cleanup (F-N1)", async () => {
+  const doc = makeBar();
+  const dlg = dialogStub({ open: true });
+  doc.els["modal-monitor"] = dlg;
+  const h = harness(doc);
+  doc.els["modal-monitor"].addEventListener("close", h.m.handleMonitorDialogClose);
+
+  h.m.openModalMonitor();
+  assert.equal(h.m.monitorTimerActive(), true, "precondition: the 2s poll is running");
+  h.m.closeMonitorModal();
+  assert.equal(dlg.open, false, "the button still closes the dialog");
+  assert.equal(h.m.monitorTimerActive(), false, "the event, not the button, cleared the 2s poll");
+  assert.equal(h.intervals.length, 0, "no interval survives the close");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(h.apiCalls.filter(p => p === "/api/monitor/alerts").length, 1,
+    "exactly one light-poll kick — the cleanup must not also live in closeMonitorModal");
+
+  // Source pin for the same rule: the button handler must not re-implement
+  // the cleanup. It cannot see ESC, so duplicating the work there would
+  // double it on this path while leaving ESC broken.
+  const body = sliceBlock(script, "function closeMonitorModal");
+  assert.ok(!body.includes("clearInterval"), "closeMonitorModal must not clear the timer itself: " + body);
+  assert.ok(!body.includes("fetchMonitorAlerts"), "closeMonitorModal must not kick the light poll itself: " + body);
+});
+
+test("fetchMonitorStats is a no-op once the dialog is closed (F-N1)", async () => {
+  const doc = makeBar();
+  const dlg = dialogStub({ open: false });
+  doc.els["modal-monitor"] = dlg;
+  let renders = 0;
+  const h = harness(doc, { render: () => { renders++; } });
+  harness._apiReply = { instances: [], worktrees: [], global: {}, alerts: [], system: {} };
+
+  await h.m.fetchMonitorStats();
+  assert.equal(h.apiCalls.length, 0, "a closed dialog must not trigger the full /proc-enumerating stats poll");
+  assert.equal(renders, 0, "a closed dialog must not be repainted");
+
+  // Control: the same call with the dialog OPEN goes through — the guard
+  // cannot pass by making the function inert.
+  dlg.open = true;
+  await h.m.fetchMonitorStats();
+  assert.equal(h.apiCalls.length, 1, "an open dialog still polls /api/instances/stats");
+  assert.equal(renders, 1, "an open dialog still renders");
 });
 
 test("toggleMonitorTree flips the Set and the DOM row optimistically", () => {
@@ -507,6 +626,9 @@ test("shipped index.html keeps the #111 P2 wiring whole", () => {
   assert.match(indexSource, /<div id="status-bar"><span id="status-bar-alerts" hidden><\/span><span id="status-bar-transport">Transport: idle<\/span><\/div>/);
   // Click wiring UNCHANGED (still opens the Resource Monitor).
   assert.match(indexSource, /document\.getElementById\("status-bar"\)\.addEventListener\("click", openModalMonitor\)/);
+  // F-N1: the modal's 'close' event — the only door ESC and the button
+  // share — is what stops the 2s poll and converges the badge.
+  assert.match(indexSource, /document\.getElementById\("modal-monitor"\)\.addEventListener\("close", handleMonitorDialogClose\)/);
   // Modal has the alerts strip.
   assert.match(indexSource, /id="monitor-alerts"/);
   // The lightweight endpoint URL is the server's route.

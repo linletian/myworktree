@@ -222,6 +222,66 @@ func TestEvaluateAlertsPSIRedIsOneEntry(t *testing.T) {
 	}
 }
 
+// TestEvaluateAlertsPartialTreeRendersLowerBound pins F-A2m1's display
+// half: an instance whose subtree could not be ENUMERATED (Partial=true —
+// what the collector feeds for a tree_unavailable row) still fires
+// subtree-rss off its MEASURED main-PID RSS. That number is a LOWER BOUND
+// on the real subtree (true subtree = main PID + descendants ≥ main PID),
+// so Current must lead with "≥" and name the reason; a non-partial row
+// keeps the exact pre-existing shape byte-for-byte.
+func TestEvaluateAlertsPartialTreeRendersLowerBound(t *testing.T) {
+	const total = uint64(1 << 20) // 1 MiB: any RSS is past the 40% line
+	const rss = uint64(1 << 19)   // 512 KiB = 50% — over the amber line
+
+	partial := EvaluateAlerts(AlertInput{
+		TotalBytes:     total,
+		AvailableBytes: total,
+		Instances: []InstanceTree{
+			{ID: "inst-p", Name: "partial", SubtreeRSS: rss, ChildCount: 0, Partial: true},
+		},
+	})
+	if len(partial) != 1 || partial[0].ID != "subtree-rss:inst-p" {
+		t.Fatalf("a partial row's main-PID RSS is MEASURED and over the line — it must fire subtree-rss: %+v", partial)
+	}
+	cur := partial[0].Current
+	if !strings.HasPrefix(cur, "≥") {
+		t.Errorf("Current must lead with a lower-bound sign, got %q", cur)
+	}
+	if !strings.Contains(cur, "≥ "+formatBytes(rss)) {
+		t.Errorf("the bytes must carry the same bound: %q (want ≥ %s)", cur, formatBytes(rss))
+	}
+	for _, want := range []string{"main PID measured", "children unenumerated", "actual is higher"} {
+		if !strings.Contains(cur, want) {
+			t.Errorf("Current must say %q — an unexplained bound reads as a census: %q", want, cur)
+		}
+	}
+	// The descendants are UNKNOWN, so child-count stays silent on a partial
+	// row: 0 is never a measured census.
+	for _, a := range partial {
+		if strings.HasPrefix(a.ID, "child-count:") {
+			t.Errorf("child-count fired on an unenumerated tree: %q", a.ID)
+		}
+	}
+
+	// The NON-partial half of the same pin: identical input minus Partial
+	// renders the old exact form — no ≥, no footnote. This is what makes the
+	// assertions above non-vacuous: the branch CHANGES the rendering, it is
+	// not decoration on top of it.
+	exact := EvaluateAlerts(AlertInput{
+		TotalBytes:     total,
+		AvailableBytes: total,
+		Instances: []InstanceTree{
+			{ID: "inst-e", Name: "exact", SubtreeRSS: rss, ChildCount: 0, Partial: false},
+		},
+	})
+	if len(exact) != 1 || exact[0].ID != "subtree-rss:inst-e" {
+		t.Fatalf("non-partial row must still fire subtree-rss: %+v", exact)
+	}
+	if want := pct(50.0) + " (" + formatBytes(rss) + ")"; exact[0].Current != want {
+		t.Errorf("non-partial Current = %q, want the unchanged exact form %q", exact[0].Current, want)
+	}
+}
+
 func alertIDs(as []Alert) []string {
 	out := make([]string, 0, len(as))
 	for _, a := range as {

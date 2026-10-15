@@ -199,6 +199,14 @@ func TestHandleInstanceDeleteClearsScopeTrackers(t *testing.T) {
 // the old one — while the decoration survives and the fresh id never had a
 // state to lose. A handler that also wiped the decoration (or dropped both)
 // drops two and fails here.
+//
+// F-N2 — why the recorder below is not redundant: the fresh id has no state
+// yet, so wiping it is a NO-OP for every Get / length assertion above — the
+// mutation `scopeDropHook(s, req.ID); scopeDropHook(s, item.ID)` passes them
+// all. Only the SET of ids the handler asked to wipe tells the two apart, so
+// the seam is wrapped for the whole test and both restarts assert their
+// exact set. (scope_reset_test.go runs no t.Parallel, so the package-level
+// seam is exclusive to this test; it is restored in t.Cleanup.)
 func TestHandleInstanceRestartClearsOldIdOnly(t *testing.T) {
 	srv := newScopeResetServer(t, store.State{
 		Version: 1,
@@ -222,6 +230,17 @@ func TestHandleInstanceRestartClearsOldIdOnly(t *testing.T) {
 		t.Fatalf("precondition: tracker holds %d of the seeded ids, want 2", before)
 	}
 
+	// F-N2: record every id the handler asks to wipe. The default hook body
+	// is production verbatim (s.dropScopeState), so wrapping it here changes
+	// nothing observable except that the request set becomes inspectable.
+	var dropped []string
+	oldHook := scopeDropHook
+	t.Cleanup(func() { scopeDropHook = oldHook })
+	scopeDropHook = func(s *Server, id string) {
+		dropped = append(dropped, id)
+		oldHook(s, id)
+	}
+
 	w := postInstance(t, srv.handleInstanceRestart, "/api/instances/restart", `{"id":"oc-old"}`)
 	if w.Code != http.StatusCreated {
 		t.Fatalf("restart oc-old: status %d, want 201 (%s)", w.Code, w.Body.String())
@@ -233,6 +252,11 @@ func TestHandleInstanceRestartClearsOldIdOnly(t *testing.T) {
 	newID, _ := view["id"].(string)
 	if newID == "" || newID == "oc-old" {
 		t.Fatalf("restart did not migrate onto a fresh id (got %q)", newID)
+	}
+	// The pin: the handler asked for the OLD id, and nothing else — in
+	// particular not the fresh one it had just allocated.
+	if len(dropped) != 1 || dropped[0] != "oc-old" {
+		t.Errorf("restart wiped the id set %v, want exactly [oc-old] — the fresh id %q must never be dropped (F-N2)", dropped, newID)
 	}
 	if _, ok := srv.ocScope.Get("oc-old"); ok {
 		t.Error("opencode tracker still holds the old id after Restart")
@@ -263,9 +287,16 @@ func TestHandleInstanceRestartClearsOldIdOnly(t *testing.T) {
 		t.Fatalf("stop %s: %v", newID, err)
 	}
 
+	// F-N2: the second door gets the same recording treatment — its own set
+	// starts empty again, so a cross-door wipe (or a second drop of an id
+	// already handled) cannot hide inside the first restart's entries.
+	dropped = nil
 	w = postInstance(t, srv.handleInstanceRestart, "/api/instances/restart", `{"id":"dsh-old"}`)
 	if w.Code != http.StatusCreated {
 		t.Fatalf("restart dsh-old: status %d, want 201 (%s)", w.Code, w.Body.String())
+	}
+	if len(dropped) != 1 || dropped[0] != "dsh-old" {
+		t.Errorf("dsh restart wiped the id set %v, want exactly [dsh-old] (F-N2)", dropped)
 	}
 	if _, ok := srv.dshScope.Get("dsh-old"); ok {
 		t.Error("dsh tracker still holds the old id after Restart")

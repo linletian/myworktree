@@ -81,6 +81,14 @@ type InstanceTree struct {
 	Name       string
 	ChildCount int
 	SubtreeRSS uint64
+	// Partial is true when the instance's subtree could NOT be enumerated
+	// (tree_unavailable): ChildCount is then UNKNOWN (it stays 0 and the
+	// child-count signal deliberately stays silent), while SubtreeRSS is
+	// the MEASURED main-PID value — a LOWER BOUND on the real subtree,
+	// never a measured total. The subtree-rss alert renders as "≥" instead
+	// of an exact figure so the UI cannot present a floor as a census
+	// (F-A2m1).
+	Partial bool
 }
 
 // AlertInput is the complete sample set EvaluateAlerts consumes. It is pure
@@ -161,10 +169,20 @@ func EvaluateAlerts(in AlertInput) []Alert {
 		if inst.SubtreeRSS > 0 && in.TotalBytes > 0 {
 			rssPct := float64(inst.SubtreeRSS) / float64(in.TotalBytes) * 100
 			if rssPct > SubtreeRSSAmberPct {
+				// F-A2m1: a Partial row's SubtreeRSS is the measured
+				// main-PID value with its descendants unenumerated —
+				// a LOWER BOUND. Prefix "≥" on both the percentage and
+				// the bytes so a floor can never be read as a census,
+				// and say why in the same string.
+				ge := ""
+				bound := ""
+				if inst.Partial {
+					ge, bound = "≥ ", "; main PID measured, children unenumerated — actual is higher"
+				}
 				alerts = append(alerts, alert(SeverityAmber, "subtree-rss:"+inst.ID,
 					"instance subtree RSS · "+inst.Name,
 					"> "+pct(SubtreeRSSAmberPct),
-					pct(rssPct)+" ("+formatBytes(inst.SubtreeRSS)+")",
+					ge+pct(rssPct)+" ("+ge+formatBytes(inst.SubtreeRSS)+bound+")",
 					"inspect this instance's children in the table below, then stop it if the growth is not yours to keep: docs/PLAYBOOK-memory-alerts.md#subtree-rss"))
 			}
 		}
