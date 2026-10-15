@@ -1,6 +1,7 @@
 package monitor
 
 import (
+	"math"
 	"os"
 	"strconv"
 	"strings"
@@ -64,7 +65,7 @@ type Alert struct {
 	ID       string `json:"id"`
 	Severity string `json:"severity"` // SeverityAmber | SeverityRed
 	Signal   string `json:"signal"`
-	// Threshold is the crossed limit as displayed ("≥ 30%", "> 50", …).
+	// Threshold is the crossed limit as displayed ("≥ 30.0%", "> 50", …).
 	Threshold string `json:"threshold"`
 	// Current is the sampled value as displayed ("47.4%", "3.1 GiB", …).
 	Current string `json:"current"`
@@ -225,21 +226,29 @@ func sortAlerts(alerts []Alert) {
 }
 
 // formatBytes renders a byte count with binary units, one decimal below
-// 1 GiB. Unit spelling (KB/MB/GB) mirrors the UI's formatBytes EXACTLY —
-// the alert strings and the table cells sit side by side in the modal and
-// must not disagree on what the same number is called.
+// 1 GiB. Unit spelling (KB/MB/GB) AND rounding mirror the UI's formatBytes
+// EXACTLY — the alert strings and the table cells sit side by side in the
+// modal and must not disagree on what the same number is called.
+//
+// The rounding is HALF-UP, like the UI's toFixed. strconv.FormatFloat is
+// ties-to-even, so the un-rounded shape disagreed with the page on every
+// exact .x5 / .xx5 value (1.25 MiB → Go "1.2 MB" vs UI "1.3 MB"; 3.125 GiB
+// → Go "3.12 GB" vs UI "3.13 GB"). Round first, format second: the number
+// is then computed the same way on both sides of the seam, so an alert row
+// and the modal cell beside it can never print two different values for
+// the same bytes (F-M1; UI targets measured, pinned in alerts_test.go).
 func formatBytes(b uint64) string {
 	kib := float64(1024)
 	if b < uint64(kib) {
 		return strconv.FormatUint(b, 10) + " B"
 	}
 	if b < uint64(kib*kib) {
-		return strconv.FormatFloat(float64(b)/kib, 'f', 1, 64) + " KB"
+		return strconv.FormatFloat(math.Round(float64(b)/kib*10)/10, 'f', 1, 64) + " KB"
 	}
 	if b < uint64(kib*kib*kib) {
-		return strconv.FormatFloat(float64(b)/(kib*kib), 'f', 1, 64) + " MB"
+		return strconv.FormatFloat(math.Round(float64(b)/(kib*kib)*10)/10, 'f', 1, 64) + " MB"
 	}
-	return strconv.FormatFloat(float64(b)/(kib*kib*kib), 'f', 2, 64) + " GB"
+	return strconv.FormatFloat(math.Round(float64(b)/(kib*kib*kib)*100)/100, 'f', 2, 64) + " GB"
 }
 
 // pct formats a percentage with one decimal, trimming "-0".

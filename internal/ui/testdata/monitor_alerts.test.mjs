@@ -70,6 +70,7 @@ const monitorFactory = new Function("deps", `
   const { api, console, document, setInterval, clearInterval } = deps;
   ${sliceStatement(script, "const MONITOR_ALERTS_POLL_MS")}
   let monitorAlertsTimer = null;
+  let monitorTimer = null;
   const monitorExpandedTrees = new Set();
   ${[
     "function escapeHTML",
@@ -93,6 +94,7 @@ const monitorFactory = new Function("deps", `
     "function stopMonitorAlertsPolling",
     "function toggleMonitorTree",
     "function handleMonitorTbodyClick",
+    "function closeMonitorModal",
   ].map(h => sliceBlock(script, h)).join("\n\n")}
   return {
     MONITOR_ALERTS_POLL_MS,
@@ -110,6 +112,7 @@ const monitorFactory = new Function("deps", `
     stopMonitorAlertsPolling,
     toggleMonitorTree,
     handleMonitorTbodyClick,
+    closeMonitorModal,
     isPolling: () => monitorAlertsTimer !== null,
     expandedIds: () => Array.from(monitorExpandedTrees),
   };
@@ -330,7 +333,11 @@ test("monitorFootnoteText: measured totals + boundary + playbook, never the old 
   assert.match(text, /main PID \+ descendants/);
   assert.match(text, /sibling processes in the same terminal scope are not visible/);
   assert.match(text, /local truth/);
-  assert.match(text, /Detection only.*PLAYBOOK-memory-alerts\.md/s);
+  // F-n5: the churn floor — a process exiting between the enumeration and
+  // the read drops its branch silently, so counts can be floors even with no
+  // walk cap. Documented in API.md too; pinned here so the sentence cannot
+  // quietly disappear from the footnote again.
+  assert.match(text, /lower bound even when no row reports a cap/, "the footnote must state the churn floor (F-n5)");
   assert.ok(!text.includes("not counted"), "the pre-#111 disclaimer must be gone");
   assert.equal(m.monitorFootnoteText(null).includes("0 running instances"), true);
 });
@@ -402,6 +409,44 @@ test("light poll does NOT repaint the badge while the monitor modal is open (ARB
   // ENTIRELY — no request, no overwrite with the system-only cached set.
   assert.equal(h.apiCalls.length, 0, "light poll stands down (no fetch) while the modal owns the badge");
   assert.equal(doc.els["status-bar-alerts"].textContent, "\u26A0 4 alerts", "badge untouched by the light poll while the modal is open");
+});
+
+test("closeMonitorModal repaints the badge from the cache-only set (F-R1n1)", async () => {
+  const doc = makeBar();
+  // A stubbed <dialog>: open flips false on close() the way the real one does.
+  const dlg = { open: true, close() { this.open = false; } };
+  doc.els["modal-monitor"] = dlg;
+  const h = harness(doc);
+  // While open, the modal's 2s full poll owns the badge — the fuller set.
+  doc.els["status-bar-alerts"].textContent = "\u26A0 4 alerts";
+  // The light poll's endpoint answers the CACHE-ONLY system set: one amber
+  // alert, none of the modal's per-instance rows.
+  harness._apiReply = { alerts: [A("amber", "available-ram")], sampled_at_ms: 1700000000000 };
+
+  // While open: the light poll still stands down, so the badge keeps the
+  // modal's set (ARB-F8 side of the same coin).
+  await h.m.fetchMonitorAlerts();
+  assert.equal(h.apiCalls.length, 0, "light poll stands down while the modal is open");
+  assert.equal(doc.els["status-bar-alerts"].textContent, "\u26A0 4 alerts");
+
+  h.m.closeMonitorModal();
+  assert.equal(dlg.open, false, "close must actually close the dialog");
+  assert.equal(h.apiCalls.length, 1, "closing kicks the light poll exactly once");
+  assert.ok(h.apiCalls[0] === "/api/monitor/alerts", "the kick hits the lightweight endpoint");
+
+  // Let the kicked fetch settle, then the badge must show the CACHE-ONLY
+  // system set the light poll serves — not the full set the modal painted.
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(doc.els["status-bar-alerts"].textContent, "\u26A0 1 alert",
+    "the badge converges to the cache-only set the moment the modal closes (F-R1n1)");
+  assert.equal(doc.els["status-bar"]._classes.has("status-alert-amber"), true);
+  assert.equal(doc.els["status-bar"]._classes.has("status-alert-red"), false,
+    "the light-poll set is amber-only — the modal's red is gone from the badge");
+
+  // A second close (dialog already closed) must not kick again: the repaint
+  // is gated on an ACTUAL close, not on the click.
+  h.m.closeMonitorModal();
+  assert.equal(h.apiCalls.length, 1, "a close on an already-closed dialog must not fetch again");
 });
 
 test("toggleMonitorTree flips the Set and the DOM row optimistically", () => {

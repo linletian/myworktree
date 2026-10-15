@@ -7199,6 +7199,7 @@
                 + " \u00B7 " + kids + " child processes \u00B7 " + formatBytes(ram) + " subtree RSS (main PID + descendants)."
                 + " myworktree sees its own instance trees + system signals (PSI / available RAM) \u2014 sibling processes in the same terminal scope are not visible here, so alerts are a local truth."
                 + " A row marked \u201ctree unavailable\u201d had an unreadable /proc walk \u2014 its numbers are unknown, not measured; walk-capped counts are floors."
+                + " \u00B7 Counts can also be floors without any walk cap: a process that exits between the enumeration and the read drops its branch silently (churn is normal, not an error), so child_count / subtree RSS may be a lower bound even when no row reports a cap."
                 + " Detection only: every action is yours (docs/PLAYBOOK-memory-alerts.md).";
         }
 
@@ -7296,7 +7297,21 @@
                 monitorTimer = null;
             }
             const dlg = document.getElementById("modal-monitor");
-            if (dlg.open) dlg.close();
+            if (dlg.open) {
+                dlg.close();
+                // The modal's 2s full poll painted the FULL alert set on the
+                // badge while it was open, and the ~10s light poll stood down
+                // for exactly that reason (ARB-F8) \u2014 so without a repaint
+                // HERE the badge would keep showing that full set for up to one
+                // light-poll interval after the modal closed, behaving as if
+                // the problem were still the one the modal last saw.
+                // dialog.open is false again, so the light poll's guard passes:
+                // repaint now and the badge converges to the cache-only system
+                // set immediately (F-R1n1). Only on an ACTUAL close \u2014 a
+                // second click on an already-closed dialog must not kick a
+                // needless fetch.
+                fetchMonitorAlerts();
+            }
         }
 
         function toggleMonitorLicenses() {

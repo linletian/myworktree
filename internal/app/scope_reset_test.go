@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -190,6 +191,14 @@ func TestHandleInstanceDeleteClearsScopeTrackers(t *testing.T) {
 // teardown belongs to the OLD id, and the fresh id Restart returns must NOT
 // be wiped (it is the session that is only now starting, and wiping it is at
 // best a no-op and at worst a race with the proxy's first record).
+//
+// F-M4 — why the assertions cross calls: recording on the NEW id AFTER the
+// handler ran cannot detect a handler that also wiped the new id (the record
+// simply lands after the damage). So the test instead seeds a SECOND stale id
+// before the restart and asserts the handler dropped exactly ONE entry —
+// the old one — while the decoration survives and the fresh id never had a
+// state to lose. A handler that also wiped the decoration (or dropped both)
+// drops two and fails here.
 func TestHandleInstanceRestartClearsOldIdOnly(t *testing.T) {
 	srv := newScopeResetServer(t, store.State{
 		Version: 1,
@@ -204,6 +213,14 @@ func TestHandleInstanceRestartClearsOldIdOnly(t *testing.T) {
 
 	srv.ocScope.Record("oc-old", opencode_web.ScopeState{Scope: opencode_web.ScopeOutOfScope, Directory: "/elsewhere"})
 	srv.dshScope.Record("dsh-old", dsh_web.ScopeState{Scope: dsh_web.ScopeOutOfScope, Directory: "/elsewhere"})
+	// A second, unrelated stale id in the SAME tracker — the canary. The
+	// restart of oc-old has no business touching it.
+	srv.ocScope.Record("oc-decoration", opencode_web.ScopeState{Scope: opencode_web.ScopeOutOfScope, Directory: "/decoration"})
+	// The tracker length BEFORE the handler runs: the two seeded ids.
+	before := ocScopePresent(srv, "oc-old", "oc-decoration")
+	if before != 2 {
+		t.Fatalf("precondition: tracker holds %d of the seeded ids, want 2", before)
+	}
 
 	w := postInstance(t, srv.handleInstanceRestart, "/api/instances/restart", `{"id":"oc-old"}`)
 	if w.Code != http.StatusCreated {
@@ -220,6 +237,21 @@ func TestHandleInstanceRestartClearsOldIdOnly(t *testing.T) {
 	if _, ok := srv.ocScope.Get("oc-old"); ok {
 		t.Error("opencode tracker still holds the old id after Restart")
 	}
+
+	// F-M4: the canary SURVIVES, and the tracker lost exactly one entry.
+	// ScopeTracker exposes Get/Record/Reset only, so "length" is probed over
+	// the id universe under test — every id this test seeded, plus the fresh
+	// id Restart allocated. The handler can only touch the id it was given
+	// (dropped) and the fresh id (never recorded), so the count over that
+	// universe is the observable tracker length here.
+	if _, ok := srv.ocScope.Get("oc-decoration"); !ok {
+		t.Error("the seeded decoration id lost its scope state — the restart wiped an unrelated entry")
+	}
+	after := ocScopePresent(srv, "oc-old", "oc-decoration", newID)
+	if before-after != 1 {
+		t.Errorf("tracker length dropped by %d entries, want exactly 1 (old id only)", before-after)
+	}
+
 	// Quiesce BEFORE the next restart. Restart spawned a live instance whose
 	// runLifecycle goroutine writes the store, and persistNewInstance gives up
 	// on a version conflict after 3 × 10 ms — a documented framework race, not
@@ -248,13 +280,30 @@ func TestHandleInstanceRestartClearsOldIdOnly(t *testing.T) {
 		}
 	}
 
-	// The fresh id is a live session this daemon just started: the proxy is
-	// free to record on it. Prove the wiring never touches it by recording
-	// and re-reading through the same tracker the endpoint serves.
+	// A handler that ALSO dropped the fresh id would still pass the canary
+	// check above (the fresh id had no state yet) — so record on it now and
+	// prove the tracker still accepts it: the fresh session is the proxy's
+	// to write, and nothing in the restart path may have poisoned it.
 	srv.ocScope.Record(newID, opencode_web.ScopeState{Scope: opencode_web.ScopeOutOfScope, Directory: "/elsewhere"})
 	if _, ok := srv.ocScope.Get(newID); !ok {
 		t.Errorf("fresh id %q must keep its own state", newID)
 	}
+	if ocScopePresent(srv, "oc-old", "oc-decoration", newID) != 2 {
+		t.Errorf("tracker should hold exactly the canary + fresh id: %v", ocScopePresent(srv, "oc-old", "oc-decoration", newID))
+	}
+}
+
+// ocScopePresent counts how many of the given ids the opencode tracker still
+// holds — the observable "length" of the tracker over the universe under
+// test (see the F-M4 comment in TestHandleInstanceRestartClearsOldIdOnly).
+func ocScopePresent(srv *Server, ids ...string) int {
+	n := 0
+	for _, id := range ids {
+		if _, ok := srv.ocScope.Get(id); ok {
+			n++
+		}
+	}
+	return n
 }
 
 // TestTeardownRefusalKeepsScopeState pins the other half of the wiring
@@ -309,6 +358,55 @@ func TestTeardownRefusalKeepsScopeState(t *testing.T) {
 	if _, ok := srv.ocScope.Get(inst.ID); ok {
 		t.Error("the accepted Stop must clear the state the refusals preserved")
 	}
+
+	// F-M5: the third refusal shape — a Stop that FAILS. Delete and Restart
+	// refuse on the Manager's own state; Stop has no such gate (and
+	// framework.Manager.Stop swallows a kind's error), so the failure is
+	// driven through the managerStop seam. The wiring must return BEFORE
+	// dropScopeState: a live instance whose teardown failed keeps its
+	// warning, exactly like the two refusals above. Moving the wipe before
+	// the Manager call turns this RED.
+	t.Run("stop failure keeps the scope state", func(t *testing.T) {
+		srv := newScopeResetServer(t, store.State{
+			Version: 1,
+			Worktrees: []store.ManagedWorktree{
+				{ID: "wt1", Name: "wt1", Path: t.TempDir()},
+			},
+		})
+		inst, err := srv.instanceMgr.Start(context.Background(), framework.StartParams{
+			WorktreeID: "wt1", Kind: "opencode-web", Name: "oc-run",
+		})
+		if err != nil {
+			t.Fatalf("start: %v", err)
+		}
+		t.Cleanup(func() { _ = srv.instanceMgr.Stop(inst.ID) })
+
+		srv.ocScope.Record(inst.ID, opencode_web.ScopeState{Scope: opencode_web.ScopeOutOfScope, Directory: "/elsewhere"})
+
+		oldStop := managerStop
+		t.Cleanup(func() { managerStop = oldStop })
+		managerStop = func(*framework.Manager, string) error { return errors.New("stop failed: injected") }
+
+		w := postInstance(t, srv.handleInstanceStop, "/api/instances/stop", `{"id":"`+inst.ID+`"}`)
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("stop of a failing instance: status %d, want 400 (%s)", w.Code, w.Body.String())
+		}
+		if _, ok := srv.ocScope.Get(inst.ID); !ok {
+			t.Error("a failed Stop must leave the live instance's warning in place (F-M5)")
+		}
+
+		// Non-vacuity: with the seam restored the SAME handler accepts the
+		// Stop and clears the state — the retained warning above is the
+		// failure's doing, not a wiring that never clears anything.
+		managerStop = oldStop
+		w = postInstance(t, srv.handleInstanceStop, "/api/instances/stop", `{"id":"`+inst.ID+`"}`)
+		if w.Code != http.StatusOK {
+			t.Fatalf("stop after restore: status %d, want 200 (%s)", w.Code, w.Body.String())
+		}
+		if _, ok := srv.ocScope.Get(inst.ID); ok {
+			t.Error("the accepted Stop must clear the state the failed one preserved")
+		}
+	})
 }
 
 // TestMCPCallTeardownClearsScopeTrackers pins the second door: the MCP /

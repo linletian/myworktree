@@ -295,7 +295,7 @@ func TestAlertSamplerReadsProcfsOutsideTheLock(t *testing.T) {
 
 	s = NewAlertSampler(time.Hour)
 	s.tick()
-	s.PublishSystem(SystemStat{TotalBytes: 100 << 30, AvailableBytes: 90 << 30})
+	s.PublishSystem(SystemStat{TotalBytes: 100 << 30, AvailableBytes: 90 << 30}, 2<<30)
 
 	if !invoked.Load() {
 		t.Fatal("daemonRSS seam never invoked — this test would pass vacuously")
@@ -312,19 +312,29 @@ func TestAlertSamplerPublishSystemRefreshesCache(t *testing.T) {
 	t.Cleanup(s.Stop)
 	waitFor(t, 2*time.Second, "first tick", func() bool { _, warm := s.Snapshot(); return warm })
 
-	s.PublishSystem(SystemStat{PSIsSomeAvg10: 55, HasPSI: true, AvailableBytes: 9 << 30, TotalBytes: 100 << 30})
+	// F-daemon-twice: the daemon RSS arrives as the caller's already-sampled
+	// value (the full collect's Global.DaemonMemoryBytes), NOT via a second
+	// /proc read inside the sampler — so it must still reach the evaluator.
+	s.PublishSystem(SystemStat{PSIsSomeAvg10: 55, HasPSI: true, AvailableBytes: 9 << 30, TotalBytes: 100 << 30}, 2<<30)
 	snap, _ := s.Snapshot()
 	if snap.System.PSIsSomeAvg10 != 55 || !snap.System.HasPSI {
 		t.Errorf("PSI not published: %+v", snap.System)
 	}
 	found := false
+	daemon := false
 	for _, a := range snap.Alerts {
 		if a.ID == "psi-memory" && a.Severity == SeverityRed {
 			found = true
 		}
+		if a.ID == "daemon-rss" {
+			daemon = true
+		}
 	}
 	if !found {
 		t.Errorf("published PSI 55 must evaluate to red psi-memory: %v", alertIDs(snap.Alerts))
+	}
+	if !daemon {
+		t.Errorf("the daemonRSSBytes argument must reach the evaluator (daemon-rss alert missing): %v", alertIDs(snap.Alerts))
 	}
 }
 
@@ -405,20 +415,130 @@ func TestAlertSamplerSingleSignalStampsWarm(t *testing.T) {
 	})
 }
 
-// TestWalkSubtreeNilIndexIsUnavailable pins the ARB-R2-F3 defensive guard:
-// walkSubtree(pid, nil) must degrade to Unavailable=true — the same marker
-// the root-miss path emits — instead of panicking on ix.known. Today the
-// collector only ever passes a non-nil index (it builds one exactly when a
-// walk will run — ARB-F10, mirrored by anyRunningInstance), so this pins
-// the shape for the day the walk's `running && PID>0` guard is ever widened
-// without that predicate: unreadable must stay unreadable, never a crash
-// and never a measured zero.
-func TestWalkSubtreeNilIndexIsUnavailable(t *testing.T) {
-	st := walkSubtree(12345, nil)
-	if !st.Unavailable {
-		t.Error("walkSubtree(pid, nil) did not report Unavailable")
+// TestAlertSamplerPublishSystemBlindStaysCold pins the F-M3 twin of
+// TestAlertSamplerBlindRefreshStaysCold: PublishSystem's own guard must
+// refuse to stamp a refresh that carried NO system signal at all. This
+// sampler was never started, so the loop's tick cannot fill the cache — the
+// ONLY writer is PublishSystem, and the guard is the only thing keeping an
+// all-zero publish from being stamped warm. Removing the guard turns the
+// all-zero system into zero alerts plus a fresh timestamp — silence dressed
+// as an all-clear (the ARB-F6 UI gate would paint it as new information).
+func TestAlertSamplerPublishSystemBlindStaysCold(t *testing.T) {
+	s := NewAlertSampler(time.Hour)  // never started → no tick, ever
+	s.PublishSystem(SystemStat{}, 0) // no PSI, TotalBytes 0: nothing was read
+
+	snap, warm := s.Snapshot()
+	if warm {
+		t.Error("a blind PublishSystem stamped the cache warm — unreadable silence dressed as all-clear (F-M3)")
 	}
-	if st.ChildCount != 0 || st.SubtreeRSSBytes != 0 || len(st.Children) != 0 {
-		t.Errorf("nil-index walk emitted numbers: %+v", st)
+	if snap.SampledAtMS != 0 {
+		t.Errorf("sampled_at_ms = %d, want 0 (the caller read nothing)", snap.SampledAtMS)
+	}
+	if len(snap.Alerts) != 0 {
+		t.Errorf("alerts = %v, want none on a blind publish", alertIDs(snap.Alerts))
+	}
+	if snap.System.HasPSI || snap.System.TotalBytes != 0 {
+		t.Errorf("system = %+v, want the untouched zero value", snap.System)
+	}
+}
+
+// TestAlertSamplerFailedPSIReadClearsStaleRed pins F-R1m2: a PSI read that
+// FAILS must clear the cached PSI, not leave the last reading standing.
+// HasPSI used to be set-only-true, so one unreadable
+// /proc/pressure/memory kept yesterday's value and a red psi-memory alert
+// stuck until the next successful read (or a restart) — a stale number
+// presented as current. The blind-both guard still holds (a mem-only tick is
+// a REAL sample: it publishes, and it publishes "PSI unknown"). Reverting
+// the clear (keeping the old value) turns this RED.
+func TestAlertSamplerFailedPSIReadClearsStaleRed(t *testing.T) {
+	installFakeSystem(t, "some avg10=55 avg60=1 avg300=1 total=1\n", nil, 100<<30, 10<<30, 0, nil)
+	s := NewAlertSampler(time.Hour) // no natural tick — drive it by hand
+
+	// Warm the cache with a RED PSI reading (55 ≥ 50) plus a low-RAM amber.
+	s.tick()
+	snap, warm := s.Snapshot()
+	if !warm {
+		t.Fatal("precondition: the warm tick did not stamp the cache")
+	}
+	if !snap.System.HasPSI || snap.System.PSIsSomeAvg10 != 55 {
+		t.Fatalf("precondition: PSI 55 not cached: %+v", snap.System)
+	}
+	redSeen := false
+	for _, a := range snap.Alerts {
+		if a.ID == "psi-memory" && a.Severity == SeverityRed {
+			redSeen = true
+		}
+	}
+	if !redSeen {
+		t.Fatalf("precondition: no red psi-memory alert on the warm cache: %v", alertIDs(snap.Alerts))
+	}
+
+	// Now the PSI read FAILS while the memory read keeps succeeding.
+	readPSIMemory = func() (string, error) { return "", errors.New("no /proc/pressure/memory") }
+	s.tick()
+
+	snap, _ = s.Snapshot()
+	if snap.System.HasPSI {
+		t.Error("HasPSI stayed true after a failed PSI read — the stale reading is still standing (F-R1m2)")
+	}
+	if snap.System.PSIsSomeAvg10 != 0 {
+		t.Errorf("PSIsSomeAvg10 = %v, want 0 after a failed read", snap.System.PSIsSomeAvg10)
+	}
+	for _, a := range snap.Alerts {
+		if a.ID == "psi-memory" {
+			t.Errorf("psi-memory alert survived the failed read: %+v", a)
+		}
+	}
+	// The memory half of the same sample is still published — the failed
+	// signal must not take the readable one down with it.
+	if snap.System.TotalBytes != 100<<30 || snap.System.AvailableBytes != 10<<30 {
+		t.Errorf("memory sample lost alongside the PSI failure: %+v", snap.System)
+	}
+	if len(snap.Alerts) != 1 || snap.Alerts[0].ID != "available-ram" {
+		t.Errorf("alerts = %v, want only available-ram (the 10%% RAM sample)", alertIDs(snap.Alerts))
+	}
+
+	// The same rule on the OTHER door: the full endpoint's PublishSystem
+	// carrying a memory-only sample (its PSI read failed) must clear the
+	// cache too, or the badge would keep showing the red the modal's last
+	// successful poll left behind. A FRESH sampler — the tick phase above
+	// already cleared this one, so reusing it would make this half pass
+	// vacuously.
+	readPSIMemory = func() (string, error) { return "some avg10=55 avg60=1 avg300=1 total=1\n", nil }
+	s2 := NewAlertSampler(time.Hour)
+	s2.tick() // warm on the same fake readers: PSI 55 red
+	if snap2, _ := s2.Snapshot(); !snap2.System.HasPSI || snap2.System.PSIsSomeAvg10 != 55 {
+		t.Fatalf("precondition: s2 did not warm with PSI 55: %+v", snap2.System)
+	}
+	s2.PublishSystem(SystemStat{AvailableBytes: 10 << 30, TotalBytes: 100 << 30}, 0)
+	snap, _ = s2.Snapshot()
+	if snap.System.HasPSI || snap.System.PSIsSomeAvg10 != 0 {
+		t.Errorf("memory-only publish kept a PSI reading: %+v", snap.System)
+	}
+	for _, a := range snap.Alerts {
+		if a.ID == "psi-memory" {
+			t.Errorf("psi-memory alert survived a memory-only publish: %+v", a)
+		}
+	}
+	if snap.System.AvailableBytes != 10<<30 || snap.System.TotalBytes != 100<<30 {
+		t.Errorf("memory sample not published: %+v", snap.System)
+	}
+}
+
+// TestNewAlertSamplerNonPositiveInterval pins F-n2: NewAlertSampler(0)
+// (or negative) must not arm a time.NewTicker that panics inside the
+// sampler's own goroutine — an unrecoverable panic that takes the process
+// down over a caller bug. The clamp to defaultAlertInterval makes the
+// sampler usable instead. Without the guard, Start() → time.NewTicker(0)
+// panics in the goroutine and this test never finishes.
+func TestNewAlertSamplerNonPositiveInterval(t *testing.T) {
+	for _, iv := range []time.Duration{0, -time.Second, -1} {
+		s := NewAlertSampler(iv)
+		if s.interval != defaultAlertInterval {
+			t.Errorf("NewAlertSampler(%v).interval = %v, want the clamped default %v", iv, s.interval, defaultAlertInterval)
+		}
+		s.Start()
+		time.Sleep(20 * time.Millisecond) // a landed interval elapses; a 0/negative ticker would have panicked already
+		s.Stop()                          // joins the loop — the whole path ran
 	}
 }

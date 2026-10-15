@@ -4,9 +4,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 	"testing"
+
+	"github.com/shirou/gopsutil/v4/mem"
 )
 
 func marshalForTest(t *testing.T, v any) string {
@@ -353,6 +356,46 @@ func TestWalkSubtreeDepthCapLeafIsNotTruncated(t *testing.T) {
 	}
 }
 
+// TestWalkSubtreeDepthCapBackEdgeIsNotTruncated pins the F-m4 half of G4: a
+// BACK-EDGE at the cap is not dropped data. Chain 1→2→…→9 puts pid 9 at the
+// depth cap; its only kid is pid 1 (already visited — the pid-reuse shape
+// where a deep descendant points back at an ancestor). The old shape read
+// `!known || len(kids) > 0` at the cap, so it counted that back-edge as
+// data lost past the cap and reported Truncated=true over a census that was
+// complete. ChildCount is then a promised floor on a number that was never
+// a floor.
+func TestWalkSubtreeDepthCapBackEdgeIsNotTruncated(t *testing.T) {
+	kids := map[int][]int{}
+	infos := map[int]procInfo{}
+	for i := 1; i <= 1+maxTreeDepth; i++ { // 1..9: pid 9 sits at depth 8
+		infos[i] = info(i-1, fmt.Sprintf("p%d", i), uint64(i))
+		if i < 1+maxTreeDepth {
+			kids[i] = []int{i + 1}
+		}
+	}
+	// The cap node's only kid is a cycle back to the root.
+	kids[1+maxTreeDepth] = []int{1}
+	installFakeTree(t, fakeTree{kids: kids, infos: infos})
+
+	st := walk1(1)
+	if st.ChildCount != maxTreeDepth {
+		t.Errorf("ChildCount = %d, want %d", st.ChildCount, maxTreeDepth)
+	}
+	if st.Truncated {
+		t.Error("Truncated = true when the cap node's only kid is a visited back-edge — nothing was dropped (F-m4)")
+	}
+
+	// The boundary's other side: a REAL unvisited grandchild past the cap
+	// is genuinely uncollected data, and the flag must light up.
+	kids[1+maxTreeDepth] = []int{1, 2 + maxTreeDepth}
+	infos[2+maxTreeDepth] = info(1+maxTreeDepth, "unvisited", 1)
+	installFakeTree(t, fakeTree{kids: kids, infos: infos})
+	st = walk1(1)
+	if !st.Truncated {
+		t.Error("Truncated = false with an unvisited descendant past the cap — data WAS dropped")
+	}
+}
+
 func TestCollectEnumeratesOncePerPoll(t *testing.T) {
 	// Review G5: the modal polls every 2s on the incident machine. One
 	// Collect must enumerate /proc EXACTLY once regardless of instance
@@ -464,6 +507,94 @@ func TestWalkSubtreeLeafRoot(t *testing.T) {
 	if st.ChildCount != 0 || st.Truncated || len(st.Children) != 0 {
 		t.Fatalf("leaf root: %+v", st)
 	}
+}
+
+// TestWalkSubtreeNilIndexIsUnavailable pins the ARB-R2-F3 defensive guard:
+// walkSubtree(pid, nil) must degrade to Unavailable=true — the same marker
+// the root-miss path emits — instead of panicking on ix.known. Today the
+// collector only ever passes a non-nil index (it builds one exactly when a
+// walk will run — ARB-F10, mirrored by anyRunningInstance), so this pins
+// the shape for the day the walk's `running && PID>0` guard is ever widened
+// without that predicate: unreadable must stay unreadable, never a crash
+// and never a measured zero.
+// (Moved here from sampler_test.go, F-n4: it tests tree.go.)
+func TestWalkSubtreeNilIndexIsUnavailable(t *testing.T) {
+	st := walkSubtree(12345, nil)
+	if !st.Unavailable {
+		t.Error("walkSubtree(pid, nil) did not report Unavailable")
+	}
+	if st.ChildCount != 0 || st.SubtreeRSSBytes != 0 || len(st.Children) != 0 {
+		t.Errorf("nil-index walk emitted numbers: %+v", st)
+	}
+}
+
+// TestCollectSkipsUnavailableTreeRowsForAlerts pins F-m3: an instance whose
+// tree could not be READ must not feed the subtree / child-count evaluator.
+// Such a row carries SubtreeRSS = main-PID-only (the one process that could
+// be sampled) and ChildCount=0, so before the fix a huge main RSS tripped
+// "subtree > 40% of RAM" — a measured claim about an unreadable tree, in a
+// UI that renders the very same row as "unavailable". The tree is UNKNOWN,
+// not small. Removing the `continue` on TreeUnavailable turns this RED.
+func TestCollectSkipsUnavailableTreeRowsForAlerts(t *testing.T) {
+	oldPSI, oldMem := readPSIMemory, readVirtualMemory
+	t.Cleanup(func() { readPSIMemory, readVirtualMemory = oldPSI, oldMem })
+	readPSIMemory = func() (string, error) { return "some avg10=0 avg60=0 avg300=0 total=0\n", nil }
+	// A 1 MiB "system": any live main-PID RSS is then far past the 40%
+	// subtree threshold, while available RAM stays at 100% so the RAM signal
+	// is silent — the only alert that can possibly fire is subtree-rss.
+	readVirtualMemory = func() (*mem.VirtualMemoryStat, error) {
+		return &mem.VirtualMemoryStat{Total: 1 << 20, Available: 1 << 20}, nil
+	}
+
+	self := os.Getpid() // a live main PID: sampleProcess returns real RSS
+	instances := []InputInstance{{ID: "inst-x", Name: "x", PID: self, Status: "running"}}
+
+	// CONTROL first: the SAME instance with a READABLE tree must fire. That
+	// is what keeps the assertion below non-vacuous — it proves the numbers
+	// on this row can cross the threshold at all.
+	installFakeTree(t, fakeTree{
+		kids:  map[int][]int{},
+		infos: map[int]procInfo{self: info(0, "test-bin", 1)},
+	})
+	st := (&Collector{}).Collect(instances, map[string]string{})
+	row := st.Instances[0]
+	if row.TreeUnavailable {
+		t.Fatalf("control precondition: the readable root was marked unavailable: %+v", row)
+	}
+	if row.SubtreeRSSBytes == 0 {
+		t.Skip("control precondition: this process sampled 0 RSS — the threshold cannot be crossed here")
+	}
+	if fired := subtreeAlertIDs(st.Alerts); len(fired) == 0 {
+		t.Fatalf("control: a readable tree with %d bytes of subtree RSS fired nothing — the numbers cannot cross the threshold on this machine", row.SubtreeRSSBytes)
+	}
+
+	// Now the tree is UNREADABLE: the enumeration does not know the root.
+	installFakeTree(t, fakeTree{
+		kids:   map[int][]int{},
+		infos:  map[int]procInfo{self: info(0, "test-bin", 1)},
+		absent: map[int]bool{self: true},
+	})
+	st = (&Collector{}).Collect(instances, map[string]string{})
+	row = st.Instances[0]
+	if !row.TreeUnavailable {
+		t.Fatalf("precondition: the absent root was not marked unavailable: %+v", row)
+	}
+	if row.SubtreeRSSBytes == 0 {
+		t.Fatal("precondition: the unavailable row carries no RSS — this test would pass vacuously")
+	}
+	if fired := subtreeAlertIDs(st.Alerts); len(fired) != 0 {
+		t.Errorf("an unreadable tree fed the subtree/child-count evaluator: %v (F-m3)", fired)
+	}
+}
+
+func subtreeAlertIDs(alerts []Alert) []string {
+	var out []string
+	for _, a := range alerts {
+		if strings.HasPrefix(a.ID, "subtree-rss:") || strings.HasPrefix(a.ID, "child-count:") {
+			out = append(out, a.ID)
+		}
+	}
+	return out
 }
 
 func TestParsePSIsomeAvg10(t *testing.T) {

@@ -51,13 +51,28 @@ type SystemStat struct {
 }
 
 // NewAlertSampler returns a sampler that has NOT started yet.
+//
+// F-n2: a non-positive interval is clamped to defaultAlertInterval.
+// time.NewTicker panics on a non-positive duration, and it would panic
+// from inside the sampler's own goroutine, where the caller cannot recover
+// it — a bad interval must degrade to the design cadence, never take the
+// daemon down. Pinned by TestNewAlertSamplerNonPositiveInterval.
 func NewAlertSampler(interval time.Duration) *AlertSampler {
+	if interval <= 0 {
+		interval = defaultAlertInterval
+	}
 	return &AlertSampler{
 		interval: interval,
 		stop:     make(chan struct{}),
 		done:     make(chan struct{}),
 	}
 }
+
+// defaultAlertInterval is the fallback cadence for a non-positive
+// NewAlertSampler interval (F-n2). It is the same ~10s the daemon itself
+// passes (alertSampleEvery), so the clamp is invisible in production and
+// only ever fires on a caller bug.
+const defaultAlertInterval = 10 * time.Second
 
 // Start launches the background loop. Idempotent like SessionWatch.Start:
 // only the first call launches the goroutine; every call after Stop returns
@@ -147,6 +162,18 @@ func (a *AlertSampler) tick() {
 	if psiOK {
 		a.system.PSIsSomeAvg10 = psi
 		a.system.HasPSI = true
+	} else {
+		// F-R1m2: a failed PSI read CLEARS the cached value. HasPSI used to
+		// only ever be set true, so one unreadable /proc/pressure/memory
+		// left the last reading standing and a red psi-memory alert could
+		// stick until the next successful read or a restart — a stale value
+		// presented as current, the exact dishonesty this feature rejects
+		// everywhere else. We are past the blind guard (memOK is true), so
+		// this IS a real sample: the sample says "PSI unknown", and the
+		// evaluator's HasPSI=false must skip the signal rather than re-fire
+		// yesterday's number.
+		a.system.PSIsSomeAvg10 = 0
+		a.system.HasPSI = false
 	}
 	if memOK {
 		a.system.AvailableBytes = avail
@@ -183,22 +210,33 @@ func (a *AlertSampler) daemonRSS() uint64 { return daemonRSS() }
 //	/api/instances/stats → everything fresh, computed per request.
 //	/api/monitor/alerts  → cached system-level alerts, ≤interval old, and
 //	                       no older than the last full poll (PublishSystem).
-func (a *AlertSampler) PublishSystem(sys SystemStat) {
+//
+// daemonRSSBytes is the daemon RSS the CALLER already sampled for this very
+// request (F-daemon-twice): the full collect reads it for its own Global
+// section, and re-reading it here paid a second /proc read per poll for a
+// number that was already in hand. The lock discipline is unchanged — there
+// is no syscall left in this function to sequence.
+func (a *AlertSampler) PublishSystem(sys SystemStat, daemonRSSBytes uint64) {
 	// ARB-R2-F2: a publish carrying NO system signal at all (no PSI, no
 	// RAM total) is a blind refresh — the caller read nothing, so the
 	// cache must not be stamped warm, the same honesty rule tick()
-	// enforces. The last good values and stamp stay untouched.
+	// enforces. The last good values and stamp stay untouched. Guard order
+	// matters: it fires only when BOTH are missing, so a mem-only publish
+	// (PSI unreadable, RAM read) still proceeds below and clears PSI.
 	if !sys.HasPSI && sys.TotalBytes == 0 {
 		return
 	}
-	// daemonRSS is a /proc read — sampled BEFORE the lock, same discipline
-	// as tick (review G9): the critical section stays pure memory.
-	rss := a.daemonRSS()
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if sys.HasPSI {
 		a.system.PSIsSomeAvg10 = sys.PSIsSomeAvg10
 		a.system.HasPSI = true
+	} else {
+		// F-R1m2, the same rule tick() enforces: the caller could not read
+		// PSI, so the cached reading is stale. Clear it rather than let a
+		// red psi-memory alert outlive the reading that produced it.
+		a.system.PSIsSomeAvg10 = 0
+		a.system.HasPSI = false
 	}
 	if sys.TotalBytes > 0 {
 		a.system.AvailableBytes = sys.AvailableBytes
@@ -209,7 +247,7 @@ func (a *AlertSampler) PublishSystem(sys SystemStat) {
 		HasPSI:         a.system.HasPSI,
 		AvailableBytes: a.system.AvailableBytes,
 		TotalBytes:     a.system.TotalBytes,
-		DaemonRSSBytes: rss,
+		DaemonRSSBytes: daemonRSSBytes,
 	})
 	a.stamped = time.Now()
 }

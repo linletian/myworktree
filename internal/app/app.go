@@ -2287,6 +2287,15 @@ func (s *Server) dropScopeState(id string) {
 	s.dshScope.Reset(id)
 }
 
+// managerStop is the framework teardown verb handleInstanceStop drives.
+// Indirected as a seam (the same pattern as monitor's readVirtualMemory) so
+// a test can force its error path: framework.Manager.Stop deliberately
+// swallows a kind's Stop error — it logs it, tears the instance down anyway
+// and returns nil — so without this seam the "a FAILED teardown keeps the
+// scope state" ordering below (F-M5) has no reachable failure to drive, and
+// the wiring's error branch would be untestable rather than proven.
+var managerStop = func(m *framework.Manager, id string) error { return m.Stop(id) }
+
 func (s *Server) handleInstanceStop(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -2299,7 +2308,12 @@ func (s *Server) handleInstanceStop(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
-	if err := s.instanceMgr.Stop(req.ID); err != nil {
+	// F-M5: the wipe sits AFTER the Manager call, so a Stop that FAILED
+	// (transport error, kind refusal, anything the framework starts
+	// returning) returns before dropScopeState and the live instance keeps
+	// its warning. Pinned by the Stop-failure subtest inside
+	// TestTeardownRefusalKeepsScopeState.
+	if err := managerStop(s.instanceMgr, req.ID); err != nil {
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
@@ -3405,8 +3419,12 @@ func (s *Server) handleInstanceStats(w http.ResponseWriter, r *http.Request) {
 	// subtree alerts are NOT published — they belong to this response and
 	// would go stale the moment the modal closes; GET /api/monitor/alerts
 	// documents the cached side of the same rule.
+	//
+	// F-daemon-twice: Collect already sampled the daemon's RSS for THIS
+	// request (stats.Global.DaemonMemoryBytes) — pass it through instead of
+	// letting the cache refresh pay a second /proc read of the same number.
 	if s.alertSampler != nil {
-		s.alertSampler.PublishSystem(stats.System)
+		s.alertSampler.PublishSystem(stats.System, stats.Global.DaemonMemoryBytes)
 	}
 
 	writeJSON(w, http.StatusOK, stats)
@@ -3982,11 +4000,18 @@ const (
 
 	// authFailsSweepBusy shortens that interval while the map is STILL over
 	// authFailsSoftCap after a sweep, i.e. while distinct failing IPs arrive
-	// faster than one window per minute. Without it the soft cap would be
-	// decoration — a flood could grow the map for a full minute between
-	// sweeps. With it the map is bounded by roughly the flood's IP count per
-	// 5 s, and the cadence stays the throttle in both directions: a sweep is
-	// never a per-request O(n) walk.
+	// faster than one window per minute. What it actually buys, stated
+	// exactly: the map's steady-state size is set by the 60 s eviction
+	// window (an entry lives authFailWindow regardless of cadence, so the
+	// map is bounded by the DISTINCT IPs that failed inside the last 60 s,
+	// never by how often we sweep). The busy cadence is a 12x sweep
+	// frequency that (a) shortens the post-flood drain tail — once new IPs
+	// stop arriving, the map empties after one window (~1m5s) instead of
+	// waiting out the minute-granularity janitor (~2min) — and (b) walks
+	// more often while over the soft cap. It is NOT a bound on size: a
+	// sustained flood of NEW distinct IPs simply keeps the busy cadence
+	// engaged, and the map keeps holding every live window. The soft cap is
+	// the trigger for that trade, never a truncation point.
 	authFailsSweepBusy = 5 * time.Second
 
 	// authFailsSoftCap is the size above which the cadence tightens to

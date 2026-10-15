@@ -17,6 +17,12 @@ func TestEvaluateAlertsTable(t *testing.T) {
 		name    string
 		in      AlertInput
 		wantIDs []string // ordered: reds first, then amber
+		// wantSeverity pins the TIER each psi-memory row must carry
+		// ("" = the signal must stay silent). The ≤50 boundary is the
+		// oomd kill line: 49.99 is "verdict approaching", 50.0 is
+		// "verdict here", and a `>` instead of `>=` at either line
+		// silently drops the tier — F-m5.
+		wantSeverity string
 	}{
 		{
 			name:    "all clear",
@@ -24,19 +30,27 @@ func TestEvaluateAlertsTable(t *testing.T) {
 			wantIDs: nil,
 		},
 		{
-			name:    "psi amber just at 30",
-			in:      AlertInput{HasPSI: true, PSIsSomeAvg10: 30.0, TotalBytes: total, AvailableBytes: 60 << 30},
-			wantIDs: []string{"psi-memory"},
+			name:         "psi amber just at 30",
+			in:           AlertInput{HasPSI: true, PSIsSomeAvg10: 30.0, TotalBytes: total, AvailableBytes: 60 << 30},
+			wantIDs:      []string{"psi-memory"},
+			wantSeverity: SeverityAmber,
 		},
 		{
-			name:    "psi below amber stays silent at 29.9",
-			in:      AlertInput{HasPSI: true, PSIsSomeAvg10: 29.9, TotalBytes: total, AvailableBytes: 60 << 30},
+			name:    "psi below amber stays silent at 29.99",
+			in:      AlertInput{HasPSI: true, PSIsSomeAvg10: 29.99, TotalBytes: total, AvailableBytes: 60 << 30},
 			wantIDs: nil,
 		},
 		{
-			name:    "psi red just at 50 collapses the amber tier to one entry",
-			in:      AlertInput{HasPSI: true, PSIsSomeAvg10: 50.0, TotalBytes: total, AvailableBytes: 60 << 30},
-			wantIDs: []string{"psi-memory"},
+			name:         "psi red just at 50 collapses the amber tier to one entry",
+			in:           AlertInput{HasPSI: true, PSIsSomeAvg10: 50.0, TotalBytes: total, AvailableBytes: 60 << 30},
+			wantIDs:      []string{"psi-memory"},
+			wantSeverity: SeverityRed,
+		},
+		{
+			name:         "psi amber at 49.99 — the kill line not yet crossed",
+			in:           AlertInput{HasPSI: true, PSIsSomeAvg10: 49.99, TotalBytes: total, AvailableBytes: 60 << 30},
+			wantIDs:      []string{"psi-memory"},
+			wantSeverity: SeverityAmber,
 		},
 		{
 			name:    "psi missing emits nothing and suppresses nothing else",
@@ -173,6 +187,29 @@ func TestEvaluateAlertsTable(t *testing.T) {
 					t.Errorf("non-PSI alert %q is red — red is reserved for the oomd kill-line mirror", a.ID)
 				}
 			}
+			// F-m5: the table's wantSeverity column. A PSI row must carry
+			// EXACTLY the tier the boundary promises (49.99 amber / 50.0
+			// red / 30.0 amber), and a case that expects NO alerts at all
+			// while PSI is present is the "below the amber line" boundary:
+			// the signal must stay silent. `>` instead of `>=` at either
+			// line flips one of these rows RED.
+			if tc.wantSeverity != "" {
+				sev := ""
+				for _, a := range got {
+					if a.ID == "psi-memory" {
+						sev = a.Severity
+					}
+				}
+				if sev != tc.wantSeverity {
+					t.Errorf("psi-memory severity = %q, want %q (boundary %v)", sev, tc.wantSeverity, tc.in.PSIsSomeAvg10)
+				}
+			} else if len(tc.wantIDs) == 0 && tc.in.HasPSI {
+				for _, a := range got {
+					if a.ID == "psi-memory" {
+						t.Errorf("psi-memory fired at %v%% — the signal must stay silent below the amber line", tc.in.PSIsSomeAvg10)
+					}
+				}
+			}
 		})
 	}
 }
@@ -269,6 +306,37 @@ func TestPlaybookAdviceAnchorsAreReachable(t *testing.T) {
 		if !seen[want] {
 			t.Errorf("no alert quoted the %q anchor — the contract's five signals must all be reachable", want)
 		}
+	}
+}
+
+// TestFormatBytesTiesRoundHalfUpToMatchUI pins F-M1: the Go formatter must
+// round HALF-UP, like the UI's toFixed, so an alert row and the modal cell
+// beside it never print two different values for the same bytes.
+// strconv.FormatFloat is ties-to-even, so the un-rounded shape disagreed
+// with the page on every exact .x5 / .xx5 value. The values below are the
+// measured UI targets — they are the authority, and each one goes RED if the
+// math.Round is dropped (or replaced by a truncation).
+func TestFormatBytesTiesRoundHalfUpToMatchUI(t *testing.T) {
+	cases := []struct {
+		in   uint64
+		want string
+	}{
+		{1310720, "1.3 MB"},     // 1.25 MiB: half-up 1.3 (ties-to-even said 1.2)
+		{3355443200, "3.13 GB"}, // 3.125 GiB: half-up 3.13 (ties-to-even said 3.12)
+		{1280, "1.3 KB"},        // the same .x5 tie in the KB band
+	}
+	for _, c := range cases {
+		if got := formatBytes(c.in); got != c.want {
+			t.Errorf("formatBytes(%d) = %q, want %q (half-up, like the UI's toFixed)", c.in, got, c.want)
+		}
+	}
+
+	// Band boundaries and non-tie values keep their old truth: a value below
+	// 1 MiB stays in the KB band (524288 = 512 KiB renders as "512.0 KB",
+	// never a fractional MB), and the existing non-tie tables in
+	// TestFormatBytesAndPct keep passing unchanged.
+	if got := formatBytes(524288); got != "512.0 KB" {
+		t.Errorf("formatBytes(524288) = %q, want 512.0 KB (below 1 MiB stays KB)", got)
 	}
 }
 

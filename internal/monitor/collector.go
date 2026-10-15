@@ -247,6 +247,16 @@ func (c *Collector) Collect(instances []InputInstance, connTypes map[string]stri
 		if is.Status != "running" {
 			continue
 		}
+		// F-m3: an UNREADABLE tree is UNKNOWN, not a small one. The row
+		// carries SubtreeRSS=main-PID-only (the one process we could
+		// sample) and ChildCount=0, so feeding it to the subtree/child-count
+		// evaluator would fire "subtree > 40% of RAM" off an unreadable
+		// tree — a measured claim about a measurement that never happened,
+		// in a UI that already renders the row as "unavailable". Skip it:
+		// the tree must be READ before its numbers may alert.
+		if is.TreeUnavailable {
+			continue
+		}
 		instTrees = append(instTrees, InstanceTree{
 			ID:         is.ID,
 			Name:       is.Name,

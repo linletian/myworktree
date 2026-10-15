@@ -242,12 +242,23 @@ walk:
 		cur := queue[0]
 		queue = queue[1:]
 		if cur.depth >= maxTreeDepth {
-			// G4: truncation is a fact about dropped data, not about
-			// touching a line. One map read tells whether this node had
-			// children past the cap; an unknown answer counts as "may
-			// have dropped data" — floor semantics, never a lie.
-			if kids, known := ix.children(cur.pid); !known || len(kids) > 0 {
+			// G4: truncation is a fact about DROPPED DATA, not about
+			// touching a line. A kid that is already in `visited` is a
+			// back-edge (cycle / pid-reuse artifact): it was collected (or
+			// is an ancestor) — nothing is dropped by not expanding it, so
+			// counting it would claim a floor on a complete census. Set
+			// Truncated only when at least one kid is NOT in visited, or
+			// when the snapshot cannot speak for this pid at all (unknown
+			// ⇒ may have had descendants we never saw — floor semantics).
+			if kids, known := ix.children(cur.pid); !known {
 				st.Truncated = true
+			} else {
+				for _, kid := range kids {
+					if !visited[kid] {
+						st.Truncated = true
+						break
+					}
+				}
 			}
 			continue
 		}
