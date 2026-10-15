@@ -2,6 +2,7 @@ package monitor
 
 import (
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -222,28 +223,31 @@ func TestEvaluateAlertsPSIRedIsOneEntry(t *testing.T) {
 	}
 }
 
-// TestEvaluateAlertsPartialTreeRendersLowerBound pins F-A2m1's display
-// half: an instance whose subtree could not be ENUMERATED (Partial=true —
+// TestEvaluateAlertsPartialTreeRendersLowerBound pins the display half of
+// F-A2m1 + F-N6: a row whose subtree could not be ENUMERATED (Unreadable —
 // what the collector feeds for a tree_unavailable row) still fires
-// subtree-rss off its MEASURED main-PID RSS. That number is a LOWER BOUND
-// on the real subtree (true subtree = main PID + descendants ≥ main PID),
-// so Current must lead with "≥" and name the reason; a non-partial row
-// keeps the exact pre-existing shape byte-for-byte.
+// subtree-rss off its MEASURED main-PID RSS, and a row whose walk was
+// CAPPED (children_truncated) fires off everything the walk did measure.
+// Both numbers are LOWER BOUNDS on the real subtree (true subtree = measured
+// + the descendants that were never read), so Current must lead with "≥" and
+// name the reason; a readable, uncapped row keeps the exact pre-existing
+// shape byte-for-byte. F-N5 adds the other half: an unreadable row's advice
+// must name the /proc walk, not a children list that row does not render.
 func TestEvaluateAlertsPartialTreeRendersLowerBound(t *testing.T) {
 	const total = uint64(1 << 20) // 1 MiB: any RSS is past the 40% line
 	const rss = uint64(1 << 19)   // 512 KiB = 50% — over the amber line
 
-	partial := EvaluateAlerts(AlertInput{
+	unreadable := EvaluateAlerts(AlertInput{
 		TotalBytes:     total,
 		AvailableBytes: total,
 		Instances: []InstanceTree{
-			{ID: "inst-p", Name: "partial", SubtreeRSS: rss, ChildCount: 0, Partial: true},
+			{ID: "inst-p", Name: "partial", SubtreeRSS: rss, ChildCount: 0, Unreadable: true},
 		},
 	})
-	if len(partial) != 1 || partial[0].ID != "subtree-rss:inst-p" {
-		t.Fatalf("a partial row's main-PID RSS is MEASURED and over the line — it must fire subtree-rss: %+v", partial)
+	if len(unreadable) != 1 || unreadable[0].ID != "subtree-rss:inst-p" {
+		t.Fatalf("an unreadable row's main-PID RSS is MEASURED and over the line — it must fire subtree-rss: %+v", unreadable)
 	}
-	cur := partial[0].Current
+	cur := unreadable[0].Current
 	if !strings.HasPrefix(cur, "≥") {
 		t.Errorf("Current must lead with a lower-bound sign, got %q", cur)
 	}
@@ -255,30 +259,84 @@ func TestEvaluateAlertsPartialTreeRendersLowerBound(t *testing.T) {
 			t.Errorf("Current must say %q — an unexplained bound reads as a census: %q", want, cur)
 		}
 	}
-	// The descendants are UNKNOWN, so child-count stays silent on a partial
-	// row: 0 is never a measured census.
-	for _, a := range partial {
+	// F-N5: the row renders "Tree unavailable", so "inspect the children
+	// below" is a dead end. The advice must name the walk itself and still
+	// point at the playbook anchor.
+	if strings.Contains(unreadable[0].Advice, "inspect this instance's children") {
+		t.Errorf("an UNREADABLE row has no children to inspect — the advice is a dead end: %q", unreadable[0].Advice)
+	}
+	for _, want := range []string{"main PID", "/proc walk failed", "permissions", "hidepid", "docs/PLAYBOOK-memory-alerts.md#subtree-rss"} {
+		if !strings.Contains(unreadable[0].Advice, want) {
+			t.Errorf("the unreadable advice must say %q: %q", want, unreadable[0].Advice)
+		}
+	}
+	// The descendants are UNKNOWN, so child-count stays silent on an
+	// unreadable row: 0 is never a measured census.
+	for _, a := range unreadable {
 		if strings.HasPrefix(a.ID, "child-count:") {
 			t.Errorf("child-count fired on an unenumerated tree: %q", a.ID)
 		}
 	}
 
-	// The NON-partial half of the same pin: identical input minus Partial
-	// renders the old exact form — no ≥, no footnote. This is what makes the
-	// assertions above non-vacuous: the branch CHANGES the rendering, it is
-	// not decoration on top of it.
+	// F-N6, the capped half: the same value on a row the walk capped is a
+	// lower bound for a DIFFERENT reason — descendants were dropped — and
+	// the child-count floor it does carry renders "≥ N".
+	capped := EvaluateAlerts(AlertInput{
+		TotalBytes:     total,
+		AvailableBytes: total,
+		Instances: []InstanceTree{
+			{ID: "inst-c", Name: "capped", SubtreeRSS: rss, ChildCount: maxTreeChildren, Capped: true},
+		},
+	})
+	if len(capped) != 2 || capped[0].ID != "subtree-rss:inst-c" || capped[1].ID != "child-count:inst-c" {
+		t.Fatalf("a capped row fires both subtree-rss and its child-count floor: %+v", capped)
+	}
+	cur = capped[0].Current
+	if !strings.HasPrefix(cur, "≥") {
+		t.Errorf("a capped row's RSS is a lower bound too — Current must lead with ≥, got %q", cur)
+	}
+	if !strings.Contains(cur, "≥ "+formatBytes(rss)) {
+		t.Errorf("the capped bytes must carry the bound: %q", cur)
+	}
+	for _, want := range []string{"walk capped", "descendants not fully counted", "actual is higher"} {
+		if !strings.Contains(cur, want) {
+			t.Errorf("the capped bound must say %q: %q", want, cur)
+		}
+	}
+	if strings.Contains(cur, "unenumerated") {
+		t.Errorf("a capped row is not an unenumerated row — the reasons must not be conflated: %q", cur)
+	}
+	if want := "≥ " + strconv.Itoa(maxTreeChildren); capped[1].Current != want {
+		t.Errorf("capped child-count Current = %q, want the floor form %q", capped[1].Current, want)
+	}
+	// Capped rows DO render top-N + "and M more", so the original
+	// inspect-the-children advice is still actionable and must survive.
+	if !strings.Contains(capped[0].Advice, "inspect this instance's children") {
+		t.Errorf("a capped row keeps the actionable advice: %q", capped[0].Advice)
+	}
+
+	// The READABLE + UNcapped half of the same pin: identical input minus the
+	// markers renders the old exact form — no ≥, no footnote, no "≥" on the
+	// child count. This is what makes the assertions above non-vacuous: the
+	// branches CHANGE the rendering, they are not decoration on top of it.
 	exact := EvaluateAlerts(AlertInput{
 		TotalBytes:     total,
 		AvailableBytes: total,
 		Instances: []InstanceTree{
-			{ID: "inst-e", Name: "exact", SubtreeRSS: rss, ChildCount: 0, Partial: false},
+			{ID: "inst-e", Name: "exact", SubtreeRSS: rss, ChildCount: maxTreeChildren, Unreadable: false, Capped: false},
 		},
 	})
-	if len(exact) != 1 || exact[0].ID != "subtree-rss:inst-e" {
-		t.Fatalf("non-partial row must still fire subtree-rss: %+v", exact)
+	if len(exact) != 2 || exact[0].ID != "subtree-rss:inst-e" || exact[1].ID != "child-count:inst-e" {
+		t.Fatalf("readable + uncapped row must still fire both signals: %+v", exact)
 	}
 	if want := pct(50.0) + " (" + formatBytes(rss) + ")"; exact[0].Current != want {
-		t.Errorf("non-partial Current = %q, want the unchanged exact form %q", exact[0].Current, want)
+		t.Errorf("readable Current = %q, want the unchanged exact form %q", exact[0].Current, want)
+	}
+	if want := strconv.Itoa(maxTreeChildren); exact[1].Current != want {
+		t.Errorf("readable child-count Current = %q, want the exact census %q", exact[1].Current, want)
+	}
+	if !strings.Contains(exact[0].Advice, "inspect this instance's children") {
+		t.Errorf("a readable row keeps the inspect-the-children advice: %q", exact[0].Advice)
 	}
 }
 

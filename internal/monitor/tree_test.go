@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -528,21 +529,22 @@ func TestWalkSubtreeNilIndexIsUnavailable(t *testing.T) {
 	}
 }
 
-// TestCollectUnavailableTreeFiresLowerBoundSubtreeAlert pins F-A2m1: an
+// TestCollectUnavailableTreeFiresLowerBoundSubtreeAlert pins F-A2m1 + F-N5: an
 // UNREADABLE tree is UNKNOWN for its descendants (child_count stays 0 and
 // the child-count signal stays silent), but its main-PID RSS is a MEASURED
 // number — memRSS comes from sampleProcess(inst.PID) in Phase 1,
 // INDEPENDENT of the enumeration — so SubtreeRSS = memRSS + 0 = memRSS is a
 // LOWER BOUND. memRSS > 40% of total RAM therefore PROVES the real subtree
 // crosses 40%, and the alert must fire, rendered as a "≥" bound rather than
-// an exact figure.
+// an exact figure — with advice aimed at the /proc walk itself (F-N5), since
+// the row renders "Tree unavailable" and has no children to inspect.
 //
 // Non-vacuity is structural: the readable control proves the same row's
 // numbers CAN cross the threshold on this machine, the unavailable row
 // proves they DO cross it when the descendants are unenumerated, and the
 // under-threshold control proves the alert is not unconditionally emitted.
 // Re-introducing the `if is.TreeUnavailable { continue }` skip (round-2 m3)
-// or dropping the Partial "≥" branch turns this RED.
+// or dropping the Unreadable "≥" branch turns this RED.
 func TestCollectUnavailableTreeFiresLowerBoundSubtreeAlert(t *testing.T) {
 	oldPSI, oldMem := readPSIMemory, readVirtualMemory
 	t.Cleanup(func() { readPSIMemory, readVirtualMemory = oldPSI, oldMem })
@@ -586,6 +588,11 @@ func TestCollectUnavailableTreeFiresLowerBoundSubtreeAlert(t *testing.T) {
 	if strings.Contains(readable.Current, "unenumerated") {
 		t.Errorf("readable row must not claim unenumerated children: %q", readable.Current)
 	}
+	// F-N5: the readable row is exactly the one the original advice is FOR —
+	// its children ARE rendered below, and the advice must keep saying so.
+	if !strings.Contains(readable.Advice, "inspect this instance's children") {
+		t.Errorf("a readable row keeps the inspect-the-children advice: %q", readable.Advice)
+	}
 
 	// Now the tree is UNREADABLE: the enumeration does not know the root.
 	// The row keeps its MEASURED main-PID RSS and fires as a lower bound.
@@ -618,6 +625,16 @@ func TestCollectUnavailableTreeFiresLowerBoundSubtreeAlert(t *testing.T) {
 	if !strings.Contains(partial.Current, "children unenumerated") {
 		t.Errorf("the bound must say WHY it is a bound: %q", partial.Current)
 	}
+	// F-N5: this row renders "Tree unavailable" in the modal — there is no
+	// children list to inspect, so the advice must name the walk instead.
+	if strings.Contains(partial.Advice, "inspect this instance's children") {
+		t.Errorf("an unreadable row's advice must not send the user to children that are not rendered: %q", partial.Advice)
+	}
+	for _, want := range []string{"main PID", "/proc walk failed", "permissions", "hidepid", "docs/PLAYBOOK-memory-alerts.md#subtree-rss"} {
+		if !strings.Contains(partial.Advice, want) {
+			t.Errorf("the unreadable advice must say %q: %q", want, partial.Advice)
+		}
+	}
 	// Child-count stays silent on an unreadable tree — the descendants are
 	// unknown, and 0 must never be reported as a measured census.
 	for _, a := range st.Alerts {
@@ -635,6 +652,119 @@ func TestCollectUnavailableTreeFiresLowerBoundSubtreeAlert(t *testing.T) {
 	st = (&Collector{}).Collect(instances, map[string]string{})
 	if fired := subtreeAlertIDs(st.Alerts); len(fired) != 0 {
 		t.Errorf("under-threshold control fired %v — the alert must be the 40%% ratio's doing", fired)
+	}
+}
+
+// TestCollectCappedTreeRendersLowerBounds pins the F-N6 half from the
+// collector's side: a walk that hit the 512-descendant cap
+// (children_truncated) DROPPED data, so child_count AND subtree_rss_bytes
+// are floors, not censuses. The alert must still fire — everything measured
+// so far is provably over the line — but rendered "≥" for the subtree RSS
+// and "≥ N" for the child count, with the reason named.
+//
+// Non-vacuity is a paired control over the SAME forest shape: a tree with
+// EXACTLY maxTreeChildren descendants drops nothing (the cap lights only on
+// the 513th) and renders both numbers in the exact form. So the only
+// difference between the capped and the exact row is the cap itself —
+// replacing the >512 forest with the exact-512 one makes the "≥" assertions
+// RED, and putting "≥" on the exact control makes them RED the other way.
+func TestCollectCappedTreeRendersLowerBounds(t *testing.T) {
+	oldPSI, oldMem := readPSIMemory, readVirtualMemory
+	t.Cleanup(func() { readPSIMemory, readVirtualMemory = oldPSI, oldMem })
+	readPSIMemory = func() (string, error) { return "some avg10=0 avg60=0 avg300=0 total=0\n", nil }
+	// A 1 MiB "system": the forest below carries 1 MiB per descendant, so the
+	// measured descendant RSS alone is ~512 MiB — over the 40% line by a
+	// deterministic margin that does not depend on this process's own RSS.
+	readVirtualMemory = func() (*mem.VirtualMemoryStat, error) {
+		return &mem.VirtualMemoryStat{Total: 1 << 20, Available: 1 << 20}, nil
+	}
+
+	const root = 4242 // the instance main PID (never this process's pid)
+	// forest builds root with n one-level descendants, each 1 MiB.
+	forest := func(n int) fakeTree {
+		kids := map[int][]int{}
+		infos := map[int]procInfo{root: info(0, "mwbeta", 1)}
+		flat := make([]int, 0, n)
+		for i := 0; i < n; i++ {
+			pid := root + 1 + i
+			flat = append(flat, pid)
+			infos[pid] = info(root, fmt.Sprintf("fake-serve%d", i), 1<<20)
+		}
+		kids[root] = flat
+		return fakeTree{kids: kids, infos: infos}
+	}
+	instances := []InputInstance{{ID: "inst-cap", Name: "capped", PID: root, Status: "running"}}
+
+	// CAPPED: more than maxTreeChildren descendants — the walk stops at the
+	// cap and says so.
+	installFakeTree(t, forest(maxTreeChildren+88))
+	st := (&Collector{}).Collect(instances, map[string]string{})
+	row := st.Instances[0]
+	if !row.ChildrenTruncated {
+		t.Fatalf("a %d-descendant forest must report children_truncated: %+v", maxTreeChildren+88, row)
+	}
+	if row.ChildCount != maxTreeChildren {
+		t.Errorf("child_count = %d, want the capped floor %d", row.ChildCount, maxTreeChildren)
+	}
+	if row.SubtreeRSSBytes == 0 {
+		t.Fatal("precondition: the capped row carries no RSS — the alert below would be vacuous")
+	}
+	sub := subtreeAlert(st.Alerts)
+	if sub == nil {
+		t.Fatalf("a capped row with %d measured bytes fired nothing — the floor must still light the signal", row.SubtreeRSSBytes)
+	}
+	if !strings.HasPrefix(sub.Current, "≥") {
+		t.Errorf("a capped row's subtree RSS is a lower bound too (F-N6), got %q", sub.Current)
+	}
+	if !strings.Contains(sub.Current, "≥ "+formatBytes(row.SubtreeRSSBytes)) {
+		t.Errorf("the capped bytes must carry the ≥ bound: %q", sub.Current)
+	}
+	for _, want := range []string{"walk capped", "descendants not fully counted", "actual is higher"} {
+		if !strings.Contains(sub.Current, want) {
+			t.Errorf("the capped bound must say %q: %q", want, sub.Current)
+		}
+	}
+	cc := childCountAlert(st.Alerts)
+	if cc == nil {
+		t.Fatal("capped child_count is over the amber line — the child-count alert must fire")
+	}
+	if want := "≥ " + strconv.Itoa(row.ChildCount); cc.Current != want {
+		t.Errorf("capped child-count Current = %q, want the floor form %q", cc.Current, want)
+	}
+	// A capped row still renders top-N + "and M more" in the modal, so the
+	// inspect-the-children advice stays actionable for it (only UNREADABLE
+	// rows get the F-N5 advice).
+	if !strings.Contains(sub.Advice, "inspect this instance's children") {
+		t.Errorf("a capped row keeps the actionable advice: %q", sub.Advice)
+	}
+
+	// CONTROL: exactly maxTreeChildren descendants drops NOTHING — the same
+	// numbers, the same thresholds, the exact (non-≥) rendering.
+	installFakeTree(t, forest(maxTreeChildren))
+	st = (&Collector{}).Collect(instances, map[string]string{})
+	row = st.Instances[0]
+	if row.ChildrenTruncated {
+		t.Errorf("an exactly-%d-descendant forest hit no cap — nothing was dropped: %+v", maxTreeChildren, row)
+	}
+	if row.ChildCount != maxTreeChildren {
+		t.Errorf("child_count = %d, want the exact census %d", row.ChildCount, maxTreeChildren)
+	}
+	exact := subtreeAlert(st.Alerts)
+	if exact == nil {
+		t.Fatalf("control: a %d-byte subtree fired nothing — the alert would be vacuous", row.SubtreeRSSBytes)
+	}
+	if strings.HasPrefix(exact.Current, "≥") {
+		t.Errorf("an exact census must not claim a bound, got %q", exact.Current)
+	}
+	if want := pct(float64(row.SubtreeRSSBytes)/float64(1<<20)*100) + " (" + formatBytes(row.SubtreeRSSBytes) + ")"; exact.Current != want {
+		t.Errorf("exact Current = %q, want %q", exact.Current, want)
+	}
+	cc = childCountAlert(st.Alerts)
+	if cc == nil {
+		t.Fatal("control: the child-count alert must fire on the exact control too")
+	}
+	if want := strconv.Itoa(row.ChildCount); cc.Current != want {
+		t.Errorf("exact child-count Current = %q, want the exact census %q", cc.Current, want)
 	}
 }
 
@@ -656,6 +786,16 @@ func subtreeAlertIDs(alerts []Alert) []string {
 		}
 	}
 	return out
+}
+
+// childCountAlert returns the single child-count alert in the set, or nil.
+func childCountAlert(alerts []Alert) *Alert {
+	for i := range alerts {
+		if strings.HasPrefix(alerts[i].ID, "child-count:") {
+			return &alerts[i]
+		}
+	}
+	return nil
 }
 
 func TestParsePSIsomeAvg10(t *testing.T) {

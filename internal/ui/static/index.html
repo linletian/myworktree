@@ -7158,8 +7158,17 @@
             // Review G3: an unreadable tree renders its state, never its
             // zeros — "No live child processes" over a failed walk would
             // dress up a procfs error as a measured all-clear.
+            //
+            // F-A3m1: the old sentence claimed "child count and RSS are
+            // unknown, not zero", which is only half true — child_count IS
+            // unknown, but subtree RSS is a MEASURED number (the main PID
+            // alone), and the subtree-rss alert on the very same screen
+            // renders it as "≥ X% (≥ Y; main PID measured, …)". Saying
+            // "unknown" above a measured lower bound is the same
+            // disagreement the feature exists to remove, so the note now
+            // states each half of the truth separately.
             if (inst && inst.tree_unavailable) {
-                return '<span class="subtree-empty">Tree unavailable \u2014 /proc walk failed; child count and RSS are unknown, not zero</span>';
+                return '<span class="subtree-empty">Tree unavailable \u2014 /proc walk failed; child count is unknown (not zero), subtree RSS is the measured main PID alone \u2014 a lower bound, actual is higher</span>';
             }
             const kids = (inst && inst.children) || [];
             const count = (inst && inst.child_count) || 0;
@@ -7195,6 +7204,12 @@
         // processes in the same terminal scope (other daemons, session
         // CLIs) are not visible here — the alerts are a local truth, and
         // acting on them is the user's call.
+        //
+        // F-A3m1: the tree_unavailable sentence used to say "its numbers
+        // are unknown, not measured" — true of child_count, false of
+        // subtree RSS, which is measured (main PID alone) and rendered as
+        // a "≥" lower bound by the alert on the same screen. Each half now
+        // states its own truth.
         function monitorFootnoteText(data) {
             let kids = 0, ram = 0, running = 0;
             for (const i of ((data && data.instances) || [])) {
@@ -7206,7 +7221,7 @@
             return "Subtree measured: " + running + " running " + (running === 1 ? "instance" : "instances")
                 + " \u00B7 " + kids + " child processes \u00B7 " + formatBytes(ram) + " subtree RSS (main PID + descendants)."
                 + " myworktree sees its own instance trees + system signals (PSI / available RAM) \u2014 sibling processes in the same terminal scope are not visible here, so alerts are a local truth."
-                + " A row marked \u201ctree unavailable\u201d had an unreadable /proc walk \u2014 its numbers are unknown, not measured; walk-capped counts are floors."
+                + " A row marked \u201ctree unavailable\u201d had an unreadable /proc walk \u2014 its child count is unknown, its subtree RSS is a measured lower bound (main PID only); walk-capped counts are floors."
                 + " \u00B7 Counts can also be floors without any walk cap: a process that exits between the enumeration and the read drops its branch silently (churn is normal, not an error), so child_count / subtree RSS may be a lower bound even when no row reports a cap."
                 + " Detection only: every action is yours (docs/PLAYBOOK-memory-alerts.md).";
         }
@@ -7345,14 +7360,23 @@
 
         async function fetchMonitorStats() {
             // Defense in depth (F-N1): a stray or leaked tick must be a
-            // no-op. The 'close' handler owns clearing monitorTimer — this
-            // is the backstop for a tick already in flight when the dialog
-            // closed, so no full /proc enumeration and no repaint of a
-            // dialog nobody is looking at.
+            // no-op. This pre-await check is the BACKSTOP for a tick that
+            // had NOT YET STARTED — one queued behind the dialog's own
+            // close (the interval already cleared by handleMonitorDialogClose,
+            // or a click-shaped call racing it) never pays for the full
+            // /proc enumeration.
             const dlg = document.getElementById("modal-monitor");
             if (dlg && !dlg.open) return;
             try {
                 const data = await api("/api/instances/stats");
+                // F-N4: re-check AFTER the await, before the repaint. The
+                // pre-await guard above has already been passed by the tick
+                // that was IN FLIGHT when the dialog closed — a stats
+                // request can straddle the close — and rendering here would
+                // paint the modal's FULL alert set on the badge after close
+                // (F-N1's symptom, back for one tick). The post-await check
+                // is what covers that one; the pre-await check cannot.
+                if (!document.getElementById("modal-monitor").open) return;
                 renderMonitorStats(data);
             } catch (e) {
                 console.error("Failed to fetch monitor stats:", e);

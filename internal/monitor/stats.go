@@ -42,13 +42,17 @@ type InstanceStat struct {
 	// undisplayed tail is NOT truncation — it reaches the UI as "and M
 	// more", child_count − len(children), and child_count stays the exact
 	// census). ChildrenTruncated is true ONLY when the walk hit a
-	// depth/count cap, where ChildCount is then a floor, not a census
-	// (ARB-F1). For stopped instances these fields are all zero — "not
-	// running", not "no children".
+	// depth/count cap, where ChildCount AND SubtreeRSSBytes are then
+	// floors, not censuses (ARB-F1 + F-N6) — everything the walk dropped
+	// is missing from both, and the alerts render them "≥". For stopped
+	// instances these fields are all zero — "not running", not "no
+	// children".
 	// TreeUnavailable (review G3) marks "the tree could not be read" —
 	// the /proc enumeration failed or the main PID was not in it. The
 	// numbers on such a row are UNKNOWN, not measured zeros; the UI
-	// renders "unavailable" instead of digits.
+	// renders "unavailable" instead of digits. SubtreeRSSBytes is the one
+	// exception: it is the measured main-PID RSS, still reported — as a
+	// lower bound.
 	ChildCount        int         `json:"child_count"`
 	SubtreeRSSBytes   uint64      `json:"subtree_rss_bytes"`
 	Children          []ChildProc `json:"children,omitempty"`

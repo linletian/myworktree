@@ -10,7 +10,9 @@
 // down entirely while the monitor modal is open so the modal's 2s full poll
 // owns the badge without flicker — and the modal's own close path, which is
 // ONE dialog 'close' event shared by the close button and the Esc key: it
-// stops that 2s poll and hands the badge back to the light poll (F-N1).
+// stops that 2s poll and hands the badge back to the light poll (F-N1), and
+// the in-flight stats response that would otherwise repaint the badge after
+// that close (F-N4).
 //
 // Same arrangement as narrow_drawer.test.mjs: every function is SLICED from
 // the shipped index.html and evaluated against stubbed browser state — no
@@ -171,23 +173,35 @@ function makeBar({ withAlerts = true, withTransport = true } = {}) {
 // close() mirrors the real contract: it flips `open` and fires 'close' ONCE
 // per actual close — a second close on an already-closed dialog does
 // nothing, which is what keeps a repeat button click from re-fetching.
+// `closes` counts actual close dispatches, so a case can tell "the dialog
+// closed while my request was in flight" from "it never closed at all".
 function dialogStub({ open = true } = {}) {
   const listeners = {};
   return {
     open,
     listeners,
+    closes: 0,
     addEventListener(type, fn) { (listeners[type] ??= []).push(fn); },
     dispatch(type) { for (const fn of listeners[type] || []) fn(); },
     showModal() { this.open = true; },
-    close() { if (this.open) { this.open = false; this.dispatch("close"); } },
+    close() { if (this.open) { this.open = false; this.closes++; this.dispatch("close"); } },
   };
 }
 
-function harness(doc, { render = () => {} } = {}) {
+// deferApi hands the case control of the api() promise's RESOLUTION: the
+// request goes out immediately and settles only when harness.resolveApi is
+// called. That is the F-N4 shape — a stats response landing after the dialog
+// already closed — which a promise that resolves on its own cannot express.
+function harness(doc, { render = () => {}, deferApi = false } = {}) {
   const intervals = [];
   let nextHandle = 1;
   const apiCalls = [];
-  const apiImpl = async (path) => { apiCalls.push(path); return harness._apiReply; };
+  let releaseApi = null;
+  const apiImpl = (path) => {
+    apiCalls.push(path);
+    if (deferApi) return new Promise((resolve) => { releaseApi = resolve; });
+    return Promise.resolve(harness._apiReply);
+  };
   const api = (path, opts) => apiImpl(path, opts);
   const document = doc ?? makeBar();
   const m = monitorFactory({
@@ -198,7 +212,7 @@ function harness(doc, { render = () => {} } = {}) {
     clearInterval: (h) => { const i = intervals.findIndex(x => x.handle === h); if (i >= 0) intervals.splice(i, 1); },
     renderMonitorStats: render,
   });
-  return { m, intervals, apiCalls, document };
+  return { m, intervals, apiCalls, document, resolveApi: (v) => releaseApi(v) };
 }
 
 const A = (sev, id, extra = {}) => ({
@@ -309,6 +323,13 @@ test("tree_unavailable renders unavailable, never measured zeros (review G3)", (
   const html = m.monitorSubtreeRowsHTML({ tree_unavailable: true, child_count: 0 }, 1700000000000);
   assert.match(html, /unavailable/i);
   assert.ok(!html.includes("No live child processes"), "unreadable must not render as measured-empty: " + html);
+  // F-A3m1: the row's own sentence must not call the subtree RSS "unknown"
+  // — it is MEASURED (main PID alone) and the subtree-rss alert on the same
+  // screen renders it as a "≥" lower bound. Each half gets its own truth.
+  assert.match(html, /child count is unknown \(not zero\)/, "the child count is the unknown half: " + html);
+  assert.match(html, /subtree RSS is the measured main PID alone — a lower bound, actual is higher/,
+    "the RSS half is measured and a lower bound, never 'unknown': " + html);
+  assert.ok(!html.includes("RSS are unknown"), "the old 'both unknown' wording contradicts the ≥ alert: " + html);
   // Healthy paths keep their old truths — the marker only moves when the
   // server actually set it.
   assert.equal(m.subtreeNoteText({ child_count: 0, tree_unavailable: false }), "");
@@ -372,6 +393,14 @@ test("monitorFootnoteText: measured totals + boundary + playbook, never the old 
   // walk cap. Documented in API.md too; pinned here so the sentence cannot
   // quietly disappear from the footnote again.
   assert.match(text, /lower bound even when no row reports a cap/, "the footnote must state the churn floor (F-n5)");
+  // F-A3m1: the tree_unavailable sentence must not call the subtree RSS
+  // "unknown, not measured" — it is measured (main PID only) and the alert
+  // on the same screen renders it as a ≥ lower bound. Only the child count
+  // is unknown.
+  assert.match(text, /had an unreadable \/proc walk — its child count is unknown, its subtree RSS is a measured lower bound \(main PID only\)/,
+    "the footnote must separate the unknown child count from the measured lower-bound RSS: " + text);
+  assert.ok(!text.includes("its numbers are unknown, not measured"),
+    "the old 'numbers are unknown' wording contradicts the ≥ alert (F-A3m1): " + text);
   assert.ok(!text.includes("not counted"), "the pre-#111 disclaimer must be gone");
   assert.equal(m.monitorFootnoteText(null).includes("0 running instances"), true);
 });
@@ -566,6 +595,46 @@ test("fetchMonitorStats is a no-op once the dialog is closed (F-N1)", async () =
   await h.m.fetchMonitorStats();
   assert.equal(h.apiCalls.length, 1, "an open dialog still polls /api/instances/stats");
   assert.equal(renders, 1, "an open dialog still renders");
+});
+
+// F-N4: the pre-await guard is the backstop for a tick that had NOT YET
+// STARTED. A tick already IN FLIGHT when the dialog closed passed it
+// before it could matter, and the response then repainted the modal's FULL
+// alert set on the badge after close — F-N1's exact symptom, back for one
+// ~10s poll. The post-await re-check is the only thing that covers it.
+test("a stats response that lands after the dialog closed does NOT repaint the badge (F-N4)", async () => {
+  const doc = makeBar();
+  const dlg = dialogStub({ open: true });
+  doc.els["modal-monitor"] = dlg;
+  let renders = 0;
+  const h = harness(doc, { render: () => { renders++; }, deferApi: true });
+  harness._apiReply = { instances: [], worktrees: [], global: {}, alerts: [], system: {} };
+
+  // The tick STARTS while the dialog is open (so the pre-await guard
+  // passes), and its response is still in flight.
+  const inFlight = h.m.fetchMonitorStats();
+  assert.equal(h.apiCalls.length, 1, "the tick started while the dialog was open");
+  assert.equal(dlg.open, true, "precondition: the dialog is open when the tick starts");
+
+  // The dialog closes while the request is ALREADY in flight.
+  dlg.close();
+  assert.equal(dlg.open, false);
+  assert.equal(dlg.closes, 1, "the close actually dispatched");
+
+  // The response lands now. Without the post-await re-check this repaints
+  // the full alert set on a badge nobody is looking at.
+  h.resolveApi(harness._apiReply);
+  await inFlight;
+  assert.equal(renders, 0, "an in-flight response that lands after close must not repaint (F-N4)");
+
+  // Control: the same deferred shape with the dialog STILL open renders —
+  // the guard cannot pass by making the function inert.
+  dlg.open = true;
+  const second = h.m.fetchMonitorStats();
+  assert.equal(h.apiCalls.length, 2, "the open dialog's tick fetches again");
+  h.resolveApi(harness._apiReply);
+  await second;
+  assert.equal(renders, 1, "an open dialog still renders its stats response");
 });
 
 test("toggleMonitorTree flips the Set and the DOM row optimistically", () => {

@@ -247,7 +247,7 @@ func (c *Collector) Collect(instances []InputInstance, connTypes map[string]stri
 		if is.Status != "running" {
 			continue
 		}
-		// F-A2m1: an UNREADABLE tree is UNKNOWN for its DESCENDANTS
+		// F-A2m1 + F-N6: an UNREADABLE tree is UNKNOWN for its DESCENDANTS
 		// (child_count stays 0 and the child-count signal never fires) —
 		// but its main-PID RSS is a MEASURED number: memRSS comes from
 		// sampleProcess(inst.PID) in Phase 1, INDEPENDENT of the
@@ -256,14 +256,20 @@ func (c *Collector) Collect(instances []InputInstance, connTypes map[string]stri
 		// descendants >= memRSS). memRSS > 40% of RAM therefore PROVES
 		// the real subtree crosses 40%: the alert is provable, not
 		// fabricated, and skipping the row would silence the one signal
-		// that reveals the blind spot eating RAM. Feed it with Partial =
-		// is.TreeUnavailable and let the evaluator render the bound.
+		// that reveals the blind spot eating RAM.
+		//
+		// A walk-CAPPED row is the same principle from the other side
+		// (F-N6): the cap dropped descendants, so both child_count and
+		// subtree_rss are floors, and the evaluator renders them "≥"
+		// rather than as censuses. Feed both markers and let the
+		// evaluator render the bounds.
 		instTrees = append(instTrees, InstanceTree{
 			ID:         is.ID,
 			Name:       is.Name,
 			ChildCount: is.ChildCount,
 			SubtreeRSS: is.SubtreeRSSBytes,
-			Partial:    is.TreeUnavailable,
+			Unreadable: is.TreeUnavailable,
+			Capped:     is.ChildrenTruncated,
 		})
 	}
 	alerts := EvaluateAlerts(AlertInput{

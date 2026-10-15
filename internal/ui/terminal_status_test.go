@@ -242,7 +242,7 @@ func TestResponsiveLayerChangelogCounts(t *testing.T) {
 		{"testdata/touch_interaction.test.mjs", `new issue #100 L3 scenarios`},
 		{"testdata/terminal_touch_scroll.test.mjs", `new issue #100 R17 scenarios`},
 		{"testdata/quick_keys.test.mjs", `issue #100 quick-keys scenarios`}, // the file's TOTAL (PR1 subset uses unguarded wording per the house rule)
-		{"testdata/monitor_alerts.test.mjs", `cases — that file's total`},   // #111 P2 entry's total claim (issue #95: a count in prose must be pinned)
+		{"testdata/monitor_alerts.test.mjs", `cases — that file's total`},   // #111 P2 entry's total claim (issue #95: a count in prose must be pinned). DIGITS on purpose: 23 has no single English word, and the hyphenated "twenty-three" would make `(\w+)` capture only "three" — which is why the digits branch below exists.
 	} {
 		src, err := os.ReadFile(tc.file)
 		if err != nil {

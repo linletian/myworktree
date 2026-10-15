@@ -76,19 +76,33 @@ type Alert struct {
 
 // InstanceTree is one running instance's subtree aggregation fed to
 // EvaluateAlerts. ID/Name identify the instance the alert belongs to.
+//
+// The two markers below are the ONLY ways a row can be less than a census,
+// and they are stated separately because they mean different things
+// (F-N6) — collapsing them into one Partial flag hid which half of the
+// number was missing and what the user could still do about it (F-N5).
 type InstanceTree struct {
 	ID         string
 	Name       string
 	ChildCount int
 	SubtreeRSS uint64
-	// Partial is true when the instance's subtree could NOT be enumerated
-	// (tree_unavailable): ChildCount is then UNKNOWN (it stays 0 and the
-	// child-count signal deliberately stays silent), while SubtreeRSS is
+	// Unreadable is true when the instance's subtree could NOT be enumerated
+	// at all (tree_unavailable): ChildCount is then UNKNOWN (it stays 0 and
+	// the child-count signal deliberately stays silent), while SubtreeRSS is
 	// the MEASURED main-PID value — a LOWER BOUND on the real subtree,
 	// never a measured total. The subtree-rss alert renders as "≥" instead
 	// of an exact figure so the UI cannot present a floor as a census
-	// (F-A2m1).
-	Partial bool
+	// (F-A2m1), and its advice points at the /proc walk itself rather than
+	// at a children list that does not exist (F-N5).
+	Unreadable bool
+	// Capped is true when the walk hit a depth/count cap
+	// (children_truncated): some descendants were dropped, so ChildCount is
+	// a FLOOR and SubtreeRSS a LOWER BOUND — the same "floor ≠ census"
+	// principle F-A2m1 established for unreadable rows, now uniform
+	// (F-N6). SubtreeRSS stays provably over the line because it includes
+	// everything measured so far, so the alert still fires — rendered "≥",
+	// with the cap named.
+	Capped bool
 }
 
 // AlertInput is the complete sample set EvaluateAlerts consumes. It is pure
@@ -169,28 +183,55 @@ func EvaluateAlerts(in AlertInput) []Alert {
 		if inst.SubtreeRSS > 0 && in.TotalBytes > 0 {
 			rssPct := float64(inst.SubtreeRSS) / float64(in.TotalBytes) * 100
 			if rssPct > SubtreeRSSAmberPct {
-				// F-A2m1: a Partial row's SubtreeRSS is the measured
-				// main-PID value with its descendants unenumerated —
-				// a LOWER BOUND. Prefix "≥" on both the percentage and
-				// the bytes so a floor can never be read as a census,
-				// and say why in the same string.
-				ge := ""
-				bound := ""
-				if inst.Partial {
+				// F-A2m1 + F-N6: a partial row's SubtreeRSS is a LOWER
+				// BOUND on the real subtree, never a census — the
+				// descendants are either enumerated nowhere (Unreadable:
+				// the measured main PID alone) or dropped at a walk cap
+				// (Capped). Prefix "≥" on both the percentage and the
+				// bytes so a floor can never be read as a census, and say
+				// which kind of floor it is in the same string. A readable,
+				// uncapped row renders the exact form byte-for-byte as
+				// before: only a row that is provably partial reads "≥".
+				ge, bound := "", ""
+				switch {
+				case inst.Unreadable:
 					ge, bound = "≥ ", "; main PID measured, children unenumerated — actual is higher"
+				case inst.Capped:
+					ge, bound = "≥ ", "; walk capped, descendants not fully counted — actual is higher"
+				}
+				// F-N5: the descendants are the action ("inspect this
+				// instance's children in the table below"), and an
+				// UNREADABLE row has none to inspect — it renders "Tree
+				// unavailable", so the old advice was a dead end on exactly
+				// the worst rows. Name the walk itself: permissions /
+				// hidepid are what make a tree unreadable, and the playbook
+				// section covers both shapes. Capped rows DO show top-N +
+				// "and M more", so their advice stays as it was.
+				advice := "inspect this instance's children in the table below, then stop it if the growth is not yours to keep: docs/PLAYBOOK-memory-alerts.md#subtree-rss"
+				if inst.Unreadable {
+					advice = "the main PID alone already crossed the line and its /proc walk failed — check permissions / hidepid so the walk can read the tree, then stop the instance if the growth is not yours to keep: docs/PLAYBOOK-memory-alerts.md#subtree-rss"
 				}
 				alerts = append(alerts, alert(SeverityAmber, "subtree-rss:"+inst.ID,
 					"instance subtree RSS · "+inst.Name,
 					"> "+pct(SubtreeRSSAmberPct),
 					ge+pct(rssPct)+" ("+ge+formatBytes(inst.SubtreeRSS)+bound+")",
-					"inspect this instance's children in the table below, then stop it if the growth is not yours to keep: docs/PLAYBOOK-memory-alerts.md#subtree-rss"))
+					advice))
 			}
 		}
 		if inst.ChildCount > ChildCountAmber {
+			// F-N6: a CAPPED walk's census is a floor — descendants were
+			// dropped at the cap, so the real count is at least this and
+			// only a cap can put a floor past the 50 line. An UNREADABLE
+			// row has ChildCount 0 and never reaches here, so there is no
+			// "≥ 0" to explain. Exact (readable, uncapped) stays as it was.
+			current := strconv.Itoa(inst.ChildCount)
+			if inst.Capped {
+				current = "≥ " + strconv.Itoa(inst.ChildCount)
+			}
 			alerts = append(alerts, alert(SeverityAmber, "child-count:"+inst.ID,
 				"instance child processes · "+inst.Name,
 				"> "+strconv.Itoa(ChildCountAmber),
-				strconv.Itoa(inst.ChildCount),
+				current,
 				"a growing descendant count is a leak fingerprint — inspect and stop the leaker yourself: docs/PLAYBOOK-memory-alerts.md#child-count"))
 		}
 	}
