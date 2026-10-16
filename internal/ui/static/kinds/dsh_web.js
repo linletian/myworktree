@@ -55,6 +55,10 @@ class DshWebRenderer {
     constructor() {
         this._frames = new Map(); // instance id → iframe element
         this._currentFrame = null;
+        // instance id → last status syncStatus() observed, so the
+        // poll-driven self-heal (issue #120) tears the panel down only
+        // on ENTRY into the terminal bucket — see syncStatus().
+        this._syncPrevStatus = new Map();
     }
 
     activate(session, container) {
@@ -69,25 +73,13 @@ class DshWebRenderer {
         this._updateRemoteMask(dshPanel);
 
         const inst = session.instance;
+        // Re-baseline the sync gate on every activation (issue #120): the
+        // prev this activation leaves behind must describe THIS instance in
+        // its CURRENT status, so a stale prev from a previous activation can
+        // never make the next syncStatus() tick re-fire the teardown.
+        this._syncPrevStatus.set(session.id, inst ? inst.status : undefined);
         if (inst && inst.status === 'stopped') {
-            this.destroyFrame(session.id);
-            // Hide EVERY cached frame, not just the stopped one: switching
-            // from a running dsh-web instance to this stopped one never ran
-            // deactivate() (selectInstance only deactivates a DIFFERENT
-            // renderer), so the previous instance's keep-alive iframe is
-            // still visible and would stack half/half under the stopped
-            // overlay (issue #96). Only the overlay should be on screen.
-            this._showOnly(null);
-            if (dshWarning) {
-                dshWarning.hidden = true;
-                dshWarning.textContent = '';
-            }
-            this._stopMonitoring();
-            this._currentFrame = null;
-            this._showLoading(dshPanel, {
-                title: 'dsh instance stopped',
-                lines: ['instance:  ' + session.id],
-            });
+            this.teardownStopped(session);
             return;
         }
 
@@ -113,6 +105,126 @@ class DshWebRenderer {
         this._currentFrame = frame;
         this._startPolling(session, dshPanel, frame);
         this._startScopeMonitoring(session, dshPanel, dshWarning);
+    }
+
+    // teardownStopped — the single truth for what "this instance is
+    // stopped" means for this renderer (issue #120). Called from
+    // activate()'s stopped branch AND from syncStatus() when a refresh
+    // tick observes the instance ENTER the terminal bucket: a stop
+    // performed in another browser never changes this page's selection,
+    // so activate() never re-runs and the embedded page would otherwise
+    // stay alive and interactive forever.
+    teardownStopped(session) {
+        const dshPanel = document.getElementById('dsh-panel');
+        const dshWarning = document.getElementById('dsh-scope-warning');
+        this.destroyFrame(session.id);
+        // Hide EVERY cached frame, not just the stopped one: switching
+        // from a running dsh-web instance to this stopped one never ran
+        // deactivate() (selectInstance only deactivates a DIFFERENT
+        // renderer), so the previous instance's keep-alive iframe is
+        // still visible and would stack half/half under the stopped
+        // overlay (issue #96). Only the overlay should be on screen.
+        this._showOnly(null);
+        if (dshWarning) {
+            dshWarning.hidden = true;
+            dshWarning.textContent = '';
+        }
+        // Abort BOTH polling loops: the ready-wait poll (which would
+        // otherwise keep re-navigating a dead backend until its 60s
+        // timeout) and the scope poll (the scope endpoint answers 200
+        // forever for a stopped instance, so it never ends on its own).
+        if (this._abort) this._abort.aborted = true;
+        this._stopMonitoring();
+        this._currentFrame = null;
+        // Deliberate convergence (issue #120 review ruling): the whole
+        // terminal bucket — stopped, failed and exited — lands on THIS
+        // stopped placeholder, so activate() keeps its exact `'stopped'`
+        // match ON PURPOSE: a directly-selected failed instance must keep
+        // the poll-owned missing-dsh dialog / 60s-timeout flow (activate()
+        // re-baselines the sync gate with the current status, so syncStatus
+        // never re-fires for it — no flicker). The failed / exited entries
+        // that reach here through syncStatus carry their reason instead:
+        // ONE extra line in the timeout overlay's format, while a plain
+        // `stopped` activation keeps today's exact placeholder.
+        const lines = ['instance:  ' + session.id];
+        if (session.instance && session.instance.status && session.instance.status !== 'stopped') {
+            lines.push('status:    ' + session.instance.status + (session.instance.last_error ? ' — ' + session.instance.last_error : ''));
+        }
+        this._showLoading(dshPanel, {
+            title: 'dsh instance stopped',
+            lines: lines,
+        });
+    }
+
+    // Poll-driven status self-heal (issue #120). refresh() calls this
+    // for the ACTIVE instance on every ~2s tick. Tears the panel down
+    // exactly once, on ENTRY into the terminal bucket (same
+    // enteringTerminalBucket gate as syncActiveTerminalStatus): pending
+    // (starting/stopping) and live statuses never trigger (issue #80),
+    // and an already-stopped instance is never torn down or repainted
+    // again on later ticks.
+    // Caller contract: syncActiveWebStatus dispatches the ACTIVE instance
+    // only, and an instance becomes active solely through selectInstance()
+    // -> activate(), so activate() always re-baselines the gate before the
+    // first syncStatus tick; the `prev === undefined || prev === null` arm
+    // below is defensive.
+    syncStatus(inst) {
+        if (!inst || !inst.id) return;
+        const classifyTerminal = (s) => typeof window.isInstanceTerminalStatus === 'function'
+            ? window.isInstanceTerminalStatus(s)
+            : !(s === 'running' || s === 'unhealthy'
+                || s === 'starting' || s === 'stopping');
+        const isTerminal = classifyTerminal(inst.status);
+        const prev = this._syncPrevStatus.get(inst.id);
+        this._syncPrevStatus.set(inst.id, inst.status);
+        if (!isTerminal) return;
+        const prevTerminal = classifyTerminal(prev);
+        const enteringTerminalBucket = prev === undefined || prev === null || !prevTerminal;
+        if (!enteringTerminalBucket) return;
+        // The instance object travels with the session so teardownStopped can
+        // put the failure reason on the placeholder (activate() passes its own
+        // session, this path only has the polled instance).
+        this.teardownStopped({ id: inst.id, instance: inst });
+        // One-shot missing-dsh recovery check (issue #120 review): the
+        // teardown above aborts the ready-wait poll — the dialog's only
+        // other driver — so a dsh instance that ENTERS failed (missing_dsh
+        // is failed-only per the backend) must re-check the SAME info
+        // endpoint here instead, or the recovery dialog could be lost to
+        // the teardown-vs-tick race. The entering gate makes this exactly
+        // ONE request per terminal transition (same shape as the PTY
+        // precedent, where entering the terminal bucket fires loadLog
+        // once), which also makes the dialog-opening deterministic; a
+        // restart migrates onto a fresh instance id whose own terminal
+        // entry runs this same check. Fire-and-forget (syncStatus must
+        // stay synchronous): any fetch/parse error is swallowed — the
+        // stopped placeholder stands on its own.
+        if (inst.status === 'failed') {
+            fetch('/api/instances/dsh?id=' + encodeURIComponent(inst.id))
+                .then((resp) => (resp.ok ? resp.json() : null))
+                .then((data) => {
+                    if (!data || !data.missing_dsh) return;
+                    // Stale-response guard (issue #120 review): the fetch is
+                    // fire-and-forget, so it can resolve long AFTER the user
+                    // switched to another tab, the instance was deleted, or a
+                    // restart moved its status on. _dialogShownFor /
+                    // _dismissedMissingFor keep duplicates quiet but not a
+                    // dialog for an id the user is no longer looking at, so
+                    // re-check the live state at response time: still listed,
+                    // still failed, still active. Otherwise skip silently —
+                    // switching back re-runs activate()'s poll, which re-drives
+                    // the dialog from this same endpoint, so nothing is lost.
+                    const live = window.state && window.state.instances
+                        ? window.state.instances.find(i => i.id === inst.id)
+                        : null;
+                    if (live && live.status === 'failed' && window.state.activeInst === inst.id) {
+                        // Reuses the poll's dialog verbatim: its guards
+                        // (_dialogShownFor / _dismissedMissingFor) keep
+                        // the already-open and cancelled cases quiet.
+                        this._showMissingDialog(inst.id, data.missing_dsh);
+                    }
+                })
+                .catch(() => {});
+        }
     }
 
     deactivate() {
@@ -293,13 +405,12 @@ class DshWebRenderer {
                         this._hideLoading(dshPanel);
                         return;
                     }
-                    // Failed instance with a structured missing-dsh
-                    // state → the three-way dialog (npx / install /
-                    // cancel). Polling keeps running so an install or
-                    // PATH fix clears the dialog automatically; a
-                    // cancel only suppresses the dialog (never stops
-                    // the poll) so it can re-appear after a manual
-                    // restart that still fails.
+                    // Failed instance with a missing-dsh state → the three-way dialog (npx / install / cancel),
+                    // driven by this poll. A cancel only suppresses the dialog (never stops the poll); a restart mints
+                    // a fresh instance id, so the dismissal keyed to the old id does not carry over and the dialog
+                    // re-appears for a new instance that still fails. If the issue #120 sync path tears a failed
+                    // instance down instead, this poll is aborted and syncStatus's own one-shot missing-dsh re-check
+                    // surfaces the dialog; the guided npx/install flows close it themselves after the restart.
                     if (data.missing_dsh) {
                         this._showMissingDialog(id, data.missing_dsh);
                     }
@@ -420,6 +531,30 @@ class DshWebRenderer {
         const id = session.id;
         const tick = async () => {
             if (abort.aborted) return;
+            // Self-stop (issue #120): the backend answers 200 for a
+            // stopped instance forever, so the poll must watch the
+            // instance status itself. Gone or terminal → clear the
+            // warning bar (no residue over the stopped placeholder), run
+            // the symmetric cleanup (_stopMonitoring: nulls the abort
+            // handle and resets the warning-state flags, so this branch
+            // lands in the same final state as the teardownStopped path —
+            // idempotent when that path already ran) and do NOT
+            // reschedule.
+            const inst = window.state && window.state.instances
+                ? window.state.instances.find(i => i.id === id)
+                : null;
+            const terminalNow = !inst || (typeof window.isInstanceTerminalStatus === 'function'
+                ? window.isInstanceTerminalStatus(inst.status)
+                : !(inst.status === 'running' || inst.status === 'unhealthy'
+                    || inst.status === 'starting' || inst.status === 'stopping'));
+            if (terminalNow) {
+                if (dshWarning) {
+                    dshWarning.hidden = true;
+                    dshWarning.textContent = '';
+                }
+                this._stopMonitoring();
+                return;
+            }
             try {
                 const resp = await fetch('/api/instances/dsh/scope?id=' + encodeURIComponent(id));
                 if (abort.aborted) return;

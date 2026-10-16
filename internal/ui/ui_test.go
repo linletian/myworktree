@@ -271,6 +271,14 @@ func TestOpencodeWebRendererKeepsFrameAlive(t *testing.T) {
 // previous instance's iframe kept hidden=false and stacked half/half
 // under the stopped overlay (switching from a terminal instance did not
 // reproduce because that cross-kind switch DID deactivate).
+//
+// Issue #120 refactored the dsh-web / opencode-web stopped branch to
+// delegate to a shared teardownStopped(session) method (so the poll-driven
+// syncStatus can reuse it for a cross-browser stop). The hide-all guarantee
+// did not move, only its location: the branch must now call
+// this.teardownStopped(session), and teardownStopped's body must contain
+// this._showOnly(null). reasonix.js was NOT refactored, so it keeps its
+// inline assertion — the same guarantee, checked where each file now keeps it.
 func TestWebRenderersStoppedSwitchHidesAllFrames(t *testing.T) {
 	// The dispatch-side invariant that makes the renderer-side fix
 	// necessary: same-kind switches never deactivate. If this guard ever
@@ -298,8 +306,193 @@ func TestWebRenderersStoppedSwitchHidesAllFrames(t *testing.T) {
 			t.Fatalf("%s: no return; after %q", asset, branchOpen)
 		}
 		branch := js[start : start+end]
-		if !strings.Contains(branch, "this._showOnly(null)") {
-			t.Fatalf("%s: stopped branch does not hide every cached frame (this._showOnly(null)) — switching to a stopped same-kind instance stacks iframes half/half (issue #96)", asset)
+		if asset == "/static/kinds/reasonix.js" {
+			if !strings.Contains(branch, "this._showOnly(null)") {
+				t.Fatalf("%s: stopped branch does not hide every cached frame (this._showOnly(null)) — switching to a stopped same-kind instance stacks iframes half/half (issue #96)", asset)
+			}
+			continue
+		}
+		// The refactored web renderers delegate the whole teardown — hide-all
+		// included — to teardownStopped(session); assert both halves so a
+		// branch that forgot the call, or a teardownStopped that dropped the
+		// hide-all, both fail here (issue #120).
+		if !strings.Contains(branch, "this.teardownStopped(") {
+			t.Fatalf("%s: stopped branch no longer delegates to this.teardownStopped(session) — the poll-driven cross-browser self-heal (issue #120) shares this teardown", asset)
+		}
+		tdStart := strings.Index(js, "teardownStopped(session) {")
+		if tdStart < 0 {
+			t.Fatalf("%s: teardownStopped(session) method not found", asset)
+		}
+		tdBody := js[tdStart:]
+		if e := strings.Index(tdBody, "\n    }"); e >= 0 {
+			tdBody = tdBody[:e]
+		}
+		if !strings.Contains(tdBody, "this._showOnly(null)") {
+			t.Fatalf("%s: teardownStopped does not hide every cached frame (this._showOnly(null)) — switching to a stopped same-kind instance stacks iframes half/half (issue #96)", asset)
+		}
+	}
+}
+
+// TestWebRenderersPollSelfHealStoppedInstance pins the issue #120 shape:
+// a stop performed in ANOTHER browser never changes this page's selection,
+// so selectInstance()'s early-return keeps activate() from re-running and
+// the embedded iframe stayed alive forever behind a stopped badge. Three
+// anchors make the self-heal exist and stay wired:
+//
+//   - index.html defines syncActiveWebStatus() and refresh() calls it right
+//     after render() — the poll tick is what observes the status change;
+//   - both web renderers define syncStatus(inst) (the entering-terminal-
+//     bucket gate, same semantics as syncActiveTerminalStatus) and
+//     teardownStopped(session) (the single teardown truth they share with
+//     activate()'s stopped branch);
+//   - each renderer's 1.5s scope-poll tick checks the instance status
+//     BEFORE issuing its fetch and returns without rescheduling once the
+//     instance is gone or terminal (the scope endpoint answers 200 for a
+//     stopped instance forever, so nothing else ever ends that poll).
+//
+// The behavioural half lives in testdata/web_status_sync.test.mjs
+// (TestWebStatusSyncHandling); this pins the shipped text so the wiring
+// cannot silently vanish while the node cases keep passing on a copy.
+func TestWebRenderersPollSelfHealStoppedInstance(t *testing.T) {
+	indexJS := fetchStaticAsset(t, "/")
+	for _, anchor := range []string{
+		"function syncActiveWebStatus() {",
+		// Dispatch guards: web kinds only, renderer must expose syncStatus,
+		// and a renderer error must never break the refresh loop.
+		"WEB_UI_KINDS.includes(inst.kind)",
+		"typeof renderer.syncStatus !== 'function'",
+		"renderer.syncStatus(inst);",
+	} {
+		if !strings.Contains(indexJS, anchor) {
+			t.Fatalf("GET / should include the issue #120 self-heal hook %q", anchor)
+		}
+	}
+	// refresh() must call it on the tick, right after render() — sliced to
+	// refresh's own body so an order check cannot match another caller.
+	refreshStart := strings.Index(indexJS, "async function refresh() {")
+	if refreshStart < 0 {
+		t.Fatal("GET /: refresh() not found")
+	}
+	refreshBody := indexJS[refreshStart:]
+	if e := strings.Index(refreshBody, "\n        }"); e >= 0 {
+		refreshBody = refreshBody[:e]
+	}
+	renderAt := strings.Index(refreshBody, "render();")
+	syncAt := strings.Index(refreshBody, "syncActiveWebStatus();")
+	if renderAt < 0 || syncAt < 0 || syncAt < renderAt {
+		t.Fatal("refresh() must call syncActiveWebStatus() immediately after render() — the poll tick is what observes a cross-browser status change (issue #120)")
+	}
+	for _, asset := range []string{"/static/kinds/dsh_web.js", "/static/kinds/opencode_web.js"} {
+		js := fetchStaticAsset(t, asset)
+		for _, anchor := range []string{
+			"syncStatus(inst) {",
+			"teardownStopped(session) {",
+			"this.teardownStopped(session);",
+			"this.teardownStopped({ id: inst.id, instance: inst });",
+			// The gate: teardown only on ENTRY into the terminal bucket.
+			"enteringTerminalBucket",
+			// The scope poll must consult the polled status itself.
+			"window.state.instances",
+			"isInstanceTerminalStatus",
+		} {
+			if !strings.Contains(js, anchor) {
+				t.Fatalf("%s should include the issue #120 self-heal hook %q", asset, anchor)
+			}
+		}
+		// The status check must sit BEFORE the scope fetch (a check after
+		// it would still request the dead backend every 1.5s forever).
+		// Anchored on the METHOD DEFINITION header — activate()'s call
+		// site names the same method and would slice to nothing.
+		defHeader := "_startScopeMonitoring(session, dshPanel, dshWarning) {"
+		if asset == "/static/kinds/opencode_web.js" {
+			defHeader = "_startScopeMonitoring(session, ocPanel, ocWarning) {"
+		}
+		scopeAt := strings.Index(js, defHeader)
+		if scopeAt < 0 {
+			t.Fatalf("%s: _startScopeMonitoring definition %q not found", asset, defHeader)
+		}
+		scopeBody := js[scopeAt:]
+		if e := strings.Index(scopeBody, "\n    }"); e >= 0 {
+			scopeBody = scopeBody[:e]
+		}
+		statusAt := strings.Index(scopeBody, "isInstanceTerminalStatus")
+		fetchAt := strings.Index(scopeBody, "fetch(")
+		if statusAt < 0 || fetchAt < 0 || statusAt > fetchAt {
+			t.Fatalf("%s: the scope tick must check the instance status BEFORE its fetch and stop rescheduling when stopped (issue #120)", asset)
+		}
+		if !strings.Contains(scopeBody, "setTimeout(tick, 1500);") {
+			t.Fatalf("%s: the scope poll must stay armed for live instances (setTimeout(tick, 1500))", asset)
+		}
+		// The self-stop branch must run the symmetric cleanup, not just
+		// clear the bar and skip rescheduling: dsh's _stopMonitoring()
+		// nulls the abort handle and resets the warning-state flags, so a
+		// poll that died on its own lands in the same final state as the
+		// teardownStopped path (issue #120 review; opencode already did
+		// this via _stopScopeMonitoring).
+		stopCall := "this._stopMonitoring();"
+		if asset == "/static/kinds/opencode_web.js" {
+			stopCall = "this._stopScopeMonitoring();"
+		}
+		selfStopAt := strings.Index(scopeBody, "if (terminalNow) {")
+		if selfStopAt < 0 {
+			t.Fatalf("%s: the scope tick's terminalNow self-stop branch not found (issue #120)", asset)
+		}
+		if e := strings.Index(scopeBody[selfStopAt:], "return;"); e >= 0 {
+			if at := strings.Index(scopeBody[selfStopAt:selfStopAt+e], stopCall); at < 0 {
+				t.Fatalf("%s: the scope tick's self-stop branch must call %s before returning — a dead poll may not keep its abort handle or its warning state (issue #120 review)", asset, stopCall)
+			}
+		} else {
+			t.Fatalf("%s: the self-stop branch must return without rescheduling (issue #120)", asset)
+		}
+		// Both syncStatus bodies classify through ONE local arrow reused
+		// for isTerminal AND prevTerminal (review #120 nit; behaviour
+		// identical to the duplicated expression it replaced).
+		if !strings.Contains(js, "const classifyTerminal = (s) =>") {
+			t.Fatalf("%s: syncStatus must classify through one local classifyTerminal arrow used for both classifications", asset)
+		}
+		if asset == "/static/kinds/dsh_web.js" {
+			// dsh-only missing-dsh recovery (issue #120 review): the
+			// teardown aborts the ready poll — the dialog's only other
+			// driver — so syncStatus itself must re-check the info
+			// endpoint, gated on the failed-only backend contract.
+			for _, anchor := range []string{"missing_dsh", "_showMissingDialog", "inst.status === 'failed'"} {
+				if !strings.Contains(js, anchor) {
+					t.Fatalf("%s should include the issue #120 missing-dsh recovery anchor %q", asset, anchor)
+				}
+			}
+			// Containment + order inside the syncStatus body: teardown
+			// first, then the one-shot fetch, then _showMissingDialog —
+			// a check living anywhere the ready poll still covers would
+			// not fix the teardown-vs-tick race.
+			syncAt := strings.Index(js, "syncStatus(inst) {")
+			if syncAt < 0 {
+				t.Fatal("/static/kinds/dsh_web.js: syncStatus(inst) definition not found")
+			}
+			syncBody := js[syncAt:]
+			if e := strings.Index(syncBody, "\n    }"); e >= 0 {
+				syncBody = syncBody[:e]
+			}
+			tdAt := strings.Index(syncBody, "this.teardownStopped({ id: inst.id, instance: inst });")
+			recoveryAt := strings.Index(syncBody, "fetch('/api/instances/dsh?id='")
+			dialogAt := strings.Index(syncBody, "_showMissingDialog")
+			if tdAt < 0 || recoveryAt < 0 || dialogAt < 0 || tdAt > recoveryAt || recoveryAt > dialogAt {
+				t.Fatal("/static/kinds/dsh_web.js: syncStatus must fire the one-shot missing_dsh fetch AFTER the teardown, reaching _showMissingDialog from within its own body (issue #120 review)")
+			}
+			// The response-time guard (issue #120 review): the fetch is
+			// fire-and-forget, so its response may land after the user
+			// switched away — the dialog must then be dropped, which is
+			// what the active-id check inside the response handler does.
+			guardAt := strings.Index(syncBody, "window.state.activeInst === inst.id")
+			if guardAt < 0 || guardAt > dialogAt {
+				t.Fatal("/static/kinds/dsh_web.js: the one-shot response handler must re-check window.state.activeInst === inst.id before opening the dialog (issue #120 review)")
+			}
+			continue
+		}
+		// opencode-web has NO missing-dsh dialog: the dsh-only recovery
+		// must not leak into this renderer (its failed entry tears down
+		// and fetches nothing).
+		if strings.Contains(js, "missing_dsh") || strings.Contains(js, "_showMissingDialog") {
+			t.Fatal("/static/kinds/opencode_web.js must not reference missing_dsh / _showMissingDialog — the recovery dialog is dsh-only (issue #120 review)")
 		}
 	}
 }

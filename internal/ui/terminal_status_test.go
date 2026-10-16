@@ -30,6 +30,31 @@ func TestTerminalStatusHandling(t *testing.T) {
 	t.Logf("%s", out)
 }
 
+// TestWebStatusSyncHandling runs the Node unit tests for the issue #120
+// cross-browser status self-heal of the embedded web-UI renderers
+// (testdata/web_status_sync.test.mjs): the SAME instance open in two browsers
+// — browser A clicks Stop, browser B only ever sees the polled status change,
+// and activate() never re-runs (selectInstance early-returns on the same id),
+// so without the poll-driven syncStatus the live iframe in browser B would
+// stay alive and interactive forever. The cases drive the shipped
+// kinds/dsh_web.js and kinds/opencode_web.js whole in a sandboxed harness and
+// assert teardown happens exactly once on entry into the terminal bucket, never
+// for pending/live, that the scope poll self-stops, that activate() re-baselines
+// the gate, and that a restart rebuilds the frame. Same arrangement as
+// TestTerminalStatusHandling: the file lives in testdata/ because static/* is
+// embedded and served to every browser. Skips when node is absent.
+func TestWebStatusSyncHandling(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not on PATH; skipping web status sync JS tests")
+	}
+	out, err := exec.Command(node, "--test", "testdata/web_status_sync.test.mjs").CombinedOutput()
+	if err != nil {
+		t.Fatalf("node --test testdata/web_status_sync.test.mjs: %v\n%s", err, out)
+	}
+	t.Logf("%s", out)
+}
+
 // TestSidebarCollapseHandling runs the Node unit tests for the issue #99
 // desktop sidebar collapse semantics (testdata/sidebar_collapse.test.mjs):
 // localStorage round-trip and degradation defaults (R3), the class-only
