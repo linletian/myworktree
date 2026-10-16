@@ -2956,6 +2956,11 @@
                         return;
                     }
                     render();
+                    // Self-heal the active web-UI iframe from the polled
+                    // status (issue #120): a cross-browser stop never
+                    // re-runs activate(), so this tick is what tears the
+                    // live page down once the instance reads terminal.
+                    syncActiveWebStatus();
                 } catch (e) {
                     console.error(e);
                     const inst = getActiveInstance();
@@ -5780,6 +5785,29 @@
                 && Date.now() - (session.lastLogLoadAttemptAt || 0) >= retryBackoffMs;
             if (enteringTerminalBucket || retryDue) {
                 loadLog(session);
+            }
+        }
+
+        // Poll-driven status self-heal for the embedded web-UI kinds
+        // (issue #120): a stop performed in ANOTHER browser never changes
+        // this page's selection, so selectInstance()'s early-return keeps
+        // activate() from re-running and the live iframe would never be
+        // torn down. refresh() calls this after render() on every tick;
+        // the renderer's own syncStatus applies the entering-terminal-
+        // bucket gate and does nothing on every other status. reasonix
+        // self-heals through its own 2s tick and exposes no syncStatus,
+        // so the guard below skips it by design.
+        function syncActiveWebStatus() {
+            const inst = getActiveInstance();
+            if (!inst || !WEB_UI_KINDS.includes(inst.kind)) return;
+            const renderer = (window.KindRenderers || {})[inst.kind];
+            if (!renderer || typeof renderer.syncStatus !== 'function') return;
+            try {
+                renderer.syncStatus(inst);
+            } catch (e) {
+                // A renderer error must never break the refresh loop —
+                // the PTY reconcile and every other tick still has to run.
+                console.error(e);
             }
         }
 

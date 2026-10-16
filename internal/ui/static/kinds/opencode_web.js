@@ -53,6 +53,10 @@ class OpencodeWebRenderer {
         // deactivate(), cleanup(), destroyFrame() (when it removes the
         // current frame) and _pruneStaleFrames() (same condition).
         this._currentFrame = null;
+        // instance id → last status syncStatus() observed, so the
+        // poll-driven self-heal (issue #120) tears the panel down only
+        // on ENTRY into the terminal bucket — see syncStatus().
+        this._syncPrevStatus = new Map();
     }
 
     activate(session, container) {
@@ -67,31 +71,13 @@ class OpencodeWebRenderer {
         this._pruneStaleFrames();
 
         const inst = session.instance;
+        // Re-baseline the sync gate on every activation (issue #120): the
+        // prev this activation leaves behind must describe THIS instance in
+        // its CURRENT status, so a stale prev from a previous activation can
+        // never make the next syncStatus() tick re-fire the teardown.
+        this._syncPrevStatus.set(session.id, inst ? inst.status : undefined);
         if (inst && inst.status === 'stopped') {
-            // Stopped instance: the backend is gone and the embedded
-            // page is dead — release its iframe (there is no page state
-            // worth keeping) so it doesn't linger in the DOM eating
-            // memory, and don't poll a dead server. A later start gets a
-            // fresh instance id, so a fresh iframe is built lazily.
-            this.destroyFrame(session.id);
-            // Hide EVERY cached frame, not just the stopped one: switching
-            // from a running opencode-web instance to this stopped one never
-            // ran deactivate() (selectInstance only deactivates a DIFFERENT
-            // renderer), so the previous instance's keep-alive iframe is
-            // still visible and would stack half/half under the stopped
-            // overlay (issue #96). Only the overlay should be on screen.
-            this._showOnly(null);
-            if (ocWarning) {
-                ocWarning.hidden = true;
-                ocWarning.textContent = '';
-            }
-            this._stopScopeMonitoring();
-            this._resetScopeState();
-            this._currentFrame = null;
-            this._showLoading(ocPanel, {
-                title: 'opencode instance stopped',
-                lines: ['instance:  ' + session.id],
-            });
+            this.teardownStopped(session);
             return;
         }
 
@@ -140,6 +126,69 @@ class OpencodeWebRenderer {
         this._currentFrame = frame;
         this._startPolling(session, ocPanel, frame);
         this._startScopeMonitoring(session, ocPanel, ocWarning);
+    }
+
+    // teardownStopped — the single truth for what "this instance is
+    // stopped" means for this renderer (issue #120). Called from
+    // activate()'s stopped branch AND from syncStatus() when a refresh
+    // tick observes the instance ENTER the terminal bucket: a stop
+    // performed in another browser never changes this page's selection,
+    // so activate() never re-runs and the embedded page would otherwise
+    // stay alive and interactive forever.
+    teardownStopped(session) {
+        const ocPanel = document.getElementById('opencode-panel');
+        const ocWarning = document.getElementById('opencode-scope-warning');
+        // Stopped instance: the backend is gone and the embedded
+        // page is dead — release its iframe (there is no page state
+        // worth keeping) so it doesn't linger in the DOM eating
+        // memory, and don't poll a dead server. A later start gets a
+        // fresh instance id, so a fresh iframe is built lazily.
+        this.destroyFrame(session.id);
+        // Hide EVERY cached frame, not just the stopped one: switching
+        // from a running opencode-web instance to this stopped one never
+        // ran deactivate() (selectInstance only deactivates a DIFFERENT
+        // renderer), so the previous instance's keep-alive iframe is
+        // still visible and would stack half/half under the stopped
+        // overlay (issue #96). Only the overlay should be on screen.
+        this._showOnly(null);
+        if (ocWarning) {
+            ocWarning.hidden = true;
+            ocWarning.textContent = '';
+        }
+        // Abort the ready-wait poll too (it would otherwise keep
+        // hammering the dead server until its 60s timeout), then the
+        // scope poll and its message listener.
+        if (this._abort) this._abort.aborted = true;
+        this._stopScopeMonitoring();
+        this._resetScopeState();
+        this._currentFrame = null;
+        this._showLoading(ocPanel, {
+            title: 'opencode instance stopped',
+            lines: ['instance:  ' + session.id],
+        });
+    }
+
+    // Poll-driven status self-heal (issue #120). refresh() calls this
+    // for the ACTIVE instance on every ~2s tick. Tears the panel down
+    // exactly once, on ENTRY into the terminal bucket (same
+    // enteringTerminalBucket gate as syncActiveTerminalStatus): pending
+    // (starting/stopping) and live statuses never trigger (issue #80),
+    // and an already-stopped instance is never torn down or repainted
+    // again on later ticks.
+    syncStatus(inst) {
+        if (!inst || !inst.id) return;
+        const classifyTerminal = (s) => typeof window.isInstanceTerminalStatus === 'function'
+            ? window.isInstanceTerminalStatus(s)
+            : !(s === 'running' || s === 'unhealthy'
+                || s === 'starting' || s === 'stopping');
+        const isTerminal = classifyTerminal(inst.status);
+        const prev = this._syncPrevStatus.get(inst.id);
+        this._syncPrevStatus.set(inst.id, inst.status);
+        if (!isTerminal) return;
+        const prevTerminal = classifyTerminal(prev);
+        const enteringTerminalBucket = prev === undefined || prev === null || !prevTerminal;
+        if (!enteringTerminalBucket) return;
+        this.teardownStopped({ id: inst.id });
     }
 
     deactivate() {
@@ -384,6 +433,28 @@ class OpencodeWebRenderer {
         const id = session.id;
         const tick = async () => {
             if (abort.aborted) return;
+            // Self-stop (issue #120): the backend answers 200 for a
+            // stopped instance forever, so the poll must watch the
+            // instance status itself. Gone or terminal → clear the
+            // warning bar (no residue over the stopped placeholder),
+            // detach the hidden-report message listener (symmetric with
+            // the poll being dead forever; idempotent when the normal
+            // teardownStopped flow already ran) and do NOT reschedule.
+            const inst = window.state && window.state.instances
+                ? window.state.instances.find(i => i.id === id)
+                : null;
+            const terminalNow = !inst || (typeof window.isInstanceTerminalStatus === 'function'
+                ? window.isInstanceTerminalStatus(inst.status)
+                : !(inst.status === 'running' || inst.status === 'unhealthy'
+                    || inst.status === 'starting' || inst.status === 'stopping'));
+            if (terminalNow) {
+                if (ocWarning) {
+                    ocWarning.hidden = true;
+                    ocWarning.textContent = '';
+                }
+                this._stopScopeMonitoring();
+                return;
+            }
             try {
                 const resp = await fetch('/api/instances/opencode/scope?id=' + encodeURIComponent(id));
                 if (abort.aborted) return;
