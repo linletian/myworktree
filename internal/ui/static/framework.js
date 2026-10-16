@@ -35,6 +35,17 @@ window.state = {
     diverged: null,
     refreshSeq: 0,
     renamingInst: null,
+    // Sidebar worktree-row rename state (issue #122), same shape as the
+    // instance-tab pair above. The two rename state machines are mutually
+    // exclusive — index.html's startWTRename clears renamingInst and
+    // startRename clears renamingWT — so at most one rename input exists
+    // in the page at any moment. renamingWTValue mirrors the existing
+    // renamingInstValue pattern above, a write-only leftover no renderer
+    // ever reads back non-empty. The worktree side keeps that same
+    // dead-variable shape on purpose, waiting for the tab-side cleanup: if
+    // the tabs ever bind the live value, the worktree side follows suit.
+    renamingWT: null,
+    renamingWTValue: "",
     version: 0,
 };
 

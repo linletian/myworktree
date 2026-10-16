@@ -1139,6 +1139,25 @@
             border-color: var(--active-color);
         }
 
+        /* Inline rename input on a sidebar worktree row (issue #122):
+           same variable palette as .tab-rename-input above, but fluid —
+           .wt-name is a block of whatever width the sidebar gives it, so
+           the input fills the cell instead of a hard-coded pixel width. */
+        .wt-rename-input {
+            background: var(--main-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 3px;
+            padding: 1px 4px;
+            font: inherit;
+            color: inherit;
+            width: 100%;
+            box-sizing: border-box;
+            outline: none;
+        }
+        .wt-rename-input:focus {
+            border-color: var(--active-color);
+        }
+
         .tab-status {
             width: 8px;
             height: 8px;
@@ -2934,7 +2953,13 @@
                     api("/api/main").then(main => {
                         const prevBranch = state.mainRepo ? state.mainRepo.branch : null;
                         state.mainRepo = main;
-                        renderSidebar(); // Only re-render sidebar, not the full UI.
+                        // Guarded: the sidebar hosts the worktree rename input,
+                        // so a background poll must not rebuild #wt-list (and
+                        // tear the input plus its IME composition down) while
+                        // a row is being renamed (issue #122 pitfall #4).
+                        if (!state.renamingWT) {
+                            renderSidebar(); // Only re-render sidebar, not the full UI.
+                        }
                         // If main repo branch changed while it's selected, refresh its git changes.
                         if (state.activeWT === MAIN_WT_ID && prevBranch && prevBranch !== main.branch) {
                             refreshGitChanges();
@@ -2951,7 +2976,7 @@
 
                     // Skip full re-render during rename — preserve input DOM and IME composition.
                     // State data (instances, etc.) is already updated above.
-                    if (state.renamingInst) {
+                    if (state.renamingInst || state.renamingWT) {
                         refreshInFlight = null;
                         return;
                     }
@@ -2982,7 +3007,13 @@
                 const data = await api("/api/worktrees/diverged");
                 if (!state.diverged) state.diverged = {};
                 state.diverged = data.items || {};
-                renderSidebar();
+                // Guarded INSIDE the callee (issue #122 pitfall #4): this
+                // runs both from refresh()'s 2s poll and from its own 60s
+                // divergeTimer, so a guard at one call site would leave the
+                // other timer free to rebuild #wt-list mid-rename.
+                if (!state.renamingWT) {
+                    renderSidebar();
+                }
             } catch (e) {
                 console.error("fetch diverge failed:", e);
             }
@@ -2995,7 +3026,18 @@
                 if (data.items) {
                     Object.assign(state.diverged, data.items);
                 }
-                renderSidebar();
+                // Guarded (issue #122 review B-F1): selectWorktree starts this
+                // request SYNCHRONOUSLY on the first click of a double-click,
+                // while the rename input does not exist until the dblclick
+                // builds it — so the blur-commits-first argument cannot cover
+                // this path. A response landing after the dblclick has entered
+                // the editing state would rebuild #wt-list mid-IME-composition
+                // and take the input's focus, selection and half-typed text
+                // with it. The diverged badge is state, not the input: it
+                // simply rides the next repaint.
+                if (!state.renamingWT) {
+                    renderSidebar();
+                }
             } catch (e) {
                 console.error("fetch diverge single failed:", e);
             }
@@ -4294,6 +4336,8 @@
                             <path d="M12 .5C5.65.5.5 5.65.5 12c0 5.08 3.29 9.39 7.86 10.91.58.11.79-.25.79-.56 0-.28-.01-1.02-.02-2-3.2.7-3.87-1.54-3.87-1.54-.52-1.33-1.27-1.69-1.27-1.69-1.04-.71.08-.7.08-.7 1.15.08 1.76 1.18 1.76 1.18 1.02 1.76 2.69 1.25 3.34.96.1-.74.4-1.25.72-1.54-2.55-.29-5.24-1.28-5.24-5.7 0-1.26.45-2.29 1.18-3.1-.12-.29-.51-1.46.11-3.04 0 0 .97-.31 3.18 1.18a11.1 11.1 0 0 1 5.79 0c2.21-1.5 3.18-1.18 3.18-1.18.63 1.58.24 2.75.12 3.04.74.81 1.18 1.84 1.18 3.1 0 4.43-2.7 5.41-5.26 5.69.41.36.78 1.06.78 2.14 0 1.55-.01 2.79-.01 3.17 0 .31.21.68.8.56C20.21 21.39 23.5 17.08 23.5 12 23.5 5.65 18.35.5 12 .5Z"/>
                         </svg>
                     </a>` : '';
+                // No inline rename here on purpose: the pinned main row is
+                // out of scope for v1 (issue #122), so it stays static text.
                 html += `
             <li class="wt-item wt-item-main ${isMainActive ? 'active' : ''}" onclick="selectWorktree(MAIN_WT_ID)">
               <div class="wt-name">
@@ -4317,9 +4361,22 @@
             html += state.worktrees.map(w => {
                 const isActive = state.activeWT === w.id;
                 const wIdEsc = escapeHtml(w.id);
+                // Verbatim mirror of renderTabs' rename branch (issue #122):
+                // renamingWTValue is the same write-only leftover the tab
+                // side ships, so the rendered value falls back to w.name.
+                const renameValue = state.renamingWT === w.id && state.renamingWTValue ? state.renamingWTValue : w.name;
+                // The row itself stays a row while editing — only the name
+                // cell swaps to an input. EVERY non-main row carries the
+                // ondblclick (not just the active one): the first click of a
+                // double-click activates the row and rebuilds #wt-list
+                // synchronously, and the dblclick then lands on the rebuilt
+                // node, which carries the very same inline handler.
+                const nameCell = state.renamingWT === w.id
+                    ? `<input id="wt-rename-input-${wIdEsc}" class="wt-rename-input" value="${escapeHtml(renameValue)}" onkeydown="handleWTRenameKeydown('${wIdEsc}', event)" onblur="commitWTRename('${wIdEsc}', event)">`
+                    : escapeHtml(w.name);
                 return `
-            <li class="wt-item ${isActive ? 'active' : ''}" onclick="selectWorktree('${wIdEsc}')">
-              <div class="wt-name">${escapeHtml(w.name)}</div>
+            <li class="wt-item ${isActive ? 'active' : ''}" onclick="selectWorktree('${wIdEsc}')" ondblclick="startWTRename('${wIdEsc}', event)" title="Double-click to rename">
+              <div class="wt-name">${nameCell}</div>
               <div class="wt-branch">
                 <span>🌱</span> ${escapeHtml(w.branch)}${divergeBadges(w.id)}
                 <div style="margin-left: auto; display: flex; gap: 4px; align-items: center;">
@@ -4346,6 +4403,11 @@
         // Rename handlers
         function startRename(id, event) {
             event.stopPropagation();
+            // Mutual exclusion with the sidebar rename state machine (at most
+            // one input in the page, issue #122): tear the sidebar input
+            // down before this tab's input gets built.
+            state.renamingWT = null;
+            renderSidebar();
             state.renamingInst = id;
             state.renamingInstValue = "";
             renderTabs(); // Create the input DOM before focusing
@@ -4360,6 +4422,14 @@
 
         function commitRename(id, event) {
             event.stopPropagation();
+            // Re-entrancy guard, mirror of commitWTRename (issue #122):
+            // renderTabs() below removes the focused tab input and Chrome
+            // re-enters via onblur while the node is still findable — a
+            // duplicate PATCH /api/instances would go out. Also covers the
+            // mutual-exclusion path added by this issue: startWTRename tears
+            // the tab input down via renderTabs(), and that blur must not
+            // commit a self-rename of a tab nobody edited.
+            if (state.renamingInst !== id) return;
             const input = document.getElementById('rename-input-' + id);
             if (!input) return;
             const newName = input.value.trim();
@@ -4379,7 +4449,19 @@
                 if (idx >= 0) {
                     state.instances[idx] = updated;
                 }
-                render();
+                // Guarded on BOTH rename states (issue #122 review A-F1):
+                // render() rebuilds the tabs AND the sidebar, so this is the
+                // tab-side twin of the B-F2 window the worktree handler just
+                // closed — and this issue's mutual exclusion made it newly
+                // reachable, since a tab PATCH can now be in flight while a
+                // SIDEBAR row is being renamed and an unguarded render() here
+                // would tear that row's input down. The handler's own state
+                // guard cannot cover it: the row's state is still set at this
+                // point, so the teardown would pass as legitimate. The tab's
+                // new name rides the next poll — the same trade as B-F2.
+                if (!state.renamingInst && !state.renamingWT) {
+                    render();
+                }
             }).catch(err => {
                 console.error('rename failed:', err);
                 refresh();
@@ -4397,6 +4479,100 @@
                 commitRename(id, event);
             } else if (event.key === 'Escape') {
                 cancelRename();
+            }
+            event.stopPropagation();
+        }
+
+        // Sidebar worktree-row rename handlers (issue #122) — the tab rename
+        // handlers above mirrored one-for-one onto the worktree rows, with
+        // PATCH /api/worktrees in place of PATCH /api/instances.
+
+        function startWTRename(id, event) {
+            event.stopPropagation();
+            // Mutual exclusion with the tab rename state machine (at most one
+            // input in the page): tear the tab input down first, so a
+            // double-click on a row while a tab is being renamed cannot leave
+            // two live inputs (and two competing blur-commit paths) behind.
+            state.renamingInst = null;
+            renderTabs();
+            state.renamingWT = id;
+            state.renamingWTValue = "";
+            renderSidebar(); // Create the input DOM before focusing
+            requestAnimationFrame(() => {
+                const input = document.getElementById('wt-rename-input-' + id);
+                if (input) {
+                    input.focus();
+                    input.select();
+                }
+            });
+        }
+
+        function commitWTRename(id, event) {
+            event.stopPropagation();
+            // Re-entrancy guard (issue #122 browser verification): the
+            // renderSidebar() below removes the focused input, and Chrome
+            // dispatches blur on the node while it is still findable via
+            // getElementById — the onblur re-enters this function with
+            // state.renamingWT already cleared, which would send a second,
+            // identical PATCH and nest an innerHTML write inside the first
+            // one. State is the source of truth: a commit is legitimate only
+            // while this row still owns the editing state (Enter / user-click-
+            // away blur both satisfy it).
+            if (state.renamingWT !== id) return;
+            const input = document.getElementById('wt-rename-input-' + id);
+            if (!input) return;
+            const newName = input.value.trim();
+            state.renamingWT = null;
+            state.renamingWTValue = "";
+            // Don't re-render during rename commit — caller handles render
+            // after API response. (Same order as commitRename: the row goes
+            // back to static text BEFORE the round trip, so a slow PATCH
+            // never leaves a live input pointing at a settled state.)
+            renderSidebar();
+            if (newName === '') {
+                return;
+            }
+            api('/api/worktrees', {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ id: id, name: newName })
+            }).then(updated => {
+                const idx = state.worktrees.findIndex(w => w.id === id);
+                if (idx >= 0) {
+                    state.worktrees[idx] = updated;
+                }
+                // Guarded (issue #122 review B-F2): the PATCH round trip is a
+                // window in which the user can have double-clicked ANOTHER row
+                // into its own editing state, and an unconditional repaint here
+                // would tear that fresh input down. The state splice above and
+                // the refresh() below stay unconditional — refresh() carries its
+                // own rename guard — so the renamed row repaints on the next
+                // poll tick at worst.
+                if (!state.renamingWT) {
+                    renderSidebar();
+                }
+                // Resync the live branch: the PATCH response carries the
+                // stored branch, while the sidebar badge shows List()'s live
+                // `git rev-parse` value. Without this the badge would fall
+                // back to the stored value until the next poll tick.
+                refresh();
+            }).catch(err => {
+                console.error('worktree rename failed:', err);
+                refresh();
+            });
+        }
+
+        function cancelWTRename() {
+            state.renamingWT = null;
+            state.renamingWTValue = "";
+            renderSidebar();
+        }
+
+        function handleWTRenameKeydown(id, event) {
+            if (event.key === 'Enter') {
+                commitWTRename(id, event);
+            } else if (event.key === 'Escape') {
+                cancelWTRename();
             }
             event.stopPropagation();
         }
@@ -6058,8 +6234,9 @@
             if (session.ttyState !== 'READY') return;
             const inst = state.instances.find(i => i.id === state.activeInst);
             if (inst && !isInstanceLiveStatus(inst.status)) return;
-            // Don't steal focus from the rename input
-            if (state.renamingInst) return;
+            // Don't steal focus from the rename input — the tab's, or the
+            // sidebar worktree row's (issue #122).
+            if (state.renamingInst || state.renamingWT) return;
 
             session.term.focus();
         }
@@ -7045,7 +7222,18 @@
                 alert("Failed to open terminal: " + e.message);
             } finally {
                 loadingActions.delete(key);
-                renderSidebar();
+                // Guarded (issue #122 review A-F1): the exemption plan R1
+                // argued that a user action blurs the open input BEFORE the
+                // render — true of the spinner-ON renderSidebar above this
+                // await, NOT of this finally. The await can run up to 10s
+                // (AbortController), and inside that window the user can
+                // double-click a row into its editing state; this repaint would
+                // then tear that input down mid-composition. The spinner's
+                // cosmetic repaint just rides the next poll, and refresh()
+                // self-heals it.
+                if (!state.renamingWT) {
+                    renderSidebar();
+                }
             }
         }
 
@@ -7089,7 +7277,12 @@
                 alert("Failed to open finder: " + e.message);
             } finally {
                 loadingActions.delete(key);
-                renderSidebar();
+                // Guarded, same reasoning as openTerminal's finally (issue #122
+                // review A-F1): the repaint lands after a window of up to 10s
+                // and must not rebuild a #wt-list that is mid-rename.
+                if (!state.renamingWT) {
+                    renderSidebar();
+                }
             }
         }
 
