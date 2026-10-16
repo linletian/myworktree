@@ -50,8 +50,8 @@ flag 的两个独立决定（评审 LOW-3 拆分，勿再混为一谈）：
 | `[ios-ime] compositionstart` | T0+T1 | 合成开始 | `value` |
 | `[ios-ime] compositionend` | T0+T1 | 合成结束 | `data`、`value` |
 | `[ios-ime] keyup` | T0+T1 | textarea 上每次 keyup | `t`（keyup 绝对时刻）、`keyCode`、`key`、`value`、`len` |
-| `[ios-ime] pending` | T1 | keydown 229 记下/保留最早 baseline | `baseline`、`len`、`keptEarliest`、`rearmed`（timer 是否重臂） |
-| `[ios-ime] deliver` | T1 | 延后 flush（keyup 后一个宏任务）、failsafe 或 blur flush 的判定结果 | `baseline`、`current`、`delta`、`emissions`、`branch`（A/B/C/D）、`payload`、`via`（keyup-defer/failsafe/blur）、`armed`（`iosImeFailsafeArmed` 关窗时为 true） |
+| `[ios-ime] pending` | T1 | keydown 229 记下/保留最早 baseline | `baseline`、`len`（baseline 长度）、`keptEarliest`、`rearmed`（timer 是否重臂；等于 keptEarliest——首击为新装，后续 229 才是重臂） |
+| `[ios-ime] deliver` | T1 | 延后 flush（keyup 后一个宏任务）、failsafe 或 blur flush 的判定结果 | `baseline`、`current`、`delta`、`emissions`、`branch`（A/B/C/D；空 delta 判定行为 null）、`payload`、`via`（keyup-defer/failsafe/blur）、`armed`（进入 flush 时 `iosImeFailsafeArmed` 的值，关窗判定依据） |
 | `[ios-ime] clear` | T1 | flush 关窗 / compositionstart / blur 后清除 pending | `reason` |
 
 字段解读：
@@ -69,7 +69,11 @@ flag 的两个独立决定（评审 LOW-3 拆分，勿再混为一谈）：
 - `keydown(keyCode=229) → input(insertText, composed=true, isComposing=false) → keyup` 是**失败路径**的
   标准形态：此刻终端无回显即为复现。
 - `deliver` 行的 `branch`：A=水印空全发、B=前缀消费发剩余、C=水印已含（xterm 自投递，静默）、
-  D=无关投递间隙全发。真机期望失败场景落在 A。
+   D=无关投递间隙全发。真机期望失败场景落在 A。日志顺序为 `deliver` 先于 `clear(close-window)`。
+- `[ios-ime] clear` 的 `reason` 取值 `close-window / compositionstart / blur`：分别对应 flush 关窗、
+  composition 取消、blur flush-then-clear 三条清除路径各自留痕。blur 清除路径同时复位
+  `iosImeFailsafeArmed` 与 `iosImeComposing`（compositionend 丢失时 blur 自愈，防 composing 锁死）；
+  重新绑定（term 重建）会整体重置窗口状态。
 - 选字栏路径应只见 `compositionstart/end` 与 `deliver(branch=C/空 delta)`，**不应出现 A 分支补发**。
 
 **切片纪律（评审 MEDIUM-3，T0 验收条件）**：埋点代码不得在 `index.html` 的 inline script 里引入
