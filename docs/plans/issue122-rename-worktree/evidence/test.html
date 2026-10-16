@@ -1,0 +1,31 @@
+<!doctype html>
+<html><body>
+<ul id="list">
+  <li id="a" class="wt-item" onclick="onLiClick(this)">A</li>
+  <li id="b" class="wt-item" onclick="onLiClick(this)">B</li>
+</ul>
+<script>
+// Faithful model of the real app:
+//   state.activeWT tracks the active row.
+//   onLiClick: if row already active -> early return (NO DOM change);
+//              else activate + render (innerHTML replaced).
+//   Each rendered <li> carries an inline ondblclick -> startRename (global fn),
+//   exactly like the issue's prescribed design for the sidebar worktree row.
+window.log = [];
+window.state = { activeWT: null };
+window.startRename = function (id) { window.log.push('RENAME-STARTED@' + id); };
+document.addEventListener('dblclick', e => window.log.push('DOC-dblclick@' + e.target.id));
+window.onLiClick = function (el) {
+  if (window.state.activeWT === el.id) return; // selectWorktree early return
+  window.state.activeWT = el.id;
+  window.log.push('activated@' + el.id);
+  document.getElementById('list').innerHTML =
+    '<li id="a" class="wt-item" onclick="onLiClick(this)" ondblclick="startRename(this.id)">A</li>' +
+    '<li id="b" class="wt-item" onclick="onLiClick(this)" ondblclick="startRename(this.id)">B</li>';
+};
+// initial inline dblclick for the first render:
+['a', 'b'].forEach(id => {
+  document.getElementById(id).setAttribute('ondblclick', 'startRename(this.id)');
+});
+</script>
+</body></html>
