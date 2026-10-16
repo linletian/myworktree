@@ -92,7 +92,7 @@ const iosImeBlock = sliceIosImeBlock(indexSource);
 // guard, so the debug gate is driven via globalThis.location per test).
 function buildBridge(consoleStub, setTimeoutStub, clearTimeoutStub) {
   return new Function("session", "console", "Date", "setTimeout", "clearTimeout",
-    iosImeBlock + "\n;return { ensureIosImeDirectInputBridge, iosImeDeltaBytes, iosImeResidualPayload, flushIosIme, iosImeResidualBranch };"
+    iosImeBlock + "\n;return { ensureIosImeDirectInputBridge, iosImeDeltaBytes, iosImeResidualPayload, flushIosIme, iosImeResidualBranch, iosImeFailsafeMs, iosImeEmissionsMaxCount, iosImeEmissionsMaxChars };"
   )(null, consoleStub, Date, setTimeoutStub, clearTimeoutStub);
 }
 
@@ -178,10 +178,30 @@ function makeHarness({ debug = false } = {}) {
     return live[live.length - 1];
   };
   const runDeferred = () => { const t = lastLiveTimer(0); t.ran = true; t.fn(); };
-  const runFailsafe = () => { const t = lastLiveTimer(750); t.ran = true; t.fn(); };
+  const runFailsafe = () => { const t = lastLiveTimer(api.iosImeFailsafeMs); t.ran = true; t.fn(); };
 
   const rows = (name) => logs.filter(([prefix]) => prefix === `[ios-ime] ${name}`).map(([, fields]) => fields);
-  const bridgeTimers = () => timers.filter((t) => t.ms === 750);
+  const bridgeTimers = () => timers.filter((t) => t.ms === api.iosImeFailsafeMs);
+
+  // FIFO discipline (scenario 19 stage two): run EVERY live setTimeout(0)
+  // callback in REGISTRATION order -- xterm's own keydown timer was queued
+  // first, so it runs before our keyup-defer and its watermark lands before
+  // the flush adjudicates. Running the queue in LIFO order would let the
+  // flush see an EMPTY emissions array (branch A) and mask the suppression.
+  const runAllZero = () => {
+    for (const t of timers.filter((x) => x.ms === 0 && !x.cleared && !x.ran)) { t.ran = true; t.fn(); }
+  };
+  // Schedule a raw setTimeout(0) through the SAME stub the bridge uses, so a
+  // caller can enqueue a callback that must run BEFORE the bridge's own
+  // keyup-defer (scenario 19 stage two emulates xterm's keydown timer).
+  const scheduleZero = (fn) => setTimeoutStub(fn, 0);
+  // Raw plumbing for the external-rewrite / flag-discrimination stages: a
+  // direct value write with NO input event, a direct flag latch, and firing a
+  // SINGLE registration by index (so the bridge's own keyup handler can be
+  // bypassed to model xterm's _keyDownSeen short-circuit).
+  const setValueRaw = (v) => { session.term.textarea.value = v; };
+  const setFlag = (name, value) => { session[name] = value; };
+  const fireOne = (type, idx, ev = {}) => { const r = session.term.textarea.registrations.filter((x) => x.type === type)[idx]; assert.ok(r, `no ${JSON.stringify(type)} listener at index ${idx}`); r.fn(ev); };
 
   const bind = () => api.ensureIosImeDirectInputBridge(session);
   const keydown = (keyCode, extra = {}) => fire("keydown", { keyCode, key: String.fromCharCode(keyCode), ...extra });
@@ -198,7 +218,8 @@ function makeHarness({ debug = false } = {}) {
     api, session, timers, logs,
     get term() { return session.term; },
     get textarea() { return session.term.textarea; },
-    bind, fire, fireWatermark, runDeferred, runFailsafe, rows, bridgeTimers,
+    bind, fire, fireWatermark, runDeferred, runFailsafe, runAllZero, rows, bridgeTimers,
+    setValueRaw, setFlag, fireOne, scheduleZero,
     keydown, keyup, input, compositionstart, compositionend, blur, tapAndGrow,
   };
 }
@@ -212,6 +233,10 @@ test("ios-ime 1: pure-append rescue — debug OFF fires the whole path with zero
   // the debug gate OFF, proving the fix is not a diagnostics artifact.
   const h = makeHarness({ debug: false });
   h.bind();
+  // debug-OFF listener census (PR round A-5): EXACTLY the six always-on
+  // listeners, and the debug-only beforeinput must not be registered at all.
+  assert.equal(h.textarea.registrations.length, 6, "debug OFF pins EXACTLY the six always-on listeners (keydown/input/keyup/compositionstart/compositionend/blur)");
+  assert.ok(!h.textarea.registrations.some((r) => r.type === "beforeinput"), "the debug-only beforeinput listener must be ABSENT with the gate OFF");
   h.keydown(229); // baseline ""
   h.textarea.value = "a";
   h.input();
@@ -294,8 +319,8 @@ test("ios-ime 3: composition never intercepted — taps are inert and compositio
 
 test("ios-ime 4: multi-tap keeps the EARLIEST baseline and re-arms every 229", () => {
   // upstream semantics: the baseline is never re-read mid-window; iOS long-press
-  // streams 229s so each keydown re-arms the failsafe (review M17) — the ms-750
-  // entry is REPLACED, and rearmed === keptEarliest on the pending row.
+  // streams 229s so each keydown re-arms the failsafe (review M17) — the previous
+  // failsafe timer entry is REPLACED, and rearmed === keptEarliest on the pending row.
   const h = makeHarness({ debug: true });
   h.bind();
   h.keydown(229); // baseline ""
@@ -309,8 +334,8 @@ test("ios-ime 4: multi-tap keeps the EARLIEST baseline and re-arms every 229", (
   assert.equal(pending[1].rearmed, true, "rearmed === keptEarliest");
   const failsafes = h.bridgeTimers();
   assert.equal(failsafes.length, 2, "the failsafe was re-armed, not skipped");
-  assert.ok(failsafes[0].cleared, "the old ms-750 entry was replaced");
-  assert.ok(!failsafes[1].cleared, "the new ms-750 entry is live");
+  assert.ok(failsafes[0].cleared, "the previous failsafe timer entry was replaced");
+  assert.ok(!failsafes[1].cleared, "the newest failsafe timer entry is live");
 });
 
 test("ios-ime 5: two consecutive windows never swallow each other (HIGH-1)", () => {
@@ -334,7 +359,7 @@ test("ios-ime 5: two consecutive windows never swallow each other (HIGH-1)", () 
 });
 
 test("ios-ime 6: failsafe rescue + the dead-key bounded second chance (N2 stage two)", () => {
-  // stage one: a MISSED keyup — only the 750ms failsafe can rescue the bytes.
+  // stage one: a MISSED keyup — only the failsafe can rescue the bytes.
   // stage two (N2): a dead-key tap (229, NO insertion) leaves an empty delta:
   // the first keyup flush ARMS and stays open (bounded second chance), the
   // failsafe then closes UNCONDITIONALLY — a pending leak would poison every
@@ -446,6 +471,25 @@ test("ios-ime 9: an external clear emits no ghost DEL — the lastSeen guard hol
   const deliver = h.rows("deliver");
   assert.equal(deliver.length, 1, "one deliver row");
   assert.equal(deliver[0].current, "abc", "the deliver row's current is the seen value, not the cleared live value");
+  // stage two — M1 replay (PR round M1): an EXTERNAL rewrite mid-window must
+  // TERMINATE the stale window at the next 229 tap, never diff against it. A
+  // programmatic textarea.value="" dispatches NO input event, so seen stays
+  // stale while live goes empty; the next tap sees live!==seen, kills the old
+  // window (pending/timer/armed) and re-baselines to the LIVE value -- so the
+  // flush yields the fresh "x", not a ghost \x7f off the stale "abc" baseline.
+  h.setValueRaw("abc");
+  h.keydown(229);            // live===seen here: no rewrite, the abc baseline rides on
+  assert.equal(h.session.iosImePending.baseline, "abc", "the window rides on the abc baseline");
+  h.setValueRaw("");         // external rewrite, NO input event -- seen stays "abc", live goes ""
+  h.keydown(229);           // next tap: live!==seen -> terminate the stale window, re-baseline to live ""
+  assert.equal(h.session.iosImePending.baseline, "", "the stale abc baseline was TERMINATED and re-baselined to the live empty value");
+  assert.equal(h.session.iosImeFailsafeArmed, false, "termination reset the armed flag -- no double window, no stale armed carry-over");
+  h.textarea.value = "x";
+  h.input();                // seen now "x"
+  h.keyup();
+  h.runDeferred();
+  assert.deepEqual(h.term.inputCalls, ["x"], "the fresh tap delivers its own x -- NOT a ghost DEL off the stale baseline");
+  assert.equal(h.session.iosImePending, null, "exactly one window, now closed");
 });
 
 test("ios-ime 10: the pinned upstream #5835 equal-length sequence yields exactly \\x7f。", () => {
@@ -532,6 +576,42 @@ test("ios-ime 13: the iosImeSending reentrancy flag excludes the bridge's own ec
   h.session.iosImeSending = false;
   h.fireWatermark("real");
   assert.deepEqual(h.session.iosImeEmissions, ["real"], "outside sending, the watermark records");
+  // stage three — emissions COUNT cap pin (plan §3.3): 70 short distinct
+  // emissions through the open watermark must stop at EXACTLY the sliced
+  // iosImeEmissionsMaxCount entries and never throw — the short strings keep
+  // total chars far below iosImeEmissionsMaxChars, so only the count can bind.
+  const shortEmissions = [];
+  for (let i = 0; i < 70; i++) shortEmissions.push("e" + i);
+  assert.doesNotThrow(() => { for (const s of shortEmissions) h.fireWatermark(s); }, "70 short emissions past the count cap must not throw");
+  assert.equal(h.session.iosImeEmissions.length, h.api.iosImeEmissionsMaxCount, "the count cap pinned: EXACTLY iosImeEmissionsMaxCount entries survive");
+  // stage four — emissions CHAR cap pin on a FRESH window (flush the capped
+  // one closed first, so baseline creation resets the list): 100 long strings
+  // whose cumulative length crosses iosImeEmissionsMaxChars BEFORE the 64-entry
+  // count cap could bind — 80-char entries stop at 51 (4080 chars), so the
+  // char cap is what freezes the list; a removed char-cap line would grow past
+  // the cap (or to the count cap) and fail the assertions below.
+  h.keyup();
+  h.runDeferred(); // closes the capped window, delivering its own "c"
+  h.tapAndGrow(229, "f"); // FRESH window, emissions reset by baseline creation
+  assert.deepEqual(h.session.iosImeEmissions, [], "the fresh window starts with empty emissions");
+  assert.equal(h.session.iosImeSending, false, "sending flag clear — the watermark records again");
+  const longEmissions = [];
+  for (let i = 0; i < 100; i++) longEmissions.push("L" + String(i).padStart(2, "0") + "x".repeat(77));
+  assert.doesNotThrow(() => { for (const s of longEmissions) h.fireWatermark(s); }, "100 long emissions past the char cap must not throw");
+  const recordedChars = h.session.iosImeEmissions.reduce((n, s) => n + s.length, 0);
+  assert.ok(recordedChars <= h.api.iosImeEmissionsMaxChars, "the char cap pinned: total recorded chars stop at iosImeEmissionsMaxChars");
+  assert.ok(h.session.iosImeEmissions.length < h.api.iosImeEmissionsMaxCount, "the char cap — NOT the count cap — halted the growth: the pin is discriminative");
+  const frozenSnapshot = h.session.iosImeEmissions.slice();
+  assert.doesNotThrow(() => { h.fireWatermark("x".repeat(80)); h.fireWatermark("y".repeat(80)); }, "post-cap emissions must not throw");
+  assert.deepEqual(h.session.iosImeEmissions, frozenSnapshot, "stop-appending: the list is frozen at the cap");
+  // stage five — the capped window still flushes normally: branch D over a
+  // near-full watermark delivers its own delta and closes sane.
+  h.keyup();
+  h.runDeferred();
+  assert.equal(h.term.inputCalls[h.term.inputCalls.length - 1], "f", "the capped window still delivered its own delta");
+  assert.equal(h.session.iosImePending, null, "the capped window closed normally");
+  assert.deepEqual(h.session.iosImeEmissions, [], "close reset the emissions");
+  assert.equal(h.session.iosImeSending, false, "sending flag sane after the flush");
 });
 
 test("ios-ime 14: per-code-point chunking — an astral char is ONE code point", () => {
@@ -545,6 +625,21 @@ test("ios-ime 14: per-code-point chunking — an astral char is ONE code point",
   h.keyup();
   h.runDeferred();
   assert.deepEqual(h.term.inputCalls, ["\u{1F600}", "x"], "exactly two calls, the astral char whole");
+  // stage two — code-point LCP (PR round M5): replacing an astral char
+  // (a😀 -> a😃) must delete exactly ONE code point and insert the new one,
+  // never a lone surrogate. At UTF-16-unit granularity the LCP would land
+  // mid-surrogate-pair and emit a dangling low surrogate; at code-point
+  // granularity (Array.from) the whole 😀 is one removed unit -> one \x7f.
+  h.setValueRaw("a\u{1F600}");
+  h.keydown(229);            // fresh baseline "a\u{1F600}"
+  assert.equal(h.session.iosImePending.baseline, "a\u{1F600}", "the window baselines on the astral string");
+  h.textarea.value = "a\u{1F603}"; // replace 😀 with 😃 (both surrogate pairs)
+  h.input();
+  h.keyup();
+  h.runDeferred();
+  assert.deepEqual(h.term.inputCalls.slice(2), ["\x7f", "\u{1F603}"], "one DEL for the whole removed astral char, then the new one whole");
+  assert.ok(!h.term.inputCalls.some((c) => c.length === 1 && c.charCodeAt(0) >= 0xDC00 && c.charCodeAt(0) <= 0xDFFF), "no lone low surrogate is EVER emitted");
+  assert.ok(!h.term.inputCalls.some((c) => c.length === 1 && c.charCodeAt(0) >= 0xD800 && c.charCodeAt(0) <= 0xDBFF), "no lone high surrogate is EVER emitted");
 });
 
 test("ios-ime 15: a whole rgb: delta is never swallowed by the query-response filter", () => {
@@ -662,6 +757,27 @@ test("ios-ime 19: keyup-before-input — the deferred flush arms, the failsafe d
   h.input();
   h.runFailsafe();
   assert.deepEqual(h.term.inputCalls, ["a"], "exactly ONE delivery of the byte");
+  assert.equal(h.session.iosImePending, null, "the window closed");
+  // stage two — FIFO ordering (PR round M4): emulate xterm's OWN keydown timer.
+  // xterm queues its setTimeout(0) textarea diff at KEYDOWN, i.e. before the
+  // bridge's keyup-defer, so under FIFO that timer runs first, lands the
+  // insertion, and fills the watermark -- so the flush then adjudicates against
+  // a NON-empty emissions array and branch C silences the fully-delivered
+  // delta (no double send). Running the 0ms queue in LIFO order would flip the
+  // branch to A and make the bridge double-send.
+  h.keydown(229);                     // fresh window, baseline "a" (live===seen, not a rewrite)
+  assert.equal(h.session.iosImePending.baseline, "a", "the new window baselines on the current value");
+  h.scheduleZero(() => {             // xterm's own keydown timer: enqueued BEFORE our keyup-defer
+    h.textarea.value = "ab";         // the insertion lands on xterm's tick
+    h.input();                       // its input event refreshes seen to "ab"
+    h.fireWatermark(h.textarea.value); // xterm's own onData diff delivers the whole value
+  });
+  h.keyup();                         // queues the bridge's keyup-defer AFTER xterm's timer
+  h.runAllZero();                    // FIFO: xterm's timer first (fills the watermark), then the flush
+  assert.deepEqual(h.term.inputCalls, ["a"], "exactly ONE delivery total -- the bridge added NOTHING");
+  const del = h.rows("deliver");
+  assert.equal(del[del.length - 1].branch, "C", "the flush adjudicated against the NON-empty watermark -> branch C");
+  assert.equal(del[del.length - 1].payload, "", "branch C is silent for the fully-delivered delta");
   assert.equal(h.session.iosImePending, null, "the window closed");
 });
 

@@ -1,7 +1,7 @@
 # Issue #115 修复计划：iPadOS/iOS 中文输入法直接键入无法输入终端
 
-**日期**：2026-10-16（v5：T1 实现轮仲裁修订落地——composing 守卫、窗口终结者统一、绑定重置、分支 C 守卫与已知局限、T2 补钉清单、signpost 归属）
-**状态**：**T0/T1/T2/T3/T4 代码与文档已落地（commit 560d557 → a9c9f4f → W4）**；结论仍以 T0 真机数据为准（T0 校准 failsafe 取值）；**T5 真机验证矩阵待执行——合并前门槛**
+**日期**：2026-10-16（v6：PR #123 第一轮评审仲裁落地——M1 外部改写终结陈旧窗、current 形状坍缩、LCP 官定码点、T5 政策调整；三轮评审 53 条 + 实现轮 + PR 轮全部落账）
+**状态**：**T0/T1/T2/T3/T4 代码与文档已落地**；结论仍以 T0 真机数据为准（T0 校准 failsafe 取值）；**T5 真机验证矩阵改为合并后（beta 渠道）执行——按维护者决定，不作为本 PR 的合并门槛**（PR #123 评审更正评论；follow-up issue 跟踪签字与校准回填）
 **Issue**：#115（bug，v0.6.0 develop / mwbeta）
 **评审记录**：三轮评审共六份临时文档（两位评审各三轮），按其自身约定不提交、不忽略，已在
 linletian 确认后删除；**逐条判定与处置完整落账于本文档附录**：附录 A（一轮 27 条）、
@@ -95,14 +95,14 @@ linletian 确认后删除；**逐条判定与处置完整落账于本文档附�
 
 | 事件 | 动作 |
 | --- | --- |
-| `keydown` 且 `keyCode===229` **且非合成中** | 无 pending → 记 `baseline = textarea.value`；已有 pending → **保留最早 baseline，不重取**；**每个 229 keydown 都重臂** failsafe timer（750ms，iOS 长按连续发 229，重置语义见评审 M17）；更新 `iosImeSeen`。**composing 守卫（T1 实现轮评审 BLOCKER，仲裁裁定）**：状态机仅在 `event.isComposing !== true && session.iosImeComposing !== true` 时运行——bundle 实证 `compositionupdate` 只绘制、合成文本仅在 `_finalizeComposition`（compositionend）投递，合成期间水印必为空，无守卫的 229 窗口会走分支 A 把拼音中间态发进终端（评审 harness 实测 `"ihao你好"`）；iOS 直提交失败路径无 composition（#5835 日志无合成事件），守卫不会哑掉修复 |
+| `keydown` 且 `keyCode===229` **且非合成中** | **外部改写检测（PR 轮评审 M1，仲裁裁定）**：先判 `textarea.value !== session.iosImeSeen` —— xterm 的程序化改写（`^C`/ETX 清空、中键驻留）不入 input 事件，一旦发生，旧窗 baseline 与 seen 都已失真；此差异在 keydown 探到即**终结陈旧窗**（清 pending/timer/armed，emissions 不动交由下次建窗复位）再建新窗（seen 与 baseline 均取当下 live）。其余：无 pending → 记 `baseline = textarea.value`；已有 pending → **保留最早 baseline，不重取**；**每个 229 keydown 都重臂** failsafe timer（750ms，iOS 长按连续发 229，重置语义见评审 M17）；更新 `iosImeSeen`。**composing 守卫（T1 实现轮评审 BLOCKER，仲裁裁定）**：状态机仅在 `event.isComposing !== true && session.iosImeComposing !== true` 时运行——bundle 实证 `compositionupdate` 只绘制、合成文本仅在 `_finalizeComposition`（compositionend）投递，合成期间水印必为空，无守卫的 229 窗口会走分支 A 把拼音中间态发进终端（评审 harness 实测 `"ihao你好"`）；iOS 直提交失败路径无 composition（#5835 日志无合成事件），守卫不会哑掉修复 |
 | `input` | `iosImeSeen = textarea.value`（每次改动后刷新最后观测值） |
 | `compositionstart` | 置 `session.iosImeComposing = true`；清 pending + 清 timer + **复位 `iosImeFailsafeArmed`**（窗口终结者统一：compositionstart 与关窗/blur 同类）；emissions 不动（composition 路径自有投递，不干涉） |
 | `compositionend` | **常驻监听**（非 debug 门控）：仅清 `session.iosImeComposing`（日志行仍 debug 门控）——合成结束后下一个直提交 tap 必须能重新进入状态机 |
 | `blur` | **flush-then-clear**：先按 §3.3 flush（评审 M7：只清不 flush 会丢字），再清 pending + timer + **复位 `iosImeFailsafeArmed`**（其自身 clear 路径终结窗口，同关窗语义）；并**无条件清 `iosImeComposing`**（compositionend 丢失时 blur 自愈，防 composing 锁死哑掉桥接；`ensureQuickKeysImeBinding` 的 blur 清 `session.composing` 为同款先例） |
 | `keyup` | **不同步 flush**——排一个 `setTimeout(0)` 宏任务再 flush（评审 HIGH-2：不得与同轮尾部 `input` 赛跑；且 xterm 的 keydown timer 先于我们的 timer 入队，FIFO 保证它先跑完，水印得以裁决） |
 
-**lastSeen 守卫**（评审 HIGH-3/M7 引出）：bundle 实证 xterm 自身有 3 处 `textarea.value=` 赋值——`_handleTextAreaBlur` 清空、`^C`/CR 的 `ETX` 分支清空、Linux 中键选区驻留。这些外部清空会晚于我们的观测发生，flush 时若直接读 live value，会算出 shrink → 发出**幽灵 `\x7f`**。因此 flush 的 current 取值规则：**live value === `iosImeSeen` 时用 live；不一致时（外部清空/改写）用 `iosImeSeen`**——桥接永不对外部改写后的值计 delta。
+**lastSeen 守卫**（评审 HIGH-3/M7 引出；**PR 轮仲裁修订两处**）：bundle 实证 xterm 自身有 3 处 `textarea.value=` 赋值——`_handleTextAreaBlur` 清空、`^C`/CR 的 `ETX` 分支清空、Linux 中键选区驻留。这些外部清空会晚于我们的观测发生，flush 时若直接读 live value，会算出 shrink → 发出**幽灵 `\x7f`**。规则：**flush 的 current 恒取 `session.iosImeSeen`**——live===seen 时二者本为同一字符串，分歧时（外部清空/改写）seen 是唯一可信源（PR 轮 Mavis 指出原三元 `live===seen ? live : seen` 是恒取 seen 的死代码、且注释会诱导未来维护者反向"修正"重新引入幽灵 DEL，故坍缩形状并明写语义；与 §3.3 真值表伪代码的形状差异记录在案）。同窗存续期内的外部改写由 keydown-229 的**外部改写检测**（上表 M1 行）在下一个 tap 探到并终结陈旧窗。
 
 **failsafe timer**（750ms）：漏 keyup 的兜底。关窗规则（评审 N2，实现前必须定死；三支齐全由评审 G1 补齐）：
 
@@ -122,7 +122,7 @@ linletian 确认后删除；**逐条判定与处置完整落账于本文档附�
 | # | 上游 PR #5836 | 本计划 | 理由 |
 | --- | --- | --- | --- |
 | timer 重臂 | `_ensurePending229Timer()` 首行 `if (this._textareaChangeTimer !== undefined) return;`——首个 229 装 timer、后续忽略 | 每个 229 keydown 重臂 | 改进：iOS 长按连续发 229，重臂使 failsafe 从最后一次 keydown 起算，避免长按中段误触发 |
-| timer 时长 | `setTimeout(…, 0)`（单次宏任务） | 750ms failsafe | 改进：上游窗口只有一次宏任务，漏 keyup 即无兜底；750ms 覆盖迟到的 input（实测 keydown→插入 10–18ms，余量 22–62×，见 R3-A） |
+| timer 时长 | `setTimeout(…, 0)`（单次宏任务） | 750ms failsafe | 改进：上游窗口只有一次宏任务，漏 keyup 即无兜底；750ms 覆盖迟到的 input（实测 keydown→插入 10–18ms，余量 **41–75×**；对照 keydown→keyup 12–34ms 则为 22–62×——PR 轮评审指出的数字配对勘误，原句把 22–62× 挂在插入区间下，见 R3-A 与 DATA-COLLECTION §三） |
 | 关窗条件 | `if (dataSent || (timerFired && keyupFired)) _clearPending229()` | 空 delta 有界保留一次机会（见上三支） | 上游"两次空即关窗"在某些次序下等于立即关窗；我们有界不关窗补漏，但有界化杜绝其副作用 |
 | current 取值 | 读 live `textarea.value` | lastSeen 守卫（读 `iosImeSeen`，§3.2） | 结构性需要：我们在 xterm 外部，读不到它内部的 diff 快照；外部清空（blur/^C）会污染 live |
 | 发送粒度 | 单串 `triggerDataEvent(payload)` | 逐码点 `term.input()`（§3.3，评审 M6） | 结构性需要：`isTerminalQueryResponse` 按整串匹配（`^rgb:` 等），整块投递会被吞；逐码点与 xterm 原生逐键语义对齐 |
@@ -135,19 +135,20 @@ linletian 确认后删除；**逐条判定与处置完整落账于本文档附�
 
 ### 3.3 flush 算法（两个纯函数 + 复位语义）
 
-**`iosImeDeltaBytes(baseline, current)`**（评审 M1：删除数必须显式定义——最长公共前缀 LCP 差分）：
+**`iosImeDeltaBytes(baseline, current)`**（评审 M1：删除数必须显式定义——最长公共前缀 LCP 差分；**PR 轮仲裁：LCP 粒度官定为码点（`Array.from`），非 UTF-16 码元**——码元粒度在 astral 替换场景（`a😀`→`a😃`）会劈开代理对、发出孤立低代理到 PTY，且多码元字符被按码元计 DEL 数（多删）；码点粒度对全部 ASCII/BMP 序列逐位等价，仅修 astral；折叠测试进 T2 ⑭）：
 
 ```text
-if current === baseline → ""
-p = LCP(baseline, current) 长度
-removed = baseline.length - p
-appended = current.slice(p)
-current.length <  baseline.length → "\x7f"                       （纯缩短：单 DEL，同 xterm 语义）
-removed > 0                     → "\x7f" × removed + appended     （替换：DEL×删除数 + 插入）
-否则                            → appended                        （纯追加）
+cpsB = Array.from(baseline); cpsC = Array.from(current)
+current === baseline                             → ""
+p = cpsB 与 cpsC 的最长公共前缀长度（码点）
+removed = cpsB.length - p
+appended = cpsC.slice(p).join("")
+cpsC.length < cpsB.length                        → "\x7f"                       （纯缩短：单 DEL）
+removed > 0（码点数相等或增长）                   → "\x7f".repeat(removed) + appended
+否则                                             → appended
 ```
 
-以上游 #5835 实测序列钉死：baseline `" ，！ "` → current `" ，！。"` → LCP=3、removed=1、appended=`"。"` → payload **`"\x7f。"`**（残留已投递时语义正确：删掉那个空格再插入。）。**未投递残留 + 转换**的 over-delete 是已知边界（上游同款，§六）。
+以上游 #5835 实测序列钉死：baseline `" ，！ "` → current `" ，！。"` → LCP=3、removed=1、appended=`"。"` → payload **`"\x7f。"`**（残留已投递时语义正确：删掉那个空格再插入。）。**未投递残留 + 转换**的 over-delete 是已知边界（上游同款，§六）。**纯缩短单 DEL 的上游 parity 实证（PR 轮 MINOR 挑战的裁定依据，REJECT 改为按 removed 计数）**：bundle `_handleAnyTextareaChanges` 缩短分支为 `t.length<e.length?this._coreService.triggerDataEvent(\`${a.C0.DEL}\`,!0)`——对任意缩短只发**一个** DEL（整个缩短串仅此一投），与 xterm 语义逐字一致；窗内多字符净删少删是上游同款行为，不属本补丁的回归面。
 
 **`iosImeResidualPayload(delta, emissions, current)`**（emissions = 本 pending 窗口内 xterm 自身经 onData 投递的串数组；**仲裁修订**：签名增补 `current`——分支 C 的第二条件需要它，v4 伪代码漏写）：
 
@@ -212,14 +213,16 @@ flushIosIme(session, via):
 | --- | --- | --- | --- |
 | T0 | 诊断埋点：`?iosime-debug=1` 门控的 textarea 事件流日志（keydown keyCode/key、input、composition*、keyup、textarea value）**+ 与 xterm 同构的 setTimeout(0) 时序探针**（评审 M3：现有 DOM 事件埋点回答不了"插入 vs 回调谁先"，探针在 keydown 内自排一个 0ms timer 打时间戳、与 input 时间戳对比——FIFO 下 xterm 的回调不晚于我们的探针，故探针早于 input 即证假设）；**+ 自带绑定实现**（评审 G2：唯一绑定函数 `ensureIosImeDirectInputBridge`，T0 阶段只登记诊断监听子集并发 `[ios-ime] bound`，否则 DATA-COLLECTION 的采集前置不可达——同一函数名、同一幂等标志 `iosImeBridgeTerm`，T1 落地即在其上叠加桥接监听，不留两套并行监听）；真机确认中/英键盘事件序列 | `index.html` | 事件流证据；校准 flush 边界（空格→。 转换序列、failsafe 取值——实测基线见 DATA-COLLECTION §三） |
 | T1 | 桥接实现：两个纯函数 + ensure-binding + keydown/input/keyup/composition/blur/timer + onData 水印 + lastSeen 守卫 + 绑定点接线 | `index.html`（quick-keys IME 段邻位新区块；`renderTerminalSessions`；`focusTerminalIfPossible`） | 修复本体 |
-| T2 | 单测：新建 `internal/ui/testdata/ios_ime_direct_input.test.mjs`，切片驱动**恰好 20 个 `^test(` 场景**（硬性验收，评审 F4：计数与 T4 CHANGELOG 数字词联动；≤20 才能用英文数字词拼写，`words` 表上限 twenty）：① 纯追加补发 ② 水印分支 C 抑制双发 ③ composition 不拦截 ④ 多敲击最早 baseline ⑤ 连续两窗互不吞字（HIGH-1）⑥ failsafe 补发 **+ 死键无插入→空 delta→有界二次机会→failsafe 无条件关窗→下一个键正常送达（N2，同一 scenario 的第二阶段）** ⑦ 重复 229 重臂 timer **+ 同窗口内两次"空 delta keyup flush"后窗口必定已关、下一个字符正常送达；`iosImeFailsafeArmed` 在关窗时复位（G1，同 scenario 的第二阶段）** ⑧ blur flush-then-clear **+ keyup 延后 flush 与 blur flush 交错只交付一次（F6，第二阶段）** ⑨ 外部清空后无幽灵 DEL ⑩ 上游等长序列 → `\x7f。` ⑪ 纯缩短单 DEL ⑫ emissions 作用域复位 ⑬ 重入标志排除自发 ⑭ 逐码点分块 ⑮ `rgb:` 整串不被过滤器吞 ⑯ 绑定幂等 ⑰ term 重建后重绑 ⑱ 死 term 容错 **+ timer 触发时 `session.term` 已销毁则 flush 静默（同 scenario 内断言，不新开 `^test(`）** ⑲ keyup 早于 input 次序单次投递 ⑳ 非 229 keydown 不拦截。**T2 实现轮补充钉死（评审第二轮，全部折叠进既有场景的第二阶段，不新增 `^test(`；每条均有变异证明——删除对应实现行恰使该场景失败）**：② 钉 `deliver` 先于 `clear(close-window)` 的日志顺序；③ 钉 composing 旗标置位/旗标单独守卫（无 `isComposing` 的 tap）与 compositionstart 前先臂窗的非空 armed 复位；⑧ 钉 blur 自愈清 `iosImeComposing`（compositionend 丢失）后直提交仍达；⑬ 钉真投递回声排除（`term.input` 内重放水印）；⑦ 钉 `deliver.armed` 的进入时值（首 flush false / 次 flush true）与空 delta 行 `branch:null`；⑰ 钉旧水印 disposable dispose 恰一次；⑱ 的 F6 断言用 **throwing term getter** 使守卫次序可判别。验收附加：切片锚点须命中 §八 的区块横幅（区块被挪走/横幅被删则 slice 阶段失败） | `internal/ui/testdata/` | 文件恰好 20 个 `^test(` |
+| T2 | 单测：新建 `internal/ui/testdata/ios_ime_direct_input.test.mjs`，切片驱动**恰好 20 个 `^test(` 场景**（硬性验收，评审 F4：计数与 T4 CHANGELOG 数字词联动；≤20 才能用英文数字词拼写，`words` 表上限 twenty）：① 纯追加补发 ② 水印分支 C 抑制双发 ③ composition 不拦截 ④ 多敲击最早 baseline ⑤ 连续两窗互不吞字（HIGH-1）⑥ failsafe 补发 **+ 死键无插入→空 delta→有界二次机会→failsafe 无条件关窗→下一个键正常送达（N2，同一 scenario 的第二阶段）** ⑦ 重复 229 重臂 timer **+ 同窗口内两次"空 delta keyup flush"后窗口必定已关、下一个字符正常送达；`iosImeFailsafeArmed` 在关窗时复位（G1，同 scenario 的第二阶段）** ⑧ blur flush-then-clear **+ keyup 延后 flush 与 blur flush 交错只交付一次（F6，第二阶段）** ⑨ 外部清空后无幽灵 DEL ⑩ 上游等长序列 → `\x7f。` ⑪ 纯缩短单 DEL ⑫ emissions 作用域复位 ⑬ 重入标志排除自发 ⑭ 逐码点分块 ⑮ `rgb:` 整串不被过滤器吞 ⑯ 绑定幂等 ⑰ term 重建后重绑 ⑱ 死 term 容错 **+ timer 触发时 `session.term` 已销毁则 flush 静默（同 scenario 内断言，不新开 `^test(`）** ⑲ keyup 早于 input 次序单次投递 ⑳ 非 229 keydown 不拦截。**T2 实现轮补充钉死（评审第二轮，全部折叠进既有场景的第二阶段，不新增 `^test(`；每条均有变异证明——删除对应实现行恰使该场景失败）**：② 钉 `deliver` 先于 `clear(close-window)` 的日志顺序；③ 钉 composing 旗标置位/旗标单独守卫（无 `isComposing` 的 tap）与 compositionstart 前先臂窗的非空 armed 复位；⑧ 钉 blur 自愈清 `iosImeComposing`（compositionend 丢失）后直提交仍达；⑬ 钉真投递回声排除（`term.input` 内重放水印）；⑦ 钉 `deliver.armed` 的进入时值（首 flush false / 次 flush true）与空 delta 行 `branch:null`；⑰ 钉旧水印 disposable dispose 恰一次；⑱ 的 F6 断言用 **throwing term getter** 使守卫次序可判别。**PR 轮补充折叠（A-5，同不改 `^test(` 计数）**：① 钉 debug-OFF 常驻监听数恰为 6；⑨ 第二阶段钉 M1 外部改写→同窗次 tap 终结陈旧窗（幽灵 DEL 消失、新字符照常送达）；⑬ 第二阶段钉 emissions 双上限（条数 64 / 长度 4096 停止追加不抛错）；⑭ 第二阶段钉 astral 替换（码点 LCP：`a😀`→`a😃` ⇒ `["\x7f","😃"]`，无孤立代理）；⑲ 第二阶段钉 xterm-timer 先入队 FIFO 次序（注入模拟 xterm timer，断言先于 keyup-defer flush 运行）；harness 的 750 不再是魔数（切片求值 `iosImeFailsafeMs`，T0 校准改值不误红）。验收附加：切片锚点须命中 §八 的区块横幅（区块被挪走/横幅被删则 slice 阶段失败） | `internal/ui/testdata/` | 文件恰好 20 个 `^test(` |
 | T3 | Go 侧：`terminal_status_test.go` 加 node wrapper（`TestIosImeDirectInputHandling`）+ `TestResponsiveLayerChangelogCounts` 表新增一行（短语 **`new issue #115 ios-ime scenarios`**、与现有七条互异、搭配数字词 **twenty**）+ 契约断言**全部按符号名**（评审 m14）：`static/kinds/pty.js` 全文 `iosIme` 计数为 0、legacy factory（`createTerminalSession`）的 onData 门锚点原样（`isInstanceTerminalStatus` / `isTerminalQueryResponse` 调用仍在原函数体内）、桥接发送口只有 `term.input(`、`iosImeSending` 重入标志存在 + **bundle 指纹守卫** `TestIosImeBridgeMatchesVendoredBundle`（§8.3：读 **CWD 相对路径** `static/vendor/xterm/xterm.js`——Go 测试的 CWD 是 `internal/ui/`，评审 R3-C；指纹 `_pending229Baseline` 在 vendored bundle 中 0 命中 ⇒ 补丁必须在位；≥1 命中 ⇒ 补丁痕迹必须清零；该 bundle 是 git 追踪资产（R3-C 已核），CI 可稳定读取）+ **signpost 归属（评审 A challenge，仲裁裁定归 T3/T4 同批）**：`scripts/download-xterm.sh` 的 `XTERM_VERSION` 行尾注释（§8.3 原文）随本批落地 | `internal/ui/terminal_status_test.go`、`scripts/download-xterm.sh` | `go test ./internal/ui/` 全绿 |
 | T4 | 文档：CHANGELOG 条目落 **`## Unreleased`**（评审 LOW-6/M8），计数措辞必须是 **`… twenty new issue #115 ios-ime scenarios …`**——数字词与短语之间**只有空格**（不加反引号/括号，否则 `(\w+) ` + QuoteMeta(phrase) 零命中，评审 F1），且**不得**复用 "Pinned by N `node --test` cases" 句形（digits 形式会被 `TestTerminalStatusChangelogCount` 误捕；该句形是 terminal_status.test.mjs 专属）；本文档；DATA-COLLECTION.md | 仓库根、`docs/plans/fix-issue115/` | 文档闭环 |
-| T5 | 真机验证矩阵（beta 渠道 + 手动清单，见下节）签字 | — | 可合并 |
+| T5 | 真机验证矩阵（beta 渠道 + 手动清单，见下节）签字 | — | **合并后执行（beta 渠道）——按维护者决定不作为本 PR 的合并门槛**（PR #123 评审更正；follow-up issue 跟踪：probe 回填 + failsafe 校准 + §五矩阵签字） |
 
 **T0/T2 验收附加（切片纪律，评审 MEDIUM-3）**：被切片区块内**不得引入新的自由标识符**（新增函数须整体可切片、依赖以 deps 注入）；`?iosime-debug` 读 `location.search` 必须在 `typeof location` 守卫内（或经 deps 注入）；测试字符串锚点边界包裹；切片块移动/重命名时 node 用例必须在 slice 阶段响亮失败，不允许以镜像副本通过。
 
 ## 五、真机验证矩阵（手动 / beta）
+
+> **执行时机（PR 轮政策调整）**：合并后 beta 渠道执行，不阻塞 PR #123 合并；自动层已证逻辑，本矩阵证时序与真机行为，结论回填本文档与 DATA-COLLECTION。
 
 - iPad/iPhone × Safari / Chrome(iOS)：中文半角数字、中文直输标点、英文软键盘字母（T0 确认项）；
 - `cat -v` 观察字节流确实到达 shell；
@@ -490,4 +493,40 @@ T0/T1/T2/T3+T4 各轮实现产出经双评审（第一轮：opencode/space-bunny
 
 ---
 
-*计划维护：fix/fix-issue115 ｜ v5 2026-10-16（T1 实现轮仲裁修订：三轮评审后由编码 Sub-agent 与仲裁者联合落地，全部双评审 APPROVE）｜ T5 真机验证待执行*
+## 附录 A-5：PR #123 第一轮评审仲裁判定与处置（2026-10-16，v6）
+
+两位评审（Muse Spark：Request Changes + 政策更正评论；Mavis：可合并 + 一条可执行意见）共 1 条政策调整、5 条 MAJOR 级、13 条 MINOR 级、8 条 NIT。逐条仲裁如下；事实性论断经仲裁者独立复验（M1 以评审复现脚本原样重放证实；纯收缩单 DEL 以 bundle 分支逐字引文证实；数字配对勘误复算证实）。
+
+**政策调整（评审更正评论，维护者决定）**：T5 真机验证移至合并后 beta 执行，不作为本 PR 合并门槛——撤回其 B1"拦合并"；四处文档（本文档 §首/§四 T5/§五、DATA-COLLECTION、CHANGELOG 尾段）与 PR body 同步改写，follow-up issue 跟踪。
+
+| # | 判定 | 依据与处置 |
+| --- | --- | --- |
+| Mavis-1 | ✅ 成立 | `live===seen ? live : seen` 恒取 seen（相等时二者同串），三元为死代码且注释会诱导反向"修正"重新引入幽灵 DEL → flush 的 current 坍缩为 `const current = session.iosImeSeen;` + 注释明写语义（§3.2 已改） |
+| M1 | ✅ 成立（复放证实） | 外部改写（xterm 程序化 `textarea.value=`，不入 input 事件）+ 同窗后续 input → seen 被无条件覆盖、keep-earliest 保留失真 baseline → 幽灵 DEL 且新字符丢失（replay：sent=`["\x7f"]`）→ keydown-229 增**外部改写检测**：`live !== seen` 即终结陈旧窗再建新窗（§3.2 已改；折叠进 T2 ⑨ 第二阶段） |
+| M2 | ✅ 成立 | CHANGELOG 把第 3 环假设写成定论（plan §一/§一 DATA 均标"待 T0 证实"）→ 加 presumed/pending-T0 hedge |
+| M3a | ✅ 成立 | 指纹守卫缺对照指纹——私有名 mangle 场景 `_pending229Baseline` 恒 0 → 补丁判"必须在位"恒绿假阴 → 加 `_dataAlreadySent >= 1` 对照断言（0 即 Fatal"指纹不可信"） |
+| M3b | ✅ 成立 | `createTerminalSession` 体按 `"\n        }"` 8 空格截断，重缩进即早截/延截 → 截断后断言切片含 `termDataDisposable` 锚点（证明到达 onData 区域）+ `end >= 0` |
+| M4 | ✅ 成立 | 测试魔数 750 镜像生产 const，T0 校准改值即全红且报错误导 → harness 切片求值 `iosImeFailsafeMs` |
+| M5 | ✅ 成立（按折叠处理） | HIGH-2 FIFO 未被钉 → ⑲ 第二阶段注入模拟 xterm timer 并断言先于 keyup-defer flush |
+| MINOR LCP 码元劈代理对 | ✅ 成立 | `a😀`→`a😃` 码元 LCP 劈开代理对 → 孤立低代理进 PTY、DEL 数按码元误计 → §3.3 LCP 粒度官定码点（ASCII/BMP 逐位等价）；折叠进 ⑭ |
+| MINOR 纯收缩单 DEL 证据链 | ❌ REJECT（parity 实证） | bundle 缩短分支 `t.length<e.length?triggerDataEvent(DEL)` 对任意缩短只发一个 DEL——单 DEL 即上游语义，多字符净删少删是上游同款行为；§3.3 已附引文 |
+| MINOR destroy 双路径不清 timer/水印 | ❌ REJECT（契约内已决） | 工厂触碰为 §8.1 零外溢契约禁止；§3.2 timer/销毁边界已记 fail-soft 守卫（F6 + input 抛错捕获）；session 死则状态随之亡 |
+| MINOR 旧 keyup-defer 跨 rebind 误 flush 新窗 | ❌ REJECT（不可达） | defer 是 keyup 后**首个排队回调**，真实 keydown 事件不可能插到它之前建新窗；rebind 重置 pending 已兜底空窗路径 |
+| MINOR 水印在 app 门之前（查询应答双丢） | ❌ REJECT（结构性不可改 + 已记） | 门在工厂自身 onData 消费者内部，零外溢契约禁止触碰；§3.3 已知局限 + §五观察项已覆盖（MEDIUM-4 已知接受） |
+| MINOR emissions cap 截断后分支 B 复发 | ✅ 成立（注释级） | cap 注释已记 C 侧退化，补 B 侧重发风险一句 |
+| MINOR debug-OFF 监听数未钉 | ✅ 成立 | 实测 ① 无监听数断言 → 钉 6 |
+| MINOR caps 零覆盖 | ✅ 成立 | 折叠进 ⑬ 第二阶段（64/4096 停止追加不抛错） |
+| MINOR pty 零溢出仅查 `iosIme` 子串 | ✅ 成立 | Go 守卫改查四模式全零（iosIme/IosIme/ios_ime/ios-ime；今日实测全零） |
+| MINOR bindingPoint==2 过刚 | ❌ REJECT | §8.1 触点全集契约就是恰两处，守卫钉契约 |
+| MINOR 发送口守卫弱 | ❌ REJECT | `term.input(` ≥1 + `.triggerDataEvent(` ==0 已是合理绊网 |
+| MINOR signpost 无守卫 | ✅ 成立 | 指纹守卫 present 分支加 signpost 在位断言、removed 分支加消失断言（CWD 相对 `../../scripts/download-xterm.sh`） |
+| MINOR harness 默认不回声 | ❌ REJECT | 按场景控制回声是设计（⑬ 专测回声），全局默认回声会污染分支断言 |
+| MINOR failsafe 倍数配对错位 | ✅ 成立 | 750/10–18=41–75×，22–62× 对应 keydown→keyup 12–34ms → §3.2 分歧表句已改 |
+| NIT ×8 | — 不拦 | B/C 标签二义（结果同静默）；顶层 function 实为 window 属性（§8.1 指"无显式 `window.*=` 赋值"，措辞已足）；`iosImeProbeT1=null` 无条件写（每键一次 null 写，churn 不值）；≤2s 残窗已记 §六；`twenty` 空格脆弱由守卫钉死；`globalThis.location` 串行由 node --test 同文件顺序保证；长度门折叠进 ⑬；checklist 硬编码 §8.4 路径随守卫共存亡 |
+
+**合并前 checklist（本 PR 内）**：修 Mavis-1/M1/M2/M3a/M3b/M4/M5 + MINOR 五项（LCP/注释/监听数/caps/pty 四模式/signpost）+ 文档政策改写。T5 改合并后执行。
+
+
+---
+
+*计划维护：fix/fix-issue115 ｜ v6 2026-10-16（PR #123 第一轮评审仲裁：M1 外部改写终结、current 坍缩、码点 LCP、T5 政策调整——全部双评审后落地）｜ T5 改合并后执行*

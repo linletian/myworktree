@@ -3,7 +3,7 @@
 诊断埋点随 T0 落地（`internal/ui/static/index.html`），**URL 参数门控、纯前端、零后端**：
 地址带 `?iosime-debug=1` 打开，日志统一前缀 `[ios-ime]`，输出到 Safari Web Inspector 控制台。
 
-**状态**：结论以 T0 数据为准（v4，2026-10-16 按三轮评审修订；plan.md 已放行 T0 与 T1）。
+**状态**：结论以 T0 数据为准（v6，2026-10-16 按 PR #123 第一轮评审仲裁修订；plan.md 已放行 T0 与 T1）。真机验证矩阵按维护者决定于**合并后（POST-MERGE）在 beta 渠道执行**，不是本 PR 的合并门禁（follow-up issue 跟踪）。
 
 **代码落点与可移除性**（plan.md §八）：埋点代码位于 `index.html` 中 issue #115 的
 `ios-ime bridge` 单一可移除区块内（`// ==== ios-ime bridge … BEGIN/END` 纯 ASCII 横幅包裹、

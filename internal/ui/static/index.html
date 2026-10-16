@@ -3906,6 +3906,10 @@
         // past either cap the watermark STOPS appending and never throws.
         // Accepted trade-off: windows that hit a cap are pathological and
         // branch-C suppression may degrade there, but the cap bounds memory.
+        // The B side of the SAME trade-off: a cap-hit leaves `joined` a
+        // truncated prefix, so branch B could strip only that prefix and
+        // re-send already-delivered bytes -- pathological windows only, and
+        // bounded by the same stop-appending rule that halts the growth.
         const iosImeEmissionsMaxCount = 64;
         const iosImeEmissionsMaxChars = 4096;
 
@@ -3914,16 +3918,24 @@
         // order is load-bearing). Pinned by upstream #5835: baseline
         // "   ! " -> current "   !." yields "\x7f." (drop the trailing
         // space, insert the new char) once the residue is already delivered.
+        // LCP granularity is CODE POINTS (Array.from), NOT UTF-16 units
+        // (plan.md 3.3, PR round M5): unit granularity splits a surrogate pair
+        // on an astral replace (a\uD83D\uDE00 -> a\uD83D\uDE03), computing a mid-pair LCP and then
+        // emitting the dangling LOW surrogate to the PTY. Code-point LCP treats
+        // the pair as one removed unit -> one \x7f + the whole new char; every
+        // ASCII/BMP sequence is bit-identical to the unit form.
         function iosImeDeltaBytes(baseline, current) {
             if (current === baseline) return "";
+            const cpsB = Array.from(baseline);
+            const cpsC = Array.from(current);
             let p = 0;
-            const n = Math.min(baseline.length, current.length);
-            while (p < n && baseline.charAt(p) === current.charAt(p)) p++;
-            const removed = baseline.length - p;
-            const appended = current.slice(p);
-            if (current.length < baseline.length) return "\x7f";       // pure shrink: ONE DEL (xterm semantics)
-            if (removed > 0) return "\x7f".repeat(removed) + appended;  // replace: DEL x removed + insert
-            return appended;                                              // pure append
+            const n = Math.min(cpsB.length, cpsC.length);
+            while (p < n && cpsB[p] === cpsC[p]) p++;
+            const removed = cpsB.length - p;
+            const appended = cpsC.slice(p).join("");
+            if (cpsC.length < cpsB.length) return "\x7f";                // pure shrink: ONE DEL (xterm semantics)
+            if (removed > 0) return "\x7f".repeat(removed) + appended;    // replace: DEL x removed + insert
+            return appended;                                               // pure append
         }
 
         // Residual branch, in A/B/C/D order (plan.md 3.3). current is
@@ -3973,9 +3985,16 @@
             if (!session.term) return;             // dead session (a timer outlives destroy paths)
             const textarea = session.term.textarea;
             if (!textarea) return;
-            // lastSeen guard (plan.md 3.2): never diff against an externally
-            // rewritten live value (xterm's blur /^C clears), use iosImeSeen.
-            const current = (textarea.value === session.iosImeSeen) ? textarea.value : session.iosImeSeen;
+            // lastSeen guard (plan.md 3.2): current is ALWAYS the lastSeen
+            // snapshot. When live===seen they are the SAME string; when they
+            // diverge (an external programmatic rewrite -- xterm's blur /^C
+            // clears, mid-key selection) seen is the ONLY trustworthy source.
+            // NEVER read the live value here: diffing a value xterm rewrote
+            // out from under us computes a shrink and re-imports the ghost
+            // \x7f this guard exists to prevent. (A live===seen ? live : seen
+            // shape here is a trap -- it reads as "live wins when trusted"
+            // and invites a backwards "fix".)
+            const current = session.iosImeSeen;
             const delta = iosImeDeltaBytes(session.iosImePending.baseline, current);
             // capture log context BEFORE any state change
             const baseline = session.iosImePending.baseline;
@@ -4067,7 +4086,8 @@
                         iosImeLog("probe", { t0: t0, t1: t1, valueAtProbe: textarea.value });
                     }, 0);
                 }
-                // STATE MACHINE (always on): baseline + per-229 failsafe re-arm.
+                // STATE MACHINE (always on): external-rewrite termination +
+                // baseline capture + per-229 failsafe re-arm, in that order.
                 // Guarded against composition: the vendored bundle delivers
                 // composition text ONLY at compositionend (_finalizeComposition),
                 // so the onData watermark is EMPTY mid-composition; a 229
@@ -4078,6 +4098,22 @@
                 // fix. When guarded out: NO pending window, NO timer arm, NO
                 // pending row; the debug keydown row above still fires.
                 if (event.keyCode === 229 && event.isComposing !== true && session.iosImeComposing !== true) {
+                    // EXTERNAL-REWRITE TERMINATION (plan.md 3.2, PR round M1):
+                    // xterm's programmatic textarea.value= writes (the ^C/ETX
+                    // clear, mid-key selection) dispatch NO input event, so a
+                    // live-vs-seen divergence seen here means BOTH the old
+                    // window's baseline AND seen are stale -- the old window's
+                    // diff would be nonsense. Terminate the stale window
+                    // (pending/timer/armed; emissions untouched -- the fresh
+                    // baseline creation below resets them) and start fresh.
+                    if (textarea.value !== session.iosImeSeen) {
+                        session.iosImePending = null;
+                        if (session.iosImeFailsafeTimer) { clearTimeout(session.iosImeFailsafeTimer); session.iosImeFailsafeTimer = null; }
+                        session.iosImeFailsafeArmed = false;
+                    }
+                    // normal path: refresh seen, then create/keep the baseline
+                    // (a terminated window means "no pending" -> fresh baseline
+                    // = the live value).
                     session.iosImeSeen = textarea.value;
                     let keptEarliest = false;
                     if (!session.iosImePending) {

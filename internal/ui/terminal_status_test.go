@@ -659,6 +659,23 @@ func TestIosImeBridgeMatchesVendoredBundle(t *testing.T) {
 	const changelogPhrase = "new issue #115 ios-ime scenarios"
 	const checklist = "docs/plans/fix-issue115/plan.md §8.4"
 
+	// CONTROL fingerprint (M3a), BEFORE the branch: the private-name fingerprint
+	// METHOD is only trustworthy if a known-present private name actually hits
+	// this unmangled build. _dataAlreadySent is that control (today it counts
+	// 4); a zero hit means the minifier renamed private fields, which would
+	// make the _pending229Baseline comparison below meaningless -- fail loudly.
+	if n := strings.Count(string(bundle), "_dataAlreadySent"); n < 1 {
+		t.Fatalf("control fingerprint _dataAlreadySent hits %d times (want >= 1) — the private-name fingerprint method is unreliable in this bundle (control hit 0), so the _pending229Baseline comparison is meaningless per %s", n, checklist)
+	}
+	// Signpost guard (M3b, plan §8.4 step 2): scripts/download-xterm.sh carries
+	// the ios-ime-115 marker while the patch is live and sheds it when the patch
+	// is removed, so the marker and the block can never drift apart. CWD is
+	// internal/ui/, so the repo-root scripts dir is ../../scripts/.
+	signpost, err := os.ReadFile("../../scripts/download-xterm.sh")
+	if err != nil {
+		t.Fatalf("read scripts/download-xterm.sh (CWD-relative ../../scripts/ — the Go test runs in internal/ui/): %v", err)
+	}
+
 	if upstreamFixed {
 		// The vendored bundle carries the upstream fix: every trace of the
 		// compensating patch must already be gone.
@@ -693,6 +710,12 @@ func TestIosImeBridgeMatchesVendoredBundle(t *testing.T) {
 		if strings.Contains(string(goTest), changelogPhrase) {
 			t.Fatalf("vendored bundle carries the upstream fix but terminal_status_test.go still carries the guard-table row quoting %q — the row must go per plan §8.3 (the historical CHANGELOG entry stays per §8.4 step 7)", changelogPhrase)
 		}
+		// §8.4 step 2: the signpost comment rides the removal -- with the
+		// upstream fix present the ios-ime-115 marker must already be gone from
+		// the download script too, else a future upgrade re-strands the removal.
+		if strings.Contains(string(signpost), "ios-ime-115") {
+			t.Fatalf("vendored bundle carries the upstream fix but scripts/download-xterm.sh still carries the ios-ime-115 signpost — remove it per %s", checklist)
+		}
 		return
 	}
 
@@ -713,14 +736,23 @@ func TestIosImeBridgeMatchesVendoredBundle(t *testing.T) {
 		t.Fatalf("index.html binding point %q occurs %d times, want exactly 2 (both session factories) per %s", bindingPoint, n, checklist)
 	}
 
-	// Zero-spill contract: the bridge must not touch the factories (review m14)
-	// — asserted by symbol/pattern, never by line number.
+	// Zero-spill contract: the bridge must not touch the factories (review m14
+	// + PR round) — asserted across EVERY touch-point spelling (camel, Pascal,
+	// snake, kebab), never by line number.
 	pty, err := os.ReadFile("static/kinds/pty.js")
 	if err != nil {
 		t.Fatalf("read kinds/pty.js: %v", err)
 	}
-	if n := strings.Count(string(pty), "iosIme"); n != 0 {
-		t.Fatalf("kinds/pty.js has %d iosIme occurrences, want zero — the bridge must not spill into the factories (review m14) per %s", n, checklist)
+	for _, pat := range []string{"iosIme", "IosIme", "ios_ime", "ios-ime"} {
+		if n := strings.Count(string(pty), pat); n != 0 {
+			t.Fatalf("kinds/pty.js has %d %q occurrences, want zero — the bridge must not spill into the factories (review m14) per %s", n, pat, checklist)
+		}
+	}
+	// PRESENT branch: the patch is live, so the download-script signpost must
+	// still carry the ios-ime-115 marker (it is shed only in §8.4 step 2, when
+	// the fingerprint flips and this branch stops running).
+	if !strings.Contains(string(signpost), "ios-ime-115") {
+		t.Fatalf("vendored bundle lacks the upstream fix but scripts/download-xterm.sh lost the ios-ime-115 signpost — the compensation would be stranded on the next upgrade per %s", checklist)
 	}
 
 	// The legacy factory's onData gates stay put: the bridge's watermark sits
@@ -731,8 +763,16 @@ func TestIosImeBridgeMatchesVendoredBundle(t *testing.T) {
 		t.Fatalf("createTerminalSession no longer found — the legacy onData gate anchor moved per %s", checklist)
 	}
 	cBody := index[cStart:]
-	if end := strings.Index(cBody, "\n        }"); end >= 0 {
-		cBody = cBody[:end]
+	end := strings.Index(cBody, "\n        }")
+	if end < 0 {
+		t.Fatalf("createTerminalSession's body terminator %q not found — the truncation idiom broke and the slice ran to EOF, so the gate assertions below could be satisfied by unrelated later text per %s", "\n        }", checklist)
+	}
+	cBody = cBody[:end]
+	// The truncated slice must actually REACH the gate region: the onData
+	// assignment anchor proves it, else an over-early truncation would make the
+	// two gate assertions below vacuously pass on a slice that never got there.
+	if !strings.Contains(cBody, "termDataDisposable") {
+		t.Fatalf("the truncated createTerminalSession slice lost the onData anchor %q — the slice truncated too early and never reached the gate region, so the gate assertions below would be vacuous per %s", "termDataDisposable", checklist)
 	}
 	for _, gate := range []string{"isInstanceTerminalStatus(inst.status)", "isTerminalQueryResponse(data)"} {
 		if !strings.Contains(cBody, gate) {
