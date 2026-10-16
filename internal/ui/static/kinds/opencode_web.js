@@ -162,9 +162,23 @@ class OpencodeWebRenderer {
         this._stopScopeMonitoring();
         this._resetScopeState();
         this._currentFrame = null;
+        // Deliberate convergence (issue #120 review ruling): the whole
+        // terminal bucket — stopped, failed and exited — lands on THIS
+        // stopped placeholder, so activate() keeps its exact `'stopped'`
+        // match ON PURPOSE: a directly-selected failed instance must keep
+        // its own poll's flow (ready-wait up to the 60s timeout overlay),
+        // and activate() re-baselines the sync gate with the current status,
+        // so syncStatus never re-fires for it — no flicker. The failed /
+        // exited entries that reach here through syncStatus carry their
+        // reason instead: ONE extra line in the timeout overlay's format,
+        // while a plain `stopped` activation keeps today's exact placeholder.
+        const lines = ['instance:  ' + session.id];
+        if (session.instance && session.instance.status && session.instance.status !== 'stopped') {
+            lines.push('status:    ' + session.instance.status + (session.instance.last_error ? ' — ' + session.instance.last_error : ''));
+        }
         this._showLoading(ocPanel, {
             title: 'opencode instance stopped',
-            lines: ['instance:  ' + session.id],
+            lines: lines,
         });
     }
 
@@ -175,6 +189,11 @@ class OpencodeWebRenderer {
     // (starting/stopping) and live statuses never trigger (issue #80),
     // and an already-stopped instance is never torn down or repainted
     // again on later ticks.
+    // Caller contract: syncActiveWebStatus dispatches the ACTIVE instance
+    // only, and an instance becomes active solely through selectInstance()
+    // -> activate(), so activate() always re-baselines the gate before the
+    // first syncStatus tick; the `prev === undefined || prev === null` arm
+    // below is defensive.
     syncStatus(inst) {
         if (!inst || !inst.id) return;
         const classifyTerminal = (s) => typeof window.isInstanceTerminalStatus === 'function'
@@ -188,7 +207,10 @@ class OpencodeWebRenderer {
         const prevTerminal = classifyTerminal(prev);
         const enteringTerminalBucket = prev === undefined || prev === null || !prevTerminal;
         if (!enteringTerminalBucket) return;
-        this.teardownStopped({ id: inst.id });
+        // The instance object travels with the session so teardownStopped can
+        // put the failure reason on the placeholder (activate() passes its own
+        // session, this path only has the polled instance).
+        this.teardownStopped({ id: inst.id, instance: inst });
     }
 
     deactivate() {

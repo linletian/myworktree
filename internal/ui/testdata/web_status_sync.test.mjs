@@ -161,6 +161,7 @@ const KIND_CONFIG = {
     warning: "dsh-scope-warning",
     loading: "dsh-loading",
     loadingTitleClass: ".dsh-loading-title",
+    loadingInfoClass: ".dsh-loading-info",
     stoppedTitle: "dsh instance stopped",
     scopePath: "/api/instances/dsh/scope",
     infoPath: "/api/instances/dsh?id=",
@@ -185,6 +186,7 @@ const KIND_CONFIG = {
     warning: "opencode-scope-warning",
     loading: "opencode-loading",
     loadingTitleClass: ".opencode-loading-title",
+    loadingInfoClass: ".opencode-loading-info",
     stoppedTitle: "opencode instance stopped",
     scopePath: "/api/instances/opencode/scope",
     infoPath: "/api/instances/opencode?id=",
@@ -295,10 +297,15 @@ function webHarness(kind) {
   assert.ok(renderer, `${kind}: renderer did not register itself`);
 
   const teardowns = [];
+  // The full session objects the teardowns received, so a case can assert
+  // what the sync path forwards (issue #120 review: the instance object must
+  // travel with the session, not just the id).
+  const teardownSessions = [];
   const realTeardown = renderer.teardownStopped.bind(renderer);
   assert.equal(typeof realTeardown, "function", `${kind}: teardownStopped must exist on the shipped renderer`);
   renderer.teardownStopped = (session) => {
     teardowns.push(session.id);
+    teardownSessions.push(session);
     return realTeardown(session);
   };
 
@@ -324,12 +331,20 @@ function webHarness(kind) {
     await flush();
   };
 
+  // The loading overlay's info block, as the user reads it.
+  const loadingInfoText = () => {
+    const el = panel.querySelector("#" + cfg.loading);
+    const info = el && el.querySelector(cfg.loadingInfoClass);
+    return info ? info.textContent : "";
+  };
+
   return {
     renderer,
     window,
     fetches,
     timers,
     teardowns,
+    teardownSessions,
     dialogOpens,
     messageListeners,
     panel,
@@ -348,6 +363,12 @@ function webHarness(kind) {
       const title = el && el.querySelector(cfg.loadingTitleClass);
       return title ? title.textContent : "";
     },
+    // The placeholder's info lines as they reach the DOM: _showLoading joins
+    // them with '\n' into .dsh-loading-info / .opencode-loading-info, so
+    // splitting there is what the user actually reads (issue #120 review: a
+    // terminal placeholder must carry the failure reason).
+    loadingInfo: loadingInfoText,
+    loadingLines: () => (loadingInfoText() === "" ? [] : loadingInfoText().split("\n")),
   };
 }
 
@@ -525,6 +546,64 @@ for (const kind of ["dsh-web", "opencode-web"]) {
     assert.doesNotThrow(() => h.renderer.syncStatus(h.inst()), "terminal fallback classification must not throw");
     assert.deepEqual(h.teardowns, ["inst1"], "the fallback still catches the stop");
   });
+
+  test(`${kind}: the stopped placeholder carries the terminal reason, plain stops stay bare`, async () => {
+    // The watched running→failed transition used to paint only
+    // `instance: <id>`, hiding the status/last_error the badge just flipped
+    // to (issue #120 review A §2b). The reason line follows the timeout
+    // overlay's format: `status:    <status>` plus ` — <last_error>` only
+    // when there is one, so an empty reason never leaves a dangling dash.
+    const h = webHarness(kind);
+    await h.activate("running");
+    h.inst().last_error = "port in use";
+    h.inst().status = "failed";
+    h.renderer.syncStatus(h.inst());
+    await h.flush();
+    assert.deepEqual(h.teardowns, ["inst1"], "the failed entry tears down");
+    assert.deepEqual(
+      h.loadingLines(),
+      ["instance:  inst1", "status:    failed — port in use"],
+      "the placeholder shows the status and its reason");
+
+    // No last_error: the line is the bare status, no trailing separator.
+    const bare = webHarness(kind);
+    await bare.activate("running");
+    bare.inst().status = "exited";
+    bare.renderer.syncStatus(bare.inst());
+    await bare.flush();
+    assert.deepEqual(
+      bare.loadingLines(),
+      ["instance:  inst1", "status:    exited"],
+      "a reason-less terminal entry gets the bare status line");
+
+    // A plain stopped activation (activate's own branch) is byte-identical
+    // to what it painted before: one line, no reason.
+    const stopped = webHarness(kind);
+    await stopped.activate("stopped");
+    assert.deepEqual(stopped.teardowns, ["inst1"], "activate's stopped branch tears down");
+    assert.deepEqual(stopped.loadingLines(), ["instance:  inst1"], "the plain stopped placeholder is unchanged");
+  });
+
+  test(`${kind}: syncStatus forwards the instance object to the teardown`, async () => {
+    // { id, instance } — the id alone cannot produce the reason line, and
+    // the forward-compat shape keeps the sync path and activate()'s path
+    // handing teardownStopped the same session contract (issue #120 review).
+    const h = webHarness(kind);
+    await h.activate("running");
+    h.inst().last_error = "backend gone";
+    h.inst().status = "failed";
+    h.renderer.syncStatus(h.inst());
+    assert.equal(h.teardownSessions.length, 1, "exactly one teardown");
+    const session = h.teardownSessions[0];
+    assert.equal(session.id, "inst1", "the teardown still carries the id");
+    assert.ok(session.instance, "the teardown carries an instance object, not just an id");
+    assert.equal(session.instance, h.inst(), "it is the very instance object from window.state");
+    assert.equal(session.instance.status, "failed", "at its current (failed) status");
+    assert.deepEqual(
+      h.loadingLines(),
+      ["instance:  inst1", "status:    failed — backend gone"],
+      "and the renderer actually consumed it for the reason line");
+  });
 }
 
 // --- dsh-web: the missing-dsh dialog survives the issue #120 teardown ----
@@ -598,6 +677,113 @@ test("dsh-web: non-failed terminal entries fire no recovery fetch; opencode neve
   await oc.flush();
   assert.deepEqual(oc.teardowns, ["inst1"], "failed is terminal: opencode tears down");
   assert.equal(oc.infoFetches().length, infoBefore, "the one-shot info fetch is dsh-only; opencode fetches nothing on a failed entry");
+});
+
+// --- the one-shot response-time guard (issue #120 review) ------------------
+//
+// The recovery fetch is fire-and-forget, so its response can land long AFTER
+// the user switched to another tab, the instance was deleted, or a restart
+// moved its status on. _dialogShownFor / _dismissedMissingFor keep DUPLICATE
+// dialogs quiet but say nothing about an id the user is no longer looking at,
+// so the response handler re-validates the live state before opening. Each
+// case below changes the page state AFTER syncStatus issued the fetch and
+// BEFORE the microtask drain, which is exactly the window a slow backend
+// creates in a browser.
+
+test("dsh-web: a stale recovery response is dropped when the user left the tab", async () => {
+  const h = webHarness("dsh-web");
+  await h.activate("starting");
+  h.inst().status = "failed";
+  const infoBefore = h.infoFetches().length;
+  h.renderer.syncStatus(h.inst());
+  h.window.state.activeInst = "other"; // switched away, response still pending
+  await h.flush();
+  assert.equal(h.infoFetches().length, infoBefore + 1, "the recovery fetch still fired exactly once");
+  assert.deepEqual(h.dialogOpens, [], "a dialog for a tab the user left must not open");
+  assert.notEqual(h.renderer._dialogShownFor, "inst1", "and no dialog state is left behind");
+});
+
+test("dsh-web: a stale recovery response is dropped when the instance was deleted", async () => {
+  const h = webHarness("dsh-web");
+  await h.activate("starting");
+  h.inst().status = "failed";
+  const infoBefore = h.infoFetches().length;
+  h.renderer.syncStatus(h.inst());
+  h.window.state.instances = []; // deleted while the response was pending
+  await h.flush();
+  assert.equal(h.infoFetches().length, infoBefore + 1, "the fetch still went out exactly once");
+  assert.deepEqual(h.dialogOpens, [], "a deleted instance never gets its dialog retroactively");
+});
+
+test("dsh-web: a stale recovery response is dropped when the status moved on", async () => {
+  // missing_dsh is failed-only per the backend: a response that arrives once
+  // the instance reads stopped/exited describes a state the page no longer
+  // shows, so it must not open (the dialog would contradict the badge).
+  for (const [label, mutate] of [
+    ["stopped", (i) => { i.status = "stopped"; }],
+    ["exited", (i) => { i.status = "exited"; }],
+    ["restarted into starting", (i) => { i.status = "starting"; }],
+  ]) {
+    const h = webHarness("dsh-web");
+    await h.activate("starting");
+    h.inst().status = "failed";
+    const infoBefore = h.infoFetches().length;
+    h.renderer.syncStatus(h.inst());
+    mutate(h.inst()); // the polled status moved on before the response landed
+    await h.flush();
+    assert.equal(h.infoFetches().length, infoBefore + 1, `${label}: the fetch still fired exactly once`);
+    assert.deepEqual(h.dialogOpens, [], `${label}: a non-failed live status drops the stale response`);
+  }
+});
+
+test("dsh-web: the still-active failed case still reaches the dialog (guard control)", async () => {
+  // The guard must only reject STALE responses: the plain case — the user is
+  // still on the failed instance — still opens, once.
+  const h = webHarness("dsh-web");
+  await h.activate("starting");
+  h.inst().status = "failed";
+  const infoBefore = h.infoFetches().length;
+  h.renderer.syncStatus(h.inst());
+  await h.flush();
+  assert.equal(h.infoFetches().length, infoBefore + 1, "exactly one recovery fetch");
+  assert.deepEqual(h.dialogOpens, ["inst1"], "still listed, still failed, still active: the dialog opens");
+});
+
+// --- dsh scope-tick self-stop hygiene (issue #120 review) ------------------
+
+test("dsh-web: the scope tick's self-stop resets the poll's warning state too", async () => {
+  // The self-stop branch already cleared the bar and stopped rescheduling; it
+  // must also run the symmetric cleanup, so the dead poll leaves no stale
+  // warning-state flags behind — the same final state opencode's
+  // _stopScopeMonitoring() lands in (and idempotent with the teardown).
+  const h = webHarness("dsh-web");
+  await h.activate("running");
+  assert.ok(h.renderer._scopeAbort, "the live scope poll owns an abort handle");
+  h.renderer._scope = "out-of-scope";
+  h.renderer._scopeDir = "/tmp/elsewhere";
+  h.renderer._versionUnsupported = true;
+  h.renderer._overlayIneffective = true;
+  h.renderer._foreignSessions = [{ session_id: "foreign" }];
+
+  h.inst().status = "stopped";
+  h.fireTimers(1500);
+  await h.flush();
+  assert.equal(h.renderer._scopeAbort, null, "the dead poll's abort handle is released");
+  assert.equal(h.renderer._scope, "in-scope", "the scope flag is reset");
+  assert.equal(h.renderer._scopeDir, "", "the out-of-scope directory is dropped");
+  assert.equal(h.renderer._versionUnsupported, false, "the advisory flags are reset");
+  assert.equal(h.renderer._overlayIneffective, false, "the advisory flags are reset");
+  assert.deepEqual(h.renderer._foreignSessions, [], "the foreign-session list is cleared");
+  assert.equal(h.warning.hidden, true, "the warning bar stays cleared");
+  assert.deepEqual(h.timers.filter((t) => t.ms === 1500), [], "and it never rearms");
+
+  // Same for a vanished instance (deleted without a terminal status seen).
+  const gone = webHarness("dsh-web");
+  await gone.activate("running");
+  gone.window.state.instances = [];
+  gone.fireTimers(1500);
+  await gone.flush();
+  assert.equal(gone.renderer._scopeAbort, null, "a vanished instance's poll is released too");
 });
 
 // --- index.html dispatch: syncActiveWebStatus ------------------------------

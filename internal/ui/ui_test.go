@@ -388,7 +388,7 @@ func TestWebRenderersPollSelfHealStoppedInstance(t *testing.T) {
 			"syncStatus(inst) {",
 			"teardownStopped(session) {",
 			"this.teardownStopped(session);",
-			"this.teardownStopped({ id: inst.id });",
+			"this.teardownStopped({ id: inst.id, instance: inst });",
 			// The gate: teardown only on ENTRY into the terminal bucket.
 			"enteringTerminalBucket",
 			// The scope poll must consult the polled status itself.
@@ -423,6 +423,27 @@ func TestWebRenderersPollSelfHealStoppedInstance(t *testing.T) {
 		if !strings.Contains(scopeBody, "setTimeout(tick, 1500);") {
 			t.Fatalf("%s: the scope poll must stay armed for live instances (setTimeout(tick, 1500))", asset)
 		}
+		// The self-stop branch must run the symmetric cleanup, not just
+		// clear the bar and skip rescheduling: dsh's _stopMonitoring()
+		// nulls the abort handle and resets the warning-state flags, so a
+		// poll that died on its own lands in the same final state as the
+		// teardownStopped path (issue #120 review; opencode already did
+		// this via _stopScopeMonitoring).
+		stopCall := "this._stopMonitoring();"
+		if asset == "/static/kinds/opencode_web.js" {
+			stopCall = "this._stopScopeMonitoring();"
+		}
+		selfStopAt := strings.Index(scopeBody, "if (terminalNow) {")
+		if selfStopAt < 0 {
+			t.Fatalf("%s: the scope tick's terminalNow self-stop branch not found (issue #120)", asset)
+		}
+		if e := strings.Index(scopeBody[selfStopAt:], "return;"); e >= 0 {
+			if at := strings.Index(scopeBody[selfStopAt:selfStopAt+e], stopCall); at < 0 {
+				t.Fatalf("%s: the scope tick's self-stop branch must call %s before returning — a dead poll may not keep its abort handle or its warning state (issue #120 review)", asset, stopCall)
+			}
+		} else {
+			t.Fatalf("%s: the self-stop branch must return without rescheduling (issue #120)", asset)
+		}
 		// Both syncStatus bodies classify through ONE local arrow reused
 		// for isTerminal AND prevTerminal (review #120 nit; behaviour
 		// identical to the duplicated expression it replaced).
@@ -451,11 +472,19 @@ func TestWebRenderersPollSelfHealStoppedInstance(t *testing.T) {
 			if e := strings.Index(syncBody, "\n    }"); e >= 0 {
 				syncBody = syncBody[:e]
 			}
-			tdAt := strings.Index(syncBody, "this.teardownStopped({ id: inst.id });")
+			tdAt := strings.Index(syncBody, "this.teardownStopped({ id: inst.id, instance: inst });")
 			recoveryAt := strings.Index(syncBody, "fetch('/api/instances/dsh?id='")
 			dialogAt := strings.Index(syncBody, "_showMissingDialog")
 			if tdAt < 0 || recoveryAt < 0 || dialogAt < 0 || tdAt > recoveryAt || recoveryAt > dialogAt {
 				t.Fatal("/static/kinds/dsh_web.js: syncStatus must fire the one-shot missing_dsh fetch AFTER the teardown, reaching _showMissingDialog from within its own body (issue #120 review)")
+			}
+			// The response-time guard (issue #120 review): the fetch is
+			// fire-and-forget, so its response may land after the user
+			// switched away — the dialog must then be dropped, which is
+			// what the active-id check inside the response handler does.
+			guardAt := strings.Index(syncBody, "window.state.activeInst === inst.id")
+			if guardAt < 0 || guardAt > dialogAt {
+				t.Fatal("/static/kinds/dsh_web.js: the one-shot response handler must re-check window.state.activeInst === inst.id before opening the dialog (issue #120 review)")
 			}
 			continue
 		}
