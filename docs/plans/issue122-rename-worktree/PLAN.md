@@ -80,7 +80,9 @@ issue 的三个坑只提到给 `refresh()` 的 `render()` 加 `state.renamingWT`
 - `fetchDiverge()`（`/api/worktrees/diverged` 返回后）：`renderSidebar()`——由 `refresh()` 每次轮询调用，**且另有 60s 独立定时器**（`divergeTimer = setInterval(fetchDiverge, 60000)`，index.html `Polling for diverge status` 处）。因此守卫必须落在 `fetchDiverge()` 函数体内（callee 侧）才能同时覆盖两条触发路径；`/api/main` 续段的守卫落在该调用点。
 - （对照证据：tab rename 从未被此坑咬到，因为 tab input 在 `#tabs-container`，`renderSidebar()` 不碰它；侧栏 rename 是新暴露面。）
 
-结论：上述两处（`/api/main` 续段调用点 + `fetchDiverge()` 函数体内）加 `if (!state.renamingWT)` 守卫；`fetchDivergeSingle` / `openTerminal` / `openFinder` / `render()` 内的调用均为用户动作同步路径（动作前 blur 已提交或状态已清），不加 guard。这与 issue pitfall #1 的注释口径一致：「preserve input DOM and IME composition」。
+结论：上述三处（`/api/main` 续段调用点 + `fetchDiverge()` 函数体内 + `fetchDivergeSingle()` 函数体内）加 `if (!state.renamingWT)` 守卫；`openTerminal` / `openFinder` 仅在用户点击行内图标时触发，mousedown 先 blur 掉输入框、`commitWTRename` 同步清零状态，其前后两次 `renderSidebar()` 均在状态已清之后执行，不加 guard。这与 issue pitfall #1 的注释口径一致：「preserve input DOM and IME composition」。
+
+**R1 代码评审修订（仲裁，证据：评审 B F1 + 仲裁者复核）**：初版结论曾把 `fetchDivergeSingle` 归入「用户动作同步路径、不加 guard」——该判断被证伪。`selectWorktree` 在同步 `render()` 之后、`refresh()` 之后还调用了 `fetchDivergeSingle(id)`，其 `await api('/api/worktree/diverged')` 回包后无条件 `renderSidebar()`。双击**非激活**行时，click1 即启动该异步链，而输入框在 dblclick 之后才创建，「动作前 blur 已提交」的论证对此不成立：回包慢于双击间隔（慢机 / daemon 繁忙可达数百 ms）时，该 `renderSidebar()` 会在 `renamingWT` 置位期间经编辑态分支重建 `#wt-list`——焦点、选区、已键入内容与 IME 组合态全部丢失（新 input 的 value 回落到 `w.name`，因 `renamingWTValue` 是死变量），正是 issue #115 类症状与验收 #3 要防的情形。裁定：`fetchDivergeSingle` 的 `renderSidebar()` 同样加 `if (!state.renamingWT)` 守卫（`state.diverged` 更新保留，badge 延后至下一轮询，无代价）；`openTerminal` / `openFinder` 的豁免论证不变（blur 先于其任何 render）。〔注：该豁免后被 §8 C-R3 部分推翻——`await` 后的 `finally` 重绘不受 blur-first 保护，已加 `if (!state.renamingWT)` 守卫；以 §8 与 CHANGELOG 为准。〕另裁定 `commitWTRename` 成功续段的 `renderSidebar()` 也加同一守卫（PATCH 往返窗口内用户可能已进入新编辑态），`state.worktrees` 拼接与 `refresh()` 保持无条件。
 
 附注（防误改）：`framework.js` 里的 `window.refresh` 是死代码——`framework.js`（`<script src="/static/framework.js">`，在 2561 行附近）先于内联脚本（2567 行起）加载，内联脚本的 `async function refresh()` 函数声明后覆盖 `window.refresh`；**轮询实际走的是 index.html 内的 `refresh()`**（guard 所在处），改守卫不要改错文件。
 
@@ -160,13 +162,14 @@ issue 原文两处口径冲突：**需求**（加粗主诉求）「交互与实�
    - 行补 `title="Double-click to rename"` 提示（对齐 tab 的 `title="Drag to reorder; double-click to rename"` 惯例）。
 3. 新 handler 组（置于 tab rename handlers 旁，命名 / 形状逐字镜像）：
    - `startWTRename(id, event)`：`event.stopPropagation()`；互斥清理 `state.renamingInst = null` + `renderTabs()`；置 `state.renamingWT = id; state.renamingWTValue = ""`；`renderSidebar()`；`requestAnimationFrame` 内 `input.focus(); input.select()`（用 `wt-rename-input-<id>` 取节点，focus 前判空）。
-   - `commitWTRename(id, event)`：`stopPropagation`；读 `wt-rename-input-<id>`（无节点直接 return）；`newName = input.value.trim()`；清 `state.renamingWT/renamingWTValue`；`renderSidebar()`（先恢复文本形态，与 `commitRename` 同序）；`newName === ''` 直接 return（不写回）；否则 `api('/api/worktrees', {method:'PATCH', body: JSON.stringify({id, name:newName})})` → 成功用响应替换 `state.worktrees` 中对应项 → `renderSidebar()` → **再调一次 `refresh()`**（评审 A F6：PATCH 响应携带的是落库 `Branch`，而侧栏 branch 徽标的数据源是 `List()` 每次 `git rev-parse` 的 live 值；不 resync 的话徽标会显示落库 branch 直到下一次 ≤2s 轮询。一次性的 refresh round-trip 与错误路径已有的 `refresh()` 对称，代价可忽略）；失败 `console.error` + `refresh()`。
+   - `commitWTRename(id, event)`：`stopPropagation`；读 `wt-rename-input-<id>`（无节点直接 return）；`newName = input.value.trim()`；清 `state.renamingWT/renamingWTValue`；`renderSidebar()`（先恢复文本形态，与 `commitRename` 同序）；`newName === ''` 直接 return（不写回）；否则 `api('/api/worktrees', {method:'PATCH', body: JSON.stringify({id, name:newName})})` → 成功用响应替换 `state.worktrees` 中对应项 → `if (!state.renamingWT) { renderSidebar(); }` → **再调一次 `refresh()`**（无条件；refresh 自带守卫）（评审 A F6：PATCH 响应携带的是落库 `Branch`，而侧栏 branch 徽标的数据源是 `List()` 每次 `git rev-parse` 的 live 值；不 resync 的话徽标会显示落库 branch 直到下一次 ≤2s 轮询。一次性的 refresh round-trip 与错误路径已有的 `refresh()` 对称，代价可忽略）；失败 `console.error` + `refresh()`。
    - `cancelWTRename()`：清状态 + `renderSidebar()`。
    - `handleWTRenameKeydown(id, event)`：Enter → commit；Escape → cancel；末尾 `event.stopPropagation()`（照抄 tab 侧，不再重新设计）。
 4. `startRename`（tab 侧）加对称互斥：进入前清 `state.renamingWT = null` + `renderSidebar()`。
-5. 两个后台守卫（决策 G、issue pitfall #1/#2）：
+5. 后台守卫（决策 G、issue pitfall #1/#2；R1 代码评审后扩充为四类共 6 处判定）：
    - `refresh()` 的既有 guard `if (state.renamingInst)` 改判 `if (state.renamingInst || state.renamingWT)`；
-   - `/api/main` `.then` 与 `fetchDiverge()` 内的 `renderSidebar()` 调用加 `if (!state.renamingWT)` 条件；
+   - `/api/main` `.then`、`fetchDiverge()` 函数体内、`fetchDivergeSingle()` 函数体内三处 `renderSidebar()` 调用加 `if (!state.renamingWT)` 条件（第三处为 R1 仲裁新增：双击非激活行的异步链先于 input 存在启动，blur-first 论证不适用，见 §2-G）；
+   - `commitWTRename` 成功续段的 `renderSidebar()` 同样加 `if (!state.renamingWT)`（PATCH 往返窗口内用户可能已进入新编辑态；`state.worktrees` 拼接与 `refresh()` 保持无条件）；
    - `focusTerminalIfPossible()` 的 `if (state.renamingInst) return;` 改判 `if (state.renamingInst || state.renamingWT) return;`。
 6. CSS：新增 `.wt-rename-input`（样式照 `.tab-rename-input` 的变量用法：`var(--main-bg)` / `var(--border-color)` / `var(--active-color)`、`font: inherit`、`outline: none`；宽度适配 `.wt-name` 容器，如 `width: 100%` + `box-sizing: border-box`，不写死像素宽）。
 
@@ -212,7 +215,7 @@ issue 原文两处口径冲突：**需求**（加粗主诉求）「交互与实�
 |---|---|---|
 | 1 | 激活行双击进编辑态，自动 focus + 全选；Enter/Esc/点外部三种退出不写脏数据（点外部语义按决策 H 仲裁：非空失焦=提交，与 tab 一致） | T3 handler 组 + T4 行为用例 1–5 |
 | 2 | 提交后 PATCH 200、侧栏更新；刷新页面 / 重启 daemon 后仍是新值（`List()` 读回） | T2 handler + T2 测试 GET 读回 + T1 store 测试 |
-| 3 | 编辑期间跨过一次后台 `refresh()` 轮询，输入框不消失、IME 组合态不被清 | 决策 G 两处后台守卫（含 60s divergeTimer 路径）+ T4 行为用例 7 |
+| 3 | 编辑期间跨过一次后台 `refresh()` 轮询，输入框不消失、IME 组合态不被清 | 决策 G 三处后台守卫 + commit 续段守卫（含 60s divergeTimer 路径）+ T4 行为用例 7/10/11 |
 | 4 | 编辑期间终端不抢焦点 | T3 `focusTerminalIfPossible` guard + T4 行为用例 8 |
 | 5 | 空串提交不写回；超长 / `<script>` / 引号渲染后原样显示为文本，无 HTML 注入 | T1 空值测试 + T3 `escapeHtml` + T4 用例 3/5/6 + Go 文本断言 |
 | 6 | `Branch` 与 `Path` 改名后不变，`git worktree list` 不受影响 | T1 集成用例（真实 repo + `git worktree list`） |
@@ -281,3 +284,27 @@ node --test internal/ui/testdata/sidebar_wt_rename.test.mjs
 两评审对修订后计划均 APPROVE。评审 A 余两条 nit，由仲裁者直接修复（§6.4）：
 - N1（nit）：T3「文件」行重复列 index.html → 已合并为一行加「(含 CSS)」。
 - N2（nit）：T1 版本保护用例括号说明过强（「重试路径不被误触发」不可证伪）→ 已改为「Version bump 已区分两条落盘路径」。
+
+## 8. 代码评审与验证记录（执行期）
+
+| 轮次 | 对象 | 评审 A（glm-5.3-flash） | 评审 B（muse-spark-1.3-contributor） | 仲裁结论 |
+|---|---|---|---|---|
+| C-R1 | T1+T2 后端 | REQUEST_CHANGES（F2 minor 空 id 无测试钉住 + F1 nit 文档样例） | APPROVE（2 nit） | F2 接受→编码修复（精确文案断言 + handler 400 用例）→C-R1b 双 APPROVE → 提交 `ba2a489` |
+| C-R2 | T3+T4+T5 前端 | APPROVE（4 nit：两处注释滞后 / Go 锚点弱钉 / §4 row 3 措辞） | REQUEST_CHANGES（F1 major fetchDivergeSingle 竞态 / F2 minor commit 续段竞态 / F3 nit） | F1/F2/F3 经仲裁者代码复核全部成立→编码修复（三处后台守卫齐 + commit 续段守卫 + 锚点 + mjs case 10/11）→C-R2b 双 APPROVE；A 的 4 nit 由编码 Agent 修复后仲裁者确认 |
+| C-R3 | blur 重入竞态（仲裁者 E2E 实测发现，见下） | **APPROVE**（F1 minor 遗留同类风险 + F2 nit 注释措辞） | **APPROVE**（FINDINGS: NONE） | 两处状态守卫（commitWTRename / commitRename）+ 忠实桩 + case 12/13 + Go 锚点；F1/F2 由编码 Agent 修复后仲裁者确认（§6.4） |
+
+### C-R3：E2E 实测发现的 blur 重入竞态（真实浏览器，桩测试不可见）
+
+双评审闭环后，仲裁者用「真实 daemon + 真实 git repo + headless Chrome（CDP）」跑 §5 人工清单时取到调用栈证据：
+
+- `commitWTRename` 内同步 `renderSidebar()` 重建 `#wt-list`，被移除的聚焦 input 在**移除中途**仍可被 `document.getElementById` 找到，Chrome 此时派发的 `blur` 经 `onblur` **重入** `commitWTRename`（`state.renamingWT` 已清但 input 可读）→ 同一 body 的**第二个 PATCH** 上线（Network 实测两条完全相同）；且重入发生在 `innerHTML` setter 执行期间（嵌套 innerHTML 写），此后渲染器层面不稳定（`Page.navigate` CDP 挂起）。
+- 同机制威胁本 PR 的互斥交叉路径：`startWTRename → renderTabs()` / `startRename → renderSidebar()` 拆除对方 input 时触发 blur 重入 → 向 `/api/instances`（或 `/api/worktrees`）发**虚假的自改名 PATCH**；Esc 路径（`cancelWTRename` → renderSidebar → 重入）理论上会提交已丢弃的半输入文本。
+- 桩测试看不到此坑：桩的 render 同步销毁元素、`getElementById` 返回 null，与真实浏览器「移除中途仍可找到」的时序不同。
+
+**裁定**：两个 commit handler 各加一行状态守卫（`if (state.renamingWT !== id) return;` / `if (state.renamingInst !== id) return;`，放在 `stopPropagation` 之后、读 input 之前）——状态是唯一真相来源，Enter 与用户点击外部引发的 blur 均满足守卫，一切重入（commit/cancel/互斥拆输入）全部 bail。mjs 新增「移除中途模型」用例 + Go 函数体锚点钉死，CHANGELOG 记录「桩测试看不到、E2E 才暴露」的教训。修复后重跑 §6.4 双评审 + 全量 E2E（单 PATCH、导航稳定、race 场景）。
+
+### C-R3 已知残留（记录在案，后续轮次处理，不阻塞本 PR）
+
+- `reorderInstances` 409 回滚的 `renderTabs()`（index.html `reorderInstances` 函数体）：预存在的 tab↔tab 暴露面（非本 PR 新可达），同类修复可在后续轮次镜像（守卫析构时 `state.renamingInst` 仍在位，state 守卫管不了第三方拆除）。
+- 通用教训（建议入 ARCHITECTURE）：本代码库大量使用「inline handler + innerHTML 重建」组合，任何**带 `onblur` 的 input** 住进被重建的容器时，都必须同时满足：(a) commit 入口有状态守卫（防自身 render 的重入）；(b) **所有第三方重绘路径**（异步续段 / await 后 finally / 回滚路径）在编辑态活跃时跳过重建。二者缺一不可——(a) 管不了第三方拆除（拆除时 state 仍在位，blur 会"合法"提交半输入），(b) 管不了自身重入。
+- E2E 工具结论（非产品缺陷）：headless Chrome + 最小 CDP 客户端下，页面一旦出现过 CDP 聚焦的 input，`Page.navigate` 不再响应（仅 dblclick 打开输入框即可复现，无提交也复现）；`Page.reload` 可用但会使该 target 的会话楔住。真实浏览器不受影响（新开 target 的渲染实例加载同 URL 完全正常，改名持久化读回验证通过）。E2E 续跑统一用「新 target」模型「用户重开页面」。
