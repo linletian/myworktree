@@ -43,13 +43,13 @@ flag 的两个独立决定（评审 LOW-3 拆分，勿再混为一谈）：
 | 日志行 | 落地 | 触发时机 | 关键字段 |
 | --- | --- | --- | --- |
 | `[ios-ime] bound` | T0+T1 | 绑定到某会话的 textarea（幂等，每会话一次） | `sessionId` |
-| `[ios-ime] keydown` | T0+T1 | textarea 上每次 keydown | `keyCode`、`key`、`value`、`len` |
+| `[ios-ime] keydown` | T0+T1 | textarea 上每次 keydown | `t`（keydown 绝对时刻）、`keyCode`、`key`、`value`、`len` |
 | `[ios-ime] probe` | T0+T1 | **同构探针**：keydown 内自排一个 `setTimeout(0)`，回调时打时间戳与当时 `value` | `t0`（keydown 时刻）、`t1`（探针回调时刻）、`valueAtProbe` |
 | `[ios-ime] beforeinput` | T0+T1 | textarea 上每次 beforeinput | `inputType`、`data`、`composed`、`isComposing`、`value` |
 | `[ios-ime] input` | T0+T1 | textarea 上每次 input | `inputType`、`data`、`composed`、`value`、`dt`（相对 `probe.t1` 的毫秒数） |
 | `[ios-ime] compositionstart` | T0+T1 | 合成开始 | `value` |
 | `[ios-ime] compositionend` | T0+T1 | 合成结束 | `data`、`value` |
-| `[ios-ime] keyup` | T0+T1 | textarea 上每次 keyup | `keyCode`、`key`、`value`、`len` |
+| `[ios-ime] keyup` | T0+T1 | textarea 上每次 keyup | `t`（keyup 绝对时刻）、`keyCode`、`key`、`value`、`len` |
 | `[ios-ime] pending` | T1 | keydown 229 记下/保留最早 baseline | `baseline`、`len`、`keptEarliest`、`rearmed`（timer 是否重臂） |
 | `[ios-ime] deliver` | T1 | 延后 flush（keyup 后一个宏任务）、failsafe 或 blur flush 的判定结果 | `baseline`、`current`、`delta`、`emissions`、`branch`（A/B/C/D）、`payload`、`via`（keyup-defer/failsafe/blur）、`armed`（`iosImeFailsafeArmed` 关窗时为 true） |
 | `[ios-ime] clear` | T1 | flush 关窗 / compositionstart / blur 后清除 pending | `reason` |
@@ -59,6 +59,10 @@ flag 的两个独立决定（评审 LOW-3 拆分，勿再混为一谈）：
 - `probe` 与 `input` 的时序就是第 3 环假设的判据：FIFO 下 xterm 的回调不晚于我们的探针，
   **`probe.t1` 早于 `input` 且 `valueAtProbe` 不含新字符 ⇒ 插入晚于 0ms 回调，假设成立**；
   若 `valueAtProbe` 已含新字符 ⇒ diff 本应命中，需回头查 `_keyPressHandled` 等其他丢弃路径。
+  `input.dt` 相对**本次敲击**探针的 `t1`（每次 keydown 重置）：本次敲击的探针触发前 `dt` 为
+  `null`，`null` 即"插入早于探针"的证伪分支；`dt` 仅当 input 跟随本次敲击的 keydown 时才有意义，无前置 keydown 的 input（粘贴、composition 驱动）该数字无意义，转写时必须忽略。
+- failsafe 校准用 `keyup.t − keydown.t`（同一次敲击的 keydown→keyup 间隔，对照 §三 实测基线
+  12–34ms）：keydown/keyup 行各自带 `t`，间隔可直接由日志字段算出。
 - **无 `probe` 行 = 该次敲击发生在绑定之前**（≤2s 残留窗口，plan.md §六）——数据无效，
   不得读作"假设不成立"（评审 N7）。采集时必须先看到 `[ios-ime] bound` 再开始记录（该行
   T0 阶段由 T0 自带绑定发出，评审 G2）。

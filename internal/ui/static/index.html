@@ -3867,6 +3867,106 @@
             updateStatus(ok ? "Copied" : "Copy failed");
         }
 
+        // ==== ios-ime bridge (issue #115) BEGIN - removable block ====
+
+        // iOS/iPadOS Chinese-IME direct commit (digits/punctuation typed
+        // without a composition) never reaches the PTY: xterm 6.0.0's
+        // keyCode-229 keydown path short-circuits into a setTimeout(0)
+        // textarea diff, and on iOS the IME insertion lands AFTER that
+        // callback, so the diff sees nothing and the composed-input guard
+        // structurally drops the event (plan.md section one). T0 ships
+        // ONLY diagnostics: an event-flow log plus an isomorphic probe
+        // that answers "insertion vs callback, who first" on device. T1
+        // layers the rescue listeners onto the SAME binding function and
+        // the SAME idempotency flag below (plan.md 3.1, review G2) -
+        // two sets of listeners never coexist on one textarea.
+
+        // Debug gate (DATA-COLLECTION.md): ?iosime-debug=1 only. location
+        // sits behind a typeof guard - the node slice harness evaluates
+        // this block with no location and must not throw (review MED-3).
+        function iosImeDebugEnabled() {
+            if (typeof location === "undefined") return false;
+            return /(?:^|[?&])iosime-debug=1(?:&|$)/.test(location.search || "");
+        }
+
+        // One console line per event, unified "[ios-ime] " prefix so the
+        // device capture in DATA-COLLECTION.md section 2 greps clean.
+        function iosImeLog(name, fields) {
+            // fail-soft: a throwing console must not abort a handler
+            try {
+                console.log("[ios-ime] " + name, fields);
+            } catch (e) { }
+        }
+
+        // The single binding function for the whole issue (plan.md 3.1):
+        // idempotency is TERM-scoped (iosImeBridgeTerm === the live term),
+        // so a Terminal rebuilt onto the same session object re-binds
+        // instead of being silently skipped (review M10). Debug OFF: zero
+        // listeners, zero overhead - but the flag is STILL set, which is
+        // what lets the T1 layering find the same bind state (review G2).
+        function ensureIosImeDirectInputBridge(session) {
+            if (!session || !session.term || !session.term.textarea) return;
+            if (session.iosImeBridgeTerm === session.term) return;
+            session.iosImeBridgeTerm = session.term;
+            if (!iosImeDebugEnabled()) return;
+            const textarea = session.term.textarea;
+            // keydown: keyCode 229 is the IME-tap signature (upstream
+            // #5835); keyCode/key are observation only, never filtered.
+            function iosImeHandleKeydown(event) {
+                session.iosImeProbeT1 = null;
+                const t0 = Date.now();
+                iosImeLog("keydown", { t: t0, keyCode: event.keyCode, key: event.key, value: textarea.value, len: textarea.value.length });
+                // The isomorphic probe (review M3): meaningful when
+                // keyCode === 229 and no compositionstart intervened for
+                // this tap - only then did xterm queue its own
+                // _handleAnyTextareaChanges setTimeout(0) at this keydown
+                // (vendored xterm.js queues the 0ms diff for keyCode 229
+                // only outside a composition), and FIFO puts it before this
+                // callback - so "t1 already passed and valueAtProbe lacks
+                // the new char" IS the section-1 link-3 assumption, on
+                // device. For other keys, or during a composition, this
+                // probe row is context only.
+                setTimeout(function iosImeRunProbe() {
+                    const t1 = Date.now();
+                    session.iosImeProbeT1 = t1;
+                    iosImeLog("probe", { t0: t0, t1: t1, valueAtProbe: textarea.value });
+                }, 0);
+            }
+            function iosImeHandleBeforeInput(event) {
+                iosImeLog("beforeinput", { inputType: event.inputType, data: event.data, composed: event.composed, isComposing: event.isComposing, value: textarea.value });
+            }
+            // dt pins the input against the CURRENT tap's probe t1 (reset
+            // to null at every keydown): a number means this tap's probe
+            // already ran (positive = insertion after the 0ms callback);
+            // null means this tap's probe has not fired yet - the
+            // insertion-before-callback case the probe exists to detect.
+            // dt is only meaningful when the input follows a keydown of
+            // the same tap; for an input with no preceding keydown (paste,
+            // composition-driven) the number is meaningless and must be
+            // ignored by the transcriber.
+            function iosImeHandleInput(event) {
+                iosImeLog("input", { inputType: event.inputType, data: event.data, composed: event.composed, value: textarea.value, dt: session.iosImeProbeT1 == null ? null : Date.now() - session.iosImeProbeT1 });
+            }
+            function iosImeHandleCompositionStart(event) {
+                iosImeLog("compositionstart", { value: textarea.value });
+            }
+            function iosImeHandleCompositionEnd(event) {
+                iosImeLog("compositionend", { data: event.data, value: textarea.value });
+            }
+            function iosImeHandleKeyUp(event) {
+                iosImeLog("keyup", { t: Date.now(), keyCode: event.keyCode, key: event.key, value: textarea.value, len: textarea.value.length });
+            }
+            textarea.addEventListener("keydown", iosImeHandleKeydown);
+            textarea.addEventListener("beforeinput", iosImeHandleBeforeInput);
+            textarea.addEventListener("input", iosImeHandleInput);
+            textarea.addEventListener("compositionstart", iosImeHandleCompositionStart);
+            textarea.addEventListener("compositionend", iosImeHandleCompositionEnd);
+            textarea.addEventListener("keyup", iosImeHandleKeyUp);
+            iosImeLog("bound", { sessionId: session.id });
+        }
+
+        // ==== ios-ime bridge (issue #115) END - removable block ====
+
         function init() {
             if (sessionStorage.getItem(SERVER_UPGRADED_FLAG) === "1") {
                 sessionStorage.removeItem(SERVER_UPGRADED_FLAG);
@@ -5943,6 +6043,7 @@
                 ? r.allSessions()
                 : Object.values(terminalSessions);
             for (const session of sessions) {
+                ensureIosImeDirectInputBridge(session); // ios-ime-115 binding point
                 // Defensive: map-resident sessions always have a
                 // container today (destroy paths remove them from the
                 // maps synchronously); the guard protects future
@@ -6052,6 +6153,7 @@
         function focusTerminalIfPossible() {
             const session = getActiveTerminalSession();
             if (!session || !session.term) return;
+            ensureIosImeDirectInputBridge(session); // ios-ime-115 binding point
             if (!windowHasFocus) return;
             if (openDialogs.size > 0) return;
             if (!state.activeInst) return;
