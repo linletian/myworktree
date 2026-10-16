@@ -74,7 +74,7 @@ flag 的两个独立决定（评审 LOW-3 拆分，勿再混为一谈）：
   composition 取消、blur flush-then-clear 三条清除路径各自留痕。blur 清除路径同时复位
   `iosImeFailsafeArmed` 与 `iosImeComposing`（compositionend 丢失时 blur 自愈，防 composing 锁死）；
   重新绑定（term 重建）会整体重置窗口状态。
-- 选字栏路径应只见 `compositionstart/end` 与 `deliver(branch=C/空 delta)`，**不应出现 A 分支补发**。
+- 选字栏路径应只见 `compositionstart/end` 行与至多一条 `clear(reason=compositionstart)` 行：合成期间 229 守卫（`event.isComposing` / `session.iosImeComposing`）不开 pending 窗口、`compositionstart` 还会关掉已开的窗口，故**永不出现 `deliver` 行与 A 分支补发**。
 
 **切片纪律（评审 MEDIUM-3，T0 验收条件）**：埋点代码不得在 `index.html` 的 inline script 里引入
 新的模块级自由标识符；`?iosime-debug` 读 `location.search` 必须包在 `typeof location !== "undefined"`
