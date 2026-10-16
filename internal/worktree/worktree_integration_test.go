@@ -482,9 +482,21 @@ func TestUpdateNameKeepsGitWorktreeIntact(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list git worktrees failed: %v", err)
 	}
+	// Compare symlink-resolved paths: on macOS t.TempDir() lives under
+	// /var/folders (a symlink to /private/var) while `git worktree list
+	// --porcelain` reports the resolved /private/var form — filepath.Clean
+	// alone cannot bridge that, so the positive membership check would fail
+	// there (PR #125 macOS CI). EvalSymlinks normalises both sides; fall
+	// back to Clean when resolution fails (e.g. the path no longer exists).
+	resolve := func(p string) string {
+		if r, err := filepath.EvalSymlinks(p); err == nil {
+			return r
+		}
+		return filepath.Clean(p)
+	}
 	found := false
 	for _, item := range items {
-		if filepath.Clean(item.Path) == filepath.Clean(wt.Path) {
+		if resolve(item.Path) == resolve(wt.Path) {
 			found = true
 			break
 		}
