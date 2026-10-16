@@ -1123,6 +1123,29 @@ func (s *Server) handleWorktrees(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, http.StatusCreated, item)
+	case http.MethodPatch:
+		// Rename the display name of a managed worktree (issue #122 —
+		// sidebar double-click rename). Error mapping mirrors the
+		// handleInstances PATCH branch: not-found is 404, everything
+		// else (empty name, bad body) is 400.
+		var req struct {
+			ID   string `json:"id"`
+			Name string `json:"name"`
+		}
+		if err := readJSON(r.Body, &req); err != nil {
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
+		updated, err := s.worktreeMgr.UpdateName(req.ID, req.Name)
+		if err != nil {
+			if errors.Is(err, worktree.ErrWorktreeNotFound) {
+				writeErr(w, http.StatusNotFound, err)
+				return
+			}
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, updated)
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
