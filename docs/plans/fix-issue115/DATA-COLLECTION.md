@@ -1,6 +1,6 @@
 # Issue #115 数据采集手册（iOS 软键盘直接提交输入丢失 → flush 算法校准）
 
-**状态**：**已执行（2026-10-17 首轮），实测结果见 §四**。failsafe 定值维持 750ms；直输数字/标点、空格→。转换、选字栏合成、死键四项已跑通；长按连击重臂语义、实体键盘对照组、`cat -v` 端到端字节验证待补（见 plan.md §五 待补项）。
+**状态**：**已执行两轮（2026-10-17），实测结果见 §四**。failsafe 定值维持 750ms（两轮 n=63 独立验证，`via` 直接证据为零触发）；直输数字/标点、空格→。转换、选字栏合成、死键、`via` 坐实、`cat -v` 端到端字节验证**全部通过**；**仅余实体键盘对照组与 astral `cat -v` 观察项**（见 §四 4.4 末与 plan.md §5.2）。
 
 诊断埋点随 T0 落地（`internal/ui/static/index.html`），**URL 参数门控、纯前端、零后端**：
 地址带 `?iosime-debug=1` 打开，日志统一前缀 `[ios-ime]`，输出到 Safari Web Inspector 控制台。
@@ -161,3 +161,31 @@ flag 的两个独立决定（评审 LOW-3 拆分，勿再混为一谈）：
 - **死键路径**：`CapsLock`（keyCode 20）/ `Shift`（keyCode 16）keydown 有 probe 但 keyCode ≠ 229，**状态机完全未介入**（无 pending 行、无 failsafe timer）。
 - **`keyup.keyCode` 实测分布推翻本手册 §三 的"标点类 0"**：空格 = 32 ✅；标点实测为 **186–222**（`，`188 `。`190 `《`188 `》`190 `？`191 `/`191 `"`222 `'`222 `：`186 `；`186），Shift 符号键为 48–54（`！`49 `@`50 `#`51 `¥`52 `%`53 `0`48）。**flush 不按 keyCode 过滤的设计因此更加必要**——若当初按"标点类 0"设了过滤规则，本机实测分布会与之全部错配。
 - **英文直输**：本轮 `abc` 仅见 keyup（keyCode 65/66/67），无 keydown 229、无 bridge 事件，未复现失败路径——与"英文无 keydown 时走 `composed=false` 的 input 路径"的代码分析预期一致，但本轮样本不足以定论，需补测。
+
+### 4.4 第二轮复验（2026-10-17，session `1d13eeebd40b` / `docs`）
+
+改采 running 实例 `docs`（首轮采在 stopped 的 `dev` 上，PTY 到达未验），并预置 `window.__im` 缓冲绕开 Safari 控制台保留上限的截断。
+
+| 指标 | 第二轮 | 两轮合并 |
+| --- | --- | --- |
+| keydown(229) → keyup | n=10，min 124 / p50 144 / p90 210 / max 227 ms | **n=63，min 63 / p50 146 / p90 222 / max 246 ms** |
+| >750ms 的敲击 | 0 | **0** |
+| `deliver.via` 分布 | `{"keyup-defer": 10}` | — |
+| `deliver.branch` 分布 | `{"A": 10}` | A×55 + B×3 |
+| `input.dt` 为 null | 0 | 3（均为 branch B） |
+
+**§4.1 的 failsafe 定案由此从单轮观察升级为两轮独立验证**：750ms 对合并 max 246ms 恒为 3.0×，250ms 恒为 1.0×。
+
+**failsafe 零触发已直接证据化**：`via` 分布全为 `keyup-defer`、无一项 `failsafe`。§4.1 中"750ms 是纯安全网"的判断由时序推断升级为实测。
+
+**长按重复发 keyCode 32，不发 229** —— 本轮最反预期的发现。长按空格 1939ms 内 17 次 keydown、keyCode 全为 32、间隔稳定 102ms、末尾仅 1 次 keyup，**229 状态机窗口数 0**。对照首轮空格**点按**有 keydown 229 ⇒ **点按发 229，自动重复发 32**。故 DATA-COLLECTION §三 末行"长按出现连续 229 keydown"这一校准项在本设备**未出现**；plan §3.2 的 M17 重臂语义相应为**防御性代码，真机不可达**（单测 T2 scenario 4/7 仍钉住该语义）。
+
+**`cat -v` 端到端通过**（关闭首轮最大缺口）：输出行解码为 `!@123[17空格]abc!@1nihao你好！@123！@123!2@123`；`M-oM-<M-^A`=`！`(U+FF01)、`M-dM-=M- `=`你`(U+4F60)、`M-eM-%M-=`=`好`(U+597D)，17 个空格与 17 次长按 keydown 精确对应。**全角多字节流完整到达 PTY。**
+
+**英文软键盘不经过 textarea**：`abc` / `!@123` / `nihao` 三段均只有 keyup，无 keydown、无 `input`、`value` 全程不变，但字符到达 PTY。⇒ 该路径不进桥接状态机，**§三 的"英文字母直输"校准项只能用终端回显判定，不能用 bridge 日志判定**。
+
+**合成无泄漏**：输出中的 `nihao` 字面量经确认是切换中文前的一次**英文键盘独立输入**，其后 `你好` 为 IME 合成结果；合成期间 textarea 暂存的 `nihao` 由 `deleteCompositionText` 清除，仅 `insertFromComposition "你好"` 出货，中间态拼音**未泄漏到 PTY**。
+
+**附带发现（登记备查，不属本 issue）**：`tty ws closed: 1005` 重连间隙内键入的字符整段丢失（仅 keyup、textarea 全程为空）。桥接未被触发故非 ios-ime 问题，但重连后未重新 focus 终端会导致静默丢输入，属终端连接层缺陷。
+
+**剩余**：实体键盘对照组（§二 ⑦）、astral `a😀`→`a😃`（plan §五 A-6 / R2-MINOR-2）。
