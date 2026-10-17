@@ -240,6 +240,8 @@ flushIosIme(session, via):                        // via ∈ {"keyup-defer","fai
 - **死键路径**（评审 G7：v3 定的核心关窗规则必须有对应手测项）：连按两次 229 而 IME 未提交任何文本（死键/语言切换键），随后输入一个正常字符，确认该字符送达、无重复、且无残留窗口影响；
 - 快速连续输入、粘贴按钮、quick-keys 面板按键、Esc/Ctrl 组合与桥接共存无异常；
 - **分支 C 首子句观察项（§3.3 已知局限的手测对照）**：启用 focus-events 的终端（vim）里，若窗口内同时出现焦点回报/查询应答等无关投递，且其文本恰包含用户直提交的单字符，确认该字符不被静默吞（理论面窄、未被观测到；真机复现则按 §3.3 仲裁修订的收紧方案处理）；
+- **迟到 input 误判观察项（A-6，R2-MINOR-1）**：长按连击场景（ua 异序使前一 tap 的 input 晚于下一 keydown 时，外部改写检测会终结并前移 baseline——极窄）开 `?iosime-debug=1` 观察 `pending/clear/deliver` 序列是否出现首字丢失；
+- **astral 替换 `cat -v` 观察项（A-6，R2-MINOR-2）**：`a😀`→`a😃` 经 IME 直提交，验证 DEL/插入对数与多字节擦除语义一致（码点 LCP 的终端侧依据实测）；（v7 更正：A-6 表格曾称该两条已入本矩阵，实为遗漏，本轮补入）
 - T0 探针结论回填：插入 vs setTimeout(0) 回调时序、failsafe 750ms 校准值。
 
 ## 六、风险与边界（显式记录）
@@ -517,7 +519,7 @@ T0/T1/T2/T3+T4 各轮实现产出经双评审（第一轮：opencode/space-bunny
 | MINOR LCP 码元劈代理对 | ✅ 成立 | `a😀`→`a😃` 码元 LCP 劈开代理对 → 孤立低代理进 PTY、DEL 数按码元误计 → §3.3 LCP 粒度官定码点（ASCII/BMP 逐位等价）；折叠进 ⑭ |
 | MINOR 纯收缩单 DEL 证据链 | ❌ REJECT（parity 实证） | bundle 缩短分支 `t.length<e.length?triggerDataEvent(DEL)` 对任意缩短只发一个 DEL——单 DEL 即上游语义，多字符净删少删是上游同款行为；§3.3 已附引文 |
 | MINOR destroy 双路径不清 timer/水印 | ❌ REJECT（成本超收益） | 清理代码只能落在工厂内，而工厂触碰为 §8.1 零外溢契约禁止——其代价（破契约）高于收益（fail-soft 守卫 F6 + input 抛错捕获已兜底，且 term falsy 时 failsafe 不关窗的窗口由重绑重置收敛）；§3.2 timer/销毁边界已记 |
-| MINOR 旧 keyup-defer 跨 rebind 误 flush 新窗 | ❌ REJECT（二轮复核：极窄 + 兜底） | defer 是 keyup 后**首个排队回调**——本评审证据下（真实事件 FIFIO 序）新窗不可能先于它建立；即便发生，rebind 重置 pending 兜底空窗、新窗内 delta 多以空/arm 收敛；T5 快速连输项顺带观察 |
+| MINOR 旧 keyup-defer 跨 rebind 误 flush 新窗 | ❌ REJECT（二轮复核：极窄 + 兜底） | defer 是 keyup 后**首个排队回调**——本评审证据下（真实事件 FIFO 序）新窗不可能先于它建立；即便发生，rebind 重置 pending 兜底空窗、新窗内 delta 多以空/arm 收敛；T5 快速连输项顺带观察 |
 | MINOR 水印在 app 门之前（查询应答双丢） | ❌ REJECT（结构性不可改 + 已记） | 门在工厂自身 onData 消费者内部，零外溢契约禁止触碰；§3.3 已知局限 + §五观察项已覆盖（MEDIUM-4 已知接受） |
 | MINOR emissions cap 截断后分支 B 复发 | ✅ 成立（注释级） | cap 注释已记 C 侧退化，补 B 侧重发风险一句 |
 | MINOR debug-OFF 监听数未钉 | ✅ 成立 | 实测 ① 无监听数断言 → 钉 6 |
