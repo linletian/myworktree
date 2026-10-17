@@ -189,8 +189,12 @@ const openerFactory = new Function("deps", `
 // windowHasFocus / openDialogs mirror the module-level declarations in
 // index.html; the setters below let a case reach the exact preconditions the
 // earlier guards demand, so the rename guard is the one that decides.
+// ensureIosImeDirectInputBridge arrives as a recording stub: #115 added the
+// call inside focusTerminalIfPossible BEFORE every focus guard, so the
+// sliced function needs the symbol injected, and the case pins that the
+// bridge keeps running for renaming rows (guard skips focus, not the bridge).
 const focusFactory = new Function("deps", `
-  const { state, getActiveTerminalSession, isInstanceLiveStatus } = deps;
+  const { state, getActiveTerminalSession, isInstanceLiveStatus, ensureIosImeDirectInputBridge } = deps;
   let windowHasFocus = true;
   const openDialogs = new Set();
   ${sliceBlock(script, "function focusTerminalIfPossible()")}
@@ -660,28 +664,40 @@ test("issue #122: the terminal does not steal focus from a renaming sidebar row"
   state.instances = [{ id: "inst-1", status: "running" }];
   let focusCount = 0;
   const session = { id: "inst-1", ttyState: "READY", term: { focus: () => { focusCount += 1; } } };
+  // #115's bridge call sits BEFORE every focus guard in the shipped
+  // focusTerminalIfPossible — the recorder pins that order through the
+  // merge: a renaming row still gets its bridge binding (#115's fix must
+  // not be silently skipped by #122's guard), and still gets ZERO focus
+  // (#122's acceptance #4). Anyone moving either line past the other flips
+  // one of these counts.
+  const bridgeCalls = [];
 
   const page = focusFactory({
     state,
     getActiveTerminalSession: () => session,
     isInstanceLiveStatus: (s) => s === "running",
+    ensureIosImeDirectInputBridge: (s) => { bridgeCalls.push(s); },
   });
 
   page.focusTerminalIfPossible();
   assert.equal(focusCount, 1, "control: with nothing being renamed the terminal takes focus");
+  assert.deepEqual(bridgeCalls, [session], "control: the ios-ime bridge is bound once per attempt (ios-ime-115)");
 
   state.renamingWT = "wt-1";
   page.focusTerminalIfPossible();
   assert.equal(focusCount, 1, "renamingWT keeps the focus off the terminal (acceptance #4)");
+  assert.equal(bridgeCalls.length, 2, "while focus is guarded, the bridge STILL runs — it sits before the rename guard (merge order pinned, ios-ime-115 × #122)");
 
   state.renamingWT = null;
   state.renamingInst = "inst-1";
   page.focusTerminalIfPossible();
   assert.equal(focusCount, 1, "the pre-existing tab-rename guard still holds as well");
+  assert.equal(bridgeCalls.length, 3, "and the bridge keeps binding on the tab-rename path too");
 
   state.renamingInst = null;
   page.focusTerminalIfPossible();
   assert.equal(focusCount, 2, "and focus returns once both renames are over");
+  assert.equal(bridgeCalls.length, 4, "the bridge ran on every single attempt — never guarded");
 });
 
 // --- 9: mutual exclusion, both directions -----------------------------------

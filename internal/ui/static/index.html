@@ -3909,6 +3909,419 @@
             updateStatus(ok ? "Copied" : "Copy failed");
         }
 
+        // ==== ios-ime bridge (issue #115) BEGIN - removable block ====
+
+        // iOS/iPadOS Chinese-IME direct commit (digits/punctuation typed
+        // without a composition) never reaches the PTY: xterm 6.0.0's
+        // keyCode-229 keydown path short-circuits into a setTimeout(0)
+        // textarea diff, and on iOS the IME insertion lands AFTER that
+        // callback, so the diff sees nothing and the composed-input guard
+        // structurally drops the event (plan.md section one). T0 shipped
+        // diagnostics only; T1 adds the rescue on the SAME binding function
+        // and the SAME idempotency flag (plan.md 3.1, review G2) - the
+        // bridge listeners are now UNCONDITIONAL and the T0 diagnostics are
+        // the only listeners still gated behind ?iosime-debug=1, so one
+        // textarea never carries two parallel sets of the same listener.
+
+        // Debug gate (DATA-COLLECTION.md): ?iosime-debug=1 only. location
+        // sits behind a typeof guard - the node slice harness evaluates
+        // this block with no location and must not throw (review MED-3).
+        function iosImeDebugEnabled() {
+            if (typeof location === "undefined") return false;
+            return /(?:^|[?&])iosime-debug=1(?:&|$)/.test(location.search || "");
+        }
+
+        // One console line per event, unified "[ios-ime] " prefix so the
+        // device capture in DATA-COLLECTION.md section 2 greps clean.
+        function iosImeLog(name, fields) {
+            // fail-soft: a throwing console must not abort a handler
+            try {
+                console.log("[ios-ime] " + name, fields);
+            } catch (e) { }
+        }
+
+        // --- block-level constants (T1) -------------------------------------
+        // Failsafe window: flush if a keyup was missed (plan.md 3.2). T0
+        // data may re-calibrate it later - it lives here, in one place.
+        const iosImeFailsafeMs = 750;
+        // Emissions caps (plan.md 3.3, the "count / length cap" fail-safe):
+        // past either cap the watermark STOPS appending and never throws.
+        // Accepted trade-off: windows that hit a cap are pathological and
+        // branch-C suppression may degrade there, but the cap bounds memory.
+        // The B side of the SAME trade-off: a cap-hit leaves `joined` a
+        // truncated prefix, so branch B could strip only that prefix and
+        // re-send already-delivered bytes -- pathological windows only, and
+        // bounded by the same stop-appending rule that halts the growth.
+        const iosImeEmissionsMaxCount = 64;
+        const iosImeEmissionsMaxChars = 4096;
+
+        // --- pure delta helpers (T1, sliceable, no session access) ------
+        // LCP-difference delta, EXACTLY in plan.md 3.3 branch order (the
+        // order is load-bearing). Pinned by upstream #5835: baseline
+        // "   ! " -> current "   !." yields "\x7f." (drop the trailing
+        // space, insert the new char) once the residue is already delivered.
+        // LCP granularity is CODE POINTS (Array.from), NOT UTF-16 units
+        // (plan.md 3.3, PR round M5): unit granularity splits a surrogate pair
+        // on an astral replace (a\uD83D\uDE00 -> a\uD83D\uDE03), computing a mid-pair LCP and then
+        // emitting the dangling LOW surrogate to the PTY. Code-point LCP treats
+        // the pair as one removed unit -> one \x7f + the whole new char; every
+        // ASCII/BMP sequence is bit-identical to the unit form.
+        function iosImeDeltaBytes(baseline, current) {
+            if (current === baseline) return "";
+            const cpsB = Array.from(baseline);
+            const cpsC = Array.from(current);
+            let p = 0;
+            const n = Math.min(cpsB.length, cpsC.length);
+            while (p < n && cpsB[p] === cpsC[p]) p++;
+            const removed = cpsB.length - p;
+            const appended = cpsC.slice(p).join("");
+            if (cpsC.length < cpsB.length) return "\x7f";                // pure shrink: ONE DEL (xterm semantics) -- vendored _handleAnyTextareaChanges shrink branch is t.length<e.length?triggerDataEvent(DEL): exactly ONE DEL for ANY shrink; do NOT "fix" it to a per-removed count (upstream parity, not our regression)
+            if (removed > 0) return "\x7f".repeat(removed) + appended;    // replace: DEL x removed + insert
+            return appended;                                               // pure append
+        }
+
+        // Residual branch, in A/B/C/D order (plan.md 3.3). current is
+        // threaded through for branch C's guard (see iosImeResidualBranch).
+        // Branch-B boundary invariant (plan.md 3.3, PR round 2 R2-MINOR-3):
+        // delta.slice(joined.length) is UTF-16-unit slicing and is SAFE only
+        // because emissions enter WHOLE (the watermark pushes complete onData
+        // strings, the caps reject whole entries) -- delta.startsWith(joined)
+        // then guarantees joined's end sits on a code-point boundary of delta;
+        // breaking that premise (slicing emissions into units) could emit a
+        // split surrogate.
+        function iosImeResidualPayload(delta, emissions, current) {
+            switch (iosImeResidualBranch(delta, emissions, current)) {
+                case "A": return delta;
+                case "B": return delta.slice(emissions.join("").length);
+                case "C": return "";
+                default: return delta;
+            }
+        }
+
+        // Shared branch predicate so iosImeResidualPayload's return value
+        // and the [ios-ime] deliver row's `branch` label can never drift.
+        // C's `contains current` clause is guarded by current !== "":
+        // joined.includes("") is vacuously true, so unguarded it would
+        // swallow a real deletion payload whenever current is empty. This
+        // is the one deliberate divergence from plan.md 3.3's literal text,
+        // recorded for the T4 plan amendment.
+        function iosImeResidualBranch(delta, emissions, current) {
+            if (!emissions || emissions.length === 0) return "A";
+            const joined = emissions.join("");
+            if (joined.length > 0 && delta.slice(0, joined.length) === joined) return "B";
+            if (joined.indexOf(delta) !== -1 || (current !== "" && joined.indexOf(current) !== -1)) return "C";
+            return "D";
+        }
+
+        // Close the pending window. MUST be called before any send (plan.md
+        // 3.3 close order). Resets every window field and logs the clear row.
+        function closeIosImeWindow(session) {
+            session.iosImePending = null;
+            if (session.iosImeFailsafeTimer) {
+                clearTimeout(session.iosImeFailsafeTimer);
+                session.iosImeFailsafeTimer = null;
+            }
+            session.iosImeEmissions = [];
+            session.iosImeFailsafeArmed = false;
+            if (iosImeDebugEnabled()) iosImeLog("clear", { reason: "close-window" });
+        }
+
+        // Flush truth table (plan.md 3.3 verbatim), via in
+        // {"keyup-defer","failsafe","blur","external-rewrite"}. Empty-delta
+        // paths also emit a deliver row (branch null, payload "") - a
+        // judgment result too.
+        function flushIosIme(session, via) {
+            if (!session.iosImePending) return;   // F6: FIRST line, before the term guard
+            if (!session.term) return;             // dead session (a timer outlives destroy paths)
+            const textarea = session.term.textarea;
+            if (!textarea) return;
+            // lastSeen guard (plan.md 3.2): current is ALWAYS the lastSeen
+            // snapshot. When live===seen they are the SAME string; when they
+            // diverge (an external programmatic rewrite -- xterm's blur /^C
+            // clears, mid-key selection) seen is the ONLY trustworthy source.
+            // NEVER read the live value here: diffing a value xterm rewrote
+            // out from under us computes a shrink and re-imports the ghost
+            // \x7f this guard exists to prevent. (A live===seen ? live : seen
+            // shape here is a trap -- it reads as "live wins when trusted"
+            // and invites a backwards "fix".)
+            const current = session.iosImeSeen;
+            const delta = iosImeDeltaBytes(session.iosImePending.baseline, current);
+            // capture log context BEFORE any state change
+            const baseline = session.iosImePending.baseline;
+            const emissionsSnapshot = (session.iosImeEmissions || []).slice();
+            const armedAtEntry = !!session.iosImeFailsafeArmed;
+
+            if (delta === "") {
+                if (via === "failsafe") {            // unconditional close (N2)
+                    if (iosImeDebugEnabled()) iosImeLog("deliver", { baseline: baseline, current: current, delta: delta, emissions: emissionsSnapshot, branch: null, payload: "", via: via, armed: armedAtEntry });
+                    closeIosImeWindow(session);
+                    return;
+                }
+                if (session.iosImeFailsafeArmed) {   // second chance spent (G1)
+                    if (iosImeDebugEnabled()) iosImeLog("deliver", { baseline: baseline, current: current, delta: delta, emissions: emissionsSnapshot, branch: null, payload: "", via: via, armed: armedAtEntry });
+                    closeIosImeWindow(session);
+                    return;
+                }
+                session.iosImeFailsafeArmed = true;  // the ONE bounded second chance; emissions untouched
+                if (iosImeDebugEnabled()) iosImeLog("deliver", { baseline: baseline, current: current, delta: delta, emissions: emissionsSnapshot, branch: null, payload: "", via: via, armed: armedAtEntry });
+                return;
+            }
+
+            const branch = iosImeResidualBranch(delta, session.iosImeEmissions, current);
+            const payload = iosImeResidualPayload(delta, session.iosImeEmissions, current);
+            if (iosImeDebugEnabled()) iosImeLog("deliver", { baseline: baseline, current: current, delta: delta, emissions: emissionsSnapshot, branch: branch, payload: payload, via: via, armed: armedAtEntry });
+            closeIosImeWindow(session);              // close BEFORE send, always for a non-empty delta
+            if (!payload) return;                    // branch C silence
+            session.iosImeSending = true;            // reentrancy: the watermark must ignore our own echo
+            try {
+                // PER CODE POINT (plan.md 3.3, review M6), never a bulk send:
+                // a multi-tap delta could match isTerminalQueryResponse whole.
+                const cps = Array.from(payload);
+                for (let i = 0; i < cps.length; i++) session.term.input(cps[i]);
+            } catch (e) {
+                // term destroyed mid-send: drop the remainder silently
+                // (flushQuickKeysQueue precedent)
+            } finally {
+                session.iosImeSending = false;
+            }
+        }
+
+        // The single binding function for the whole issue (plan.md 3.1):
+        // idempotency is TERM-scoped (iosImeBridgeTerm === the live term),
+        // so a Terminal rebuilt onto the same session object re-binds
+        // instead of being silently skipped (review M10). ALWAYS-ON listeners
+        // are keydown/input/keyup/compositionstart/compositionend/blur plus
+        // the onData watermark; debug-only is beforeinput (plus the keydown
+        // probe timer) - review G2 - and every [ios-ime] log row is
+        // debug-gated. compositionend is ALWAYS-ON because it clears the
+        // bridge-owned composing flag the 229 guard consults (review HIGH).
+        function ensureIosImeDirectInputBridge(session) {
+            if (!session || !session.term || !session.term.textarea) return;
+            if (session.iosImeBridgeTerm === session.term) return;
+            session.iosImeBridgeTerm = session.term;
+            const textarea = session.term.textarea;
+            // Defensive init; the state machine maintains it afterwards.
+            session.iosImeSeen = textarea.value;
+            // Bind is term-scoped: stale window state from a dead term must
+            // not leak into the new one -- an old baseline vs the freshly
+            // re-initialized iosImeSeen is a pure shrink (ghost \x7f into
+            // the NEW terminal), and a latched composing or stale armed
+            // flag would mute/mis-close the first window on the new term.
+            session.iosImePending = null;
+            if (session.iosImeFailsafeTimer) { clearTimeout(session.iosImeFailsafeTimer); session.iosImeFailsafeTimer = null; }
+            session.iosImeEmissions = [];
+            session.iosImeFailsafeArmed = false;
+            session.iosImeComposing = false;
+            // keydown: keyCode 229 is the IME-tap signature (upstream
+            // #5835); keyCode/key are observation only, never filtered.
+            function iosImeHandleKeydown(event) {
+                session.iosImeProbeT1 = null;
+                if (iosImeDebugEnabled()) {
+                    const t0 = Date.now();
+                    iosImeLog("keydown", { t: t0, keyCode: event.keyCode, key: event.key, value: textarea.value, len: textarea.value.length });
+                    // The isomorphic probe (review M3): meaningful when
+                    // keyCode === 229 and no compositionstart intervened for
+                    // this tap - only then did xterm queue its own
+                    // _handleAnyTextareaChanges setTimeout(0) at this keydown
+                    // (vendored xterm.js queues the 0ms diff for keyCode 229
+                    // only outside a composition), and FIFO puts it before this
+                    // callback - so "t1 already passed and valueAtProbe lacks
+                    // the new char" IS the section-1 link-3 assumption, on
+                    // device. For other keys, or during a composition, this
+                    // probe row is context only. Debug-only: a production
+                    // keydown must never schedule a probe timer (review G2).
+                    setTimeout(function iosImeRunProbe() {
+                        const t1 = Date.now();
+                        session.iosImeProbeT1 = t1;
+                        iosImeLog("probe", { t0: t0, t1: t1, valueAtProbe: textarea.value });
+                    }, 0);
+                }
+                // STATE MACHINE (always on): external-rewrite termination +
+                // baseline capture + per-229 failsafe re-arm, in that order.
+                // Guarded against composition: the vendored bundle delivers
+                // composition text ONLY at compositionend (_finalizeComposition),
+                // so the onData watermark is EMPTY mid-composition; a 229
+                // window opened there would take branch A and leak the interim
+                // pinyin into the terminal. The iOS direct-commit failure path
+                // has NO composition at all (isComposing false - upstream #5835
+                // shows no composition events), so this guard cannot mute the
+                // fix. When guarded out: NO pending window, NO timer arm, NO
+                // pending row; the debug keydown row above still fires.
+                if (event.keyCode === 229 && event.isComposing !== true && session.iosImeComposing !== true) {
+                    // EXTERNAL-REWRITE TERMINATION (plan.md 3.2, PR round M1 +
+                    // round 2 R2-M1): xterm's programmatic textarea.value= writes
+                    // (the ^C/ETX clear, mid-key selection) dispatch NO input
+                    // event, so a live-vs-seen divergence seen here means BOTH the
+                    // old window's baseline AND seen are stale -- the old window's
+                    // diff would be nonsense. Disposition is FLUSH-THEN-TERMINATE
+                    // (plan.md 3.2, PR round 2 R2-M1: round 1's terminate-and-drop
+                    // replay proved a lost keystroke -- the undelivered increment
+                    // was silently dropped before the keyup-defer ever ran): flush
+                    // FIRST -- the window's undelivered increment must ride its
+                    // LAST delivery chance before the rewrite makes baseline/seen
+                    // meaningless; current = iosImeSeen is still trustworthy here
+                    // (the external rewrite never went through the input handler).
+                    // Same reason blur flushes before clearing (M7): terminating/
+                    // interrupting must not eat keystrokes the user already made --
+                    // on a physical keyboard they would have reached the shell
+                    // before the interrupt. The empty-delta arm/close rules apply
+                    // AS-IS; whatever survives the flush (an armed empty window) is
+                    // terminated below (pending/timer/armed; emissions untouched --
+                    // the fresh baseline creation below resets them). Loss window
+                    // was mainly the iOS long-press stream where no keyup-defer
+                    // ever runs.
+                    if (textarea.value !== session.iosImeSeen) {
+                        flushIosIme(session, "external-rewrite");
+                        // A flush that CLOSED the window already logged its own
+                        // close-window row; log the terminator's row ONLY when
+                        // pending was still non-null right after the flush (the
+                        // blur pattern, no double log).
+                        if (session.iosImePending) {
+                            session.iosImePending = null;
+                            if (session.iosImeFailsafeTimer) { clearTimeout(session.iosImeFailsafeTimer); session.iosImeFailsafeTimer = null; }
+                            session.iosImeFailsafeArmed = false;
+                            if (iosImeDebugEnabled()) iosImeLog("clear", { reason: "external-rewrite" });
+                        }
+                    }
+                    // normal path: refresh seen, then create/keep the baseline
+                    // (a terminated window means "no pending" -> fresh baseline
+                    // = the live value).
+                    session.iosImeSeen = textarea.value;
+                    let keptEarliest = false;
+                    if (!session.iosImePending) {
+                        session.iosImePending = { baseline: textarea.value };
+                        session.iosImeEmissions = [];   // emissions reset (1): baseline creation
+                        keptEarliest = false;
+                    } else {
+                        // keep the EARLIEST baseline, never re-read (upstream semantics)
+                        keptEarliest = true;
+                    }
+                    // re-arm EVERY 229 keydown (plan.md 3.2, review M17): iOS
+                    // long-press streams 229s, so the failsafe runs from the last
+                    if (session.iosImeFailsafeTimer) clearTimeout(session.iosImeFailsafeTimer);
+                    session.iosImeFailsafeTimer = setTimeout(function iosImeFailsafe() { flushIosIme(session, "failsafe"); }, iosImeFailsafeMs);
+                    if (iosImeDebugEnabled()) iosImeLog("pending", { baseline: session.iosImePending.baseline, len: session.iosImePending.baseline.length, keptEarliest: keptEarliest, rearmed: keptEarliest });
+                }
+            }
+            function iosImeHandleInput(event) {
+                session.iosImeSeen = textarea.value;   // lastSeen refresh (plan.md 3.2)
+                if (iosImeDebugEnabled()) {
+                    // dt pins the input against the CURRENT tap's probe t1
+                    // (reset to null at every keydown): a number means this
+                    // tap's probe already ran (positive = insertion after the
+                    // 0ms callback); null means this tap's probe has not fired
+                    // yet - the insertion-before-callback case the probe exists
+                    // to detect. dt is only meaningful when the input follows a
+                    // keydown of the same tap; for an input with no preceding
+                    // keydown (paste, composition-driven) the number is
+                    // meaningless and must be ignored by the transcriber.
+                    iosImeLog("input", { inputType: event.inputType, data: event.data, composed: event.composed, value: textarea.value, dt: session.iosImeProbeT1 == null ? null : Date.now() - session.iosImeProbeT1 });
+                }
+            }
+            function iosImeHandleKeyUp(event) {
+                if (iosImeDebugEnabled()) iosImeLog("keyup", { t: Date.now(), keyCode: event.keyCode, key: event.key, value: textarea.value, len: textarea.value.length });
+                // NEVER flush synchronously (review HIGH-2): xterm's keydown
+                // timer is queued first, FIFO lets it finish, the watermark
+                // adjudicates - so defer by one macrotask. The !composing
+                // clause is belt-and-braces: a window can never legitimately
+                // exist while composing (the 229 guard never opens one and
+                // compositionstart closes any), and it documents that invariant.
+                if (session.iosImePending && !session.iosImeComposing) setTimeout(function iosImeKeyupFlush() { flushIosIme(session, "keyup-defer"); }, 0);
+            }
+            function iosImeHandleCompositionStart(event) {
+                // Bridge-owned composing flag set FIRST, so the 229 state
+                // machine ignores every composing keystroke: the vendored
+                // bundle delivers composition text only at compositionend, so
+                // the watermark is empty during composition and a 229 window
+                // would take branch A and leak the interim pinyin.
+                // compositionstart now terminates a window fully, like
+                // close/blur - hence the failsafeArmed reset (arbitrator-
+                // approved, recorded for the T4 plan amendment).
+                session.iosImeComposing = true;
+                if (iosImeDebugEnabled()) iosImeLog("compositionstart", { value: textarea.value });
+                if (session.iosImePending) {
+                    // composition self-delivers; do NOT touch emissions here -
+                    // the next baseline creation resets them.
+                    session.iosImePending = null;
+                    if (session.iosImeFailsafeTimer) { clearTimeout(session.iosImeFailsafeTimer); session.iosImeFailsafeTimer = null; }
+                    session.iosImeFailsafeArmed = false;
+                    if (iosImeDebugEnabled()) iosImeLog("clear", { reason: "compositionstart" });
+                }
+            }
+            function iosImeHandleCompositionEnd(event) {
+                // ALWAYS-ON. Its ONLY state action is clearing the composing
+                // flag, which re-admits the next direct-commit tap to the 229
+                // state machine. The flag exists because the vendored bundle
+                // delivers composition text only at compositionend, so the
+                // watermark is empty during composition and an unguarded 229
+                // window would take branch A and leak the interim pinyin. The
+                // log row stays debug-gated.
+                session.iosImeComposing = false;
+                if (iosImeDebugEnabled()) iosImeLog("compositionend", { data: event.data, value: textarea.value });
+            }
+            function iosImeHandleBlur(event) {
+                // flush-then-clear (review M7): flush first so a blur does
+                // not drop the pending bytes...
+                flushIosIme(session, "blur");
+                // ...then, if the empty-delta arm path left pending behind,
+                // clear it. If the blur flush closed the window,
+                // closeIosImeWindow already logged "close-window" - no double log.
+                if (session.iosImePending) {
+                    session.iosImePending = null;
+                    if (session.iosImeFailsafeTimer) { clearTimeout(session.iosImeFailsafeTimer); session.iosImeFailsafeTimer = null; }
+                    // blur terminating a window resets armed too (terminator
+                    // unification, like close/compositionstart): stale armed
+                    // would close the NEXT window on its first empty delta,
+                    // losing that window's bounded second chance.
+                    session.iosImeFailsafeArmed = false;
+                    if (iosImeDebugEnabled()) iosImeLog("clear", { reason: "blur" });
+                }
+                // Missed-compositionend self-heal: focus loss can abort a
+                // composition with NO compositionend delivered, latching
+                // iosImeComposing forever and muting the state machine for
+                // the life of the term. Unconditional unlatch, outside the
+                // pending branch -- same precedent as ensureQuickKeysImeBinding's
+                // blur listener clearing session.composing.
+                session.iosImeComposing = false;
+            }
+            textarea.addEventListener("keydown", iosImeHandleKeydown);
+            textarea.addEventListener("input", iosImeHandleInput);
+            textarea.addEventListener("keyup", iosImeHandleKeyUp);
+            textarea.addEventListener("compositionstart", iosImeHandleCompositionStart);
+            textarea.addEventListener("compositionend", iosImeHandleCompositionEnd);
+            textarea.addEventListener("blur", iosImeHandleBlur);
+            // Watermark: records what xterm's own onData already delivered in
+            // THIS pending window, so flush can suppress a double send. It
+            // watches BEFORE the app's own gates (isInstanceTerminalStatus /
+            // isTerminalQueryResponse live inside the onData consumer) -
+            // reviewed and accepted position (review MEDIUM-4).
+            if (session.iosImeDataDisposable && typeof session.iosImeDataDisposable.dispose === "function") {
+                try { session.iosImeDataDisposable.dispose(); } catch (e) { }
+            }
+            session.iosImeDataDisposable = session.term.onData(function iosImeWatermark(data) {
+                if (!session.iosImePending) return;
+                if (session.iosImeSending) return;   // exclude our own term.input echo (review HIGH-1/M5)
+                if (!session.iosImeEmissions) session.iosImeEmissions = [];
+                if (session.iosImeEmissions.length >= iosImeEmissionsMaxCount) return;   // count cap
+                let totalChars = 0;
+                for (let i = 0; i < session.iosImeEmissions.length; i++) totalChars += session.iosImeEmissions[i].length;
+                if (totalChars + (data ? data.length : 0) > iosImeEmissionsMaxChars) return;   // length cap
+                session.iosImeEmissions.push(data);
+            });
+            // Debug-only diagnostic listener (pure observation, review G2):
+            // beforeinput never touches bridge state. compositionend is NOT
+            // here anymore - it is always-on now (it clears the composing flag
+            // the 229 guard consults), only its log row stays debug-gated.
+            if (iosImeDebugEnabled()) {
+                textarea.addEventListener("beforeinput", function iosImeHandleBeforeInput(event) {
+                    iosImeLog("beforeinput", { inputType: event.inputType, data: event.data, composed: event.composed, isComposing: event.isComposing, value: textarea.value });
+                });
+            }
+            if (iosImeDebugEnabled()) iosImeLog("bound", { sessionId: session.id });
+        }
+
+        // ==== ios-ime bridge (issue #115) END - removable block ====
+
         function init() {
             if (sessionStorage.getItem(SERVER_UPGRADED_FLAG) === "1") {
                 sessionStorage.removeItem(SERVER_UPGRADED_FLAG);
@@ -6137,6 +6550,7 @@
                 ? r.allSessions()
                 : Object.values(terminalSessions);
             for (const session of sessions) {
+                ensureIosImeDirectInputBridge(session); // ios-ime-115 binding point
                 // Defensive: map-resident sessions always have a
                 // container today (destroy paths remove them from the
                 // maps synchronously); the guard protects future
@@ -6246,6 +6660,7 @@
         function focusTerminalIfPossible() {
             const session = getActiveTerminalSession();
             if (!session || !session.term) return;
+            ensureIosImeDirectInputBridge(session); // ios-ime-115 binding point
             if (!windowHasFocus) return;
             if (openDialogs.size > 0) return;
             if (!state.activeInst) return;
