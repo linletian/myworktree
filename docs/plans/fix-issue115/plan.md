@@ -1,7 +1,7 @@
 # Issue #115 修复计划：iPadOS/iOS 中文输入法直接键入无法输入终端
 
-**日期**：2026-10-16（v7：PR #123 第二轮评审仲裁落地——外部改写终结改 flush-then-terminate（via 增补 "external-rewrite"）、真值表坍缩对齐、终结者 clear 日志；v6 一轮仲裁（外部改写检测、current 坍缩、码点 LCP、T5 政策调整）见 A-5；三轮评审 53 条 + 实现轮 + PR 一/二轮全部落账）
-**状态**：**T0/T1/T2/T3/T4 代码与文档已落地**；结论仍以 T0 真机数据为准（T0 校准 failsafe 取值）；**T5 真机验证矩阵改为合并后（beta 渠道）执行——按维护者决定，不作为本 PR 的合并门槛**（PR #123 评审更正评论；follow-up issue 跟踪签字与校准回填）
+**日期**：2026-10-17（v8：**T0 真机数据已采集并回填——failsafe 定值维持 750ms 不下调**（实测 keydown→keyup 63–246ms，远高于 DATA-COLLECTION §三 假定的 10–40ms 量级，issue #124 的"降至 200–300ms"前提被证伪）；第 3 环假设在 47/50 例成立，3 例 `dt:null` 全部由分支 B 正确抑制、无丢字；§五 矩阵首轮已过，直输/标点/合成/死键四路全绿。v7：PR #123 第二轮评审仲裁落地——外部改写终结改 flush-then-terminate（via 增补 "external-rewrite"）、真值表坍缩对齐、终结者 clear 日志；v6 一轮仲裁（外部改写检测、current 坍缩、码点 LCP、T5 政策调整）见 A-5；三轮评审 53 条 + 实现轮 + PR 一/二轮全部落账）
+**状态**：**T0 真机数据已落地，T1/T2/T3/T4 代码与文档已完成；failsafe 取值已定（维持 750ms）**；**T5 真机验证矩阵改为合并后（beta 渠道）执行——按维护者决定，不作为 PR 的合并门槛**（PR #123 评审更正评论）。首轮矩阵（2026-10-17，iPad Safari + Tailscale 远端 + Safari Web Inspector，session `89b67bf9642a`）已跑通直输数字/标点、空格→。转换、选字栏合成、死键四项；**待补**：长按连击的重臂语义、实体键盘对照组、`cat -v` 端到端字节验证（采集落在 stopped 的 `dev` 实例上，桥接层时序有效但 PTY 到达未验）——见 §五 末尾。
 **Issue**：#115（bug，v0.6.0 develop / mwbeta）
 **评审记录**：三轮评审共六份临时文档（两位评审各三轮），按其自身约定不提交、不忽略，已在
 linletian 确认后删除；**逐条判定与处置完整落账于本文档附录**：附录 A（一轮 27 条）、
@@ -104,7 +104,7 @@ linletian 确认后删除；**逐条判定与处置完整落账于本文档附�
 
 **lastSeen 守卫**（评审 HIGH-3/M7 引出；**PR 轮仲裁修订两处**）：bundle 实证 xterm 自身有 3 处 `textarea.value=` 赋值——`_handleTextAreaBlur` 清空、`^C`/CR 的 `ETX` 分支清空、Linux 中键选区驻留。这些外部清空会晚于我们的观测发生，flush 时若直接读 live value，会算出 shrink → 发出**幽灵 `\x7f`**。规则：**flush 的 current 恒取 `session.iosImeSeen`**——live===seen 时二者本为同一字符串，分歧时（外部清空/改写）seen 是唯一可信源（PR 轮 Mavis 指出原三元 `live===seen ? live : seen` 是恒取 seen 的死代码、且注释会诱导未来维护者反向"修正"重新引入幽灵 DEL，故坍缩形状并明写语义；与 §3.3 真值表伪代码的形状差异记录在案）。同窗存续期内的外部改写由 keydown-229 的**外部改写检测**（上表 M1 行）在下一个 tap 探到并终结陈旧窗。
 
-**failsafe timer**（750ms）：漏 keyup 的兜底。关窗规则（评审 N2，实现前必须定死；三支齐全由评审 G1 补齐）：
+**failsafe timer**（750ms，**v8 定值维持不变**）：漏 keyup 的兜底。关窗规则（评审 N2，实现前必须定死；三支齐全由评审 G1 补齐）：
 
 - **keyup 延后 flush 产出空 delta** 且 `iosImeFailsafeArmed` 为 false（第一次）：**不关窗**，置 `iosImeFailsafeArmed = true`，把"第二次机会"交给 failsafe；emissions 不动；
 - **keyup 延后 flush 产出空 delta** 且 `iosImeFailsafeArmed` 已为 true（第二次，评审 G1 补的 else 支——同窗口内连按两次 229、IME 两次都没提交即可达）：**无条件关窗**（第二次机会已用过，不能再延期；否则 N2 的 pending 泄漏原样复现）；
@@ -114,6 +114,20 @@ linletian 确认后删除；**逐条判定与处置完整落账于本文档附�
 关窗时 `iosImeFailsafeArmed` 一并复位（新窗口重新允许一次留窗机会）。
 
 不关窗的理由（评审 MEDIUM-1）：flush 早于插入时若立即关窗，字符永失（成为下一次 baseline 后无人再补发）；有界地保留一次机会兼顾两者。无界保留的故障链（N2 实测推演）：死键 tap（229 无插入）→ 空 delta 不关窗 → failsafe 仍空 → 再不关 → pending 泄漏，后续按键沿用陈旧 baseline，叠加 lastSeen 守卫算出空/错 delta——与 issue #115 同类的静默吞字。有界化后该链断裂。
+
+**failsafe 取值校准（v8，T0 真机数据定案——维持 750ms，不下调）**：
+
+issue #124 曾计划"若真机 keydown→keyup 亦在 10–40ms 量级，可议降到 200–300ms"。**T0 实测该前提不成立**：iPad Safari 中文软键盘直提交路径，keydown(229) → keyup 实测 **n=53，min 63 / p50 146 / p90 222 / max 246 ms**（对照 DATA-COLLECTION §三 依上游 #5835 假定的 12–34ms，为其 **4–7 倍**）。分布规律：快速连打时（`123` 连击）达 190–246ms，慢速单敲仅 63–160ms——**峰值由快速输入贡献，而快速输入恰是最易丢 keyup 的场景**。
+
+按余量换算（对实测 max 246ms）：750ms = **3.0×**；500ms = 2.0×；300ms = 1.2×；250ms = **1.0×（压线）**；200ms = **0.8×（抢在 keyup 之前）**。
+
+**定案 750ms 的三条依据**：
+
+1. **降到 250ms 会抢在 keyup 之前触发 failsafe。** failsafe 是"无条件关窗"，它一旦先跑，有界第二次机会（空 delta → armed → 等插入）即被饿死——正是上一段 N2 故障链要防的失效。
+2. **首轮 53 次敲击 failsafe 一次都没触发**：所有 `deliver` 均紧随同拍 keyup 出现（delta 非空 → 交付并关窗），无一次延后至 keydown+750ms。750ms 是**纯安全网，未为 UX 付出代价**，下调换来的 UX 收益是虚的。（`via` 字段在本轮采集的控制台显示中被截断，此判断由时序推得；坐实需 `via` 值，见 §五 待补项。）
+3. **探针→插入实测仅 5–37ms（p50 10ms），插入恒早于 keyup**。有界第二次机会保护的是"keyup 正常但插入迟到"的窗口，该窗口在慢敲下约 50–200ms 长；下调 failsafe 等于压缩这个窗口。
+
+**备选（未采纳）**：降至 500ms。2.0× 余量仍安全，最坏"字符卡住"由 0.75s 缩至 0.5s，收益有限。
 
 **flush 首行守卫**（评审 F6，明写为契约）：`if (!session.iosImePending) return;` 必须排在 term 守卫（`!session.term`）**之前**——keyup 延后 flush 与 blur flush 可交错（keyup 排下 D、blur 先跑并关窗交付、D 后到），第二次进入必须因 pending 已空而空转，正确性不能依赖未写下的约定。
 
@@ -242,7 +256,35 @@ flushIosIme(session, via):                        // via ∈ {"keyup-defer","fai
 - **分支 C 首子句观察项（§3.3 已知局限的手测对照）**：启用 focus-events 的终端（vim）里，若窗口内同时出现焦点回报/查询应答等无关投递，且其文本恰包含用户直提交的单字符，确认该字符不被静默吞（理论面窄、未被观测到；真机复现则按 §3.3 仲裁修订的收紧方案处理）；
 - **迟到 input 误判观察项（A-6，R2-MINOR-1）**：长按连击场景（ua 异序使前一 tap 的 input 晚于下一 keydown 时，外部改写检测会终结并前移 baseline——极窄）开 `?iosime-debug=1` 观察 `pending/clear/deliver` 序列是否出现首字丢失；
 - **astral 替换 `cat -v` 观察项（A-6，R2-MINOR-2）**：`a😀`→`a😃` 经 IME 直提交，验证 DEL/插入对数与多字节擦除语义一致（码点 LCP 的终端侧依据实测）；（v7 更正：A-6 表格曾称该两条已入本矩阵，实为遗漏，本轮补入）
-- T0 探针结论回填：插入 vs setTimeout(0) 回调时序、failsafe 750ms 校准值。
+- T0 探针结论回填：插入 vs setTimeout(0) 回调时序、failsafe 750ms 校准值。**（v8 已回填，见下）**
+
+### 5.1 首轮矩阵执行结果（2026-10-17）
+
+**环境**：iPad + Safari，远端访问 `100.86.87.23:40751/?iosime-debug=1`（Tailscale），Mac Safari Web Inspector 观察；采集落在 session `89b67bf9642a`（`dev` 实例）；daemon `mwbeta` 构建于当日 14:16，晚于 PR #123 合并。
+
+| 矩阵项 | 结果 | 证据要点 |
+| --- | --- | --- |
+| ① 中文直输数字 `123` | ✅ | 逐字 `keydown 229 → probe → beforeinput → input(dt 8–10ms) → keyup → deliver(branch A) → clear(close-window)` |
+| ② 中文直输标点 `！@#¥%…（），。《》？/"\`：；` | ✅ | 同上，50+ 字符全部 branch A 补发成功 |
+| ③ 连按两次空格触发 `。` 转换 | ✅ | baseline `…； `(len 44) → current `…；。`(len 45)，delta = **`\x7f。`**（`\x7f` 在控制台不可见，渲染为 `delta: 。"`）——**正是 §3.3 LCP 差分预测的"删后插"输出**，branch A 补发 |
+| ④ 英文软键盘直输 `abc` | ⚠️ 部分 | keyup 到达（keyCode 65/66/67）但**无 229、无 bridge 事件**，未复现失败；`abc` 本身无 keydown 行，需确认是走了 §3.3 分支 D（无关投递间隙）还是本轮未真正键入 |
+| ⑤ 选字栏候选输入「你好」（`nihao`） | ✅ | `compositionstart → insertCompositionText(ni/ni h/ni ha/ni hao/你好) → deleteCompositionText → insertFromComposition → compositionend`；**零 deliver 行、零 branch A 补发**，与 DATA-COLLECTION §一 预测一致；229 窗口在 `compositionstart` 即被 `clear{compositionstart}` 关闭 |
+| 死键路径 | ✅ | `CapsLock`（keyCode 20）/`Shift`（keyCode 16）keydown 有 probe 但 keyCode ≠ 229，**状态机完全未介入**（无 pending 行、无 timer）——与 T2 scenario 20 一致 |
+| ⑥ 长按连删 | ⚠️ 数据不足 | 两批 Backspace（keyCode 8）**只记录到 keyup、无 keydown 229**，与正常敲击行模式不一致；无法区分是控制台截断还是真实行为 |
+| ⑦ 实体键盘对照组 | ❌ 未执行 | 本轮未接实体键盘 |
+
+**第 3 环假设判定**：**在 47/50 例成立**（`input.dt` 为 5–37ms，即插入晚于 0ms 探针回调，与 plan §一 假设一致）。**3 例例外 `dt: null`**（插入早于探针）：`@` / `#` / `》`。
+
+**例外行的正面结论**（回答 A-6 / R2-MINOR-1 观察项）：这 3 例 `deliver` **全部走 branch B** 且 `emissions` 携带该字符——即 **xterm 自身已投递成功**，桥接水印正确抑制了重复发送，**无首字丢失**。两种事件序均被正确处理。故 `valueAtProbe` 已含新字符这一分支**不需要回头排查 `_keyPressHandled` 等丢弃路径**（该排查仅在"假设被证伪 **且** 字符丢失"时才触发），但"第 3 环假设是强假设而非不变式"这一事实应记入已知边界。
+
+**待补（阻塞 T5 签字）**：
+
+1. **`cat -v` 端到端字节验证**——采集落在 API 状态为 `stopped` 的 `dev` 实例上，桥接层时序有效，但 `term.input → PTY → shell` 到达未验。须在 running 实例（`docs`，`1d13eeebd40b`）重做一次直输 + `cat -v`。
+2. **长按连击的 229 重臂语义**（plan §3.2「每个 keydown 都重臂」）——须采到连续 `pending` 行且 `keptEarliest: true, rearmed: true`、baseline 保持最早值。采集前须先装 `__im` 缓冲，避免长按密集行被 Safari 控制台保留上限截断。
+3. **实体键盘对照组**（矩阵第 ⑦ 项）。
+4. **`via` 字段坐实**——确认首轮 53 次 `deliver` 的 `via` 全为 `keyup-defer`、无一为 `failsafe`（本轮为时序推断，控制台显示截断了该字段）。
+5. **astral `cat -v` 观察项**（A-6 / R2-MINOR-2）`a😀`→`a😃` 本轮未采。
+
 
 ## 六、风险与边界（显式记录）
 

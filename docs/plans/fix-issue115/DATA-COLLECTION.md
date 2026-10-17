@@ -1,5 +1,7 @@
 # Issue #115 数据采集手册（iOS 软键盘直接提交输入丢失 → flush 算法校准）
 
+**状态**：**已执行（2026-10-17 首轮），实测结果见 §四**。failsafe 定值维持 750ms；直输数字/标点、空格→。转换、选字栏合成、死键四项已跑通；长按连击重臂语义、实体键盘对照组、`cat -v` 端到端字节验证待补（见 plan.md §五 待补项）。
+
 诊断埋点随 T0 落地（`internal/ui/static/index.html`），**URL 参数门控、纯前端、零后端**：
 地址带 `?iosime-debug=1` 打开，日志统一前缀 `[ios-ime]`，输出到 Safari Web Inspector 控制台。
 
@@ -107,9 +109,55 @@ flag 的两个独立决定（评审 LOW-3 拆分，勿再混为一谈）：
 | 英文字母直输成功（有 keydown 且 `composed=false`） | 维持 229 单一入口，范围不变 |
 | 英文字母直输失败（同样无投递） | baseline 扩展到 beforeinput（预案扩展点），flush 条件不变 |
 | 空格→。 呈现删后插等长替换 | delta 等长分支按 LCP 差分输出 `\x7f。`（残留已投递时语义正确）；观察是否出现 over-delete（未投递残留 + 转换的已知边界，plan.md §六） |
-| keyup keyCode：**空格类 32、标点类 0**（评审 M4 修正——此前文档误写"恒为 0"；上游 #5835 日志实测即此分布） | flush 触发不按 keyCode 过滤（现设计如此），确认即可；`[ios-ime] keyup` 行的 `keyCode` 仅作观测记录，不设"异常"阈值 |
-| 敲击间隔落在某区间 | failsafe 取值校准：**实测基线**（#5835 三次敲击 keydown→keyup = **12–34ms**）对照计划现值 750ms = **22–62 倍余量**（22–62× 对 keydown→keyup 12–34ms；对 keydown→插入 10–18ms 为 41–75×——与 plan §3.2 分歧表的数字配对一致）——现值是极端保守的兜底，非贴近交互的取值。若 T0 实测本机 keydown→keyup 同样在 10–40ms 量级，可议降到 200–300ms（仍有 6–25 倍余量，漏 keyup 时"字符卡住"从 0.75s 缩到 0.2–0.3s）——**UX 取舍由 T0 数据 + 评审定，本手册不预设结论** |
+| keyup keyCode：**空格类 32、标点类 0**（评审 M4 修正——此前文档误写"恒为 0"；上游 #5835 日志实测即此分布） | flush 触发不按 keyCode 过滤（现设计如此），确认即可；`[ios-ime] keyup` 行的 `keyCode` 仅作观测记录，不设"异常"阈值 **→ v8 实测推翻"标点类 0"，见 §四** |
+| 敲击间隔落在某区间 | failsafe 取值校准：**实测基线**（#5835 三次敲击 keydown→keyup = **12–34ms**）对照计划现值 750ms = **22–62 倍余量**（22–62× 对 keydown→keyup 12–34ms；对 keydown→插入 10–18ms 为 41–75×——与 plan §3.2 分歧表的数字配对一致）——现值是极端保守的兜底，非贴近交互的取值。若 T0 实测本机 keydown→keyup 同样在 10–40ms 量级，可议降到 200–300ms（仍有 6–25 倍余量，漏 keyup 时"字符卡住"从 0.75s 缩到 0.2–0.3s）——**UX 取舍由 T0 数据 + 评审定，本手册不预设结论** **→ v8 实测前提不成立，定案维持 750ms，见 §四** |
 | 长按出现连续 229 keydown | 确认"每个 keydown 重臂 timer、baseline 取最早"的重臂语义（plan.md §3.2） |
 
 数据回答上述问题后，评估诊断 flag 的保留/移除（与 #114 `[tty-metrics]` 保留先例的对照，
 按两个独立决定分别评审，见文首），再进入 T1–T5 的正式实现与验证。
+
+## 四、T0 实测结果回填（2026-10-17）
+
+**环境**：iPad + Safari，`?iosime-debug=1` 远端访问（Mac Safari Web Inspector 经数据线连接后观察）；session `89b67bf9642a`；daemon `mwbeta` 构建于当日 14:16（晚于 PR #123 合并）。
+
+### 4.1 failsafe 校准 —— **定案维持 750ms**
+
+| 指标 | 实测 | §三 依上游 #5835 假定的基线 |
+| --- | --- | --- |
+| keydown(229) → keyup | **n=53，min 63 / p50 146 / p90 222 / max 246 ms** | 12–34 ms |
+| probe.t1 → 插入（`input.dt`，非合成直提交） | **n=50，min 5 / p50 10 / p90 11 / max 37 ms** | 10–18 ms |
+
+实测 keydown→keyup 为假定基线的 **4–7 倍**，"若本机同样在 10–40ms 量级则可降到 200–300ms" 的前提**不成立**。
+
+分布规律：快速连打（`123` 连击）时 keydown→keyup 达 190–246ms，慢速单敲仅 63–160ms。**峰值由快速输入贡献**——而快速输入正是最易丢 keyup、长按连发 229 的场景。
+
+余量换算（对实测 max 246ms）：
+
+| failsafe | 对 max 246ms | 对 min 63ms | 判定 |
+| --- | --- | --- | --- |
+| 200 ms | 0.8× | 3.2× | 抢在 keyup 之前触发 |
+| 250 ms | 1.0× | 4.0× | 压线，不可用 |
+| 300 ms | 1.2× | 4.8× | 过薄 |
+| 500 ms | 2.0× | 7.9× | 可议（未采纳） |
+| **750 ms（现值）** | **3.0×** | **11.9×** | **定案** |
+
+**定案理由**：① 降到 250ms 会让 failsafe 抢在 keyup 前跑，而 failsafe 是"无条件关窗"，有界第二次机会（空 delta → armed → 等插入）会被饿死；② 本轮 53 次敲击 **failsafe 一次都没触发**（所有 `deliver` 均紧随同拍 keyup 出现），750ms 是纯安全网、未为 UX 付出代价；③ 插入恒在 keydown+5~37ms 落地，远早于 keyup，有界第二次机会保护的正是"keyup 正常但插入迟到"的 50–200ms 窗口，下调等于压缩它。
+
+> `via` 字段在本轮 Safari 控制台显示中被截断，"failsafe 未触发"为时序推断；坐实需 `deliver` 行的 `via` 值（见 plan.md §五 待补项 4）。
+
+### 4.2 第 3 环假设 —— 成立，但非不变式
+
+- **47/50 例**：`input.dt` 为 5–37ms，插入晚于 0ms 探针回调 ⇒ 假设成立，flush 挂 keyup 的时序设计确认。
+- **3 例 `dt: null`**（插入早于探针）：`@` / `#` / `》`。
+
+**这 3 例全部走 branch B 且 `emissions` 携带该字符** —— xterm 自身已投递成功，桥接水印正确抑制重复发送，**无首字丢失**。两种事件序均被正确处理（A-6 / R2-MINOR-1 观察项正面作答）。
+
+⇒ `valueAtProbe` 已含新字符这一分支**无需回头排查 `_keyPressHandled` 等丢弃路径**（该排查仅在"假设被证伪 **且** 字符丢失"时触发）。但应记入已知边界：**第 3 环是强假设而非不变式**，约 6% 的直提交走另一条时序。
+
+### 4.3 其他实测结论
+
+- **空格→。 转换**：baseline `…； `(len 44) → current `…；。`(len 45)，delta = **`\x7f。`**（`\x7f` 在控制台不可见，渲染为 `delta: 。"`），branch A 补发 —— **§3.3 LCP 差分预测的"删后插"输出被实测确认**，未观察到 over-delete。
+- **选字栏合成**：`nihao`→`你好` 全程 `compositionstart → insertCompositionText → deleteCompositionText → insertFromComposition → compositionend`，**零 deliver 行、零 branch A 补发**，与 §一 预测一致；229 窗口在 `compositionstart` 即被 `clear{reason:"compositionstart"}` 关闭。
+- **死键路径**：`CapsLock`（keyCode 20）/ `Shift`（keyCode 16）keydown 有 probe 但 keyCode ≠ 229，**状态机完全未介入**（无 pending 行、无 failsafe timer）。
+- **`keyup.keyCode` 实测分布推翻本手册 §三 的"标点类 0"**：空格 = 32 ✅；标点实测为 **186–222**（`，`188 `。`190 `《`188 `》`190 `？`191 `/`191 `"`222 `'`222 `：`186 `；`186），Shift 符号键为 48–54（`！`49 `@`50 `#`51 `¥`52 `%`53 `0`48）。**flush 不按 keyCode 过滤的设计因此更加必要**——若当初按"标点类 0"设了过滤规则，本机实测分布会与之全部错配。
+- **英文直输**：本轮 `abc` 仅见 keyup（keyCode 65/66/67），无 keydown 229、无 bridge 事件，未复现失败路径——与"英文无 keydown 时走 `composed=false` 的 input 路径"的代码分析预期一致，但本轮样本不足以定论，需补测。
