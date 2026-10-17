@@ -262,7 +262,7 @@ flushIosIme(session, via):                        // via ∈ {"keyup-defer","fai
 
 ### 5.1 首轮矩阵执行结果（2026-10-17）
 
-**环境**：iPad + Safari，远端访问 `100.86.87.23:40751/?iosime-debug=1`（Tailscale），Mac Safari Web Inspector 观察；采集落在 session `89b67bf9642a`（`dev` 实例）；daemon `mwbeta` 构建于当日 14:16，晚于 PR #123 合并。
+**环境**：iPad + Safari，远端访问 `203.0.113.23:40751/?iosime-debug=1`（Tailscale），Mac Safari Web Inspector 观察；采集落在 session `89b67bf9642a`（`dev` 实例）；daemon `mwbeta` 构建于当日 14:16，晚于 PR #123 合并。
 
 | 矩阵项 | 结果 | 证据要点 |
 | --- | --- | --- |
