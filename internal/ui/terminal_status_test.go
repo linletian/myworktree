@@ -55,6 +55,34 @@ func TestWebStatusSyncHandling(t *testing.T) {
 	t.Logf("%s", out)
 }
 
+// TestWebDeleteAutoSelectHandling runs the Node unit tests for the issue
+// #120 follow-up black screen (testdata/web_delete_autoselect.test.mjs):
+// deleting the ACTIVE instance runs selectInstance(null) → render() →
+// renderTabs' auto-select → selectInstance(B) → activate(B) shows B's panel,
+// and selectInstance's formerly unconditional hideWebPanels() after render()
+// erased that panel: a black web foreground with no self-heal — the 2s poll
+// never refills panel visibility (activate() is the sole panel-show entry
+// point, and renderWorkspace deliberately does not touch web-panel
+// visibility for web kinds) and re-clicking the same tab dies on the
+// same-id early-return; only another instance's tab, or a reload, brings it
+// back. The
+// cases drive the shipped selectInstance/renderTabs/renderWorkspace slices
+// and pin that the auto-selected panel survives, mutual exclusion between
+// web kinds still holds, and the terminal / empty-state backstops keep
+// hiding. Same arrangement as TestWebStatusSyncHandling. Skips when node is
+// absent.
+func TestWebDeleteAutoSelectHandling(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not on PATH; skipping web delete auto-select JS tests")
+	}
+	out, err := exec.Command(node, "--test", "testdata/web_delete_autoselect.test.mjs").CombinedOutput()
+	if err != nil {
+		t.Fatalf("node --test testdata/web_delete_autoselect.test.mjs: %v\n%s", err, out)
+	}
+	t.Logf("%s", out)
+}
+
 // TestSidebarCollapseHandling runs the Node unit tests for the issue #99
 // desktop sidebar collapse semantics (testdata/sidebar_collapse.test.mjs):
 // localStorage round-trip and degradation defaults (R3), the class-only
