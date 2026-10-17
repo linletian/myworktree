@@ -308,3 +308,16 @@ node --test internal/ui/testdata/sidebar_wt_rename.test.mjs
 - `reorderInstances` 409 回滚的 `renderTabs()`（index.html `reorderInstances` 函数体）：预存在的 tab↔tab 暴露面（非本 PR 新可达），同类修复可在后续轮次镜像（守卫析构时 `state.renamingInst` 仍在位，state 守卫管不了第三方拆除）。
 - 通用教训（建议入 ARCHITECTURE）：本代码库大量使用「inline handler + innerHTML 重建」组合，任何**带 `onblur` 的 input** 住进被重建的容器时，都必须同时满足：(a) commit 入口有状态守卫（防自身 render 的重入）；(b) **所有第三方重绘路径**（异步续段 / await 后 finally / 回滚路径）在编辑态活跃时跳过重建。二者缺一不可——(a) 管不了第三方拆除（拆除时 state 仍在位，blur 会"合法"提交半输入），(b) 管不了自身重入。
 - E2E 工具结论（非产品缺陷）：headless Chrome + 最小 CDP 客户端下，页面一旦出现过 CDP 聚焦的 input，`Page.navigate` 不再响应（仅 dblclick 打开输入框即可复现，无提交也复现）；`Page.reload` 可用但会使该 target 的会话楔住。真实浏览器不受影响（新开 target 的渲染实例加载同 URL 完全正常，改名持久化读回验证通过）。E2E 续跑统一用「新 target」模型「用户重开页面」。
+
+## 9. PR #125 外部评审记录（linletian 委托代理，2026-10-16）
+
+PR 评审提 6 条（V1–V6），仲裁者逐条代码复核后裁定：
+
+| # | 意见 | 复核证据 | 裁定 |
+|---|---|---|---|
+| V1 | 重试耗尽的版本冲突映射 400，仓库先例是 409 | `handleInstances` reorder 分支 `errors.Is(err, store.ErrVersionConflict)` → 409（app.go `ReorderInstances` 分支）；PATCH 分支未区分 | **成立，修**：补 409 映射 + API.md + 注释说明该分支无确定性测试路径（Manager 为具体类型无 seam，见 V3） |
+| V2 | 乐观锁只防 bump 版本的写者；Create/Import/Delete 的 plain Save 不 bump，会穿过版本检查被 UpdateName 整卷覆盖（对称方向丢写：并发新建的工作树可能从 state.json 消失 / 改名被打回 / 已删除的复活） | `store.Save` 不 bump Version（state.go）；`SaveWithVersion` 锁内重载后仅比较 Version（state.go）；worktree.go Create/Import/Delete 三处 plain Save | **成立，记为已知残留**（范围裁定）：本 PR 让「双击改名」与「新建/删除」成为同侧栏毫秒级并发动作，窗口真实存在；完整修复 = 三处 `Save(st)` 改 `SaveWithVersion(st, st.Version)` + 重试（机械但改动既有写路径的版本行为，需独立评审轮次）。**后续轮次处理** |
+| V3 | 3 次重试循环无用例驱动（Version bump 只证明了 SaveWithVersion） | `TestUpdateNameBumpsVersion` 不产生冲突；store 层 `TestSaveWithVersionConflictDetected` 用过时版本 trick，UpdateName 永远传刚 Load 的版本，无确定性冲突入口；framework `updateStore` 的重试同样无直接单测（仓库既有标准） | **成立，修**：barrier 并发用例（2 goroutine 同时放行对同一工作树改名，断言都成功 / Version=base+2 / 终值是两者之一——确定性通过不 flaky）；确定性强割冲突需生产 seam（`Manager.Store` 是具体类型），记为已知缺口 |
+| V4 | IME 组词中按 Enter 直接提交半组词字符串 | 两个 keydown handler 均无 `event.isComposing` 检查（index.html `handleWTRenameKeydown` / `handleRenameKeydown`） | **成立，修**：两个 handler 同步加 `if (event.isComposing) return;`（parity 不破；Enter/Esc 在组词中都不该抢 IME 确认键）+ mjs 用例 + Go 锚点 |
+| V5 | 行尾 ✕ / 终端 / finder 只对 click stopPropagation，dblclick 冒泡到 li → 双击控件会连带进入改名态 | 控件 handlers 的 stopPropagation 在 click 上；dblclick 是独立事件（index.html 行模板 + deleteWorktree/openTerminal/openFinder） | **成立，修**：行模板动作容器加 `wt-row-actions` class；`startWTRename` 开头加 `if (event.target.closest('.wt-row-actions')) return;` + mjs 用例 + Go 锚点 |
+| V6 | name 无长度上限，建议加 cap 或 maxlength | `Manager.UpdateName` 与 `framework.Manager.UpdateName` 均无 cap；决策 C 已裁定 parity（C-R1 双评审认可） | **驳回**：只给工作树名加上限（或只给侧栏 input 加 maxlength）会制造 issue 痛点本身所指责的「同界面两套行为」——实例 tab 侧无 cap。若需 cap，必须两个状态机一起加（含 tab input 的 maxlength），后续轮次统一处理 |
