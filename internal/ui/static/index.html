@@ -4379,7 +4379,7 @@
               <div class="wt-name">${nameCell}</div>
               <div class="wt-branch">
                 <span>🌱</span> ${escapeHtml(w.branch)}${divergeBadges(w.id)}
-                <div style="margin-left: auto; display: flex; gap: 4px; align-items: center;">
+                <div class="wt-row-actions" style="margin-left: auto; display: flex; gap: 4px; align-items: center;">
                     ${shortcuts(w.id)}
                     ${isActive ? `<span style="font-size:10px;cursor:pointer;padding:2px 4px;" onclick="deleteWorktree('${wIdEsc}', event)">✕</span>` : ''}
                 </div>
@@ -4475,6 +4475,12 @@
         }
 
         function handleRenameKeydown(id, event) {
+            // Same IME guard as handleWTRenameKeydown, the exact same line —
+            // Enter mid-composition is the input method confirming a
+            // candidate, not the user committing (issue #122 review V4; the
+            // tab side had the same pre-existing hole and parity demands both
+            // state machines move together).
+            if (event.isComposing) return;
             if (event.key === 'Enter') {
                 commitRename(id, event);
             } else if (event.key === 'Escape') {
@@ -4489,6 +4495,11 @@
 
         function startWTRename(id, event) {
             event.stopPropagation();
+            // The row's own controls (delete ✕, terminal, finder) stop propagation on
+            // click but NOT on the separate dblclick event — without this check a
+            // double-click on them would pop the delete confirm / open the terminal
+            // AND drop the row into rename at the same time (issue #122 review).
+            if (event.target.closest('.wt-row-actions')) return;
             // Mutual exclusion with the tab rename state machine (at most one
             // input in the page): tear the tab input down first, so a
             // double-click on a row while a tab is being renamed cannot leave
@@ -4569,6 +4580,13 @@
         }
 
         function handleWTRenameKeydown(id, event) {
+            // IME guard (issue #122 review V4): Enter / Escape during IME
+            // composition are the input method's candidate-confirm / cancel
+            // keys, not commit / cancel — without this a half-composed string
+            // would be PATCHed the moment the user pressed Enter to accept a
+            // candidate. Mirrored on the tab side in handleRenameKeydown so
+            // the two state machines keep identical semantics (parity).
+            if (event.isComposing) return;
             if (event.key === 'Enter') {
                 commitWTRename(id, event);
             } else if (event.key === 'Escape') {

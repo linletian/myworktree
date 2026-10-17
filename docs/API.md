@@ -184,6 +184,10 @@ Response (200): the updated worktree object, same shape as a `GET
 Errors:
 - 400 — blank `name` (after trim), blank `id`, malformed JSON, or unknown fields.
 - 404 — unknown worktree `id`.
+- 409 — the state version still conflicted after the 3 save retries (a
+  concurrent writer bumped `state.json` underneath the rename; the client can
+  refresh and retry — the response carries the current `version`, same shape
+  as the instance-reorder conflict).
 
 ### Open Terminal (host macOS)
 `POST /api/worktrees/open-terminal`

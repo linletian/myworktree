@@ -4,6 +4,7 @@ import (
 	"errors"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"myworktree/internal/store"
@@ -272,5 +273,59 @@ func TestUpdateNameRejectsEmptyAndUnknown(t *testing.T) {
 	}
 	if len(st.Worktrees) != 1 || st.Worktrees[0].Name != "old" {
 		t.Fatalf("rejected renames must not mutate the store, got %#v", st.Worktrees)
+	}
+}
+
+// TestUpdateNameConcurrentRenames drives the SaveWithVersion retry loop for
+// real (issue #122 review V3): two goroutines released from a shared barrier
+// rename the SAME worktree, so their Load→modify→SaveWithVersion windows
+// overlap with high probability and the loser of each collision gets the
+// store.ErrVersionConflict that makes the loop reload and retry. The
+// assertions hold under EVERY interleaving, so the case cannot flake: both
+// renames must succeed (a swallowed conflict would surface as an error or a
+// lost Version bump — Version lands at exactly base+2 only if BOTH saves
+// went through their version-checked path), and the final name is one of the
+// two — which one depends on the race, so it is deliberately not pinned.
+// Honesty note: deterministically FORCING a single conflict would need a
+// seam in production code (Manager.Store is a concrete struct field with no
+// hook to interleave a competing write between Load and Save); this case
+// makes the contended path reachable and pins every outcome, but does not
+// assert that a retry definitely happened.
+func TestUpdateNameConcurrentRenames(t *testing.T) {
+	m, fs := newRenameTestStore(t)
+	base, err := fs.Load()
+	if err != nil {
+		t.Fatalf("load base: %v", err)
+	}
+
+	names := []string{"name-a", "name-b"}
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	errs := make([]error, len(names))
+	for i, name := range names {
+		wg.Add(1)
+		go func(i int, name string) {
+			defer wg.Done()
+			<-start
+			_, errs[i] = m.UpdateName("wt1", name)
+		}(i, name)
+	}
+	close(start)
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent UpdateName(%q) failed: %v", names[i], err)
+		}
+	}
+	st, err := fs.Load()
+	if err != nil {
+		t.Fatalf("load after: %v", err)
+	}
+	if st.Version != base.Version+2 {
+		t.Fatalf("Version = %d, want base+2 (%d) — both saves must pass the version check, retrying off the loser's conflict if needed", st.Version, base.Version+2)
+	}
+	if st.Worktrees[0].Name != "name-a" && st.Worktrees[0].Name != "name-b" {
+		t.Fatalf("final name = %q, want one of %v", st.Worktrees[0].Name, names)
 	}
 }

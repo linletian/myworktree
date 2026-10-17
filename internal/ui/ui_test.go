@@ -2953,6 +2953,9 @@ func TestSidebarWorktreeRenameAnchors(t *testing.T) {
 		`onkeydown="handleWTRenameKeydown('${wIdEsc}', event)"`,
 		`onblur="commitWTRename('${wIdEsc}', event)"`,
 		`escapeHtml(w.name)`,
+		// The controls wrapper the startWTRename source guard matches on
+		// (review V5): without this class the guard silently never hits.
+		`class="wt-row-actions"`,
 	} {
 		if !strings.Contains(row, anchor) {
 			t.Fatalf("index.html worktree row template missing %q (issue #122)", anchor)
@@ -3066,6 +3069,38 @@ func TestSidebarWorktreeRenameAnchors(t *testing.T) {
 	}
 	if !(clearAt < renderAt && renderAt < setAt) {
 		t.Fatal("startWTRename must clear + re-render the tabs BEFORE entering the row's editing state (issue #122)")
+	}
+	// Review V5: the row's own controls (delete ✕, terminal, finder) stop
+	// propagation on CLICK but not on the separate dblclick event, so the
+	// entry point itself has to exclude double-clicks that started inside
+	// .wt-row-actions — otherwise the delete confirm dialog and the rename
+	// input pop at the same time. The guard must sit BEFORE the
+	// mutual-exclusion teardown, so an excluded double-click does not even
+	// disturb the tab machine.
+	srcGuard := strings.Index(startWT, "if (event.target.closest('.wt-row-actions')) return;")
+	if srcGuard < 0 {
+		t.Fatal("startWTRename must exclude double-clicks sourced from the row's own controls (.wt-row-actions) (review V5, issue #122)")
+	}
+	if !(srcGuard < clearAt) {
+		t.Fatal("startWTRename's row-actions guard must precede the mutual-exclusion teardown (review V5, issue #122)")
+	}
+
+	// Review V4: Enter / Escape during IME composition are the input method's
+	// candidate-confirm / cancel keys — both keydown handlers must bail
+	// before dispatching, and the bail must PRECEDE the key checks, or the
+	// half-composed string rides the PATCH the moment the user accepts a
+	// candidate. The identical line on both halves keeps the parity that is
+	// the issue's core requirement.
+	for _, header := range []string{"function handleWTRenameKeydown(id, event) {", "function handleRenameKeydown(id, event) {"} {
+		kb := bodyOf(header)
+		imeAt := strings.Index(kb, "if (event.isComposing) return;")
+		enterAt := strings.Index(kb, "if (event.key === 'Enter')")
+		if imeAt < 0 || enterAt < 0 {
+			t.Fatalf("%s must carry the IME-composition bail before the key dispatch (review V4, issue #122)", header)
+		}
+		if !(imeAt < enterAt) {
+			t.Fatalf("%s's IME bail must precede the Enter/Escape dispatch (review V4, issue #122)", header)
+		}
 	}
 
 	// 5. The commit handler's contract, spelled in the shipped source: the

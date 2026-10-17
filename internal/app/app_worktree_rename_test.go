@@ -98,6 +98,16 @@ func TestHandleWorktreeRenamePersistsAndReadsBack(t *testing.T) {
 // and a request with unknown fields → 400 (readJSON's DisallowUnknownFields
 // — pinning it here keeps the strict-decoder contract from silently
 // loosening later).
+//
+// The 409 branch (version conflict after the retry loop, review V1) has NO
+// automated path here on purpose: worktree.Manager is a concrete type with
+// no injection seam, so a conflict cannot be forced deterministically
+// through the handler — it needs real concurrency against the same
+// state.json, and even then the retry loop may absorb it before the
+// handler ever sees it. Conflict DETECTION is pinned at the store layer
+// (SaveWithVersion) and the contended rename path is exercised by
+// internal/worktree's TestUpdateNameConcurrentRenames; the handler here
+// only maps the sentinel to a status code.
 func TestHandleWorktreeRenameRejections(t *testing.T) {
 	srv, fs := newRenameTestServer(t)
 

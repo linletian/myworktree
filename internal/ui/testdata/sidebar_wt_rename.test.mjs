@@ -38,6 +38,18 @@
 // expectation with a control that renames nobody, so muting all repaints could
 // not pass either.
 //
+// Cases 16 and 17 pin the two review-round holes in the KEYPATH / ENTRY
+// side: V4 — Enter (and Escape) during IME composition are the input
+// method's own candidate-confirm / cancel keys, so a half-composed string
+// must never be committed and the editing state must survive; both the
+// sidebar and the tab keydown handlers carry the identical guard, so both
+// halves are driven here. V5 — the row's own controls (delete ✕, terminal,
+// finder) stop propagation on CLICK but not on the separate dblclick event,
+// so a double-click starting on one of them must open its dialog/action
+// WITHOUT dropping the row into rename — the source check runs after
+// stopPropagation but BEFORE the mutual-exclusion teardown, so a control
+// double-click stays inert for the rename machine end to end.
+//
 // Same arrangement as sidebar_collapse.test.mjs: every function is SLICED
 // from the shipped index.html (and window.state from framework.js) and
 // evaluated against stubbed browser state — no second copy of the logic — so
@@ -130,12 +142,13 @@ const renameFactory = new Function("deps", `
   ${[
     "function startRename(id, event)",
     "function commitRename(id, event)",
+    "function handleRenameKeydown(id, event)",
     "function startWTRename(id, event)",
     "function commitWTRename(id, event)",
     "function cancelWTRename()",
     "function handleWTRenameKeydown(id, event)",
   ].map((h) => sliceBlock(script, h)).join("\n\n")}
-  return { startRename, commitRename, startWTRename, commitWTRename, cancelWTRename, handleWTRenameKeydown };
+  return { startRename, commitRename, handleRenameKeydown, startWTRename, commitWTRename, cancelWTRename, handleWTRenameKeydown };
 `);
 
 // refresh(), fetchDiverge() and fetchDivergeSingle() sliced whole, with the
@@ -202,7 +215,35 @@ function makeEvent(extra = {}) {
   return {
     stopPropagationCount: 0,
     stopPropagation() { this.stopPropagationCount += 1; },
+    // A real dblclick/blur/keydown event always carries an element target,
+    // and startWTRename's row-actions guard calls event.target.closest()
+    // (issue #122 review V5) — so every stubbed event gets a default target
+    // that hits NOTHING (.wt-row-actions-less span); cases that want to
+    // simulate a double-click ON a row control override it with a node
+    // whose ancestor chain carries the class (see fakeNode below).
+    target: fakeNode("SPAN"),
     ...extra,
+  };
+}
+
+// A minimal DOM node stub: a tagName, an optional parent, and closest()
+// walking the parent chain for a class selector — enough for the shipped
+// `.wt-row-actions` membership check without pretending to be a DOM.
+function fakeNode(tagName, parent = null, classes = []) {
+  return {
+    tagName,
+    parent,
+    closest(sel) {
+      if (sel.startsWith(".")) {
+        const cls = sel.slice(1);
+        for (let n = this; n; n = n.parent) {
+          if (n.classes && n.classes.includes(cls)) return n;
+        }
+        return null;
+      }
+      return null;
+    },
+    classes,
   };
 }
 
@@ -951,4 +992,107 @@ test("issue #122 review A-F1: openTerminal / openFinder repaint after their awai
     assert.equal(ok.calls.renderSidebar.length, before + 1,
       `${name} still repaints its spinner away when nobody is renaming`);
   }
+});
+
+// --- 16: IME composition never commits (review V4) -------------------------
+
+test("issue #122 review V4: Enter / Escape during IME composition neither commits nor cancels — both handlers", async () => {
+  // Sidebar half: a live editing state with a half-composed Chinese string.
+  const h = renameHarness();
+  h.startWTRename("wt-1", makeEvent());
+  h.flushFrames();
+  const input = h.input("wt-1");
+  input.value = "半组词"; // what the input holds mid-composition
+
+  // Enter with isComposing:true is the IME confirming a CANDIDATE — the
+  // keystroke belongs to the input method, not to the commit state machine.
+  const composingEnter = makeEvent({ key: "Enter", isComposing: true });
+  h.handleWTRenameKeydown("wt-1", composingEnter);
+  await h.flush();
+  assert.deepEqual(h.calls.api.filter((c) => c.opts.method === "PATCH"), [],
+    "a half-composed string is never PATCHed by the IME's Enter");
+  assert.equal(h.state.renamingWT, "wt-1", "the editing state survives — the user keeps composing");
+  assert.ok(h.input("wt-1"), "the input is still in the page");
+  assert.equal(h.state.worktrees[0].name, "fix-the-flaky-thing", "the stored name is untouched");
+
+  // Escape mid-composition is the IME's own cancel — it must not tear the
+  // rename down either.
+  h.handleWTRenameKeydown("wt-1", makeEvent({ key: "Escape", isComposing: true }));
+  await h.flush();
+  assert.equal(h.state.renamingWT, "wt-1", "the IME's Escape does not cancel the rename");
+  assert.deepEqual(h.calls.api.filter((c) => c.opts.method === "PATCH"), [], "and still nothing was written");
+
+  // Composition ends, the user presses a REAL Enter: the full string commits.
+  input.value = "半组词 final";
+  h.handleWTRenameKeydown("wt-1", makeEvent({ key: "Enter", isComposing: false }));
+  await h.flush();
+  const patches = h.calls.api.filter((c) => c.opts.method === "PATCH");
+  assert.equal(patches.length, 1, "the genuine Enter commits exactly once");
+  assert.deepEqual(JSON.parse(patches[0].opts.body), { id: "wt-1", name: "半组词 final" }, "the completed string rides the wire, nothing was lost to the earlier IME keystrokes");
+  assert.equal(h.state.renamingWT, null, "and the editing state closes on the real commit");
+
+  // Tab half: the same guard, the same drive — parity is the point.
+  const t = renameHarness();
+  t.state.renamingInst = "inst-1";
+  t.renderTabs();
+  t.tabInput("inst-1").value = "半组词";
+  t.handleRenameKeydown("inst-1", makeEvent({ key: "Enter", isComposing: true }));
+  await t.flush();
+  assert.deepEqual(t.calls.api.filter((c) => c.opts.method === "PATCH"), [],
+    "the tab side never commits a half-composed string either");
+  assert.equal(t.state.renamingInst, "inst-1", "the tab keeps its editing state");
+  assert.ok(t.tabInput("inst-1"), "and its input");
+  // Escape mid-composition, symmetric with the sidebar half: the IME's own
+  // cancel must not cancel the tab rename either.
+  t.handleRenameKeydown("inst-1", makeEvent({ key: "Escape", isComposing: true }));
+  await t.flush();
+  assert.equal(t.state.renamingInst, "inst-1", "the IME's Escape does not cancel the tab rename");
+  assert.ok(t.tabInput("inst-1"), "and the tab input survives it");
+  assert.deepEqual(t.calls.api.filter((c) => c.path === "/api/instances"), [], "and nothing reached the instance endpoint");
+  t.tabInput("inst-1").value = "半组词 final";
+  t.handleRenameKeydown("inst-1", makeEvent({ key: "Enter", isComposing: false }));
+  await t.flush();
+  const instPatches = t.calls.api.filter((c) => c.path === "/api/instances" && c.opts.method === "PATCH");
+  assert.equal(instPatches.length, 1, "the tab's genuine Enter still commits exactly once");
+  assert.deepEqual(JSON.parse(instPatches[0].opts.body), { id: "inst-1", name: "半组词 final" });
+});
+
+// --- 17: double-clicks on the row's own controls stay out of rename (V5) --
+
+test("issue #122 review V5: a double-click starting on delete / terminal / finder never enters the editing state", () => {
+  // The controls live in the row's .wt-row-actions div; the dblclick that
+  // bubbles up from them carries a target INSIDE that div. closest() walks
+  // the ancestor chain, so both the button itself and an svg child of it
+  // resolve to the actions div.
+  const actions = () => fakeNode("DIV", null, ["wt-row-actions"]);
+
+  // Control source 1: the delete ✕ span itself.
+  const h = renameHarness();
+  const btn = fakeNode("SPAN", actions());
+  const evBtn = makeEvent({ target: btn });
+  h.startWTRename("wt-1", evBtn);
+  h.flushFrames();
+  assert.equal(evBtn.stopPropagationCount, 1, "the dblclick is still stopped from bubbling further");
+  assert.equal(h.state.renamingWT, null, "a double-click on a row control does NOT open the rename state");
+  assert.deepEqual(h.calls.renderSidebar, [], "and it never repaints the sidebar into an editing row");
+  assert.equal(h.renameInputCount(), 0, "no rename input was built");
+
+  // Control source 2: an <svg> child inside a shortcut button — closest()
+  // must walk UP from the event's actual target, not just read it.
+  const h2 = renameHarness();
+  const svgChild = fakeNode("path", fakeNode("svg", actions()));
+  const evSvg = makeEvent({ target: svgChild });
+  h2.startWTRename("wt-1", evSvg);
+  h2.flushFrames();
+  assert.equal(h2.state.renamingWT, null, "an svg/path target inside .wt-row-actions resolves up to the actions div and is excluded too");
+  assert.deepEqual(h2.calls.renderSidebar, [], "no repaint from the svg-sourced double-click");
+  assert.equal(h2.calls.renderTabs.length, 0, "the guard runs BEFORE the mutual-exclusion teardown — an excluded double-click does not even disturb the tab machine");
+
+  // Control: the same double-click sourced from the row's TEXT cell enters
+  // the editing state exactly as before — the guard excludes controls only.
+  const ok = renameHarness();
+  ok.startWTRename("wt-1", makeEvent({ target: fakeNode("SPAN", fakeNode("DIV", null, ["wt-name"])) }));
+  ok.flushFrames();
+  assert.equal(ok.state.renamingWT, "wt-1", "a name-cell double-click still opens the rename");
+  assert.ok(ok.input("wt-1"), "and builds the input");
 });

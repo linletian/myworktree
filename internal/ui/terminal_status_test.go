@@ -92,7 +92,7 @@ func TestSidebarCollapseHandling(t *testing.T) {
 // input, and the two rename state machines stay mutually exclusive in both
 // directions (at most one input in the page).
 //
-// The file holds fifteen cases in total. The last six are the ones the
+// The file holds seventeen cases in total. The last eight are the ones the
 // reviews and the browser verification forced: B-F1 — fetchDivergeSingle's
 // late /api/worktree/diverged response, fired by selectWorktree on the FIRST
 // click of a double-click while the rename input does not exist yet, merges
@@ -104,11 +104,16 @@ func TestSidebarCollapseHandling(t *testing.T) {
 // that node while getElementById still resolves it, so onblur re-enters the
 // commit handler with the editing state already cleared, which the
 // `state.renamingWT !== id` / `state.renamingInst !== id` guards stop on the
-// self path and on the mutual-exclusion cross path alike; and two A-F1 cases —
-// a THIRD party rebuilding the list while a row is mid-rename, where those
+// self path and on the mutual-exclusion cross path alike; two A-F1 cases — a
+// THIRD party rebuilding the list while a row is mid-rename, where those
 // state guards are blind because the row's state is still set, so the repaint
 // itself is guarded (commitRename's success render() on both rename states,
-// openTerminal / openFinder's finally blocks on the row state).
+// openTerminal / openFinder's finally blocks on the row state); V4 — Enter /
+// Escape during IME composition are the input method's keys, so neither half
+// of the keydown handlers (sidebar and tab, driven alike) commits, cancels or
+// PATCHes on a composing keystroke; and V5 — a double-click whose target is
+// inside the row's own .wt-row-actions controls (delete ✕, terminal, finder)
+// never enters the editing state, while a name-cell double-click still does.
 //
 // Same arrangement as TestSidebarCollapseHandling: the cases slice the
 // shipped index.html (and window.state from framework.js) and run against

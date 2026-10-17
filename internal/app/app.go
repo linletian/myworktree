@@ -1142,6 +1142,21 @@ func (s *Server) handleWorktrees(w http.ResponseWriter, r *http.Request) {
 				writeErr(w, http.StatusNotFound, err)
 				return
 			}
+			// Version conflict after the retry loop exhausted (a
+			// concurrent writer bumped the shared state.json version):
+			// 409, not 400 — a legitimate rename that merely lost a race
+			// is retryable, and a client must be able to tell that from
+			// "your name was blank". Shape mirrors handleInstanceReorder's
+			// conflict response, carrying the current version so the
+			// client can resync (issue #122 review V1).
+			if errors.Is(err, store.ErrVersionConflict) {
+				st, _ := s.store.Load()
+				writeJSON(w, http.StatusConflict, map[string]any{
+					"error":   err.Error(),
+					"version": st.Version,
+				})
+				return
+			}
 			writeErr(w, http.StatusBadRequest, err)
 			return
 		}
