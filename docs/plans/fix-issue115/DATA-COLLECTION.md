@@ -51,7 +51,7 @@ flag 的两个独立决定（评审 LOW-3 拆分，勿再混为一谈）：
 | `[ios-ime] compositionend` | T0+T1 | 合成结束 | `data`、`value` |
 | `[ios-ime] keyup` | T0+T1 | textarea 上每次 keyup | `t`（keyup 绝对时刻）、`keyCode`、`key`、`value`、`len` |
 | `[ios-ime] pending` | T1 | keydown 229 记下/保留最早 baseline | `baseline`、`len`（baseline 长度）、`keptEarliest`、`rearmed`（timer 是否重臂；等于 keptEarliest——首击为新装，后续 229 才是重臂） |
-| `[ios-ime] deliver` | T1 | 延后 flush（keyup 后一个宏任务）、failsafe 或 blur flush 的判定结果 | `baseline`、`current`、`delta`、`emissions`、`branch`（A/B/C/D；空 delta 判定行为 null）、`payload`、`via`（keyup-defer/failsafe/blur）、`armed`（进入 flush 时 `iosImeFailsafeArmed` 的值，关窗判定依据） |
+| `[ios-ime] deliver` | T1 | 延后 flush（keyup 后一个宏任务）、failsafe 或 blur flush 的判定结果 | `baseline`、`current`、`delta`、`emissions`、`branch`（A/B/C/D；空 delta 判定行为 null）、`payload`、`via`（keyup-defer/failsafe/blur/external-rewrite（外部改写终结前的末次投递））、`armed`（进入 flush 时 `iosImeFailsafeArmed` 的值，关窗判定依据） |
 | `[ios-ime] clear` | T1 | flush 关窗 / compositionstart / blur 后清除 pending | `reason` |
 
 字段解读：
@@ -70,8 +70,8 @@ flag 的两个独立决定（评审 LOW-3 拆分，勿再混为一谈）：
   标准形态：此刻终端无回显即为复现。
 - `deliver` 行的 `branch`：A=水印空全发、B=前缀消费发剩余、C=水印已含（xterm 自投递，静默）、
    D=无关投递间隙全发。真机期望失败场景落在 A。日志顺序为 `deliver` 先于 `clear(close-window)`。
-- `[ios-ime] clear` 的 `reason` 取值 `close-window / compositionstart / blur`：分别对应 flush 关窗、
-  composition 取消、blur flush-then-clear 三条清除路径各自留痕。blur 清除路径同时复位
+- `[ios-ime] clear` 的 `reason` 取值 `close-window / compositionstart / blur / external-rewrite`：分别对应 flush 关窗、
+  composition 取消、blur flush-then-clear、外部改写终结四条清除路径各自留痕。blur 清除路径同时复位
   `iosImeFailsafeArmed` 与 `iosImeComposing`（compositionend 丢失时 blur 自愈，防 composing 锁死）；
   重新绑定（term 重建）会整体重置窗口状态。
 - 选字栏路径应只见 `compositionstart/end` 行与至多一条 `clear(reason=compositionstart)` 行：合成期间 229 守卫（`event.isComposing` / `session.iosImeComposing`）不开 pending 窗口、`compositionstart` 还会关掉已开的窗口，故**永不出现 `deliver` 行与 A 分支补发**。
@@ -108,7 +108,7 @@ flag 的两个独立决定（评审 LOW-3 拆分，勿再混为一谈）：
 | 英文字母直输失败（同样无投递） | baseline 扩展到 beforeinput（预案扩展点），flush 条件不变 |
 | 空格→。 呈现删后插等长替换 | delta 等长分支按 LCP 差分输出 `\x7f。`（残留已投递时语义正确）；观察是否出现 over-delete（未投递残留 + 转换的已知边界，plan.md §六） |
 | keyup keyCode：**空格类 32、标点类 0**（评审 M4 修正——此前文档误写"恒为 0"；上游 #5835 日志实测即此分布） | flush 触发不按 keyCode 过滤（现设计如此），确认即可；`[ios-ime] keyup` 行的 `keyCode` 仅作观测记录，不设"异常"阈值 |
-| 敲击间隔落在某区间 | failsafe 取值校准：**实测基线**（#5835 三次敲击 keydown→keyup = **12–34ms**）对照计划现值 750ms = **22–62 倍余量**——现值是极端保守的兜底，非贴近交互的取值。若 T0 实测本机 keydown→keyup 同样在 10–40ms 量级，可议降到 200–300ms（仍有 6–25 倍余量，漏 keyup 时"字符卡住"从 0.75s 缩到 0.2–0.3s）——**UX 取舍由 T0 数据 + 评审定，本手册不预设结论** |
+| 敲击间隔落在某区间 | failsafe 取值校准：**实测基线**（#5835 三次敲击 keydown→keyup = **12–34ms**）对照计划现值 750ms = **22–62 倍余量**（22–62× 对 keydown→keyup 12–34ms；对 keydown→插入 10–18ms 为 41–75×——与 plan §3.2 分歧表的数字配对一致）——现值是极端保守的兜底，非贴近交互的取值。若 T0 实测本机 keydown→keyup 同样在 10–40ms 量级，可议降到 200–300ms（仍有 6–25 倍余量，漏 keyup 时"字符卡住"从 0.75s 缩到 0.2–0.3s）——**UX 取舍由 T0 数据 + 评审定，本手册不预设结论** |
 | 长按出现连续 229 keydown | 确认"每个 keydown 重臂 timer、baseline 取最早"的重臂语义（plan.md §3.2） |
 
 数据回答上述问题后，评估诊断 flag 的保留/移除（与 #114 `[tty-metrics]` 保留先例的对照，

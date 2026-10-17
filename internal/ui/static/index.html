@@ -3933,13 +3933,20 @@
             while (p < n && cpsB[p] === cpsC[p]) p++;
             const removed = cpsB.length - p;
             const appended = cpsC.slice(p).join("");
-            if (cpsC.length < cpsB.length) return "\x7f";                // pure shrink: ONE DEL (xterm semantics)
+            if (cpsC.length < cpsB.length) return "\x7f";                // pure shrink: ONE DEL (xterm semantics) -- vendored _handleAnyTextareaChanges shrink branch is t.length<e.length?triggerDataEvent(DEL): exactly ONE DEL for ANY shrink; do NOT "fix" it to a per-removed count (upstream parity, not our regression)
             if (removed > 0) return "\x7f".repeat(removed) + appended;    // replace: DEL x removed + insert
             return appended;                                               // pure append
         }
 
         // Residual branch, in A/B/C/D order (plan.md 3.3). current is
         // threaded through for branch C's guard (see iosImeResidualBranch).
+        // Branch-B boundary invariant (plan.md 3.3, PR round 2 R2-MINOR-3):
+        // delta.slice(joined.length) is UTF-16-unit slicing and is SAFE only
+        // because emissions enter WHOLE (the watermark pushes complete onData
+        // strings, the caps reject whole entries) -- delta.startsWith(joined)
+        // then guarantees joined's end sits on a code-point boundary of delta;
+        // breaking that premise (slicing emissions into units) could emit a
+        // split surrogate.
         function iosImeResidualPayload(delta, emissions, current) {
             switch (iosImeResidualBranch(delta, emissions, current)) {
                 case "A": return delta;
@@ -3978,8 +3985,9 @@
         }
 
         // Flush truth table (plan.md 3.3 verbatim), via in
-        // {"keyup-defer","failsafe","blur"}. Empty-delta paths also emit a
-        // deliver row (branch null, payload "") - a judgment result too.
+        // {"keyup-defer","failsafe","blur","external-rewrite"}. Empty-delta
+        // paths also emit a deliver row (branch null, payload "") - a
+        // judgment result too.
         function flushIosIme(session, via) {
             if (!session.iosImePending) return;   // F6: FIRST line, before the term guard
             if (!session.term) return;             // dead session (a timer outlives destroy paths)
@@ -4098,18 +4106,40 @@
                 // fix. When guarded out: NO pending window, NO timer arm, NO
                 // pending row; the debug keydown row above still fires.
                 if (event.keyCode === 229 && event.isComposing !== true && session.iosImeComposing !== true) {
-                    // EXTERNAL-REWRITE TERMINATION (plan.md 3.2, PR round M1):
-                    // xterm's programmatic textarea.value= writes (the ^C/ETX
-                    // clear, mid-key selection) dispatch NO input event, so a
-                    // live-vs-seen divergence seen here means BOTH the old
-                    // window's baseline AND seen are stale -- the old window's
-                    // diff would be nonsense. Terminate the stale window
-                    // (pending/timer/armed; emissions untouched -- the fresh
-                    // baseline creation below resets them) and start fresh.
+                    // EXTERNAL-REWRITE TERMINATION (plan.md 3.2, PR round M1 +
+                    // round 2 R2-M1): xterm's programmatic textarea.value= writes
+                    // (the ^C/ETX clear, mid-key selection) dispatch NO input
+                    // event, so a live-vs-seen divergence seen here means BOTH the
+                    // old window's baseline AND seen are stale -- the old window's
+                    // diff would be nonsense. Disposition is FLUSH-THEN-TERMINATE
+                    // (plan.md 3.2, PR round 2 R2-M1: round 1's terminate-and-drop
+                    // replay proved a lost keystroke -- the undelivered increment
+                    // was silently dropped before the keyup-defer ever ran): flush
+                    // FIRST -- the window's undelivered increment must ride its
+                    // LAST delivery chance before the rewrite makes baseline/seen
+                    // meaningless; current = iosImeSeen is still trustworthy here
+                    // (the external rewrite never went through the input handler).
+                    // Same reason blur flushes before clearing (M7): terminating/
+                    // interrupting must not eat keystrokes the user already made --
+                    // on a physical keyboard they would have reached the shell
+                    // before the interrupt. The empty-delta arm/close rules apply
+                    // AS-IS; whatever survives the flush (an armed empty window) is
+                    // terminated below (pending/timer/armed; emissions untouched --
+                    // the fresh baseline creation below resets them). Loss window
+                    // was mainly the iOS long-press stream where no keyup-defer
+                    // ever runs.
                     if (textarea.value !== session.iosImeSeen) {
-                        session.iosImePending = null;
-                        if (session.iosImeFailsafeTimer) { clearTimeout(session.iosImeFailsafeTimer); session.iosImeFailsafeTimer = null; }
-                        session.iosImeFailsafeArmed = false;
+                        flushIosIme(session, "external-rewrite");
+                        // A flush that CLOSED the window already logged its own
+                        // close-window row; log the terminator's row ONLY when
+                        // pending was still non-null right after the flush (the
+                        // blur pattern, no double log).
+                        if (session.iosImePending) {
+                            session.iosImePending = null;
+                            if (session.iosImeFailsafeTimer) { clearTimeout(session.iosImeFailsafeTimer); session.iosImeFailsafeTimer = null; }
+                            session.iosImeFailsafeArmed = false;
+                            if (iosImeDebugEnabled()) iosImeLog("clear", { reason: "external-rewrite" });
+                        }
                     }
                     // normal path: refresh seen, then create/keep the baseline
                     // (a terminated window means "no pending" -> fresh baseline

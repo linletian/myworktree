@@ -195,13 +195,10 @@ function makeHarness({ debug = false } = {}) {
   // caller can enqueue a callback that must run BEFORE the bridge's own
   // keyup-defer (scenario 19 stage two emulates xterm's keydown timer).
   const scheduleZero = (fn) => setTimeoutStub(fn, 0);
-  // Raw plumbing for the external-rewrite / flag-discrimination stages: a
-  // direct value write with NO input event, a direct flag latch, and firing a
-  // SINGLE registration by index (so the bridge's own keyup handler can be
-  // bypassed to model xterm's _keyDownSeen short-circuit).
+  // Raw plumbing for the external-rewrite stages: a direct value write with NO
+  // input event, so seen stays stale while live moves -- xterm's programmatic
+  // blur/^C/selection writes dispatch no input event.
   const setValueRaw = (v) => { session.term.textarea.value = v; };
-  const setFlag = (name, value) => { session[name] = value; };
-  const fireOne = (type, idx, ev = {}) => { const r = session.term.textarea.registrations.filter((x) => x.type === type)[idx]; assert.ok(r, `no ${JSON.stringify(type)} listener at index ${idx}`); r.fn(ev); };
 
   const bind = () => api.ensureIosImeDirectInputBridge(session);
   const keydown = (keyCode, extra = {}) => fire("keydown", { keyCode, key: String.fromCharCode(keyCode), ...extra });
@@ -219,7 +216,7 @@ function makeHarness({ debug = false } = {}) {
     get term() { return session.term; },
     get textarea() { return session.term.textarea; },
     bind, fire, fireWatermark, runDeferred, runFailsafe, runAllZero, rows, bridgeTimers,
-    setValueRaw, setFlag, fireOne, scheduleZero,
+    setValueRaw, scheduleZero,
     keydown, keyup, input, compositionstart, compositionend, blur, tapAndGrow,
   };
 }
@@ -471,17 +468,32 @@ test("ios-ime 9: an external clear emits no ghost DEL — the lastSeen guard hol
   const deliver = h.rows("deliver");
   assert.equal(deliver.length, 1, "one deliver row");
   assert.equal(deliver[0].current, "abc", "the deliver row's current is the seen value, not the cleared live value");
-  // stage two — M1 replay (PR round M1): an EXTERNAL rewrite mid-window must
-  // TERMINATE the stale window at the next 229 tap, never diff against it. A
+  // stage two — R2-M1 replay (PR round 2): an EXTERNAL rewrite mid-window is
+  // FLUSH-THEN-TERMINATE at the next 229 tap, never terminate-and-drop. A
   // programmatic textarea.value="" dispatches NO input event, so seen stays
-  // stale while live goes empty; the next tap sees live!==seen, kills the old
-  // window (pending/timer/armed) and re-baselines to the LIVE value -- so the
-  // flush yields the fresh "x", not a ghost \x7f off the stale "abc" baseline.
+  // stale while live goes empty; the next tap sees live!==seen, flushes the
+  // window's last delivery chance (via=external-rewrite) THEN terminates the
+  // residue and re-baselines to the LIVE value -- so the flush yields the fresh
+  // "x", not a ghost \x7f off the stale "abc" baseline. First settle stage one's
+  // STILL-ARMED open window (its second empty-delta keyup flush closes it, G1
+  // else-branch) so the window under test is FRESH (armed=false) -- otherwise
+  // the divergence flush would take the second-chance-spent close path and the
+  // terminator's own clear row could never appear.
+  h.keyup();
+  h.runDeferred(); // armed was true -> unconditional close (G1): clear(close-window)
   h.setValueRaw("abc");
-  h.keydown(229);            // live===seen here: no rewrite, the abc baseline rides on
+  h.keydown(229);            // live===seen here: no rewrite, a fresh abc baseline
   assert.equal(h.session.iosImePending.baseline, "abc", "the window rides on the abc baseline");
   h.setValueRaw("");         // external rewrite, NO input event -- seen stays "abc", live goes ""
-  h.keydown(229);           // next tap: live!==seen -> terminate the stale window, re-baseline to live ""
+  h.keydown(229);           // next tap: live!==seen -> flush-then-terminate, re-baseline to live ""
+  // the flush rode its LAST delivery chance: empty delta (seen still equals the
+  // stale baseline) -> ARM (branch null), the window stays open, THEN the
+  // terminator sweeps it (Mavis MINOR: the terminator leaves its own clear row).
+  const erDeliver = h.rows("deliver").filter((r) => r.via === "external-rewrite");
+  assert.equal(erDeliver.length, 1, "the divergence tap logged exactly ONE deliver row via external-rewrite");
+  assert.equal(erDeliver[0].delta, "", "the flush's delta is empty -- seen still equals the stale baseline");
+  assert.equal(erDeliver[0].branch, null, "empty delta -> branch null");
+  assert.ok(h.rows("clear").some((r) => r.reason === "external-rewrite"), "the terminator logged clear(reason=external-rewrite) -- the flush armed, the terminator cleared");
   assert.equal(h.session.iosImePending.baseline, "", "the stale abc baseline was TERMINATED and re-baselined to the live empty value");
   assert.equal(h.session.iosImeFailsafeArmed, false, "termination reset the armed flag -- no double window, no stale armed carry-over");
   h.textarea.value = "x";
@@ -490,6 +502,39 @@ test("ios-ime 9: an external clear emits no ghost DEL — the lastSeen guard hol
   h.runDeferred();
   assert.deepEqual(h.term.inputCalls, ["x"], "the fresh tap delivers its own x -- NOT a ghost DEL off the stale baseline");
   assert.equal(h.session.iosImePending, null, "exactly one window, now closed");
+  // stage three — R2-M1 NON-empty rescue (review round 3): the exact proven loss
+  // sequence with an UNDELIVERED increment still in seen -- keydown229 on "abc"
+  // -> grow to "abcd" (input refreshes seen, NO keyup) -> external clear (NO
+  // input event) -> keydown229 divergence: the flush-then-terminate fix must
+  // DELIVER the undelivered "d" on the external-rewrite flush (round 1's
+  // terminate-and-drop lost exactly this byte). A NON-empty flush CLOSES the
+  // window itself (close order), so pending is NULL right after the deliver and
+  // the terminator's own clear row must NOT appear -- the behavior that
+  // distinguishes this sub-case from the arm-path sub-case above, where the
+  // empty flush armed and the terminator logged clear(external-rewrite).
+  h.setValueRaw("abc");
+  h.input();              // seen "abc" -- the abc state rides in normally
+  h.keydown(229);       // live===seen -> no divergence, fresh baseline "abc"
+  assert.equal(h.session.iosImePending.baseline, "abc", "the rescue window baselines on abc");
+  h.setValueRaw("abcd");
+  h.input();            // seen "abcd" -- the undelivered increment "d" rides in seen, NO keyup
+  h.setValueRaw("");    // external clear, NO input event -- live "", seen stays "abcd"
+  const erClearsBefore = h.rows("clear").filter((r) => r.reason === "external-rewrite").length;
+  h.keydown(229);     // divergence -> flush-then-terminate
+  assert.deepEqual(h.term.inputCalls, ["x", "d"], "the external-rewrite flush DELIVERED the undelivered d -- NOT terminate-and-drop");
+  const erDeliver2 = h.rows("deliver").filter((r) => r.via === "external-rewrite");
+  assert.equal(erDeliver2.length, 2, "stage two's arm-path row plus this non-empty rescue row");
+  assert.equal(erDeliver2[1].delta, "d", "the flush's delta is the undelivered increment");
+  assert.equal(erDeliver2[1].payload, "d", "the payload is the undelivered increment");
+  assert.equal(erDeliver2[1].branch, "A", "empty watermark -> branch A");
+  assert.equal(h.session.iosImePending.baseline, "", "the non-empty flush CLOSED the window and this same keydown re-baselined to the live empty value -- pending was NULL at the terminator's guard");
+  assert.equal(h.rows("clear").filter((r) => r.reason === "external-rewrite").length, erClearsBefore, "the terminator logged NO external-rewrite clear row -- pending was already NULL right after the deliver, so its clear-row guard skipped (the arm-path sub-case above logged one)");
+  assert.equal(h.rows("clear")[h.rows("clear").length - 1].reason, "close-window", "the flush's own close-window row is the newest clear row");
+  h.tapAndGrow(229, "e"); // a fresh tap riding normally
+  h.keyup();
+  h.runDeferred();
+  assert.deepEqual(h.term.inputCalls, ["x", "d", "e"], "the fresh tap delivers its own e -- and d was never double-sent");
+  assert.equal(h.session.iosImePending, null, "the rescue window closed at the flush; the fresh tap's window now closed too");
 });
 
 test("ios-ime 10: the pinned upstream #5835 equal-length sequence yields exactly \\x7f。", () => {
