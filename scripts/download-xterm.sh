@@ -9,7 +9,7 @@ for cmd in curl python3; do
     fi
 done
 
-XTERM_VERSION="6.0.0"
+XTERM_VERSION="6.0.0"   # ios-ime-115: 早于上游 #5835/#5836（iOS IME 直提交修复）；index.html 的 ios-ime bridge 是补偿层，升级版本后按 docs/plans/fix-issue115/plan.md §八清单移除
 FIT_VERSION="0.11.0"
 BASE_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 

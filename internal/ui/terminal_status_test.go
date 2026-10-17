@@ -266,8 +266,9 @@ func TestResponsiveLayerChangelogCounts(t *testing.T) {
 		{"testdata/narrow_drawer.test.mjs", `new issue #100 L2 scenarios`},
 		{"testdata/touch_interaction.test.mjs", `new issue #100 L3 scenarios`},
 		{"testdata/terminal_touch_scroll.test.mjs", `new issue #100 R17 scenarios`},
-		{"testdata/quick_keys.test.mjs", `issue #100 quick-keys scenarios`}, // the file's TOTAL (PR1 subset uses unguarded wording per the house rule)
-		{"testdata/monitor_alerts.test.mjs", `cases — that file's total`},   // #111 P2 entry's total claim (issue #95: a count in prose must be pinned). DIGITS on purpose: 23 has no single English word, and the hyphenated "twenty-three" would make `(\w+)` capture only "three" — which is why the digits branch below exists.
+		{"testdata/quick_keys.test.mjs", `issue #100 quick-keys scenarios`},            // the file's TOTAL (PR1 subset uses unguarded wording per the house rule)
+		{"testdata/monitor_alerts.test.mjs", `cases — that file's total`},              // #111 P2 entry's total claim (issue #95: a count in prose must be pinned). DIGITS on purpose: 23 has no single English word, and the hyphenated "twenty-three" would make `(\w+)` capture only "three" — which is why the digits branch below exists.
+		{"testdata/ios_ime_direct_input.test.mjs", `new issue #115 ios-ime scenarios`}, // #115 bridge rescue matrix; the phrase is distinct from the seven above, and the entry's count word ("twenty") must equal the file's `^test(` total (issue #95).
 	} {
 		src, err := os.ReadFile(tc.file)
 		if err != nil {
@@ -601,5 +602,207 @@ func TestTerminalStatusPollReconnectsStaleSocket(t *testing.T) {
 	}
 	if !strings.Contains(rBody, "if (isTTYHeartbeatStale(session)) {\n                        reconnectStaleTTY(session);\n                    } else {\n                        connectTTY(session);\n                    }") {
 		t.Fatal("reconnectRunningTerminalSessions must route only stale sessions through the helper; the else-branch keeps the direct connectTTY (FIX-U, issue #83)")
+	}
+}
+
+// TestIosImeDirectInputHandling runs the Node unit tests for the issue #115
+// iOS/iPadOS Chinese-IME direct-commit rescue (testdata/ios_ime_direct_input.test.mjs):
+// the bridge rescue matrix, sliced out of the shipped index.html banner block
+// and driven against a stubbed textarea + xterm — the pure delta helpers (pure
+// append, replace via DEL×removed + insert, pure shrink as a single DEL), the
+// residual A/B/C/D watermark that suppresses a double send, the earliest-
+// baseline rule across repeated 229 taps, the two-window no-swallow invariant,
+// the bounded second chance and the unconditional failsafe close, blur flush-
+// then-clear, the lastSeen guard against xterm's external textarea clears, per-
+// code-point term.input so a whole multi-tap delta can never match
+// isTerminalQueryResponse, the reentrancy flag excluding the bridge's own echo,
+// term-scoped binding idempotency and re-bind after a term rebuild, and the
+// composing taps staying entirely out of the state machine.
+//
+// Same arrangement as the seven wrappers above: the cases slice the shipped
+// index.html and run against stubbed browser state, this wrapper makes `go test`
+// enforce them, and the file lives in testdata/ instead of static/ because
+// static/* is embedded and served to every browser. Skips when node is absent.
+func TestIosImeDirectInputHandling(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not on PATH; skipping ios-ime direct input JS tests")
+	}
+	out, err := exec.Command(node, "--test", "testdata/ios_ime_direct_input.test.mjs").CombinedOutput()
+	if err != nil {
+		t.Fatalf("node --test testdata/ios_ime_direct_input.test.mjs: %v\n%s", err, out)
+	}
+	t.Logf("%s", out)
+}
+
+// TestIosImeBridgeMatchesVendoredBundle pins the removable ios-ime bridge
+// (issue #115) to the state of the vendored xterm bundle it compensates for.
+// It branches on a bundle FINGERPRINT, not a version number: `_pending229Baseline`
+// is the CompositionHelper field upstream PR #5836 adds to repair the keyCode-
+// 229 direct-commit path, and private field names survive unmangled in this
+// build (the control `_dataAlreadySent` counts four), so a fingerprint hit means
+// the vendored bundle genuinely carries the upstream fix while a miss means it
+// does not — a predicate no routine upstream bump can spoof in either direction
+// (plan §8.3, review N1/F2). Absent, the patch must be fully intact; present,
+// every trace of the patch must already be gone. Every failure points at the
+// §8.4 removal checklist — that red build is exactly what the guard is for.
+func TestIosImeBridgeMatchesVendoredBundle(t *testing.T) {
+	bundle, err := os.ReadFile("static/vendor/xterm/xterm.js")
+	if err != nil {
+		t.Fatalf("read vendored xterm bundle (CWD-relative — the Go test runs in internal/ui/, a repo-root path would fail on first run): %v", err)
+	}
+	upstreamFixed := strings.Count(string(bundle), "_pending229Baseline") >= 1
+
+	const beginBanner = "// ==== ios-ime bridge (issue #115) BEGIN - removable block ===="
+	const endBanner = "// ==== ios-ime bridge (issue #115) END - removable block ===="
+	const bindingPoint = "ensureIosImeDirectInputBridge(session); // ios-ime-115 binding point"
+	const changelogPhrase = "new issue #115 ios-ime scenarios"
+	const checklist = "docs/plans/fix-issue115/plan.md §8.4"
+
+	// CONTROL fingerprint (M3a), BEFORE the branch: the private-name fingerprint
+	// METHOD is only trustworthy if a known-present private name actually hits
+	// this unmangled build. _dataAlreadySent is that control (today it counts
+	// 4); a zero hit means the minifier renamed private fields, which would
+	// make the _pending229Baseline comparison below meaningless -- fail loudly.
+	if n := strings.Count(string(bundle), "_dataAlreadySent"); n < 1 {
+		t.Fatalf("control fingerprint _dataAlreadySent hits %d times (want >= 1) — the private-name fingerprint method is unreliable in this bundle (control hit 0), so the _pending229Baseline comparison is meaningless per %s", n, checklist)
+	}
+	// Signpost guard (M3b, plan §8.4 step 2): scripts/download-xterm.sh carries
+	// the ios-ime-115 marker while the patch is live and sheds it when the patch
+	// is removed, so the marker and the block can never drift apart. CWD is
+	// internal/ui/, so the repo-root scripts dir is ../../scripts/.
+	signpost, err := os.ReadFile("../../scripts/download-xterm.sh")
+	if err != nil {
+		t.Fatalf("read scripts/download-xterm.sh (CWD-relative ../../scripts/ — the Go test runs in internal/ui/): %v", err)
+	}
+
+	if upstreamFixed {
+		// The vendored bundle carries the upstream fix: every trace of the
+		// compensating patch must already be gone.
+		index := fetchIndexHTML(t)
+		for _, gone := range []string{beginBanner, endBanner, "function iosImeDeltaBytes", "function ensureIosImeDirectInputBridge", "iosImeSending"} {
+			if strings.Contains(index, gone) {
+				t.Fatalf("vendored bundle carries the upstream fix (_pending229Baseline) but index.html still ships %q — remove it per %s", gone, checklist)
+			}
+		}
+		// §8.4 step 2: the binding-point call sites must go WITH the block.
+		// The symbol loop above only pins the function definition — a partial
+		// removal that leaves the marked call behind is a runtime
+		// ReferenceError this guard would otherwise watch go green, so the
+		// marker itself must count zero.
+		if n := strings.Count(index, bindingPoint); n != 0 {
+			t.Fatalf("vendored bundle carries the upstream fix but index.html still calls %q %d times — a dangling bridge call is a runtime ReferenceError with CI green; remove the binding points per %s", bindingPoint, n, checklist)
+		}
+		if _, err := os.Stat("testdata/ios_ime_direct_input.test.mjs"); err == nil {
+			t.Fatalf("vendored bundle carries the upstream fix but testdata/ios_ime_direct_input.test.mjs still exists — remove it per %s", checklist)
+		}
+		goTest, err := os.ReadFile("terminal_status_test.go")
+		if err != nil {
+			t.Fatalf("read terminal_status_test.go: %v", err)
+		}
+		if strings.Contains(string(goTest), "TestIosImeDirectInputHandling") {
+			t.Fatalf("vendored bundle carries the upstream fix but terminal_status_test.go still declares TestIosImeDirectInputHandling — remove it per %s", checklist)
+		}
+		// The guard-TABLE row is the §8.3 'guard 表行' item, so the phrase's
+		// absence is asserted against THIS file — not CHANGELOG.md, whose
+		// historical entry is retained per §8.4 step 7 (asserting its absence
+		// there contradicted the retention step).
+		if strings.Contains(string(goTest), changelogPhrase) {
+			t.Fatalf("vendored bundle carries the upstream fix but terminal_status_test.go still carries the guard-table row quoting %q — the row must go per plan §8.3 (the historical CHANGELOG entry stays per §8.4 step 7)", changelogPhrase)
+		}
+		// §8.4 step 2: the signpost comment rides the removal -- with the
+		// upstream fix present the ios-ime-115 marker must already be gone from
+		// the download script too, else a future upgrade re-strands the removal.
+		if strings.Contains(string(signpost), "ios-ime-115") {
+			t.Fatalf("vendored bundle carries the upstream fix but scripts/download-xterm.sh still carries the ios-ime-115 signpost — remove it per %s", checklist)
+		}
+		return
+	}
+
+	// Fingerprint absent (today's state): the compensating patch must be intact.
+	index := fetchIndexHTML(t)
+	if n := strings.Count(index, beginBanner); n != 1 {
+		t.Fatalf("index.html BEGIN banner occurs %d times, want exactly 1 — the removable block must stay contiguous and single per %s", n, checklist)
+	}
+	if n := strings.Count(index, endBanner); n != 1 {
+		t.Fatalf("index.html END banner occurs %d times, want exactly 1 — the removable block must stay contiguous and single per %s", n, checklist)
+	}
+	for _, present := range []string{"function iosImeDeltaBytes", "function ensureIosImeDirectInputBridge", "iosImeSending"} {
+		if !strings.Contains(index, present) {
+			t.Fatalf("index.html lost the bridge symbol %q while the vendored bundle lacks the upstream fix — the patch must be intact per %s", present, checklist)
+		}
+	}
+	if n := strings.Count(index, bindingPoint); n != 2 {
+		t.Fatalf("index.html binding point %q occurs %d times, want exactly 2 (both session factories) per %s", bindingPoint, n, checklist)
+	}
+
+	// Zero-spill contract: the bridge must not touch the factories (review m14
+	// + PR round) — asserted across EVERY touch-point spelling (camel, Pascal,
+	// snake, kebab), never by line number.
+	pty, err := os.ReadFile("static/kinds/pty.js")
+	if err != nil {
+		t.Fatalf("read kinds/pty.js: %v", err)
+	}
+	for _, pat := range []string{"iosIme", "IosIme", "ios_ime", "ios-ime"} {
+		if n := strings.Count(string(pty), pat); n != 0 {
+			t.Fatalf("kinds/pty.js has %d %q occurrences, want zero — the bridge must not spill into the factories (review m14) per %s", n, pat, checklist)
+		}
+	}
+	// PRESENT branch: the patch is live, so the download-script signpost must
+	// still carry the ios-ime-115 marker (it is shed only in §8.4 step 2, when
+	// the fingerprint flips and this branch stops running).
+	if !strings.Contains(string(signpost), "ios-ime-115") {
+		t.Fatalf("vendored bundle lacks the upstream fix but scripts/download-xterm.sh lost the ios-ime-115 signpost — the compensation would be stranded on the next upgrade per %s", checklist)
+	}
+
+	// The legacy factory's onData gates stay put: the bridge's watermark sits
+	// BEFORE them by design (accepted, MEDIUM-4), so the gates themselves must
+	// never move or vanish. Slice by symbol, like the existing helper tests.
+	cStart := strings.Index(index, "function createTerminalSession(id) {")
+	if cStart < 0 {
+		t.Fatalf("createTerminalSession no longer found — the legacy onData gate anchor moved per %s", checklist)
+	}
+	cBody := index[cStart:]
+	end := strings.Index(cBody, "\n        }")
+	if end < 0 {
+		t.Fatalf("createTerminalSession's body terminator %q not found — the truncation idiom broke and the slice ran to EOF, so the gate assertions below could be satisfied by unrelated later text per %s", "\n        }", checklist)
+	}
+	cBody = cBody[:end]
+	// The truncated slice must actually REACH the gate region: the onData
+	// assignment anchor proves it, else an over-early truncation would make the
+	// two gate assertions below vacuously pass on a slice that never got there.
+	if !strings.Contains(cBody, "termDataDisposable") {
+		t.Fatalf("the truncated createTerminalSession slice lost the onData anchor %q — the slice truncated too early and never reached the gate region, so the gate assertions below would be vacuous per %s", "termDataDisposable", checklist)
+	}
+	for _, gate := range []string{"isInstanceTerminalStatus(inst.status)", "isTerminalQueryResponse(data)"} {
+		if !strings.Contains(cBody, gate) {
+			t.Fatalf("createTerminalSession's onData body lost the gate %q — the bridge watermark sits before these gates by design and they must stay per %s", gate, checklist)
+		}
+	}
+
+	// The bridge block's ONLY send port is term.input( — the app layer never
+	// calls xterm internals (review M6). Slice by the banner delimiters.
+	bStart := strings.Index(index, beginBanner)
+	bEnd := strings.Index(index, endBanner)
+	if bStart < 0 || bEnd < 0 || bStart > bEnd {
+		t.Fatalf("the ios-ime bridge block is not delimited by its BEGIN/END banners in order per %s", checklist)
+	}
+	block := index[bStart:bEnd]
+	if n := strings.Count(block, "term.input("); n < 1 {
+		t.Fatalf("the bridge block has %d term.input( occurrences, want >= 1 — term.input is the only sanctioned send port per %s", n, checklist)
+	}
+	if n := strings.Count(block, ".triggerDataEvent("); n != 0 {
+		t.Fatalf("the bridge block calls .triggerDataEvent( %d times, want zero — the app layer never calls xterm internals (review M6) per %s", n, checklist)
+	}
+
+	if _, err := os.Stat("testdata/ios_ime_direct_input.test.mjs"); err != nil {
+		t.Fatalf("testdata/ios_ime_direct_input.test.mjs is missing while the vendored bundle lacks the upstream fix — the rescue matrix must exist per %s", checklist)
+	}
+	goTest, err := os.ReadFile("terminal_status_test.go")
+	if err != nil {
+		t.Fatalf("read terminal_status_test.go: %v", err)
+	}
+	if !strings.Contains(string(goTest), "TestIosImeDirectInputHandling") {
+		t.Fatalf("terminal_status_test.go lost TestIosImeDirectInputHandling while the vendored bundle lacks the upstream fix per %s", checklist)
 	}
 }
