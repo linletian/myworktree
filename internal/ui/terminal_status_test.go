@@ -79,6 +79,59 @@ func TestSidebarCollapseHandling(t *testing.T) {
 	t.Logf("%s", out)
 }
 
+// TestSidebarWTRenameJS runs the Node unit tests for the issue #122 sidebar
+// worktree-row rename state machine (testdata/sidebar_wt_rename.test.mjs):
+// double-click enters the editing state and focuses + selects the input,
+// Enter / non-empty blur commit a trimmed PATCH /api/worktrees whose response
+// replaces the row (followed by a refresh() so the branch badge keeps List()'s
+// live value), Escape / empty / whitespace-only input rolls back without ever
+// touching the wire, markup-heavy names reach the server verbatim because
+// escaping is render-side only, the 2s poll and the 60s diverge timer stay off
+// the sidebar while a row is being renamed (so the input and its IME
+// composition survive a poll tick), the terminal does not steal focus from that
+// input, and the two rename state machines stay mutually exclusive in both
+// directions (at most one input in the page).
+//
+// The file holds seventeen cases in total. The last eight are the ones the
+// reviews and the browser verification forced: B-F1 — fetchDivergeSingle's
+// late /api/worktree/diverged response, fired by selectWorktree on the FIRST
+// click of a double-click while the rename input does not exist yet, merges
+// state.diverged without rebuilding #wt-list; B-F2 — commitWTRename's PATCH
+// response leaves a NEW editing-state input (opened by a second double-click
+// during the round trip) intact, with its state.worktrees splice and its
+// refresh() resync still unconditional; two blur re-entrancy cases — removing
+// the focused input inside an innerHTML write makes Chrome dispatch blur on
+// that node while getElementById still resolves it, so onblur re-enters the
+// commit handler with the editing state already cleared, which the
+// `state.renamingWT !== id` / `state.renamingInst !== id` guards stop on the
+// self path and on the mutual-exclusion cross path alike; two A-F1 cases — a
+// THIRD party rebuilding the list while a row is mid-rename, where those
+// state guards are blind because the row's state is still set, so the repaint
+// itself is guarded (commitRename's success render() on both rename states,
+// openTerminal / openFinder's finally blocks on the row state); V4 — Enter /
+// Escape during IME composition are the input method's keys, so neither half
+// of the keydown handlers (sidebar and tab, driven alike) commits, cancels or
+// PATCHes on a composing keystroke; and V5 — a double-click whose target is
+// inside the row's own .wt-row-actions controls (delete ✕, terminal, finder)
+// never enters the editing state, while a name-cell double-click still does.
+//
+// Same arrangement as TestSidebarCollapseHandling: the cases slice the
+// shipped index.html (and window.state from framework.js) and run against
+// stubbed browser state, this wrapper makes `go test` enforce them, and the
+// file lives in testdata/ because static/* is embedded and served to every
+// browser. Skips when node is absent.
+func TestSidebarWTRenameJS(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not on PATH; skipping sidebar worktree rename JS tests")
+	}
+	out, err := exec.Command(node, "--test", "testdata/sidebar_wt_rename.test.mjs").CombinedOutput()
+	if err != nil {
+		t.Fatalf("node --test testdata/sidebar_wt_rename.test.mjs: %v\n%s", err, out)
+	}
+	t.Logf("%s", out)
+}
+
 // TestViewportHeightHandling runs the Node unit tests for the issue #100 L1
 // viewport & height layer (testdata/viewport_height.test.mjs): the iOS soft
 // keyboard is compensated by pinning #app's inline height to

@@ -161,6 +161,34 @@ otherwise silently drop a trailing flag), the `--force=<bool>` spelling and
 the `--` terminator work as in the flag-based subcommands, and a clean
 delete prints the destroyed gitignored count to stderr.
 
+### Rename
+`PATCH /api/worktrees`
+
+Body:
+```json
+{ "id": "<worktreeId>", "name": "<new display name>" }
+```
+
+- Renames the worktree's display `name` (issue #122 — the dashboard's
+  sidebar double-click rename). `id` and `name` are trimmed; a blank name
+  (or blank id) is rejected. Only the human-facing name changes — `branch`
+  and `path` are untouched, so `git worktree list` is unaffected.
+- The request body is decoded strictly: unknown fields are rejected.
+
+Response (200): the updated worktree object, same shape as a `GET
+/api/worktrees` list element:
+```json
+{ "id":"...","name":"renamed-worktree","path":"...","branch":"...","base_ref":"...","created_at":"..." }
+```
+
+Errors:
+- 400 — blank `name` (after trim), blank `id`, malformed JSON, or unknown fields.
+- 404 — unknown worktree `id`.
+- 409 — the state version still conflicted after the 3 save retries (a
+  concurrent writer bumped `state.json` underneath the rename; the client can
+  refresh and retry — the response carries the current `version`, same shape
+  as the instance-reorder conflict).
+
 ### Open Terminal (host macOS)
 `POST /api/worktrees/open-terminal`
 

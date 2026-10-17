@@ -562,6 +562,70 @@ func (m Manager) Delete(id string, force bool) (int, error) {
 	return ignoredDestroyed, nil
 }
 
+// ErrWorktreeNotFound is returned by UpdateName when no managed worktree
+// carries the requested ID; the app layer maps it to HTTP 404 (issue #122).
+var ErrWorktreeNotFound = errors.New("worktree not found")
+
+// UpdateName renames a managed worktree's display name (issue #122 — the
+// sidebar double-click rename). Input semantics mirror
+// framework.Manager.UpdateName verbatim (trim id/name, reject empties) and
+// only Name is written — ID/Path/Branch/BaseRef/CreatedAt stay untouched.
+//
+// The write goes through SaveWithVersion inside a short retry loop (3
+// attempts, 10 ms backoff — the shape of framework.Manager.updateStore),
+// NOT the plain Save this package's Create/Import/Delete use: state.json
+// holds worktrees, instances and tab order in ONE file, and net/http runs
+// each request in its own goroutine with the instance lifecycle goroutines
+// resident. A plain Save between this method's Load and Save could rewrite
+// the whole file with the stale Version loaded before an unrelated instance
+// write, silently rolling that write back and resetting the shared Version
+// (issue #122 review). SaveWithVersion bumps Version on success — the other
+// write paths here do not — which is side-effect-free for callers: the
+// version only serves the optimistic lock, and the dashboard re-reads it on
+// every poll.
+func (m Manager) UpdateName(id, name string) (store.ManagedWorktree, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return store.ManagedWorktree{}, errors.New("id is required")
+	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return store.ManagedWorktree{}, errors.New("name cannot be empty")
+	}
+	const maxRetries = 3
+	var lastErr error
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		st, err := m.Store.Load()
+		if err != nil {
+			return store.ManagedWorktree{}, err
+		}
+		idx := -1
+		for i := range st.Worktrees {
+			if st.Worktrees[i].ID == id {
+				idx = i
+				break
+			}
+		}
+		if idx == -1 {
+			return store.ManagedWorktree{}, fmt.Errorf("%w: %s", ErrWorktreeNotFound, id)
+		}
+		// Only the display name changes; the git-facing fields
+		// (Path/Branch) must survive a rename untouched (issue #122).
+		st.Worktrees[idx].Name = name
+		updated := st.Worktrees[idx]
+		if err := m.Store.SaveWithVersion(st, st.Version); err != nil {
+			if errors.Is(err, store.ErrVersionConflict) {
+				lastErr = err
+				time.Sleep(10 * time.Millisecond)
+				continue
+			}
+			return store.ManagedWorktree{}, err
+		}
+		return updated, nil
+	}
+	return store.ManagedWorktree{}, fmt.Errorf("update worktree name: %w (after %d retries)", lastErr, maxRetries)
+}
+
 var (
 	nonSlug     = regexp.MustCompile(`[^a-z0-9]+`)
 	branchToken = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)

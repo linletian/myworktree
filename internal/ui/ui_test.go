@@ -2906,3 +2906,368 @@ func TestRegisterTitleWithSpecialRepoNames(t *testing.T) {
 		})
 	}
 }
+
+// TestSidebarWorktreeRenameAnchors pins the issue #122 wiring in the served
+// sources — the surface the node cases cannot see, because they stub the
+// renderers and drive the handlers directly. Local slices everywhere: a bare
+// whole-file Contains would still pass if the double-click handler had been
+// moved onto the pinned main row (acceptance #7 forbids exactly that), or if
+// the editing-state branch had been deleted while its text survived in a
+// comment.
+func TestSidebarWorktreeRenameAnchors(t *testing.T) {
+	index := fetchIndexHTML(t)
+	framework := fetchStaticAsset(t, "/static/framework.js")
+
+	// bodyOf slices a function from its header to the closing brace at this
+	// file's function indent (8 spaces), so an assertion cannot be satisfied
+	// by an identically spelled line living in some other function.
+	bodyOf := func(header string) string {
+		t.Helper()
+		i := strings.Index(index, header)
+		if i < 0 {
+			t.Fatalf("index.html lost %q (issue #122)", header)
+		}
+		b := index[i:]
+		if e := strings.Index(b, "\n        }"); e >= 0 {
+			b = b[:e]
+		}
+		return b
+	}
+
+	// 1. The regular worktree row template: the double-click entry point, the
+	// tooltip, and the editing-state input with its escaping.
+	rowStart := strings.Index(index, "html += state.worktrees.map(w => {")
+	if rowStart < 0 {
+		t.Fatal("index.html lost the regular-worktree map block of renderSidebar (issue #122)")
+	}
+	rowEnd := strings.Index(index[rowStart:], "}).join(\"\");")
+	if rowEnd < 0 {
+		t.Fatal("index.html regular-worktree map block has no terminator (issue #122)")
+	}
+	row := index[rowStart : rowStart+rowEnd]
+	for _, anchor := range []string{
+		`ondblclick="startWTRename('${wIdEsc}', event)"`,
+		`title="Double-click to rename"`,
+		`const renameValue = state.renamingWT === w.id && state.renamingWTValue ? state.renamingWTValue : w.name;`,
+		`<input id="wt-rename-input-${wIdEsc}" class="wt-rename-input" value="${escapeHtml(renameValue)}"`,
+		// Review #7 hardening: the live binding that turns the F5 leftover
+		// into a real field — without it a slipped repaint rebuilds from
+		// w.name and silently loses typed text.
+		`oninput="state.renamingWTValue = this.value"`,
+		`onkeydown="handleWTRenameKeydown('${wIdEsc}', event)"`,
+		`onblur="commitWTRename('${wIdEsc}', event)"`,
+		`escapeHtml(w.name)`,
+		// The controls wrapper the startWTRename source guard matches on
+		// (review V5): without this class the guard silently never hits.
+		`class="wt-row-actions"`,
+	} {
+		if !strings.Contains(row, anchor) {
+			t.Fatalf("index.html worktree row template missing %q (issue #122)", anchor)
+		}
+	}
+
+	// 2. The pinned main row stays static: no entry point, no tooltip, no
+	// input (acceptance #7 — v1 excludes it deliberately).
+	mainStart := strings.Index(index, `<li class="wt-item wt-item-main`)
+	if mainStart < 0 {
+		t.Fatal("index.html lost the pinned main worktree row (issue #122)")
+	}
+	mainEnd := strings.Index(index[mainStart:], "</li>")
+	if mainEnd < 0 {
+		t.Fatal("index.html main worktree row has no closing </li> (issue #122)")
+	}
+	mainRow := index[mainStart : mainStart+mainEnd]
+	for _, forbidden := range []string{"startWTRename", "ondblclick", "Double-click to rename", "wt-rename-input"} {
+		if strings.Contains(mainRow, forbidden) {
+			t.Fatalf("the pinned main row must stay out of the rename feature, found %q (acceptance #7, issue #122)", forbidden)
+		}
+	}
+
+	// 3. The guards. Three background repaints of #wt-list now sit behind
+	// if (!state.renamingWT): refresh()'s /api/main continuation, fetchDiverge
+	// (INSIDE the callee, so its independent 60s divergeTimer is covered too —
+	// decision G) and fetchDivergeSingle. The last one is the arbitration that
+	// overturned plan decision G's exemption (review B-F1): selectWorktree
+	// fires that request synchronously on the FIRST click of a double-click,
+	// long before the dblclick builds the input, so "the blur committed first"
+	// cannot cover it — a late response would rebuild the row mid-edit and take
+	// focus, the selection, the half-typed text and the IME composition with
+	// it. refresh() keeps its own full-render skip, and commitWTRename's
+	// success continuation guards the repaint it owes the PATCH response
+	// (review B-F2: another row may have entered the editing state during the
+	// round trip) while its state splice and its refresh() stay unconditional.
+	refreshBody := bodyOf("async function refresh() {")
+	if !strings.Contains(refreshBody, "if (state.renamingInst || state.renamingWT) {") {
+		t.Fatal("refresh() must skip the full render() while a worktree row is being renamed (pitfall #1, issue #122)")
+	}
+	guardedRender := regexp.MustCompile(`if \(!state\.renamingWT\) \{\s*renderSidebar\(\);`)
+	if !guardedRender.MatchString(refreshBody) {
+		t.Fatal("refresh()'s /api/main continuation must guard its renderSidebar() with if (!state.renamingWT) (pitfall #4, issue #122)")
+	}
+	divergeBody := bodyOf("async function fetchDiverge() {")
+	if !guardedRender.MatchString(divergeBody) {
+		t.Fatal("fetchDiverge() must guard renderSidebar() INSIDE the callee, so its own 60s divergeTimer cannot rebuild the sidebar mid-rename (decision G, issue #122)")
+	}
+	singleBody := bodyOf("async function fetchDivergeSingle(id) {")
+	if !guardedRender.MatchString(singleBody) {
+		t.Fatal("fetchDivergeSingle() must guard renderSidebar() too — selectWorktree starts it on the first click of the double-click, so its response can land after the editing state exists (review B-F1, issue #122)")
+	}
+	if !strings.Contains(singleBody, "`/api/worktree/diverged?id=${encodeURIComponent(id)}`") {
+		t.Fatal("fetchDivergeSingle must keep querying /api/worktree/diverged with the encoded id (issue #122)")
+	}
+	if !strings.Contains(singleBody, "Object.assign(state.diverged, data.items);") {
+		t.Fatal("fetchDivergeSingle must still merge the diverged state even while the repaint is deferred (issue #122)")
+	}
+	// Six guarded repaints, no more and no less: the /api/main continuation,
+	// fetchDiverge, fetchDivergeSingle (each asserted by name above),
+	// commitWTRename's success continuation, and the two spinner `finally`
+	// blocks in openTerminal / openFinder. Those last two are the third-party
+	// teardowns review A-F1 flagged: plan R1's exemption ("a user action blurs
+	// the input before the render") covers the spinner-ON render before the
+	// await and NOT this finally, which lands up to 10s later — inside a
+	// window in which the user can have double-clicked a row into its editing
+	// state. The count is the completeness check in both directions: a seventh
+	// site would mean a repaint guarded somewhere the reasoning above does not
+	// account for, a missing one a path that still rebuilds #wt-list mid-rename.
+	if n := strings.Count(index, "if (!state.renamingWT)"); n != 6 {
+		t.Fatalf("index.html has %d `if (!state.renamingWT)` guards, want exactly 6 (/api/main continuation + fetchDiverge + fetchDivergeSingle + commitWTRename's success continuation + openTerminal's finally + openFinder's finally, issue #122)", n)
+	}
+	// The two spinner finally blocks, by name, so the count above cannot be
+	// satisfied by two guards planted anywhere else.
+	for _, fn := range []string{"async function openTerminal(id, event) {", "async function openFinder(id, event) {"} {
+		b := bodyOf(fn)
+		if !strings.Contains(b, "if (!state.renamingWT) {") || !strings.Contains(b, "loadingActions.delete(key);") {
+			t.Fatalf("%s must guard its finally repaint with if (!state.renamingWT) (review A-F1, issue #122)", fn)
+		}
+		if strings.Index(b, "if (!state.renamingWT) {") < strings.Index(b, "loadingActions.delete(key);") {
+			t.Fatalf("%s's finally must clear the spinner BEFORE deciding on the repaint (review A-F1, issue #122)", fn)
+		}
+	}
+	if n := strings.Count(index, "state.renamingInst || state.renamingWT"); n != 2 {
+		t.Fatalf("index.html has %d combined rename guards, want exactly 2 (refresh() and focusTerminalIfPossible, issue #122)", n)
+	}
+	if !strings.Contains(bodyOf("function focusTerminalIfPossible() {"), "if (state.renamingInst || state.renamingWT) return;") {
+		t.Fatal("focusTerminalIfPossible must not steal focus from a renaming worktree row (acceptance #4, issue #122)")
+	}
+
+	// 4. Mutual exclusion, both entry points, in the order that matters: the
+	// OTHER machine's state is cleared and its renderer runs BEFORE this
+	// machine's state is set, so at most one rename input ever exists
+	// (decision D, acceptance #8).
+	startTab := bodyOf("function startRename(id, event) {")
+	clearAt := strings.Index(startTab, "state.renamingWT = null;")
+	renderAt := strings.Index(startTab, "renderSidebar();")
+	setAt := strings.Index(startTab, "state.renamingInst = id;")
+	if clearAt < 0 || renderAt < 0 || setAt < 0 {
+		t.Fatal("startRename must clear the sidebar rename state and re-render the sidebar (decision D, issue #122)")
+	}
+	if !(clearAt < renderAt && renderAt < setAt) {
+		t.Fatal("startRename must clear + re-render the sidebar BEFORE entering the tab rename, or the sidebar input survives into the tab's editing state (issue #122)")
+	}
+	startWT := bodyOf("function startWTRename(id, event) {")
+	clearAt = strings.Index(startWT, "state.renamingInst = null;")
+	renderAt = strings.Index(startWT, "renderTabs();")
+	setAt = strings.Index(startWT, "state.renamingWT = id;")
+	if clearAt < 0 || renderAt < 0 || setAt < 0 {
+		t.Fatal("startWTRename must clear the tab rename state and re-render the tabs (decision D, issue #122)")
+	}
+	if !(clearAt < renderAt && renderAt < setAt) {
+		t.Fatal("startWTRename must clear + re-render the tabs BEFORE entering the row's editing state (issue #122)")
+	}
+	// Review V5: the row's own controls (delete ✕, terminal, finder) stop
+	// propagation on CLICK but not on the separate dblclick event, so the
+	// entry point itself has to exclude double-clicks that started inside
+	// .wt-row-actions — otherwise the delete confirm dialog and the rename
+	// input pop at the same time. The guard must sit BEFORE the
+	// mutual-exclusion teardown, so an excluded double-click does not even
+	// disturb the tab machine.
+	srcGuard := strings.Index(startWT, "if (event.target.closest('.wt-row-actions')) return;")
+	if srcGuard < 0 {
+		t.Fatal("startWTRename must exclude double-clicks sourced from the row's own controls (.wt-row-actions) (review V5, issue #122)")
+	}
+	if !(srcGuard < clearAt) {
+		t.Fatal("startWTRename's row-actions guard must precede the mutual-exclusion teardown (review V5, issue #122)")
+	}
+
+	// Review V4: Enter / Escape during IME composition are the input method's
+	// candidate-confirm / cancel keys — both keydown handlers must bail
+	// before dispatching, and the bail must PRECEDE the key checks, or the
+	// half-composed string rides the PATCH the moment the user accepts a
+	// candidate. The identical line on both halves keeps the parity that is
+	// the issue's core requirement.
+	for _, header := range []string{"function handleWTRenameKeydown(id, event) {", "function handleRenameKeydown(id, event) {"} {
+		kb := bodyOf(header)
+		imeAt := strings.Index(kb, "if (event.isComposing) return;")
+		enterAt := strings.Index(kb, "if (event.key === 'Enter')")
+		if imeAt < 0 || enterAt < 0 {
+			t.Fatalf("%s must carry the IME-composition bail before the key dispatch (review V4, issue #122)", header)
+		}
+		if !(imeAt < enterAt) {
+			t.Fatalf("%s's IME bail must precede the Enter/Escape dispatch (review V4, issue #122)", header)
+		}
+	}
+
+	// 5. The commit handler's contract, spelled in the shipped source: the
+	// worktree endpoint, the trimmed name, the empty-name bail, the
+	// state.worktrees replacement and the branch-badge resync.
+	// `if (state.renamingWT !== id) return` is the re-entrancy guard the
+	// browser verification forced: renderSidebar() below removes the focused
+	// input, Chrome dispatches blur on that node while getElementById still
+	// resolves it, and the re-entered commit would fire a second identical
+	// PATCH (and nest an innerHTML write inside the first). It must sit BEFORE
+	// the input is read — after it, the re-entry has already touched the node.
+	// `if (!input) return` stays as the second line of defence.
+	commitBody := bodyOf("function commitWTRename(id, event) {")
+	for _, anchor := range []string{
+		"if (state.renamingWT !== id) return;",
+		"const input = document.getElementById('wt-rename-input-' + id);",
+		"if (!input) return;",
+		"const newName = input.value.trim();",
+		"if (newName === '') {",
+		"api('/api/worktrees', {",
+		"method: 'PATCH',",
+		"JSON.stringify({ id: id, name: newName })",
+		"state.worktrees[idx] = updated;",
+		"refresh();",
+	} {
+		if !strings.Contains(commitBody, anchor) {
+			t.Fatalf("commitWTRename missing %q (issue #122)", anchor)
+		}
+	}
+	// Order, not mere presence: the state guard has to precede the node read,
+	// otherwise the re-entrant blur has already done its damage.
+	guardFirst := strings.Index(commitBody, "if (state.renamingWT !== id) return;")
+	readFirst := strings.Index(commitBody, "const input = document.getElementById('wt-rename-input-' + id);")
+	if !(guardFirst >= 0 && readFirst >= 0 && guardFirst < readFirst) {
+		t.Fatal("commitWTRename's re-entrancy guard must precede the input read (issue #122 browser verification)")
+	}
+
+	// The tab handler carries the mirror guard, and it is not decoration:
+	// startWTRename's mutual-exclusion teardown (renderTabs) blurs a live tab
+	// input, and without this guard that blur renames the instance by itself.
+	tabCommitBody := bodyOf("function commitRename(id, event) {")
+	for _, anchor := range []string{
+		"if (state.renamingInst !== id) return;",
+		"const input = document.getElementById('rename-input-' + id);",
+		"if (!input) return;",
+		"api('/api/instances', {",
+		"renderTabs();",
+	} {
+		if !strings.Contains(tabCommitBody, anchor) {
+			t.Fatalf("commitRename missing %q (issue #122 browser verification)", anchor)
+		}
+	}
+	guardTab := strings.Index(tabCommitBody, "if (state.renamingInst !== id) return;")
+	readTab := strings.Index(tabCommitBody, "const input = document.getElementById('rename-input-' + id);")
+	if !(guardTab >= 0 && readTab >= 0 && guardTab < readTab) {
+		t.Fatal("commitRename's re-entrancy guard must precede the input read (issue #122 browser verification)")
+	}
+	if n := strings.Count(index, "!== id) return;"); n != 2 {
+		t.Fatalf("index.html has %d re-entrancy guards, want exactly 2 (commitWTRename + commitRename, issue #122)", n)
+	}
+	// commitRename's success continuation repaints through render(), which
+	// rebuilds the tabs AND the sidebar — the tab-side twin of the B-F2
+	// window, and newly reachable because of this issue's mutual exclusion (a
+	// tab PATCH can now be in flight while a SIDEBAR row is being renamed).
+	// It must be guarded on BOTH states, and the guard must sit inside the
+	// .then block, after the unconditional splice (review A-F1, issue #122).
+	if n := strings.Count(index, "if (!state.renamingInst && !state.renamingWT) {"); n != 1 {
+		t.Fatalf("index.html has %d render() rename guards, want exactly 1 (commitRename's success continuation, review A-F1, issue #122)", n)
+	}
+	tabThen := tabCommitBody[strings.Index(tabCommitBody, ".then(updated => {"):strings.Index(tabCommitBody, "}).catch(err => {")]
+	for _, anchor := range []string{"state.instances[idx] = updated;", "if (!state.renamingInst && !state.renamingWT) {", "render();"} {
+		if !strings.Contains(tabThen, anchor) {
+			t.Fatalf("commitRename's success continuation must keep %q inside the .then block (review A-F1, issue #122)", anchor)
+		}
+	}
+	if !(strings.Index(tabThen, "state.instances[idx] = updated;") < strings.Index(tabThen, "if (!state.renamingInst && !state.renamingWT) {")) {
+		t.Fatal("commitRename must splice the renamed instance BEFORE deciding on the repaint — the data update stays unconditional (review A-F1, issue #122)")
+	}
+	if !(strings.Index(tabThen, "if (!state.renamingInst && !state.renamingWT) {") < strings.Index(tabThen, "render();")) {
+		t.Fatal("commitRename's render() must sit INSIDE its rename guard (review A-F1, issue #122)")
+	}
+	// The PATCH round trip is a window in which another row can enter the
+	// editing state — the success continuation's repaint must be guarded,
+	// while the state splice and the refresh() resync stay unconditional
+	// (refresh() carries its own guard) (review B-F2, issue #122).
+	if !guardedRender.MatchString(commitBody) {
+		t.Fatal("commitWTRename's success continuation must guard its renderSidebar() with if (!state.renamingWT) (review B-F2, issue #122)")
+	}
+	// Explicit forward order, not a LastIndex lookup: splice -> guarded repaint
+	// -> refresh. Index() lands on the SUCCESS continuation's refresh()
+	// because the catch branch sits below it, and the .then block is then
+	// sliced and checked on its own — with a LastIndex lookup, deleting the
+	// success resync would silently re-anchor to the catch branch's refresh()
+	// and stay green (review A-F3, issue #122).
+	spliceAt := strings.Index(commitBody, "state.worktrees[idx] = updated;")
+	guardAt := strings.Index(commitBody, "if (!state.renamingWT) {")
+	refreshAt := strings.Index(commitBody, "refresh();")
+	if spliceAt < 0 || guardAt < 0 || refreshAt < 0 {
+		t.Fatal("commitWTRename lost the splice / guarded repaint / refresh() trio (review B-F2 + A-F3, issue #122)")
+	}
+	if !(spliceAt < guardAt && guardAt < refreshAt) {
+		t.Fatal("commitWTRename's order must stay splice -> guarded repaint -> refresh() (review B-F2, issue #122)")
+	}
+	thenAt := strings.Index(commitBody, ".then(updated => {")
+	catchAt := strings.Index(commitBody, "}).catch(err => {")
+	if thenAt < 0 || catchAt < 0 || thenAt > catchAt {
+		t.Fatal("commitWTRename must keep its .then / .catch split (issue #122)")
+	}
+	if !strings.Contains(commitBody[thenAt:catchAt], "refresh();") {
+		t.Fatal("the SUCCESS continuation must keep its unconditional refresh() resync — the catch branch's refresh() is not a substitute (review A-F3, issue #122)")
+	}
+	if strings.Contains(commitBody[thenAt:catchAt], "if (") && !guardedRender.MatchString(commitBody[thenAt:catchAt]) {
+		t.Fatal("the success continuation's renderSidebar() must be the guarded one (review B-F2, issue #122)")
+	}
+	if !strings.Contains(bodyOf("function cancelWTRename() {"), "state.renamingWT = null;") ||
+		!strings.Contains(bodyOf("function cancelWTRename() {"), "renderSidebar();") {
+		t.Fatal("cancelWTRename must reset the state and repaint the sidebar (issue #122)")
+	}
+
+	// 6. framework.js declares the mirrored state fields, and the CSS rule is
+	// fluid: the input fills whatever width .wt-name gets, never a hard-coded
+	// pixel width like the tab's 100px input.
+	for _, field := range []string{"renamingWT: null,", "renamingWTValue: \"\","} {
+		if !strings.Contains(framework, field) {
+			t.Fatalf("framework.js window.state must initialize %q (issue #122)", field)
+		}
+	}
+	cssStart := strings.Index(index, ".wt-rename-input {")
+	if cssStart < 0 {
+		t.Fatal("index.html lost the .wt-rename-input rule (issue #122)")
+	}
+	cssEnd := strings.Index(index[cssStart:], "\n        }")
+	if cssEnd < 0 {
+		t.Fatal("index.html .wt-rename-input rule has no closing brace (issue #122)")
+	}
+	cssRule := index[cssStart : cssStart+cssEnd]
+	for _, decl := range []string{
+		"background: var(--main-bg);",
+		"border: 1px solid var(--border-color);",
+		"border-radius: 3px;",
+		"padding: 1px 4px;",
+		"font: inherit;",
+		"color: inherit;",
+		"width: 100%;",
+		"box-sizing: border-box;",
+		"outline: none;",
+	} {
+		if !strings.Contains(cssRule, decl) {
+			t.Fatalf("index.html .wt-rename-input should declare %q (issue #122)", decl)
+		}
+	}
+	if regexp.MustCompile(`width:\s*\d+px`).MatchString(cssRule) {
+		t.Fatal(".wt-rename-input must stay fluid (width: 100% + box-sizing), no hard-coded pixel width (plan T3.6, issue #122)")
+	}
+	focusStart := strings.Index(index, ".wt-rename-input:focus {")
+	if focusStart < 0 {
+		t.Fatal("index.html lost the .wt-rename-input:focus rule (issue #122)")
+	}
+	focusRule := index[focusStart:]
+	if e := strings.Index(focusRule, "\n        }"); e >= 0 {
+		focusRule = focusRule[:e]
+	}
+	if !strings.Contains(focusRule, "border-color: var(--active-color);") {
+		t.Fatal(".wt-rename-input:focus should take var(--active-color) like the tab input (issue #122)")
+	}
+}

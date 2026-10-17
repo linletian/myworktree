@@ -35,6 +35,20 @@ window.state = {
     diverged: null,
     refreshSeq: 0,
     renamingInst: null,
+    // Sidebar worktree-row rename state (issue #122), same shape as the
+    // instance-tab pair above. The two rename state machines are mutually
+    // exclusive — index.html's startWTRename clears renamingInst and
+    // startRename clears renamingWT — so at most one rename input exists
+    // in the page at any moment. renamingWTValue is a LIVE binding since
+    // review #7's hardening: the editing input's oninput writes it on every
+    // keystroke and renderSidebar's renameValue ternary reads it back, so a
+    // repaint that slips past the guards rebuilds the input with the typed
+    // text instead of falling back to w.name. renamingInstValue above stays
+    // the write-only dead leftover it always was — the deliberate parity
+    // edge the review approved: zero behaviour change on the tab side, the
+    // hardening lands on the new surface only.
+    renamingWT: null,
+    renamingWTValue: "",
     version: 0,
 };
 
