@@ -606,6 +606,33 @@ func TestEmptyWorktreeSwitchHidesAllWebPanels(t *testing.T) {
 		t.Fatal("selectInstance no longer hides web panels via hideWebPanels() — the two call sites can drift (issue #101)")
 	}
 
+	// selectInstance's hide must live INSIDE the `if (id && renderer)`
+	// branch, not run unconditionally before it (issue #120 follow-up):
+	// render() above may have nested-activated a renderer already — deleting
+	// the active instance runs selectInstance(null) → render() → renderTabs'
+	// auto-select → selectInstance(B) → activate(B) shows B's panel — and an
+	// unconditional hide here would erase it: a black workspace with no
+	// self-heal (the 2s poll never refills panel visibility and re-clicking
+	// B's tab dies on the same-id early-return; another tab or a reload
+	// still brings it back). The null-id / no-instances case is hidden by
+	// renderWorkspace's empty branch (asserted above) and terminal kinds by
+	// its non-web branch (asserted above).
+	siHeader := strings.Index(si, "if (id && renderer) {")
+	if siHeader < 0 {
+		t.Fatal("selectInstance lost its `if (id && renderer)` dispatch branch")
+	}
+	siHide := strings.Index(si, "hideWebPanels();")
+	if siHide < siHeader {
+		t.Fatal("selectInstance's hideWebPanels() runs before the renderer dispatch again — it erases the panel the nested auto-select showed after a delete (issue #120 follow-up)")
+	}
+	// IMMEDIATELY before the dispatch, not slid behind a kind-specific `if`
+	// inside the branch — a hide that only covers one kind leaves the other
+	// two web kinds stacked half/half while the positional anchor above
+	// still passes (PR #126 review).
+	if rest := strings.TrimLeft(si[siHide+len("hideWebPanels();"):], " \t\n"); !strings.HasPrefix(rest, "renderer.activate(") {
+		t.Fatal("selectInstance's hideWebPanels() is no longer immediately before renderer.activate() — it slid behind a kind-specific guard and the mutual exclusion went partial (issue #120 follow-up)")
+	}
+
 	// (B) selectWorktree must deactivate the previous instance's renderer so
 	// web kinds hide their panel and stop polling. It must NOT carry
 	// selectInstance's prevRenderer !== renderer guard: a worktree switch is

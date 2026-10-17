@@ -5455,11 +5455,6 @@
             const kind = (inst && inst.kind) || 'pty';
             const renderer = (window.KindRenderers || {})[kind];
             const session = { id: id, instance: inst };
-            // Web-ui panels are mutually exclusive: hide them all before
-            // dispatching so the activated renderer's panel is the only
-            // visible one (prevents the stacked half/half layout when
-            // switching between web-ui kinds).
-            hideWebPanels();
             // Deactivate the previously-active renderer first so it
             // can release any listeners / hide its panel cleanly.
             if (previousID) {
@@ -5471,6 +5466,40 @@
                 }
             }
             if (id && renderer) {
+                // Web-ui panels are mutually exclusive: hide them all before
+                // dispatching so the activated renderer's panel is the only
+                // visible one (prevents the stacked half/half layout when
+                // switching between web-ui kinds). The hide lives INSIDE this
+                // branch on purpose: render() above may have nested-activated
+                // a renderer already — deleting the active instance ALWAYS
+                // runs selectInstance(null) (renderTabs computes a neighbour
+                // only while the deleted instance is still in the list, so
+                // the newId branch is unreachable for deletes) → render() →
+                // renderTabs' auto-select → selectInstance(B) → activate(B)
+                // shows B's panel — and an unconditional hide here would erase
+                // the panel the nested activation just showed: a black
+                // workspace with no iframe, no stopped placeholder and no
+                // empty state, with NO SELF-HEAL — the 2s poll never refills
+                // panel visibility (activate() is the sole panel-show entry
+                // point) and re-clicking B's tab dies on the same-id
+                // early-return above; only another instance's tab, or a
+                // reload, brings it back. Nothing else needs the
+                // unconditional hide: a registered terminal kind dispatches
+                // through THIS branch (the hide runs for it too) with
+                // renderWorkspace's non-web branch as the second backstop;
+                // the null-id / no-instances case is hidden by
+                // renderWorkspace's empty branch; and a web kind whose
+                // renderer script failed to load never showed its own panel
+                // to begin with, while the previous kind's panel was hidden
+                // by the deactivate() above (issue #101's contract untouched).
+                // One load-bearing fact for the delete path: the OUTER
+                // frame's prevRenderer.deactivate() above is SKIPPED there —
+                // the deleted id resolves to no instance → prevKind defaults
+                // to 'pty' → the same pty-defaulted renderer as this
+                // null-id frame → guard skips — so it cannot re-cover the
+                // panel after the nested activate; changing the prevKind
+                // default would re-open the black screen.
+                hideWebPanels();
                 renderer.activate(session, document.getElementById('workspace'));
                 if (kind === 'opencode-web') {
                     updateStatus('opencode web ui');
