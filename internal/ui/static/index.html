@@ -4774,9 +4774,18 @@
             html += state.worktrees.map(w => {
                 const isActive = state.activeWT === w.id;
                 const wIdEsc = escapeHtml(w.id);
-                // Verbatim mirror of renderTabs' rename branch (issue #122):
-                // renamingWTValue is the same write-only leftover the tab
-                // side ships, so the rendered value falls back to w.name.
+                // Verbatim mirror of renderTabs' rename branch (issue #122).
+                // renamingWTValue started life as the write-only leftover the
+                // tab side ships (issue named the two as isomorphic, plan F5
+                // kept it) — review #7 hardened it into a LIVE binding below:
+                // oninput keeps the field current, so a repaint that slips
+                // past the six guards rebuilds the input from what the user
+                // has typed instead of falling back to w.name and silently
+                // losing text (same disease class as the blur re-entrancy the
+                // browser verification caught). The TAB side stays the dead
+                // write-only leftover — that is the deliberate parity edge:
+                // zero behaviour change there, hardening on the new surface
+                // only (explicitly approved boundary, review #7).
                 const renameValue = state.renamingWT === w.id && state.renamingWTValue ? state.renamingWTValue : w.name;
                 // The row itself stays a row while editing — only the name
                 // cell swaps to an input. EVERY non-main row carries the
@@ -4785,7 +4794,7 @@
                 // synchronously, and the dblclick then lands on the rebuilt
                 // node, which carries the very same inline handler.
                 const nameCell = state.renamingWT === w.id
-                    ? `<input id="wt-rename-input-${wIdEsc}" class="wt-rename-input" value="${escapeHtml(renameValue)}" onkeydown="handleWTRenameKeydown('${wIdEsc}', event)" onblur="commitWTRename('${wIdEsc}', event)">`
+                    ? `<input id="wt-rename-input-${wIdEsc}" class="wt-rename-input" value="${escapeHtml(renameValue)}" oninput="state.renamingWTValue = this.value" onkeydown="handleWTRenameKeydown('${wIdEsc}', event)" onblur="commitWTRename('${wIdEsc}', event)">`
                     : escapeHtml(w.name);
                 return `
             <li class="wt-item ${isActive ? 'active' : ''}" onclick="selectWorktree('${wIdEsc}')" ondblclick="startWTRename('${wIdEsc}', event)" title="Double-click to rename">

@@ -50,6 +50,15 @@
 // stopPropagation but BEFORE the mutual-exclusion teardown, so a control
 // double-click stays inert for the rename machine end to end.
 //
+// Case 18 pins review #7's hardening: the editing-state input carries
+// `oninput="state.renamingWTValue = this.value"`, turning the issue-named
+// isomorphic leftover (plan F5's write-only dead field) into a LIVE binding —
+// the case EXTRACTS that attribute from the shipped template text and
+// EXECUTES it against the harness (not a hand-copied assignment), then
+// simulates a repaint that slips past the six guards and asserts the
+// rebuilt input carries the typed text, not the stale w.name. The tab side
+// stays the dead leftover — the deliberate parity edge review #7 approved.
+//
 // Same arrangement as sidebar_collapse.test.mjs: every function is SLICED
 // from the shipped index.html (and window.state from framework.js) and
 // evaluated against stubbed browser state — no second copy of the logic — so
@@ -1111,4 +1120,59 @@ test("issue #122 review V5: a double-click starting on delete / terminal / finde
   ok.flushFrames();
   assert.equal(ok.state.renamingWT, "wt-1", "a name-cell double-click still opens the rename");
   assert.ok(ok.input("wt-1"), "and builds the input");
+});
+
+// --- 18: oninput keeps renamingWTValue live (review #7) ----------------------
+
+test("issue #122 review #7: oninput keeps renamingWTValue live — a repaint that slips past the guards rebuilds the input with the typed text", () => {
+  // EXTRACT the shipped oninput attribute from the row template text — the
+  // case runs the attribute the browsers run, not a hand-copied assignment.
+  const rowStart = script.indexOf('html += state.worktrees.map(w => {');
+  assert.notEqual(rowStart, -1, "index.html lost the regular-worktree map block");
+  const rowEnd = script.indexOf('}).join("");', rowStart);
+  assert.notEqual(rowEnd, -1, "regular-worktree map block has no terminator");
+  const rowTemplate = script.slice(rowStart, rowEnd);
+  const oninputAttr = /\soninput="([^"]*)"/.exec(rowTemplate);
+  assert.ok(oninputAttr, "the editing-state input must carry an oninput attribute (review #7)");
+  assert.equal(oninputAttr[1], "state.renamingWTValue = this.value", "the attribute must be exactly the one-line live binding");
+
+  // Inline-attribute semantics: `this` is the element, identifiers resolve
+  // against the page globals — new Function("state", attr).call(el, state)
+  // is the faithful harness equivalent.
+  const runOninput = (state, el) => new Function("state", oninputAttr[1]).call(el, state);
+
+  const h = renameHarness({ blurOnRemoval: false });
+  h.startWTRename("wt-1", makeEvent());
+  h.flushFrames();
+  const input = h.input("wt-1");
+
+  // The F5 leftover is now LIVE: a keystroke (oninput) writes the field.
+  input.value = "半输入 typed";
+  runOninput(h.state, input);
+  assert.equal(h.state.renamingWTValue, "半输入 typed", "typing must flow into renamingWTValue through the SHIPPED attribute expression");
+
+  // Simulated slipped repaint — blurOnRemoval:false models the rebuild
+  // while the input is NOT the blur source (focus elsewhere, programmatic
+  // rebuild): no blur fires, so no commit rescues the text, and the live
+  // binding is the ONLY line of defence against losing it. A rebuild that
+  // did blur would commit through decision H instead — a different, already
+  // pinned path (cases 12/14/15).
+  h.renderSidebar();
+  const rebuilt = h.input("wt-1");
+  assert.ok(rebuilt, "the rebuild recreates the editing-state input");
+  assert.equal(rebuilt.value, "半输入 typed", "the rebuilt input is seeded from renamingWTValue — typed text survives the slipped guard");
+  assert.notEqual(rebuilt.value, h.state.worktrees[0].name, "it must NOT fall back to the stale stored name");
+  assert.deepEqual(h.calls.api.filter((c) => c.opts.method === "PATCH"), [], "an un-focused rebuild commits nothing — this is text preservation, not a disguised commit");
+
+  // Contract control: an untouched rename still seeds w.name — the ternary's
+  // fallback branch (the one the dead field always took) stays alive.
+  const fresh = renameHarness();
+  fresh.startWTRename("wt-1", makeEvent());
+  fresh.flushFrames();
+  assert.equal(fresh.input("wt-1").value, "fix-the-flaky-thing", "an untouched rename still seeds w.name");
+
+  // Parity edge review #7 approved: the TAB side stays the dead write-only
+  // leftover — no oninput on its rename input, zero behaviour change there.
+  const tabsBody = sliceBlock(script, "function renderTabs() {");
+  assert.ok(!/oninput="state\.renamingInstValue/.test(tabsBody), "the tab side keeps its dead leftover — hardening is new-surface only");
 });

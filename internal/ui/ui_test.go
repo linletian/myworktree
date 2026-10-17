@@ -2950,6 +2950,10 @@ func TestSidebarWorktreeRenameAnchors(t *testing.T) {
 		`title="Double-click to rename"`,
 		`const renameValue = state.renamingWT === w.id && state.renamingWTValue ? state.renamingWTValue : w.name;`,
 		`<input id="wt-rename-input-${wIdEsc}" class="wt-rename-input" value="${escapeHtml(renameValue)}"`,
+		// Review #7 hardening: the live binding that turns the F5 leftover
+		// into a real field — without it a slipped repaint rebuilds from
+		// w.name and silently loses typed text.
+		`oninput="state.renamingWTValue = this.value"`,
 		`onkeydown="handleWTRenameKeydown('${wIdEsc}', event)"`,
 		`onblur="commitWTRename('${wIdEsc}', event)"`,
 		`escapeHtml(w.name)`,
