@@ -541,7 +541,7 @@ Bi-directional stream for terminal output/input with PTY support.
 `caps` is an optional, comma-separated capability list (issue #98), and the
 parameter may be **repeated** (`?caps=pong&caps=ping` — every value is
 scanned, not just the first). Matching is by whole, case-sensitive token:
-`caps=pinger` and `caps=PING` do NOT opt in. Five capabilities are defined.
+`caps=pinger` and `caps=PING` do NOT opt in. Six capabilities are defined.
 One of them, `replay-window`, carries a value (`replay-window=<bytes>`), so
 it is matched by key up to the first `=` rather than as a whole token —
 whitespace around the key and the value is trimmed, an empty value
@@ -603,6 +603,50 @@ connection; where a list declares the same key more than once the first
   today) is the client half of this pair and is NOT part of this server
   change — a client that declares `slow-link` and keeps a 30 s threshold will
   simply reconnect on its own schedule, which is safe, not wrong.
+- **`compress`** (issue #114, decision 5a) — the client can consume
+  app-layer-compressed BINARY frames: the server feeds every binary frame
+  through ONE persistent per-connection raw-deflate stream
+  (`compress/flate`, level BestSpeed, RFC 1951 — no zlib wrapper), sync
+  flushing after each frame, so each WS binary frame carries one flushed
+  segment of that single stream and the client inflates the binary frames
+  through one persistent `DecompressionStream('deflate-raw')` pipe, in
+  order, for the life of the connection. The negotiation is echoed in the
+  ready frame: a compressed connection gets
+  `{"type":"ready","compress":true}`, every other connection gets the
+  legacy `{"type":"ready"}` byte-for-byte — the echo is the switch the
+  client wires its decoder on, and its absence (an old server) means the
+  plaintext path. **TEXT frames are never compressed** (ready, sync, ping,
+  overflow notice, resize, pong ride the wire as plaintext JSON), and so
+  are RFC 6455 ping/pong and close frames — the inflate stream only ever
+  consumes binary frames. The stream is **never closed mid-connection**
+  (a Close would end the shared context and desync every later frame; the
+  context dies with the socket). A deflate failure closes the connection
+  with **1011** — never 1013, whose "retry" semantics belong to the
+  overflow contract alone. **Cursor arithmetic is untouched:** every
+  offset, sync, and dropped-bytes figure stays a LOGICAL (uncompressed,
+  ring) byte count — compression lives only in the delivery layer, so the
+  client advances its cursor by the INFLATED length of each frame, never
+  by the frame's wire length; dropped chunks never entered the deflate
+  stream (a chunk is compressed exactly once, when it is written, in
+  write order), so the two ends' contexts cannot diverge across a drop. A
+  client that does NOT declare `compress` — every client that exists today,
+  legacy included — keeps the plaintext wire verbatim: no flate object is
+  even constructed on that path. Wire-vs-logical observability rides the
+  `[tty-metrics]` lines: `wireBytes` (compressed delivery) and
+  `logicalBytes` (pre-compression) on slow-write/conn-closed rows (equal
+  on plaintext connections, so the columns stay historically comparable),
+  and `compress=true` appended to the handshake row of compressed
+  connections only. The replay/drain columns carry the same two families
+  (issue #114 review R1): `replayBytes` stays the WIRE replay and
+  `replayLogicalBytes` is its LOGICAL pair on the handshake row;
+  `liveBytes` stays the WIRE drain and `liveLogicalBytes` its LOGICAL
+  pair on the overflow row. What is frozen — so the collector's grep/awk
+  never breaks — is the column NAMES and POSITIONS, not any single column's
+  unit across connection types: on a compressed connection `replayBytes` /
+  `liveBytes` are WIRE counts, so any comparison that must hold across
+  compressed and plaintext connections has to read the LOGICAL family
+  (`replayLogicalBytes` / `liveLogicalBytes`), which is the one unit the
+  client's cursor speaks.
 - **`replay-window=<bytes>`** (issue #114) — the client asks for a **smaller**
   handshake replay window than the operator's default. The window bounds a
   catch-up replay at both ends: the replay starts no earlier than
@@ -616,6 +660,17 @@ connection; where a list declares the same key more than once the first
   pre-existing #86 behavior; the window does not govern that path).
   Malformed values are ignored, never refused. See the replay section below
   for the cursor semantics, which need no new frame type.
+
+The four capabilities compose independently; the resulting wire contract per
+combination (issue #114 review R12), each cell pinned by its own test:
+
+| caps | overflow behaviour | binary wire | cursor unit |
+| --- | --- | --- | --- |
+| (none, legacy) | 1013 close | plaintext | wire = logical |
+| `overflow-notice` | notice + drop, connection kept | plaintext | wire = logical |
+| `compress` | 1013 close | deflate-raw | logical (inflated) |
+| both | notice + drop, connection kept | deflate-raw | logical (inflated) |
+
 The rule is deliberately opt-IN rather than version-gated: the server can
 never again leak a future visible control frame to a client that did not
 declare it. Older servers ignore unknown query parameters, so a new client
@@ -650,7 +705,11 @@ instead throw the client into a full tail replay.
   whatever the ring's head is *at that instant*: under sustained output the
   replay follows a head that keeps moving, and only a count of the bytes
   actually written stops it. Measured in production before this cap existed,
-  one replay ran 84.6 s with the client's screen frozen throughout.
+  one replay ran 84.6 s with the client's screen frozen throughout. **`W` and
+  this byte count are LOGICAL (ring) bytes, never compressed wire bytes:** the
+  replay window and the `compress` cap are orthogonal — a compressed
+  connection's replay is still capped at `W` logical bytes out of the ring,
+  whatever those bytes shrink to on the wire (issue #114, decision 4 ∩ 5a).
 
 `W` resolves once per handshake as `min(MYWORKTREE_TTY_REPLAY_WINDOW_BYTES,
 the client's caps replay-window=<bytes>)`, default **1 MiB**
@@ -779,6 +838,9 @@ conflate them:
 
 **Handshake Protocol:**
 1. Server sends `{"type":"ready"}` immediately after connection
+   (`{"type":"ready","compress":true}` for a connection that declared
+   `caps=compress` — the echo is the client's decoder switch; the legacy
+   frame is unchanged byte-for-byte for every other connection)
 2. Client should wait for this message before sending resize
 3. Client sends `{"type":"resize","cols":80,"rows":24}` to start data flow
 4. Server sends `{"type":"sync","offset":<S>,"start":true}` (text frame,
@@ -828,8 +890,8 @@ conflate them:
 - Liveness probe: `{"type":"ping"}` (text frame, issue #83) — answered with `{"type":"pong"}` and **not** treated as input: the server consumes it before the input fallthrough, so the probe JSON is never typed into the instance's PTY. (A user literally typing that exact JSON is swallowed the same way `{"type":"resize",...}` already is.)
 
 *Server → Client:*
-- Ready: `{"type":"ready"}` (text frame)
-- Output: binary frames (terminal output chunks)
+- Ready: `{"type":"ready"}` (text frame; `{"type":"ready","compress":true}` for a client that declared `caps=compress` — see the capability list above)
+- Output: binary frames (terminal output chunks; for a `caps=compress` client these are flushed segments of ONE persistent raw-deflate stream — inflate through a single `DecompressionStream('deflate-raw')` for the life of the connection, advance the cursor by the INFLATED length; TEXT frames and this stream never mix)
 - Sync: `{"type":"sync","offset":<int64>}` (text frame, **opt-in via `caps=sync` — or inferred from an explicit `since` parameter — since issue #98**), the cursor handoff of the handshake, sent even when the replay was empty. Since issue #94 a replay addressed to a cursor-bearing client is bracketed by TWO of these: `{"type":"sync","offset":<S>,"start":true}` ahead of the FIRST replay chunk carries the replay's real (possibly clamped) start offset, and the closing sync after the last chunk carries its end offset — every other path (the cursor-less tail, `since=-2`, an empty replay) sends the closing sync alone. The client latches per connection: a replay frame advances the cursor by its wire byte count only once SOME sync has arrived — against a post-#94 server that is the start sync, so frames count from chunk 1 on (S and chunk 1 come from the same server-side read, so the base is truthful); against a pre-#94 server the latch lifts only at the closing sync, which publishes the end of the whole replay in one step. Either way the closing sync is the absolute authority — whenever the summed frames and it drift (a ring rollover mid-replay can evict unsent bytes, landing the sum short), it wins. Counting binary frames is sound at all because every one of them is ring-buffer output: the server closes the connection rather than writing diagnostics as binary. The `"start":true` marker exists for consumers that must know WHEN the replay ends; a client that ignores it and treats both syncs as absolute offsets to adopt implements the full contract)
 - Heartbeat: `{"type":"ping"}` (text frame, every 10 s, issue #83; **opt-in via `caps=ping` since issue #98**) — the application-level mirror of the RFC 6455 ping the server sends on the same tick. Browsers answer the protocol ping automatically from their network stack (which refreshes the server's 45 s read deadline); this text frame is the heartbeat browser JavaScript can observe, since `onmessage` never fires for control frames. Clients MUST whitelist `ping` (and `pong`) as control types and MUST NOT render them as terminal output — and the server only sends this frame to clients that declared `ping` in the handshake `caps` list, so a client without the whitelist never receives it.
 - Overflow notice: `{"type":"overflow","droppedBytes":<int64>,"droppedChunks":<int64>}` (text frame, issue #114; **opt-in via `caps=overflow-notice`**) — the counted proof that this client's live queue overflowed and the server kept it streaming anyway: `droppedChunks` chunks totalling `droppedBytes` were discarded from the OLDEST end of its queue to make room for the newest. The counts are **INCREMENTAL** (everything dropped since the previous notice on this connection), never a cumulative total — a client needs no baseline to act on one, and a total it had to diff itself would silently under-report if it ever missed a frame. **The frame is rate-aggregated on the wire at 250 ms** (`ttyOverflowNoticeInterval`, issue #114 decision 1 补 1 / review R5): the **first** drop increment of a connection notices **immediately**, and after that at most **one frame per 250 ms (≤4/s)** carrying the **Σ** of every increment since the previous notice. That ceiling exists because a notice per increment is ~150 TEXT frames/s in a storm, each one taking `ws.Conn`'s write mutex away from the binary chunk it precedes — the notice was amplifying the congestion it reported. Aggregation never costs a count: the server advances its drop baseline on every sample whether or not a frame goes out, so a deferred increment is grouped into the next notice, not lost; and since issue #114 review round one the flush contract closes the one remaining gap: a pending pair stranded by the gate is flushed by the **heartbeat branch**, so it reaches the wire **within one heartbeat cycle** — the 10 s/15 s interval normally leaves the 250 ms gate long since open on the tick that sees the debt, and the one exception (a chunk-path notice written <250 ms before the tick) defers the flush by at most one further 250 ms gate window onto the following tick — even when output has stopped entirely and the connection stays alive with no further chunks, the pending notice still arrives within ≤1 heartbeat period. Whatever frame does go out is still written **ahead of the binary chunk of its own iteration**, because the client's cursor advances by binary frame length: a notice that trailed the bytes it describes could be processed after those bytes were already painted under a torn screen — and every byte it reports is older than that chunk, since they were evicted to make room for chunks up to and including it. A client therefore MUST NOT assume a notice arrives within 250 ms of every drop: the correct reading is "the first one is immediate, and later ones are the running total, at ≤4/s". On receiving one, the client MUST reset its screen and repaint from a cursorless (tail) reconnect: the bytes it is missing are gone from its side of the cursor, and a cursor advanced past a gap would skip them forever. Sent ONLY to clients that declared `overflow-notice` — an unwhitelisted page paints it into the terminal (issue #98) — and never for a subscriber whose drops nobody counted, so a legacy (#82) client sees only the close. The server's own log line for this path is throttled separately, at 500 ms (`ttyDropLogInterval`), and a sampled line carries its own increment rather than the suppressed sum: the log is a sample, the notices are the complete record.

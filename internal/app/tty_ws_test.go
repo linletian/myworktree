@@ -4261,8 +4261,8 @@ func TestTTYMetricsHandshakeLineCarriesWindowFields(t *testing.T) {
 	if !strings.HasPrefix(line, wantPrefix) {
 		t.Fatalf("handshake line = %q, want the frozen column layout %q... — the columns that existed before issue #114 keep their names, order and values", line, wantPrefix)
 	}
-	if !strings.HasSuffix(line, " budgetExhausted=false windowed=true droppedFromWindow=60000") {
-		t.Fatalf("handshake line = %q, want it to END with \" budgetExhausted=false windowed=true droppedFromWindow=60000\" — budgetExhausted keeps its old slot, the two new fields ride the end (head %d − window 40000 − since 0 = 60000 refused at the front)", line, head)
+	if !strings.HasSuffix(line, " budgetExhausted=false windowed=true droppedFromWindow=60000 replayLogicalBytes=40000") {
+		t.Fatalf("handshake line = %q, want it to END with \" budgetExhausted=false windowed=true droppedFromWindow=60000 replayLogicalBytes=40000\" — budgetExhausted keeps its old slot, the window fields ride the end (head %d − window 40000 − since 0 = 60000 refused at the front), and replayLogicalBytes is the logical pair of replayBytes appended after them (issue #114 R1: always present, EQUAL to replayBytes on this plaintext connection; a compressed connection appends the conditional compress=true after it)", line, head)
 	}
 }
 

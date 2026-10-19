@@ -2,6 +2,7 @@ package app
 
 import (
 	"bytes"
+	"compress/flate"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -2647,6 +2648,147 @@ func ttyClientCapValue(caps []string, name string) (string, bool) {
 	return "", false
 }
 
+// ttyCompressor owns ONE connection's persistent app-layer deflate-raw
+// stream (issue #114, decision 5a). It is constructed ONLY for a client
+// that declared the `compress` cap — a legacy connection never allocates
+// one, and its wire stays byte-identical (the pin tests hold). The stream
+// is created before the connection's first binary frame and lives as long
+// as the socket: replay and live share ONE deflate context, every frame is
+// sync-flushed so the client can inflate per frame from a
+// DecompressionStream('deflate-raw'), and the writer is NEVER Closed
+// mid-connection — Close terminates the shared context and would desync
+// the client for the rest of the socket's life; teardown rides the socket
+// close instead.
+//
+// The scratch buffer is allocated once per connection and reused by every
+// frame (no per-frame make on the hot path). compress hands back a slice
+// ALIASING that buffer: the caller must hand it to the socket before the
+// next compress on the same compressor, which is exactly what
+// ttyCompressingConn.WriteBinary does — compress, write, drain.
+//
+// out is the sink the deflate stream writes into: the internal buf in
+// production (so compress can hand the produced bytes straight back to
+// the socket), and an injectable seam for the fault test — a sink that
+// always fails makes fw.Write/fw.Flush error, which is the ONLY way to
+// reach the compressor-failure teardown on a real socket. A non-buffering
+// sink is only ever injected to drive that failure path; the success path
+// reads buf back, so the two are never mixed on one compressor.
+type ttyCompressor struct {
+	buf bytes.Buffer
+	out io.Writer
+	fw  *flate.Writer
+}
+
+func newTTYCompressor() (*ttyCompressor, error) {
+	return newTTYCompressorSink(nil)
+}
+
+// newTTYCompressorSink is the injectable-seam constructor: out == nil
+// selects the internal scratch buffer (production); a non-nil out binds the
+// deflate output to the caller's writer — used by the fault test to force
+// a Write/Flush error and pin the 1011 teardown that must follow.
+func newTTYCompressorSink(out io.Writer) (*ttyCompressor, error) {
+	c := &ttyCompressor{}
+	if out == nil {
+		out = &c.buf
+	}
+	c.out = out
+	// BestSpeed, raw deflate (no zlib wrapper): the format the client
+	// names in DecompressionStream('deflate-raw'), and the level the
+	// A0 gate measured (5.719x at the 1KB PTY frame size, PASS ≥2x).
+	fw, err := flate.NewWriter(c.out, flate.BestSpeed)
+	if err != nil {
+		return nil, err
+	}
+	c.fw = fw
+	return c, nil
+}
+
+// compress appends p to the persistent stream, sync-flushes it, and
+// returns the compressed bytes produced since the previous call — the one
+// WS binary frame the caller will write. Errors here mean the deflate
+// stream itself failed (a closed writer, or an injected failing sink on
+// the fault-test path); the caller must fail the connection, not skip the
+// frame — a skipped frame would desync the shared context forever. The
+// logical byte count is NOT tracked here: ttyMeteredConn.logicalBytes is
+// the single source of truth, advanced by the caller that owns the meter.
+func (c *ttyCompressor) compress(p []byte) ([]byte, error) {
+	if _, err := c.fw.Write(p); err != nil {
+		return nil, err
+	}
+	if err := c.fw.Flush(); err != nil {
+		return nil, err
+	}
+	return c.buf.Bytes(), nil
+}
+
+// drain forgets the bytes the last compress handed out. It runs after the
+// socket write even when that write failed: the connection dies there
+// anyway, and stale bytes must never ride a later frame.
+func (c *ttyCompressor) drain() { c.buf.Reset() }
+
+// ttyCompressingConn wraps the metered conn for EVERY tty connection and
+// decides per frame whether the binary payload is compressed. It sits
+// OUTSIDE the metered wrapper on purpose: the meter sees the compressed
+// bytes it is handed, so binBytes stays WIRE bytes, while the compressor
+// keeps the logical count the R14 lines pair with it. A connection that
+// did not declare `compress` gets comp == nil: WriteBinary delegates
+// verbatim, zero flate objects, zero wire difference (legacy pin tests).
+// Everything else — TEXT (ready/sync/ping/notice/resize/pong), RFC 6455
+// ping, Close, deadlines, reads — promotes through the embedding untouched
+// and is never compressed: the client's decoder only ever sees binary
+// frames fed to its inflate stream.
+type ttyCompressingConn struct {
+	*ttyMeteredConn
+	comp *ttyCompressor
+}
+
+func newTTYCompressingConn(mc *ttyMeteredConn, comp *ttyCompressor) *ttyCompressingConn {
+	return &ttyCompressingConn{ttyMeteredConn: mc, comp: comp}
+}
+
+// WriteBinary is the single compression choke point: every binary byte
+// this endpoint ever writes flows through here, exactly once, in order —
+// which is what keeps dropped chunks out of the deflate stream (a chunk
+// the handler never writes was never compressed) and the ring offsets the
+// cursor speaks of in logical bytes.
+func (c *ttyCompressingConn) WriteBinary(p []byte) error {
+	if c.comp == nil {
+		if err := c.ttyMeteredConn.WriteBinary(p); err != nil {
+			return err
+		}
+		c.m.logicalBytes += int64(len(p))
+		return nil
+	}
+	data, err := c.comp.compress(p)
+	if err != nil {
+		if c.logger != nil {
+			c.logger.Printf("tty compress stream failure id=%s: %v — closing connection", c.id, err)
+		}
+		// No drain here, defensively reasoned (round-2 arbitration): under
+		// the sink design a failed compress writes its partial bytes into
+		// the sink, not into the shared buf — and in production the sink
+		// IS that buf, where a failed flush leaves at most a partial block
+		// that no later frame can see anyway, because this very failure
+		// terminates the connection with 1011 below and the deflate stream
+		// dies with it. drain stays reserved for the socket-write paths,
+		// success or failure, where bytes were actually handed out.
+		// 1011 internal error, deliberately NOT 1013: 1013 tells the
+		// browser "retry, the server is busy" and drives the overflow
+		// reconnect contract; a dead compressor is not retryable by
+		// reconnecting to the same daemon.
+		_ = c.ttyMeteredConn.WriteClose(ws.CloseMessage(1011, "compress stream failure"))
+		return err
+	}
+	err = c.ttyMeteredConn.WriteBinary(data)
+	c.comp.drain()
+	if err != nil {
+		return err
+	}
+	c.m.logicalBytes += int64(len(p))
+	return nil
+}
+
 // ttyPolicyOutputSubscriber is the optional kind surface the TTY handler
 // uses to take a live subscription with a chosen overflow policy (issue
 // #114). The handler reaches it through Manager.SubscribeOutputWith,
@@ -2771,6 +2913,19 @@ func (s *Server) handleInstanceTTYWSLiveness(w http.ResponseWriter, r *http.Requ
 	// terminal) and keeps the #82 contract verbatim — overflow closes the
 	// subscription, and the !ok teardown below answers 1013.
 	overflowNoticeCap := ttyClientHasCap(caps, "overflow-notice")
+	// "compress" (issue #114, decision 5a): a whole-token cap only. A
+	// client that declares it gets app-layer compression: every BINARY
+	// frame this handler writes is fed through one persistent per-connection
+	// deflate-raw stream (BestSpeed, sync-flushed per frame) and the
+	// frame's compressed bytes go out as one WS binary frame. TEXT frames
+	// (ready/sync/ping/notice/resize), RFC 6455 pings and Close frames stay
+	// verbatim plaintext — the client's inflate stream only ever consumes
+	// binary frames. The ready frame echoes the decision
+	// ({"type":"ready","compress":true}) so the client knows which decoder
+	// to wire up (TASK-B B1.4). A client that does NOT declare it — every
+	// client that exists today, legacy included — keeps the plaintext wire
+	// verbatim: no flate object is even constructed on that path.
+	compressCap := ttyClientHasCap(caps, "compress")
 	// "slow-link" (issue #114, decision 3(c)/5c): a whole-token cap only, no
 	// value to read. A client that declares it is on a link where the 10 s
 	// heartbeat costs a measurable share of the connection's write budget
@@ -2802,7 +2957,37 @@ func (s *Server) handleInstanceTTYWSLiveness(w http.ResponseWriter, r *http.Requ
 	// Issue #114 diagnostics: every write on this handler is timed and
 	// counted through the metered wrapper (tty_metrics.go). Method set is
 	// identical to *ws.Conn, so nothing below changes shape.
-	conn := newTTYMeteredConn(rawConn, s.logger, id)
+	meteredConn := newTTYMeteredConn(rawConn, s.logger, id)
+	// Issue #114 decision 5a: the compressor mounts OUTSIDE the metered
+	// wrapper — WriteBinary below compresses first and hands the meter the
+	// compressed bytes, so binBytes stays the wire count while the
+	// compressor keeps the logical count (the R14 pair). The stream is
+	// established here, after the caps have been parsed and before this
+	// connection's first binary frame (the ready frame is TEXT); it is
+	// never Closed mid-connection and dies with the socket below. A
+	// connection without the cap gets comp == nil: zero flate objects,
+	// byte-identical plaintext wire.
+	var ttyComp *ttyCompressor
+	if compressCap {
+		c, cerr := newTTYCompressor()
+		if cerr != nil {
+			// flate.NewWriter only fails on an invalid level, and the
+			// level is a constant, so this is unreachable; if it ever
+			// fired the only honest answer is teardown, never a silent
+			// downgrade to plaintext the client's inflate cannot read.
+			if s.logger != nil {
+				s.logger.Printf("tty compressor init failed id=%s: %v", id, cerr)
+			}
+			_ = meteredConn.WriteClose(ws.CloseMessage(1011, "compress init failure"))
+			_ = meteredConn.Close()
+			return
+		}
+		ttyComp = c
+	}
+	conn := newTTYCompressingConn(meteredConn, ttyComp)
+	if ttyMetricsBuild {
+		conn.m.compress = compressCap
+	}
 	clientHandle, resizeUpdates, err := s.newTTYClientHandle(id)
 	if err != nil {
 		_ = conn.WriteClose(ws.CloseMessage(1013, err.Error()))
@@ -2823,6 +3008,17 @@ func (s *Server) handleInstanceTTYWSLiveness(w http.ResponseWriter, r *http.Requ
 
 	// Step 1: Send handshake ready message
 	readyMsg := []byte(`{"type":"ready"}`)
+	// compress echo (issue #114, decision 5a, arbitration gap fix): a
+	// compressed connection's ready frame carries "compress":true so the
+	// client knows to feed its binary frames through a
+	// DecompressionStream('deflate-raw') (TASK-B B1.4). A connection that
+	// did not declare the cap keeps the byte-for-byte legacy ready frame
+	// (R16 rollback: the client whitelist dispatches by type, so the extra
+	// field is harmless to an old client, and a new client that receives no
+	// field falls back to the plaintext path).
+	if compressCap {
+		readyMsg = []byte(`{"type":"ready","compress":true}`)
+	}
 	if err := conn.WriteText(readyMsg); err != nil {
 		return
 	}
@@ -3607,6 +3803,7 @@ func (s *Server) handleInstanceTTYWSLiveness(w http.ResponseWriter, r *http.Requ
 			conn.m.windowed = windowed
 			conn.m.droppedFromWindow = droppedFromWindow
 			conn.m.replayBytes = conn.m.binBytes
+			conn.m.replayLogicalBytes = conn.m.logicalBytes
 			conn.m.replayDur = time.Since(conn.m.handshakeStart)
 			conn.m.subscribedAt = time.Now()
 		}

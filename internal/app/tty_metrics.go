@@ -51,7 +51,11 @@ type ttyConnMetrics struct {
 	// client advances its #87 cursor by binary frame length, so binBytes
 	// is the number comparable with the client's cursor, while text
 	// (sync/ping/pong/resize) and RFC 6455 ping frames are control
-	// traffic the cursor never sees.
+	// traffic the cursor never sees. Since decision 5a the meter sits
+	// INSIDE the compressor, so on a compressed connection binBytes is
+	// the WIRE count (deflate output) and the cursor-comparable number
+	// moves to logicalBytes below; on a plaintext connection the two
+	// stay equal, which is what keeps old and new readings comparable.
 	binBytes        int64
 	binFrames       int64
 	txtFrames       int64
@@ -59,6 +63,20 @@ type ttyConnMetrics struct {
 	slowWrites      int64
 	maxWriteBlock   time.Duration
 	totalWriteBlock time.Duration
+
+	// logicalBytes counts the UNCOMPRESSED binary payload bytes handed to
+	// the write path (issue #114, decision 5a R14). On a compressed
+	// connection binBytes is the wire count (deflate output) and this is
+	// its logical pair; on an uncompressed connection the two are equal by
+	// construction — every frame arrives at the meter verbatim — so the
+	// R14 lines can carry both fields on every connection and stay
+	// historically comparable.
+	logicalBytes int64
+	// compress reports the app-layer deflate-raw negotiation (the
+	// `compress` cap, decision 5a): true only when this connection declared
+	// it and got the compressed path. The handshake line appends
+	// compress=true for those connections only.
+	compress bool
 
 	// Handshake (filled in by completeHandshake).
 	mode            string // "follow-live-end" | "tail" | "catchup"
@@ -68,7 +86,18 @@ type ttyConnMetrics struct {
 	publishedOffset int64
 	replayBytes     int64 // binBytes snapshot at handshake end
 	replayDur       time.Duration
-	subscribedAt    time.Time // zero until SubscribeOutput succeeds
+	// replayLogicalBytes is the LOGICAL counterpart of replayBytes
+	// (issue #114 decision 5a, review R1): the snapshot of logicalBytes
+	// at handshake end. On a COMPRESSED connection replayBytes is the
+	// WIRE count — the deflate output the replay put on the socket — and
+	// its name stays frozen for historical comparability, while
+	// replayLogicalBytes is the ring/logical byte count the client's
+	// cursor actually advanced by; FIX-PLAN §五.3.b's acceptance
+	// arithmetic ("logicalBytes/replayMs on compressed connections")
+	// computes off THIS field paired with replayMs. On a plaintext
+	// connection the two families are equal by construction.
+	replayLogicalBytes int64
+	subscribedAt       time.Time // zero until SubscribeOutput succeeds
 	// windowed reports that this handshake's replay was bounded by the
 	// issue #114 replay window — TRUE when EITHER half fired: the START
 	// clamp (the client's `since` sat behind head−W_eff, so the replay
@@ -131,7 +160,9 @@ func newTTYMeteredConn(conn *ws.Conn, logger *log.Logger, id string) *ttyMetered
 
 // WriteBinary routes through timed (real timing in ttymetrics builds, a
 // passthrough that inlines away otherwise). The counter updates stay in
-// both variants: two integer increments per frame, below noise.
+// both variants: two integer increments here (binBytes, binFrames), three
+// once the compressing wrapper is counted in — it adds logicalBytes per
+// compressed frame (issue #114 R1); all of them sit below measurement noise.
 func (c *ttyMeteredConn) WriteBinary(p []byte) error {
 	err := c.timed("binary", len(p), func() error { return c.Conn.WriteBinary(p) })
 	if err == nil {
