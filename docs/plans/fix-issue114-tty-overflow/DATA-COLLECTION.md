@@ -27,8 +27,8 @@
 
 | 日志行 | 触发时机 | 关键字段 |
 | --- | --- | --- |
-| `[tty-metrics] handshake` | 每次 WS 握手完成（订阅建立时） | `mode`（tail/catchup/follow-live-end）、`since`（客户端 cursor）、`headAtStart`（握手开始时 ring head）、`replayBytes`、`replayMs`、`budgetExhausted`（是否撞 8MB 预算） |
-| `[tty-metrics] overflow` | subscriber 队列溢出、以 1013 断开前 | `subAgeMs`（订阅存活时长）、`liveBytes`/`liveFrames`（本次连接已交付的 live 输出）、`headNow`（溢出时 ring head）、`maxWriteBlockMs`、`slowWrites` |
+| `[tty-metrics] handshake` | 每次 WS 握手完成（订阅建立时） | `mode`（tail/catchup/follow-live-end）、`since`（客户端 cursor）、`headAtStart`（握手开始时 ring head）、`replayBytes`、`replayMs`、`budgetExhausted`（是否撞 8MB 预算）。**规划中（FIX-PLAN v6，尚未产出）**：`windowed=true`/`droppedFromWindow`（窗口化回放截断）；compress 连接的 slow-write/conn-closed 将增 `wireBytes`（压缩后）与 `logicalBytes`（解压后）双字段，消费速率口径随连接而变，届时以 logicalBytes 对齐历史数据 |
+| `[tty-metrics] overflow` | subscriber 队列溢出（drop 策略连接：发 overflow notice，连接保留；close 策略：以 1013 断开前） | `subAgeMs`（订阅存活时长）、`liveBytes`/`liveFrames`（本次连接已交付的 live 输出）、`headNow`（溢出时 ring head）、`maxWriteBlockMs`、`slowWrites`。**注意（2026-10-17 实测）**：drop 策略连接的该日志行受 `ttyDropLogInterval=500ms` 节流（首增量即打、后续每连接 ≤2 行/s），**日志是采样、wire notice 才是完整记录**；按日志行数推算 drop 总数会偏低 |
 | `[tty-metrics] conn-closed` | 每条 TTY WS 连接消亡时（任何原因） | `aliveMs`、`binBytes`/`binFrames`、`slowWrites`、`maxWriteBlockMs`、`totalWriteBlockMs` |
 | `[tty-metrics] slow-write` | 单次 socket 写阻塞 ≥1s | `op`（binary/text/ping）、`bytes`、`blockMs` |
 
@@ -100,13 +100,26 @@ grep '\[tty-metrics\]' daemon.log > tty-metrics-server.log
 
 ## 四、数据 → 决策矩阵
 
+> **2026-10-17 修订注记（评审 R9；v5 二轮补注 LOW-E；v6 三轮复核订数）**：
+> 第二行「subAge 小 + replay 大 → 回放洪流压垮 → 限速/降预算」**已作废**；
+> 第五行「回放分帧背压 / 预算重估」同批作废（「分帧背压」即被否决的
+> pacing 方向）。2026-10-17 生产日志+代码走查（EVIDENCE-2026-10-17.md
+> §三）证实：回放走 `ReadSince` 直读 ring、不经订阅者队列，压不垮队列；
+> subAge 小的溢出 = live 生产超标（引擎 A，缺口为 **burst 性**：持续生产
+> 端点法 ~17KB/s、burst 150–358KB/s、drain 中位 47KB/s——v6 口径订正），
+> 回放的真实代价是**时长**且跟随活 head（引擎 B，最差 replayMs 84.7s，
+> 时长只受 8MB 预算约束）。「限速/pacing」无对象可限，已否决。现行方案
+> 见 FIX-PLAN.md（v6）：引擎 A → drop-oldest+notice+4MB 队列（决策 1/1b，
+> 缺口算术见其仲裁记录）；引擎 B → 窗口化回放起点+总量双封顶（决策 4）；
+> 止血 → 指数退避（closing sync 后 60s 稳定锚点，决策 2）。
+
 | 观测结果 | 结论 | 主治方案 |
 | --- | --- | --- |
-| `close` 行 `visibility=hidden` 占比高 | 后台标签页节流是主因 | 优先级提前：hidden 暂停推流 / 回前台再重连 |
-| `overflow` 行 `subAgeMs` 小（秒级内）且 `handshake.replayBytes` 大 | 回放洪流本身压垮消费者 | 带内 resync（skip-to-live）+ 回放限速/降预算 |
+| `close` 行 `visibility=hidden` 占比高 | 后台标签页节流是主因 | 优先级提前：hidden 暂停推流 / 回前台再重连（**待 Phase B-8 客户端埋点回填验证**，MED-4） |
+| ~~`overflow` 行 `subAgeMs` 小（秒级内）且 `handshake.replayBytes` 大~~ → **回放洪流本身压垮消费者** | ~~带内 resync（skip-to-live）+ 回放限速/降预算~~ | **已作废**（见上注）；实际机理：live 生产超标（队列仅订阅后存在）→ drop+notice |
 | `slow-write` 多、`maxWriteBlockMs` 大，但标签页前台、网络正常 | 浏览器渲染/CPU 瓶颈（疑与 #111 耦合） | 带内 resync 为主；同时查 mwbeta CPU/内存 |
 | `slow-write op=ping` 出现 | 心跳被输出写锁饿死 | write deadline（#83 遗留）必须补 |
-| `replayMs` 远大于 live 阶段时长 | 回放是循环的放大器 | 回放分帧背压 / 预算重估 |
+| ~~`replayMs` 远大于 live 阶段时长~~ → 回放是循环的放大器 | ~~回放分帧背压 / 预算重估~~ | **已作废（v5 补注 LOW-E）**：「分帧背压」即被否决的 pacing 方向（回放不经订阅队列、每 chunk 同步阻塞写，无对象可限）；现行对策为决策 4 窗口化回放（起点+总量双封顶）；已证实回放跟随活 head、时长只受预算约束（HIGH-2） |
 
 无论哪种成因，客户端指数退避 + jitter 都是无条件的止血项。
 
