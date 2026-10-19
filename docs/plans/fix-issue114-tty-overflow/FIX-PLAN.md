@@ -545,7 +545,8 @@ legacy 行为），连接照常、无新语义。单测 pin「未知 caps → le
      压缩翻转缺口时趋于不溢出）；
    - b. **catchup 完成时间 ≤ W_eff ÷ 实测有效带宽 + 余量**，实测带宽 =
      `replayBytes/replayMs`（服务端 handshake 埋点；compress 连接用
-     `logicalBytes/replayMs`，W_eff 同为逻辑口径），而非与 backlog 成
+     `replayLogicalBytes/replayMs`——handshake 行自 TASK-A3 返工起带
+     逻辑口径字段；replayBytes 在 compress 连接为 wire 口径，冻结不改名），而非与 backlog 成
      正比——W=256–512KB 时 ≈5–10s@50–100KB/s；
    - c. **deadline 误杀数=0**（操作定义：handshake 成功且 `conn-closed
      binFrames` 持续增长=有写入进展，但单写超 deadline 被服务端回收者
@@ -556,7 +557,12 @@ legacy 行为），连接照常、无新语义。单测 pin「未知 caps → le
    `maxDecompressedBytes` 超限有关断+重连路径。
 5. 多设备量化：N=5 慢消费者并发，各自独立 drop/notice（广播扇出无恶化）；
    notice 率 ≤4/s（节流生效）；服务端 CPU 无异常、**RSS 上界 =
-   4MB×N + 64KB×N（flate）**；netem 下互不恶化。
+   4MB×N + ~1.3MB×N（flate，v7 订正）**；netem 下互不恶化。
+   （v7 订正，TASK-A3 评审 B F2 实证：Go compress/flate 每 writer 常驻
+   ~1.2MB——结构地板 hashHead 512KB(1<<17 uint32)+hashPrev 128KB
+   (1<<15 uint32)与 level 无关，加 window 64KB+deflateFast 表/tokens；
+   原「64KB×N」系误估。备选小内存实现（klauspost/compress 等）留作
+   未来项，本期维持 stdlib BestSpeed。）
 6. 退避：指数增长（日志可证）；**回放中段断连与 notice 循环均不退避清零**
    （60s 稳定锚点）；前台可见上限 8s。
 7. 人为阻塞 socket 写 ≥15s，handler 有界回收（env 调档后按新值）。

@@ -37,10 +37,23 @@ scrollback UX 语义、env 名三个、slow-link 档、compress wire 语义
 1. 客户端埋点清单段补「Phase B 已落地」状态与实际字段名(以 index.html 实现为准)。
 2. 补一行:压缩上线后用 wireBytes/logicalBytes 双字段回验 A0 的 5.719x
    与帧尺寸分布(A0-GATE §六局限 3 的闭环)。
+3. **仲裁增补(TASK-A3 评审 B B2-2,必做)**:服务端五列全名写入字段表——
+   `wireBytes`/`logicalBytes`/`replayLogicalBytes`/`liveLogicalBytes`/`compress=true`;
+   删除「规划中(FIX-PLAN v6,尚未产出)」状态(已产出);:37 速率解读行
+   订正——压缩连接上 `liveBytes` 为 wire 口径,消费速率须读 `liveLogicalBytes`;
+   handshake 行 `replayBytes` 同口径注记(compress 连接=wire,逻辑口径读
+   `replayLogicalBytes`;§五.3.b 验收算术读后者)。
+4. **a0compress 幻影订正(必做)**:tools/a0compress/main.go:207
+   `res.StreamHeader = 2` 改为 0(raw deflate 无流头;该值仅入 mean/fr
+   显示列,ratio/分位数不受影响——评审 B 复跑实证 5.719x 不变),
+   并重跑 `go run . -sample /tmp/a0-sample.bin -json`(若样本仍在)或
+   注明「样本离场,仅改显示列」。
 
 ## 硬约束
-- 允许:CHANGELOG.md、docs/API.md、docs/plans/fix-issue114-tty-overflow/DATA-COLLECTION.md。
-- 禁止:一切代码、FIX-PLAN.md、各任务书。
+- 允许:CHANGELOG.md、docs/API.md、docs/plans/fix-issue114-tty-overflow/DATA-COLLECTION.md、
+  docs/plans/fix-issue114-tty-overflow/tools/a0compress/main.go(仅 D3.4 的
+  StreamHeader 订正,改后 `go build` 该 mini-module 验证)。
+- 禁止:一切产品代码(internal/、cmd/)、FIX-PLAN.md、各任务书。
 - 完成判据:`go test ./... -count=1` 全绿(文档改动不应破坏任何守卫测试,
   特别是 #95 计数守卫与 API.md 锚点类测试);`git diff --stat` 只含上述三文件。
 - 交付:改动摘要 + 数字出处对照表(条目内每个数字→出处文件:行)。

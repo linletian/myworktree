@@ -187,7 +187,10 @@ ANSI 占比 **37.5%（ESC 字节 4.209%）**，确实极高；但 **base64 块�
   `DecompressionStream('deflate-raw')` 脱同步）→ ratio 的分子/分母都只统计
   到「最后一次 Flush」为止，不被收尾块稀释。
 - 压缩字节在 **`Flush()` 之后的下游 writer** 上计数（= 服务端交给 socket 的
-  位置）；deflate-raw 2 字节流头（CMF+FLG）计入首帧。
+  位置）；**raw deflate（RFC 1951）无流头**，首帧直接起于 deflate 块头
+  （TASK-A3 编码实测订正 2026-10-20：Go compress/flate 不产 zlib
+  CMF+FLG；原「2 字节流头」表述系把 RFC 1950 zlib 包装误记到 raw 格式，
+  测量值本身由 flate.Writer 直产、不受影响）。
 - **场景 A（主判指标）**：1024 B/帧 = PTY 读粒度（driver.go:302）。
 - **场景 B（次指标）**：65,536 B/帧 = `ReadSince` 粒度（app.go:3427）。
 - `ratio = Σ原始字节 / Σ压缩字节`，两场景分别算，同一份字节流、同一 flate
@@ -211,7 +214,7 @@ sweep 16384B frame                  512     8388608      730944  11.476x   91.29
 ref: no per-frame flush               1     8388608      695523  12.061x   91.71%  695521.0
 ref: DefaultCompression 1KB        8192     8388608      642522  13.056x   92.34%      78.4
 
-scenario A per-frame compressed size: min 28 p50 163 p99 401 max 518 (deflate-raw header 2 B, sync-flush floor ~40960 B)
+scenario A per-frame compressed size: min 28 p50 163 p99 401 max 518 (raw deflate 无流头, sync-flush floor ~40960 B)
 scenario A fresh-stream windows (n=8): min 5.048x (offset 5242880)  max 7.735x (offset 1048576)
 roundtrip, one persistent deflate-raw stream flushed per frame: ok=true
 
