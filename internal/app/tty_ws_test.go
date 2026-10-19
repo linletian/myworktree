@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"myworktree/internal/framework"
+	"myworktree/internal/instance/pty"
 	"myworktree/internal/ws"
 )
 
@@ -66,6 +67,18 @@ type ttyHandshakeKind struct {
 	// completeHandshake is genuine. Consumed under scriptMu.
 	scriptMu    sync.Mutex
 	scriptSince []scriptedRead
+
+	// liveWriteOnce, when non-nil, runs EXACTLY ONCE inside the next
+	// incremental (since>=0) ReadLogs call, right BEFORE the ring is
+	// consulted — the deterministic shape of "the producer wrote between
+	// the window clamp's head read and the loop's first read" that the
+	// issue #114 review measured on the wire as W=40000 → 65536 bytes
+	// out. Arming it makes the real RingBuffer answer a trimmed
+	// maxBytes against a ring that just grew, which is precisely what
+	// the R3 read trim must bound; nil in every other test, so every
+	// existing read stays byte-identical. Armed via armLiveWriteOnce
+	// and Consumed under scriptMu, the same discipline as scriptSince.
+	liveWriteOnce func()
 }
 
 // scriptedRead is one canned incremental ReadLogs answer (body, next).
@@ -98,9 +111,21 @@ func newTTYHandshakeKind(capBytes int64) *ttyHandshakeKind {
 // leave internal/app green. Same contract as pty.subscriber.drain: it
 // terminates ONLY because the channel is already closed, which is why publish
 // collects under its lock and drains after releasing it.
+//
+// policy/stats mirror the issue #114 pair: legacy subscribers (the zero
+// OverflowClose) keep the #82 close path verbatim; subscribers taken through
+// SubscribeOutputWithPolicy with OverflowDropOldest survive their overflows
+// with the loss counted into the SAME *pty.DropStats handle the real handler
+// reads, so the notice path is exercised against genuine counters.
 type ttySubscriber struct {
 	ch     chan string
 	closed bool
+	policy pty.OverflowPolicy
+	// stats mirrors production (driver.go subscriber.stats): non-nil for
+	// EVERY subscriber — both constructors below allocate it — and exactly
+	// zero under OverflowClose, whose overflow signals by close and never
+	// counts.
+	stats *pty.DropStats
 }
 
 func (s *ttySubscriber) drain() {
@@ -154,10 +179,24 @@ func (k *ttyHandshakeKind) ReadLogs(h framework.Handle, since, maxBytes int64) (
 	if len(k.scriptSince) > 0 {
 		r := k.scriptSince[0]
 		k.scriptSince = k.scriptSince[1:]
+		fn := k.liveWriteOnce
+		k.liveWriteOnce = nil
 		k.scriptMu.Unlock()
+		if fn != nil {
+			fn()
+		}
 		return r.body, r.next, nil
 	}
+	fn := k.liveWriteOnce
+	k.liveWriteOnce = nil
 	k.scriptMu.Unlock()
+	if fn != nil {
+		// The deterministic live producer: the ring grows right here,
+		// between the replay window's clamp head-read (a tail read,
+		// never hooked) and this incremental read's answer — the exact
+		// instant the R3 read trim must bound.
+		fn()
+	}
 	return k.buf.ReadSince(since, maxBytes)
 }
 
@@ -165,6 +204,16 @@ func (k *ttyHandshakeKind) ReadLogs(h framework.Handle, since, maxBytes int64) (
 func (k *ttyHandshakeKind) scriptIncrementalReads(reads ...scriptedRead) {
 	k.scriptMu.Lock()
 	k.scriptSince = reads
+	k.scriptMu.Unlock()
+}
+
+// armLiveWriteOnce arms the one-shot live producer hook under scriptMu,
+// the same assembly discipline as scriptIncrementalReads above (issue #114
+// R3): the hook is consumed under scriptMu inside ReadLogs, so arming must
+// not race that consumption.
+func (k *ttyHandshakeKind) armLiveWriteOnce(fn func()) {
+	k.scriptMu.Lock()
+	k.liveWriteOnce = fn
 	k.scriptMu.Unlock()
 }
 
@@ -202,7 +251,10 @@ func (k *ttyHandshakeKind) gotInput() string {
 // subscription ends, whether that is this cancel or an overflow in
 // publish, and cancel stays safe to call after either.
 func (k *ttyHandshakeKind) SubscribeOutput(id string) (<-chan string, func(), error) {
-	sub := &ttySubscriber{ch: make(chan string, 16)}
+	// The zero-value stats mirrors production SubscribeOutput: the
+	// subscriber always carries a handle, and the close path never counts
+	// into it.
+	sub := &ttySubscriber{ch: make(chan string, 16), stats: &pty.DropStats{}}
 	k.subsMu.Lock()
 	k.subs[sub] = struct{}{}
 	k.subsMu.Unlock()
@@ -219,6 +271,47 @@ func (k *ttyHandshakeKind) SubscribeOutput(id string) (<-chan string, func(), er
 	return sub.ch, cancel, nil
 }
 
+// SubscribeOutputWithPolicy mirrors pty.Driver.SubscribeOutputWithPolicy
+// (issue #114): same registry, same exactly-once cancel, but the overflowing
+// subscriber's behaviour is the subscriber's policy — OverflowClose today's
+// #82 teardown, OverflowDropOldest count-and-survive. The handler reaches it
+// through Manager.SubscribeOutputWith (the running-instance gate + the
+// Registry.Get kind resolution live in framework) and a structural interface
+// assertion inside the callback (app.go ttyPolicyOutputSubscriber), which is
+// exactly what this double must satisfy for the overflow-notice e2e path to
+// run against a real drop subscription instead of falling back to legacy
+// (ttyPlainOnlyKind covers the fallback half).
+func (k *ttyHandshakeKind) SubscribeOutputWithPolicy(id string, policy pty.OverflowPolicy) (<-chan string, func(), *pty.DropStats, error) {
+	stats := &pty.DropStats{}
+	sub := &ttySubscriber{ch: make(chan string, 16), policy: policy, stats: stats}
+	k.subsMu.Lock()
+	k.subs[sub] = struct{}{}
+	k.subsMu.Unlock()
+	cancel := func() {
+		k.subsMu.Lock()
+		defer k.subsMu.Unlock()
+		delete(k.subs, sub)
+		sub.closeLocked()
+	}
+	return sub.ch, cancel, stats, nil
+}
+
+// droppedTotals sums every live subscriber's DropStats — the test-side
+// window onto the counts the handler turns into overflow notices. It reads
+// live subscribers only, same as publish.
+func (k *ttyHandshakeKind) droppedTotals() (int64, int64) {
+	k.subsMu.Lock()
+	defer k.subsMu.Unlock()
+	var chunks, bytes int64
+	for sub := range k.subs {
+		if sub.stats != nil {
+			chunks += sub.stats.Chunks()
+			bytes += sub.stats.Bytes()
+		}
+	}
+	return chunks, bytes
+}
+
 // publish stands in for pumpLogs' broadcast side of the PTY output pump,
 // overflow behaviour included (issue #82): a subscriber whose buffer is full
 // is removed, closed and DRAINED rather than having the chunk dropped in an
@@ -231,6 +324,12 @@ func (k *ttyHandshakeKind) SubscribeOutput(id string) (<-chan string, func(), er
 // handler's <-outputChan, so a double that skipped the drain would leave the
 // e2e test pinned to the pre-drain shape and a revert of production's drain
 // would keep internal/app green.
+//
+// Issue #114 adds the per-subscriber branch the production broadcast gained:
+// an OverflowDropOldest subscriber is kept registered and its OLDEST chunk
+// evicted into the stats instead of being closed — so the overflow-notice
+// e2e test drives the real handler against the same shape the pty kind
+// produces in production, counted loss included.
 func (k *ttyHandshakeKind) publish(chunk string) {
 	// Declared before the lock so the deferred unlock below can drain what
 	// this critical section provably closed.
@@ -246,6 +345,25 @@ func (k *ttyHandshakeKind) publish(chunk string) {
 		select {
 		case sub.ch <- chunk:
 		default:
+			if sub.policy == pty.OverflowDropOldest {
+				// Mirrors production's drop arm: evict the OLDEST buffered
+				// chunk (a non-blocking receive is the only way to pop a
+				// channel's head), count it, retry once — the retry cannot
+				// fail to have room for the same structural reason as
+				// production's (all producers serialise behind k.subsMu,
+				// the consumer only frees slots).
+				select {
+				case dropped := <-sub.ch:
+					sub.stats.Add(1, int64(len(dropped)))
+				default:
+				}
+				select {
+				case sub.ch <- chunk:
+				default:
+					sub.stats.Add(1, int64(len(chunk)))
+				}
+				continue
+			}
 			delete(k.subs, sub)
 			if sub.closeLocked() {
 				closed = append(closed, sub)
@@ -726,20 +844,49 @@ func frameSizes(frames [][]byte) []int {
 // pins the replay budget (review finding A3). A delta larger than
 // ttyHandshakeReplayBudget must NOT be replayed in full on one handshake:
 // the loop stops at the budget and publishes the end offset of the last
-// chunk it actually WROTE, which is strictly behind head. The bytes past the
-// budget are then ahead of the client's cursor, so the next reconnect
-// re-requests them — truncation defers bytes, it never skips them (the same
-// self-healing property as the final-read→SubscribeOutput window).
+// chunk it actually WROTE.
 //
-// The budget is a byte count, not a deadline, so the truncation point is
-// exact and machine-independent: the client receives exactly
-// ttyHandshakeReplayBudget bytes (8MB is a whole multiple of the 64KB read
-// cap, so the loop's stop-before-read guard lands on the boundary) and sync
-// equals that count.
+// Issue #114 changed what that sentence has to mean, and this test is the
+// pin for the change rather than a survivor of the old one. Since decision
+// 4 the replay window W_eff sits UNDER the budget by construction
+// (ttyReplayWindowBytes clamps any configuration above ttyHandshakeReplayBudget
+// down to it, because 8MB is a whole multiple of the 64KB read cap and W is
+// meant to be the tighter bound, not the looser one). So the only way to
+// still exercise THIS stop is to raise W_eff to the budget itself — which is
+// what the env override below does — and then the two guards coincide on the
+// same byte count. What this test therefore pins, and the only thing left
+// for it to pin:
+//
+//   - the budget is the ceiling W cannot lift: an env window above 8MB is
+//     clamped to 8MB, so exactly ttyHandshakeReplayBudget bytes go out and
+//     not one byte more (delivered == budget, frame count == budget/64KB);
+//   - the byte count is machine-independent: 8MB is a whole multiple of the
+//     64KB read cap, so the stop-before-read guard lands exactly on the
+//     boundary;
+//   - the published cursor is the end of the LAST chunk written — here that
+//     is head, because the front clamp moved the start to head−budget and
+//     the loop then wrote exactly the window;
+//   - the bytes in FRONT of that window are not replayed. They are behind
+//     the cursor the client adopts from the start sync, so for THIS client
+//     they are gone — that is what a window costs, and docs/API.md says so
+//     in the same breath as the closing-sync round trip the total cap does
+//     keep (see TestHandleInstanceTTYWS_ReplayWindowTotalCapTruncatesAndNext
+//     ReconnectResumes, which pins the truncated-not-skipped half).
+//
+// Not parallel: t.Setenv. The env read is per handshake (app.go
+// ttyReplayWindowBytes), and a sequential test is what keeps that read from
+// being observed by a parallel test's connection.
 func TestHandleInstanceTTYWS_ReplayBudgetTruncatesAndPublishesLastWrittenOffset(t *testing.T) {
-	t.Parallel()
+	// Raise the window above the budget so the budget, not the window, is
+	// the guard that stops this loop. Clamped to the budget on the way in
+	// — the first assertion, three lines later, is that this clamp happened.
+	t.Setenv(envTTYReplayWindowBytes, strconv.FormatInt(ttyHandshakeReplayBudget+4*1024*1024, 10))
+	if got := ttyReplayWindowBytes(nil); got != ttyHandshakeReplayBudget {
+		t.Fatalf("W_eff with an env window above the budget = %d, want it clamped to %d — W ≤ budget must hold by construction, the budget is the ceiling", got, ttyHandshakeReplayBudget)
+	}
+
 	// A delta of budget + 4 chunks, and a ring cap above it, so the
-	// truncation under test is the budget's — never the ring's eviction.
+	// truncation under test is never the ring's eviction.
 	// It stays a few bytes past the boundary on purpose: with the guard
 	// removed the loop delivers the whole delta, so any overshoot (or any
 	// missing stop) shows up as delivered != budget.
@@ -756,11 +903,14 @@ func TestHandleInstanceTTYWS_ReplayBudgetTruncatesAndPublishesLastWrittenOffset(
 	_ = c.WriteClose(ws.CloseMessage(1000, "bye"))
 	_ = c.Close()
 
-	// The start sync (issue #94) opened the replay at the requested cursor —
-	// no clamp below the oldest live byte applies here — and the client's
-	// frame-by-frame advance from it must land exactly on the closing offset.
-	if startOffset != 0 {
-		t.Fatalf("start sync offset = %d, want 0 (the replay starts at the requested cursor)", startOffset)
+	// The start sync (issue #94) now opens the replay at the WINDOW's front
+	// edge, head−W_eff, not at the requested cursor: the backlog is larger
+	// than the window, so the oldest bytes are the ones dropped. The client
+	// learns this from the frame it already knows how to handle — no new
+	// wire type, no client change.
+	wantStart := head - ttyHandshakeReplayBudget
+	if startOffset != wantStart {
+		t.Fatalf("start sync offset = %d, want %d (head %d − window %d) — with W_eff raised to the budget the front clamp lands on the budget's front edge", startOffset, wantStart, head, ttyHandshakeReplayBudget)
 	}
 
 	var delivered int64
@@ -769,10 +919,10 @@ func TestHandleInstanceTTYWS_ReplayBudgetTruncatesAndPublishesLastWrittenOffset(
 			t.Fatalf("replay frame of %d bytes exceeds the 64KB read cap", len(f))
 		}
 		// Byte-exact and in order: each frame is the delta at its own
-		// offset, so the budget cut at the TAIL and skipped nothing from
-		// the middle.
-		if !bytes.Equal(f, delta[delivered:delivered+int64(len(f))]) {
-			t.Fatalf("replay frame %d at offset %d is not the delta's bytes there", i, delivered)
+		// offset, so the cut happened at the FRONT (the clamp) and nothing
+		// was skipped out of the middle.
+		if !bytes.Equal(f, delta[delivered+wantStart:delivered+wantStart+int64(len(f))]) {
+			t.Fatalf("replay frame %d at offset %d is not the delta's bytes there", i, delivered+wantStart)
 		}
 		delivered += int64(len(f))
 	}
@@ -786,35 +936,27 @@ func TestHandleInstanceTTYWS_ReplayBudgetTruncatesAndPublishesLastWrittenOffset(
 	if startOffset+delivered != syncOffset {
 		t.Fatalf("start %d + delivered %d != sync offset %d — advancing the cursor per frame from the start offset must land exactly on the closing offset", startOffset, delivered, syncOffset)
 	}
-	// The published cursor is the end of the LAST chunk written, behind
-	// head: the remainder stays re-requestable.
-	if syncOffset != ttyHandshakeReplayBudget {
-		t.Fatalf("sync offset = %d, want %d (end of the last delivered chunk)", syncOffset, ttyHandshakeReplayBudget)
-	}
-	if syncOffset >= head {
-		t.Fatalf("sync offset = %d, want strictly behind head %d — publishing head here would strand the undelivered remainder forever", syncOffset, head)
+	// The published cursor is the end of the LAST chunk written. With the
+	// front clamp at head−budget and exactly budget bytes written, that end
+	// IS head — the window closed the gap the old test's remainder lived in.
+	if syncOffset != head {
+		t.Fatalf("sync offset = %d, want head %d (end of the last delivered chunk) — start %d + %d bytes written", syncOffset, head, startOffset, delivered)
 	}
 
-	// Self-healing: a reconnect from the published cursor re-requests the
-	// bytes the budget deferred — the last 4 chunks — and catches up to
-	// head, so nothing was lost, only deferred. Its start sync must open
-	// exactly AT the published cursor: resuming, not restarting.
+	// And the live stream is contiguous from there: a reconnect from the
+	// published cursor asks for nothing, because the window delivered
+	// everything from its front edge to head.
 	c2, frames2, start2, sync2 := dialHandshakeStart(t, addr, ttyWSPath(instID, "since="+strconv.FormatInt(syncOffset, 10)+"&caps=sync"))
 	_ = c2.WriteClose(ws.CloseMessage(1000, "bye"))
 	_ = c2.Close()
-	if start2 != syncOffset {
-		t.Fatalf("start sync of the re-request = %d, want the published cursor %d — the replay must resume where the truncated one stopped", start2, syncOffset)
+	if start2 != -1 {
+		t.Fatalf("start sync of the reconnect = %d, want none (-1): the reconnect writes no chunk, and the #94 start frame is written ahead of a chunk or not at all", start2)
 	}
-	var replay2 []byte
-	for _, f := range frames2 {
-		replay2 = append(replay2, f...)
-	}
-	want2 := delta[ttyHandshakeReplayBudget:]
-	if !bytes.Equal(replay2, want2) {
-		t.Fatalf("re-request after truncation = %d bytes, want the %d deferred bytes — the budget must defer, never skip", len(replay2), len(want2))
+	if len(frames2) != 0 {
+		t.Fatalf("reconnect replayed %d frame(s) after a window that already reached head — nothing is behind that cursor", len(frames2))
 	}
 	if sync2 != head {
-		t.Fatalf("sync offset after the re-request = %d, want head %d — the deferred remainder must be recoverable in full", sync2, head)
+		t.Fatalf("sync offset after the reconnect = %d, want head %d", sync2, head)
 	}
 }
 
@@ -1579,6 +1721,489 @@ func TestHandleInstanceTTYWS_SubscriberOverflowClosesConnectionWith1013(t *testi
 	// internal/instance/pty/driver_test.go, where a panic fails the test.
 	if n := k.subscriberCount(); n != 0 {
 		t.Fatalf("%d subscriber(s) still registered after the teardown", n)
+	}
+}
+
+// TestHandleInstanceTTYWS_OverflowNoticeCapNoticesInsteadOfClosing pins
+// the issue #114 negotiated path end to end over a real hijacked WebSocket:
+// a client that declares `caps=sync,overflow-notice` and then goes deaf
+// while the producer outruns its queue must see —
+//
+//   - NO close frame, ever: not 1013, not any code. The subscription
+//     survives (subscriberCount stays 1), the socket stays up, the stream
+//     keeps flowing. This is the whole point: the legacy 1013 storm above
+//     is what this path replaces for opted-in clients;
+//   - the contract overflow TEXT frame: {"type":"overflow","droppedBytes":
+//     N,"droppedChunks":M} with POSITIVE counts, byte-shaped exactly as
+//     §三 of the fix plan specifies, riding AHEAD of the binary chunk it
+//     covers (the client's cursor advances by binary length, so a notice
+//     that trailed the bytes it covers would arrive after they were already
+//     painted under a torn screen);
+//   - the 250ms AGGREGATION of decision 1 补 1 / review R5, which is what
+//     this comment now documents because it changed the assertions below
+//     (the test itself is the same test, kept and re-pointed — the
+//     pre-aggregation version of it pinned "one notice per increment",
+//     which is exactly the ~150 frames/s write-mutex storm R5 removed):
+//     the FIRST frame carries the first increment and goes out immediately,
+//     every later frame carries the SUM of the increments since it and is
+//     separated from the previous one by ≥ ttyOverflowNoticeInterval, and
+//     the running total across frames converges on the producer's own
+//     DropStats — grouping costs nothing, Σ is never lost;
+//   - server-side observability: the handler logged the overflow with the
+//     instance id and the notice semantics, and the legacy
+//     "closing with 1013" line never fired.
+//
+// The flood is publish-until-counted (same outrun-the-drain shape the
+// legacy test drives, bounded the same way): the queue is 16 slots and the
+// handler is a slower consumer than the publish loop by orders of
+// magnitude, so drops are structural, not a scheduling bet.
+func TestHandleInstanceTTYWS_OverflowNoticeCapNoticesInsteadOfClosing(t *testing.T) {
+	t.Parallel()
+	k := newTTYHandshakeKind(1024)
+	addr, _, instID, logOut := ttyWSTestServer(t, k)
+
+	c, _, _ := dialHandshake(t, addr, ttyWSPath(instID, "caps=sync,overflow-notice"))
+	k.waitSubscribers(t, 5*time.Second)
+
+	chunk := strings.Repeat("x", 32*1024)
+	published := 0
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		if time.Now().After(deadline) {
+			t.Fatalf("no drops counted after %d publishes into a 16-slot deaf queue: the drop-oldest broadcast never evicted anything", published)
+		}
+		k.publish(chunk)
+		published++
+		if dc, _ := k.droppedTotals(); dc > 0 {
+			break
+		}
+	}
+	if n := k.subscriberCount(); n != 1 {
+		t.Fatalf("%d subscriber(s) registered after a drop-oldest overflow, want 1: the cap client's subscriber must be KEPT (no delete, no close) — issue #82's teardown is exactly what this path replaces", n)
+	}
+
+	// Drain phase one: walk to the first overflow notice. BINARY chunks
+	// legitimately precede it here: the handler drains the queue and writes
+	// whatever still fits the socket buffer before the first eviction
+	// happens, and those bytes are cursor-contiguous — no notice is owed
+	// for them (the notice announces the gap, and no gap exists until the
+	// queue first overflows). The handshake's resize echo rides a different
+	// channel and may land anywhere (the legacy test above states the same
+	// allowance); heartbeat pings are control traffic. None of the three is
+	// the frame under test, so all three are skipped. A close frame at ANY
+	// point is fatal — the negotiated path must notice-and-keep, never close.
+	var notice []byte
+	firstNoticeAt := time.Now()
+	for {
+		op, p := readFrame(t, c, 10*time.Second)
+		if op == wsOpClose {
+			t.Fatalf("close frame on an overflow-notice connection (payload %q): the negotiated path must notice-and-keep, never close", p)
+		}
+		if op == wsOpPing || op == wsOpBinary || (op == wsOpText && strings.Contains(string(p), `"resize"`)) {
+			continue
+		}
+		if op != wsOpText {
+			t.Fatalf("op=%d before the first overflow notice, want the notice TEXT frame", op)
+		}
+		firstNoticeAt = time.Now()
+		notice = p
+		break
+	}
+
+	// Byte shape of the contract frame, then its numbers. Built with
+	// strconv at app.go, so the prefix is deterministic; the counts must
+	// be positive, and every evicted chunk so far was one 32KB publish, so
+	// bytes == chunks × 32768 holds exactly — aggregation sums whole
+	// evictions, it never splits one.
+	const noticePrefix = `{"type":"overflow","droppedBytes":`
+	if !strings.HasPrefix(string(notice), noticePrefix) {
+		t.Fatalf("notice frame = %q, want the contract shape %s...", notice, noticePrefix)
+	}
+	var ctl struct {
+		Type          string `json:"type"`
+		DroppedBytes  int64  `json:"droppedBytes"`
+		DroppedChunks int64  `json:"droppedChunks"`
+	}
+	if err := json.Unmarshal(notice, &ctl); err != nil {
+		t.Fatalf("notice frame %q is not JSON: %v", notice, err)
+	}
+	if ctl.Type != "overflow" || ctl.DroppedChunks <= 0 || ctl.DroppedBytes <= 0 {
+		t.Fatalf("notice = %+v, want type=overflow with positive counts", ctl)
+	}
+	if ctl.DroppedChunks > int64(published) {
+		t.Fatalf("notice claims %d dropped chunks, but only %d chunks were ever published", ctl.DroppedChunks, published)
+	}
+	if ctl.DroppedBytes != ctl.DroppedChunks*int64(len(chunk)) {
+		t.Fatalf("notice bytes/chunks = %d/%d, want bytes == chunks × %d (every eviction so far took one 32KB publish)", ctl.DroppedBytes, ctl.DroppedChunks, len(chunk))
+	}
+
+	// The notice rides AHEAD of the chunk it covers: both writes come from
+	// the same handler select iteration, so no third frame may interleave
+	// them on the wire. Aggregation did not loosen this — a frame that goes
+	// out at all still precedes the chunk of ITS iteration, and every byte
+	// it reports is older than that chunk.
+	op, p := readFrame(t, c, 10*time.Second)
+	if op == wsOpClose {
+		t.Fatalf("close frame right after the overflow notice (payload %q): never on this path", p)
+	}
+	if op != wsOpBinary {
+		t.Fatalf("frame after the overflow notice op=%d payload=%q, want the BINARY chunk the notice precedes", op, p)
+	}
+
+	// Drain phase two (bounded window): the buffered backlog keeps flowing
+	// and must never turn into a teardown. The NOTICE frames in this window
+	// are the aggregation under test — counted with the timestamps that
+	// make the rate claim checkable, and summed into a running total that
+	// has to converge on the producer's counters.
+	windowEnd := time.Now().Add(2 * time.Second)
+	binaries := 0
+	notices := []noticeFrame{{at: firstNoticeAt, chunks: ctl.DroppedChunks, bytes: ctl.DroppedBytes}}
+	for {
+		if err := c.SetReadDeadline(windowEnd); err != nil {
+			t.Fatalf("set read deadline: %v", err)
+		}
+		op, p, rerr := c.ReadMessage()
+		if rerr != nil {
+			break // window elapsed — the expected end of this phase
+		}
+		switch {
+		case op == wsOpClose:
+			t.Fatalf("close frame mid-stream on an overflow-notice connection (payload %q): the connection must stay up", p)
+		case op == wsOpBinary:
+			binaries++
+		case op == wsOpText && isOverflowNotice(p):
+			var n struct {
+				DroppedBytes  int64 `json:"droppedBytes"`
+				DroppedChunks int64 `json:"droppedChunks"`
+			}
+			if err := json.Unmarshal(p, &n); err != nil {
+				t.Fatalf("overflow notice %q is not JSON: %v", p, err)
+			}
+			if n.DroppedChunks <= 0 || n.DroppedBytes <= 0 {
+				t.Fatalf("aggregated notice carries non-positive counts: %q", p)
+			}
+			notices = append(notices, noticeFrame{at: time.Now(), chunks: n.DroppedChunks, bytes: n.DroppedBytes})
+		default:
+			// ping / resize / further control traffic: all legal here.
+		}
+		if time.Now().After(windowEnd) {
+			break
+		}
+	}
+	if binaries == 0 {
+		t.Fatal("no binary chunks flowed after the overflow notice: the drop-oldest stream must keep streaming")
+	}
+
+	// THE RATE CEILING (decision 1 补 1 / R5): at most one notice per
+	// ttyOverflowNoticeInterval, the first one exempt because the first
+	// increment of a connection always goes out immediately. Over a window
+	// of elapsed ms the bound is 1 + floor(elapsed/interval), and the
+	// ceiling is stated as +1 tolerant of the read-side scheduling this
+	// test cannot control (a frame whose write opened the gate just before
+	// the window closed is still read inside it).
+	elapsed := notices[len(notices)-1].at.Sub(notices[0].at)
+	// Integer ceil of elapsed/interval, PLUS one for the first frame, which
+	// the gate exempts by design (the first increment always goes out).
+	ceiling := (int64(elapsed)+int64(ttyOverflowNoticeInterval)-1)/int64(ttyOverflowNoticeInterval) + 1
+	if int64(len(notices)) > ceiling {
+		var ts []string
+		for _, n := range notices {
+			ts = append(ts, n.at.Sub(notices[0].at).String())
+		}
+		t.Fatalf("%d overflow notices in %s (offsets %v), want ≤ %d — the wire rate is capped at one per %s precisely so the notice stops competing with the binary chunks for ws.Conn's write mutex (issue #114 R5)", len(notices), elapsed, ts, ceiling, ttyOverflowNoticeInterval)
+	}
+
+	// Σ IS NEVER LOST: the baseline advances on every sample, so every
+	// count the producer recorded must reach the wire in SOME frame. The
+	// storm above stopped, so the totals are final. Since issue #114
+	// review round one the pending flush contract is: a stranded pending
+	// aggregate reaches the wire by the NEXT HEARTBEAT TICK at the latest
+	// (the heartbeat branch flushes it; 10 s/15 s ≫ the 250 ms gate, so
+	// the gate is always open there). The keep-alive loop below is kept
+	// as the faster chunk-path route — live traffic in production still
+	// flushes via arriving chunks — but correctness no longer depends on
+	// it: even with zero further chunks the heartbeat delivers the Σ.
+	var wantChunks, wantBytes int64
+	if wantChunks, wantBytes = k.droppedTotals(); wantChunks <= 0 {
+		t.Fatal("droppedTotals() went to zero mid-test; the double regressed")
+	}
+	var sumChunks, sumBytes int64
+	for _, n := range notices {
+		sumChunks += n.chunks
+		sumBytes += n.bytes
+	}
+	keepAlive := time.Now().Add(5 * time.Second)
+	for (sumChunks != wantChunks || sumBytes != wantBytes) && time.Now().Before(keepAlive) {
+		k.publish("KEEPALIVE")
+		if err := c.SetReadDeadline(time.Now().Add(500 * time.Millisecond)); err != nil {
+			t.Fatalf("set read deadline: %v", err)
+		}
+		for {
+			op, p, rerr := c.ReadMessage()
+			if rerr != nil {
+				break
+			}
+			if op == wsOpClose {
+				t.Fatalf("close frame while converging the notice totals (payload %q): never on this path", p)
+			}
+			if op == wsOpText && isOverflowNotice(p) {
+				var n struct {
+					DroppedBytes  int64 `json:"droppedBytes"`
+					DroppedChunks int64 `json:"droppedChunks"`
+				}
+				if err := json.Unmarshal(p, &n); err != nil {
+					t.Fatalf("overflow notice %q is not JSON: %v", p, err)
+				}
+				sumChunks += n.DroppedChunks
+				sumBytes += n.DroppedBytes
+				notices = append(notices, noticeFrame{at: time.Now(), chunks: n.DroppedChunks, bytes: n.DroppedBytes})
+			}
+		}
+		if wantChunks, wantBytes = k.droppedTotals(); wantChunks <= 0 {
+			t.Fatal("droppedTotals() went to zero while converging; the double regressed")
+		}
+	}
+	if sumChunks != wantChunks || sumBytes != wantBytes {
+		t.Fatalf("notice Σ = %d chunks / %d bytes, want the producer's %d / %d — aggregation groups increments, it must never lose one (gaps would leave the client's reset arithmetic short)", sumChunks, sumBytes, wantChunks, wantBytes)
+	}
+
+	// The connection is still fully live: a fresh chunk reaches the client.
+	k.publish("LIVE-CHUNK")
+	for {
+		op, p := readFrame(t, c, 10*time.Second)
+		if op == wsOpClose {
+			t.Fatalf("close frame while delivering the post-flood chunk (payload %q)", p)
+		}
+		if op == wsOpBinary && string(p) == "LIVE-CHUNK" {
+			break
+		}
+	}
+
+	if n := k.subscriberCount(); n != 1 {
+		t.Fatalf("%d subscriber(s) registered at the end, want 1 (kept throughout)", n)
+	}
+
+	logged := logOut.String()
+	if !strings.Contains(logged, instID) || !strings.Contains(logged, "overflow") || !strings.Contains(logged, "notice") {
+		t.Fatalf("handler never logged the notice-sent overflow for %s; log so far = %q", instID, logged)
+	}
+	if strings.Contains(logged, "closing with 1013") {
+		t.Fatalf("the legacy 1013 teardown fired on a drop-oldest connection; log = %q", logged)
+	}
+}
+
+// noticeFrame is one observed overflow notice: when it arrived and what it
+// carried, so the rate ceiling and the Σ convergence can both be computed
+// from the same collection.
+type noticeFrame struct {
+	at     time.Time
+	chunks int64
+	bytes  int64
+}
+
+// isOverflowNotice recognises the contract TEXT control frame by its
+// prefix (built with strconv at app.go, so the prefix is byte-stable).
+func isOverflowNotice(p []byte) bool {
+	return strings.HasPrefix(string(p), `{"type":"overflow","droppedBytes":`)
+}
+
+// ttyPlainOnlyKind wraps a ttyHandshakeKind but does NOT implement
+// SubscribeOutputWithPolicy — it is the "kind without policy support" the
+// SubscribeOutputWith callback must fall back on: the cap client reaches it
+// behind Manager's running-instance gate, the callback's assertion fails,
+// and its plain SubscribeOutput fallback keeps the #82 close-on-overflow
+// contract. Delegation is explicit (not embedding) on purpose: embedding
+// would promote the inner kind's SubscribeOutputWithPolicy and the wrapper
+// would silently satisfy the policy assertion, testing nothing.
+type ttyPlainOnlyKind struct{ inner *ttyHandshakeKind }
+
+func (k ttyPlainOnlyKind) Manifest() framework.KindInfo {
+	return framework.KindInfo{Name: "tty-plain-only", Label: "TTY Plain Only"}
+}
+
+func (k ttyPlainOnlyKind) Spawn(ctx context.Context, p framework.SpawnParams) (framework.Handle, *framework.ReadySignal, error) {
+	_, ready, err := k.inner.Spawn(ctx, p)
+	return framework.NewHandle("tty-plain-only", "inner"), ready, err
+}
+
+func (k ttyPlainOnlyKind) Stop(h framework.Handle, graceSeconds int) error {
+	return k.inner.Stop(h, graceSeconds)
+}
+
+func (k ttyPlainOnlyKind) Status(h framework.Handle) (framework.Status, string) {
+	return k.inner.Status(h)
+}
+
+func (k ttyPlainOnlyKind) ReadLogs(h framework.Handle, since, maxBytes int64) (string, int64, error) {
+	return k.inner.ReadLogs(h, since, maxBytes)
+}
+
+func (k ttyPlainOnlyKind) KindBlob(h framework.Handle) (json.RawMessage, error) {
+	return k.inner.KindBlob(h)
+}
+
+func (k ttyPlainOnlyKind) HTTPHint(instanceID string) string { return "" }
+
+func (k ttyPlainOnlyKind) RegisterHTTP(mux *http.ServeMux, instanceID string, h framework.Handle) {
+}
+
+func (k ttyPlainOnlyKind) Resize(h framework.Handle, cols, rows int) error {
+	return k.inner.Resize(h, cols, rows)
+}
+
+func (k ttyPlainOnlyKind) SendInput(h framework.Handle, input string) error {
+	return k.inner.SendInput(h, input)
+}
+
+// SubscribeOutput is the ONLY subscription door this kind has.
+func (k ttyPlainOnlyKind) SubscribeOutput(id string) (<-chan string, func(), error) {
+	return k.inner.SubscribeOutput(id)
+}
+
+// TestHandleInstanceTTYWS_OverflowNoticeCapOnPlainKindFallsBackToLegacy1013
+// pins the fallback inside the SubscribeOutputWith callback end to end
+// (issue #114 review): a client that declares caps=sync,overflow-notice
+// against a kind WITHOUT SubscribeOutputWithPolicy must degrade to that
+// kind's plain SubscribeOutput — the #82 close contract verbatim — and
+// must NEVER receive a fabricated overflow notice. That fallback is the
+// callback's other half; the framework-level gate and resolution are
+// pinned in internal/framework (manager_subscribeoutputwith_test.go), and
+// this e2e proves the handler's callback keeps a live plain subscription
+// and tears it down exactly like a legacy client would.
+func TestHandleInstanceTTYWS_OverflowNoticeCapOnPlainKindFallsBackToLegacy1013(t *testing.T) {
+	t.Parallel()
+	inner := newTTYHandshakeKind(1024)
+	k := ttyPlainOnlyKind{inner: inner}
+	_, m := newLogTestServer(t, k)
+	logOut := &lockedLogBuffer{}
+	srv := &Server{instanceMgr: m, logger: log.New(logOut, "", 0)}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/instances/tty/ws", func(w http.ResponseWriter, r *http.Request) {
+		srv.handleInstanceTTYWSLiveness(w, r, ttyPingInterval, ttyReadDeadline)
+	})
+	hs := httptest.NewServer(mux)
+	t.Cleanup(hs.Close)
+	instID := startKindInstance(t, m, "tty-plain-only")
+	addr := strings.TrimPrefix(hs.URL, "http://")
+
+	c, _, _ := dialHandshake(t, addr, ttyWSPath(instID, "caps=sync,overflow-notice"))
+	inner.waitSubscribers(t, 5*time.Second)
+
+	// Outrun the plain 16-slot queue exactly as the legacy test does; the
+	// subscriber here is OverflowClose (the fallback took it through the
+	// plain door), so publish's close arm deletes and closes it.
+	chunk := strings.Repeat("x", 32*1024)
+	published := 0
+	deadline := time.Now().Add(20 * time.Second)
+	for inner.subscriberCount() > 0 {
+		if time.Now().After(deadline) {
+			t.Fatalf("overflow never happened after %d publishes into a deaf plain queue: the fallback subscription never took the #82 close path", published)
+		}
+		inner.publish(chunk)
+		published++
+	}
+	if published < 17 {
+		t.Fatalf("subscriber vanished after only %d chunks, want at least 17 (the 16-slot capacity plus the one that did not fit)", published)
+	}
+
+	// The teardown the cap client gets on this kind is the legacy one:
+	// 1013 naming the overflow, and NO overflow notice anywhere ahead of
+	// it — nobody counted drops for a plain subscriber, so a notice here
+	// would be a fabricated one. Binary chunks legitimately precede the
+	// close (the handler drains what still fits the socket; the legacy
+	// test states the same allowance); the resize echo rides a different
+	// channel; pings are control traffic. A TEXT frame carrying
+	// "overflow" is none of those — it is the notice, and it must not
+	// appear.
+	for {
+		op, p := readFrame(t, c, 10*time.Second)
+		if op == wsOpClose {
+			if len(p) < 2 {
+				t.Fatalf("close frame payload too short: %v", p)
+			}
+			if got := binary.BigEndian.Uint16(p); got != 1013 {
+				t.Fatalf("close code = %d, want 1013 (reason %q)", got, string(p[2:]))
+			}
+			if !strings.Contains(string(p[2:]), "overflow") {
+				t.Fatalf("close reason = %q, want it to name the overflow", string(p[2:]))
+			}
+			break
+		}
+		if op == wsOpText && strings.Contains(string(p), `"type":"overflow"`) {
+			t.Fatalf("fabricated overflow notice on a plain-kind fallback connection: %q — nobody counted these drops", p)
+		}
+		if op == wsOpText && strings.Contains(string(p), `"sync"`) {
+			t.Fatalf("a second sync after the teardown claims a cursor past undelivered bytes: %q", p)
+		}
+	}
+
+	// Server-side: the legacy 1013 line fired, the notice-sent line never
+	// did — the two overflow log semantics are mutually exclusive per
+	// path, and this is the close path.
+	logged := logOut.String()
+	if !strings.Contains(logged, instID) || !strings.Contains(logged, "closing with 1013") {
+		t.Fatalf("handler never logged the legacy 1013 teardown for %s; log so far = %q", instID, logged)
+	}
+	if strings.Contains(logged, "sent overflow notice") {
+		t.Fatalf("the notice-sent log line fired on a plain-kind fallback; log = %q", logged)
+	}
+	// And the fallback itself is observable (issue #114 review, minor): the
+	// client declared a capability the server did not honour, and this line is
+	// the ONE place that fact is visible from the daemon — the connection
+	// otherwise looks healthy and merely behaves like a legacy one, so a
+	// silent degrade has no witness except a browser console nobody is
+	// reading.
+	if !strings.Contains(logged, "overflow-notice cap degraded") {
+		t.Fatalf("the cap-degradation log line never fired on a plain-kind fallback; log = %q", logged)
+	}
+
+	expectSocketClosed(t, c, 10*time.Second)
+
+	if n := inner.subscriberCount(); n != 0 {
+		t.Fatalf("%d subscriber(s) still registered after the teardown", n)
+	}
+	// (No droppedTotals assertion here on purpose: the close path deletes
+	// its subscriber, so the live-registry sum is trivially zero at this
+	// point and pins nothing. The real "never a fabricated notice" pin is
+	// on the wire — the walk above reads every frame up to the close and
+	// fatals on any overflow TEXT — and in the log exclusion above.)
+}
+
+// TestHandleInstanceTTYWS_OverflowNoticeCapOnStoppedInstanceDegradesToFirstConnect
+// pins that the overflow-notice cap changes NOTHING about the stopped-instance
+// degrade (issue #114 review, test supplement): the cap is a live-subscription
+// negotiation, and there is no live subscription to negotiate here. So the
+// handshake keeps the exact legacy shape pinned by
+// TestHandleInstanceTTYWS_NonRunningInstanceDegradesToFirstConnect — empty
+// replay, sync offset 0, the client's own `since` never echoed back as
+// authoritative — and Manager's running-instance gate answers 1013 "instance
+// not running" BEFORE the SubscribeOutputWith callback resolves any kind.
+// That ordering is what the last two assertions pin: no subscriber of either
+// policy was registered, and no notice or cap-degradation line was logged,
+// because the callback never ran to produce either.
+func TestHandleInstanceTTYWS_OverflowNoticeCapOnStoppedInstanceDegradesToFirstConnect(t *testing.T) {
+	t.Parallel()
+	k := newTTYHandshakeKind(1024)
+	addr, m, instID, logOut := ttyWSTestServer(t, k)
+	k.buf.WriteString("buffered-before-stop")
+	if err := m.Stop(instID); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+
+	c, replay, syncOffset := dialHandshake(t, addr, ttyWSPath(instID, "since=5&caps=sync,overflow-notice"))
+	if replay != "" {
+		t.Fatalf("replay on stopped instance = %q, want nothing", replay)
+	}
+	if syncOffset != 0 {
+		t.Fatalf("sync offset = %d, want 0 — the client-supplied cursor must not be echoed back as authoritative (first-connect semantics)", syncOffset)
+	}
+	expectCloseFrame(t, c, 1013, "instance not running")
+
+	if n := k.subscriberCount(); n != 0 {
+		t.Fatalf("%d subscriber(s) registered for a stopped instance, want 0 — the running-instance gate must reject before the callback reaches any subscribe door, policy or plain", n)
+	}
+	if logged := logOut.String(); strings.Contains(logged, "sent overflow notice") || strings.Contains(logged, "overflow-notice cap degraded") {
+		t.Fatalf("the cap path produced overflow traffic for a stopped instance it never subscribed to; log = %q", logged)
 	}
 }
 
@@ -2387,5 +3012,1278 @@ func TestHandleInstanceLog_RejectsFollowLiveEndSentinel(t *testing.T) {
 	srv.handleInstanceLog(w, req)
 	if w.Code != http.StatusOK || w.Body.String() != "newest-bytes" {
 		t.Fatalf("since=-1 = (%d, %q), want the tail as always", w.Code, w.Body.String())
+	}
+}
+
+// --- issue #114 G2: the overflow notice's 250ms wire aggregation ----------
+
+// TestHandleInstanceTTYWS_OverflowNoticeFirstIncrementIsImmediate pins the
+// first half of decision 1 补 1 (review R5) that aggregation must NOT touch:
+// the FIRST drop increment of a connection notices immediately. The 250ms
+// window exists to stop the ~150 frames/s storm, and a client that has just
+// lost its first chunk must not be made to wait inside it — its screen is
+// already torn, and every millisecond of delay is another chunk painted under
+// a cursor it no longer trusts.
+//
+// The bound is a wall clock, deliberately loose and deliberately BELOW the
+// interval: 150ms against a 250ms floor. It cannot be tighter than the
+// localhost pipeline it measures (publish → broadcast → handler → socket →
+// this test's ReadMessage, plus a 1ms poll for the producer's counter), but
+// it is tight enough to fail loudly if the first frame ever inherits the
+// throttle it was exempted from, which is the regression this pins — a
+// throttled first notice arrives ≥ ttyOverflowNoticeInterval after the drop,
+// not ≤150ms.
+func TestHandleInstanceTTYWS_OverflowNoticeFirstIncrementIsImmediate(t *testing.T) {
+	t.Parallel()
+	k := newTTYHandshakeKind(1024)
+	addr, _, instID, _ := ttyWSTestServer(t, k)
+	c, _, _ := dialHandshake(t, addr, ttyWSPath(instID, "caps=sync,overflow-notice"))
+	k.waitSubscribers(t, 5*time.Second)
+
+	// When did the producer first count a drop? Polled by its own goroutine
+	// at 1ms so the answer is not quantised by the read cadence below.
+	var mu sync.Mutex
+	var firstDropAt time.Time
+	stop := make(chan struct{})
+	go func() {
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			if chunks, _ := k.droppedTotals(); chunks > 0 {
+				mu.Lock()
+				if firstDropAt.IsZero() {
+					firstDropAt = time.Now()
+				}
+				mu.Unlock()
+				return
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}()
+
+	// A producer that outruns the drain: 32KB into a 16-slot queue, the
+	// client reading but slower than the publish loop by orders of magnitude.
+	chunk := strings.Repeat("x", 32*1024)
+	go func() {
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			k.publish(chunk)
+		}
+	}()
+	defer close(stop)
+
+	var noticeAt time.Time
+	var noticeChunks int64
+	readDeadline := time.Now().Add(10 * time.Second)
+	for {
+		if err := c.SetReadDeadline(readDeadline); err != nil {
+			t.Fatalf("set read deadline: %v", err)
+		}
+		op, p, err := c.ReadMessage()
+		if err != nil {
+			t.Fatalf("no overflow notice arrived: %v", err)
+		}
+		if op == wsOpText && isOverflowNotice(p) {
+			noticeAt = time.Now()
+			var ctl struct {
+				DroppedChunks int64 `json:"droppedChunks"`
+			}
+			if err := json.Unmarshal(p, &ctl); err != nil {
+				t.Fatalf("overflow notice %q is not JSON: %v", p, err)
+			}
+			noticeChunks = ctl.DroppedChunks
+			break
+		}
+	}
+	if noticeChunks <= 0 {
+		t.Fatalf("the first notice carried %d chunks, want a positive count", noticeChunks)
+	}
+	mu.Lock()
+	dropAt := firstDropAt
+	mu.Unlock()
+	// A ZERO here means the 1ms poller had not yet OBSERVED the counter
+	// when the notice landed — zero is "not sampled yet", nothing more
+	// (the old comment here claimed zero was "STRONGEST" and silently
+	// skipped the bound below; a skipped assertion is absence of
+	// evidence, not evidence, and the skip was the review finding). The
+	// counter itself went positive BEFORE the notice was composed — the
+	// notice is composed from a sample of the same counter — so the
+	// poller records within its 1ms cadence plus scheduling slack: wait
+	// for it with a generous margin (never flaky: the notice above
+	// already proves the counter is positive), then assert as normal.
+	if dropAt.IsZero() {
+		pollDeadline := time.Now().Add(2 * time.Second)
+		for dropAt.IsZero() && time.Now().Before(pollDeadline) {
+			time.Sleep(time.Millisecond)
+			mu.Lock()
+			dropAt = firstDropAt
+			mu.Unlock()
+		}
+	}
+	if dropAt.IsZero() {
+		t.Fatal("the 1ms drop poller never sampled the positive counter within 2s — the timing basis of the lag bound below is missing entirely; hint: check k.droppedTotals() wiring and the poller goroutine above")
+	}
+	if lag := noticeAt.Sub(dropAt); lag > 150*time.Millisecond {
+		t.Fatalf("first overflow notice reached the client %s after the first counted drop, want ≤150ms — the first increment of a connection is exempt from the %s aggregation window (issue #114 R5); a throttled first frame lands ≥%s after the drop, which is what this bound separates", lag, ttyOverflowNoticeInterval, ttyOverflowNoticeInterval)
+	}
+	if chunks, _ := k.droppedTotals(); chunks <= 0 {
+		t.Fatal("no drops were ever counted; the storm above never outran the queue")
+	}
+}
+
+// TestHandleInstanceTTYWS_OverflowNoticePendingFlushedByHeartbeat pins the
+// R2 flush contract (review B round 1 / F2): the drop sampling and notice
+// write live in the outputChan branch, so a pending pair stranded by the
+// 250ms gate when output stops was never written — the review measured
+// 22-24 counted drops never announced, the client's cursor left behind the
+// ring head to repaint duplicates on reconnect (the #87 complaint). The new
+// contract: the heartbeat branch flushes any pending pair by the next tick
+// at the latest, bounding the stranding to ONE heartbeat period.
+//
+// WHY A REAL ~10s WAIT: the contract's bound is the PRODUCTION heartbeat
+// period, so only a connection on production liveness (ttyWSTestServer:
+// 10s ticks, same seam the SlowLink wire test uses) can pin it — a
+// compressed seam would prove that some tick flushes, never that the
+// shipped cadence does. The wait is bounded by the tick plus a fixed
+// margin, so the wall clock added is one heartbeat, not a poll storm.
+//
+// Shape: storm A strands nothing (the first notice is immediate), but it
+// proves the pipe works; storm B lands AFTER the client has seen its first
+// notice, so its increments arrive as a pending pair inside the gate's
+// closed window while the client is deaf; the drain consumes the chunks
+// with the gate still shut; then output stops. Whatever remains unwritten
+// at that silence is exactly what the heartbeat flush must deliver — the
+// old code could only leave it on the floor.
+func TestHandleInstanceTTYWS_OverflowNoticePendingFlushedByHeartbeat(t *testing.T) {
+	t.Parallel()
+	k := newTTYHandshakeKind(1024)
+	addr, _, instID, _ := ttyWSTestServer(t, k) // production heartbeat: 10s
+
+	c, _, _ := dialHandshake(t, addr, ttyWSPath(instID, "caps=sync,overflow-notice"))
+	k.waitSubscribers(t, 5*time.Second)
+
+	chunk := strings.Repeat("x", 32*1024)
+
+	// Storm A: outrun the drain until drops are counted (deaf publish,
+	// same shape the overflow-notice e2e test uses).
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		if time.Now().After(deadline) {
+			t.Fatal("storm A never outran the queue; no drops were counted")
+		}
+		k.publish(chunk)
+		if dc, _ := k.droppedTotals(); dc > 0 {
+			break
+		}
+	}
+
+	// Walk to the FIRST notice N1 (the first increment is immediate) and
+	// stop reading there — do NOT drain to silence first: storm B must
+	// land inside the 250ms gate window that N1 just closed, so its
+	// increments arrive at the handler as a pending pair the gate refuses
+	// to write. Publish A left the recv buffer stuffed and the handler
+	// blocked, so the queue is still full and one publish counts a drop.
+	var notices []noticeFrame
+	readNotice := func() (noticeFrame, int) {
+		binaries := 0
+		for {
+			op, p := readFrame(t, c, 10*time.Second)
+			switch {
+			case op == wsOpClose:
+				t.Fatalf("close frame on an overflow-notice connection (payload %q): the negotiated path must notice-and-keep, never close", p)
+			case op == wsOpBinary:
+				binaries++
+			case op == wsOpText && isOverflowNotice(p):
+				var n struct {
+					DroppedBytes  int64 `json:"droppedBytes"`
+					DroppedChunks int64 `json:"droppedChunks"`
+				}
+				if err := json.Unmarshal(p, &n); err != nil {
+					t.Fatalf("overflow notice %q is not JSON: %v", p, err)
+				}
+				return noticeFrame{at: time.Now(), chunks: n.DroppedChunks, bytes: n.DroppedBytes}, binaries
+			default:
+				// ping/resize control traffic.
+			}
+		}
+	}
+	n1, _ := readNotice()
+	notices = append(notices, n1)
+
+	// Storm B, immediately — still inside the gate's closed window. The
+	// client is deaf for the publish burst only (µs–ms: the queue is
+	// already full, so the next publish counts), then reads again.
+	baseChunks, _ := k.droppedTotals()
+	deadline = time.Now().Add(20 * time.Second)
+	for {
+		if time.Now().After(deadline) {
+			t.Fatal("storm B never grew the drop counters")
+		}
+		k.publish(chunk)
+		dc, _ := k.droppedTotals()
+		if dc > baseChunks {
+			break
+		}
+	}
+	// Output stops HERE: no further publish ever happens on this
+	// connection. Whatever Σ the wire has not carried by the end of the
+	// drain is the heartbeat's debt — the gate is shut behind N1, so on
+	// a healthy machine the drain finishes with the pair unwritten (the
+	// review's stranded shape).
+
+	// Drain: consume everything still buffered, counting notices. A
+	// straggler notice here is legal — if the drain ever straddles the
+	// 250ms boundary the chunk path may flush early — and the Σ check
+	// below absorbs either shape; what may NEVER happen is silence.
+	drainEnd := time.Now().Add(2 * time.Second)
+drain:
+	for {
+		if err := c.SetReadDeadline(drainEnd); err != nil {
+			t.Fatalf("set read deadline: %v", err)
+		}
+		op, p, err := c.ReadMessage()
+		if err != nil {
+			break drain // silence — the drain is done
+		}
+		switch {
+		case op == wsOpClose:
+			t.Fatalf("close frame on an overflow-notice connection (payload %q): the negotiated path must notice-and-keep, never close", p)
+		case op == wsOpBinary:
+			// buffered backlog flowing — expected
+		case op == wsOpText && isOverflowNotice(p):
+			var n struct {
+				DroppedBytes  int64 `json:"droppedBytes"`
+				DroppedChunks int64 `json:"droppedChunks"`
+			}
+			if err := json.Unmarshal(p, &n); err != nil {
+				t.Fatalf("overflow notice %q is not JSON: %v", p, err)
+			}
+			notices = append(notices, noticeFrame{at: time.Now(), chunks: n.DroppedChunks, bytes: n.DroppedBytes})
+		default:
+			// ping/resize control traffic.
+		}
+	}
+
+	wantChunks, wantBytes := k.droppedTotals()
+
+	// If the drain left a debt (the usual, intended shape), the flush
+	// MUST arrive on the next production heartbeat tick at the latest —
+	// one period plus a fixed margin. Nothing else can write it now: no
+	// chunks remain and no publisher exists. If the drain itself already
+	// carried the full Σ (a CI stall straddled the gate), the contract
+	// is met early and there is no debt to wait for — the Σ check below
+	// is the invariant either way.
+	var sumChunks, sumBytes int64
+	for _, n := range notices {
+		sumChunks += n.chunks
+		sumBytes += n.bytes
+	}
+	if sumChunks != wantChunks || sumBytes != wantBytes {
+		if err := c.SetReadDeadline(time.Now().Add(ttyPingInterval + 5*time.Second)); err != nil {
+			t.Fatalf("set read deadline: %v", err)
+		}
+		flushed := false
+		for !flushed {
+			op, p, err := c.ReadMessage()
+			if err != nil {
+				t.Fatalf("no heartbeat-flushed overflow notice within %s after output stopped: %v — the pending pair was stranded, the exact F2 failure the R2 flush closes", ttyPingInterval+5*time.Second, err)
+			}
+			switch {
+			case op == wsOpClose:
+				t.Fatalf("close frame while awaiting the heartbeat flush (payload %q)", p)
+			case op == wsOpBinary:
+				t.Fatalf("binary chunk after output stopped and the drain closed — a phantom publisher exists")
+			case op == wsOpText && isOverflowNotice(p):
+				var n struct {
+					DroppedBytes  int64 `json:"droppedBytes"`
+					DroppedChunks int64 `json:"droppedChunks"`
+				}
+				if err := json.Unmarshal(p, &n); err != nil {
+					t.Fatalf("flush notice %q is not JSON: %v", p, err)
+				}
+				notices = append(notices, noticeFrame{at: time.Now(), chunks: n.DroppedChunks, bytes: n.DroppedBytes})
+				flushed = true
+			default:
+				// ping/resize control traffic while waiting for the flush.
+			}
+		}
+	}
+
+	// Σ completeness: every counted drop reached the wire across all
+	// notices on this connection (N1, any drain straggler, the flush) —
+	// the visible half of "notices are the complete record", which the
+	// stranding used to break.
+	sumChunks, sumBytes = 0, 0
+	for _, n := range notices {
+		sumChunks += n.chunks
+		sumBytes += n.bytes
+	}
+	if sumChunks != wantChunks || sumBytes != wantBytes {
+		t.Fatalf("Σ(notices) = %d chunks / %d bytes, want the DropStats final %d chunks / %d bytes — a counted drop never reached the wire", sumChunks, sumBytes, wantChunks, wantBytes)
+	}
+}
+
+// --- issue #114 G3: the windowed replay, both caps ------------------------
+
+// TestHandleInstanceTTYWS_ReplayWindowInsideWindowBehavesVerbatimAsToday
+// pins the negative case first, because it is the one that decides whether
+// this feature is safe to ship at all: a `since` that falls INSIDE the
+// window must produce a replay that is byte-for-byte what the same request
+// produced before the window existed. No clamp (so the start sync still
+// carries the client's own cursor), every byte of the delta on the wire,
+// the closing sync still head. If this test can pass only by the window
+// being invisible, the window is the addition it claims to be — a ceiling on
+// the pathological reconnect, not a tax on the ordinary one.
+func TestHandleInstanceTTYWS_ReplayWindowInsideWindowBehavesVerbatimAsToday(t *testing.T) {
+	t.Parallel()
+	payload := make([]byte, 100*1024) // far below the 1MiB default W
+	for i := range payload {
+		payload[i] = byte('a' + i%26)
+	}
+	k := newTTYHandshakeKind(int64(len(payload)) + 1024)
+	addr, _, instID, _ := ttyWSTestServer(t, k)
+	k.buf.Write(payload)
+	head := k.buf.Offset()
+
+	// No `replay-window` cap at all: the default (1MiB) applies, and a
+	// 100KiB backlog sits inside it untouched.
+	c, frames, startOffset, syncOffset := dialHandshakeStart(t, addr, ttyWSPath(instID, "since=0&caps=sync"))
+	_ = c.WriteClose(ws.CloseMessage(1000, "bye"))
+	_ = c.Close()
+
+	if startOffset != 0 {
+		t.Fatalf("start sync offset = %d, want the requested cursor 0 — a backlog inside the window must not be clamped at all", startOffset)
+	}
+	var delivered int64
+	for _, f := range frames {
+		delivered += int64(len(f))
+	}
+	if delivered != int64(len(payload)) {
+		t.Fatalf("replay = %d bytes, want all %d — an in-window backlog is delivered whole", delivered, len(payload))
+	}
+	if syncOffset != head {
+		t.Fatalf("closing sync = %d, want head %d", syncOffset, head)
+	}
+	// The window was not applied, and the shape of the replay proves the
+	// loop ran exactly as it did before: the same two 64KB/36KB chunks the
+	// pre-window test pins.
+	if len(frames) != 2 || len(frames[0]) != 64*1024 || len(frames[1]) != len(payload)-64*1024 {
+		t.Fatalf("replay chunking = %v, want [65536, %d] — the unchanged read loop", frameSizes(frames), len(payload)-64*1024)
+	}
+}
+
+// TestHandleInstanceTTYWS_ReplayWindowClampsStartToHeadMinusWindow pins the
+// front cap of decision 4: a `since` behind head−W_eff does not buy a
+// replay of everything missed — the replay starts at head−W_eff, and the
+// client learns that start from the issue #94 start-sync frame it already
+// handles, so the clamp needs no new wire type and no client change.
+func TestHandleInstanceTTYWS_ReplayWindowClampsStartToHeadMinusWindow(t *testing.T) {
+	t.Parallel()
+	payload := make([]byte, 100000)
+	for i := range payload {
+		payload[i] = byte('a' + i%26)
+	}
+	k := newTTYHandshakeKind(int64(len(payload)) + 1024)
+	addr, _, instID, _ := ttyWSTestServer(t, k)
+	k.buf.Write(payload)
+	head := k.buf.Offset()
+
+	const window = 40000
+	c, frames, startOffset, syncOffset := dialHandshakeStart(t, addr, ttyWSPath(instID, "since=0&caps=sync,replay-window=40000"))
+	_ = c.WriteClose(ws.CloseMessage(1000, "bye"))
+	_ = c.Close()
+
+	wantStart := head - window
+	if startOffset != wantStart {
+		t.Fatalf("start sync offset = %d, want head(%d) − W(%d) = %d — the front clamp must publish the offset the replay REALLY starts at, never the request it refused", startOffset, head, window, wantStart)
+	}
+	var delivered []byte
+	for _, f := range frames {
+		delivered = append(delivered, f...)
+	}
+	// The newest W bytes, and nothing older: head−W through head.
+	wantDelivered := payload[head-window:]
+	if !bytes.Equal(delivered, wantDelivered) {
+		t.Fatalf("replay = %d bytes, want the newest %d (payload[%d:%d]) — the clamp drops the OLDEST bytes and keeps the newest, in order", len(delivered), len(wantDelivered), head-window, head)
+	}
+	if syncOffset != head {
+		t.Fatalf("closing sync = %d, want head %d — the window reached the live edge, so the live stream stays contiguous", syncOffset, head)
+	}
+}
+
+// TestHandleInstanceTTYWS_ReplayWindowZeroIsPureTail pins the degenerate
+// W the plan calls "永远安全": W=0 replays NOTHING and still completes the
+// handshake. The closing sync publishes head, because that is where the live
+// stream starts and there is no last-written chunk to name instead — the
+// same truthful-head rule the follow-live-end mode already ships. A client
+// that asks for no history gets exactly that, and gets LIVE, which is the
+// difference between a small window and a broken reconnect.
+func TestHandleInstanceTTYWS_ReplayWindowZeroIsPureTail(t *testing.T) {
+	t.Parallel()
+	payload := make([]byte, 100000)
+	for i := range payload {
+		payload[i] = byte('a' + i%26)
+	}
+	k := newTTYHandshakeKind(int64(len(payload)) + 1024)
+	addr, _, instID, _ := ttyWSTestServer(t, k)
+	k.buf.Write(payload)
+	head := k.buf.Offset()
+
+	c, frames, startOffset, syncOffset := dialHandshakeStart(t, addr, ttyWSPath(instID, "since=0&caps=sync,replay-window=0"))
+	_ = c.WriteClose(ws.CloseMessage(1000, "bye"))
+	_ = c.Close()
+
+	if len(frames) != 0 {
+		t.Fatalf("W=0 replayed %d frame(s) (%d bytes), want zero — pure tail means no replay bytes at all", len(frames), frameSizes(frames))
+	}
+	if startOffset != -1 {
+		t.Fatalf("start sync = %d, want none: W=0 writes no chunk, and the #94 start frame belongs ahead of a chunk", startOffset)
+	}
+	if syncOffset != head {
+		t.Fatalf("closing sync = %d, want head %d — the handshake still completes and hands over at the live edge", syncOffset, head)
+	}
+}
+
+// TestHandleInstanceTTYWS_ReplayWindowZeroLiveProducerReplaysNothing pins
+// the R1 rework of G3.5: "W=0 is pure tail" must hold CONSTRUCTIVELY, not
+// by the producer happening to be idle. The static-ring sibling above could
+// not see the difference — the review's live-producer probe could: the old
+// code parked the cursor at head and re-entered the read loop, and
+// ReadSince answered with whatever head was CURRENT, so 262144 replay bytes
+// reached a socket that had asked for zero. Here the live producer is
+// scripted (each incremental read returns a fresh 64KB chunk, the exact
+// shape the review's probe used), so if the loop ran even once, bytes WOULD
+// go out — and the scripted queue consumption is the structural witness
+// either way.
+func TestHandleInstanceTTYWS_ReplayWindowZeroLiveProducerReplaysNothing(t *testing.T) {
+	t.Parallel()
+	k := newTTYHandshakeKind(64 * 1024 * 1024)
+	addr, _, instID, _ := ttyWSTestServer(t, k)
+	// A small genuine backlog so the START clamp fires (span 1000 > 0) and
+	// parks the cursor at head; EndOffset is a tail read, never scripted,
+	// so the head the clamp adopts is genuine.
+	k.buf.Write([]byte(strings.Repeat("R", 1000)))
+	head := k.buf.Offset()
+	// The scripted live producer: four consecutive 64KB answers, each
+	// advancing `next` — "the ring keeps producing no matter how often
+	// you read it". If the catch-up loop entered, the wire would carry
+	// 256KB; the review measured this shape at 262144 bytes.
+	k.scriptIncrementalReads(
+		scriptedRead{body: strings.Repeat("P", 64*1024), next: head + 64*1024},
+		scriptedRead{body: strings.Repeat("Q", 64*1024), next: head + 2*64*1024},
+		scriptedRead{body: strings.Repeat("S", 64*1024), next: head + 3*64*1024},
+		scriptedRead{body: strings.Repeat("T", 64*1024), next: head + 4*64*1024},
+	)
+
+	c, frames, startOffset, syncOffset := dialHandshakeStart(t, addr, ttyWSPath(instID, "since=0&caps=sync,replay-window=0"))
+	_ = c.WriteClose(ws.CloseMessage(1000, "bye"))
+	_ = c.Close()
+
+	var delivered int64
+	for _, f := range frames {
+		delivered += int64(len(f))
+	}
+	if len(frames) != 0 || delivered != 0 {
+		t.Fatalf("W=0 with a live producer replayed %d frame(s) / %d bytes, want zero — R1 makes pure tail constructive: the replay loop is never entered, so a moving head cannot leak bytes onto a socket that asked for no history", len(frames), delivered)
+	}
+	if startOffset != -1 {
+		t.Fatalf("start sync = %d, want none — the #94 start frame belongs ahead of a chunk, and there is no chunk", startOffset)
+	}
+	if syncOffset != head {
+		t.Fatalf("closing sync = %d, want the head the clamp read (%d) — publish head, hand over to the live subscription, the sinceFollowLiveEnd semantics the R1 branch mirrors", syncOffset, head)
+	}
+	k.scriptMu.Lock()
+	unread := len(k.scriptSince)
+	k.scriptMu.Unlock()
+	if unread != 4 {
+		t.Fatalf("%d scripted read(s) consumed, want zero — structural proof the replay loop never ran, not just a wire that happens to be quiet", 4-unread)
+	}
+
+	// Contrast, same scripted producer, replay-window=65536: unchanged
+	// behavior — the loop DOES run, streams exactly one full scripted
+	// chunk (the total cap stops it at exactly W), and publishes that
+	// chunk's end as the truncation point. Three scripted reads stay
+	// unread: truncated, not skipped, and never over-read.
+	c2, frames2, start2, sync2 := dialHandshakeStart(t, addr, ttyWSPath(instID, "since=0&caps=sync,replay-window=65536"))
+	_ = c2.WriteClose(ws.CloseMessage(1000, "bye"))
+	_ = c2.Close()
+	var delivered2 int64
+	for _, f := range frames2 {
+		delivered2 += int64(len(f))
+	}
+	if len(frames2) != 1 || delivered2 != 65536 {
+		t.Fatalf("W=65536 replay = %d frame(s) / %d bytes, want exactly one 64KB chunk — the cap counts bytes WRITTEN and lands exactly on W", len(frames2), delivered2)
+	}
+	if start2 != head {
+		t.Fatalf("start sync = %d, want %d — S = next − len(body) of the scripted chunk [head, head+64KB)", start2, head)
+	}
+	if sync2 != head+65536 {
+		t.Fatalf("closing sync = %d, want the truncation point %d — the end of the last chunk written", sync2, head+65536)
+	}
+	k.scriptMu.Lock()
+	unread2 := len(k.scriptSince)
+	k.scriptMu.Unlock()
+	if unread2 != 3 {
+		t.Fatalf("%d scripted read(s) consumed at W=65536, want exactly one — the loop ran and stopped at the cap, no over-read", 4-unread2)
+	}
+}
+
+// TestHandleInstanceTTYWS_ReplayWindowTotalCapTruncatesAndNextReconnect
+// Resumes pins the back cap — the half decision 4 had to add because
+// clamping the front does not bound the duration (review HIGH-2): the ring
+// reads to whatever head is CURRENT (ringbuffer.go), so a catch-up under
+// sustained production follows a head that keeps moving, and the only thing
+// that stops it is a count of the bytes already written.
+//
+// The scenario is built to be deterministic rather than raced: the backlog
+// is EXACTLY W at handshake time, so no front clamp applies and the loop
+// streams its one 64KB chunk; the test writes the next 32KB only AFTER that
+// chunk has been received, which is after the handler has already run its
+// guard and stopped. The truncation point is therefore fixed by the loop's
+// structure, not by a scheduling bet:
+//
+//   - exactly W_eff bytes out (not W_eff + 32KB, which is what the ring
+//     holds by then);
+//   - the closing sync publishes the TRUNCATION POINT, strictly behind head —
+//     never the head, which would strand those bytes behind an adopted
+//     cursor forever;
+//   - the reconnect from that cursor gets them: truncated, not skipped, the
+//     same self-healing round trip the byte budget always gave, now bounded
+//     by W instead of by 8MB.
+func TestHandleInstanceTTYWS_ReplayWindowTotalCapTruncatesAndNextReconnectResumes(t *testing.T) {
+	t.Parallel()
+	first := make([]byte, 64*1024) // exactly W_eff: no front clamp
+	for i := range first {
+		first[i] = byte('a' + i%26)
+	}
+	later := make([]byte, 32*1024) // produced while the replay is on the wire
+	for i := range later {
+		later[i] = byte('A' + i%26)
+	}
+	k := newTTYHandshakeKind(1024 * 1024)
+	addr, _, instID, _ := ttyWSTestServer(t, k)
+	k.buf.Write(first)
+
+	c := dialTTY(t, addr, ttyWSPath(instID, "since=0&caps=sync,replay-window=65536"))
+	sendResize(t, c)
+
+	startOffset := int64(-1)
+	var painted []byte
+	for len(painted) < len(first) {
+		op, p := readFrame(t, c, 5*time.Second)
+		switch op {
+		case wsOpBinary:
+			if startOffset == -1 {
+				t.Fatalf("binary replay chunk before the start sync — the client would advance its cursor from a base it never learned")
+			}
+			painted = append(painted, p...)
+		case wsOpPing:
+		case wsOpText:
+			var ctl struct {
+				Type   string `json:"type"`
+				Offset int64  `json:"offset"`
+				Start  bool   `json:"start"`
+			}
+			if err := json.Unmarshal(p, &ctl); err != nil {
+				t.Fatalf("control frame %q is not JSON: %v", p, err)
+			}
+			switch ctl.Type {
+			case "sync":
+				if ctl.Start {
+					startOffset = ctl.Offset
+					continue
+				}
+				t.Fatalf("closing sync arrived %d bytes into the replay, want it after the FULL window was written", len(painted))
+			case "resize", "ping", "pong":
+			default:
+				t.Fatalf("unexpected control frame %q during the replay", p)
+			}
+		default:
+			t.Fatalf("unexpected opcode %d during the replay", op)
+		}
+	}
+
+	// The backlog grows now — after the handler has written its window-full
+	// chunk, so the head the truncation leaves behind is real and the next
+	// reconnect has something to come back for.
+	k.buf.Write(later)
+	head := k.buf.Offset()
+
+	closingOp, closingPayload := readFrame(t, c, 5*time.Second)
+	if closingOp != wsOpText {
+		t.Fatalf("frame after the window's last chunk op=%d, want the closing sync TEXT", closingOp)
+	}
+	var closing struct {
+		Type   string `json:"type"`
+		Offset int64  `json:"offset"`
+		Start  bool   `json:"start"`
+	}
+	if err := json.Unmarshal(closingPayload, &closing); err != nil || closing.Type != "sync" || closing.Start {
+		t.Fatalf("frame after the window's last chunk = %q, want the closing sync", closingPayload)
+	}
+	if startOffset != 0 {
+		t.Fatalf("start sync = %d, want 0 — the backlog was exactly W, so the front clamp had nothing to refuse", startOffset)
+	}
+	if int64(len(painted)) != 65536 {
+		t.Fatalf("replay = %d bytes, want exactly the window (65536) — the total cap counts bytes WRITTEN", len(painted))
+	}
+	if closing.Offset != 65536 {
+		t.Fatalf("closing sync = %d, want the truncation point 65536 — publishing head(%d) here would move the cursor past %d bytes the client never received", closing.Offset, head, head-65536)
+	}
+	if closing.Offset >= head {
+		t.Fatalf("closing sync %d is not behind head %d — the truncated remainder must stay ahead of the cursor to be re-requestable", closing.Offset, head)
+	}
+	_ = c.WriteClose(ws.CloseMessage(1000, "bye"))
+	_ = c.Close()
+
+	// The round trip: from the published truncation point the reconnect
+	// resumes and collects exactly what the cap deferred. Still in the ring
+	// — the qualifier docs/API.md carries — because this test's ring is
+	// bigger than the window and the producer stopped.
+	c2, frames2, start2, sync2 := dialHandshakeStart(t, addr, ttyWSPath(instID, "since=65536&caps=sync,replay-window=65536"))
+	_ = c2.WriteClose(ws.CloseMessage(1000, "bye"))
+	_ = c2.Close()
+	if start2 != 65536 {
+		t.Fatalf("resume start sync = %d, want the truncation point 65536 — resuming, not restarting", start2)
+	}
+	var replay2 []byte
+	for _, f := range frames2 {
+		replay2 = append(replay2, f...)
+	}
+	if !bytes.Equal(replay2, later) {
+		t.Fatalf("re-request after truncation = %d bytes, want the %d deferred bytes — the window truncates, it never skips", len(replay2), len(later))
+	}
+	if sync2 != head {
+		t.Fatalf("closing sync after the re-request = %d, want head %d", sync2, head)
+	}
+}
+
+// TestHandleInstanceTTYWS_ReplayWindowTrimReadsLandExactlyOnWindow pins the
+// R3 read trim: the total cap is checked BEFORE the read, so an untrimmed
+// 64KB read could push the wire to W + 64KB − 1 — the review measured
+// W=40000 → 65536 bytes out. AC2's "replay ≤ W_eff" is authoritative, so
+// the read itself now shrinks to the remainder and the cap lands EXACTLY
+// on W_eff. The scenario is deterministic rather than raced: the ring holds
+// exactly W past the clamped cursor, and the liveWriteOnce hook grows the
+// ring inside the loop's first incremental read — the exact instant of the
+// review's finding — so an untrimmed read would answer 65536 bytes and fail
+// this pin, while the trimmed read answers exactly the window's remainder
+// from the REAL ring (maxBytes honored by genuine RingBuffer semantics,
+// not by a scripted double).
+func TestHandleInstanceTTYWS_ReplayWindowTrimReadsLandExactlyOnWindow(t *testing.T) {
+	t.Parallel()
+	k := newTTYHandshakeKind(1024 * 1024)
+	addr, _, instID, _ := ttyWSTestServer(t, k)
+	backlog := make([]byte, 100000) // > W: the front clamp fires
+	for i := range backlog {
+		backlog[i] = byte('a' + i%26)
+	}
+	k.buf.Write(backlog)
+	head := k.buf.Offset()
+	late := make([]byte, 30000) // produced between clamp and read
+	for i := range late {
+		late[i] = byte('A' + i%26)
+	}
+	const window = 40000
+	// Arm the deterministic live producer: when the replay loop issues its
+	// first incremental read, the ring grows past the head the clamp read,
+	// making the untrimmed 64KB read overshoot the window — the wire shape
+	// the review measured.
+	k.armLiveWriteOnce(func() { k.buf.Write(late) })
+
+	c, frames, startOffset, syncOffset := dialHandshakeStart(t, addr, ttyWSPath(instID, "since=0&caps=sync,replay-window=40000"))
+	_ = c.WriteClose(ws.CloseMessage(1000, "bye"))
+	_ = c.Close()
+
+	var delivered []byte
+	for _, f := range frames {
+		delivered = append(delivered, f...)
+	}
+	if int64(len(delivered)) != window {
+		t.Fatalf("replay = %d bytes (%d frames), want EXACTLY the window %d — the cap is checked before the read, so the read must shrink to the remainder; W+%d is the overshoot this trim exists to kill", len(delivered), len(frames), window, len(delivered)-window)
+	}
+	if len(frames) != 1 || len(frames[0]) != window {
+		t.Fatalf("replay chunking = %v, want [%d] — one trimmed read, exactly the window's remainder", frameSizes(frames), window)
+	}
+	wantDelivered := backlog[head-window:]
+	if !bytes.Equal(delivered, wantDelivered) {
+		t.Fatalf("replay bytes are not the window's newest-at-clamp region payload[%d:%d] — the clamp start and the trim must agree on the same window", head-window, head)
+	}
+	if startOffset != head-window {
+		t.Fatalf("start sync = %d, want the clamped start %d", startOffset, head-window)
+	}
+	grownHead := head + int64(len(late))
+	if syncOffset != head {
+		t.Fatalf("closing sync = %d, want the truncation point %d — the end of the last chunk written; publishing head(%d) here would move the cursor past %d bytes the client never received", syncOffset, head, grownHead, grownHead-head)
+	}
+	if syncOffset >= grownHead {
+		t.Fatalf("closing sync %d is not behind the grown head %d — the truncated remainder must stay ahead of the cursor to be re-requestable", syncOffset, grownHead)
+	}
+
+	// The round trip: from the PUBLISHED truncation point (the closing
+	// sync's offset, head=100000) the reconnect resumes and collects
+	// exactly the bytes the cap deferred — truncated, not skipped. No
+	// replay-window cap here: the default 1MiB applies, the deferred span
+	// is 30000 bytes, so no clamp fires and the whole region comes back.
+	c2, frames2, start2, sync2 := dialHandshakeStart(t, addr, ttyWSPath(instID, "since=100000&caps=sync"))
+	_ = c2.WriteClose(ws.CloseMessage(1000, "bye"))
+	_ = c2.Close()
+	var replay2 []byte
+	for _, f := range frames2 {
+		replay2 = append(replay2, f...)
+	}
+	if start2 != 100000 {
+		t.Fatalf("resume start sync = %d, want the truncation point 100000 — resuming, not restarting", start2)
+	}
+	if !bytes.Equal(replay2, late) {
+		t.Fatalf("re-request after truncation = %d bytes, want the %d deferred bytes — the window truncates, it never skips", len(replay2), len(late))
+	}
+	if sync2 != grownHead {
+		t.Fatalf("closing sync after the re-request = %d, want head %d", sync2, grownHead)
+	}
+}
+
+// TestHandleInstanceTTYWS_ReplayWindowCapAboveDefaultIsClampedDown pins the
+// anti-DoS direction of the negotiation (decision 5b: 只许缩小): a client may
+// ask for a SMALLER window than the operator's, and may not ask for a bigger
+// one. A 2MiB claim against a 1MiB default buys a 1MiB replay, because the
+// env default is the operator's ceiling and the client's cursor contract
+// makes a bigger window a longer frozen screen, not a better one.
+func TestHandleInstanceTTYWS_ReplayWindowCapAboveDefaultIsClampedDown(t *testing.T) {
+	t.Parallel()
+	if got := ttyReplayWindowBytes([]string{"sync,overflow-notice,replay-window=2097152"}); got != defaultTTYReplayWindowBytes {
+		t.Fatalf("W_eff for a 2MiB claim against the %d default = %d, want the default — the client's claim may only shrink the window", defaultTTYReplayWindowBytes, got)
+	}
+
+	payload := make([]byte, 3*1024*1024)
+	for i := range payload {
+		payload[i] = byte('a' + i%26)
+	}
+	k := newTTYHandshakeKind(int64(len(payload)) + 1024)
+	addr, _, instID, _ := ttyWSTestServer(t, k)
+	k.buf.Write(payload)
+	head := k.buf.Offset()
+
+	c, frames, startOffset, syncOffset := dialHandshakeStart(t, addr, ttyWSPath(instID, "since=0&caps=sync,replay-window=2097152"))
+	_ = c.WriteClose(ws.CloseMessage(1000, "bye"))
+	_ = c.Close()
+
+	if startOffset != head-defaultTTYReplayWindowBytes {
+		t.Fatalf("start sync = %d, want head(%d) − default(%d) — the 2MiB claim must have been clamped to the default before it ever reached the clamp", startOffset, head, defaultTTYReplayWindowBytes)
+	}
+	var delivered int64
+	for _, f := range frames {
+		delivered += int64(len(f))
+	}
+	if delivered != defaultTTYReplayWindowBytes {
+		t.Fatalf("replay = %d bytes, want exactly the default %d", delivered, defaultTTYReplayWindowBytes)
+	}
+	if syncOffset != head {
+		t.Fatalf("closing sync = %d, want head %d", syncOffset, head)
+	}
+}
+
+// TestHandleInstanceTTYWS_ReplayWindowEnvDefaultApplies pins the operator
+// knob end to end: MYWORKTREE_TTY_REPLAY_WINDOW_BYTES moves the window a
+// REAL handshake clamps to, with no client cap in play — and a value the
+// operator mistyped (letters, zero, negative) moves nothing at all, because
+// a window is not a knob worth refusing a connection over.
+//
+// Not parallel: t.Setenv, and the value is read per handshake (app.go
+// ttyReplayWindowBytes), so a parallel test's connection could otherwise
+// observe a window that belongs to this one.
+func TestHandleInstanceTTYWS_ReplayWindowEnvDefaultApplies(t *testing.T) {
+	payload := make([]byte, 100000)
+	for i := range payload {
+		payload[i] = byte('a' + i%26)
+	}
+
+	newServer := func(t *testing.T) (string, string, int64) {
+		t.Helper()
+		k := newTTYHandshakeKind(int64(len(payload)) + 1024)
+		addr, _, instID, _ := ttyWSTestServer(t, k)
+		k.buf.Write(payload)
+		return addr, instID, k.buf.Offset()
+	}
+
+	t.Run("env override shrinks the window the clamp uses", func(t *testing.T) {
+		t.Setenv(envTTYReplayWindowBytes, "32768")
+		if got := ttyReplayWindowBytes(nil); got != 32768 {
+			t.Fatalf("W_eff = %d, want the env value 32768", got)
+		}
+		addr, instID, head := newServer(t)
+		c, frames, startOffset, syncOffset := dialHandshakeStart(t, addr, ttyWSPath(instID, "since=0&caps=sync"))
+		_ = c.WriteClose(ws.CloseMessage(1000, "bye"))
+		_ = c.Close()
+		if startOffset != head-32768 {
+			t.Fatalf("start sync = %d, want head(%d) − 32768 — the env default must be the window a capless handshake clamps to", startOffset, head)
+		}
+		var delivered int64
+		for _, f := range frames {
+			delivered += int64(len(f))
+		}
+		if delivered != 32768 {
+			t.Fatalf("replay = %d bytes, want exactly the env window 32768", delivered)
+		}
+		if syncOffset != head {
+			t.Fatalf("closing sync = %d, want head %d", syncOffset, head)
+		}
+	})
+
+	for _, bad := range []string{"", "abc", "0", "-1", "32.7", "32KB"} {
+		t.Run("invalid env "+strconv.Quote(bad)+" falls back to the default", func(t *testing.T) {
+			t.Setenv(envTTYReplayWindowBytes, bad)
+			if got := ttyReplayWindowBytes(nil); got != defaultTTYReplayWindowBytes {
+				t.Fatalf("W_eff for env %q = %d, want the default %d — a mistyped window is not a reason to refuse or to starve a reconnect", bad, got, defaultTTYReplayWindowBytes)
+			}
+			addr, instID, head := newServer(t)
+			c, frames, startOffset, _ := dialHandshakeStart(t, addr, ttyWSPath(instID, "since=0&caps=sync"))
+			_ = c.WriteClose(ws.CloseMessage(1000, "bye"))
+			_ = c.Close()
+			if startOffset != 0 {
+				t.Fatalf("start sync = %d, want the requested cursor 0 — a 100000-byte backlog sits inside the default window, so an invalid env must be invisible on the wire", startOffset)
+			}
+			var delivered int64
+			for _, f := range frames {
+				delivered += int64(len(f))
+			}
+			if delivered != int64(len(payload)) {
+				t.Fatalf("replay = %d bytes, want all %d", delivered, len(payload))
+			}
+			if head != int64(len(payload)) {
+				t.Fatalf("head = %d, want %d", head, len(payload))
+			}
+		})
+	}
+}
+
+// TestTTYReplayWindowBytesResolution pins the negotiation table in one
+// place, without a socket: the sources, the one-way direction, the malformed
+// values, and the budget ceiling that makes W ≤ 8MB true by construction.
+func TestTTYReplayWindowBytesResolution(t *testing.T) {
+	t.Parallel()
+	const budget = ttyHandshakeReplayBudget
+	cases := []struct {
+		name string
+		caps []string
+		want int64
+	}{
+		{"no caps at all takes the default", nil, defaultTTYReplayWindowBytes},
+		{"shrink is honoured", []string{"sync,overflow-notice,replay-window=1024"}, 1024},
+		{"W=0 is honoured — pure tail is a legitimate request", []string{"replay-window=0"}, 0},
+		{"grow is ignored", []string{"replay-window=999999999"}, defaultTTYReplayWindowBytes},
+		{"non-numeric is ignored", []string{"replay-window=big"}, defaultTTYReplayWindowBytes},
+		{"negative is ignored", []string{"replay-window=-1"}, defaultTTYReplayWindowBytes},
+		{"empty value is ignored", []string{"replay-window="}, defaultTTYReplayWindowBytes},
+		{"a malformed claim does not shadow a good one in the same list", []string{"replay-window=abc", "replay-window=2048"}, 2048},
+		{"the first good claim wins", []string{"replay-window=2048", "replay-window=4096"}, 2048},
+		{"spaces around the value are trimmed", []string{" replay-window = 4096 "}, 4096},
+	}
+	for _, tc := range cases {
+		if got := ttyReplayWindowBytes(tc.caps); got != tc.want {
+			t.Errorf("%s: W_eff(%q) = %d, want %d", tc.name, tc.caps, got, tc.want)
+		}
+		if got := ttyReplayWindowBytes(tc.caps); got > budget {
+			t.Errorf("%s: W_eff = %d exceeds the %d byte budget — W ≤ budget must hold for EVERY input", tc.name, got, budget)
+		}
+	}
+}
+
+// --- issue #114 G4: k=v capability parsing ---------------------------------
+
+// TestTTYClientCapValue pins the four shapes R15 names, and the reason each
+// one is what it is. This parser exists because ttyClientHasCap is a
+// whole-token matcher — correctly, deliberately, and unchanged: "pinger" must
+// not opt a client into a heartbeat. That same exactness is blind to
+// `replay-window=<bytes>`, so parameterised caps need their own door, and
+// this is the only one.
+func TestTTYClientCapValue(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		caps    []string
+		key     string
+		want    string
+		wantOK  bool
+		comment string
+	}{
+		{"name=v hits", []string{"sync,overflow-notice,replay-window=1024"}, "replay-window", "1024", true, "the shape the client sends"},
+		{"name= is not a value", []string{"replay-window="}, "replay-window", "", false, "an empty value names nothing; ignored, connection unaffected"},
+		{"a bare name is not this cap", []string{"replay-window"}, "replay-window", "", false, "no '=' means a whole-token cap, and ttyClientHasCap owns those"},
+		{"nameX does not match name", []string{"replay-windowX=1"}, "replay-window", "", false, "the name must end at the '='"},
+		{"repeated caps take the first parseable value", []string{"replay-window=1", "replay-window=2"}, "replay-window", "1", true, "first declaration wins"},
+		{"an unparseable value does not consume the scan", []string{"replay-window=abc", "replay-window=4096"}, "replay-window", "4096", true, "首个可解析值 (task book G4): a stray token must not silently disable the capability"},
+		{"spaces are trimmed on both sides", []string{" replay-window = 77 "}, "replay-window", "77", true, "the query string is user-editable"},
+		{"the search is case-sensitive", []string{"Replay-Window=1"}, "replay-window", "", false, "same rule as ttyClientHasCap"},
+		{"a value inside another token still matches by prefix", []string{"sync,replay-window=8"}, "replay-window", "8", true, "comma-separated list, scanned token by token"},
+		{"zero is a parseable value", []string{"replay-window=0"}, "replay-window", "0", true, "the parser reports what the token says; the caller decides W=0 means tail"},
+		{"a different key does not match", []string{"compress=1"}, "replay-window", "", false, "the name is part of the match"},
+	}
+	for _, tc := range cases {
+		got, ok := ttyClientCapValue(tc.caps, tc.key)
+		if got != tc.want || ok != tc.wantOK {
+			t.Errorf("ttyClientCapValue(%q, %q) = (%q, %v), want (%q, %v) — %s", tc.caps, tc.key, got, ok, tc.want, tc.wantOK, tc.comment)
+		}
+	}
+}
+
+// TestTTYClientCapValueDoesNotChangeWholeTokenMatching pins the boundary
+// the two matchers share: adding a k=v door must not leak a whole-token
+// capability to a client that spelled it as a parameter, and must not stop a
+// whole token from matching because something else in the list carries an '='.
+func TestTTYClientCapValueDoesNotChangeWholeTokenMatching(t *testing.T) {
+	t.Parallel()
+	// A parameterised token is NOT the whole token.
+	if ttyClientHasCap([]string{"replay-window=1024"}, "replay-window") {
+		t.Fatal(`"replay-window=1024" must not satisfy the whole-token matcher — R15's whole reason ttyClientCapValue exists`)
+	}
+	// And the value matcher does not answer for a bare token.
+	if _, ok := ttyClientCapValue([]string{"overflow-notice"}, "overflow-notice"); ok {
+		t.Fatal(`a bare "overflow-notice" carries no value; ttyClientCapValue must report none rather than ""`)
+	}
+	// Mixed lists: each matcher sees its own half, untouched.
+	mixed := []string{"ping,sync,overflow-notice,slow-link,replay-window=262144"}
+	for _, cap := range []string{"ping", "sync", "overflow-notice", "slow-link"} {
+		if !ttyClientHasCap(mixed, cap) {
+			t.Errorf("whole-token %q lost from a mixed caps list — the k=v addition must not disturb ttyClientHasCap", cap)
+		}
+	}
+	if v, ok := ttyClientCapValue(mixed, "replay-window"); !ok || v != "262144" {
+		t.Errorf("replay-window in the mixed list = (%q, %v), want (\"262144\", true)", v, ok)
+	}
+}
+
+// --- issue #114 G5: env-configurable deadline, slow-link heartbeat -------
+
+// TestTTYWriteTimeoutFromEnv pins the resolver and the default it falls back
+// to. The default is pinned numerically (15000ms) as well as symbolically:
+// the number is what docs/API.md promises operators, and a silent change to
+// it should fail a test rather than a production link.
+//
+// Not parallel: t.Setenv.
+func TestTTYWriteTimeoutFromEnv(t *testing.T) {
+	if defaultTTYWriteTimeout != 15*time.Second {
+		t.Fatalf("defaultTTYWriteTimeout = %s, want 15s — the documented default (decision 3, API.md)", defaultTTYWriteTimeout)
+	}
+	// Unset: today's behaviour, verbatim. The env name is frozen (R13) and
+	// nothing else may arm this deadline.
+	if _, present := os.LookupEnv(envTTYWriteTimeoutMS); present {
+		t.Fatalf("%s is set in the test environment; this test needs it unset to pin the default", envTTYWriteTimeoutMS)
+	}
+	if got := ttyWriteTimeout(); got != 15*time.Second {
+		t.Fatalf("ttyWriteTimeout() unset = %s, want the 15s default", got)
+	}
+
+	cases := []struct {
+		raw  string
+		want time.Duration
+		why  string
+	}{
+		{"30000", 30 * time.Second, "the cross-border setting decision 3 names"},
+		{"1", time.Millisecond, "any positive value is honoured; the operator owns the consequence"},
+		{" 25000 ", 25 * time.Second, "a value typed into a shell profile with spaces"},
+		{"", 15 * time.Second, "empty means unset to a human, so it means the default"},
+		{"abc", 15 * time.Second, "unparsable: fall back, never fail the handshake"},
+		{"0", 15 * time.Second, "zero is NOT 'no deadline' here — removing the bound #114 installs would be the bug, not the feature"},
+		{"-1000", 15 * time.Second, "negative would arm a deadline in the past and fail every write instantly"},
+		{"15.5", 15 * time.Second, "milliseconds are integers"},
+	}
+	for _, tc := range cases {
+		t.Setenv(envTTYWriteTimeoutMS, tc.raw)
+		if got := ttyWriteTimeout(); got != tc.want {
+			t.Errorf("ttyWriteTimeout() with %s=%q = %s, want %s — %s", envTTYWriteTimeoutMS, tc.raw, got, tc.want, tc.why)
+		}
+	}
+}
+
+// TestHandleInstanceTTYWS_WriteTimeoutFromEnvReclaimsStalledWriter proves
+// the env value is the number the CONNECTION runs on, not just the number
+// the resolver returns: with the deadline set to 500ms, a peer that stops
+// reading must have its handler unwound in about half a second, where the
+// default would hold it for fifteen. That asymmetry is the whole test — the
+// same stall measured against two different clocks.
+//
+// The stall is structural: a deaf client, 32KB chunks, and the socket buffer
+// as the only room left. The connection declares overflow-notice so the
+// subscription SURVIVES its overflows (issue #114) and the handler stays on
+// the binary-write path, which is the path the deadline exists to bound.
+//
+// Not parallel: t.Setenv.
+func TestHandleInstanceTTYWS_WriteTimeoutFromEnvReclaimsStalledWriter(t *testing.T) {
+	const timeout = 500 * time.Millisecond
+	t.Setenv(envTTYWriteTimeoutMS, strconv.FormatInt(int64(timeout/time.Millisecond), 10))
+
+	k := newTTYHandshakeKind(1024)
+	// Production liveness intervals: the heartbeat must not be the thing
+	// that tears this connection down, only the armed write deadline.
+	addr, srv, _, instID, _ := ttyWSTestServerWithLiveness(t, k, ttyPingInterval, ttyReadDeadline)
+	c, _, _ := dialHandshake(t, addr, ttyWSPath(instID, "caps=sync,overflow-notice"))
+	k.waitSubscribers(t, 5*time.Second)
+
+	// Deaf from here on: this test never reads the socket, so the only room
+	// left for the producer's bytes is the socket buffer, and once that is
+	// full the handler sits inside WriteBinary with the armed deadline
+	// counting. One reader only — the test itself — because two goroutines
+	// pulling from the same conn would race for the frames this test is
+	// trying to observe.
+	chunk := strings.Repeat("x", 32*1024)
+	stop := make(chan struct{})
+	var published atomic.Int64 // the publisher's counter, read by the test below
+	stallStart := time.Now()
+	go func() {
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			k.publish(chunk)
+			published.Add(1)
+			time.Sleep(time.Millisecond)
+		}
+	}()
+
+	// The reclamation event is the handler's own unregister — the defer that
+	// runs when the blocked write finally errors. Timestamped, because the
+	// WHEN is the whole assertion: the default would hold it ~15s.
+	var reclaimedAt time.Time
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		srv.ttyMu.Lock()
+		n := len(srv.ttyClients[instID])
+		srv.ttyMu.Unlock()
+		if n == 0 {
+			reclaimedAt = time.Now()
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	close(stop)
+
+	if reclaimedAt.IsZero() {
+		t.Fatalf("the stalled writer was never reclaimed after %d chunks in 5s: the deadline armed from %s never reached the connection", published.Load(), envTTYWriteTimeoutMS)
+	}
+	elapsed := reclaimedAt.Sub(stallStart)
+	if elapsed < 400*time.Millisecond {
+		t.Fatalf("the stalled writer was reclaimed after %s, want >=%s — an instant teardown is a write that never blocked, which pins nothing", elapsed, timeout)
+	}
+	if elapsed > 4*time.Second {
+		t.Fatalf("the stalled writer was reclaimed after %s, want ~%s and certainly not the %s default — the connection must run the env value, not the fallback", elapsed, timeout, defaultTTYWriteTimeout)
+	}
+	// And the socket really is gone. Frames the handler wrote BEFORE its
+	// blocked write are sitting in the socket buffer and stay readable after
+	// the close — that is how TCP works, and the client's own read loop
+	// drains them the same way — so the assertion is not "the next read
+	// fails" but "the reads end": a connection the server had NOT reclaimed
+	// would keep producing frames instead of an error.
+	closed := false
+	drainUntil := time.Now().Add(3 * time.Second)
+	for time.Now().Before(drainUntil) {
+		_ = c.SetReadDeadline(time.Now().Add(time.Second))
+		if _, _, err := c.ReadMessage(); err != nil {
+			closed = true
+			break
+		}
+	}
+	if !closed {
+		t.Fatal("the client is still being served after the handler was reclaimed — the teardown never reached the socket")
+	}
+}
+
+// TestTTYHeartbeatIntervalFor pins both heartbeat paths at the seam that
+// decides them: a `slow-link` client moves the PRODUCTION interval to
+// ttyHeartbeatIntervalSlowLink, and everything else — every legacy client,
+// every undeclared cap list, and every compressed test interval — passes
+// through byte-identically. The production constant is pinned numerically
+// too, because 10s/45s is the contract docs/API.md and index.html's 30s
+// threshold are built on.
+func TestTTYHeartbeatIntervalFor(t *testing.T) {
+	t.Parallel()
+	if ttyPingInterval != 10*time.Second {
+		t.Fatalf("ttyPingInterval = %s, want 10s — the base heartbeat every client that does not declare slow-link keeps", ttyPingInterval)
+	}
+	if ttyHeartbeatIntervalSlowLink != 15*time.Second {
+		t.Fatalf("ttyHeartbeatIntervalSlowLink = %s, want 15s (decision 3(c), ORCA relay's 15s/75s reference)", ttyHeartbeatIntervalSlowLink)
+	}
+
+	cases := []struct {
+		name    string
+		caps    []string
+		in      time.Duration
+		want    time.Duration
+		comment string
+	}{
+		{"undeclared keeps production", nil, ttyPingInterval, 10 * time.Second, "the default is untouched — this widening is opt-in"},
+		{"other caps keep production", []string{"ping,sync,overflow-notice"}, ttyPingInterval, 10 * time.Second, "every client that exists today"},
+		{"slow-link widens production", []string{"ping,sync,slow-link"}, ttyPingInterval, 15 * time.Second, "the widening itself"},
+		{"slow-link alone widens", []string{"slow-link"}, ttyPingInterval, 15 * time.Second, "no other cap is required"},
+		{"repeated caps parameters", []string{"caps-are-repeated", "ping,slow-link"}, ttyPingInterval, 15 * time.Second, "the raw slice is scanned, not Values.Get"},
+		{"slowlink is not slow-link", []string{"slowlink"}, ttyPingInterval, 10 * time.Second, "whole token, same rule as every other cap"},
+		{"slow-link-extra is not slow-link", []string{"slow-link-extra"}, ttyPingInterval, 10 * time.Second, "no substring matching"},
+		{"SLOW-LINK is not slow-link", []string{"SLOW-LINK"}, ttyPingInterval, 10 * time.Second, "case-sensitive"},
+		{"slow-link does not widen a test seam", nil, 100 * time.Millisecond, 100 * time.Millisecond, "a caller that chose an interval owns it"},
+		{"slow-link does not widen a non-production interval", []string{"slow-link"}, 100 * time.Millisecond, 100 * time.Millisecond, "the guard is on the production value, so a compressed seam still observes the interval it asked for — which is what makes the widening testable at all"},
+	}
+	for _, tc := range cases {
+		if got := ttyHeartbeatIntervalFor(tc.caps, tc.in); got != tc.want {
+			t.Errorf("%s: ttyHeartbeatIntervalFor(%q, %s) = %s, want %s — %s", tc.name, tc.caps, tc.in, got, tc.want, tc.comment)
+		}
+	}
+}
+
+// TestHandleInstanceTTYWS_SlowLinkHeartbeatIntervalOnTheWire pins the two
+// heartbeat paths on a real socket, at the PRODUCTION intervals, in one test
+// that costs one heartbeat period rather than two (decision 3(c)/5c):
+//
+//   - a connection that did NOT declare `slow-link` must still receive its
+//     first TEXT {"type":"ping"} at ~ttyPingInterval (10s), well before the
+//     widened 15s — the legacy cadence, verbatim, the one every existing
+//     client and the 30s threshold in index.html are built on;
+//   - a connection that DID declare it must NOT receive one at 10s, and must
+//     receive it at ~ttyHeartbeatIntervalSlowLink (15s).
+//
+// The two bounds are mutually exclusive with a second of margin between them
+// (13.5s / 14.5s), which is what makes this the pin for "applied to the
+// declared connection and to nobody else" — the failure the arbitration
+// called out is a cap that is parsed but never applied, and this is the only
+// test that can see the difference on the wire.
+//
+// Both connections dial before either reads, so neither measurement waits on
+// the other's tick, and the wall clock the test adds is ~15s total.
+func TestHandleInstanceTTYWS_SlowLinkHeartbeatIntervalOnTheWire(t *testing.T) {
+	t.Parallel()
+	k := newTTYHandshakeKind(1024)
+	addr, _, instID, _ := ttyWSTestServer(t, k) // production 10s / 45s
+
+	type pingAt struct {
+		caps string
+		at   time.Duration
+		err  error
+	}
+	// firstTextPing returns the time from the connection's own start to the
+	// first TEXT heartbeat frame. The RFC 6455 ping is deliberately not the
+	// observable here: it is answered inside the browser's stack (and inside
+	// ws.Conn here) and never reaches page JS, which is exactly why the TEXT
+	// frame exists — so the TEXT frame is the frame the interval claim has to
+	// be measured on.
+	firstTextPing := func(c *ws.Conn, clientID string, start time.Time, limit time.Duration) pingAt {
+		if err := c.SetReadDeadline(time.Now().Add(limit)); err != nil {
+			return pingAt{caps: clientID, err: err}
+		}
+		for {
+			op, p, err := c.ReadMessage()
+			if err != nil {
+				return pingAt{caps: clientID, err: err}
+			}
+			if op == wsOpText && strings.Contains(string(p), `"type":"ping"`) {
+				return pingAt{caps: clientID, at: time.Since(start)}
+			}
+		}
+	}
+
+	cLegacy := dialTTY(t, addr, ttyWSPath(instID, "caps=ping,sync"))
+	cSlow := dialTTY(t, addr, ttyWSPath(instID, "caps=ping,sync,slow-link"))
+	// Both handshakes are complete (dialTTY consumed ready, and the empty
+	// ring plus the 5s handshake timer would complete it anyway); the tick
+	// clocks start with the handlers, so a single shared start taken here is
+	// honest to within the dial round trip.
+	start := time.Now()
+	legacyCh := make(chan pingAt, 1)
+	slowCh := make(chan pingAt, 1)
+	go func() { legacyCh <- firstTextPing(cLegacy, "legacy", start, 13500*time.Millisecond) }()
+	go func() { slowCh <- firstTextPing(cSlow, "slow-link", start, 22*time.Second) }()
+
+	legacy, slow := <-legacyCh, <-slowCh
+	if legacy.err != nil {
+		t.Fatalf("the undeclared connection never got a TEXT ping within %s: %v — the heartbeat it depends on for liveness must not be widened by a cap it did not declare", 13500*time.Millisecond, legacy.err)
+	}
+	if legacy.at > 13500*time.Millisecond {
+		t.Fatalf("undeclared connection's first TEXT ping at %s, want ~%s — the widening leaked onto a client that did not declare slow-link", legacy.at, ttyPingInterval)
+	}
+	if slow.err != nil {
+		t.Fatalf("the slow-link connection never got a TEXT ping within %s: %v — the widened heartbeat has to actually arrive", 22*time.Second, slow.err)
+	}
+	if slow.at < 14500*time.Millisecond {
+		t.Fatalf("slow-link connection's first TEXT ping at %s, want ≥%s — a `slow-link` client that still gets the %s cadence is a cap parsed and never applied (decision 3(c))", slow.at, ttyHeartbeatIntervalSlowLink, ttyPingInterval)
+	}
+	if slow.at > 22*time.Second {
+		t.Fatalf("slow-link connection's first TEXT ping at %s, want ~%s — widened, not silenced: a heartbeat that stops is a dead-connection detector that stopped working", slow.at, ttyHeartbeatIntervalSlowLink)
+	}
+	if slow.at <= legacy.at {
+		t.Fatalf("the slow-link connection pinged at %s, no later than the undeclared one at %s — the two paths are supposed to differ by the widening, in this direction", slow.at, legacy.at)
+	}
+}
+
+// TestTTYMetricsHandshakeLineCarriesWindowFields pins the [tty-metrics]
+// handshake line's column layout — the two new fields appended at the END,
+// every existing column byte-identical in its old position — and the values
+// the window reports on a clamped catch-up.
+//
+// It runs only in the ttymetrics build variant (where logHandshake is the
+// real implementation); the stable variant is covered by the const-gated
+// silence of tty_metrics_off.go and by this test's skip, which is loud about
+// which variant it belongs to. The layout is the point: DATA-COLLECTION.md
+// documents these columns, so a reorder would silently break the collector
+// while every value stayed correct.
+func TestTTYMetricsHandshakeLineCarriesWindowFields(t *testing.T) {
+	if !ttyMetricsBuild {
+		t.Skip("[tty-metrics] logging is compiled out of this build variant; run with -tags ttymetrics to pin the column layout")
+	}
+	t.Parallel()
+	payload := make([]byte, 100000)
+	for i := range payload {
+		payload[i] = byte('a' + i%26)
+	}
+	k := newTTYHandshakeKind(int64(len(payload)) + 1024)
+	addr, _, instID, logOut := ttyWSTestServer(t, k)
+	k.buf.Write(payload)
+	head := k.buf.Offset()
+
+	// since=0 against a 100000-byte backlog with a 40000-byte window: the
+	// front clamp refuses 60000 bytes, so windowed=true and
+	// droppedFromWindow=60000, with the budget untouched.
+	c, _, syncOffset := dialHandshake(t, addr, ttyWSPath(instID, "since=0&caps=sync,replay-window=40000"))
+	_ = c.WriteClose(ws.CloseMessage(1000, "bye"))
+	_ = c.Close()
+
+	line := waitForLine(t, logOut, "[tty-metrics] handshake id="+instID, 5*time.Second)
+	wantPrefix := "[tty-metrics] handshake id=" + instID +
+		" mode=catchup since=0 headAtStart=" + strconv.FormatInt(head, 10) +
+		" published=" + strconv.FormatInt(syncOffset, 10) +
+		" replayBytes=40000 replayMs="
+	if !strings.HasPrefix(line, wantPrefix) {
+		t.Fatalf("handshake line = %q, want the frozen column layout %q... — the columns that existed before issue #114 keep their names, order and values", line, wantPrefix)
+	}
+	if !strings.HasSuffix(line, " budgetExhausted=false windowed=true droppedFromWindow=60000") {
+		t.Fatalf("handshake line = %q, want it to END with \" budgetExhausted=false windowed=true droppedFromWindow=60000\" — budgetExhausted keeps its old slot, the two new fields ride the end (head %d − window 40000 − since 0 = 60000 refused at the front)", line, head)
+	}
+}
+
+// waitForLine polls an injected log buffer for a line containing want. Local
+// to this file on purpose: the ttymetrics suite has its own copy behind the
+// build tag, and a test that runs in BOTH variants cannot depend on a
+// tag-gated helper.
+func waitForLine(t *testing.T, buf *lockedLogBuffer, want string, d time.Duration) string {
+	t.Helper()
+	deadline := time.Now().Add(d)
+	for {
+		if s := buf.String(); strings.Contains(s, want) {
+			for _, line := range strings.Split(s, "\n") {
+				if strings.Contains(line, want) {
+					return line
+				}
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("log line containing %q never appeared within %s; log so far = %q", want, d, buf.String())
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }

@@ -49,13 +49,22 @@ func (c *ttyMeteredConn) timed(op string, n int, write func() error) error {
 // in place. replayBytes is read off the connection's binary counter at that
 // instant, which is exact for all three handshake modes (tail, catch-up,
 // follow-live-end) without per-branch accounting.
+//
+// The two issue #114 fields are APPENDED at the end of the line, and every
+// field name and position before them is frozen: this line is a data source
+// (DATA-COLLECTION.md), so the column layout the collector's grep/awk and
+// the decision matrix already depend on is part of its contract. windowed
+// is the OR of the two window truncations (start clamp / total cap),
+// droppedFromWindow their sum — see ttyConnMetrics for the exact arithmetic
+// and for why a windowed handshake can legitimately report 0.
 func (m *ttyConnMetrics) logHandshake(logger *log.Logger, id string, since int64) {
 	if logger == nil {
 		return
 	}
-	logger.Printf("[tty-metrics] handshake id=%s mode=%s since=%d headAtStart=%d published=%d replayBytes=%d replayMs=%d budgetExhausted=%v",
+	logger.Printf("[tty-metrics] handshake id=%s mode=%s since=%d headAtStart=%d published=%d replayBytes=%d replayMs=%d budgetExhausted=%v windowed=%v droppedFromWindow=%d",
 		id, m.mode, since, m.headAtStart, m.publishedOffset,
-		m.replayBytes, m.replayDur.Milliseconds(), m.budgetExhausted)
+		m.replayBytes, m.replayDur.Milliseconds(), m.budgetExhausted,
+		m.windowed, m.droppedFromWindow)
 }
 
 // logOverflow emits the subscriber-overflow line next to the existing

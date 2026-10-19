@@ -30,6 +30,17 @@ type Conn struct {
 	rw     *bufio.ReadWriter
 	mu     sync.Mutex
 	client bool
+	// writeTimeout bounds every writeFrame (issue #114, the #83 write
+	// deadline the tty path had never implemented). ZERO — the value every
+	// Conn is constructed with, and the value every endpoint that never
+	// calls SetWriteTimeout keeps — means NO deadline, today's exact
+	// behaviour: a stalled peer stalls the write indefinitely. It is
+	// strictly opt-in, per Conn, so enabling it on the tty path cannot
+	// reach the other WS endpoints or the client-side Dial path.
+	//
+	// read under c.mu (writeFrame holds it); written by SetWriteTimeout,
+	// which also takes c.mu so the two cannot interleave with a write.
+	writeTimeout time.Duration
 	// Client-side continuation reassembly state (RFC 6455 §5.4): a
 	// fin=0 data frame opens a message whose payload accumulates in
 	// fragBuf until the fin=1 continuation; fragOp preserves the FIRST
@@ -37,6 +48,39 @@ type Conn struct {
 	// path) never fragment and keep the strict rejection instead.
 	fragOp  byte
 	fragBuf []byte
+}
+
+// SetWriteTimeout arms a per-write deadline on every subsequent writeFrame
+// (issue #114). d <= 0 clears it back to the default no-deadline behaviour:
+// the disarm takes the socket with the field — SetWriteDeadline(time.Time{})
+// on the embedded Conn — so the absolute deadline an earlier armed writeFrame
+// left on the socket cannot outlive the timeout that armed it. Without that
+// clear, arm(15s) → write → SetWriteTimeout(0) would still fail any write
+// issued after the original now+15s with os.ErrDeadlineExceeded, a deadline
+// no caller asked for any more, contradicting the sentence above.
+// It takes c.mu — the same lock writeFrame holds across a write — so the
+// field is never read mid-write by a racing writeFrame while being written
+// here, and a caller cannot arm a deadline onto a write already in flight.
+// The same lock is what makes the clear safe: no write is in flight here, so
+// a zero deadline cannot land mid-frame.
+//
+// Opt-in by design: Upgrade/Dial never call it, so a Conn that does not ask
+// for a deadline behaves byte-identically to before this method existed.
+func (c *Conn) SetWriteTimeout(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if d <= 0 {
+		c.writeTimeout = 0
+		// The error is ignored on purpose: a socket that refuses to drop a
+		// deadline is not actionable here. The next arm re-sets it through
+		// writeFrame's own checked path, and on the zero path the only
+		// thing a caller can depend on is that ws.Conn stops arming new
+		// per-write deadlines — which holds regardless of whether this
+		// particular clear landed.
+		_ = c.Conn.SetWriteDeadline(time.Time{})
+		return
+	}
+	c.writeTimeout = d
 }
 
 func Upgrade(w http.ResponseWriter, r *http.Request) (*Conn, error) {
@@ -269,6 +313,23 @@ func (c *Conn) WriteClose(p []byte) error { return c.writeFrame(opClose, p) }
 func (c *Conn) writeFrame(op byte, p []byte) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	// Issue #114 (decision 3): a per-Conn write deadline, armed via
+	// SetWriteTimeout, refreshed at the start of EVERY write so it bounds
+	// each frame individually — a healthy connection keeps re-arming it
+	// (every heartbeat ping, every chunk) and never trips it; a stalled
+	// peer turns the indefinitely-blocked write that used to pin this
+	// goroutine, c.mu, and every later frame behind it into a bounded
+	// stall that errors and unwinds the caller. The zero path is a
+	// compare-and-branch: writeTimeout == 0 (every Conn that never called
+	// SetWriteTimeout — every other WS endpoint, every dialed client)
+	// touches no deadline and behaves exactly as before, including leaving
+	// any deadline a caller set on the raw Conn (e.g. app.go's explicit
+	// 5 s teardown deadline) fully in charge.
+	if c.writeTimeout > 0 {
+		if err := c.SetWriteDeadline(time.Now().Add(c.writeTimeout)); err != nil {
+			return err
+		}
+	}
 	h := []byte{0x80 | op}
 	n := len(p)
 	var maskBit byte

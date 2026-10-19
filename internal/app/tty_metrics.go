@@ -69,6 +69,45 @@ type ttyConnMetrics struct {
 	replayBytes     int64 // binBytes snapshot at handshake end
 	replayDur       time.Duration
 	subscribedAt    time.Time // zero until SubscribeOutput succeeds
+	// windowed reports that this handshake's replay was bounded by the
+	// issue #114 replay window — TRUE when EITHER half fired: the START
+	// clamp (the client's `since` sat behind head−W_eff, so the replay
+	// began later than it asked) or the TOTAL cap (the loop stopped at
+	// W_eff bytes written). Both halves truncate, and the two causes need
+	// different follow-up reads — a clamped start means a backlog older
+	// than the window, a total cap means a head that outran the replay —
+	// so the flag is the OR and droppedFromWindow is the sum.
+	//
+	// W_eff ≤ ttyHandshakeReplayBudget holds BY CONSTRUCTION (the window
+	// config clamps to the budget, never above). One reading this flag
+	// records as legal: budgetExhausted=true with windowed=false and
+	// droppedFromWindow=0 is a VALID combination, reachable when
+	// W_eff == budget (the env raised to ≥8MB and clamped there) AND
+	// the backlog at handshake is < W_eff (so the start clamp never
+	// fired) AND a producer then outruns the replay past the budget —
+	// the clamp had nothing to cut, yet the total cap still did, and
+	// that truncation is the budget's own, reported by its own field.
+	// windowed is the OR of the two WINDOW truncations only, by design
+	// excluding the budget stop (the review-B arbitration): the field
+	// answers "was the frozen screen sized by the window", not "did
+	// any ceiling cut bytes".
+	windowed bool
+	// droppedFromWindow is the byte count the window kept off this socket:
+	//
+	//	droppedFromWindow = (clampedStart − since)          start clamp
+	//	                  + (head − endOffset at truncation)  total cap
+	//
+	// The first term is the span the window refused at the front end,
+	// measured against the client's own request — so when `since` is ALSO
+	// stale (behind the ring's oldest live byte) it overlaps the region the
+	// issue #94 start-sync had already re-based the client onto; both
+	// figures describe the same skipped bytes, NOT two independent
+	// losses, and this one is the window's arithmetic. The second term
+	// is read once, at the instant the total cap
+	// fires, and is 0 when the loop stopped exactly on head. Zero on a
+	// windowed handshake is therefore legitimate: clamped at the front,
+	// caught up at the back.
+	droppedFromWindow int64
 }
 
 // ttyMeteredConn wraps *ws.Conn and times every write on the TTY handler

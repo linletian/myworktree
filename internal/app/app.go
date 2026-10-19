@@ -167,15 +167,18 @@ const maxTTYClientsPerInstance = 8
 // BEFORE the live stream — the recent live output still lands at the end
 // and stays visible.
 //
-// There is deliberately no write deadline on this path, and that is an
-// accepted cost rather than an oversight: the handshake has not called
-// SubscribeOutput yet, so a blocked write here does not stall the live pump;
-// and a wall-clock deadline would livelock a slow-but-progressing consumer,
-// which can never catch up and would be re-truncated on every attempt. A
-// byte budget degrades gracefully — the next reconnect resumes from the
-// published cursor — where a deadline can livelock forever. (The broader
-// absence of a TTY write deadline is issue #83's documented boundary; this
-// notes it, it does not move it.)
+// The budget is a byte count and NOT a write deadline, and the two are
+// different instruments on this path: the budget bounds how much one
+// handshake may write in total, while ttyWriteTimeout (armed directly after
+// the ready frame, before this loop runs) bounds how long any ONE of those
+// writes may block. Neither is redundant with the other, and neither
+// livelocks a slow-but-progressing consumer: the budget defers the
+// remainder to the next reconnect, and the per-write deadline re-arms on
+// every frame, so a consumer that keeps taking bytes keeps resetting it
+// while a peer that stopped taking bytes at all is released in 15 s instead
+// of pinning this goroutine and ws.Conn's mutex indefinitely (issue #114,
+// decision 3 — the write deadline #83 deliberately left out; this is where
+// #114 lands it, replay included).
 const ttyHandshakeReplayBudget int64 = 8 << 20 // 8 MB
 
 type ttyClientHandle struct {
@@ -2360,7 +2363,312 @@ const sinceFollowLiveEnd int64 = -2
 const (
 	ttyPingInterval = 10 * time.Second
 	ttyReadDeadline = 45 * time.Second
+	// defaultTTYWriteTimeout is the fallback that bounds every write on the
+	// TTY socket from the ready frame onward — the handshake replay writes
+	// included (issue #114, decision 3 — the write deadline #83 deliberately
+	// left out and #114 finally lands). It is the fallback rather than the
+	// value: MYWORKTREE_TTY_WRITE_TIMEOUT_MS (envTTYWriteTimeoutMS) moves it,
+	// resolved once per connection by ttyWriteTimeout() and armed at the one
+	// call site below. The knob exists because "past 15 s the link is dead"
+	// is a false binary (issue #114 review R2): on a 50 KB/s link with 2%
+	// loss a single 64 KB write legitimately blocks longer than 15 s while
+	// the connection recovers, and killing that connection replays into the
+	// same stall — a deadline-induced loop. An operator on such a link raises
+	// the bound to 30 s without a code change; a missing, unparsable, zero or
+	// negative value lands back here, on this documented default.
+	//
+	// It is deliberately LONGER than ttyPingInterval: a
+	// healthy peer re-arms it with its own traffic every 10 s and never
+	// trips it, so the bound is invisible until a peer truly stalls — and
+	// then it turns the write that used to pin this goroutine, ws.Conn's
+	// mutex, and every frame behind it (heartbeats included, the issue #114
+	// amplification) into a bounded stall that errors and unwinds the
+	// handler through its existing defers. (On a `slow-link` connection the
+	// heartbeat sits at ttyHeartbeatIntervalSlowLink, level with this bound:
+	// the deadline is re-armed at the START of every write, so what it
+	// measures is one blocked write, never the gap between two frames, and
+	// the heartbeat frames themselves are a handful of bytes.)
+	//
+	// Arming sits right after the ready frame rather than after the
+	// subscription because the replay is the larger exposure: up to 8 MB
+	// (ttyHandshakeReplayBudget) written to a socket whose peer may already
+	// be gone, with no subscription yet to bound it. A dead consumer there
+	// pinned the handler and ws.Conn's mutex for as long as the OS let the
+	// write block — the review's amplifier — and "armed after SubscribeOutput"
+	// left that whole window unbounded. Per-write semantics are unchanged
+	// (writeFrame re-arms at now+d on EVERY frame), so a slow but progressing
+	// replay is never mistaken for a stall: only a peer that stops taking
+	// bytes for a full timeout period trips. The explicit 5 s teardown
+	// deadline keeps its tighter documented bound — that path disarms this
+	// one first.
+	defaultTTYWriteTimeout = 15 * time.Second
+	// ttyDropLogInterval is the floor between two overflow log lines on one
+	// connection (issue #114 review, minor). A drop storm produces one
+	// notice per live chunk, and logging every one of them floods the log
+	// while the peer that cannot take bytes is exactly the peer whose
+	// congestion that log makes worse. The FIRST increment of every
+	// connection still logs immediately — an operator's "did this connection
+	// drop anything?" question is answered at the first drop — and later
+	// ones are sampled at this rate. A sampled line carries ITS OWN
+	// increment, not the sum of the suppressed ones: the log is a sample,
+	// the wire notices are the complete record. The log gate and the wire
+	// gate are two independent knobs — ttyOverflowNoticeInterval below is
+	// the wire's, and neither one's rate bounds the other's.
+	ttyDropLogInterval = 500 * time.Millisecond
+	// ttyOverflowNoticeInterval is the floor between two overflow NOTICE
+	// frames on one connection (issue #114, decision 1 补 1 / review R5).
+	// The wire notice used to ride every single drop increment, which in a
+	// storm is one TEXT frame per live chunk — ~150 frames/s at the
+	// measured 150 KB/s burst, each one taking ws.Conn's write mutex away
+	// from the binary chunk it precedes (writeFrame serialises on c.mu):
+	// the notice was itself an amplifier of the congestion it reported.
+	// So: the FIRST drop increment of a connection still notices immediately,
+	// and after that at most one frame per interval — four per second —
+	// carrying the SUM of every increment since the last notice.
+	//
+	// Why a ≤250 ms deferral is safe, and what it costs nobody:
+	//   - what gets dropped is always the OLDEST undelivered chunk (the
+	//     queue head: broadcast evicts the head to free a slot), so the
+	//     running total is exact at every instant; aggregation only groups
+	//     increments that are already final, it never estimates them;
+	//   - the client's response to a notice is reset + tail (or cursor +
+	//     Σdropped), and both are idempotent w.r.t. a notice arriving
+	//     ≤250 ms late: the reset repaints, and a transient hole in the
+	//     scrollback self-heals through that same repaint;
+	//   - if output stops before a pending aggregate goes out, the pending
+	//     counts cover nothing the screen still needs: the drops are behind
+	//     the newest delivered bytes, and the bytes the client did receive
+	//     stay contiguous, so there is no hole left uncovered by a frame
+	//     that never arrived.
+	// The counts themselves never depend on this gate: the baseline advances
+	// on EVERY sample whether or not a frame goes out (see the live loop),
+	// so no increment is ever lost, only grouped.
+	ttyOverflowNoticeInterval = 250 * time.Millisecond
+	// ttyHeartbeatIntervalSlowLink is the widened heartbeat for a client
+	// that declared `slow-link` (issue #114, decision 3(c)/5c): 15 s instead
+	// of ttyPingInterval's 10 s, with the RFC 6455 ping and the TEXT
+	// {"type":"ping"} frame riding the same ticker as always, so the two
+	// cannot drift. Rationale (ORCA relay runs 15 s/75s): on a 300 ms RTT
+	// with 1-5% loss the 10 s tick spends a measurable share of the
+	// connection's budget on heartbeat frames and their write-lock time,
+	// while a 5:1 heartbeat-to-staleness ratio still detects a dead peer
+	// well inside the client's own window. The client side of the pair —
+	// the 60 s stale threshold — is Phase B; the server changes only its
+	// transmit rate here. A connection that does NOT declare `slow-link`
+	// keeps 10 s/45 s VERBATIM, and so does every compressed test seam:
+	// see ttyHeartbeatIntervalFor.
+	ttyHeartbeatIntervalSlowLink = 15 * time.Second
 )
+
+// The operator-tunable TTY knobs (issue #114, decision 5c; names frozen in
+// Phase A per review R13 and documented in docs/API.md). Each is resolved
+// from the environment ONCE PER CONNECTION at handshake time — never per
+// frame, and never into a package-level value: a handshake is one env read
+// against a connection that then serves thousands of frames, so the read is
+// free, the operator's most recent setting always wins without a restart,
+// and no connection inherits a value captured before it was configured.
+// Same shape as pty.subscriberQueueChunksDrop, the sibling knob of this
+// issue (internal/instance/pty/driver.go), for the same reasons.
+const (
+	// envTTYWriteTimeoutMS overrides defaultTTYWriteTimeout in milliseconds
+	// (see there for why the knob exists). Missing, unparsable, zero or
+	// negative yields the default — a timeout is not a knob worth failing a
+	// handshake over.
+	envTTYWriteTimeoutMS = "MYWORKTREE_TTY_WRITE_TIMEOUT_MS"
+
+	// envTTYReplayWindowBytes sets DEFAULT replay window W (decision 4/5b):
+	// the window bounds both the replay's START (a `since` older than
+	// head−W is clamped forward) and the TOTAL bytes one handshake replay
+	// may write. Default 1 MiB — the round-number reading of the plan's 1 MB
+	// line-loss budget, and comfortably inside the 8 MB ttyHandshakeReplayBudget
+	// that backstops it. Cross-border links measured at 50-100 KB/s want
+	// 256-512 KB (decision 5b). W is a LINE-LOSS budget, not a scrollback
+	// line count: bytes↔lines is non-linear under ANSI, so 1 MiB is an
+	// engineering estimate (10000 rows × ~100 B), never a provable
+	// equivalence. Missing, unparsable, zero or negative yields
+	// defaultTTYReplayWindowBytes; W == 0 is legal and means pure tail.
+	envTTYReplayWindowBytes = "MYWORKTREE_TTY_REPLAY_WINDOW_BYTES"
+
+	// defaultTTYReplayWindowBytes is 1 MiB, the W of decision 4.
+	defaultTTYReplayWindowBytes int64 = 1 << 20 // 1048576
+)
+
+// ttyWriteTimeout resolves the per-write deadline for ONE connection from
+// MYWORKTREE_TTY_WRITE_TIMEOUT_MS, falling back to defaultTTYWriteTimeout on
+// anything missing, unparsable, zero or negative. A negative value is a
+// fallback and not a passthrough (unlike `since`, where negatives are
+// meaningful sentinels): a deadline of now-d in the past would fail every
+// write instantly, and "0" read as "no deadline" would silently remove the
+// bound #114 exists to install.
+func ttyWriteTimeout() time.Duration {
+	raw, ok := os.LookupEnv(envTTYWriteTimeoutMS)
+	if !ok {
+		return defaultTTYWriteTimeout
+	}
+	ms, err := strconv.ParseInt(strings.TrimSpace(raw), 10, 64)
+	if err != nil || ms <= 0 {
+		return defaultTTYWriteTimeout
+	}
+	return time.Duration(ms) * time.Millisecond
+}
+
+// ttyReplayWindowDefaultBytes resolves the OPERATOR's default W from
+// MYWORKTREE_TTY_REPLAY_WINDOW_BYTES: missing, unparsable, zero or negative
+// all land on defaultTTYReplayWindowBytes. Zero is a fallback here and NOT a
+// request for pure tail (the asymmetry against the client's cap is deliberate:
+// an operator who types 0 into a systemd unit almost certainly did not mean
+// "stop replaying terminals", while a client that puts replay-window=0 in a
+// query string is asking for exactly that, in the field that means it — see
+// ttyReplayWindowBytes). A value above ttyHandshakeReplayBudget is left
+// alone here and clamped there, so the ceiling lives in one place.
+func ttyReplayWindowDefaultBytes() int64 {
+	raw, ok := os.LookupEnv(envTTYReplayWindowBytes)
+	if !ok {
+		return defaultTTYReplayWindowBytes
+	}
+	n, err := strconv.ParseInt(strings.TrimSpace(raw), 10, 64)
+	if err != nil || n <= 0 {
+		return defaultTTYReplayWindowBytes
+	}
+	return n
+}
+
+// ttyReplayWindowBytes resolves W_eff — the effective replay window of ONE
+// connection — from the two sources decision 4/5b names, and only those:
+//
+//	W_eff = min(env default, the client's `replay-window=<bytes>` claim)
+//
+// The client's claim may only SHRINK the window: a declared value at or
+// above the default is ignored rather than honoured, because the env default
+// is the operator's ceiling and a client that asks for 512 MB of replay on a
+// cross-border link would otherwise buy exactly the multi-minute, screen-
+// freezing replay the window exists to bound (decision 5b: 只许缩小, anti-DoS).
+// An unparsable, negative or empty claim is ignored the same way — the
+// connection keeps the default and is never refused for a malformed token.
+// W == 0 IS honoured: pure tail is a legitimate request.
+//
+// The final clamp to ttyHandshakeReplayBudget keeps W ≤ budget TRUE BY
+// CONSTRUCTION even when an operator points the env at something absurd (an
+// 8 MB+ window would otherwise let the loop run past the budget it is meant
+// to sit inside): the budget stays the single hard backstop above W, which
+// is what makes the budget guard in completeHandshake unreachable in normal
+// operation while keeping it the authority on the last byte.
+func ttyReplayWindowBytes(caps []string) int64 {
+	w := ttyReplayWindowDefaultBytes()
+	if raw, ok := ttyClientCapValue(caps, "replay-window"); ok {
+		if v, err := strconv.ParseInt(strings.TrimSpace(raw), 10, 64); err == nil && v >= 0 && v < w {
+			w = v
+		}
+	}
+	if w > ttyHandshakeReplayBudget {
+		w = ttyHandshakeReplayBudget
+	}
+	return w
+}
+
+// ttyHeartbeatIntervalFor picks the heartbeat period for ONE connection
+// (issue #114, decision 3(c)/5c): ttyHeartbeatIntervalSlowLink when the
+// client declared `slow-link` as a WHOLE token, otherwise the interval it
+// was handed — which for every real connection is ttyPingInterval, verbatim
+// and unchanged.
+//
+// The `pingInterval == ttyPingInterval` guard is what keeps the compressed
+// test seam honest: handleInstanceTTYWSLiveness takes the interval as a
+// parameter precisely so a test can watch a tick in milliseconds, and a cap
+// that silently replaced that parameter with 15 s would both break those
+// tests and hide the fact that the widening is applied at all. So the
+// widening applies to the PRODUCTION interval and to nothing else: a caller
+// that chose a different interval has already made its own decision about
+// the heartbeat rate, and this function does not second-guess it.
+//
+// The read deadline is deliberately NOT widened here. At 15 s pings the 45 s
+// deadline still leaves three unanswered ping rounds before it bites —
+// peer-dead, not peer-busy — and the client's own staleness threshold for a
+// slow-link connection (60 s) is Phase B's half of the pair.
+func ttyHeartbeatIntervalFor(caps []string, pingInterval time.Duration) time.Duration {
+	if pingInterval == ttyPingInterval && ttyClientHasCap(caps, "slow-link") {
+		return ttyHeartbeatIntervalSlowLink
+	}
+	return pingInterval
+}
+
+// ttyClientCapValue reads a k=v capability out of the tty WS handshake's
+// `caps` parameter (issue #114, review R15). ttyClientHasCap above matches
+// WHOLE tokens only — by design, because "pinger" must not opt a client into
+// the TEXT ping — and that same exactness makes it blind to the parameterised
+// caps this issue adds (`replay-window=262144` is not the token
+// `replay-window`). So parameterised caps get their own parser, with the
+// same case-sensitivity and the same tolerance for a REPEATED caps query
+// parameter (?caps=a&caps=b) that ttyClientHasCap has.
+//
+// The four shapes a caller can meet, pinned by unit test:
+//
+//	"replay-window=262144"  → ("262144", true)   the match
+//	"replay-window="        → ("", false)         empty value names nothing; ignored
+//	"replay-window"         → ("", false)         no '=' sign, that is a plain cap
+//	"replay-windowX=1"      → ("", false)         the name must be the whole key
+//
+// The key is the text BEFORE the first '=' with whitespace trimmed, so a
+// value may itself contain '=' (a future token-shaped cap) and a hand-typed
+// `replay-window = 4096` in a systemd unit or a curl still resolves: the
+// parser is forgiving about the separator and strict about the name, which is
+// the same posture ttyClientHasCap takes toward whitespace.
+//
+// Repeated declarations take the FIRST PARSEABLE value, and a value that is
+// not an integer does not consume the scan: `replay-window=abc` followed by
+// `replay-window=4096` yields 4096. That is the arbitrated reading (task
+// book G4: 首个可解析值) — a client that sends a malformed token and then a
+// good one has expressed an intent the server can honour, and honouring the
+// first PARSEABLE token is the only interpretation that does not let one
+// stray token silently disable a capability the same client asked for.
+// Nothing here rejects the connection: an unrecognised or malformed cap is
+// ignored, and the client falls back to the behaviour it would have had
+// without it (the R16 rollback surface).
+func ttyClientCapValue(caps []string, name string) (string, bool) {
+	for _, v := range caps {
+		for _, tok := range strings.Split(v, ",") {
+			key, val, found := strings.Cut(strings.TrimSpace(tok), "=")
+			if !found {
+				continue // a bare token: ttyClientHasCap's territory, not a value
+			}
+			if strings.TrimSpace(key) != name {
+				continue // case-sensitive whole-key match, same rule as the token matcher
+			}
+			val = strings.TrimSpace(val)
+			if val == "" {
+				continue // "name=" names no value: not a hit, keep scanning
+			}
+			if _, err := strconv.ParseInt(val, 10, 64); err != nil {
+				continue // not parseable: not a hit, keep scanning (see above)
+			}
+			return val, true
+		}
+	}
+	return "", false
+}
+
+// ttyPolicyOutputSubscriber is the optional kind surface the TTY handler
+// uses to take a live subscription with a chosen overflow policy (issue
+// #114). The handler reaches it through Manager.SubscribeOutputWith,
+// which gates on Manager's own running-instance authority (the same door
+// as Manager.SubscribeOutput) and resolves the kind through the same
+// Registry.Get(ri.handle.KindName) lookup before handing it to the
+// callback; the handler asserts this structural interface inside that
+// callback. A kind that does not implement it is subscribed there through
+// its plain SubscribeOutput instead — the #82 close-on-overflow contract,
+// which is what an overflow-notice client on a kind without drop support
+// must fall back to (1013 on overflow, never a fabricated notice).
+type ttyPolicyOutputSubscriber interface {
+	SubscribeOutputWithPolicy(id string, policy pty.OverflowPolicy) (<-chan string, func(), *pty.DropStats, error)
+}
+
+// ttyPlainOutputSubscriber is Manager.SubscribeOutput's kind-side door,
+// restated here so the fallback inside the SubscribeOutputWith callback
+// calls the KIND's plain SubscribeOutput on the resolved kind — the exact
+// dispatch Manager.SubscribeOutput performs behind the same gate.
+type ttyPlainOutputSubscriber interface {
+	SubscribeOutput(id string) (<-chan string, func(), error)
+}
 
 // handleInstanceTTYWS is the mux entry point: production liveness
 // intervals, no mutable interval state anywhere on this path.
@@ -2373,11 +2681,21 @@ func (s *Server) handleInstanceTTYWS(w http.ResponseWriter, r *http.Request) {
 // #83. It is a signature, not a mutable package var: a test that
 // compresses the windows to milliseconds cannot make a parallel test's
 // connection flap, so -race and t.Parallel stay clean.
+//
+// pingInterval is the caller's chosen BASE period, and one thing may widen
+// it below: a client that declared `slow-link` moves the PRODUCTION value
+// (ttyPingInterval) to ttyHeartbeatIntervalSlowLink. Any other value a
+// caller passed — a compressed test seam included — passes through
+// untouched, which is what keeps this seam honest: the interval a test
+// hands in is the interval that test observes.
 func (s *Server) handleInstanceTTYWSLiveness(w http.ResponseWriter, r *http.Request, pingInterval, readDeadline time.Duration) {
 	// Non-positive intervals are nonsense for a liveness seam
 	// (time.NewTicker panics on <= 0; a non-positive read deadline would
 	// either reap instantly or silently disable the deadline). Fall back
-	// to the production constants rather than trusting every caller.
+	// to the production constants rather than trusting every caller. The
+	// fallback lands ON ttyPingInterval, so a caller that passed nonsense
+	// is then subject to the slow-link widening above — which is right:
+	// nonsense means "whatever production would have used".
 	if pingInterval <= 0 {
 		pingInterval = ttyPingInterval
 	}
@@ -2439,6 +2757,44 @@ func (s *Server) handleInstanceTTYWSLiveness(w http.ResponseWriter, r *http.Requ
 	textPingCap := ttyClientHasCap(caps, "ping")
 	_, sincePresent := r.URL.Query()["since"]
 	syncCap := ttyClientHasCap(caps, "sync") || sincePresent
+	// "overflow-notice" (issue #114): the client whitelists the TEXT
+	// {"type":"overflow","droppedBytes":N,"droppedChunks":M} control
+	// frame and RESETS + repaints from a cursorless (tail) reconnect when
+	// it sees one. Declaring it opts the connection into the pty kind's
+	// OverflowDropOldest subscription: a full live queue now drops the
+	// OLDEST chunks (counted) instead of closing the subscription, and
+	// the counts ride to the client as that notice ahead of the chunk
+	// they precede — a slow viewer degrades to one redraw instead of the
+	// issue #82 close-every-overflow 1013 reconnect storm. A client that
+	// does NOT declare it is never sent the frame (the same #98 leak
+	// class as the TEXT ping: an unwhitelisted page paints it into the
+	// terminal) and keeps the #82 contract verbatim — overflow closes the
+	// subscription, and the !ok teardown below answers 1013.
+	overflowNoticeCap := ttyClientHasCap(caps, "overflow-notice")
+	// "slow-link" (issue #114, decision 3(c)/5c): a whole-token cap only, no
+	// value to read. A client that declares it is on a link where the 10 s
+	// heartbeat costs a measurable share of the connection's write budget
+	// (cross-border, 200-400 ms RTT, 1-5% loss), so the server's heartbeat
+	// drops to ttyHeartbeatIntervalSlowLink — the RFC 6455 ping and the TEXT
+	// control frame ride the same ticker, so both move together and the
+	// read deadline stays where it is (see ttyHeartbeatIntervalFor for the
+	// full margin arithmetic, and the same helper for the whole-token test).
+	// A client that does NOT declare it — every client that exists today,
+	// legacy included — keeps 10 s/45 s verbatim: this is an opt-in
+	// widening, never a default change.
+	pingInterval = ttyHeartbeatIntervalFor(caps, pingInterval)
+	// The replay window W_eff (issue #114, decision 4/5b) is resolved here,
+	// once per connection, from the env default and the client's optional
+	// `replay-window=<bytes>` claim (ttyReplayWindowBytes: the claim may only
+	// shrink it, and the result never exceeds ttyHandshakeReplayBudget). The
+	// catch-up branch of completeHandshake is its only consumer — the tail
+	// and follow-live-end modes replay a bounded 64KB or nothing at all, so
+	// there is no window there to apply — and it uses it twice: to clamp the
+	// START forward past head−W, and to stop the loop once W bytes have been
+	// WRITTEN. Read here rather than inside the closure so the caps are
+	// consulted where every other cap is consulted, and so one connection
+	// negotiates one window instead of re-reading the environment mid-replay.
+	replayWindow := ttyReplayWindowBytes(caps)
 	rawConn, err := ws.Upgrade(w, r)
 	if err != nil {
 		return
@@ -2470,6 +2826,22 @@ func (s *Server) handleInstanceTTYWSLiveness(w http.ResponseWriter, r *http.Requ
 	if err := conn.WriteText(readyMsg); err != nil {
 		return
 	}
+
+	// Issue #114 (decision 3, revised by the Phase A review): arm the
+	// per-write deadline HERE — after the ready frame, before completeHandshake
+	// is ever called — so the handshake replay writes are covered too. The
+	// replay is up to 8 MB (ttyHandshakeReplayBudget) written to a socket
+	// whose peer may already be gone; armed only after SubscribeOutput, that
+	// whole window left a dead consumer free to pin this goroutine, ws.Conn's
+	// mutex and every frame queued behind it indefinitely, which is the
+	// amplification the #114 evidence chain names. Arming is per-write
+	// (writeFrame re-arms at now+d on every frame), so this costs a slow but
+	// progressing replay nothing — it only bounds the stall. The ready frame
+	// itself, and the writes before it, stay deadline-free exactly as they
+	// shipped: they are one small frame each, and a peer that cannot take the
+	// ready frame has no session to lose. SetWriteTimeout lives on ws.Conn,
+	// promoted through the metered wrapper untouched.
+	conn.SetWriteTimeout(ttyWriteTimeout())
 
 	// Step 2: Start single goroutine to read all messages
 	type wsMessage struct {
@@ -2508,6 +2880,37 @@ func (s *Server) handleInstanceTTYWSLiveness(w http.ResponseWriter, r *http.Requ
 	handshakeComplete := false
 	var outputChan <-chan string
 	var cancel context.CancelFunc
+	// dropStats is non-nil exactly when the live subscription was taken
+	// with OverflowDropOldest (an overflow-notice cap client, issue #114);
+	// dropsSeenChunks and dropsSeenBytes are the two baselines — the
+	// cumulative counts already SAMPLED, not the counts already sent, which
+	// is the distinction the 250ms aggregation below depends on. All four
+	// are handler-goroutine state (completeHandshake and the select loop are
+	// the same goroutine), so plain fields suffice — the counters themselves
+	// are atomic because the pty broadcast producer writes them under its
+	// own lock.
+	var dropStats *pty.DropStats
+	var dropsSeenChunks, dropsSeenBytes int64
+	// pendingNoticeChunks / pendingNoticeBytes are the aggregated counts of
+	// every drop increment sampled since the last notice FRAME went out
+	// (issue #114, decision 1 补 1 / review R5): the baseline advances on
+	// every sample, so an increment is never lost, only grouped, and the
+	// group goes out whole on the next frame the rate gate opens. Zero when
+	// nothing is owed.
+	var pendingNoticeChunks, pendingNoticeBytes int64
+	// lastDropNoticeLogAt is the LOG throttle clock for this connection
+	// (issue #114 review, minor): the zero value means "nothing logged yet",
+	// so the FIRST drop increment logs immediately and later ones are sampled
+	// at ttyDropLogInterval. It is a separate clock from lastOverflowNoticeAt
+	// below on purpose — the log's 500ms and the wire's 250ms are independent
+	// knobs and neither may silently become the other's.
+	var lastDropNoticeLogAt time.Time
+	// lastOverflowNoticeAt is the WIRE throttle clock (ttyOverflowNoticeInterval):
+	// the zero value means "no notice sent yet", which is what makes the
+	// FIRST increment of a connection go out immediately — the client's reset
+	// decision must not wait 250ms to learn it has a problem — and every
+	// later frame wait out the interval.
+	var lastOverflowNoticeAt time.Time
 	defer func() {
 		if cancel != nil {
 			cancel()
@@ -2520,7 +2923,11 @@ func (s *Server) handleInstanceTTYWSLiveness(w http.ResponseWriter, r *http.Requ
 	// Liveness heartbeat ticker (issue #83): the same tick drives both the
 	// RFC 6455 ping (A3) and the observable TEXT control frame (A4), so
 	// the two can never drift apart. Stopped via defer, same pattern as
-	// handshakeTimer above.
+	// handshakeTimer above. The period is the caller's, widened to
+	// ttyHeartbeatIntervalSlowLink for a client that declared `slow-link`
+	// (issue #114 decision 3(c)) — one ticker, so the widening reaches both
+	// frames by construction and there is no second interval to keep in
+	// step.
 	heartbeat := time.NewTicker(pingInterval)
 	defer heartbeat.Stop()
 
@@ -2587,6 +2994,14 @@ func (s *Server) handleInstanceTTYWSLiveness(w http.ResponseWriter, r *http.Requ
 		// write's own end offset; every path that writes nothing sets it
 		// from the ring's real head (or leaves the 0 of a fresh instance).
 		var endOffset int64
+		// windowed / droppedFromWindow (issue #114, decision 4): declared
+		// out here so the handshake instrumentation below can see them, but
+		// written ONLY by the catch-up branch — the tail mode replays a
+		// bounded 64KB and the follow-live-end mode replays nothing, so
+		// neither has a window to apply and both report windowed=false
+		// droppedFromWindow=0, which is the truth rather than a default.
+		windowed := false
+		var droppedFromWindow int64
 		// Issue #114 diagnostics: time the replay and record the ring's
 		// head at handshake start, so headAtStart-since sizes the replay
 		// demand even when the 8MB budget truncates it. EndOffset is a
@@ -2662,6 +3077,79 @@ func (s *Server) handleInstanceTTYWSLiveness(w http.ResponseWriter, r *http.Requ
 		} else {
 			conn.m.mode = "catchup"
 			cursor := since
+			// ── Replay window, half one: the START clamp (issue #114,
+			// decision 4) ─────────────────────────────────────────────────
+			// W_eff bounds BOTH ends of one handshake replay, and this is
+			// the front end. A client that reconnects with a `since` from
+			// before head−W_eff does not get a replay of everything it has
+			// missed — it gets the newest W_eff bytes, which is the whole
+			// point on the link this was designed for: the backlog it is
+			// asking for is bigger than its scrollback can render and bigger
+			// than its link can carry before the live stream needs the same
+			// socket (the 3.96MB / 84.6s replay of the 2026-10-17 evidence).
+			//
+			// No new wire surface: the clamped start reaches the client
+			// through the issue #94 start-sync path it already implements.
+			// emitStartSync below publishes `next - len(body)` — the start
+			// of the first chunk from the SAME ReadSince call — so once
+			// `cursor` has moved forward here, the frame the client adopts is
+			// the clamped offset, and the closing sync republishes the real
+			// end. A client that understands only sync-at-the-end is exactly
+			// where it was before #94; nothing has to know a clamp happened.
+			//
+			// The EndOffset read is one manager call per catch-up handshake,
+			// unconditionally now that the answer is load-bearing rather than
+			// observational: handshakes are rare against the per-chunk work
+			// the window then bounds. On error (an instance that stopped
+			// between the upgrade and here) ONLY the start clamp is given up
+			// — the total cap below never reads head, it counts bytes
+			// already written, so the replay's upper bound stays in force
+			// regardless. Failing to apply a clamp is a degradation, never
+			// a corruption. The ReadSince below keeps its own error
+			// handling untouched.
+			// pureTail (issue #114, review B round 1 / R1): W_eff == 0 is
+			// CONSTRUCTIVELY pure tail — the replay read loop below is
+			// never entered, independent of whether the producer happens to
+			// be idle (the review's live-producer probe sent 262144 bytes
+			// through the old "cursor parked at head, loop writes nothing"
+			// assumption, because ReadSince reads whatever head is current
+			// at each call). Semantics mirror the sinceFollowLiveEnd
+			// sentinel above: zero replay frames, publish the head this
+			// clamp read, hand over to the live subscription. No new
+			// mechanism; the sentinel path itself is untouched.
+			pureTail := false
+			if head, herr := s.instanceMgr.EndOffset(id); herr == nil {
+				if span := head - cursor; span > replayWindow {
+					clampedStart := head - replayWindow
+					// 口径: the clamp's contribution to droppedFromWindow is
+					// the span the window refused, clampedStart − since. When
+					// `since` is ALSO stale (behind the ring's oldest live
+					// byte) this figure overlaps the bytes #94's start-sync
+					// already re-based the client onto — both counts describe
+					// the same skipped region, and this one is the window's
+					// arithmetic, which is what the field is for.
+					droppedFromWindow += clampedStart - since
+					cursor = clampedStart
+					windowed = true
+				}
+				if replayWindow == 0 {
+					// R1: the head read SUCCEEDED and the window is zero,
+					// so the replay is empty BY CONSTRUCTION — publish this
+					// head (the same value the clamp above is defined
+					// against) and skip the whole catch-up loop, landing on
+					// the existing closing sync + SubscribeOutput below.
+					// A head read that FAILED leaves pureTail false: the
+					// degradation stands (no window applied, loop runs
+					// unclamped), consistent with the "failing to apply an
+					// upper bound is a degradation" note above, and the
+					// loop's own zero-progress path still publishes head
+					// once the ring is caught up.
+					endOffset = head
+					pureTail = true
+				}
+			} else if s.logger != nil {
+				s.logger.Printf("tty replay window not applied for %s: head unknown (%v), catching up unclamped", id, herr)
+			}
 			first := true
 			var streamed int64
 			// startPublished (issue #94) marks that the replay's real
@@ -2703,10 +3191,17 @@ func (s *Server) handleInstanceTTYWSLiveness(w http.ResponseWriter, r *http.Requ
 				payload := []byte(`{"type":"sync","offset":` + strconv.FormatInt(start, 10) + `,"start":true}`)
 				return conn.WriteText(payload) == nil
 			}
-			for {
+			// for !pureTail (R1): when W_eff == 0 and the clamp's head
+			// read above succeeded, the loop is skipped in full — no
+			// replay read is ever issued, so no replay byte can reach the
+			// wire even under a live producer. endOffset already holds
+			// that head and flows straight into the existing closing sync
+			// and the live subscription below. The loop body is verbatim
+			// unchanged for every other route.
+			for !pureTail {
 				if streamed >= ttyHandshakeReplayBudget {
-					// Budget exhausted — the ONE budget guard, checked
-					// before the read so no further read is issued once the
+					// Budget exhausted — the hard backstop, checked before the
+					// read so no further read is issued once the
 					// budget is spent. Reaching this line already means
 					// ttyHandshakeReplayBudget (>0) bytes went out on this
 					// socket, so endOffset holds the end offset of the LAST
@@ -2717,12 +3212,108 @@ func (s *Server) handleInstanceTTYWSLiveness(w http.ResponseWriter, r *http.Requ
 					// The guard counts bytes already written, so in principle
 					// a stream could end one chunk past the boundary; 8MB is
 					// a whole multiple of the 64KB read cap, so it lands
-					// exactly on it — which is what the budget test pins. Do
-					// not "harden" this by also trimming the read size to
-					// the remainder: both routes produce the same truncation
-					// point, and the second one would silently leave this
-					// stop unexercised by every test.
+					// exactly on it — which is what the budget test pins.
+					// The window trim added below (R3) interacts with this
+					// boundary in two shapes, and neither breaks the pin:
+					// ReadSince returns AT MOST maxBytes (a partial read is
+					// routine — the inside-window test pins the [65536,
+					// 36864] shape), so on the full-read route (W_eff ==
+					// this budget, every read a full 64KB) the trim never
+					// changes a read and `streamed` stays a whole multiple
+					// of 64KB, landing exactly on the budget as before; on
+					// a partial-read route the remainder can fall below one
+					// full read, the trim DOES fire, and it tightens the
+					// budget route to stop exactly on W — which incidentally
+					// closes the budget's own ≤64KB−1 overshoot edge the
+					// review B probe measured (8388608 trimmed / 8424144
+					// untrimmed). The budget guard remains the stop the
+					// budget test exercises, byte-for-byte unchanged there.
+					//
+					// Since issue #114 the window guard below is normally the
+					// one that fires, because ttyReplayWindowBytes keeps
+					// W_eff ≤ this budget BY CONSTRUCTION — an operator who
+					// points MYWORKTREE_TTY_REPLAY_WINDOW_BYTES above 8MB is
+					// clamped to it there, not honoured. That is deliberate,
+					// and it is why this guard stays exactly where it is: the
+					// budget remains the single authority on the last byte,
+					// the ceiling a window can never lift, and the only stop
+					// available to a handshake whose window was configured
+					// away above it.
+					//
+					// Within that W_eff ≤ budget world, the reading
+					// budgetExhausted=true with windowed=false and
+					// droppedFromWindow=0 is LEGAL, not a contradiction:
+					// it is reachable when W_eff == budget (the env raised
+					// to ≥8MB and clamped there) AND the backlog at
+					// handshake is < W_eff (so the START clamp above never
+					// fires) AND a producer then outruns the replay past
+					// the budget — the clamp had nothing to cut, yet the
+					// total cap still did. windowed's semantics are the
+					// OR of the two WINDOW truncations only (start clamp OR
+					// total cap), deliberately excluding the budget stop —
+					// the frozen-screen window is what the field reports
+					// (the review-B arbitration), and a budget truncation
+					// is reported by its own field. The truncated-not-
+					// skipped semantics of a stop on exactly the last
+					// written byte are pinned by the WINDOW tests, which
+					// exercise the same closing-sync path this break flows
+					// into (review B round 1 / R5).
 					conn.m.budgetExhausted = true
+					break
+				}
+				if replayWindow > 0 && streamed >= replayWindow {
+					// ── Replay window, half two: the TOTAL cap (issue #114,
+					// decision 4 / review HIGH-2) ─────────────────────────
+					// Clamping the START does not bound the DURATION.
+					// ReadSince reads to whatever head is current at each
+					// call (ringbuffer.go), so a catch-up under sustained
+					// production follows a head that keeps moving and streams
+					// until the byte budget stops it — 84.6 s of replay in the
+					// 2026-10-17 evidence, screen frozen the whole time. The
+					// start clamp sizes the replay against the backlog; only
+					// a count of the bytes actually WRITTEN sizes it against
+					// reality. The two caps together are what make replay
+					// duration ≤ W_eff / effective bandwidth, independent of
+					// how big the backlog is.
+					//
+					// Semantics are the budget's verbatim, on purpose: the
+					// closing sync below publishes the end offset of the LAST
+					// chunk written — never the head — so the undelivered
+					// remainder sits AHEAD of the client's cursor and the next
+					// reconnect re-requests it. Truncated, not skipped. (The
+					// bytes the START clamp skipped are the opposite case:
+					// behind the cursor, off this client's screen for good —
+					// that is what W costs, and docs/API.md says so.)
+					//
+					// replayWindow > 0 because W == 0 is legal and means
+					// pure tail, and since R1 that purity is CONSTRUCTIVE:
+					// the W==0 clamp route sets pureTail and this loop is
+					// never entered, so this guard's byte count is only
+					// ever compared against a positive W. On the degraded
+					// W==0 route (head read failed, pureTail false) the
+					// guard stays disarmed exactly as before — and a guard
+					// firing on 0 >= 0 there would still break with
+					// endOffset possibly 0, publishing a cursor the ring
+					// may never have held, which is what the > 0 term has
+					// always prevented.
+					windowed = true
+					// 口径: this truncation's contribution is the gap between
+					// the ring head AT THIS INSTANT — one read, here, the
+					// only moment the figure is defined — and the last byte
+					// actually written. Zero when the loop happened to stop
+					// exactly on head (the usual case with no live producer),
+					// and the bytes still in the ring when a producer outran
+					// the replay, which is the case this cap exists for.
+					// Const-gated like every other probe on this path: the
+					// flag itself is what the wire behaviour needs (nothing —
+					// it is observational too), the manager read behind the
+					// number is only worth making where the number is
+					// collected, so stable builds skip it.
+					if ttyMetricsBuild {
+						if h, herr := s.instanceMgr.EndOffset(id); herr == nil && h > endOffset {
+							droppedFromWindow += h - endOffset
+						}
+					}
 					break
 				}
 				// RingBuffer.ReadSince silently clamps a stale cursor to
@@ -2730,7 +3321,30 @@ func (s *Server) handleInstanceTTYWSLiveness(w http.ResponseWriter, r *http.Requ
 				// since >= head (ringbuffer.go), so a normal loop exit
 				// terminates with endOffset == head and a stale offset
 				// degrades to a tail replay (AC3).
-				body, next, err := s.instanceMgr.ReadSince(id, cursor, 64*1024)
+				//
+				// Read-size trim (issue #114, review B round 1 / R3): the
+				// cap above is checked BEFORE the read, so a full 64KB
+				// read could push the wire total to W + 64KB − 1 (the
+				// review measured W=40000 → 65536 out). AC2's "replay
+				// ≤ W_eff" is authoritative, so when the window is armed
+				// and less than one full read remains, the read itself is
+				// trimmed to the remainder — the cap then lands exactly
+				// on W_eff, truncated-not-skipped semantics unchanged
+				// (the closing sync still publishes the last byte
+				// actually written). When W_eff == 0 this trim is inert
+				// (guard below never arms, and the pureTail route never
+				// reaches this line); on the degraded W==0 route
+				// (head unknown) the trim is likewise inert, matching
+				// the unclamped degradation above.
+				readSize := int64(64 * 1024)
+				if replayWindow > 0 {
+					if rem := replayWindow - streamed; rem < readSize {
+						// streamed < replayWindow here — the cap guard
+						// above breaks otherwise — so rem >= 1.
+						readSize = rem
+					}
+				}
+				body, next, err := s.instanceMgr.ReadSince(id, cursor, readSize)
 				if err != nil {
 					_ = conn.WriteClose(ws.CloseMessage(1013, err.Error()))
 					return false
@@ -2893,13 +3507,96 @@ func (s *Server) handleInstanceTTYWSLiveness(w http.ResponseWriter, r *http.Requ
 			}
 		}
 
-		ch, cancelFn, err := s.instanceMgr.SubscribeOutput(id)
+		// Subscribe per negotiated overflow policy (issue #114): a client
+		// that declared overflow-notice gets OverflowDropOldest — overflow
+		// is then counted and announced, never a disconnect — and every
+		// other client gets today's Manager.SubscribeOutput call, the #82
+		// close contract, unchanged. The cap path does NOT gate liveness
+		// on a store read: Manager's running-instance map is the single
+		// authority, so it goes through Manager.SubscribeOutputWith, the
+		// same door Manager.SubscribeOutput itself checks — an instance
+		// absent from it answers the byte-identical "instance not
+		// running". The resolved kind is handed to the callback below,
+		// which asserts the optional policy interface and, on a kind
+		// without it, falls back inside the callback to that kind's plain
+		// SubscribeOutput — the #82 contract, so a cap client on such a
+		// kind still gets 1013 on overflow and never a fabricated notice
+		// (dropStats stays nil, the live loop stays quiet).
+		//
+		// Every one of those degradations is LOGGED (issue #114 review,
+		// minor): the client asked for counted-and-kept overflow and did
+		// not get it, and without a server-side line the difference between
+		// "this kind cannot drop-oldest" and "this kind silently regressed"
+		// is invisible from the daemon — the client's console is the only
+		// other witness, and it is not in front of the operator. The
+		// nil-guard mirrors every other log on this path: production cannot
+		// reach it (app.New rejects a nil logger), the tests inject one, so
+		// the lines below are exercised rather than decorative.
+		var ch <-chan string
+		var cancelFn func()
+		var err error
+		if overflowNoticeCap {
+			ch, cancelFn, err = s.instanceMgr.SubscribeOutputWith(id, func(k framework.Kind) (<-chan string, func(), error) {
+				if ps, ok := k.(ttyPolicyOutputSubscriber); ok {
+					pCh, pCancel, stats, pErr := ps.SubscribeOutputWithPolicy(id, pty.OverflowDropOldest)
+					if pErr != nil {
+						// Degradation, and the most surprising kind: the kind
+						// claims drop support and the subscription itself
+						// refused. The cap client gets the error verbatim
+						// (1013 below) rather than a quiet plain fallback,
+						// because a kind that fails a policy subscription it
+						// advertised has already told us something is wrong
+						// with this instance — inventing a subscription behind
+						// its back would hide that, and the client would keep
+						// a connection whose drops nobody counts.
+						if s.logger != nil {
+							s.logger.Printf("tty overflow-notice cap degraded for %s: kind %q policy subscription failed, closing with 1013 instead: %v", id, k.Manifest().Name, pErr)
+						}
+						return nil, nil, pErr
+					}
+					dropStats = stats
+					return pCh, pCancel, nil
+				}
+				if plain, ok := k.(ttyPlainOutputSubscriber); ok {
+					if s.logger != nil {
+						s.logger.Printf("tty overflow-notice cap degraded for %s: kind %q has no policy subscription, falling back to legacy overflow-close (1013 on overflow, no notice)", id, k.Manifest().Name)
+					}
+					return plain.SubscribeOutput(id)
+				}
+				// Same message Manager.SubscribeOutput returns for a kind
+				// behind the same gate; the registry keys kinds by
+				// Manifest().Name, so the name is identical there too.
+				if s.logger != nil {
+					s.logger.Printf("tty overflow-notice cap degraded for %s: kind %q supports no output subscription at all, closing with 1013", id, k.Manifest().Name)
+				}
+				return nil, nil, fmt.Errorf("kind %q does not support output subscription", k.Manifest().Name)
+			})
+		} else {
+			ch, cancelFn, err = s.instanceMgr.SubscribeOutput(id)
+		}
 		if err != nil {
 			_ = conn.WriteClose(ws.CloseMessage(1013, err.Error()))
 			return false
 		}
 		cancel = cancelFn
 		outputChan = ch
+		// No SetWriteTimeout here: the per-write deadline is armed earlier,
+		// directly after the ready frame (Step 1 above), and stays armed
+		// through this subscription and every live write after it. Arming
+		// here — "once the subscription is established", the plan's original
+		// wording — was the gap the Phase A review caught: everything this
+		// closure writes before reaching this line, up to the 8 MB replay,
+		// ran with no deadline at all, so a consumer that had already died
+		// could pin this goroutine and ws.Conn's mutex inside a replay write
+		// forever. The default timeout (15 s, MYWORKTREE_TTY_WRITE_TIMEOUT_MS
+		// to change it) still exceeds the heartbeat period a connection
+		// actually runs — 10 s, or 15 s on ttyHeartbeatIntervalSlowLink for
+		// a `slow-link` client, where the deadline is re-armed at the START
+		// of every write and so measures one blocked write rather than the
+		// gap between frames — so a healthy connection re-arms it with its
+		// own traffic long before it trips. The write deadline #83
+		// deliberately scoped out is what #114 finally lands, now without
+		// the replay hole.
 		// Issue #114 diagnostics: snapshot the replay counters off the
 		// binary counter — every binary frame so far was handshake replay,
 		// so this is exact for all three modes with no per-branch
@@ -2907,6 +3604,8 @@ func (s *Server) handleInstanceTTYWSLiveness(w http.ResponseWriter, r *http.Requ
 		// compile the block away, and logHandshake is a no-op there.
 		if ttyMetricsBuild {
 			conn.m.publishedOffset = endOffset
+			conn.m.windowed = windowed
+			conn.m.droppedFromWindow = droppedFromWindow
 			conn.m.replayBytes = conn.m.binBytes
 			conn.m.replayDur = time.Since(conn.m.handshakeStart)
 			conn.m.subscribedAt = time.Now()
@@ -2923,6 +3622,13 @@ func (s *Server) handleInstanceTTYWSLiveness(w http.ResponseWriter, r *http.Requ
 			}
 
 			if ws.IsClose(msg.op) {
+				// The answer to the client's close is a best-effort close
+				// of our own. Since this phase it also runs under the
+				// per-write deadline armed after the ready frame, so a peer
+				// that has already stopped reading cannot pin the handler
+				// here forever — the write errors at ttyWriteTimeout and the
+				// defers unwind the connection, which is the outcome this
+				// branch was already heading toward.
 				_ = conn.WriteClose(ws.CloseMessage(1000, "bye"))
 				return
 			}
@@ -3006,6 +3712,36 @@ func (s *Server) handleInstanceTTYWSLiveness(w http.ResponseWriter, r *http.Requ
 					return
 				}
 			}
+			// Pending-notice flush (issue #114, review B round 1 / R2):
+			// the drop sampling and notice write above live in the
+			// outputChan branch, so once output stops a pending pair
+			// stranded by the 250ms gate could never reach the wire —
+			// the review measured 22-24 counted drops never announced.
+			// That breaks the visible half of "notices are the complete
+			// record": the client's cursor advanced only over received
+			// bytes, so it sits behind the ring head and a reconnect
+			// repaints the dropped region (the #87 complaint). Flushing
+			// here — same goroutine, same select, no new lock, no new
+			// timer — bounds the stranding to within one heartbeat
+			// cycle: the gate has normally long opened by this tick
+			// (10s/15s ≫ 250ms), so any pair still pending when output
+			// stopped is delivered on the next heartbeat; the one
+			// exception is a chunk-path notice written <250ms before the
+			// tick, where the gate defers this flush by at most one
+			// more gate window onto the following tick. Same verbatim
+			// discipline as the outputChan branch: clear BEFORE the
+			// write, a failed write takes the existing return path.
+			if dropStats != nil && (pendingNoticeChunks > 0 || pendingNoticeBytes > 0) {
+				if lastOverflowNoticeAt.IsZero() || time.Since(lastOverflowNoticeAt) >= ttyOverflowNoticeInterval {
+					noticeChunks, noticeBytes := pendingNoticeChunks, pendingNoticeBytes
+					pendingNoticeChunks, pendingNoticeBytes = 0, 0
+					lastOverflowNoticeAt = time.Now()
+					notice := []byte(`{"type":"overflow","droppedBytes":` + strconv.FormatInt(noticeBytes, 10) + `,"droppedChunks":` + strconv.FormatInt(noticeChunks, 10) + `}`)
+					if err := conn.WriteText(notice); err != nil {
+						return
+					}
+				}
+			}
 
 		case <-handshakeTimer.C:
 			if !handshakeComplete {
@@ -3032,15 +3768,19 @@ func (s *Server) handleInstanceTTYWSLiveness(w http.ResponseWriter, r *http.Requ
 				// or not, and resyncs from its own cursor (the #87 offset
 				// contract). The 5 s deadline below is deliberately
 				// BOUNDED, and it bounds exactly one thing: THIS close-frame
-				// write, on this teardown path. It does NOT bound the
-				// handler's other writes — a handler already blocked inside
-				// a live WriteBinary above never reaches this branch, and is
-				// reclaimed only when that write returns: ws.Upgrade sets no
-				// write deadline, and a write deadline on this socket is
-				// STILL not implemented — issue #83 (since merged) added
-				// only the READ deadline and deliberately scoped a write
-				// deadline out of its contract, so this is settled design,
-				// not pending work. What keeps this failure path from writing
+				// write, on this teardown path — tighter than the 15 s
+				// per-write timeout armed after the ready frame (issue
+				// #114 / decision 3, the write deadline #83 deliberately
+				// scoped out of its own contract and #114 landed here), so
+				// the timeout is DISARMED first: writeFrame re-arms its
+				// deadline on every write, and leaving 15 s armed would
+				// silently loosen this 5 s bound it was set to enforce.
+				// The general timeout still does NOT change what this
+				// branch means: a handler already blocked inside a live
+				// WriteBinary above never reaches it either — it now just
+				// stops being pinned forever there (the write errors at
+				// 15 s and the handler unwinds through the same defers;
+				// AC3 of the #114 plan). What keeps this failure path from writing
 				// the backlog onto the stalled socket is upstream, in the pty
 				// kind: broadcast drains the closed subscriber's queue at
 				// the source (driver.go) — after it releases subsMu, never
@@ -3063,8 +3803,10 @@ func (s *Server) handleInstanceTTYWSLiveness(w http.ResponseWriter, r *http.Requ
 				// and docs/API.md states the same qualifier). Nothing writes
 				// on this conn after this branch returns —
 				// this branch returns immediately and the deferred
-				// conn.Close() follows — so healthy connections keep the
-				// unbounded write behaviour they have today.
+				// conn.Close() follows. (Healthy connections never see the
+				// armed 15 s timeout bite: their own frame traffic re-arms
+				// it on every write, so the bound is invisible until a peer
+				// truly stalls — which is the state the bound exists for.)
 				//
 				// Server-side, this is the only trace of the disconnect
 				// besides the close frame: the client retries on a
@@ -3093,9 +3835,111 @@ func (s *Server) handleInstanceTTYWSLiveness(w http.ResponseWriter, r *http.Requ
 					}
 					conn.m.logOverflow(s.logger, id, headNow)
 				}
+				// Disarm the general 15 s per-write timeout (armed after the
+				// ready frame, issue #114) BEFORE setting this explicit
+				// deadline: writeFrame re-arms its own deadline on every
+				// write, so leaving it set would silently loosen this
+				// documented 5 s bound to 15 s. With d == 0 the deadline
+				// below is fully in charge, exactly as it was pre-#114.
+				conn.SetWriteTimeout(0)
 				_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 				_ = conn.WriteClose(ws.CloseMessage(1013, "subscriber overflow: slow consumer"))
 				return
+			}
+			// Overflow notice (issue #114, drop-oldest subscribers only —
+			// dropStats is nil for every legacy subscriber, so this is one
+			// pointer nil-check there, zero wire change). The pty
+			// broadcast has discarded OLDEST chunks to keep this consumer
+			// streaming; the counts are the ONLY proof of that loss, and
+			// they ride AHEAD of the chunk they precede so the client's
+			// reset decision is made before a torn byte hits its screen:
+			// TEXT {"type":"overflow","droppedBytes":N,"droppedChunks":M}.
+			//
+			// The counts are INCREMENTAL — every drop since the last notice
+			// FRAME, which since R5 is a 250ms WINDOW rather than a single
+			// increment. The client does not need the absolute total to know
+			// it must reset, and an interval sum is exact for the same reason
+			// a single increment was: what broadcast drops is always the
+			// OLDEST undelivered chunk (the queue head), so every number here
+			// is already final by the time it can be sampled, and each
+			// increment still comes off ONE Snapshot() load — DropStats
+			// publishes chunks and bytes as a single atomic unit, so summing
+			// consecutive published pairs yields a pair the producer's history
+			// really produced rather than two counters sampled torn.
+			//
+			// Written before the binary frame on purpose, and that ordering
+			// survives the aggregation: a frame that goes out here still
+			// precedes the chunk of THIS iteration, and the bytes it reports
+			// are all strictly older than that chunk (they were evicted to
+			// make room for chunks up to and including this one). The
+			// client's cursor advances by binary frame length, so a notice
+			// that trailed the bytes it covers could be processed after those
+			// bytes were painted — too late to reset cleanly. The notice is
+			// itself counted into txtFrames by the metered conn.
+			//
+			// TWO INDEPENDENT RATE GATES live in this block, and the split
+			// is the point (issue #114 review minor + R5):
+			//   - the LOG line at ttyDropLogInterval (500ms): first increment
+			//     logs immediately, later ones sampled. A sampled line carries
+			//     ITS OWN increment, not the sum of the suppressed ones — the
+			//     log is a sample, the wire notices are the complete record,
+			//     which is the right way round since the notices are what the
+			//     client's reset decision actually reads. The [ttymetrics]
+			//     line rides the same gate because it is the same flood
+			//     written by the same iteration (and stays const-gated:
+			//     stable builds compile it away entirely);
+			//   - the WIRE frame at ttyOverflowNoticeInterval (250ms): the
+			//     first increment of the connection goes out immediately —
+			//     a client must not wait to learn it has a hole — and after
+			//     that at most four frames per second. That ceiling is what
+			//     this gate exists for: ~150 notices/s in a storm each took
+			//     ws.Conn's write mutex away from the binary chunk they
+			//     precede, so the notice was amplifying the very congestion
+			//     it reported.
+			//
+			// The gate never costs a count: the baseline advances and the
+			// pending pair accumulates on EVERY sample, and only the write
+			// below is gated. A pending pair whose window has not opened is
+			// carried to the next frame, not dropped — Σ is complete by
+			// construction. There is no case in which a pending pair is
+			// never written: when output stops before this branch's next
+			// chunk un-gates it, the HEARTBEAT case above flushes it — by
+			// the next tick at the latest (see the R2 flush comment there),
+			// so the client's screen/cursor honesty is guaranteed by the
+			// flush, not by the hole being silent.
+			if dropStats != nil {
+				if chunks, bytes := dropStats.Snapshot(); chunks != dropsSeenChunks || bytes != dropsSeenBytes {
+					dChunks, dBytes := chunks-dropsSeenChunks, bytes-dropsSeenBytes
+					dropsSeenChunks, dropsSeenBytes = chunks, bytes
+					pendingNoticeChunks += dChunks
+					pendingNoticeBytes += dBytes
+					if s.logger != nil && (lastDropNoticeLogAt.IsZero() || time.Since(lastDropNoticeLogAt) >= ttyDropLogInterval) {
+						lastDropNoticeLogAt = time.Now()
+						s.logger.Printf("tty output subscriber overflow for %s: consumer fell behind, overflow notice pending (wire rate %s): droppedChunks=%d droppedBytes=%d (drop-oldest, connection kept)", id, ttyOverflowNoticeInterval, dChunks, dBytes)
+						if ttyMetricsBuild {
+							if h, herr := s.instanceMgr.EndOffset(id); herr == nil {
+								conn.m.logOverflow(s.logger, id, h)
+							}
+						}
+					}
+				}
+				if pendingNoticeChunks > 0 || pendingNoticeBytes > 0 {
+					if lastOverflowNoticeAt.IsZero() || time.Since(lastOverflowNoticeAt) >= ttyOverflowNoticeInterval {
+						noticeChunks, noticeBytes := pendingNoticeChunks, pendingNoticeBytes
+						// Cleared BEFORE the write, not after: a client that
+						// dies on this write never gets the frame, and the
+						// counts must not then be double-counted into the next
+						// connection's first notice — the baseline above has
+						// already moved past them, and the reconnecting client
+						// re-establishes its own zero from a fresh subscription.
+						pendingNoticeChunks, pendingNoticeBytes = 0, 0
+						lastOverflowNoticeAt = time.Now()
+						notice := []byte(`{"type":"overflow","droppedBytes":` + strconv.FormatInt(noticeBytes, 10) + `,"droppedChunks":` + strconv.FormatInt(noticeChunks, 10) + `}`)
+						if err := conn.WriteText(notice); err != nil {
+							return
+						}
+					}
+				}
 			}
 			if err := conn.WriteBinary([]byte(chunk)); err != nil {
 				return
