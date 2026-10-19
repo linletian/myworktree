@@ -1,6 +1,6 @@
 # TASK-C:Phase C 收尾(仲裁者任务书 v1,2026-10-19)
 
-依据 FIX-PLAN.md v6 §四 Phase C。执行者:编码 Agent(文档撰写同走编码通道)。
+依据 FIX-PLAN.md v7 §四 Phase C。执行者:编码 Agent(文档撰写同走编码通道)。
 **FIX-PLAN.md 的 §四.0 状态表回填由仲裁者本人完成,执行者不得触碰 FIX-PLAN.md。**
 
 ## 前置
@@ -17,8 +17,10 @@
      (起点 clamp+总量封顶)、write deadline 15s env、slow-link 心跳 15s、
      app-layer deflate-raw 压缩(A0 门 5.719x);
    - 客户端:overflow 白名单+reset+tail+可见提示、generation+fencing、
-     指数退避(前 8s/后 30s、60s closing-sync 锚点)、B-5 backlog 2MB、
-     B-9 单帧 4MB 界、compress 消费与降级;
+     指数退避(前 8s/后 30s 前置 cap、60s closing-sync 锚点)、B-5 backlog
+     2MB、**B-9 滑窗膨胀率守卫(v7 重裁定:2MB trailing 窗口+32:1 阈值+
+     fail-closed,不是单帧界——FIX-PLAN pin5 现行口径)**、压缩消费与降级
+     (ready.compress 回声分流、DecompressionStream 缺失走明文);
    - 兼容性:legacy/未声明 caps 零变化;#82/#87/#94/#98 全绿;
    - env 名三个 + 测试名清单(全部真实存在的测试,逐个核对后写入)。
 2. **数字纪律**:条目内所有数字必须能在 FIX-PLAN v6/A0-GATE/测试中找到出处,
@@ -32,6 +34,9 @@
 线损预算口径)、overflow 帧+250ms 聚合、caps 四组合矩阵、notice 清空
 scrollback UX 语义、env 名三个、slow-link 档、compress wire 语义
 (deflate-raw、ready 回声、双字段口径、cursor=逻辑字节)。
+**仲裁增补**:补一句 backlog 守卫状态行原文引用
+「stream reset: backlog exceeded, data dropped」(评审 A round4 文档缺口;
+与 degenerate 守卫文案「stream reset: degenerate stream, data dropped」并列)。
 
 ## 子任务 D3:DATA-COLLECTION.md 补记
 1. 客户端埋点清单段补「Phase B 已落地」状态与实际字段名(以 index.html 实现为准)。
@@ -53,7 +58,10 @@ scrollback UX 语义、env 名三个、slow-link 档、compress wire 语义
 - 允许:CHANGELOG.md、docs/API.md、docs/plans/fix-issue114-tty-overflow/DATA-COLLECTION.md、
   docs/plans/fix-issue114-tty-overflow/tools/a0compress/main.go(仅 D3.4 的
   StreamHeader 订正,改后 `go build` 该 mini-module 验证)。
-- 禁止:一切产品代码(internal/、cmd/)、FIX-PLAN.md、各任务书。
+- 禁止:一切产品代码(internal/、cmd/)、FIX-PLAN.md、各任务书;
+  **禁止执行任何 git 写操作(git add/commit/push 等)——提交闸在仲裁者**。
 - 完成判据:`go test ./... -count=1` 全绿(文档改动不应破坏任何守卫测试,
-  特别是 #95 计数守卫与 API.md 锚点类测试);`git diff --stat` 只含上述三文件。
+  特别是 #95 计数守卫与 API.md 锚点类测试);`git diff --stat` 只含允许清单
+  内文件(仲裁者自改的计划文档另计——FIX-PLAN.md/TASK-C 本文/REVIEW 记录
+  由仲裁者署名,不计入执行者越界判定)。
 - 交付:改动摘要 + 数字出处对照表(条目内每个数字→出处文件:行)。

@@ -5,11 +5,28 @@
 （双评审闭环第二轮）；v6 修订 2026-10-19（双评审闭环第三轮：REVIEW-v5-TEMP
 V5-N1–N4 + REVIEW-B 第三轮 R3-MED-1/2、R3-LOW-1/2/3、R3-nit——全部实测核验后
 处置；本轮为文档同步与数字可复现性修正，无方案性变更）；**v7 修订 2026-10-19
-深夜（Phase A 服务端落地后 §四.0 状态表回填；另采纳评审 B round2 实证订正：
-回放在活生产者下存在部分读（ReadSince 至多 maxBytes），streamed 非恒 64KB
-整数倍——读长裁剪在 W_eff==budget 路线可触发并将预算路线收紧到精确 8MB；
-budgetExhausted=true & windowed=false 组合在「W_eff==budget 且 clamp 未触发且
-生产者跑赢回放」下可达，windowed 语义冻结为两个窗口截断的 OR。无方案性变更）**。
+深夜（实施期修订集，经 Phase A/B 五轮双评审收敛）**：
+1. **pin 5 方案性重裁定（TASK-B 评审 B round2 R1/round3 N1，探针实证）**：
+   「单帧解压后字节上界」在共享 deflate 上下文下客户端不可实现（帧界不可
+   识别、write() 受背压门控），废止；改为**滑窗膨胀率守卫**（trailing 2MB
+   窗口 + 32:1 阈值 + fail-closed + 可见提示），分母经 lag 修正为
+   wireFedTotal−wireConsumedTotal@窗口起点采样（仲裁者初版 fed-vs-fed 分母
+   在排空期坍缩被评审实证推翻，收回）；方向随形态翻转（高估 ≤1.61x/
+   低估至 0.75x），安全相关侧为高估侧。详见 pin 5 正文。
+2. 决策 2 cap 措辞订正：「上限 8s/30s」为 min() 前置 cap，jitter 后置，
+   有效上限 = cap×1.25（评审 B 质疑 2）。
+3. §五.5 RSS 上界订正 4MB×N+~1.3MB×N（评审 B F2 实测 flate BestSpeed
+   ~1.2MB/连接，结构地板 hashHead 512KB+hashPrev 128KB）。
+4. §五.3.b 字段口径：compress 连接读 replayLogicalBytes/replayMs
+   （TASK-A3 返工 R1 落地；replayBytes 在 compress 连接为 wire 口径冻结）。
+5. notice UX 文案裁定：英文 "stream reset: slow link, data dropped"
+   （#73 English-only 守卫优先于计划中文示例文案）。
+6. §四.0 状态表回填 + A0-GATE「raw deflate 无流头」措辞订正（编码质疑成立）。
+7. TASK-A2 round2 实证订正（评审 B）：回放在活生产者下存在部分读
+   （ReadSince 至多 maxBytes），streamed 非恒 64KB 整数倍——读长裁剪在
+   W_eff==budget 路线可触发并将预算路线收紧到精确 8MB；
+   budgetExhausted=true & windowed=false 组合在「W_eff==budget 且 clamp
+   未触发且生产者跑赢回放」下可达，windowed 语义冻结为两个窗口截断的 OR。
 本计划对编码/评审 Agent 生效：可以质疑挑战（回报给仲裁者），**不得自行修改本文件**。
 行号基线：2026-10-17 工作树（含未提交 Phase A 编码）。
 
@@ -443,14 +460,17 @@ legacy 行为），连接照常、无新语义。单测 pin「未知 caps → le
 | --- | --- | --- | --- |
 | 1 drop+notice | 已列 Phase A | **已实现并提交（含 250ms 聚合+心跳冲刷，两轮双评审闭环）** | driver.go policy/DropStats；app.go notice 先于 chunk、ttyOverflowNoticeInterval=250ms、心跳分支冲刷 pending（评审 B F2 修复）；聚合帧率 ≤4/s 测试钉住 |
 | 1b 队列 4096 | Phase A-1 | **已实现并提交（1b6c658）** | driver.go drop 4096 / close 64 逐字不变 |
-| 2 退避 | Phase B | 未开工 | index.html 两处 TTY_RECONNECT_DELAY_MS 固定 5s（TASK-B 待发） |
+| 2 退避 | Phase B | **已实现并提交（05b4677，双评审五轮闭环）** | index.html ttyReconnectDelayMs/armTTYBackoffReconnect（base 1s、cap 前 8s/30s、60s closing-sync 锚点）；两处固定 5s 已替换 |
 | 3 write deadline | Phase A | **已实现并提交（env 可配，ready 后武装）** | app.go ttyWriteTimeout()/MYWORKTREE_TTY_WRITE_TIMEOUT_MS（每连接解析，评审 F5 仲裁接受）；ws.go SetWriteTimeout+writeFrame 装弹 |
 | 4 窗口化 | Phase A-3 | **已实现并提交（起点 clamp+总量封顶+W=0 构造性纯 tail）** | app.go clamp（复用 #94 start-sync）、streamed>=W_eff 守卫、读长裁剪精确 ≤W（评审 B F1/F3 修复）；截断语义=预算语义 |
-| 5a 压缩 | Phase A-3 | **未实现（A0 门 PASS 5.719x，TASK-A3 待发）** | A0-GATE.md；工作树无 flate 代码 |
+| 5a 压缩 | Phase A-3 | **已实现并提交（d2fc415，双评审两轮闭环）** | ttyCompressor/ttyCompressingConn（WriteBinary 唯一咽喉）、ready 回声、双口径埋点；A0 门 5.719x |
 | 5b W 可配 | Phase A-3 | **已实现并提交（env+replay-window 前缀解析，只缩不涨）** | app.go ttyReplayWindowBytes/ttyClientCapValue（R15） |
 | 5c deadline/心跳可配 | Phase A-3 | **已实现并提交（deadline env + slow-link 心跳 15s 档）** | app.go ttyHeartbeatIntervalFor/slow-link caps；未声明连接 10s/45s 逐字不变 |
 
-处置（仲裁）：Phase A 服务端（除 5a）已全部落地并经双评审两轮闭环（第一轮 B 提 F1/F2 HIGH 返工，第二轮双 APPROVE+nit 清零）。**5a 由 TASK-A3 接续（A0 门已放行）**；Phase B 由 TASK-B 接续；Phase C 以本表与 CHANGELOG 收尾。
+处置（仲裁，2026-10-20 订正）：Phase A 服务端（1b/A2/A3 含 5a）与 Phase B
+客户端已全部落地并经双评审闭环提交（eeb3851 / d2fc415 / 05b4677；A2 两轮、
+A3 两轮、B 五轮，记录见 REVIEW-A2-RECORD.md / REVIEW-B-RECORD.md）。
+Phase C 以本表与 CHANGELOG 收尾。
 
 ### Phase A(server)· 一次编码
 1. `internal/instance/pty/driver.go`:
@@ -513,9 +533,11 @@ legacy 行为），连接照常、无新语义。单测 pin「未知 caps → le
    `term.reset()`+弃连+tail 重连（与服务端 drop 同构；压缩把背压推进页面，
    浏览器 onmessage 不可暂停，机器不提供该界）。
 6. 退避：`ttyReconnectAttempts`（session 级），延迟 =
-   `min(1000*2^n, 30000)*(0.75+rand*0.5)`；**隐藏 30s / 前台可见 8s 上限**；
-   **重置锚点 = closing sync 到达且该连接自 closing sync 起存活 ≥60s**
-   （v6 订正 V5-N2：与决策 2 逐字一致；60s 从连接真正可用起算、与 W 解耦）。
+   `min(1000*2^n, cap)*(0.75+rand*0.5)`，cap 隐藏 30000 / 前台可见 8000
+   （**前置 cap**，jitter 后置 ⇒ 有效上限 37.5s/10s——与决策 2 v7 措辞
+   逐字一致，评审 B 质疑 2）；**重置锚点 = closing sync 到达且该连接自
+   closing sync 起存活 ≥60s**（v6 订正 V5-N2：与决策 2 逐字一致；60s 从
+   连接真正可用起算、与 W 解耦）。
    替换 :6269/:6787 两处固定 5s（全仓复核仅此两处调度重连，含 liveness
    tick 不间接调度）。
 7. node-test 切片规则（含 `Math.random` 写法）；`scripts/` 计数守卫（#95）通过。
@@ -523,14 +545,15 @@ legacy 行为），连接照常、无新语义。单测 pin「未知 caps → le
    close 行的 `visibility`/`writeWait` 数据（DATA-COLLECTION §一客户端
    清单首次落地），回填决策矩阵第一行（hidden 节流 vs 网络/CPU 归因）
    并归档到本目录。
-9. **单帧解压炸弹守卫（v6 新增，R3-MED-1：5a pin5 的客户端侧落地）**：
-   每连接对 `DecompressionStream` 输出的**单帧解压后字节**计上界
-   `maxDecompressedBytes = max(W_eff, 4MB)`；超限=流退化/损坏 → 关连接
-   + tail 重连（与 notice 路径同构）。与 B-5 的分工：**本界防炸弹
-   （v7：滑窗膨胀率，见 pin 5 重裁定），B-5 界防积压（待解压+待写总量
-   1–2MB）**；明确 **不做连接生命周期累计**（任何 MB 级累计在 150–300KB/s
-   生产下 20–30s 耗尽=定时杀器）。合法流（A0 实测 ≤13.1x）远低于 32:1
-   触发线；退化流（≥64:1）必触发。
+9. **解压炸弹守卫（v6 新增；v7 机制重裁定落地——旧「单帧解压后字节上界
+   maxDecompressedBytes」定义已废止，见 pin 5）**：滑窗膨胀率守卫——
+   trailing 输出窗口 ≥2MB 且窗口比率 >32:1（分母为 wireFedTotal−
+   wireConsumedTotal@窗口起点采样的净值口径）→ 关连接 + 可见提示
+   + tail 重连（与 notice 路径同构）。与 B-5 的分工：**本界防炸弹，
+   B-5 界防积压（待解压+待写总量 1–2MB）**；明确 **不做连接生命周期累计**
+   （任何 MB 级累计在 150–300KB/s 生产下 20–30s 耗尽=定时杀器）。
+   合法流（A0 实测 ≤13.1x）算得 ≤~21x，远低于 32:1 触发线；
+   退化流（≥64:1）必触发；分母 ==0 且窗口输出有增长 = 退化签名，触发。
 
 ### Phase C · 收尾
 - CHANGELOG.md（fix 段）。
@@ -571,7 +594,8 @@ legacy 行为），连接照常、无新语义。单测 pin「未知 caps → le
    - d. 全程无 cursor 错位（压缩×drop 一致性由 Phase A 单测覆盖）。
 4. 压缩回归：中途 drop 后 inflate 不错位（Phase A 单测+Phase B node test）；
    caps 四组合矩阵全绿；legacy/未声明 compress 字节流零变化；
-   `maxDecompressedBytes` 超限有关断+重连路径。
+   `maxDecompressedBytes` 超限有关断+重连路径（v7 措辞：即滑窗膨胀率守卫
+   的触发路径——单帧界定义已废止，验收以比率守卫触发+可见提示+重连为准）。
 5. 多设备量化：N=5 慢消费者并发，各自独立 drop/notice（广播扇出无恶化）；
    notice 率 ≤4/s（节流生效）；服务端 CPU 无异常、**RSS 上界 =
    4MB×N + ~1.3MB×N（flate，v7 订正）**；netem 下互不恶化。

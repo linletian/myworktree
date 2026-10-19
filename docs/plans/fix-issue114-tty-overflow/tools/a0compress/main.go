@@ -204,7 +204,13 @@ func measure(raw []byte, frameSize, level int, label string, closeStream bool) (
 		}
 	}
 	res.CompBytes = cw.n
-	res.StreamHeader = 2 // deflate-raw stream header (CMF+FLG), one-off per stream
+	// Raw deflate (compress/flate) carries NO zlib CMF+FLG stream header -
+	// that 2-byte wrapper belongs to the zlib container (compress/zlib), not
+	// to the raw stream the client's DecompressionStream('deflate-raw')
+	// reads. The old value 2 was a phantom (review B: re-run confirms the
+	// 5.719x gate is unaffected); it only ever fed the MeanFrame / display
+	// column below, never ratio or the quantiles. Correct value: 0.
+	res.StreamHeader = 0
 	if len(perFrame) > 0 {
 		res.MeanFrame = float64(res.CompBytes-res.StreamHeader) / float64(len(perFrame))
 		s := append([]int64(nil), perFrame...)
@@ -571,7 +577,7 @@ func render(r report) string {
 		row(*r.DefaultRef)
 	}
 	fmt.Fprintf(&b, "\nscenario A per-frame compressed size: min %d p50 %d p99 %d max %d"+
-		" (deflate-raw header %d B, sync-flush floor ~%d B)\n",
+		" (stream header %d B - raw deflate carries none, sync-flush floor ~%d B)\n",
 		r.ScenarioA.MinFrame, r.ScenarioA.P50Frame, r.ScenarioA.P99Frame, r.ScenarioA.MaxFrame,
 		r.ScenarioA.StreamHeader, r.ScenarioA.FlushTaxBytes)
 	if n := len(r.Ansi.Windows); n > 0 {

@@ -785,7 +785,12 @@ default window and heartbeat cadence.
   stream) plus pending-write (inflated bytes awaiting the `term.write`
   callback): it bounds resident memory, the ratio guard bounds the
   compression-degeneracy. Either firing resets the screen, abandons the
-  socket, and tail-reconnects.
+  socket, and tail-reconnects, each with its OWN VISIBLE status line — the
+  backlog guard shows `"stream reset: backlog exceeded, data dropped"` at BOTH
+  its trip points (pump-side and feed-side), the ratio guard shows
+  `"stream reset: degenerate stream, data dropped"` above; both sit beside the
+  overflow notice's `"stream reset: slow link, data dropped"`, all gated on the
+  active session and none ever silent (rework D2 / review A round4 gap).
 
 Each replay read is capped at 64KB. When the delta since `since` exceeds
 64KB, the server loops reads until it is caught up and **streams each chunk

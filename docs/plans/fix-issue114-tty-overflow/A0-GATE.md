@@ -204,7 +204,7 @@ sample: /tmp/a0-sample.bin  bytes=8388608  md5=ff566edd0bf1644dd4d40f89139cd77f 
 
 scenario                         frames   raw bytes  comp bytes    ratio  savings   mean/fr
 A live 1KB sync flush              8192     8388608     1466688   5.719x   82.52%     179.0
-B replay 64KB sync flush            128     8388608      744277  11.271x   91.13%    5814.6
+B replay 64KB sync flush            128     8388608      744277  11.271x   91.13%    5814.7
 sweep 256B frame                  32768     8388608     2820295   2.974x   66.38%      86.1
 sweep 512B frame                  16384     8388608     1936420   4.332x   76.92%     118.2
 sweep 2048B frame                  4096     8388608     1169782   7.171x   86.06%     285.6
@@ -214,7 +214,7 @@ sweep 16384B frame                  512     8388608      730944  11.476x   91.29
 ref: no per-frame flush               1     8388608      695523  12.061x   91.71%  695521.0
 ref: DefaultCompression 1KB        8192     8388608      642522  13.056x   92.34%      78.4
 
-scenario A per-frame compressed size: min 28 p50 163 p99 401 max 518 (raw deflate 无流头, sync-flush floor ~40960 B)
+scenario A per-frame compressed size: min 28 p50 163 p99 401 max 518 (stream header 0 B - raw deflate carries none, sync-flush floor ~40960 B)
 scenario A fresh-stream windows (n=8): min 5.048x (offset 5242880)  max 7.735x (offset 1048576)
 roundtrip, one persistent deflate-raw stream flushed per frame: ok=true
 
@@ -233,6 +233,13 @@ scenario A ratio 5.719x >= 2.0x: proceed to 5a encoding; worst of 8 windows 5.04
 Phase A-0：**放行进入 5a 压缩编码**；无需触发「压缩降为 Phase C 候选、
 W/队列参数按无压缩重算」的降级处置。计划预估「文本日志 3–5x」被实测
 超出（5.719x）。
+
+**复跑留档（2026-10-20，评审 B round-C + 编码 agent TASK-C 两次独立）**：
+同一样本（`/tmp/a0-sample.bin`，8,388,608 B，md5 `ff566edd0bf1644dd4d40f89139cd77f`）
+在 StreamHeader 幻影订正（2→0，见 §四）后复跑——ratio 5.719x /
+DefaultCompression 13.056x / 窗口 5.048–7.735x / 分位 min 28 p50 163
+p99 401 max 518 **全部不变**，仅 mean/fr 显示列末位差异（该列系唯一
+引用 StreamHeader 的展示位）。门数字自此不依赖样本在场。
 
 ### 稳健性（不是单点数字）
 
