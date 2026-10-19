@@ -250,9 +250,13 @@ docs subAge 最大 **1,919,661ms（~32min，19:55:05，窗口外）**，窗口�
     压缩成立后典型消费者实际占用趋近于 0。
 - close 策略容量不变 → #82/#87 回归零改动。
 
-**决策 2：指数退避 + jitter；重置锚点 = closing sync 之后存活 ≥60s；前台可见连接上限 8s。**（v2 修正，v4 再修正，v5 计时基准修订）
+**决策 2：指数退避 + jitter；重置锚点 = closing sync 之后存活 ≥60s；前台可见连接上限 8s。**（v2 修正，v4 再修正，v5 计时基准修订，v7 cap 措辞订正）
 - base 1s ×2，±25% jitter。**隐藏/后台连接上限 30s；前台可见连接上限 8s**
   （R10：用户盯着屏幕，30s 黑屏不可接受，手动刷新可用）。
+  **（v7 措辞订正，评审 B 质疑 2）：「上限」指 min() 的前置 cap**——jitter
+  乘在 cap 之后（±25%），故有效最大值 = cap×1.25（隐藏 37.5s/前台 10s）；
+  jitter 后置是刻意的去相关设计（避免多连接在 cap 处同步重连的惊群），
+  公式为准。
 - **v4 锚点修正（MED-1，实测确认）**：closing sync 对 syncCap 客户端在
   **tail 模式也发送**（app.go:2996-3000）——v2 的「closing sync 即重置」
   会被 notice→tail 重连（1.3s 即达 closing sync）**每轮清零**，退避形同
@@ -330,16 +334,25 @@ docs subAge 最大 **1,919,661ms（~32min，19:55:05，窗口外）**，窗口�
   背压。node-test 切片规则适用。
 - **pin 4（丢弃标志逐输出检查）**：notice（TEXT）同步置位；解压管道**每一
   输出**（含已入队未输出）写入前查标志。单测 pin。
-- **pin 5（解压炸弹，v5 定义澄清 N3）**：`ws.go maxMessageBytes=10MB` 只
-  限 wire 单帧。守卫 = **单帧解压后字节上界 maxDecompressedBytes =
-  max(W_eff, 4MB)**：合法 1KB live 帧解压后远低于界；64KB 回放帧需
-  >64:1 膨胀率（deflate 上限 ~1032:1，仅退化/损坏流可达）才触发。
-  **明确不做连接生命周期累计**——150–300KB/s 生产下任何 MB 级累计上限
-  都会在 20–30s 耗尽，等于给压缩长连接装定时杀器（正是评审担心的）。
-  与 1b 队列的关系：队列是服务端逻辑字节缓冲（生产侧），本 guard 是
-  客户端解压后上界（消费侧），两者独立。超限处置=关连接+客户端 tail
-  重连（与 notice 路径同构）。回放窗口+live 在途的「待消费」上界由
-  Phase B-5 客户端设界（1–2MB）覆盖，不重复计数。
+- **pin 5（解压炸弹，v5 定义澄清 N3；v7 机制重裁定 R1）**：`ws.go maxMessageBytes=10MB` 只
+  限 wire 单帧。**v7 重裁定（TASK-B 评审 B round2 R1，探针实证）**：共享 deflate
+  上下文下客户端**无法可靠识别帧界**（帧内拆多 read、write promise 受 readable
+  背压门控、逐帧独立上下文会杀死共享字典压缩比 5.719x→弃）——故「单帧解压后
+  字节上界」在客户端**不可实现**，原定义废止。新机制 = **滑窗膨胀率守卫**：
+  trailing 输出窗口 ≥2MB 且该窗口 输出字节/对应 wire 字节 > **32:1** →
+  判退化/损坏流 → 关连接 + 可见提示 + tail 重连（与 notice 路径同构）。
+  计数只用单调累计量(泵滞后免疫;分母 = wireFedTotal(now) −
+  wireConsumedTotal(窗口起点采样),为「feed 领先泵(抬高分母)与
+  write() 先于 transform 产出 resolve(压低分母)」两个反向领先的净值,
+  方向随形态翻转:实测高估 ≤1.61x(64KB 帧)亦可低估至 0.75x;安全相关
+  侧为高估侧——合法上限 13.056x 下算得 ≤~21x < 32,不误触健康突发;
+  分母 ==0 且窗口输出有增长 = 退化签名,触发(fail-closed))。阈值依据:
+  A0 实测合法最大 13.056x(DefaultCompression 1KB 帧);退化流 ≥64:1
+  (deflate 上限 ~1032:1);32:1 居中。(v7 三订:初稿「wire 领先=低估=
+  不误触」经评审 B round3/round5 实证为单形态片面论断,现按净值口径订正;
+  滑窗机制的原始提案经两轮实证返工收敛,评审驱动设计纠错留档。)
+  **仍不做连接生命周期累计**（v5 N3 理由不变）。与 1b 队列关系同前
+  （生产侧/消费侧独立）。
 - **双字段埋点（R14）**：compress 连接上 slow-write/conn-closed 增
   `wireBytes`（压缩后）与 `logicalBytes`（解压后）双字段——消费速率读数
   口径随连接而变，双字段保历史可比。
@@ -379,9 +392,13 @@ legacy 行为），连接照常、无新语义。单测 pin「未知 caps → le
   `term.reset()` → **主动关闭 socket**（reset 后残留字节不得上屏——
   generation+fencing 收编三层残余：WS 缓冲/解压管道/xterm 回调）→ 不带
   `since` 的 tail 重连，**计入退避序列**（60s 稳定锚点下真正生效）。
-- **notice 的 UX 语义（v4，MED-3 仲裁）**：API.md 写明「notice 会清空客户端
+- **notice 的 UX 语义（v4，MED-3 仲裁；v7 文案裁定）**：API.md 写明「notice 会清空客户端
   scrollback」；notice 时终端 UI 显示一次可见降级提示（「流已重置：链路慢，
   有数据丢弃」状态行；ORCA host-health 可见性借鉴）。
+  **文案裁定（v7，TASK-B 编码质疑成立）**：实际落地文案为英文
+  "stream reset: slow link, data dropped"——#73 的 TestUICopyIsEnglishOnly
+  （ui_test.go）对 served 资产逐 rune 禁 CJK，上述中文示例文案与该 shipped
+  不变量冲突；MED-3 实质要求为「可见降级提示」语义，文案语言不构成语义。
 - **caps 四组合矩阵（R12）**（wire 语义与 cursor 口径）：
 
 | caps | 溢出行为 | 二进制 wire | cursor 口径 |
@@ -510,10 +527,10 @@ legacy 行为），连接照常、无新语义。单测 pin「未知 caps → le
    每连接对 `DecompressionStream` 输出的**单帧解压后字节**计上界
    `maxDecompressedBytes = max(W_eff, 4MB)`；超限=流退化/损坏 → 关连接
    + tail 重连（与 notice 路径同构）。与 B-5 的分工：**本界防炸弹
-   （单帧解压膨胀），B-5 界防积压（待解压+待写总量 1–2MB）**；明确
-   **不做连接生命周期累计**（任何 MB 级累计在 150–300KB/s 生产下
-   20–30s 耗尽=定时杀器）。合法 1KB live 帧永不触及；64KB 回放帧需
-   >64:1 膨胀率才触发。
+   （v7：滑窗膨胀率，见 pin 5 重裁定），B-5 界防积压（待解压+待写总量
+   1–2MB）**；明确 **不做连接生命周期累计**（任何 MB 级累计在 150–300KB/s
+   生产下 20–30s 耗尽=定时杀器）。合法流（A0 实测 ≤13.1x）远低于 32:1
+   触发线；退化流（≥64:1）必触发。
 
 ### Phase C · 收尾
 - CHANGELOG.md（fix 段）。

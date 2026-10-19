@@ -629,9 +629,12 @@ connection; where a list declares the same key more than once the first
   by the frame's wire length; dropped chunks never entered the deflate
   stream (a chunk is compressed exactly once, when it is written, in
   write order), so the two ends' contexts cannot diverge across a drop. A
-  client that does NOT declare `compress` — every client that exists today,
-  legacy included — keeps the plaintext wire verbatim: no flate object is
-  even constructed on that path. Wire-vs-logical observability rides the
+  client that does NOT declare `compress` — every non-web client, and the
+  shipped web client on a platform without
+  `DecompressionStream('deflate-raw')` (decision 5a pin 2) — keeps the
+  plaintext wire verbatim: no flate object is even constructed on that
+  path. (The shipped web client declares `compress` whenever its browser
+  can inflate deflate-raw; see the client consumption contract below.) Wire-vs-logical observability rides the
   `[tty-metrics]` lines: `wireBytes` (compressed delivery) and
   `logicalBytes` (pre-compression) on slow-write/conn-closed rows (equal
   on plaintext connections, so the columns stay historically comparable),
@@ -676,6 +679,113 @@ never again leak a future visible control frame to a client that did not
 declare it. Older servers ignore unknown query parameters, so a new client
 against an old daemon behaves exactly as before (the old daemon sends the
 TEXT ping unconditionally, and the new client whitelists it).
+
+**The client consumption contract (issue #114 Phase B).** The shipped web
+client (`internal/ui/static/index.html`) now declares
+`caps=ping,sync,overflow-notice` always, and appends `compress` only when
+`new DecompressionStream('deflate-raw')` constructs successfully — a platform
+without the format (pre-Chrome 103 / pre-Safari 16.4, decision 5a pin 2)
+declares no `compress` cap and stays on the plaintext wire, console-noted. It
+deliberately declares NEITHER `replay-window` NOR `slow-link` (arbitration:
+operator knobs with no client-side scenario data), so it keeps the operator's
+default window and heartbeat cadence.
+
+- **Ready-frame gate.** The client wires its inflate path on the ready echo:
+  `{"type":"ready","compress":true}` switches it to the compressed state
+  (one persistent `DecompressionStream('deflate-raw')`, one sequential
+  reader, `term.write` awaited per output chunk for parse backpressure); an
+  absent or false field — every server before Phase A-3, and every connection
+  that did not declare the cap — keeps the plaintext consumption path
+  byte-for-byte (the R16 rollback). The cursor advances by the **inflated**
+  length in the compressed state and by the **wire** length in the plaintext
+  state. In the compressed state the pump attributes its opaque byte stream to
+  the HEAD token of a feed-time FIFO (`pipe.frameLedger`), each token's
+  replay/live identity captured at feed and consumed strictly IN STREAM ORDER.
+  The advance is evaluated at PAINT time: once a sync base is known (a start or
+  closing sync has adopted an absolute offset, latched on the pipe), the cursor
+  advances by a head that was LIVE at feed time OR while the closing sync has
+  not yet landed (`ttyClosingSyncAt === 0`). So replay bytes painted DURING
+  replay advance from the start-sync base — a mid-replay drop reconnects with
+  `since` at the painted position, isomorphic to the plaintext #94 path — while
+  the closing sync's absolute assignment stays the SOLE terminal authority: a
+  replay frame painted AFTER the closing sync sees `ttyClosingSyncAt > 0` with
+  `head.live === false` and cannot re-open the cursor it pinned, so the W1
+  burst-exactness (cursor lands exactly on `sync.offset`) holds. With NO sync
+  base (a cursorless first connect) it never advances. The residual of this
+  frame-boundary-blind attribution — a lagged head popping while the head frame's
+  tail is still queued misattributes <= one frame tail (in practice <= one read
+  chunk) onto the NEXT token — is a DELIBERATE trade-off: in the dominant
+  replay-then-live shape the error is UNDER-CEILING (the tail lands on a live
+  token whose own paint also advances, so the cursor runs a little SHORT), so
+  the next `since` merely re-asks bytes already painted -> a bounded duplicate
+  the closing sync then self-heals. The opposite direction (over-ceiling ->
+  silent loss) is the one we refuse, and the server's beyond-head branch
+  (`cursor > head` -> first-connect tail replay, app.go:3577) clamps even a
+  rare overshoot back to the tail (rework W8/W9). In the plaintext state the
+  cursor advances by wire length only after the `sync` latch, unchanged.
+- **Overflow notice.** A `{"type":"overflow",...}` frame (whitelisted in
+  `parseTTYControlMessage`) drives the consumption-degradation shape: log
+  the dropped counters, show ONE visible status line, bump the session
+  generation (fence), reset the screen, abandon the socket, and tail-reconnect
+  WITHOUT `since` — a notice therefore **clears the client scrollback** by
+  design. The visible status line shows ONLY on the active (foreground) session
+  — a background session's notice is handled silently (the console log, the
+  fence bump, the reset and the tail reconnect still run; only the status line
+  is gated on `state.activeInst === session.id`). Late artifacts of the fenced
+  generation (WS-buffer residue, in-flight inflate output, a pending
+  `term.write` callback) are dropped, not best-effort skipped.
+- **Exponential reconnect backoff (decision 2).** Every delayed reconnect
+  schedules at `min(1000ms * 2**attempts, cap) * (0.75 + rand*0.5)` — base
+  1 s, ±25 % jitter, capped at **8 s while the tab is visible** and **30 s
+  while hidden** (a user watching a black screen must not wait 30 s). The
+  attempt counter is session-level and its ONLY reset anchor is a closing
+  `sync` followed by that same connection staying the live socket for
+  **≥ 60 s**; a mid-replay drop or a notice→tail reconnect under 60 s never
+  clears it, so the notice loop's fast closing sync cannot self-erase the
+  backoff (MED-1).
+- **Client-side bounds.** Two per-connection guards on the compressed path,
+  with a clear division of labour. A per-WS-frame decompressed-output ceiling
+  is UNIMPLEMENTABLE under the server's shared deflate context (flushed per
+  frame into ONE stream, app.go:2656/:2919): the pump cannot see frame
+  boundaries, so any head-stuck per-frame counter false-trips a healthy
+  multi-frame burst (probes 8-14, review probe12). The frame ceiling is
+  therefore replaced by a **sliding-window inflation-ratio guard** (rework
+  W7, denominator fixed W13/N1+N2): the pump keeps a monotonic `inflatedTotal`
+  and the feed keeps TWO monotonic counters — `wireFedTotal` (wire counted on
+  frame entry) and `wireConsumedTotal` (the SAME wire counted only once
+  `writer.write` RESOLVES, i.e. the transform ACCEPTED it). Every 256 KB of
+  painted output a `(output, wireConsumed)` snapshot goes into a small bounded
+  deque, and once the trailing window is full (**`TTY_INFLATION_WINDOW_BYTES`
+  = 2 MB** of output) the ratio
+  `window / (wireFedTotal(now) - wireConsumedAt[window-start])` is evaluated.
+  This consumed-based denominator is far tighter than the old fed-vs-fed one,
+  which COLLAPSED during a drain lag (the feed runs ahead of the transform, so
+  the window-start fed snapshot already counted wire whose output had not
+  surfaced), shrinking the denominator and OVER-estimating the ratio into false
+  trips — that defect is what W13 closes. The denominator is nonetheless a
+  NET of two opposing leads whose direction FLIPS with shape/cadence (W19/F2):
+  the feed LEADS the pump (raising the denominator) while Node's
+  `writer.write()` RESOLVES BEFORE the transform emits the inflated bytes
+  (`wireConsumedTotal` leading inflated output, lowering the denominator). The
+  SAFETY-relevant side is the OVER-estimate side: measured on real deflate-raw
+  it is <= ~1.61x at the 64KB-frame shape, and can UNDER-estimate to ~0.75x on
+  this repo's W18 discriminating content (134 guard evals, 0 over-estimates;
+  ~0.996x at a 1KB live-frame shape). A legit stream at A0's true ceiling
+  13.056:1 therefore computes <= ~21x, still under the 32 limit — a margin
+  held by MEASUREMENT and the discriminating tests (legit content pinned
+  ~13.2:1, a `RATIO_LIMIT` mutated 32->8 trips them), NOT by a structural
+  proof. Past
+  **`TTY_INFLATION_RATIO_LIMIT` = 32:1** — or on a zero denominator whose
+  window output nevertheless GREW (fail-open CLOSED) — the stream is
+  degenerate/corrupt; the response is a VISIBLE status line
+  (`"stream reset: degenerate stream, data dropped"`) plus reset + tail
+  reconnect, isomorphic to the overflow notice — never just a console line.
+  The second guard is B-5's
+  **2 MB backlog** of pending-decode (wire bytes queued into the inflate
+  stream) plus pending-write (inflated bytes awaiting the `term.write`
+  callback): it bounds resident memory, the ratio guard bounds the
+  compression-degeneracy. Either firing resets the screen, abandons the
+  socket, and tail-reconnects.
 
 Each replay read is capped at 64KB. When the delta since `since` exceeds
 64KB, the server loops reads until it is caught up and **streams each chunk

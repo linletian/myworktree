@@ -389,13 +389,13 @@ func TestTerminalStatusLivenessHeartbeatContract(t *testing.T) {
 	if end := strings.Index(helper, "\n        }"); end >= 0 {
 		helper = helper[:end]
 	}
-	if !strings.Contains(helper, "disconnectTTY(session);\n            session.ttyState = 'IDLE';\n            session.ttyReconnectTimer = setTimeout(() => connectTTY(session), TTY_RECONNECT_DELAY_MS);") {
-		t.Fatal("the socket branch must stay disconnect -> force IDLE -> arm retry, contiguously in that order (issue #83)")
+	if !strings.Contains(helper, "disconnectTTY(session);\n            session.ttyState = 'IDLE';\n            armTTYBackoffReconnect(session);") {
+		t.Fatal("the socket branch must stay disconnect -> force IDLE -> arm retry, contiguously in that order (issue #83; #114 arms it through armTTYBackoffReconnect)")
 	}
 	nullAt := strings.Index(helper, "if (!session.ttySocket) {")
 	immediateAt := strings.Index(helper, "session.ttyState = 'IDLE';\n                connectTTY(session);\n                return;")
 	if nullAt < 0 || immediateAt < 0 || nullAt > immediateAt {
-		t.Fatal("the no-socket branch must connect immediately, no TTY_RECONNECT_DELAY_MS backoff on overlay recovery (issue #83 FIX-T)")
+		t.Fatal("the no-socket branch must connect immediately, no backoff on overlay recovery (issue #83 FIX-T)")
 	}
 	if n := strings.Count(index, "reconnectStaleTTY(session);"); n < 3 {
 		t.Fatalf("index.html has %d reconnectStaleTTY call sites, want >= 3 (watchdog / poll / reconnectRunning, issue #83)", n)
@@ -419,9 +419,28 @@ func TestTerminalStatusLivenessHeartbeatContract(t *testing.T) {
 	readSec := num(`ttyReadDeadline = (\d+) \* time\.Second`, string(appSrc), "server ttyReadDeadline")
 	checkMs := num(`const TTY_LIVENESS_CHECK_MS = (\d+);`, index, "client TTY_LIVENESS_CHECK_MS")
 	staleMs := num(`const TTY_LIVENESS_STALE_MS = (\d+);`, index, "client TTY_LIVENESS_STALE_MS")
-	delayMs := num(`const TTY_RECONNECT_DELAY_MS = (\d+);`, index, "client TTY_RECONNECT_DELAY_MS")
-	if delayMs != 5000 {
-		t.Fatalf("client TTY_RECONNECT_DELAY_MS = %d, want 5000 - the node FIX-K/FIX-T cases arm exactly this delay", delayMs)
+	// Issue #114 decision 2 replaced the fixed 5000ms reconnect delay with
+	// exponential backoff: base 1s, cap 8s visible / 30s hidden, reset anchor
+	// 60s after a closing sync. The node FIX-K/FIX-T cases arm exactly the
+	// base (first step) via fireTimers(1000), so the base must stay 1000.
+	delayMs := num(`const TTY_RECONNECT_BASE_MS = (\d+);`, index, "client TTY_RECONNECT_BASE_MS")
+	if delayMs != 1000 {
+		t.Fatalf("client TTY_RECONNECT_BASE_MS = %d, want 1000 - the node FIX-K/FIX-T cases arm exactly the first backoff step", delayMs)
+	}
+	capMs := num(`const TTY_RECONNECT_CAP_MS = (\d+);`, index, "client TTY_RECONNECT_CAP_MS")
+	if capMs != 8000 {
+		t.Fatalf("client TTY_RECONNECT_CAP_MS = %d, want 8000 (decision 2 R10: visible cap, no 30s black screen)", capMs)
+	}
+	capHiddenMs := num(`const TTY_RECONNECT_CAP_MS_HIDDEN = (\d+);`, index, "client TTY_RECONNECT_CAP_MS_HIDDEN")
+	if capHiddenMs != 30000 {
+		t.Fatalf("client TTY_RECONNECT_CAP_MS_HIDDEN = %d, want 30000 (decision 2: hidden cap)", capHiddenMs)
+	}
+	resetAliveMs := num(`const TTY_BACKOFF_RESET_ALIVE_MS = (\d+);`, index, "client TTY_BACKOFF_RESET_ALIVE_MS")
+	if resetAliveMs != 60000 {
+		t.Fatalf("client TTY_BACKOFF_RESET_ALIVE_MS = %d, want 60000 (decision 2 MED-1: 60s survival after closing sync)", resetAliveMs)
+	}
+	if capMs >= capHiddenMs {
+		t.Fatalf("visible cap %dms must be under the hidden cap %dms (decision 2 R10)", capMs, capHiddenMs)
 	}
 	if staleMs != 3*pingSec*1000 {
 		t.Fatalf("client threshold %dms is not 3x the %ds server ping - re-derive the margin (issue #83)", staleMs, pingSec)
