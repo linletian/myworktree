@@ -1,10 +1,15 @@
-# Issue #114 修复计划（FIX-PLAN v6）—— tty WS subscriber overflow 1013 重连循环
+# Issue #114 修复计划（FIX-PLAN v7）—— tty WS subscriber overflow 1013 重连循环
 
 仲裁者定稿 2026-10-14；v2 修订 2026-10-17（生产日志证据）；v3 修订 2026-10-17
 （跨境慢链路适配）；v4 修订 2026-10-17（双评审闭环第一轮）；v5 修订 2026-10-17
-（双评审闭环第二轮）；**v6 修订 2026-10-19（双评审闭环第三轮：REVIEW-v5-TEMP
+（双评审闭环第二轮）；v6 修订 2026-10-19（双评审闭环第三轮：REVIEW-v5-TEMP
 V5-N1–N4 + REVIEW-B 第三轮 R3-MED-1/2、R3-LOW-1/2/3、R3-nit——全部实测核验后
-处置；本轮为文档同步与数字可复现性修正，无方案性变更）**。
+处置；本轮为文档同步与数字可复现性修正，无方案性变更）；**v7 修订 2026-10-19
+深夜（Phase A 服务端落地后 §四.0 状态表回填；另采纳评审 B round2 实证订正：
+回放在活生产者下存在部分读（ReadSince 至多 maxBytes），streamed 非恒 64KB
+整数倍——读长裁剪在 W_eff==budget 路线可触发并将预算路线收紧到精确 8MB；
+budgetExhausted=true & windowed=false 组合在「W_eff==budget 且 clamp 未触发且
+生产者跑赢回放」下可达，windowed 语义冻结为两个窗口截断的 OR。无方案性变更）**。
 本计划对编码/评审 Agent 生效：可以质疑挑战（回报给仲裁者），**不得自行修改本文件**。
 行号基线：2026-10-17 工作树（含未提交 Phase A 编码）。
 
@@ -415,20 +420,20 @@ legacy 行为），连接照常、无新语义。单测 pin「未知 caps → le
 
 ## 四、任务分解（按序执行，每阶段：编码 → 双评审 → 仲裁 → 修复）
 
-### §四.0 实现状态（v4 新增，HIGH-1；2026-10-17 工作树实测）
+### §四.0 实现状态（v4 新增，HIGH-1；2026-10-19 深夜回填：Phase A 双评审闭环后）
 
 | 决策 | 计划要求 | 工作树现状 | 证据 |
 | --- | --- | --- | --- |
-| 1 drop+notice | 已列 Phase A | **已实现（未提交）** | driver.go:759/819（policy/DropStats）、app.go:3334-3375（notice 先于 chunk）、log 节流 ttyDropLogInterval=500ms（app.go:2399） |
-| 1b 队列 4096 | Phase A-1 | **未实现（仍 64）** | driver.go:759/819 `make(chan string, 64)` |
-| 2 退避 | Phase B | 未开工 | index.html:6269/6787 固定 5s |
-| 3 write deadline | Phase A | **已实现（const 15s）** | app.go:2388、武装 2562（ready 后）、teardown 卸除 |
-| 4 窗口化 | Phase A-3 | **未实现（无 clamp）** | app.go:2771 `cursor := since` |
-| 5a 压缩 | Phase A-3 | 未实现 | 无 flate 相关代码 |
-| 5c env 可配 | Phase A-3 | **未实现（const）** | app.go:2388 const 块 |
+| 1 drop+notice | 已列 Phase A | **已实现并提交（含 250ms 聚合+心跳冲刷，两轮双评审闭环）** | driver.go policy/DropStats；app.go notice 先于 chunk、ttyOverflowNoticeInterval=250ms、心跳分支冲刷 pending（评审 B F2 修复）；聚合帧率 ≤4/s 测试钉住 |
+| 1b 队列 4096 | Phase A-1 | **已实现并提交（1b6c658）** | driver.go drop 4096 / close 64 逐字不变 |
+| 2 退避 | Phase B | 未开工 | index.html 两处 TTY_RECONNECT_DELAY_MS 固定 5s（TASK-B 待发） |
+| 3 write deadline | Phase A | **已实现并提交（env 可配，ready 后武装）** | app.go ttyWriteTimeout()/MYWORKTREE_TTY_WRITE_TIMEOUT_MS（每连接解析，评审 F5 仲裁接受）；ws.go SetWriteTimeout+writeFrame 装弹 |
+| 4 窗口化 | Phase A-3 | **已实现并提交（起点 clamp+总量封顶+W=0 构造性纯 tail）** | app.go clamp（复用 #94 start-sync）、streamed>=W_eff 守卫、读长裁剪精确 ≤W（评审 B F1/F3 修复）；截断语义=预算语义 |
+| 5a 压缩 | Phase A-3 | **未实现（A0 门 PASS 5.719x，TASK-A3 待发）** | A0-GATE.md；工作树无 flate 代码 |
+| 5b W 可配 | Phase A-3 | **已实现并提交（env+replay-window 前缀解析，只缩不涨）** | app.go ttyReplayWindowBytes/ttyClientCapValue（R15） |
+| 5c deadline/心跳可配 | Phase A-3 | **已实现并提交（deadline env + slow-link 心跳 15s 档）** | app.go ttyHeartbeatIntervalFor/slow-link caps；未声明连接 10s/45s 逐字不变 |
 
-处置（仲裁）：**补齐 1b/4/5a/5c 或显式分期**，分期决策回写本表；Phase C
-以本表回填最终落地状态。**Phase A-0（压缩率测量门，R3 pin 1）先于压缩编码。**
+处置（仲裁）：Phase A 服务端（除 5a）已全部落地并经双评审两轮闭环（第一轮 B 提 F1/F2 HIGH 返工，第二轮双 APPROVE+nit 清零）。**5a 由 TASK-A3 接续（A0 门已放行）**；Phase B 由 TASK-B 接续；Phase C 以本表与 CHANGELOG 收尾。
 
 ### Phase A(server)· 一次编码
 1. `internal/instance/pty/driver.go`:
