@@ -590,7 +590,13 @@ Phase C 以本表与 CHANGELOG 收尾。
      正比——W=256–512KB 时 ≈5–10s@50–100KB/s；
    - c. **deadline 误杀数=0**（操作定义：handshake 成功且 `conn-closed
      binFrames` 持续增长=有写入进展，但单写超 deadline 被服务端回收者
-     计为误杀；client-liveness 收割（30s/60s 无数据）不计）（R2/N6）；
+     计为误杀；client-liveness 收割（30s/60s 无数据）不计）（R2/N6）。
+     **v7 口径限定（TASK-D 评审 B round3/round4 实证）**：该判据的
+     适用域=健康慢链路（消费者排空跟得上生产）；消费者排空速率持续
+     低于生产速率（socket 缓冲填满、单写阻塞超 deadline）时的回收属
+     设计保护路径（write deadline 的存在意义），不计入误杀，也不计入
+     本项 PASS/FAIL——反例实测：240/340KB/s 生产 + 300ms 慢读（无
+     netem）即 blockMs=15001 回收）；
    - d. 全程无 cursor 错位（压缩×drop 一致性由 Phase A 单测覆盖）。
 4. 压缩回归：中途 drop 后 inflate 不错位（Phase A 单测+Phase B node test）；
    caps 四组合矩阵全绿；legacy/未声明 compress 字节流零变化；
@@ -604,6 +610,17 @@ Phase C 以本表与 CHANGELOG 收尾。
    (1<<15 uint32)与 level 无关，加 window 64KB+deflateFast 表/tokens；
    原「64KB×N」系误估。备选小内存实现（klauspost/compress 等）留作
    未来项，本期维持 stdlib BestSpeed。）
+   （v7 再注，TASK-D 评审 B Q4/R5-B2：1.3MB×N 为**分配口径**上界
+   （HeapAlloc；hashHead/hashPrev 为 compressor 内联数组，任何 level
+   随 Writer 分配——deflate.go struct 值字段实证）；**判据口径=每连接
+   连接/队列分量**（per-instance ring 为既有内存，16–256MB 级、config
+   决定，不在本判据——AC5 场景实测总 RSS 608–624MB，差额即 ring）。
+   RSS 常驻口径实测：round1 口述 ~620kB/conn（工件未留存）；round4
+   冷启动静实例 ≈175kB/conn（工件留存，复跑 171kB 复现〔复跑探针工件未入库·评审 /tmp〕）；round3
+   热堆 ≈29kB/conn（daemon 基线已 ~1GB、增量被已驻留页吸收，不代表
+   冷启动读数）——量级随堆热度在 ~30–280kB/conn 波动（稀疏哈希页
+   触碰率决定；评审 B 探针另测得每 flate writer 常驻份额 ~122kB〔探针工件未入库·评审 /tmp〕，
+   与每连接验收增量非同一测量）。验收按分配口径判上界。）
 6. 退避：指数增长（日志可证）；**回放中段断连与 notice 循环均不退避清零**
    （60s 稳定锚点）；前台可见上限 8s。
 7. 人为阻塞 socket 写 ≥15s，handler 有界回收（env 调档后按新值）。
