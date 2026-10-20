@@ -385,6 +385,31 @@ func TestHandleInstanceTTYWS_MatrixOverflowNoticePlaintext(t *testing.T) {
 // frame inflates, and the whole stream restores to exactly
 // frames×chunk: a dropped chunk that had leaked into the deflate context
 // would overshoot that byte count (C2.2).
+//
+// The one-chunk pre-flood delivery is the sync point that de-flakes this
+// cell (measured 3–8% of runs failing "no binary frames before the 1013
+// teardown" without it — deliberately NOT a fixed rate: it scales with
+// contention intensity, and review B measured 0.36%–1% at the
+// low-contention tier). The old shape asserted an ordering it never
+// synchronized: waitSubscribers observes the SUBSCRIPTION being registered,
+// not the handler having PARKED on <-outputChan, and the flood can overtake
+// the handler goroutine in the gap between the two (still returning from
+// completeHandshake, or descheduled under -parallel load). Then publish #1
+// is buffered instead of handed off, publish #17 overflows, and publish's
+// drain — production's DOCUMENTED bound, app.go: "a readied receiver races
+// the drain loop for the values still buffered, so a few chunks may
+// legitimately reach the socket before this branch runs" — sweeps all 16
+// buffered chunks before the handler's first receive, and the handler's
+// first outputChan event is the close itself: 1013 with zero binary frames
+// is legal production behaviour, not a product bug. The instrumented
+// capture showed both shapes verbatim: PASS published=18 maxQueued=16
+// binaries=1 (publish #1 handed off to the parked handler with the queue
+// at 0, drain sweeping #2–#17), flake published=17 maxQueued=16
+// binaries=0 (no handoff ever happened, drain won every race). Reading one
+// live chunk THROUGH the pipeline — queue → handler → deflate → socket →
+// this read — before flooding pins ≥1 binary frame onto the wire BEFORE
+// teardown can start: no drain can retract bytes already written, and TCP
+// delivers them ahead of the 1013 that follows.
 func TestHandleInstanceTTYWS_MatrixCompressOverflowDeflate1013(t *testing.T) {
 	t.Parallel()
 	k := newTTYHandshakeKind(1 << 20)
@@ -393,9 +418,29 @@ func TestHandleInstanceTTYWS_MatrixCompressOverflowDeflate1013(t *testing.T) {
 	c, _, _ := dialHandshakeCompress(t, addr, ttyWSPath(instID, "caps=sync,compress"))
 	k.waitSubscribers(t, 5*time.Second)
 	chunk := strings.Repeat("abcdefgh", 4096)
+
+	// Sync point: publish one chunk and read it back as a deflate segment.
+	// The ring is empty at handshake, so the first binary frame after the
+	// closing sync can only be this live chunk — once it is in the test's
+	// hands, the ≥1-binary-before-teardown assertion below is structural.
+	k.publish(chunk)
+	var binaries [][]byte
+	for {
+		op, p := readFrame(t, c, 10*time.Second)
+		if op == wsOpBinary {
+			binaries = append(binaries, p)
+			break
+		}
+		if op == wsOpClose {
+			t.Fatalf("close before the first live chunk reached the socket — the sync point never saw the pipeline it pins: %q", p)
+		}
+		// TEXT (resize echoes, control pings) may ride here; they are not
+		// what the sync point waits for — only the binary frame proves the
+		// chunk left the deflate stream onto the wire.
+	}
+
 	floodUntilOverflow(t, k, chunk)
 
-	var binaries [][]byte
 	for {
 		op, p := readFrame(t, c, 10*time.Second)
 		if op == wsOpClose {
@@ -418,7 +463,7 @@ func TestHandleInstanceTTYWS_MatrixCompressOverflowDeflate1013(t *testing.T) {
 		}
 	}
 	if len(binaries) == 0 {
-		t.Fatal("no binary frames before the 1013 teardown")
+		t.Fatal("no binary frames before the 1013 teardown") // unreachable: the sync point put frame 1 here before the flood could drain anything
 	}
 	got := inflateTTYStream(t, binaries)
 	if want := bytes.Repeat([]byte(chunk), len(binaries)); !bytes.Equal(got, want) {
