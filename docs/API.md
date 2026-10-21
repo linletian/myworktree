@@ -771,54 +771,33 @@ default window and heartbeat cadence.
   **≥ 60 s**; a mid-replay drop or a notice→tail reconnect under 60 s never
   clears it, so the notice loop's fast closing sync cannot self-erase the
   backoff (MED-1).
-- **Client-side bounds.** Two per-connection guards on the compressed path,
-  with a clear division of labour. A per-WS-frame decompressed-output ceiling
-  is UNIMPLEMENTABLE under the server's shared deflate context (flushed per
+- **Client-side bounds.** One memory guard and one failure path bound the
+  compressed path. A per-WS-frame decompressed-output ceiling is
+  UNIMPLEMENTABLE under the server's shared deflate context (flushed per
   frame into ONE stream, app.go:2656/:2919): the pump cannot see frame
   boundaries, so any head-stuck per-frame counter false-trips a healthy
-  multi-frame burst (probes 8-14, review probe12). The frame ceiling is
-  therefore replaced by a **sliding-window inflation-ratio guard** (rework
-  W7, denominator fixed W13/N1+N2): the pump keeps a monotonic `inflatedTotal`
-  and the feed keeps TWO monotonic counters — `wireFedTotal` (wire counted on
-  frame entry) and `wireConsumedTotal` (the SAME wire counted only once
-  `writer.write` RESOLVES, i.e. the transform ACCEPTED it). Every 256 KB of
-  painted output a `(output, wireConsumed)` snapshot goes into a small bounded
-  deque, and once the trailing window is full (**`TTY_INFLATION_WINDOW_BYTES`
-  = 2 MB** of output) the ratio
-  `window / (wireFedTotal(now) - wireConsumedAt[window-start])` is evaluated.
-  This consumed-based denominator is far tighter than the old fed-vs-fed one,
-  which COLLAPSED during a drain lag (the feed runs ahead of the transform, so
-  the window-start fed snapshot already counted wire whose output had not
-  surfaced), shrinking the denominator and OVER-estimating the ratio into false
-  trips — that defect is what W13 closes. The denominator is nonetheless a
-  NET of two opposing leads whose direction FLIPS with shape/cadence (W19/F2):
-  the feed LEADS the pump (raising the denominator) while Node's
-  `writer.write()` RESOLVES BEFORE the transform emits the inflated bytes
-  (`wireConsumedTotal` leading inflated output, lowering the denominator). The
-  SAFETY-relevant side is the OVER-estimate side: measured on real deflate-raw
-  it is <= ~1.61x at the 64KB-frame shape, and can UNDER-estimate to ~0.75x on
-  this repo's W18 discriminating content (134 guard evals, 0 over-estimates;
-  ~0.996x at a 1KB live-frame shape). A legit stream at A0's true ceiling
-  13.056:1 therefore computes <= ~21x, still under the 32 limit — a margin
-  held by MEASUREMENT and the discriminating tests (legit content pinned
-  ~13.2:1, a `RATIO_LIMIT` mutated 32->8 trips them), NOT by a structural
-  proof. Past
-  **`TTY_INFLATION_RATIO_LIMIT` = 32:1** — or on a zero denominator whose
-  window output nevertheless GREW (fail-open CLOSED) — the stream is
-  degenerate/corrupt; the response is a VISIBLE status line
-  (`"stream reset: degenerate stream, data dropped"`) plus reset + tail
-  reconnect, isomorphic to the overflow notice — never just a console line.
-  The second guard is B-5's
-  **2 MB backlog** of pending-decode (wire bytes queued into the inflate
-  stream) plus pending-write (inflated bytes awaiting the `term.write`
-  callback): it bounds resident memory, the ratio guard bounds the
-  compression-degeneracy. Either firing resets the screen, abandons the
-  socket, and tail-reconnects, each with its OWN VISIBLE status line — the
-  backlog guard shows `"stream reset: backlog exceeded, data dropped"` at BOTH
-  its trip points (pump-side and feed-side), the ratio guard shows
-  `"stream reset: degenerate stream, data dropped"` above; both sit beside the
-  overflow notice's `"stream reset: slow link, data dropped"`, all gated on the
-  active session and none ever silent (rework D2 / review A round4 gap).
+  multi-frame burst (probes 8-14, review probe12). Its v7 successor - a
+  sliding-window inflation-ratio guard - was RETIRED by the v8
+  re-arbitration (PR #129 review R1-P1/R2-P1, PR129-ADJUDICATION): legit
+  BestSpeed terminal output measures 118-209x at 64KB frames (a `yes`-style
+  stream), so NO fixed ratio threshold separates legit output from a
+  degenerate stream, and the windowed denominator collapses to <=0 whenever
+  one frame inflates past the trailing window, fail-closing on healthy
+  streams. Painting legit high-inflation output is the correct behavior.
+  What remains: the **2 MB backlog** of pending-decode (wire bytes queued
+  into the inflate stream) plus pending-write (inflated bytes awaiting the
+  `term.write` callback) bounds resident memory - over the line it resets
+  the screen, abandons the socket and tail-reconnects with its OWN VISIBLE
+  status line (`"stream reset: backlog exceeded, data dropped"`) at BOTH
+  its trip points (pump-side and feed-side). Corruption is not counted, it
+  is CAUGHT: a `DecompressionStream` construction failure or an inflate
+  read/write error (the normal surfacing of a corrupt or out-of-sync
+  deflate stream) resets + tail-reconnects with the visible status line
+  `"stream reset: stream error, data dropped"` and NEVER falls back to
+  painting deflate bytes as plaintext (v8 P2). All these lines sit beside
+  the overflow notice's `"stream reset: slow link, data dropped"`, are
+  gated on the active session, and none is ever silent (rework D2 / review
+  A round4 gap).
 
 Each replay read is capped at 64KB. When the delta since `since` exceeds
 64KB, the server loops reads until it is caught up and **streams each chunk

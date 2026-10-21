@@ -2762,49 +2762,16 @@
         const TTY_BACKOFF_RESET_ALIVE_MS = 60000;
 
         // --- issue #114 Phase B: compressed-consumption guards -------------
-        // Sliding-window INFLATION-RATIO guard (decision 5a pin 5, v7
-        // re-arbitration / rework W7, denominator fixed W13/N1+N2). A
-        // per-WS-frame decompressed-output ceiling is UNIMPLEMENTABLE under
-        // the shared deflate context: the server flushes ONE stream per frame
-        // (app.go:2656/:2919), so the pump cannot see frame boundaries
-        // (probes 8-14) and a naive head-stuck counter false-trips a healthy
-        // 200x64KB burst (review probe12). What IS observable without frame
-        // boundaries is the INFLATION RATIO over a trailing window of output:
-        // over the last TTY_INFLATION_WINDOW_BYTES of inflated bytes, how much
-        // WIRE produced them? Legit terminal text inflates a few:1 (A0
-        // production measured a max of 13.056:1); a bomb collapses to ~50:1+,
-        // so a sustained ratio past TTY_INFLATION_RATIO_LIMIT (32:1) means a
-        // degenerate/corrupt stream - reset + tail reconnect + a VISIBLE status
-        // line, isomorphic to the overflow notice (B-5 owns the backlog; this
-        // owns the ratio).
-        // DENOMINATOR DIRECTION (W13, wording corrected W19/F2): the
-        // denominator is wireFedTotal(now) - wireConsumedTotal(sample), NOT a
-        // diff of the fed counter. The old fed-vs-fed denominator COLLAPSED
-        // during a drain lag: at the sample point (output = window ago) the fed
-        // total already counted wire whose output had not surfaced, shrinking the
-        // denominator and OVER-estimating the ratio into false trips. Sampling
-        // the CONSUMED total is far tighter, but the denominator is a NET of
-        // two opposing leads and its direction FLIPS with shape/cadence: the
-        // feed LEADS the pump (raising the denominator) while Node's
-        // writer.write() RESOLVES BEFORE the transform emits (wireConsumedTotal
-        // leading inflated output, lowering the denominator). The SAFETY-relevant
-        // side is the OVER-estimate side: measured on real deflate-raw it is
-        // <= ~1.61x at the 64KB-frame shape (and can UNDER-estimate to ~0.75x
-        // on this repo's W18 discriminating content - 134 guard evals, 0
-        // over-estimates; ~0.996x at a 1KB live-frame shape). A legit stream at
-        // A0's true ceiling 13.056:1 therefore computes <= ~21x, still under the
-        // 32 limit - the margin is held by MEASUREMENT and the discriminating
-        // tests (ratio pinned ~13.2:1, a 32->8 mutant trips), NOT by a
-        // structural proof. A single-frame bomb's whole wire (e.g.
-        // 36KB -> 2MB) is the denominator => ~55x > 32 and trips. A denominator
-        // of 0 with the window's output having grown is itself degenerate
-        // (fail-open CLOSED): it trips, never skips.
-        const TTY_INFLATION_WINDOW_BYTES = 2000000;
-        const TTY_INFLATION_RATIO_LIMIT = 32;
-        // Output-offset sample stride for the ratio window: one (output,
-        // wireConsumed) snapshot per 256KB of inflated output bounds the deque
-        // to ~window/stride (~8) entries while keeping the ratio tight.
-        const TTY_INFLATION_SAMPLE_BYTES = 262144;
+        // The inflation-ratio guard (v7 pin 5) was RETIRED by the v8
+        // re-arbitration (PR #129 review R1-P1/R2-P1, PR129-ADJUDICATION):
+        // legit BestSpeed terminal output measures 118-209x at 64KB frames
+        // (a `yes`-style stream), and no fixed ratio threshold can separate
+        // it from a degenerate stream, while the windowed denominator
+        // collapses to <=0 whenever one frame inflates past the window - the
+        // guard false-killed healthy streams by construction. Corruption is
+        // caught by the inflate/read/write failure paths (which reset +
+        // reconnect visibly), not by a ratio. What remains here is the one
+        // guard that bounds resident memory:
         // B-1.6 client-side bound (arbitration value 2MB): wire bytes
         // queued into the per-connection DecompressionStream (pending
         // decode) plus inflated bytes awaiting the xterm write callback
@@ -6840,8 +6807,9 @@
         }
 
         // Common reset shape of every "the stream is done for" path —
-        // overflow notice, backlog bound, inflation-ratio guard (the
-        // three are isomorphic by design, TASK-B B1.5/B1.6/B2). FENCE
+        // overflow notice, backlog bound, and (v8 P2) the compressed pipe's
+        // construct/read/write failure paths (they are isomorphic by design,
+        // TASK-B B1.6/B2). FENCE
         // FIRST, close second: once the counter has moved no output of
         // this stream may reach the screen, whatever layer it is stuck
         // in. The cursors go to CURSOR_UNKNOWN so the reconnect sends no
@@ -6864,15 +6832,28 @@
         // after every WS binary frame, so each frame is one flushed
         // segment of a single stream: one persistent
         // DecompressionStream('deflate-raw'), one sequential reader,
-        // for the life of the connection. Returns false (staying on the
-        // plaintext consumption path) if the platform cannot inflate
-        // deflate-raw - unreachable in practice, because connectTTY only
-        // declares the `compress` cap behind the same feature probe, and
-        // the ready echo gate (compress===true) is what wires this.
+        // for the life of the connection. BOTH "cannot inflate" branches
+        // are reset-and-reconnect by design (v8 P2, PR129-ADJUDICATION P2):
+        // no DecompressionStream at all, or a construction that throws,
+        // shows the VISIBLE stream-error status line and tail-reconnects -
+        // NEVER falls back to plaintext consumption, because the server is
+        // already committed to sending deflate frames by the ready echo and
+        // plaintext consumption would paint compressed garbage. The ready
+        // call site therefore makes a plain call and ignores the return
+        // value: every failure path owns its own reset. (A construction
+        // throw past the connect-time probe is rare - resource exhaustion -
+        // but it exists, and silence here once meant a frozen terminal.)
         function startTTYCompressedPipe(session, ws) {
             if (!session || !ws) return false;
             if (typeof DecompressionStream === "undefined") {
                 console.error("[tty] server echoed compress=true but DecompressionStream is unavailable - plaintext consumption would paint garbage, resetting (issue #114)");
+                // v8 review A N1: this branch and the construction catch below
+                // are isomorphic by design - BOTH show the same VISIBLE status
+                // line (active-session gated) before the reset, so "cannot
+                // inflate" is never silent whichever way it fails.
+                if (state.activeInst === session.id) {
+                    updateStatus("stream reset: stream error, data dropped");
+                }
                 resetTTYStreamAndReconnect(session, "deflate-raw unsupported despite ready.compress echo");
                 return false;
             }
@@ -6892,37 +6873,24 @@
                     // Each token: { seq, live, inflating }.
                     frameLedger: [],
                     framesFed: 0,
-                    // Sliding-window inflation-ratio state (rework W7,
-                    // denominator fixed W13): inflatedTotal painted by the pump;
-                    // wireFedTotal counted by the feed ON FRAME ENTRY; and
-                    // wireConsumedTotal counted by the feed AFTER writer.write
-                    // RESOLVES (the transform ACCEPTED that wire). The ratio
-                    // denominator is wireFedTotal(now) - wireConsumedTotal(at
-                    // the sample point): a NET of two opposing leads (feed
-                    // leading the pump raises it, write() resolving before the
-                    // transform emits lowers it) whose direction flips with
-                    // shape/cadence - see the constants block for the
-                    // W19/F2-corrected direction and the safety-relevant side.
-                    // inflSamples is a bounded deque of (output, wireConsumed)
-                    // snapshots taken every SAMPLE stride.
                     syncBaseKnown: false,
-                    inflatedTotal: 0,
-                    wireFedTotal: 0,
-                    wireConsumedTotal: 0,
-                    inflSamples: [],
-                    inflNextMark: 0,
-                    // Passive diagnostic: how many times the ratio guard has
-                    // actually evaluated a full window (tests assert it ran).
-                    inflEvals: 0,
                 };
                 session.ttyCompressed = true;
                 session.ttyBacklogBytes = 0;
                 pumpTTYDecompressor(session, ws);
                 return true;
             } catch (e) {
+                // v8 P2: construction failed on a platform that passed the
+                // connect-time probe (resource exhaustion). Isomorphic to
+                // the unavailable branch above - console.error + VISIBLE
+                // status line + reset + tail reconnect, never plaintext.
                 console.error("[tty] DecompressionStream('deflate-raw') construction failed:", e && e.message);
                 session.ttyDecompressor = null;
                 session.ttyCompressed = false;
+                if (state.activeInst === session.id) {
+                    updateStatus("stream reset: stream error, data dropped");
+                }
+                resetTTYStreamAndReconnect(session, "deflate-raw stream construction failed");
                 return false;
             }
         }
@@ -6979,6 +6947,22 @@
                 try {
                     r = await pipe.reader.read();
                 } catch (e) {
+                    // v8 P2: THIS is where a corrupt or out-of-sync deflate
+                    // stream surfaces (the inflate transform throws) - the
+                    // NORMAL failure path, not a rare one. If this pipe is
+                    // still the session's current connection and generation
+                    // the stream is done for: VISIBLE status line + reset +
+                    // tail reconnect (isomorphic to the notice path), never
+                    // a silent freeze with a live socket. A teardown abort
+                    // (bumpTTYGeneration before writer.abort) lands here
+                    // too with the fence already moved - that rejection is
+                    // expected and stays silent.
+                    if (session.ttySocket === ws && session.ttyGeneration === pipe.gen) {
+                        if (state.activeInst === session.id) {
+                            updateStatus("stream reset: stream error, data dropped");
+                        }
+                        resetTTYStreamAndReconnect(session, "inflate stream error (read): " + ((e && e.message) || "unknown"));
+                    }
                     return;
                 }
                 if (r.done) return;
@@ -6994,56 +6978,6 @@
                     }
                     resetTTYStreamAndReconnect(session, "client backlog exceeded " + TTY_CLIENT_BACKLOG_MAX_BYTES + " bytes");
                     return;
-                }
-                // Sliding-window inflation-ratio guard (rework W7, denominator
-                // fixed W13/N1+N2). Painted output total is monotonic; when it
-                // crosses a sample stride, snapshot (output, wireConsumedTotal)
-                // - the CONSUMED wire, read synchronously off the feed's
-                // counter (single-threaded, no race). The denominator is then
-                // wireFedTotal(now) - ref.wireConsumed: wire fed up to NOW
-                // minus wire the transform had already ACCEPTED when the window
-                // START (output = inflatedTotal - WINDOW) was sampled. This is
-                // far tighter than the old fed-vs-fed denominator, but a NET of
-                // two opposing leads whose direction flips with shape/cadence
-                // (W19/F2): the feed leading the pump raises the denominator,
-                // write() resolving before the transform emits lowers it. The
-                // safety-relevant side is the OVER-estimate side (measured
-                // <= ~1.61x at 64KB frames; can under-estimate to ~0.75x,
-                // ~0.996x at 1KB live frames). A legit stream at A0's true
-                // ceiling 13.056:1 computes <= ~21x, still under 32; the margin
-                // is empirical (measurement + discriminating tests), not a
-                // structural proof. Only evaluated once the window is full
-                // (output >= WINDOW).
-                pipe.inflatedTotal += chunk.byteLength;
-                while (pipe.inflatedTotal >= pipe.inflNextMark) {
-                    pipe.inflSamples.push({ out: pipe.inflNextMark, wireConsumed: pipe.wireConsumedTotal });
-                    pipe.inflNextMark += TTY_INFLATION_SAMPLE_BYTES;
-                }
-                const target = pipe.inflatedTotal - TTY_INFLATION_WINDOW_BYTES;
-                while (pipe.inflSamples.length > 1 && pipe.inflSamples[0].out < target - TTY_INFLATION_SAMPLE_BYTES) {
-                    pipe.inflSamples.shift();
-                }
-                if (pipe.inflatedTotal >= TTY_INFLATION_WINDOW_BYTES && pipe.inflSamples.length >= 2) {
-                    pipe.inflEvals++;
-                    let ref = pipe.inflSamples[0];
-                    for (let i = 0; i < pipe.inflSamples.length; i++) {
-                        if (pipe.inflSamples[i].out <= target) ref = pipe.inflSamples[i];
-                        else break;
-                    }
-                    const wireSpan = pipe.wireFedTotal - ref.wireConsumed;
-                    // Fail-open CLOSED: a window that grew on a zero denominator
-                    // is degenerate by definition (output with no attributable
-                    // wire) - trip, never skip. Past the ratio limit, likewise.
-                    if (wireSpan <= 0 || TTY_INFLATION_WINDOW_BYTES > TTY_INFLATION_RATIO_LIMIT * wireSpan) {
-                        // Degenerate/corrupt deflate stream. Visible notice +
-                        // reset + tail reconnect, isomorphic to the overflow
-                        // notice (rework W7 - never just console.error).
-                        if (state.activeInst === session.id) {
-                            updateStatus("stream reset: degenerate stream, data dropped");
-                        }
-                        resetTTYStreamAndReconnect(session, "inflation ratio past " + TTY_INFLATION_RATIO_LIMIT + ":1 over " + TTY_INFLATION_WINDOW_BYTES + " byte window (degenerate deflate stream)");
-                        return;
-                    }
                 }
                 const text = sanitizeTerminalOutput(decodeTTYOutputChunk(session, chunk));
                 if (text && session.term) {
@@ -7083,22 +7017,11 @@
         //   painted during replay advances from the sync base (mid-replay
         //   resume), yet replay painted after the closing sync cannot re-open
         //   the pinned cursor (W1 burst exactness).
-        // - the WIRE byte count into two monotonic counters that drive the
-        //   sliding-window inflation-ratio guard (rework W7, denominator fixed
-        //   W13): wireFedTotal counts wire ON FRAME ENTRY, wireConsumedTotal
-        //   counts the SAME wire only AFTER writer.write RESOLVES (the
-        //   transform ACCEPTED it). The ratio denominator is
-        //   wireFedTotal(now) - wireConsumedTotal(sample): far tighter than the
-        //   old fed-vs-fed denominator, but a NET of two opposing leads whose
-        //   direction flips with shape/cadence - the feed leading the pump raises
-        //   it, write() resolving before the transform emits lowers it. The
-        //   safety-relevant side is the over-estimate side (measured <= ~1.61x
-        //   at 64KB frames; can under-estimate to ~0.75x, ~0.996x at 1KB live
-        //   frames); the 32 limit's margin over A0's true 13.056 ceiling
-        //   (<= ~21x) is held by measurement + tests, not a structural proof.
-        // Wire bytes join the backlog ledger on the way in and leave it when
-        // the transform consumed them; the inflated chunk then rides the
-        // ledger as pending write inside the pump until xterm's callback.
+        // - the backlog ledger: wire bytes join it on the way in and leave
+        //   it when the transform consumed them (writer.write resolved); the
+        //   inflated chunk then rides it as pending write inside the pump
+        //   until xterm's callback. This is the only consumption bound left
+        //   after the v8 retirement of the inflation-ratio guard.
         async function feedTTYCompressedFrame(session, ws, u8) {
             const pipe = session.ttyDecompressor;
             if (!pipe || session.ttySocket !== ws || session.ttyGeneration !== pipe.gen) return;
@@ -7109,7 +7032,6 @@
                 inflating: true,
             };
             pipe.frameLedger.push(token);
-            pipe.wireFedTotal += u8.length;
             session.ttyBacklogBytes = (session.ttyBacklogBytes || 0) + u8.length;
             if (session.ttyBacklogBytes > TTY_CLIENT_BACKLOG_MAX_BYTES) {
                 // Backlog guard, notice-isomorphic (rework W16/N5): a VISIBLE
@@ -7123,16 +7045,29 @@
             try {
                 await pipe.writer.write(u8);
             } catch (e) {
+                // v8 P2: writer.write rejected - the deflate context is
+                // errored (corrupt stream / aborted pipe). Current
+                // connection and generation -> VISIBLE status line + reset +
+                // tail reconnect; a pipe fenced by teardown is fenced
+                // already -> silent. NOTE: this frame's wire bytes stay
+                // counted in session.ttyBacklogBytes on the bare return -
+                // deliberate status quo: the reset path destroys this
+                // stream's session state and zeroes the ledger itself, so
+                // no compensating subtraction is required (and doing one
+                // after the reset could only miscount a ledger nobody reads
+                // anymore).
+                if (session.ttySocket === ws && session.ttyGeneration === pipe.gen) {
+                    if (state.activeInst === session.id) {
+                        updateStatus("stream reset: stream error, data dropped");
+                    }
+                    resetTTYStreamAndReconnect(session, "inflate stream error (write): " + ((e && e.message) || "unknown"));
+                }
                 return;
             }
             if (session.ttySocket !== ws || session.ttyGeneration !== pipe.gen) return;
-            // writer.write resolved: the transform has ACCEPTED this wire.
-            // Count it consumed (rework W13). Relative to the OLD fed-vs-fed
-            // denominator this bounds the window's wire from ABOVE and is immune
-            // to the drain-lag collapse - a comparison against that obsolete
-            // mechanism, NOT a claim that it bounds the TRUE window wire (the
-            // net-of-two-leads direction lives in the constants block, W19/F2).
-            pipe.wireConsumedTotal += u8.length;
+            // writer.write resolved: the transform has ACCEPTED this wire, so
+            // the frame's inflating latch clears and its wire leaves the
+            // backlog ledger.
             token.inflating = false;
             session.ttyBacklogBytes -= u8.length;
         }

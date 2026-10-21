@@ -99,7 +99,12 @@ func (m *ttyConnMetrics) logHandshake(logger *log.Logger, id string, since int64
 // liveBytes/liveFrames are what THIS connection delivered between
 // subscribing and the overflow: liveBytes/subAgeMs is the consumer's
 // effective drain rate, the number the 64KB queue capacity gets compared
-// against. headNow (-1 on error) minus the client's cursor (client-side
+// against. BOTH subtract their handshake snapshots (replayBytes/
+// replayFrames, taken at handshake end), so the two live in the same
+// live-only family: replay frames and bytes never inflate either reading
+// (issue #114 v8 P3 — liveFrames once shipped as the raw binFrames and
+// pulled the per-frame size estimate toward the replay's).
+// headNow (-1 on error) minus the client's cursor (client-side
 // close line) sizes the backlog the next reconnect will replay.
 //
 // liveLogicalBytes (review R1) is the LOGICAL counterpart of liveBytes,
@@ -117,7 +122,7 @@ func (m *ttyConnMetrics) logOverflow(logger *log.Logger, id string, headNow int6
 		subAgeMs = time.Since(m.subscribedAt).Milliseconds()
 	}
 	logger.Printf("[tty-metrics] overflow id=%s subAgeMs=%d liveBytes=%d liveFrames=%d headNow=%d maxWriteBlockMs=%d slowWrites=%d liveLogicalBytes=%d",
-		id, subAgeMs, m.binBytes-m.replayBytes, m.binFrames,
+		id, subAgeMs, m.binBytes-m.replayBytes, m.binFrames-m.replayFrames,
 		headNow, m.maxWriteBlock.Milliseconds(), m.slowWrites,
 		m.logicalBytes-m.replayLogicalBytes)
 }

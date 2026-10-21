@@ -85,6 +85,7 @@ type ttyConnMetrics struct {
 	budgetExhausted bool
 	publishedOffset int64
 	replayBytes     int64 // binBytes snapshot at handshake end
+	replayFrames    int64 // binFrames snapshot at handshake end
 	replayDur       time.Duration
 	// replayLogicalBytes is the LOGICAL counterpart of replayBytes
 	// (issue #114 decision 5a, review R1): the snapshot of logicalBytes

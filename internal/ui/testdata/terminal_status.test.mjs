@@ -933,10 +933,8 @@ const ttyWsFactory = new Function("deps", `
     "const TTY_RECONNECT_CAP_MS",
     "const TTY_RECONNECT_CAP_MS_HIDDEN",
     "const TTY_BACKOFF_RESET_ALIVE_MS",
-    // Issue #114 Phase B compressed-consumption guards.
-    "const TTY_INFLATION_WINDOW_BYTES",
-    "const TTY_INFLATION_RATIO_LIMIT",
-    "const TTY_INFLATION_SAMPLE_BYTES",
+    // Issue #114 Phase B compressed-consumption guard (the inflation-ratio
+    // guard was retired by the v8 re-arbitration; the backlog stays).
     "const TTY_CLIENT_BACKLOG_MAX_BYTES",
     // connectTTY's three-state `since` (issue #86) branches on these.
     "const CURSOR_UNKNOWN",
@@ -989,9 +987,6 @@ const ttyWsFactory = new Function("deps", `
     TTY_RECONNECT_CAP_MS,
     TTY_RECONNECT_CAP_MS_HIDDEN,
     TTY_BACKOFF_RESET_ALIVE_MS,
-    TTY_INFLATION_WINDOW_BYTES,
-    TTY_INFLATION_RATIO_LIMIT,
-    TTY_INFLATION_SAMPLE_BYTES,
     TTY_CLIENT_BACKLOG_MAX_BYTES,
   };
 `);
@@ -2204,14 +2199,12 @@ const followLiveEndFactory = new Function("deps", `
     "const TTY_LIVENESS_CHECK_MS",
     "const TTY_LIVENESS_STALE_MS",
     // Issue #114: Phase B constants - backoff (decision 2) and the
-    // compressed-consumption guards (5a pin 5 / B-1.6).
+    // compressed-consumption backlog guard (B-1.6; the v7 inflation-ratio
+    // guard was retired by the v8 re-arbitration).
     "const TTY_RECONNECT_BASE_MS",
     "const TTY_RECONNECT_CAP_MS",
     "const TTY_RECONNECT_CAP_MS_HIDDEN",
     "const TTY_BACKOFF_RESET_ALIVE_MS",
-    "const TTY_INFLATION_WINDOW_BYTES",
-    "const TTY_INFLATION_RATIO_LIMIT",
-    "const TTY_INFLATION_SAMPLE_BYTES",
     "const TTY_CLIENT_BACKLOG_MAX_BYTES",
   ].map(h => sliceStatement(inlineScript(indexSource), h)).join("\n")}
   ${[

@@ -3973,6 +3973,7 @@ func (s *Server) handleInstanceTTYWSLiveness(w http.ResponseWriter, r *http.Requ
 			conn.m.windowed = windowed
 			conn.m.droppedFromWindow = droppedFromWindow
 			conn.m.replayBytes = conn.m.binBytes
+			conn.m.replayFrames = conn.m.binFrames
 			conn.m.replayLogicalBytes = conn.m.logicalBytes
 			conn.m.replayDur = time.Since(conn.m.handshakeStart)
 			conn.m.subscribedAt = time.Now()

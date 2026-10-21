@@ -2,8 +2,9 @@
 // the exponential reconnect backoff (decision 2), the overflow-notice
 // consumption path (reset + visible notice + tail reconnect, decision 1/R6),
 // the generation+fencing of every async artifact, the app-layer `compress`
-// consumption pipeline (decision 5a) and its two client-side bounds
-// (B-1.5/W7 sliding-window inflation ratio, B-1.6 backlog), plus the R16
+// consumption pipeline (decision 5a) and its client-side backlog bound
+// (B-1.6; the v7 inflation-ratio guard was retired by the v8
+// re-arbitration, PR129-ADJUDICATION P1), plus the R16
 // graceful degradation when the server never echoes ready.compress.
 //
 // Like the sibling suites, every function under test is SLICED out of the
@@ -49,41 +50,6 @@ async function makeServerFrames(chunks, level = 1) {
   const wire = frames.reduce((n, f) => n + f.length, 0);
   d.destroy(); // server never closes the context mid-connection; release it
   return { frames, wire, inflated, ratio: wire > 0 ? inflated / wire : Infinity };
-}
-
-// Threshold-DISCRIMINATING legit content (rework W18/N4-delta). A
-// high-repetition template loop (a fixed log line whose only variation is
-// k%7 in the timestamp digit and k%11 in the worker id) PLUS a per-frame
-// random tail of `tailLen` printable bytes. The template collapses under
-// deflate while the random tail is incompressible, so the REAL deflate ratio
-// is pinned near the A0 production upper bound (~13.2:1 at tailLen=640) -
-// comfortably inside (8, 32): legit (under 32, never trips) yet
-// discriminating (a threshold mutated 32->8 WOULD trip it). The two
-// no-false-trip tests use this so the ratio guard's threshold is actually
-// exercised, not trivially passed by a ~4:1 prose stream. Each frame is
-// ~60.7KB (60657 bytes: the loop counts lines by /52 but the template line
-// is ~48-49 bytes, so a frame lands short of 64KB - the titles say ~60.7KB
-// frames, and 72 frames give 4.367MB inflated, a 4.1% margin over 4MiB).
-// CAVEAT (rework I2, Phase C tracking): the ~13.2:1 ratio is pinned to the
-// server's BestSpeed basis (level=1, app.go:2696). Under Go DefaultCompression
-// this SAME content measures ~58.3:1 and WOULD trip the 32 limit - any server
-// compression-level change must re-pin both the threshold and this recipe.
-function makeRatioLegitChunks(seed, frames, tailLen = 640) {
-  let s = seed >>> 0;
-  const rand = (n) => {
-    let out = "";
-    for (let j = 0; j < n; j++) { s = (s * 1103515245 + 12345) & 0x7fffffff; out += String.fromCharCode(32 + (s % 95)); }
-    return out;
-  };
-  const chunks = [];
-  for (let i = 0; i < frames; i++) {
-    let str = "";
-    const lines = Math.floor((65536 - tailLen) / 52);
-    for (let k = 0; k < lines; k++) str += "[2024-01-01 00:00:0" + (k % 7) + "] svc worker-" + (k % 11) + " task done ok\n";
-    str += rand(tailLen);
-    chunks.push(new TextEncoder().encode(str));
-  }
-  return chunks;
 }
 
 // --- source slicing helpers (same shape as terminal_status.test.mjs) ----
@@ -279,9 +245,6 @@ const consumeFactory = new Function("deps", `
     "const TTY_RECONNECT_CAP_MS",
     "const TTY_RECONNECT_CAP_MS_HIDDEN",
     "const TTY_BACKOFF_RESET_ALIVE_MS",
-    "const TTY_INFLATION_WINDOW_BYTES",
-    "const TTY_INFLATION_RATIO_LIMIT",
-    "const TTY_INFLATION_SAMPLE_BYTES",
     "const TTY_CLIENT_BACKLOG_MAX_BYTES",
     "const CURSOR_UNKNOWN",
     "const CURSOR_FOLLOW_LIVE_END",
@@ -319,9 +282,6 @@ const consumeFactory = new Function("deps", `
     teardownTTYDecompressor,
     parseTTYControlMessage,
     armTTYBackoffReconnect,
-    TTY_INFLATION_WINDOW_BYTES,
-    TTY_INFLATION_RATIO_LIMIT,
-    TTY_INFLATION_SAMPLE_BYTES,
     TTY_CLIENT_BACKLOG_MAX_BYTES,
     TTY_RECONNECT_BASE_MS,
     TTY_RECONNECT_CAP_MS,
@@ -340,6 +300,7 @@ function makeFakeDS(registry) {
   const ds = {
     _out: [],
     _parked: [],
+    _parkedWrites: [],
     _aborted: false,
     _writes: [],
     writable: {
@@ -347,6 +308,16 @@ function makeFakeDS(registry) {
         return {
           write(u8) {
             if (ds._aborted) return Promise.reject(new Error("aborted"));
+            // v8 P2 fault injection: write rejects (errored transform).
+            if (registry.writeReject) return Promise.reject(new Error(registry.writeRejectMsg || "inflate write rejected"));
+            // v8 P2 write-direction teardown pin: holdWrites parks the write
+            // UNRESOLVED (the transform is "in flight") so the test can call
+            // teardown (bump generation, THEN abort) mid-await and drive the
+            // feed's write-catch on a fenced generation. The frame is NOT
+            // processed while parked.
+            if (registry.holdWrites) {
+              return new Promise((res, rej) => ds._parkedWrites.push({ res, rej }));
+            }
             ds._writes.push(u8.length);
             const size = registry.inflate(u8.length);
             // registry.split models a large frame surfacing as MULTIPLE
@@ -366,14 +337,23 @@ function makeFakeDS(registry) {
             // wake parked readers, one queued chunk each
             while (ds._parked.length && ds._out.length) {
               const r = ds._parked.shift();
-              r({ done: false, value: ds._out.shift() });
+              r.res({ done: false, value: ds._out.shift() });
             }
             return Promise.resolve();
           },
           abort(e) {
             ds._aborted = true;
+            // v8 P2: a real writer.abort errors the transform, so BOTH
+            // pending writes and parked reads must settle - writes reject
+            // (the feed's write-catch is what the teardown test drives),
+            // parked reads reject with the flag or resolve done.
+            const pw = ds._parkedWrites.splice(0);
+            pw.forEach(p => p.rej(e || new Error("aborted")));
             const waiting = ds._parked.splice(0);
-            waiting.forEach(r => r({ done: true }));
+            // v8 P2: with abortRejectsReads the parked reads REJECT, the
+            // way a real errored readable errors its pending read - this is
+            // how the test drives the pump's read-catch.
+            waiting.forEach(r => registry.abortRejectsReads ? r.rej(e || new Error("aborted")) : r.res({ done: true }));
             return Promise.resolve();
           },
         };
@@ -383,7 +363,7 @@ function makeFakeDS(registry) {
       cancel() {
         ds._aborted = true;
         const waiting = ds._parked.splice(0);
-        waiting.forEach(r => r({ done: true }));
+        waiting.forEach(r => r.res({ done: true }));
         return Promise.resolve();
       },
       getReader() {
@@ -391,12 +371,12 @@ function makeFakeDS(registry) {
           read() {
             if (ds._out.length) return Promise.resolve({ done: false, value: ds._out.shift() });
             if (ds._aborted) return Promise.resolve({ done: true });
-            return new Promise(res => ds._parked.push(res));
+            return new Promise((res, rej) => ds._parked.push({ res, rej }));
           },
           cancel() {
             ds._aborted = true;
             const waiting = ds._parked.splice(0);
-            waiting.forEach(r => r({ done: true }));
+            waiting.forEach(r => r.res({ done: true }));
             return Promise.resolve();
           },
         };
@@ -414,6 +394,19 @@ async function settle(n = 4) {
   for (let i = 0; i < n; i++) await new Promise((res) => setTimeout(res, 0));
 }
 
+// Painted bytes once the pump has fully drained: every inflated byte has
+// reached the fake terminal AND the last paint callback has returned (the
+// backlog leaves the ledger only at that callback). Bounded - a stuck pump
+// fails the test that calls this, not the helper.
+async function drainPainted(h, target, maxRounds = 4000) {
+  const paintedLen = () => h.writes.reduce((n, t) => n + new TextEncoder().encode(t).length, 0);
+  for (let i = 0; i < maxRounds && paintedLen() < target && h.session.ttySocket !== null; i++) {
+    await settle(1);
+  }
+  await settle(4); // let the final term.write callbacks land and clear backlog
+  return paintedLen();
+}
+
 function consumeHarness({
   ttyOffset = -1,
   status = "running",
@@ -421,6 +414,13 @@ function consumeHarness({
   inflate = (n) => n,
   split = 1,
   realDS = false, // use the REAL global DecompressionStream (rework W7/W12)
+  writeReject = false, // v8 P2: writer.write rejects (errored transform)
+  holdWrites = false, // v8 P2: writer.write parks UNRESOLVED (in flight),
+                      // rejected later by abort — drives the write-direction
+                      // teardown race (teardown fenced the generation first)
+  abortRejectsReads = false, // v8 P2: parked reader.read() rejects on abort
+  failPipeConstruct = false, // v8 P2: the PIPE's construction throws (the
+                             // caps probe - construction #1 - still succeeds)
 } = {}) {
   const sockets = [];
   const writes = [];
@@ -431,7 +431,7 @@ function consumeHarness({
   const consoleLogs = [];
   let nextId = 1;
   let clockNow = 1_000_000;
-  const registry = { inflate, split };
+  const registry = { inflate, split, writeReject, holdWrites, abortRejectsReads, failPipeConstruct };
   const enc = new TextEncoder();
 
   // Each new DecompressionStream construction (the caps probe and the
@@ -440,6 +440,13 @@ function consumeHarness({
   const dsList = [];
   function FakeDecompressionStream(format) {
     assert.equal(format, "deflate-raw", "only deflate-raw is negotiated");
+    // v8 P2: the caps probe is construction #1 and the live pipe is #2;
+    // failPipeConstruct throws ONLY on the pipe so the probe still passes
+    // and the compress cap is still declared (the realistic window: the
+    // platform probed OK at connect but the ready-time construction throws).
+    if (registry.failPipeConstruct && dsList.length >= 1) {
+      throw new Error("synthetic pipe construction failure");
+    }
     const ds = makeFakeDS(registry);
     dsList.push(ds);
     return ds;
@@ -591,6 +598,22 @@ test("issue #114 B1: caps declare overflow-notice always and compress only when 
   assert.ok(!no.sockets[0].url.includes("compress"),
     "no deflate-raw -> no compress cap (pin 2 graceful degradation)");
 
+  // v8 review A N1 (the adversarial half of the degradation): a server that
+  // echoes compress=true to a client that did NOT declare the cap (or whose
+  // platform lost the constructor since the probe) must hit the SAME visible
+  // reset shape as every other "cannot inflate" branch - never a silent one,
+  // never plaintext consumption of deflate bytes.
+  no.toReady({ compress: true });
+  assert.ok(no.consoleErrors.some((e) => e.includes("DecompressionStream is unavailable")),
+    "the unavailable echo is logged");
+  assert.ok(no.statusLines.includes("stream reset: stream error, data dropped"),
+    "the unavailable branch shows the VISIBLE status line, isomorphic to the construction catch (review A N1)");
+  assert.equal(no.session.ttyCompressed, false, "no compressed state survives");
+  assert.equal(no.session.ttyDecompressor, null, "no pipe is built without the platform");
+  assert.equal(no.session.ttySocket, null, "the socket was abandoned");
+  assert.ok(no.term.resets >= 1, "reset + tail reconnect");
+  assert.notEqual(no.session.ttyReconnectTimer, null, "the reconnect rides the backoff");
+
   // replay-window/slow-link stay undeclared by arbitration (TASK-B B1.2).
   assert.ok(!yes.sockets[0].url.includes("replay-window"), "replay-window NOT declared (arbitration)");
   assert.ok(!yes.sockets[0].url.includes("slow-link"), "slow-link NOT declared (arbitration)");
@@ -727,41 +750,18 @@ test("issue #114 B2 fencing: a binary frame dispatched after the fence never ent
   assert.equal(h.session.ttyOffset, 105, "and it never touched the cursor");
 });
 
-// --- B1.5 / B1.6: the two client-side bounds ------------------------------
-
-test("issue #114 B1.5/W7: a sustained inflation ratio past the limit trips the sliding-window guard + visible notice", async () => {
-  // The per-frame 4MB ceiling is GONE (unimplementable under the shared
-  // deflate context, rework W7). The guard is now a sliding-window inflation
-  // RATIO: over the trailing 2MB of painted output, wire/rate past 32:1 means
-  // a degenerate stream. Here the fake inflates 40x the wire, so with cadence
-  // the ratio over a full 2MB window is ~40:1 and trips once the window fills.
-  const h = consumeHarness({ inflate: (n) => n * 40 }); // 40:1 > the 32:1 limit
-  h.connect();
-  const ws = h.toReady({ compress: true });
-  h.startSync(100);
-  h.closingSync(100);
-  const wire = new Uint8Array(8192); // 8KB wire -> 320KB inflated per frame
-  // Feed with per-message cadence (settle drains the pump between frames so
-  // the BACKLOG stays low and the ratio guard, not backlog, is what fires).
-  for (let i = 0; i < 12 && h.session.ttySocket !== null; i++) {
-    ws.onmessage({ data: wire.buffer });
-    await settle();
-  }
-  assert.ok(h.consoleErrors.some(e => e.includes("inflation ratio past")),
-    "the sliding-window ratio guard logs why it fired");
-  assert.ok(!h.consoleErrors.some(e => e.includes("client backlog exceeded")),
-    "cadence keeps the backlog low - the RATIO guard, not backlog, caught it");
-  assert.ok(h.statusLines.includes("stream reset: degenerate stream, data dropped"),
-    "the ratio guard shows the VISIBLE status line, not just console (rework W7)");
-  assert.ok(h.term.resets >= 1, "reset + abandon + tail reconnect, notice-isomorphic");
-  assert.equal(h.session.ttyOffset, h.api.CURSOR_UNKNOWN, "tail reconnect: no since");
-  assert.notEqual(h.session.ttyReconnectTimer, null, "and it rides the backoff sequence");
-});
+// --- B1.6: the client-side backlog bound ------------------------------------
+// The v7 sliding-window inflation-ratio guard (B1.5/W7) was RETIRED by the
+// v8 re-arbitration (PR129-ADJUDICATION P1): legit BestSpeed output measures
+// 118-209x at 64KB frames, no fixed ratio threshold separates legit from
+// degenerate, and the windowed denominator collapses to <=0 when one frame
+// inflates past the window. The backlog bound below is the surviving memory
+// guard; corrupt streams surface as inflate read/write errors (the P2
+// failure paths, pinned in their own section).
 
 test("issue #114 B1.6: a backlog past 2MB abandons the connection and tail-reconnects", async () => {
   // A single inflated chunk past the backlog bound (2MB) but with essentially
-  // no wire, so ONLY the backlog guard can fire - the ratio guard needs a
-  // full window of wire-fed output and a 1-byte wire feeds none of it.
+  // no wire, so the trip is unambiguously the pump-side backlog accounting.
   const h = consumeHarness({ inflate: () => h.api.TTY_CLIENT_BACKLOG_MAX_BYTES + 1 });
   h.connect();
   const ws = h.toReady({ compress: true });
@@ -773,8 +773,6 @@ test("issue #114 B1.6: a backlog past 2MB abandons the connection and tail-recon
     "the backlog guard logs why it fired");
   assert.ok(h.statusLines.includes("stream reset: backlog exceeded, data dropped"),
     "the backlog guard shows the VISIBLE status line, not just console (rework W16/N5)");
-  assert.ok(!h.consoleErrors.some(e => e.includes("inflation ratio past")),
-    "a 1-byte wire cannot fill a wire-fed ratio window - the BACKLOG guard caught it");
   assert.ok(h.term.resets >= 1);
   assert.equal(h.session.ttySocket, null);
   assert.equal(h.session.ttyOffset, h.api.CURSOR_UNKNOWN);
@@ -786,7 +784,7 @@ test("issue #114 B1.6/W16: a feed-side backlog past 2MB shows the VISIBLE status
   // inflate so the wire bytes ARE the backlog; a single >2MB wire frame
   // crosses TTY_CLIENT_BACKLOG_MAX_BYTES at the feed site before the pump
   // drains any of it. rework W16/N5 - both backlog trip points must show the
-  // visible status line, isomorphic to the ratio/notice path.
+  // visible status line, isomorphic to the overflow-notice path.
   const h = consumeHarness({ inflate: (n) => n });
   h.connect();
   const ws = h.toReady({ compress: true });
@@ -820,6 +818,148 @@ test("issue #114 B1.6: a healthy compressed stream drains the backlog to zero (n
     "every frame but the LAST drained off the head as the next was fed; the " +
     "trailing token stays until a later frame arrives (or the socket dies) - " +
     "the head only advances when a LATER token exists (W8 cursor attribution)");
+});
+
+// --- v8 P2: compressed-pipe failure paths - never silent, never plaintext --
+
+test("issue #114 v8 P2: pipe construction failure resets visibly and NEVER falls back to plaintext", async () => {
+  // The caps probe (construction #1) passed so the compress cap was declared
+  // and the server echoes compress=true - then the PIPE's construction
+  // throws. The old branch only console.error'd and returned false, and the
+  // ready call site dropped the value: the client stayed on the plaintext
+  // path and painted deflate garbage. v8 P2: isomorphic reset.
+  const h = consumeHarness({ failPipeConstruct: true });
+  h.connect();
+  const ws = h.toReady({ compress: true });
+  await settle();
+  assert.ok(h.consoleErrors.some(e => e.includes("construction failed")),
+    "the construction failure is logged");
+  assert.ok(h.statusLines.includes("stream reset: stream error, data dropped"),
+    "the failure shows the VISIBLE status line, isomorphic to the no-DecompressionStream branch");
+  assert.equal(h.session.ttyCompressed, false, "no compressed state survives");
+  assert.equal(h.session.ttyDecompressor, null, "no half-built pipe is left behind");
+  assert.equal(h.session.ttySocket, null, "the socket was abandoned");
+  assert.ok(h.term.resets >= 1, "the screen was reset");
+  assert.notEqual(h.session.ttyReconnectTimer, null, "and a tail reconnect is armed");
+  // The abandoned socket carries NO message handler at all (stronger than a
+  // guarding one): nothing can even attempt plaintext consumption on it.
+  assert.notEqual(typeof ws.onmessage, "function",
+    "the abandoned socket has no message handler - plaintext consumption is unreachable");
+  assert.equal(h.writes.length, 0,
+    "nothing painted - no plaintext consumption of compressed bytes");
+});
+
+test("issue #114 v8 P2: an inflate read rejection on the CURRENT generation resets visibly", async () => {
+  const h = consumeHarness({ abortRejectsReads: true });
+  h.connect();
+  const ws = h.toReady({ compress: true });
+  h.startSync(0);
+  h.closingSync(0);
+  // Paint one healthy frame, then ERROR the live stream under the still
+  // current socket+generation (a corrupt deflate surfacing through read()).
+  ws.onmessage({ data: h.enc.encode("ok").buffer });
+  await settle();
+  assert.deepEqual(h.writes, ["ok"], "the healthy frame painted first");
+  h.session.ttyDecompressor.writer.abort(new Error("inflate corrupt"));
+  await settle();
+  assert.ok(h.consoleErrors.some(e => e.includes("inflate stream error (read)")),
+    "the read failure logs its reason");
+  assert.ok(h.statusLines.includes("stream reset: stream error, data dropped"),
+    "the read failure shows the VISIBLE status line - never a silent freeze with a live socket");
+  assert.equal(h.session.ttySocket, null, "the connection was abandoned");
+  assert.ok(h.term.resets >= 1, "reset + tail reconnect");
+  assert.notEqual(h.session.ttyReconnectTimer, null, "the reconnect rides the backoff");
+});
+
+test("issue #114 v8 P2: a writer.write rejection on the CURRENT generation resets visibly", async () => {
+  const h = consumeHarness({ writeReject: true });
+  h.connect();
+  const ws = h.toReady({ compress: true });
+  h.startSync(0);
+  h.closingSync(0);
+  ws.onmessage({ data: h.enc.encode("boom").buffer });
+  await settle();
+  assert.deepEqual(h.writes, [], "the rejected frame never painted");
+  assert.ok(h.consoleErrors.some(e => e.includes("inflate stream error (write)")),
+    "the write failure logs its reason");
+  assert.ok(h.statusLines.includes("stream reset: stream error, data dropped"),
+    "the write failure shows the VISIBLE status line");
+  assert.equal(h.session.ttySocket, null, "the connection was abandoned");
+  assert.equal(h.session.ttyBacklogBytes, 0,
+    "the reset path zeroes the backlog ledger - the bare-return site deliberately does not subtract");
+  assert.notEqual(h.session.ttyReconnectTimer, null, "the reconnect rides the backoff");
+});
+
+test("issue #114 v8 P2: a read rejection of a FENCED generation stays silent - no reset, no unhandled rejection", async () => {
+  const h = consumeHarness({ abortRejectsReads: true });
+  const uncaught = [];
+  const unhandled = [];
+  const onExc = (e) => uncaught.push(e);
+  const onRej = (e) => unhandled.push(e);
+  process.on("uncaughtException", onExc);
+  process.on("unhandledRejection", onRej);
+  try {
+    h.connect();
+    h.toReady({ compress: true });
+    h.startSync(0);
+    // The shipped teardown order: fence FIRST, abort SECOND. The parked
+    // read rejects, but the pump sees the generation has moved - an
+    // expected teardown abort - and must return WITHOUT resetting again.
+    h.api.teardownTTYDecompressor(h.session);
+    await settle(8);
+  } finally {
+    process.off("uncaughtException", onExc);
+    process.off("unhandledRejection", onRej);
+  }
+  assert.ok(!h.statusLines.some(s => s.includes("stream reset")),
+    "the fenced rejection shows NO status line (teardown abort is expected)");
+  assert.ok(!h.consoleErrors.some(e => e.includes("inflate stream error")),
+    "the fenced rejection logs no stream error");
+  assert.deepEqual(uncaught, [], "no uncaught exception");
+  assert.deepEqual(unhandled, [], "the rejected read is handled by the pump, never unhandled");
+});
+
+test("issue #114 v8 P2: a write rejection DURING teardown (fenced generation) stays silent - no reset, no unhandled rejection", async () => {
+  // Write-direction twin of the fenced-read pin above. holdWrites parks the
+  // feed's `await pipe.writer.write(u8)` UNRESOLVED (transform in flight).
+  // While it is parked, teardown runs the shipped order - bump generation
+  // FIRST, abort the writer SECOND - so the abort rejects the parked write
+  // AFTER the fence has moved. The feed's write-catch sees the fenced
+  // generation and must return WITHOUT a status line or a second reset.
+  const h = consumeHarness({ holdWrites: true });
+  const uncaught = [];
+  const unhandled = [];
+  const onExc = (e) => uncaught.push(e);
+  const onRej = (e) => unhandled.push(e);
+  process.on("uncaughtException", onExc);
+  process.on("unhandledRejection", onRej);
+  try {
+    h.connect();
+    const ws = h.toReady({ compress: true });
+    h.startSync(0);
+    h.closingSync(0);
+    const resetsBefore = h.term.resets;
+    // Dispatch a binary frame: feed reaches `await pipe.writer.write(u8)`
+    // and parks there (the write is held unresolved).
+    ws.onmessage({ data: h.enc.encode("in-flight").buffer });
+    await settle(2);
+    // No live frame painted yet - the write never resolved.
+    assert.deepEqual(h.writes, [], "the held write painted nothing while parked");
+    // Tear down WHILE the write is parked: bump generation, then abort.
+    h.api.teardownTTYDecompressor(h.session);
+    await settle(8);
+    assert.ok(!h.statusLines.some((s) => s.includes("stream reset")),
+      "the fenced write rejection showed NO status line (teardown abort is expected)");
+    assert.ok(!h.consoleErrors.some((e) => e.includes("inflate stream error")),
+      "the fenced write rejection logged no stream error");
+    assert.equal(h.term.resets, resetsBefore,
+      "teardown's own reset is the only one - the fenced write-catch did not reset again");
+  } finally {
+    process.off("uncaughtException", onExc);
+    process.off("unhandledRejection", onRej);
+  }
+  assert.deepEqual(uncaught, [], "no uncaught exception");
+  assert.deepEqual(unhandled, [], "the rejected write is handled by the feed, never unhandled");
 });
 
 // --- B3 through the real connectTTY: the anchor across connections -------
@@ -918,126 +1058,98 @@ test("issue #114 W1: a replay burst + closing sync in one dispatch leaves the cu
   // server-side suite, so the residual cannot lose data regardless.
 });
 
-// --- rework W7/W8/W10: real DecompressionStream timing ------------------
+// --- rework W8/W10 + v8 P1: real DecompressionStream timing --------------
 // These exercise the REAL global DecompressionStream('deflate-raw') driven
 // by REAL deflate-raw wire produced server-style (one persistent context,
 // Z_SYNC_FLUSH per frame) - closing R7's "no real-stream coverage" gap and
-// pinning the sliding-window ratio (W7), the paint-time cursor resume (W8)
-// and the teardown-under-load rejection hygiene (W10).
+// pinning the paint-time cursor resume (W8) and the teardown-under-load
+// rejection hygiene (W10). The v8 re-arbitration (PR129-ADJUDICATION P1)
+// RETIRED the sliding-window ratio guard the old W7/W15 tests pinned: no
+// fixed ratio separates legit from degenerate (legit BestSpeed output runs
+// 118-209x at 64KB frames) and the windowed denominator collapses to <=0
+// when one frame inflates past the window. What these tests pin NOW is the
+// flip side of that ruling: a LEGIT high-inflation stream - the exact shape
+// the retired guard false-killed - must paint every byte and survive.
 
-test("issue #114 W7: a healthy multi-frame burst over the full window never false-trips (real DS)", async () => {
-  const h = consumeHarness({ realDS: true });
-  h.connect();
-  const ws = h.toReady({ compress: true });
-  h.startSync(0);
-  // ~72 x ~60.7KB of threshold-DISCRIMINATING legit content (rework W18/N4-
-  // delta): a high-repetition log-template loop + a 640-byte random tail per
-  // frame, ONE persistent deflate context, delivered one message at a time.
-  // The REAL deflate ratio lands ~13.2:1 - near the A0 production upper
-  // bound (13.056:1) and INSIDE (8, 32): legit (under 32, never trips) yet
-  // discriminating, so a threshold mutated 32->8 WOULD trip this very stream.
-  const chunks = makeRatioLegitChunks(13, 72, 640);
-  const { frames, ratio, inflated } = await makeServerFrames(chunks);
-  assert.ok(inflated >= 4 * 1024 * 1024, "content produces >=4MB of output (got " + inflated + ")");
-  assert.ok(ratio > 8 && ratio < 32,
-    "measured real ratio " + ratio.toFixed(2) + ":1 sits inside (8,32) so the 32->8 mutant trips it");
-  for (const f of frames) {
-    if (h.session.ttySocket === null) break;
-    ws.onmessage({ data: f.buffer });
-    await settle();
-  }
-  const pipe = h.session.ttyDecompressor;
-  assert.ok(pipe && pipe.inflEvals > 0,
-    "the ratio guard ACTUALLY evaluated full windows (inflEvals=" + (pipe ? pipe.inflEvals : "no-pipe") + ")");
-  assert.equal(h.session.ttySocket, ws, "the healthy burst connection survives");
-  assert.ok(!h.consoleErrors.some(e => e.includes("inflation ratio past")),
-    "a healthy multi-frame burst never trips the ratio guard");
-});
-
-test("issue #114 W7: a high-compression bomb trips the ratio guard with a VISIBLE notice (real DS)", async () => {
+test("issue #114 v8: a legit yes-style high-inflation stream (>32:1) paints every byte and survives (real DS)", async () => {
   const h = consumeHarness({ realDS: true });
   h.connect();
   const ws = h.toReady({ compress: true });
   h.startSync(0);
   h.closingSync(0);
-  // Zeros: deflate collapses them ~200:1, well past the 32:1 limit. Enough
-  // frames to fill the 2MB output window (the guard only evaluates then).
+  // A `yes`-style stream at the shipped BestSpeed basis (level=1): 64KB of
+  // "y\n" per frame collapses ~200:1 - past the retired 32 limit, exactly
+  // the shape PR129-ADJUDICATION measured at 209.4x and ruled CORRECT to
+  // paint. The surviving guards (2MB backlog, inflate error paths) must let
+  // it through untouched.
+  const enc = new TextEncoder();
   const chunks = [];
-  for (let i = 0; i < 48; i++) chunks.push(new Uint8Array(64 * 1024)); // ~3MB output
-  const { frames, ratio } = await makeServerFrames(chunks);
-  assert.ok(ratio > 32, "the bomb compresses past the limit (measured " + ratio.toFixed(0) + ":1)");
-  for (const f of frames) {
-    if (h.session.ttySocket === null) break;
-    ws.onmessage({ data: f.buffer });
-    await settle();
-  }
-  assert.ok(h.consoleErrors.some(e => e.includes("inflation ratio past")),
-    "the ratio guard logs why it fired");
-  assert.ok(h.statusLines.includes("stream reset: degenerate stream, data dropped"),
-    "the ratio guard shows the VISIBLE status line, not just console (rework W7)");
-  assert.equal(h.session.ttySocket, null, "the degenerate connection was abandoned");
-  assert.ok(h.term.resets >= 1, "reset + tail reconnect");
-});
-
-test("issue #114 W7/W15: legit repetitive content under the threshold never trips over >=4MB of real ~60.7KB frames (real DS)", async () => {
-  const h = consumeHarness({ realDS: true });
-  h.connect();
-  const ws = h.toReady({ compress: true });
-  h.startSync(0);
-  // ~72 x ~60.7KB of threshold-DISCRIMINATING legit content (different seed)
-  // -> 4.367MB inflated (a 4.1% margin over 4MiB, many windows evaluated) at
-  // a REAL deflate ratio ~13.2:1, inside (8, 32). Drain-lag false-trip
-  // regression pin (rework W13/N1+N2): the fed-vs-fed denominator collapsed the
-  // window wire during the pump's drain and inflated the computed ratio into a
-  // false trip. The consumed-based denominator is a NET of two opposing leads
-  // whose direction flips with shape/cadence (W19/F2): the feed leading the
-  // pump raises the denominator, write() resolving before the transform emits
-  // lowers it. The safety-relevant side is the over-estimate side (measured
-  // <= ~1.61x at 64KB frames; can under-estimate to ~0.75x here, ~0.996x at
-  // 1KB live frames). A legit stream at A0's true ceiling 13.056:1 therefore
-  // computes <= ~21x, still under 32; the margin is held by measurement and
-  // these tests, not by a structural proof (rework W19/F2).
-  const chunks = makeRatioLegitChunks(99, 72, 640);
-  const { frames, inflated, ratio } = await makeServerFrames(chunks);
+  for (let i = 0; i < 64; i++) chunks.push(enc.encode("y\n".repeat(32 * 1024))); // 4MB output
+  const { frames, ratio, inflated } = await makeServerFrames(chunks);
   assert.ok(inflated >= 4 * 1024 * 1024, "content produces >=4MB of output (got " + inflated + ")");
-  assert.ok(ratio > 8 && ratio < 32,
-    "measured real ratio " + ratio.toFixed(2) + ":1 sits inside (8,32) so the 32->8 mutant trips it");
+  assert.ok(ratio > 32,
+    "legit yes-style content DOES inflate past the retired 32 limit (measured " + ratio.toFixed(0) + ":1)");
   for (const f of frames) {
     if (h.session.ttySocket === null) break;
     ws.onmessage({ data: f.buffer });
     await settle();
   }
-  const pipe = h.session.ttyDecompressor;
-  assert.ok(pipe && pipe.inflEvals > 0,
-    "the ratio guard ACTUALLY evaluated full windows (inflEvals=" + (pipe ? pipe.inflEvals : "no-pipe") + ")");
-  assert.equal(h.session.ttySocket, ws, "legit below-threshold content survives");
-  assert.ok(!h.consoleErrors.some(e => e.includes("inflation ratio past")),
-    "below-threshold repetitive content never trips");
+  assert.equal(h.session.ttySocket, ws, "the healthy high-inflation connection was never abandoned");
+  assert.ok(!h.statusLines.some(s => s.includes("stream reset")),
+    "no reset status line on a legit stream");
+  assert.ok(!h.consoleErrors.some(e => e.includes("resetting stream")),
+    "no stream reset was logged for legit repetitive output");
+  // Drain the pump fully (the real stream surfaces each 64KB frame as
+  // several read chunks; settle rounds only advance one chunk each).
+  const painted = await drainPainted(h, inflated);
+  assert.equal(painted, inflated, "every inflated byte reached the terminal");
+  assert.equal(h.session.ttyBacklogBytes, 0, "the backlog drained to zero");
 });
 
-test("issue #114 W15: a SINGLE-frame bomb (one wire -> >2MB output) trips the ratio guard + visible notice (real DS)", async () => {
+test("issue #114 v8: a multi-frame burst of mixed compressibility over >=4MB paints every byte and survives (real DS)", async () => {
   const h = consumeHarness({ realDS: true });
   h.connect();
   const ws = h.toReady({ compress: true });
   h.startSync(0);
-  // ONE frame: 4MB of zeros collapses to a few KB of wire (~1000:1). Once
-  // the pump paints >2MB the window fills and the guard evaluates. The
-  // denominator (wireFedTotal(now) - ref.wireConsumed) is 0 or the whole tiny
-  // frame wire; both trip - the fail-open clause closes the wireSpan<=0 hole
-  // the old `wireSpan > 0 &&` guard left open (rework W13/N1, W15).
-  const { frames, ratio } = await makeServerFrames([new Uint8Array(4 * 1024 * 1024)]);
-  assert.ok(ratio > 32, "the single-frame bomb compresses far past the limit (" + ratio.toFixed(0) + ":1)");
-  ws.onmessage({ data: frames[0].buffer });
-  // One 4MB frame surfaces through the real stream as many ~64KB read
-  // chunks; drive the pump until it either trips (socket abandoned) or the
-  // whole frame is painted, so the window genuinely fills past 2MB.
-  for (let i = 0; i < 400 && h.session.ttySocket !== null; i++) await settle(1);
-  assert.ok(h.consoleErrors.some(e => e.includes("inflation ratio past")),
-    "the single-frame bomb tripped the ratio guard");
-  assert.ok(h.statusLines.includes("stream reset: degenerate stream, data dropped"),
-    "the single-frame bomb shows the VISIBLE status line (rework W15)");
-  assert.equal(h.session.ttySocket, null, "the degenerate connection was abandoned");
-  assert.ok(h.term.resets >= 1, "reset + tail reconnect");
+  h.closingSync(0);
+  // ~72 x ~60.7KB of repetitive-log-template frames with a 640-byte
+  // pseudo-random tail (one persistent deflate context, delivered one
+  // message at a time) -> >=4MB inflated. Drain-lag regression shape kept
+  // from the old W13/N1+N2 pin: the pump lags the feed during a burst of
+  // this size, and the connection must still survive with the painted total
+  // complete and the backlog drained. The random alphabet is LETTERS ONLY:
+  // digits/semicolons would let the pre-existing sanitizeTerminalOutput
+  // cursor-report patterns strip bytes, and this test must account every
+  // byte exactly.
+  let s = 99 >>> 0;
+  const ALPHA = "abdefghijlmnopqstuvwxyzABDEFGHIJKLMNOPQTVWXYZ ";
+  const rand = (n) => {
+    let out = "";
+    for (let j = 0; j < n; j++) { s = (s * 1103515245 + 12345) & 0x7fffffff; out += ALPHA[s % ALPHA.length]; }
+    return out;
+  };
+  const enc = new TextEncoder();
+  const chunks = [];
+  for (let i = 0; i < 72; i++) {
+    let str = "";
+    const lines = Math.floor((65536 - 640) / 52);
+    for (let k = 0; k < lines; k++) str += "[2024-01-01 00:00:0" + (k % 7) + "] svc worker-" + (k % 11) + " task done ok\n";
+    str += rand(640);
+    chunks.push(enc.encode(str));
+  }
+  const { frames, inflated } = await makeServerFrames(chunks);
+  assert.ok(inflated >= 4 * 1024 * 1024, "content produces >=4MB of output (got " + inflated + ")");
+  for (const f of frames) {
+    if (h.session.ttySocket === null) break;
+    ws.onmessage({ data: f.buffer });
+    await settle();
+  }
+  assert.equal(h.session.ttySocket, ws, "the healthy burst connection survives");
+  assert.ok(!h.statusLines.some(s => s.includes("stream reset")),
+    "no reset status line on a healthy burst");
+  const painted = await drainPainted(h, inflated);
+  assert.equal(painted, inflated, "every inflated byte reached the terminal");
+  assert.equal(h.session.ttyBacklogBytes, 0, "the backlog drained to zero");
 });
 
 test("issue #114 W8: a mid-replay disconnect resumes at the painted position, not the replay start", async () => {

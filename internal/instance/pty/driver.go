@@ -449,6 +449,17 @@ const (
 	// subscriberQueueChunksClose and no effect on SubscribeOutput, which is
 	// close-policy by construction (issue #82, verbatim).
 	envSubscriberQueueChunksDrop = "MYWORKTREE_TTY_DROP_QUEUE_CHUNKS"
+
+	// maxSubscriberQueueChunksDrop is the UPPER bound of the env override:
+	// 1<<20 = 1,048,576 chunks × 1024 B ≈ 1 GB of queue per subscriber at
+	// the pump's read size — already far past any legitimate RSS budget.
+	// A value past it falls back to defaultSubscriberQueueChunksDrop, the
+	// same "invalid → default" family as ttyWriteTimeout() and
+	// ttyReplayWindowDefaultBytes(). The bound is not about RSS politeness:
+	// a maxInt-scale value PANICS the subscription at makechan ("size out
+	// of range", reproduced in arbitration for PR #129 R2-A), killing the
+	// connection with a runtime stack instead of serving it the default.
+	maxSubscriberQueueChunksDrop = 1 << 20
 )
 
 // subscriberQueueChunksDrop resolves the drop-policy queue capacity, read
@@ -464,10 +475,15 @@ const (
 // A missing, unparsable, zero or negative value yields
 // defaultSubscriberQueueChunksDrop rather than an error: the queue size is
 // not a knob worth failing a subscription over, and a fallback that keeps
-// the service up beats a rejected connection. A huge value is NOT clamped
-// either — an operator who sets 1000000 owns the RSS that buys, and the
-// bound that matters (4 MB per subscriber at the default) is documented at
-// defaultSubscriberQueueChunksDrop.
+// the service up beats a rejected connection. A huge-but-allocatable value
+// is still NOT clamped down to the default — an operator who sets
+// 1000000 owns the RSS that buys, and the bound that matters (4 MB per
+// subscriber at the default) is documented at
+// defaultSubscriberQueueChunksDrop — but a value PAST
+// maxSubscriberQueueChunksDrop falls back to the default: past that ceiling
+// the channel is no longer a big allocation, it is a makechan panic
+// ("size out of range" at maxInt scale, PR #129 R2-A), and a subscription
+// that panics serves nobody.
 func subscriberQueueChunksDrop() int {
 	raw, ok := os.LookupEnv(envSubscriberQueueChunksDrop)
 	if !ok {
@@ -475,6 +491,9 @@ func subscriberQueueChunksDrop() int {
 	}
 	n, err := strconv.Atoi(raw)
 	if err != nil || n <= 0 {
+		return defaultSubscriberQueueChunksDrop
+	}
+	if n > maxSubscriberQueueChunksDrop {
 		return defaultSubscriberQueueChunksDrop
 	}
 	return n

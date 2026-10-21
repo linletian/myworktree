@@ -13,8 +13,10 @@ import (
 // reconnect, decision 1/R6); the generation+fencing of late frames and
 // in-flight inflate output; the app-layer `compress` consumption pipeline
 // behind its ready-frame gate with the R16 plaintext degradation (decision
-// 5a); and the two client-side guards — the sliding-window inflation-ratio
-// guard (B-1.5, rework W7/W13) and the 2MB backlog (B-1.6).
+// 5a); and the client-side 2MB backlog guard (B-1.6) — the v7
+// sliding-window inflation-ratio guard was retired by the v8
+// re-arbitration (PR129-ADJUDICATION P1), so the suite now pins that
+// legit high-inflation streams paint and survive instead.
 //
 // Same arrangement as TestTerminalStatusHandling: the cases slice the
 // shipped index.html and run against stubbed browser state, this wrapper

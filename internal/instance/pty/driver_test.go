@@ -994,6 +994,13 @@ func TestSubscribeOutputWithPolicy_DropQueueCapacityEnvOverride(t *testing.T) {
 	}{
 		{"valid override", "128", 128},
 		{"valid small", "1", 1},
+		// v8 R2-A ceiling: 1<<20 is the last value accepted; one past it —
+		// and the maxInt value that PANICS makechan ("size out of range",
+		// PR #129 R2-A) — fall back to the default instead of killing the
+		// subscription with a runtime stack.
+		{"ceiling is accepted", "1048576", 1 << 20},
+		{"one past the ceiling falls back", "1048577", 4096},
+		{"maxInt is the makechan panic, not a capacity", "9223372036854775807", 4096},
 		{"unparsable", "abc", 4096},
 		{"zero", "0", 4096},
 		{"negative", "-5", 4096},
