@@ -39,3 +39,28 @@
 (本记录 + TASK-PR129-fixes.md)。遗留记录项:NIT-3(feed 侧 backlog 跳闸独立判别,
 pre-existing)与评审 B 合并轮 N1(本地 develop 领先 origin 5 提交,后续推送 develop 后
 本 PR 需再合一次 CHANGELOG)——均不阻塞,记入 PR 回复。
+
+## Round 3(PR 第二轮评审意见闭环,2026-10-21 晚)
+
+PR 推送后两位评审员给出第二轮评审。仲裁者逐条取证裁定:
+
+- **评审 A 阻塞项 P2-1(接受,已修复)**:`startTTYCompressedPipe` 失败分支的可见 reset
+  行被 ready 尾部**同步**续跑覆盖——`updateStatus("websocket live")` 是最终状态,死
+  socket 上还被 arm 了 liveness(首跳自愈但不该装)。仲裁者代码实证:
+  `resetTTYStreamAndReconnect`(index.html:6818)同步执行;既有用例只断 `includes`
+  而非最后一条。根因是仲裁者工单"ready 调用点维持简单调用即可"的误判,留档自省。
+  修复(编码代理):门控改 `compress===true && !startTTYCompressedPipe(...) → return`;
+  两失败用例各加 4 断言(末条状态行/无 "websocket live"/ttyLivenessTimer===null/
+  intervals.length===0)。mutant 实证:改回丢弃返回值 → 恰两用例红(8 断言全敏感)。
+- **评审 B APPROVE + 3 非阻塞补充**:N-1(driver.go 注释沿用不精确类比 → 已改写为
+  "invalid→default 一族 + 第二道硬上界=makechan panic");N-2(实测
+  `merge-tree develop origin/fix/fix-issue114` 无冲突 → 证伪仲裁者 PR 回复里"需再合一次
+  CHANGELOG"的提示,已在第三轮回复中更正致谢);N-3(backlog 两侧 reason 逐字相同 →
+  加 `(pump)`/`(feed)` 站点后缀,可见状态行逐字不变,两用例互斥 pin,mutant 对调双红)。
+- **双评审 round-3**:A=APPROVE-WITH-NITS(1 条注释 nit:pipe 头部注释仍写"忽略
+  返回值",与新门控矛盾);B=APPROVE(mutant×2 + 端到端探针:替换连接真开出且其
+  ready 跑全尾部;明文路径 HEAD vs 工作树行为摘要逐字节相同)。
+- **nit 处置(仲裁者特权,双 APPROVE 后仅注释级)**:仲裁者修 3 处纯注释——
+  ①A-N1 矛盾注释改写;②B(a) `!session||!ws` 早返加"不可达 + 唯一不 arm 重连的
+  false 返回"注记;③B(b) driver.go 括注加 "below the ceiling" 限定。
+  提交 `6ad0049`。
