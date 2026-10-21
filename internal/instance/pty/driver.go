@@ -453,12 +453,17 @@ const (
 	// maxSubscriberQueueChunksDrop is the UPPER bound of the env override:
 	// 1<<20 = 1,048,576 chunks × 1024 B ≈ 1 GB of queue per subscriber at
 	// the pump's read size — already far past any legitimate RSS budget.
-	// A value past it falls back to defaultSubscriberQueueChunksDrop, the
-	// same "invalid → default" family as ttyWriteTimeout() and
-	// ttyReplayWindowDefaultBytes(). The bound is not about RSS politeness:
-	// a maxInt-scale value PANICS the subscription at makechan ("size out
-	// of range", reproduced in arbitration for PR #129 R2-A), killing the
-	// connection with a runtime stack instead of serving it the default.
+	// The env already resolves INVALID values (missing, unparsable, zero,
+	// negative) to defaultSubscriberQueueChunksDrop — the "invalid →
+	// default" family it shares with ttyWriteTimeout() and
+	// ttyReplayWindowDefaultBytes() — and this bound is a SECOND, different
+	// guard on top of that family: a hard ceiling on VALID values, past
+	// which the value falls back to the default too. The ceiling is not
+	// about RSS politeness (huge-but-allocatable sizes below the ceiling
+	// stay honored, the operator owns that memory): a maxInt-scale value PANICS the
+	// subscription at makechan ("size out of range", reproduced in
+	// arbitration for PR #129 R2-A), killing the connection with a runtime
+	// stack instead of serving it the default.
 	maxSubscriberQueueChunksDrop = 1 << 20
 )
 

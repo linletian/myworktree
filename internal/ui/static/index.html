@@ -6839,11 +6839,21 @@
         // NEVER falls back to plaintext consumption, because the server is
         // already committed to sending deflate frames by the ready echo and
         // plaintext consumption would paint compressed garbage. The ready
-        // call site therefore makes a plain call and ignores the return
-        // value: every failure path owns its own reset. (A construction
-        // throw past the connect-time probe is rare - resource exhaustion -
-        // but it exists, and silence here once meant a frozen terminal.)
+        // call site therefore CHECKS the return and early-returns on false
+        // (v8 review A P2-1): every failure path owns its own reset AND its
+        // visible status line, and the ready tail - liveness arm, the
+        // "websocket live" status, resize, focus - must NOT run on the
+        // abandoned socket: it would overwrite the reset line the user is
+        // meant to see and arm a watchdog on a dead connection. (A
+        // construction throw past the connect-time probe is rare - resource
+        // exhaustion - but it exists, and silence here once meant a frozen
+        // terminal.)
         function startTTYCompressedPipe(session, ws) {
+            // Unreachable today (the single ready call site always passes
+            // both) - and the ONE false return that neither resets nor arms
+            // a reconnect: under the ready gate's early-return it would skip
+            // the tail silently. A future caller that could pass a null here
+            // must route this through reset-and-reconnect first.
             if (!session || !ws) return false;
             if (typeof DecompressionStream === "undefined") {
                 console.error("[tty] server echoed compress=true but DecompressionStream is unavailable - plaintext consumption would paint garbage, resetting (issue #114)");
@@ -6972,11 +6982,14 @@
                 session.ttyBacklogBytes = (session.ttyBacklogBytes || 0) + chunk.byteLength;
                 if (session.ttyBacklogBytes > TTY_CLIENT_BACKLOG_MAX_BYTES) {
                     // Backlog guard, notice-isomorphic (rework W16/N5): a
-                    // VISIBLE status line, not just console.
+                    // VISIBLE status line, not just console. The reset REASON
+                    // carries the trip site "(pump)" (v8 review B N-3) — the
+                    // two backlog trip points share the user-facing line, so
+                    // the log alone must say which side tripped.
                     if (state.activeInst === session.id) {
                         updateStatus("stream reset: backlog exceeded, data dropped");
                     }
-                    resetTTYStreamAndReconnect(session, "client backlog exceeded " + TTY_CLIENT_BACKLOG_MAX_BYTES + " bytes");
+                    resetTTYStreamAndReconnect(session, "client backlog exceeded " + TTY_CLIENT_BACKLOG_MAX_BYTES + " bytes (pump)");
                     return;
                 }
                 const text = sanitizeTerminalOutput(decodeTTYOutputChunk(session, chunk));
@@ -7035,11 +7048,14 @@
             session.ttyBacklogBytes = (session.ttyBacklogBytes || 0) + u8.length;
             if (session.ttyBacklogBytes > TTY_CLIENT_BACKLOG_MAX_BYTES) {
                 // Backlog guard, notice-isomorphic (rework W16/N5): a VISIBLE
-                // status line, not just console.
+                // status line, not just console. The reset REASON carries the
+                // trip site "(feed)" (v8 review B N-3) - both trip points
+                // share the user-facing line, so the log alone distinguishes
+                // feed-side admission pressure from pump-side drain pressure.
                 if (state.activeInst === session.id) {
                     updateStatus("stream reset: backlog exceeded, data dropped");
                 }
-                resetTTYStreamAndReconnect(session, "client backlog exceeded " + TTY_CLIENT_BACKLOG_MAX_BYTES + " bytes");
+                resetTTYStreamAndReconnect(session, "client backlog exceeded " + TTY_CLIENT_BACKLOG_MAX_BYTES + " bytes (feed)");
                 return;
             }
             try {
@@ -7850,8 +7866,22 @@
                         // declare the cap) keeps the plaintext consumption
                         // path byte-for-byte - the R16 rollback graceful
                         // degradation, pinned by the node suite.
-                        if (controlMsg.compress === true) {
-                            startTTYCompressedPipe(session, ws);
+                        // FAILURE FAILS FAST (v8 review A P2-1): when the
+                        // pipe cannot be armed (no DecompressionStream, or a
+                        // construction that throws) startTTYCompressedPipe has
+                        // ALREADY reset + abandoned this socket and armed a
+                        // backoff reconnect, and it returns false. The handler
+                        // tail below (liveness watchdog, "websocket live",
+                        // sendResize, focus) belongs to a LIVE socket only -
+                        // running it on the just-abandoned one would arm a
+                        // watchdog on a dead socket and, worst, OVERWRITE the
+                        // visible "stream reset: stream error" line the failure
+                        // branch just painted with "websocket live", hiding the
+                        // very reason the user needs to see. So `!ok -> return`
+                        // skips the whole tail; the replacement connection's own
+                        // ready runs it in full.
+                        if (controlMsg.compress === true && !startTTYCompressedPipe(session, ws)) {
+                            return;
                         }
                         // Arm the liveness watchdog (issue #83) once READY
                         // (the 5s handshake timeout above owns the window

@@ -608,6 +608,17 @@ test("issue #114 B1: caps declare overflow-notice always and compress only when 
     "the unavailable echo is logged");
   assert.ok(no.statusLines.includes("stream reset: stream error, data dropped"),
     "the unavailable branch shows the VISIBLE status line, isomorphic to the construction catch (review A N1)");
+  // v8 review A P2-1: the reset line must be the LAST word - the ready
+  // handler returns on the failure, so the tail never overwrites it with
+  // "websocket live" and never arms the liveness watchdog on the abandoned
+  // socket. (Mutant: drop the `!ok -> return` at the ready gate and the
+  // tail repaints "websocket live" + arms a tick, reddening both asserts.)
+  assert.equal(no.statusLines[no.statusLines.length - 1], "stream reset: stream error, data dropped",
+    "the reset line is the LAST status line - the tail did not overwrite it with 'websocket live' (P2-1)");
+  assert.ok(!no.statusLines.includes("websocket live"),
+    "'websocket live' never appears after a failed pipe arm (P2-1)");
+  assert.equal(no.session.ttyLivenessTimer, null, "no liveness watchdog armed on the abandoned socket (P2-1)");
+  assert.equal(no.intervals.length, 0, "no setInterval was armed by the ready tail on the dead socket (P2-1)");
   assert.equal(no.session.ttyCompressed, false, "no compressed state survives");
   assert.equal(no.session.ttyDecompressor, null, "no pipe is built without the platform");
   assert.equal(no.session.ttySocket, null, "the socket was abandoned");
@@ -769,8 +780,10 @@ test("issue #114 B1.6: a backlog past 2MB abandons the connection and tail-recon
   ws.onmessage({ data: h.enc.encode("x").buffer });
   await settle();
 
-  assert.ok(h.consoleErrors.some(e => e.includes("client backlog exceeded")),
-    "the backlog guard logs why it fired");
+  assert.ok(h.consoleErrors.some(e => e.includes("client backlog exceeded") && e.includes("(pump)")),
+    "the backlog guard logs WHY and WHERE it fired - the PUMP site for a pump-driven trip (review B N-3)");
+  assert.ok(!h.consoleErrors.some(e => e.includes("(feed)")),
+    "the feed-side reason never appears on a pump-driven trip - the two sites are distinguishable in the log (N-3)");
   assert.ok(h.statusLines.includes("stream reset: backlog exceeded, data dropped"),
     "the backlog guard shows the VISIBLE status line, not just console (rework W16/N5)");
   assert.ok(h.term.resets >= 1);
@@ -792,8 +805,10 @@ test("issue #114 B1.6/W16: a feed-side backlog past 2MB shows the VISIBLE status
   const big = new Uint8Array(h.api.TTY_CLIENT_BACKLOG_MAX_BYTES + 1);
   ws.onmessage({ data: big.buffer });
   await settle();
-  assert.ok(h.consoleErrors.some(e => e.includes("client backlog exceeded")),
-    "the feed-side backlog guard logged why it fired");
+  assert.ok(h.consoleErrors.some(e => e.includes("client backlog exceeded") && e.includes("(feed)")),
+    "the feed-side backlog guard logged WHY and WHERE it fired - the FEED site (review B N-3)");
+  assert.ok(!h.consoleErrors.some(e => e.includes("(pump)")),
+    "the pump-side reason never appears on a feed-driven trip - the two sites are distinguishable in the log (N-3)");
   assert.ok(h.statusLines.includes("stream reset: backlog exceeded, data dropped"),
     "the feed-side backlog guard shows the VISIBLE status line (rework W16/N5)");
   assert.equal(h.session.ttySocket, null);
@@ -836,6 +851,15 @@ test("issue #114 v8 P2: pipe construction failure resets visibly and NEVER falls
     "the construction failure is logged");
   assert.ok(h.statusLines.includes("stream reset: stream error, data dropped"),
     "the failure shows the VISIBLE status line, isomorphic to the no-DecompressionStream branch");
+  // v8 review A P2-1: same fail-fast contract as the unavailable branch -
+  // the reset line is the LAST status line (no "websocket live" repaint on
+  // the abandoned socket) and no liveness watchdog is armed there.
+  assert.equal(h.statusLines[h.statusLines.length - 1], "stream reset: stream error, data dropped",
+    "the reset line is the LAST status line - the ready tail did not run on the dead socket (P2-1)");
+  assert.ok(!h.statusLines.includes("websocket live"),
+    "'websocket live' never appears after a failed pipe arm (P2-1)");
+  assert.equal(h.session.ttyLivenessTimer, null, "no liveness watchdog armed on the abandoned socket (P2-1)");
+  assert.equal(h.intervals.length, 0, "no setInterval was armed by the ready tail on the dead socket (P2-1)");
   assert.equal(h.session.ttyCompressed, false, "no compressed state survives");
   assert.equal(h.session.ttyDecompressor, null, "no half-built pipe is left behind");
   assert.equal(h.session.ttySocket, null, "the socket was abandoned");
