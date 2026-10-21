@@ -1,4 +1,4 @@
-# Issue #114 修复计划（FIX-PLAN v7）—— tty WS subscriber overflow 1013 重连循环
+# Issue #114 修复计划（FIX-PLAN v8）—— tty WS subscriber overflow 1013 重连循环
 
 仲裁者定稿 2026-10-14；v2 修订 2026-10-17（生产日志证据）；v3 修订 2026-10-17
 （跨境慢链路适配）；v4 修订 2026-10-17（双评审闭环第一轮）；v5 修订 2026-10-17
@@ -27,6 +27,27 @@ V5-N1–N4 + REVIEW-B 第三轮 R3-MED-1/2、R3-LOW-1/2/3、R3-nit——全部�
    W_eff==budget 路线可触发并将预算路线收紧到精确 8MB；
    budgetExhausted=true & windowed=false 组合在「W_eff==budget 且 clamp
    未触发且生产者跑赢回放」下可达，windowed 语义冻结为两个窗口截断的 OR。
+**v8 修订 2026-10-21（PR #129 评审闭环，全取证记录见 PR129-ADJUDICATION.md）**：
+1. **pin 5 滑窗膨胀率守卫废止（方案性重裁定，PR 评审 R1-P1/R2-P1 成立）**：
+   阈值校准前提「合法流上限 13.056x」被否证——本 PR 自家 AC3a 实测合法
+   负载 41.89–42.17x > 32 阈值；仲裁者用 a0compress 以出货口径（BestSpeed、
+   持久流、逐帧 Flush）复测三种合法负载：64KB 帧下 yes 风格 **209.4x**、
+   空格填充 146.2x、短语重复 118.5x,且全同字节长行程逼近 deflate 理论
+   上限 ~1032:1——**不存在能分开合法重复输出与退化流的固定比率阈值**。
+   同时分母口径在「单帧膨胀 > 窗口」(>31.25x @64KB 帧，回放常态)下塌缩
+   至 ≤0,fail-closed 分支误杀健康流。移除守卫整体（常量/采样/双计数/判定
+   分支）;真实防护 = inflate/读写错误→reset+reconnect(本次 P2 修复生效)
+   + 2MB backlog 上限(内存界) + awaited term.write(解析背压)。详见 pin 5。
+2. **P2 压缩管道失败路径修复**:构造失败不再静默退回明文（与无
+   DecompressionStream 分支同构 reset+reconnect);pump read / feed write
+   异常按 generation 判定：当前连接 → 可见状态 + reset+reconnect,teardown
+   中止 → 静默放行。
+3. **P3 埋点口径修复**:overflow 行 `liveFrames` 增列快照 replayFrames 后
+   扣除（与 liveBytes=binBytes−replayBytes 同族）,DATA-COLLECTION 定义不变。
+4. **R2-A env 上界**:`MYWORKTREE_TTY_DROP_QUEUE_CHUNKS` 增 ≤1<<20 上界，
+   越界回落默认（实测 maxInt 值 `makechan: size out of range` panic)。
+5. **P0 流程**:合并 develop 解 6 文件冲突（CHANGELOG 手工插入式合并）,
+   推送后盯 CI。
 本计划对编码/评审 Agent 生效：可以质疑挑战（回报给仲裁者），**不得自行修改本文件**。
 行号基线：2026-10-17 工作树（含未提交 Phase A 编码）。
 
@@ -370,6 +391,22 @@ docs subAge 最大 **1,919,661ms（~32min，19:55:05，窗口外）**，窗口�
   滑窗机制的原始提案经两轮实证返工收敛,评审驱动设计纠错留档。)
   **仍不做连接生命周期累计**（v5 N3 理由不变）。与 1b 队列关系同前
   （生产侧/消费侧独立）。
+  **v8 重裁定（PR #129 评审 R1-P1/R2-P1 成立，守卫整体废止）**：v7 阈值
+  校准前提「合法流上限 13.056x」被两级证据否证——①本 PR 自家 AC3a 三轮
+  实测合法负载 41.89/41.98/42.17x 已超 32 阈值（守卫对验收同款 payload
+  必触发；AC3a 判 PASS 系 Go harness 不执行客户端守卫所致）；②仲裁者以
+  出货口径（BestSpeed、持久流、逐帧 Flush）复测合法负载:64KB 帧下
+  yes 风格 209.4x、空格填充 146.2x、短语重复 118.5x,全同字节长行程逼近
+  deflate 理论上限 ~1032:1——**合法与退化之间不存在可放置固定阈值的
+  空档**。分母口径亦在「单帧膨胀 > 窗口」时塌缩至 ≤0（64KB 帧 >31.25x
+  即达，回放常态）,fail-closed 分支因此误杀健康流。**废止**:常量
+  TTY_INFLATION_*、inflSamples/inflatedTotal/wireFed/wireConsumed 计数、
+  判定分支与关联 node 用例全部移除;frameLedger/backlog 等无关机制保留。
+  真实防护三件套:inflate/读写错误 → 可见状态 + reset+reconnect（v8 P2
+  修复后方真正生效——损坏/失同步 deflate 必抛错);2MB backlog 上限（内存
+  界）;awaited term.write（解析背压）。合法高膨胀输出被照常绘制是正确
+  行为（`yes` 天经地义）;服务端为本机受信进程，CPU 型炸弹威胁模型不
+  成立（等效 `yes` 的合法负载本就存在）。
 - **双字段埋点（R14）**：compress 连接上 slow-write/conn-closed 增
   `wireBytes`（压缩后）与 `logicalBytes`（解压后）双字段——消费速率读数
   口径随连接而变，双字段保历史可比。
