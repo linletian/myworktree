@@ -7,6 +7,8 @@
 //	port             actual bound address (written by --port-file)
 //	pid              serve main process PID (written by --pid-file)
 //	serve.log        subprocess stdout/stderr
+//	serve.log.1      the previous serve.log, kept by Start's rotation (one
+//	                 backup, no more — see serveLogMaxBytes)
 //
 // The serve runs WITHOUT a REASONIX_HOME override: it uses the user's real
 // ~/.reasonix exactly like a terminal-run reasonix, so sessions, history,
@@ -62,6 +64,45 @@ type Driver struct {
 	startsMu sync.Mutex
 	starts   map[string]*sync.Mutex
 
+	// pidsMu guards pids: instance id -> pid of the live serve process.
+	// REGISTRATIONS are written only under the per-instance Start lock; the
+	// entry is dropped by Stop, which deliberately runs outside that lock (see
+	// the invariant stated on trackPID/untrackPID). The table covers TWO
+	// kinds of pid, and it is worth naming both because they are not the same
+	// guarantee:
+	//   (a) a pid THIS Driver spawned — registered at cmd.Start, before
+	//       readiness (see Start), then overwritten after waitReady with the
+	//       pid file's authoritative value;
+	//   (b) a SURVIVOR pid adopted by Start's idempotent re-attach branch —
+	//       when the Health check at the top of Start finds a serve already
+	//       running, Start records the pid it just saw healthy even though
+	//       this Driver never spawned it, so memory covers that serve from
+	//       the moment the branch adopts it.
+	// What the table does NOT cover is an instance reached ONLY through
+	// Reattach (kind.go): Reattach probes Health alone and deliberately does
+	// NOT populate this table, so such a serve is stopped via its pid file
+	// and never via memory — unless and until some later Start re-attaches
+	// and adopts it, which is case (b).
+	// Stop takes the pid from the pid file first and falls back to this
+	// table when that file yields nothing — the state dir can be wiped before
+	// Stop runs (Restart migrates onto a fresh id and Cleanup removes the
+	// old dir; a test that RemoveAlls the dir hits the same window), and
+	// without the fallback the serve process would be orphaned forever
+	// (issue #113: each leaked fake serve costs ~16MB on the dev box).
+	// Deliberate scope (issue #113 arbitration): production does NOT scan
+	// the process table to kill historical orphans by cmdline pattern —
+	// pattern matching risks killing foreign processes. A cross-restart
+	// orphan is instead reached through the persisted pid file, which is what
+	// Health reads. Reconcile/Reattach semantics are unchanged.
+	// Known, NOT implemented follow-up: sweep <DataDir>/reasonix/*/pid at
+	// startup and adopt still-live cross-restart orphans into the running
+	// set. Rejected for #113 because that issue's scope is the fake-serve
+	// TEST leak; a production startup sweep needs its own evaluation (killing
+	// or taking over processes this process never spawned is a different
+	// risk profile, and Reattach already covers the surviving-record case).
+	pidsMu sync.Mutex
+	pids   map[string]int
+
 	// verMu guards verPass: per-binary memo of a PASSED version gate, so
 	// repeated Starts of the same reasonix binary do not re-spawn
 	// `reasonix --version` on every call (issue #45). Failures are NOT
@@ -84,6 +125,19 @@ type Driver struct {
 // --pid-file/--no-open plus the reasonix_token cookie name (proxy side).
 // Verified against v1.22.0 (issue #45).
 const defaultMinVersion = "1.22.0"
+
+// serveLogMaxBytes is the size serve.log is allowed to reach before the next
+// Start rotates it to serve.log.1 (issue #111 P3). serve.log is opened
+// O_APPEND and had no rotation at all, so the file only ever grew for as long
+// as an instance's management dir survived.
+//
+// 10 MiB, deliberately: serve's own output is a few KB per boot (startup
+// banner, session events, the occasional error), so 10 MiB is many days of a
+// busy instance — the threshold is there to catch a serve that turns its
+// verbosity on or runs for months, not to rotate a healthy log every other
+// restart. One backup, never more: the point is a bound, not a history, and
+// a single .1 keeps the state dir at two files of known size.
+const serveLogMaxBytes = 10 << 20 // 10 MiB
 
 // cachedAddr is a cached {port, token} for one instance, valid until
 // Stop/Cleanup or the next successful Start overwrites it (no TTL — see the
@@ -174,6 +228,7 @@ func (d *Driver) Start(in StartInput) (Info, error) {
 
 	if info, ok, err := d.Health(in.InstanceID); err == nil && ok {
 		d.logf("instance %s already running (pid %d, port %d)", in.InstanceID, info.PID, info.Port)
+		d.trackPID(in.InstanceID, info.PID) // re-attach: keep the memory table in sync
 		return info, nil
 	}
 
@@ -272,6 +327,15 @@ func (d *Driver) Start(in StartInput) (Info, error) {
 	cmd.Env = RemoveEnv(os.Environ(), "REASONIX_HOME", "REASONIX_STATE_HOME")
 	cmd.Env = append(cmd.Env, in.Env...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	// Rotate before opening, so the fd this Start hands to serve always
+	// belongs to a log that starts at zero when it was over the cap. This is
+	// START-time rotation only: a serve that is already running keeps its own
+	// fd, and renaming under it would leave every byte it writes landing in
+	// the renamed inode (POSIX renames the name, not the open file), so
+	// in-run rotation needs the child to reopen — a serve-side change, out of
+	// scope here. The bound this does buy is that a management dir never holds
+	// more than the current run plus one previous run of serve.log.
+	d.rotateServeLog(in.InstanceID, logFile)
 	f, err := os.OpenFile(logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return Info{}, fmt.Errorf("reasonix: open serve.log: %w", err)
@@ -282,6 +346,35 @@ func (d *Driver) Start(in StartInput) (Info, error) {
 	if err := cmd.Start(); err != nil {
 		return Info{}, fmt.Errorf("reasonix: start serve: %w", err)
 	}
+	// Register the pid the MOMENT the process exists (issue #113). Tracking
+	// only after waitReady left a window as long as the readiness poll (up to
+	// 15 s) in which a Stop for this id found no pid file (Start removed the
+	// stale one above, serve has not written the new one yet) and nothing in
+	// memory, answered "never started", and returned — while the process it
+	// was asked to stop was already running and became an orphan.
+	// pgid semantics, qualified to THIS registration: SysProcAttr.Setpgid
+	// above put this child into a NEW process group whose pgid equals
+	// cmd.Process.Pid, so cmd.Process.Pid is the group LEADER and Stop's
+	// kill(-pid) reaches every descendant serve spawns inside that group —
+	// exactly the target Setpgid exists for.
+	// waitReady overwrites the entry with the pid file's pid once that file
+	// appears (reasonix's own pid is the authoritative Health/Stop target and
+	// may differ from the exec pid). The group-kill guarantee above holds for
+	// the EXEC pid registration only: if the pid file's pid is a different
+	// process, it is not this group's leader, kill(-pid) finds no such group
+	// (ESRCH) and Stop degrades to signaling that single process. That is not
+	// a regression — Stop has always preferred the pid file's pid, so the
+	// degraded shape is the same one the pid-file path has always had; the
+	// exec-pid registration is what makes the group kill reachable during the
+	// readiness window.
+	// The readiness-failure path untracks. Absent the narrow Start/Stop race
+	// named below, a registration does not outlive the process it names: if
+	// waitReady has already read the pid file and returned while a
+	// concurrent Stop for this id has untracked and signalled it, this next
+	// line re-registers a pid that is on its way out. The residue
+	// self-heals — the next Stop finds processAlive false and untracks — so
+	// the race costs one transient stale entry, never a permanent one.
+	d.trackPID(in.InstanceID, cmd.Process.Pid)
 	d.logf("started reasonix serve pid %d for instance %s (worktree %s)", cmd.Process.Pid, in.InstanceID, in.WorktreePath)
 
 	// Reap the process from a goroutine: cmd.Wait() both detects an early
@@ -297,6 +390,10 @@ func (d *Driver) Start(in StartInput) (Info, error) {
 	info, err := d.waitReady(in.InstanceID, done, portFile, pidFile, token, 15*time.Second)
 	if err != nil {
 		_ = cmd.Process.Kill()
+		// The pid tracked at cmd.Start above names a process this Start is
+		// abandoning; drop it so the table never carries a dead (or about to
+		// be dead) registration that a later Stop would act on.
+		d.untrackPID(in.InstanceID)
 		// waitReady may already have consumed the done value (early-exit
 		// path); a blocking <-done would then hang forever. Drain
 		// non-blockingly: the Wait goroutine reaps the process either way,
@@ -308,6 +405,7 @@ func (d *Driver) Start(in StartInput) (Info, error) {
 		return Info{}, err
 	}
 	d.storeCache(in.InstanceID, info)
+	d.trackPID(in.InstanceID, info.PID) // authoritative pid-file pid; Stop's fallback if that file is gone before then (issue #113)
 	return info, nil
 }
 
@@ -348,9 +446,59 @@ func (d *Driver) waitReady(instanceID string, done <-chan error, portFile, pidFi
 	return Info{}, fmt.Errorf("reasonix: serve did not become ready within %v for instance %s\nserve.log tail:\n%s", timeout, instanceID, d.serveLogTail(instanceID, 10))
 }
 
+// rotateServeLog renames an over-cap serve.log to serve.log.1 ahead of a
+// fresh Start, so the log the new serve writes into begins empty and the
+// previous run is kept as a single backup (issue #111 P3). os.Rename is
+// atomic and replaces an existing destination on POSIX, so "overwrite the old
+// .1" needs no unlink-first dance, and the inode keeps the 0o600 it was
+// created with — the backup is never more readable than the live log.
+//
+// Best-effort, and that is the deliberate trade-off: a rename that fails (a
+// read-only mount, or a serve.log.1 left as a directory by something outside
+// this driver) does not make serve itself broken, so refusing to start the
+// user's chat over log bookkeeping is the worse failure. It is logged, not
+// swallowed — an oversized log that did not rotate is exactly the kind of
+// thing that must not go quiet.
+//
+// Rotation runs under the per-instance Start lock (lockStart is taken at the
+// top of Start), so no concurrent Start can be holding the log open while the
+// name moves.
+func (d *Driver) rotateServeLog(instanceID, logFile string) {
+	// Lstat, not Stat: Stat follows a symlink, so the size compared below
+	// would be the TARGET's while the rename moves the link itself — the
+	// check and the move would be about different objects and rotation would
+	// silently stop working. Lstat judges the very entry rename moves, and
+	// keeps the IsRegular branch honest (a symlink is not a plain file).
+	fi, err := os.Lstat(logFile)
+	if err != nil || !fi.Mode().IsRegular() {
+		// Absent (a first Start, or Stop/Cleanup took the dir down) or not a
+		// plain file: nothing to rotate. Any real problem with this path still
+		// surfaces from the OpenFile in Start, whose error shape is unchanged.
+		return
+	}
+	if fi.Size() <= serveLogMaxBytes {
+		return
+	}
+	backup := logFile + ".1"
+	if err := os.Rename(logFile, backup); err != nil {
+		d.logf("rotate serve.log for instance %s (%d bytes > %d): %v — appending to the oversized log instead", instanceID, fi.Size(), int64(serveLogMaxBytes), err)
+		return
+	}
+	// "(before start)" is load-bearing: the rename runs ahead of OpenFile
+	// and cmd.Start, so when this Start then fails the line describes a
+	// rotation with no run behind it. The rotate stays before the open —
+	// moving it after Start would break the over-cap judgement — so the log
+	// says what it is.
+	d.logf("rotated previous serve.log (before start) for instance %s (%d bytes > %d) to %s", instanceID, fi.Size(), int64(serveLogMaxBytes), filepath.Base(backup))
+}
+
 // serveLogTail returns the last n non-empty lines of the instance's serve.log
 // (or "" when absent/empty), so readiness failures carry reasonix's own error
 // text instead of a bare "did not become ready".
+//
+// It reads serve.log, never the .1 backup, which is the right half after
+// rotation: a readiness failure describes the run that just started, and the
+// rotated file is the previous run.
 func (d *Driver) serveLogTail(instanceID string, n int) string {
 	b, err := os.ReadFile(filepath.Join(d.dir(instanceID), "serve.log"))
 	if err != nil {
@@ -512,6 +660,83 @@ func (d *Driver) dropCache(instanceID string) {
 	delete(d.cache, instanceID)
 }
 
+// trackPID registers the live serve pid for an instance. Start writes twice:
+// at cmd.Start (the exec pid, which is the process-group leader because of
+// Setpgid) so Stop can reach the process from the instant it exists, and
+// again after waitReady with the pid file's authoritative value; the
+// idempotent re-attach branch writes the pid it just saw healthy. Stop
+// deletes the entry once the process is gone. See the Driver comment on pids
+// for why Stop needs the table at all (issue #113).
+//
+// LOCK INVARIANT — stated here because it is what makes untrackPID safe, and
+// it holds today only by call-site placement: EVERY registration of a given
+// instance id is written while that id's lockStart mutex is held. All three
+// call sites are inside Start, between its lockStart/unlock pair, and Start
+// is the only caller. Consequence: sibling Starts of the same id cannot
+// interleave registrations, so the table holds at most one registration per id
+// at a time in a known order, and untrackPID's unconditional delete-by-id
+// (below) can never silently drop a pid a concurrent sibling Start just
+// registered for a live process. Cost of honouring it: zero — no extra lock is
+// taken, this only pins the placement. If a future change ever moves a
+// trackPID call outside lockStart, the invariant breaks with no compiler error
+// and no failing test; re-examine untrackPID at that point.
+func (d *Driver) trackPID(instanceID string, pid int) {
+	if pid <= 0 {
+		return
+	}
+	d.pidsMu.Lock()
+	if d.pids == nil {
+		d.pids = map[string]int{}
+	}
+	d.pids[instanceID] = pid
+	d.pidsMu.Unlock()
+}
+
+// trackedPID returns the last pid Start registered for instanceID, or 0
+// when none is tracked.
+func (d *Driver) trackedPID(instanceID string) int {
+	d.pidsMu.Lock()
+	defer d.pidsMu.Unlock()
+	return d.pids[instanceID]
+}
+
+// untrackPID drops the registration for instanceID. It deletes by id alone
+// and never compares the pid it removes against a pid the caller named, which
+// is sound only under the lock invariant stated on trackPID: one registration
+// per id, all of them written under that id's lockStart, so there is no
+// concurrent sibling registration to lose.
+// Locking of the two call sites differs, deliberately:
+//   - Start's readiness-failure path runs UNDER lockStart, so its delete is
+//     ordered against that same Start's registrations.
+//   - Stop's two deletes run OUTSIDE lockStart — Stop does not take the Start
+//     lock at all, and must not: the whole point of #113 is that Stop can
+//     reach a process whose Start is still parked in the readiness poll, and
+//     taking the lock here would make Stop wait behind it (up to 15 s).
+//     The accepted residual of that asymmetry is a narrow window in which a
+//     Stop acting on a stale pid deletes a fresher registration a concurrent
+//     Start of the same id just made; it self-heals once serve writes its pid
+//     file, which is Stop's primary source from then on.
+func (d *Driver) untrackPID(instanceID string) {
+	d.pidsMu.Lock()
+	delete(d.pids, instanceID)
+	d.pidsMu.Unlock()
+}
+
+// trackedInstanceIDs lists the instance ids with a tracked (not yet
+// stopped) pid, so a caller tearing the driver down (e.g. a test
+// t.Cleanup, issue #113) can Stop everything without keeping its own
+// bookkeeping. Unexported: the production shutdown path is
+// framework.Manager.StopAllKind, this only exposes the driver's own view.
+func (d *Driver) trackedInstanceIDs() []string {
+	d.pidsMu.Lock()
+	defer d.pidsMu.Unlock()
+	ids := make([]string, 0, len(d.pids))
+	for id := range d.pids {
+		ids = append(ids, id)
+	}
+	return ids
+}
+
 // cmdProcessPID reads the pid file if present and valid, falling back to 0.
 // reasonix serve writes its own pid there; it may differ from the exec.Cmd pid.
 func cmdProcessPID(pidFile string) int {
@@ -577,17 +802,40 @@ func (d *Driver) Health(instanceID string) (Info, bool, error) {
 }
 
 // Stop terminates the tracked serve process (its whole process group) and
-// waits for it to exit. It is idempotent.
+// waits for it to exit. It is idempotent. The pid comes from the pid file;
+// the driver falls back to the pid Start registered in memory whenever that
+// file yields nothing usable. "Nothing usable" covers THREE distinct
+// triggers, and all three land in the same `pid <= 0` branch below:
+//
+//   - MISSING: there is no pid file at all — never started, or Cleanup /
+//     Restart wiped the state dir before Stop ran. That is the shape of
+//     TestDriverAddrCacheRefresh, which removes the old id's dir while its
+//     serve still lives and whose deferred Stop must still kill it
+//     (issue #113).
+//   - UNREADABLE: the file exists but os.ReadFile fails on it — permission
+//     denied, an I/O error, or the path is a directory.
+//   - UNPARSEABLE or NON-POSITIVE CONTENT: the bytes are empty, a truncated
+//     or garbage write, "0", or a negative number. strconv.Atoi fails, or
+//     the value is <= 0, so no process could be named by it.
+//
+// Only when neither source yields a positive pid is the instance "never
+// started", and that is the single case Stop reports as a no-op.
 func (d *Driver) Stop(instanceID string) error {
 	d.dropCache(instanceID)
 	dir := d.dir(instanceID)
-	b, err := os.ReadFile(filepath.Join(dir, "pid"))
-	if err != nil {
-		return nil // never started
+	pid := 0
+	if b, err := os.ReadFile(filepath.Join(dir, "pid")); err == nil {
+		if v, aerr := strconv.Atoi(strings.TrimSpace(string(b))); aerr == nil {
+			pid = v
+		}
 	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(b)))
-	if err != nil || pid <= 0 {
-		return nil
+	if pid <= 0 {
+		// MISSING / UNREADABLE / UNPARSEABLE-or-NON-POSITIVE (see the doc
+		// comment): fall back to the pid Start registered in memory.
+		pid = d.trackedPID(instanceID)
+	}
+	if pid <= 0 {
+		return nil // never started (no usable pid file, nothing tracked in memory)
 	}
 	if err := syscall.Kill(-pid, syscall.SIGTERM); err != nil {
 		// Fall back to signaling the single process (no group).
@@ -597,6 +845,7 @@ func (d *Driver) Stop(instanceID string) error {
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		if !processAlive(pid) {
+			d.untrackPID(instanceID)
 			d.logf("stopped reasonix serve pid %d for instance %s", pid, instanceID)
 			return nil
 		}
@@ -604,6 +853,7 @@ func (d *Driver) Stop(instanceID string) error {
 	}
 	_ = syscall.Kill(-pid, syscall.SIGKILL)
 	_ = syscall.Kill(pid, syscall.SIGKILL)
+	d.untrackPID(instanceID)
 	d.logf("force-killed reasonix serve pid %d for instance %s", pid, instanceID)
 	return nil
 }
@@ -614,7 +864,29 @@ func (d *Driver) Stop(instanceID string) error {
 // never deleted by instance lifecycle. The instance id is never reused
 // (restart allocates a fresh id), so removing its management dir avoids
 // unbounded accumulation under <DataDir>/reasonix/. Call after Stop when the
-// instance is deleted.
+// instance is deleted. Cleanup deliberately does NOT kill and does NOT drop
+// the in-memory pid entry: wiping the dir must stay side-effect-free, and
+// keeping the pid is what lets a Stop that arrives after this Cleanup (the
+// old-id teardown order in Restart-style flows) still kill the process
+// (issue #113).
+//
+// The documented order is Stop first, Cleanup second, and this method carries
+// a TRIPWIRE for that invariant: when it runs while the in-memory table
+// still holds a live pid for the instance, it logs a warning naming the pid
+// and the call-order problem, because the caller just removed the pid file out
+// from under a serve process that is still running (a mis-ordered teardown,
+// and the window in which a later Stop has nothing left to find if the driver
+// dies before it).
+// Stated at its exact reach, because the honest scope is narrower than the
+// warning's existence suggests: on today's production paths this warning does
+// NOT light up. The only two callers of Cleanup are Kind.Stop and
+// Kind.Cleanup (kind.go), and BOTH call Stop first; Stop untracks on both of
+// its return paths, so by the time Cleanup runs there trackedPID is already
+// 0 and the tripwire cannot fire. It fires on an OUT-OF-ORDER teardown —
+// currently exercised only by TestCleanupWarnsWhenStopWasSkipped — which makes
+// it a guard for the invariant against a FUTURE caller that breaks the order,
+// not a line the daemon log is expected to show routinely. The behaviour is
+// unchanged either way — no kill, still RemoveAll.
 func (d *Driver) Cleanup(instanceID string) error {
 	d.dropCache(instanceID)
 	d.dropStartLock(instanceID)
@@ -622,6 +894,27 @@ func (d *Driver) Cleanup(instanceID string) error {
 		return errors.New("reasonix: instance id is required")
 	}
 	dir := d.dir(instanceID)
+	// Call-order alarm (issue #113): a tracked pid that is still alive means
+	// Stop has not run (or did not reach the process) for this instance, yet
+	// its management dir is being removed now. Deliberately BEFORE the
+	// RemoveAll below, and deliberately warning-only — Cleanup neither kills
+	// the process nor drops the pid entry (see the doc comment), so the
+	// in-memory fallback stays available to the Stop that should have come
+	// first.
+	// Semantic boundary of the liveness test, so the false positive is named
+	// rather than hidden: processAlive is kill(pid, 0), which answers ALIVE
+	// both for a ZOMBIE (the slot is still occupied until its parent reaps
+	// it) and for a pid the kernel has REUSED by an unrelated process. So
+	// this warning can fire once about a pid that is already gone or no longer
+	// ours — accepted, because it is a warning and Cleanup takes no signal on
+	// the strength of it. The same kill(0) semantics under Stop's
+	// SIGKILL-after-timeout (a reused pid would take a stray SIGKILL): that
+	// is pre-existing behaviour on the pid-file path, unchanged by and not
+	// introduced in #113, which only added memory as a second source of the
+	// same number.
+	if pid := d.trackedPID(instanceID); pid > 0 && processAlive(pid) {
+		d.logf("WARNING cleanup before stop: instance %s still has a live serve pid %d tracked while %s is being removed — the caller must Stop, then Cleanup; the process is NOT killed here (by design) and now survives with no pid file on disk, reachable only through this driver's in-memory pid table", instanceID, pid, dir)
+	}
 	if _, err := os.Stat(dir); os.IsNotExist(err) {
 		return nil
 	}

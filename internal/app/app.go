@@ -98,12 +98,23 @@ type Server struct {
 	dshInstallMu sync.Mutex
 	mcpAdapter   mcp.Adapter
 	monitor      monitor.Collector
+	// alertSampler is the background system-level alert cache feeding
+	// GET /api/monitor/alerts (issue #111 P2). Started in Start, stopped
+	// in Shutdown — see internal/monitor/sampler.go for the layered-
+	// polling contract (system signals only, never a tree walk).
+	alertSampler *monitor.AlertSampler
 	authMu       sync.Mutex
-	authFails    map[string]authFail
-	ttyMu        sync.Mutex
-	ttyClients   map[string]map[string]*ttyClientState
-	ttyApplied   map[string]ttySize
-	ttyNextID    uint64
+	// authFails is keyed by client IP; authFailsNextSweep is the wall-clock
+	// instant at which the next piggybacked eviction of closed windows is
+	// due (see sweepExpiredAuthFailsLocked). Both are guarded by authMu, and
+	// the zero value of authFailsNextSweep means "due now", so the first
+	// attempt sweeps an empty map and arms the cadence.
+	authFails          map[string]authFail
+	authFailsNextSweep time.Time
+	ttyMu              sync.Mutex
+	ttyClients         map[string]map[string]*ttyClientState
+	ttyApplied         map[string]ttySize
+	ttyNextID          uint64
 
 	gitRunner func(timeout time.Duration, gitRoot string, args ...string) ([]byte, error)
 }
@@ -125,6 +136,14 @@ type ttyClientState struct {
 }
 
 const maxTTYClientsPerInstance = 8
+
+// alertSampleEvery is the background system-level sampling cadence for the
+// status-bar alert channel (issue #111 P2). ~10s is the design number from
+// issue #111 comment #2; it is deliberately slower than the modal's 2s full
+// poll because the status bar is a glance channel, not a dashboard — and
+// each tick costs two /proc reads (PSI + meminfo) plus one process stat,
+// never a tree walk.
+const alertSampleEvery = 10 * time.Second
 
 // ttyHandshakeReplayBudget bounds how many bytes ONE TTY WebSocket
 // handshake replays before handing the connection to the live output
@@ -377,8 +396,11 @@ func New(cfg Config, logger *log.Logger) (*Server, error) {
 			Worktrees: worktreeMgr,
 			Instances: instanceMgr,
 		},
-		authFails: map[string]authFail{},
-		isSecure:  isSecure,
+		// ~10s background system-level sampling (issue #111 P2); the
+		// goroutine starts in Start() and is reaped by Shutdown().
+		alertSampler: monitor.NewAlertSampler(alertSampleEvery),
+		authFails:    map[string]authFail{},
+		isSecure:     isSecure,
 	}
 	s.registerAPIs(mux)
 	if err := ui.Register(mux, filepath.Base(filepath.Clean(s.root)), func(r *http.Request) bool {
@@ -652,6 +674,14 @@ func (s *Server) Start() (string, error) {
 	h := s.withServerRevision(s.withAuth(s.mux))
 	s.httpSrv = &http.Server{Handler: h}
 
+	// Background alert sampler (issue #111 P2): starts with the HTTP server
+	// so /api/monitor/alerts answers real data the moment the UI loads,
+	// and is joined by Shutdown() — the goroutine's done channel is the
+	// exit proof, no leak.
+	if s.alertSampler != nil {
+		s.alertSampler.Start()
+	}
+
 	go func() {
 		if s.cfg.TLSCert != "" || s.cfg.TLSKey != "" {
 			_ = s.httpSrv.ServeTLS(ln, s.cfg.TLSCert, s.cfg.TLSKey)
@@ -713,6 +743,12 @@ func (s *Server) Shutdown() {
 	}
 	if s.dshWatch != nil {
 		s.dshWatch.Stop()
+	}
+	// Stop the alert sampler and WAIT for its goroutine to exit (Stop
+	// joins the loop's done channel — issue #111 P2; a sampler ticking
+	// past Shutdown would read procfs from a dying daemon for no reader).
+	if s.alertSampler != nil {
+		s.alertSampler.Stop()
 	}
 	if s.rxSrv != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -820,6 +856,7 @@ func (s *Server) registerAPIs(mux *http.ServeMux) {
 	mux.HandleFunc("/api/instances/log", s.handleInstanceLog)
 	mux.HandleFunc("/api/instances/log/stream", s.handleInstanceLogStream)
 	mux.HandleFunc("/api/instances/stats", s.handleInstanceStats)
+	mux.HandleFunc("/api/monitor/alerts", s.handleMonitorAlerts)
 	mux.HandleFunc("/api/instances/opencode", s.handleInstanceOpencodeInfo)
 	mux.HandleFunc("/api/instances/opencode/scope", s.handleInstanceOpencodeScope)
 	mux.HandleFunc("/api/instances/dsh", s.handleInstanceDshInfo)
@@ -1090,6 +1127,44 @@ func (s *Server) handleWorktrees(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, http.StatusCreated, item)
+	case http.MethodPatch:
+		// Rename the display name of a managed worktree (issue #122 —
+		// sidebar double-click rename). Error mapping mirrors the
+		// handleInstances PATCH branch: not-found is 404, everything
+		// else (empty name, bad body) is 400.
+		var req struct {
+			ID   string `json:"id"`
+			Name string `json:"name"`
+		}
+		if err := readJSON(r.Body, &req); err != nil {
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
+		updated, err := s.worktreeMgr.UpdateName(req.ID, req.Name)
+		if err != nil {
+			if errors.Is(err, worktree.ErrWorktreeNotFound) {
+				writeErr(w, http.StatusNotFound, err)
+				return
+			}
+			// Version conflict after the retry loop exhausted (a
+			// concurrent writer bumped the shared state.json version):
+			// 409, not 400 — a legitimate rename that merely lost a race
+			// is retryable, and a client must be able to tell that from
+			// "your name was blank". Shape mirrors handleInstanceReorder's
+			// conflict response, carrying the current version so the
+			// client can resync (issue #122 review V1).
+			if errors.Is(err, store.ErrVersionConflict) {
+				st, _ := s.store.Load()
+				writeJSON(w, http.StatusConflict, map[string]any{
+					"error":   err.Error(),
+					"version": st.Version,
+				})
+				return
+			}
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, updated)
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
@@ -2192,6 +2267,87 @@ func (s *Server) requireDshInstance(id string) (store.ManagedInstance, error) {
 	return inst, nil
 }
 
+// dropScopeState wipes the recorded out-of-scope state of one instance from
+// BOTH web-UI trackers (issue #111 P3). ScopeTracker.Reset had always
+// documented "used on instance stop" and had never been called from
+// production, so the states maps only ever grew: one permanent entry per
+// instance id the reverse proxy ever served, for the life of the daemon.
+//
+// Why an entry is dead once the instance is torn down, and why wiping it
+// therefore loses nothing: the trackers are keyed by instance id, and the
+// framework never runs an id again after teardown — Manager.Restart migrates
+// onto a fresh id (Start allocates one via newID), Manager.Stop leaves the
+// record stopped with no path back to running except that Restart, and
+// Manager.Delete removes the record. The scope endpoints 404 once the record
+// is gone, and while it merely reads stopped the warning is already gone from
+// the screen: both renderers' `status === 'stopped'` branches hide the bar
+// and stop polling, each clearing its scope state by its own mechanism —
+// kinds/opencode_web.js calls an explicit _resetScopeState() beside
+// _stopScopeMonitoring(), while kinds/dsh_web.js folds the equivalent reset
+// into _stopMonitoring(), which aborts the poll and clears _scope/_scopeDir
+// itself (same effect, different machinery). Server side and client side
+// therefore agree that a stopped instance has no scope to report. A Restart is a
+// brand-new session, so it must NOT inherit the previous session's warning —
+// which is why the Restart wiring wipes the OLD id and never the new one.
+//
+// Wiring lives on the SUCCESS path of each teardown at the app layer rather
+// than inside framework.Manager: the trackers are app-level Server fields
+// the framework must not know about, Manager already drops everything it
+// owns (ring buffer, subscribers, conns, the kind's state dir through
+// cleanupKind), and wiring after the call keeps the warning intact when a
+// teardown is REFUSED (Delete on a running instance, Restart on a running or
+// unknown one) — the instance stays live, so its warning must too.
+//
+// The id is wiped raw, not TrimSpace'd: it is the same key the proxy
+// recorded from the request path (framework ids are hex, so the two forms
+// cannot differ in practice, and raw is the one that is certainly right).
+//
+// Known residue, deliberately NOT closed here: a process that dies on its own
+// never passes through any of these handlers (runLifecycle marks the record
+// terminal in the framework), so such an instance's entry survives until a
+// later teardown runs INSIDE this daemon for that id. That residue is bounded
+// by the number of records in the store, unlike the unbounded proxy-keyed
+// growth this closes; reclaiming it needs a framework→app teardown callback,
+// a wider contract change than the leak it would fix.
+//
+// The same bound covers the one door this function CANNOT reach, which also
+// states its scope: this wiring covers the IN-PROCESS teardown doors — the
+// app.Server HTTP stop/restart/delete handlers and the MCP instance_stop /
+// instance_delete verbs, all running inside the daemon against this Server.
+// The CLI's `myworktree instance stop` is a CROSS-PROCESS door: instanceCmd
+// builds its own framework.NewManager (cli.go:315) and calls mgr.Stop in a
+// separate short-lived process (cli.go:368), where there is no Server, no
+// trackers and no dropScopeState to call — structurally unreachable from
+// here, not a missed wiring. The entry it leaves behind in a live daemon is
+// the same bounded residue as a process that died on its own (one entry per
+// historical record in the store, and any later in-daemon door for that id
+// reclaims it), and delegating CLI instance teardown to the daemon's HTTP
+// API is recorded as a follow-up, the same shape as #113's startup-sweep
+// follow-up.
+func (s *Server) dropScopeState(id string) {
+	s.ocScope.Reset(id)
+	s.dshScope.Reset(id)
+}
+
+// scopeDropHook is the teardown-wipe seam (the managerStop pattern): every
+// dropScopeState call site routes through it, and a test can wrap it to
+// RECORD the set of ids a handler asked to wipe. It exists because the
+// tracker's own contents cannot see the Restart mistake this pins — the
+// fresh id Restart allocated has no recorded state yet, so wiping it is a
+// silent no-op for every Get/len assertion. Only the requested id SET
+// distinguishes "old id" from "old + fresh". The default body is production
+// verbatim, so shipping is unaffected.
+var scopeDropHook = func(s *Server, id string) { s.dropScopeState(id) }
+
+// managerStop is the framework teardown verb handleInstanceStop drives.
+// Indirected as a seam (the same pattern as monitor's readVirtualMemory) so
+// a test can force its error path: framework.Manager.Stop deliberately
+// swallows a kind's Stop error — it logs it, tears the instance down anyway
+// and returns nil — so without this seam the "a FAILED teardown keeps the
+// scope state" ordering below (F-M5) has no reachable failure to drive, and
+// the wiring's error branch would be untestable rather than proven.
+var managerStop = func(m *framework.Manager, id string) error { return m.Stop(id) }
+
 func (s *Server) handleInstanceStop(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -2204,10 +2360,16 @@ func (s *Server) handleInstanceStop(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
-	if err := s.instanceMgr.Stop(req.ID); err != nil {
+	// F-M5: the wipe sits AFTER the Manager call, so a Stop that FAILED
+	// (transport error, kind refusal, anything the framework starts
+	// returning) returns before dropScopeState and the live instance keeps
+	// its warning. Pinned by the Stop-failure subtest inside
+	// TestTeardownRefusalKeepsScopeState.
+	if err := managerStop(s.instanceMgr, req.ID); err != nil {
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
+	scopeDropHook(s, req.ID)
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
@@ -2228,6 +2390,9 @@ func (s *Server) handleInstanceRestart(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
+	// Old id only: Restart allocated a fresh one (item.ID) and that session
+	// has not been observed doing anything yet. See dropScopeState.
+	scopeDropHook(s, req.ID)
 	writeJSON(w, http.StatusCreated, s.instanceView(item))
 }
 
@@ -2247,6 +2412,11 @@ func (s *Server) handleInstanceDelete(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
+	// Delete is also the backstop for the crash residue named in
+	// dropScopeState: a process that died on its own is already in a terminal
+	// state, so Delete accepts it and this is the last point where its
+	// recorded scope can be reclaimed.
+	scopeDropHook(s, req.ID)
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
@@ -4329,7 +4499,58 @@ func (s *Server) handleInstanceStats(w http.ResponseWriter, r *http.Request) {
 	connTypes := s.instanceMgr.AllConnectionTypes()
 	stats := s.monitor.Collect(flat, connTypes)
 
+	// Cache coherence (issue #111 P2): this response is FRESH — PSI,
+	// available RAM, daemon RSS, every subtree — computed per request. Its
+	// system numbers are also published to the background sampler's cache
+	// so the status bar's cached view never contradicts what the modal
+	// just showed (the modal's 2s poll is fresher than the ≤10s tick;
+	// publishing keeps the cache at least as fresh). Instance-level
+	// subtree alerts are NOT published — they belong to this response and
+	// would go stale the moment the modal closes; GET /api/monitor/alerts
+	// documents the cached side of the same rule.
+	//
+	// F-daemon-twice: Collect already sampled the daemon's RSS for THIS
+	// request (stats.Global.DaemonMemoryBytes) — pass it through instead of
+	// letting the cache refresh pay a second /proc read of the same number.
+	if s.alertSampler != nil {
+		s.alertSampler.PublishSystem(stats.System, stats.Global.DaemonMemoryBytes)
+	}
+
 	writeJSON(w, http.StatusOK, stats)
+}
+
+// handleMonitorAlerts serves the lightweight, cached alert channel that the
+// status bar polls every ~10s (issue #111 P2).
+//
+// Freshness contract, stated once and honored by both endpoints:
+//   - everything in THIS response is cached — sampled by the background
+//     loop at most alertSampleEvery ago, and no older than the last full
+//     stats poll (the modal's 2s poll republishes through PublishSystem);
+//   - everything in GET /api/instances/stats is live, per-request.
+//
+// Scope: system-level signals only (PSI / available RAM / daemon RSS).
+// Subtree and child-count alerts need a tree walk, which this loop
+// deliberately never does — those alerts appear in the full response while
+// the modal is open. The status bar shows fewer lights than the modal by
+// design, not by oversight.
+//
+// A cold cache (daemon just started, first tick not done — or the sampler
+// never started, as in hand-built test servers) answers an EMPTY alert set
+// with sampled_at_ms=0; the UI reads zero as "no data yet" and shows no
+// alerts rather than dressing up silence as an all-clear.
+func (s *Server) handleMonitorAlerts(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var snap monitor.AlertsSnapshot
+	if s.alertSampler != nil {
+		snap, _ = s.alertSampler.Snapshot()
+	}
+	if snap.Alerts == nil {
+		snap.Alerts = []monitor.Alert{}
+	}
+	writeJSON(w, http.StatusOK, snap)
 }
 
 func (s *Server) handleMCPTools(w http.ResponseWriter, r *http.Request) {
@@ -4486,6 +4707,12 @@ func (s *Server) handleMCPCall(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusBadRequest, err)
 			return
 		}
+		// Same teardown as POST /api/instances/stop — the second IN-DAEMON
+		// door to the same Manager.Stop, so it wipes the scope state too
+		// (leaving it here would keep the leak alive for every client that
+		// stops over MCP; the CLI's instance stop is a cross-process door
+		// that structurally cannot reach this — see dropScopeState).
+		scopeDropHook(s, args.ID)
 		writeJSON(w, http.StatusOK, map[string]any{"result": map[string]string{"status": "ok"}})
 	case "instance_input":
 		var args struct {
@@ -4513,6 +4740,7 @@ func (s *Server) handleMCPCall(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusBadRequest, err)
 			return
 		}
+		scopeDropHook(s, args.ID) // see instance_stop above
 		writeJSON(w, http.StatusOK, map[string]any{"result": map[string]string{"status": "ok"}})
 	case "instance_log_tail":
 		var args struct {
@@ -4830,19 +5058,120 @@ func isLoopbackRequest(r *http.Request) bool {
 	return isLoopbackHost(clientIP(r.RemoteAddr))
 }
 
+// Rate-limit knobs for the non-loopback auth path.
+//
+// authFailWindow / authFailLimit are the sliding window itself, named so the
+// eviction code below can talk about the same window the limiter uses instead
+// of re-spelling time.Minute and 20. The values are the ones this function has
+// always used — naming them changed nothing.
+const (
+	authFailWindow = time.Minute
+	authFailLimit  = 20
+
+	// authFailsSweepEvery is how long a CLOSED window may linger in authFails
+	// before a sweep removes it. The map is keyed by client IP and an entry
+	// was only ever removed by that same IP coming back (which resets the
+	// window) or by a successful login (resetAuthAttempts), so an IP that
+	// failed once and never returned left its entry for the life of the
+	// daemon — an unbounded map in a long-lived process.
+	//
+	// Sweeping is piggybacked on the auth path instead of running in a
+	// dedicated goroutine, and the trade-off is stated whole: a janitor
+	// goroutine needs its own shutdown signal and would tick forever on a
+	// daemon whose map is empty (the normal case — loopback clients never
+	// reach this path, and every successful login deletes its own key), while
+	// a piggybacked sweep costs one time comparison per attempt and nothing
+	// at all when there is no auth traffic. The honest price of that choice:
+	// with NO traffic there is no sweep, so whatever the map held when
+	// traffic stopped is held until the next attempt. It cannot grow there,
+	// because nothing is arriving to grow it.
+	authFailsSweepEvery = time.Minute
+
+	// authFailsSweepBusy shortens that interval while the map is STILL over
+	// authFailsSoftCap after a sweep, i.e. while distinct failing IPs arrive
+	// faster than one window per minute. What it actually buys, stated
+	// exactly: the map's steady-state size is set by the 60 s eviction
+	// window (an entry lives authFailWindow regardless of cadence, so the
+	// map is bounded by the DISTINCT IPs that failed inside the last 60 s,
+	// never by how often we sweep). The busy cadence is a 12x sweep
+	// frequency that (a) shortens the post-flood drain tail — once new IPs
+	// stop arriving, the map empties after one window (~1m5s) instead of
+	// waiting out the minute-granularity janitor (~2min) — and (b) walks
+	// more often while over the soft cap. It is NOT a bound on size: a
+	// sustained flood of NEW distinct IPs simply keeps the busy cadence
+	// engaged, and the map keeps holding every live window. The soft cap is
+	// the trigger for that trade, never a truncation point.
+	authFailsSweepBusy = 5 * time.Second
+
+	// authFailsSoftCap is the size above which the cadence tightens to
+	// authFailsSweepBusy. It is a trigger, never a truncation: entries leave
+	// only because their window closed (see sweepExpiredAuthFailsLocked), so a
+	// flood of live entries is allowed to sit over the cap rather than have a
+	// block lifted to pay for shrinking the map.
+	authFailsSoftCap = 1024
+)
+
+// allowAuthAttempt is the sliding-window limiter for failed auth attempts:
+// 20 per authFailWindow per IP.
+//
+// The sweep runs AFTER this IP's entry is written, which is what keeps it
+// invisible to the caller — the entry just written has a WindowEnd in the
+// future, so it can never be a victim of the sweep it triggered.
 func (s *Server) allowAuthAttempt(ip string) bool {
 	s.authMu.Lock()
 	defer s.authMu.Unlock()
 	now := time.Now()
 	v := s.authFails[ip]
 	if now.After(v.WindowEnd) {
-		v = authFail{Count: 0, WindowEnd: now.Add(time.Minute)}
+		v = authFail{Count: 0, WindowEnd: now.Add(authFailWindow)}
 	}
 	v.Count++
 	s.authFails[ip] = v
-	return v.Count <= 20
+	if !now.Before(s.authFailsNextSweep) {
+		s.sweepExpiredAuthFailsLocked(now)
+	}
+	return v.Count <= authFailLimit
 }
 
+// sweepExpiredAuthFailsLocked evicts entries whose window has closed and
+// schedules the next sweep (busy cadence while the map is still over its soft
+// cap, normal cadence otherwise). The caller holds authMu: the sweep is not a
+// second writer but the same critical section, so no new lock and no new lock
+// ordering appears anywhere on this path.
+//
+// WHY DELETION CANNOT CHANGE A VERDICT — the property the design rests on: an
+// entry is removed only when now.After(v.WindowEnd), the EXACT comparison the
+// read path uses to decide a window is over. An evicted key and a surviving
+// expired key therefore answer the next attempt identically: present-but-expired
+// hits that same branch, absent reads the zero value whose zero WindowEnd is
+// also in the past, and both come back as Count 1. Eviction is a no-op on
+// behaviour, always, and the 20-per-window-per-IP answer is untouched. That is
+// also why the predicate is now.After and not !now.Before — at the exact
+// instant a window ends the limiter KEEPS counting, and an eviction disagreeing
+// by one nanosecond would be a real, if tiny, semantic change.
+//
+// A blocked IP is never freed early: at Count 20 its WindowEnd is in the
+// future, so the predicate stays false until the window closes, which is the
+// moment the limiter releases it anyway.
+func (s *Server) sweepExpiredAuthFailsLocked(now time.Time) {
+	for ip, v := range s.authFails {
+		if now.After(v.WindowEnd) {
+			delete(s.authFails, ip)
+		}
+	}
+	// Deleting while ranging a map is specified behaviour in Go (an entry
+	// removed before it is reached is simply never produced), so this needs no
+	// staging buffer of keys to delete afterwards.
+	s.authFailsNextSweep = now.Add(authFailsSweepEvery)
+	if len(s.authFails) > authFailsSoftCap {
+		s.authFailsNextSweep = now.Add(authFailsSweepBusy)
+	}
+}
+
+// resetAuthAttempts clears an IP's counter on a successful login. Deliberately
+// NOT extended to sweep: this runs on every authenticated non-loopback
+// request, so sweeping here would make the cadence of a full map walk a
+// function of login volume, and allowAuthAttempt already sweeps on this clock.
 func (s *Server) resetAuthAttempts(ip string) {
 	s.authMu.Lock()
 	defer s.authMu.Unlock()

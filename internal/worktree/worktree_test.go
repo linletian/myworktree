@@ -1,8 +1,13 @@
 package worktree
 
 import (
+	"errors"
+	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+
+	"myworktree/internal/store"
 )
 
 func TestParseBranchSpec(t *testing.T) {
@@ -152,5 +157,175 @@ func TestCapDirtyPorcelain(t *testing.T) {
 	// Two over: plural.
 	if got := capDirtyPorcelain(make(maxDirtyPorcelainLines + 2)); !strings.HasSuffix(got, "… (2 more lines truncated)") {
 		t.Fatalf("2-over truncation marker should be plural, got suffix %q", got[len(got)-40:])
+	}
+}
+
+// newRenameTestStore seeds a temp state file with one managed worktree so
+// UpdateName's store behaviour can be pinned without a git repo (issue #122).
+func newRenameTestStore(t *testing.T) (Manager, store.FileStore) {
+	t.Helper()
+	fs := store.FileStore{Path: filepath.Join(t.TempDir(), "state.json")}
+	seed := store.State{
+		Worktrees: []store.ManagedWorktree{
+			{ID: "wt1", Name: "old", Path: "/tmp/x", Branch: "b", BaseRef: "main", CreatedAt: "2020-01-01T00:00:00Z"},
+		},
+	}
+	if err := fs.Save(seed); err != nil {
+		t.Fatalf("seed state: %v", err)
+	}
+	return Manager{Store: fs}, fs
+}
+
+// TestUpdateNameTrimsAndPersists pins the happy path (issue #122): the
+// incoming name is trimmed, only Name changes, and the update survives a
+// Load round-trip.
+func TestUpdateNameTrimsAndPersists(t *testing.T) {
+	m, fs := newRenameTestStore(t)
+
+	updated, err := m.UpdateName("wt1", "  new name  ")
+	if err != nil {
+		t.Fatalf("UpdateName failed: %v", err)
+	}
+	if updated.Name != "new name" {
+		t.Fatalf("returned Name = %q, want the trimmed %q", updated.Name, "new name")
+	}
+	// Only the display name moves; every git-facing field is untouched.
+	if updated.ID != "wt1" || updated.Path != "/tmp/x" || updated.Branch != "b" || updated.BaseRef != "main" || updated.CreatedAt != "2020-01-01T00:00:00Z" {
+		t.Fatalf("non-name fields changed: %#v", updated)
+	}
+
+	st, err := fs.Load()
+	if err != nil {
+		t.Fatalf("load state: %v", err)
+	}
+	if len(st.Worktrees) != 1 {
+		t.Fatalf("worktree count = %d, want 1", len(st.Worktrees))
+	}
+	persisted := st.Worktrees[0]
+	if persisted.Name != "new name" || persisted.ID != "wt1" || persisted.Path != "/tmp/x" || persisted.Branch != "b" || persisted.BaseRef != "main" || persisted.CreatedAt != "2020-01-01T00:00:00Z" {
+		t.Fatalf("persisted record drifted from the rename: %#v", persisted)
+	}
+}
+
+// TestUpdateNameBumpsVersion pins the persistence path (issue #122 review
+// A-F1): a rename must go through SaveWithVersion, which increments Version.
+// A plain Save (what this package's Delete does) leaves Version flat, so a
+// flat version would mean the cross-record lost-write window was re-opened.
+// Two renames in a row also prove the loop reloads the bumped version.
+func TestUpdateNameBumpsVersion(t *testing.T) {
+	m, fs := newRenameTestStore(t)
+
+	before, err := fs.Load()
+	if err != nil {
+		t.Fatalf("load before: %v", err)
+	}
+	if _, err := m.UpdateName("wt1", "first"); err != nil {
+		t.Fatalf("first UpdateName failed: %v", err)
+	}
+	after, err := fs.Load()
+	if err != nil {
+		t.Fatalf("load after: %v", err)
+	}
+	if after.Version != before.Version+1 {
+		t.Fatalf("Version = %d, want %d — a plain Save would leave it flat", after.Version, before.Version+1)
+	}
+
+	// A second rename must succeed off the reloaded (bumped) version.
+	if _, err := m.UpdateName("wt1", "second"); err != nil {
+		t.Fatalf("second UpdateName failed: %v", err)
+	}
+	after2, err := fs.Load()
+	if err != nil {
+		t.Fatalf("load after second: %v", err)
+	}
+	if after2.Version != after.Version+1 || after2.Worktrees[0].Name != "second" {
+		t.Fatalf("second rename state = version %d name %q, want version %d name %q",
+			after2.Version, after2.Worktrees[0].Name, after.Version+1, "second")
+	}
+}
+
+// TestUpdateNameRejectsEmptyAndUnknown pins the input validation and the
+// not-found sentinel (issue #122): blank id/name are rejected before any
+// write — with the EXACT wording decision B copied verbatim from
+// framework/methods.go, so deleting a validation branch cannot silently
+// regress the API contract (a dropped id check would fall through to the
+// not-found path — still an error, but 404 instead of the contractual 400).
+// An unknown id wraps ErrWorktreeNotFound so errors.Is can see it.
+func TestUpdateNameRejectsEmptyAndUnknown(t *testing.T) {
+	m, fs := newRenameTestStore(t)
+
+	if _, err := m.UpdateName("wt1", "   "); err == nil || err.Error() != "name cannot be empty" {
+		t.Fatalf("whitespace-only name: err = %v, want exactly %q", err, "name cannot be empty")
+	}
+	if _, err := m.UpdateName("   ", "valid"); err == nil || err.Error() != "id is required" {
+		t.Fatalf("whitespace-only id: err = %v, want exactly %q", err, "id is required")
+	}
+
+	_, err := m.UpdateName("does-not-exist", "x")
+	if !errors.Is(err, ErrWorktreeNotFound) {
+		t.Fatalf("unknown id err = %v, want it to wrap ErrWorktreeNotFound", err)
+	}
+
+	// None of the rejected calls touched the store.
+	st, loadErr := fs.Load()
+	if loadErr != nil {
+		t.Fatalf("load state: %v", loadErr)
+	}
+	if len(st.Worktrees) != 1 || st.Worktrees[0].Name != "old" {
+		t.Fatalf("rejected renames must not mutate the store, got %#v", st.Worktrees)
+	}
+}
+
+// TestUpdateNameConcurrentRenames drives the SaveWithVersion retry loop for
+// real (issue #122 review V3): two goroutines released from a shared barrier
+// rename the SAME worktree, so their Load→modify→SaveWithVersion windows
+// overlap with high probability and the loser of each collision gets the
+// store.ErrVersionConflict that makes the loop reload and retry. The
+// assertions hold under EVERY interleaving, so the case cannot flake: both
+// renames must succeed (a swallowed conflict would surface as an error or a
+// lost Version bump — Version lands at exactly base+2 only if BOTH saves
+// went through their version-checked path), and the final name is one of the
+// two — which one depends on the race, so it is deliberately not pinned.
+// Honesty note: deterministically FORCING a single conflict would need a
+// seam in production code (Manager.Store is a concrete struct field with no
+// hook to interleave a competing write between Load and Save); this case
+// makes the contended path reachable and pins every outcome, but does not
+// assert that a retry definitely happened.
+func TestUpdateNameConcurrentRenames(t *testing.T) {
+	m, fs := newRenameTestStore(t)
+	base, err := fs.Load()
+	if err != nil {
+		t.Fatalf("load base: %v", err)
+	}
+
+	names := []string{"name-a", "name-b"}
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	errs := make([]error, len(names))
+	for i, name := range names {
+		wg.Add(1)
+		go func(i int, name string) {
+			defer wg.Done()
+			<-start
+			_, errs[i] = m.UpdateName("wt1", name)
+		}(i, name)
+	}
+	close(start)
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent UpdateName(%q) failed: %v", names[i], err)
+		}
+	}
+	st, err := fs.Load()
+	if err != nil {
+		t.Fatalf("load after: %v", err)
+	}
+	if st.Version != base.Version+2 {
+		t.Fatalf("Version = %d, want base+2 (%d) — both saves must pass the version check, retrying off the loser's conflict if needed", st.Version, base.Version+2)
+	}
+	if st.Worktrees[0].Name != "name-a" && st.Worktrees[0].Name != "name-b" {
+		t.Fatalf("final name = %q, want one of %v", st.Worktrees[0].Name, names)
 	}
 }

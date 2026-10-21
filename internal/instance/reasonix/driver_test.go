@@ -1,9 +1,11 @@
 package reasonix
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"os"
@@ -66,9 +68,8 @@ func TestStartStripsReasonixHome(t *testing.T) {
 	t.Setenv("REASONIX_HOME", "/fake/home")
 	t.Setenv("REASONIX_STATE_HOME", "/fake/state")
 
-	dataDir := t.TempDir()
 	worktree := t.TempDir()
-	d := &Driver{DataDir: dataDir, ReasonixBin: fakeServeBin(t)}
+	d := newFakeServeDriver(t)
 	id := "inst1"
 
 	info, err := d.Start(StartInput{InstanceID: id, WorktreePath: worktree})
@@ -120,9 +121,8 @@ func TestStartStripsReasonixHome(t *testing.T) {
 // token and pid files, and they do not interfere. (Real session-lease
 // serialization lives inside reasonix itself; this guards the driver layer.)
 func TestConcurrentInstancesSameCwd(t *testing.T) {
-	dataDir := t.TempDir()
 	worktree := t.TempDir()
-	d := &Driver{DataDir: dataDir, ReasonixBin: fakeServeBin(t)}
+	d := newFakeServeDriver(t)
 
 	ids := []string{"inst-a", "inst-b"}
 	infos := make(map[string]Info, len(ids))
@@ -315,10 +315,215 @@ srv.serve_forever()
 	return bin
 }
 
-func TestStartStopFakeServe(t *testing.T) {
-	dataDir := t.TempDir()
+// newFakeServeDriver builds a Driver backed by the fake serve fixture and
+// registers a t.Cleanup backstop (issue #113): the fake serve runs until
+// explicitly killed and `go test` exit does not take it down, so every
+// instance the driver still tracks (Driver.pids — no extra test-side
+// bookkeeping needed) is Stopped when the test ends. Tests may still Stop
+// explicitly (Stop is idempotent); forgetting to can no longer leak a
+// ~16MB python fixture.
+func newFakeServeDriver(t *testing.T) *Driver {
+	t.Helper()
+	d := &Driver{DataDir: t.TempDir(), ReasonixBin: fakeServeBin(t)}
+	t.Cleanup(func() {
+		for _, id := range d.trackedInstanceIDs() {
+			_ = d.Stop(id)
+		}
+	})
+	return d
+}
+
+// TestStopFallsBackToTrackedPid covers issue #113: Stop must kill the serve
+// process even when the pid file is gone — here the state dir is wiped by
+// Cleanup before Stop runs (the shape of the old-id teardown in
+// TestDriverAddrCacheRefresh). Without the driver's in-memory pid fallback
+// Stop reports "never started" and the process is orphaned forever. The
+// assertion polls the captured pid, not Health: Health reads the pid file
+// Cleanup just removed, so it would pass vacuously.
+func TestStopFallsBackToTrackedPid(t *testing.T) {
+	d := newFakeServeDriver(t)
+	id := "inst-no-pidfile"
+	info, err := d.Start(StartInput{InstanceID: id, WorktreePath: t.TempDir()})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if _, ok, err := d.Health(id); err != nil || !ok {
+		t.Fatalf("Health after Start: ok=%v err=%v", ok, err)
+	}
+	if err := d.Cleanup(id); err != nil {
+		t.Fatalf("Cleanup: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(d.dir(id), "pid")); !os.IsNotExist(err) {
+		t.Fatalf("pid file should be gone after Cleanup: %v", err)
+	}
+	if err := d.Stop(id); err != nil {
+		t.Fatalf("Stop after pid file removed: %v", err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for processAlive(info.PID) {
+		if time.Now().After(deadline) {
+			t.Fatalf("serve process %d still alive after Stop with pid file removed", info.PID)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// fakePendingServeBin answers the version probe, then hangs WITHOUT writing
+// either the port file or the pid file — the shape of a serve that has been
+// spawned but has not reached readiness. It exists to make Start's readiness
+// window observable: during that window the driver's in-memory pid table is
+// the ONLY place the process's pid exists (issue #113, the window closed by
+// tracking at cmd.Start).
+func fakePendingServeBin(t *testing.T) string {
+	t.Helper()
+	bin := filepath.Join(t.TempDir(), "fake-pending-serve.py")
+	script := `#!/usr/bin/env python3
+import sys, time
+if sys.argv[1:2] == ["--version"]:
+    print("reasonix v1.22.0")
+    sys.exit(0)
+time.sleep(3600)
+`
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return bin
+}
+
+// TestStopDuringPendingStartKillsTrackedPid pins the window R4 closes
+// (issue #113): the pid is registered at cmd.Start, so a Stop that lands
+// while Start is still waiting for readiness kills the process instead of
+// answering "never started". The fixture writes no pid file at all, so
+// without the early registration Stop would find nothing on disk, nothing in
+// memory, return nil, and Start would keep blocking for the full 15 s
+// readiness timeout over a process nobody can reach any more.
+func TestStopDuringPendingStartKillsTrackedPid(t *testing.T) {
+	d := &Driver{DataDir: t.TempDir(), ReasonixBin: fakePendingServeBin(t)}
+	t.Cleanup(func() {
+		for _, id := range d.trackedInstanceIDs() {
+			_ = d.Stop(id)
+		}
+	})
+	const id = "rx-pending"
 	worktree := t.TempDir()
-	d := &Driver{DataDir: dataDir, ReasonixBin: fakeServeBin(t)}
+
+	started := make(chan error, 1)
+	go func() {
+		_, err := d.Start(StartInput{InstanceID: id, WorktreePath: worktree})
+		started <- err
+	}()
+
+	// The registration must land while Start is still in flight — poll the
+	// table, not the filesystem (there is no pid file to read by design).
+	pid := 0
+	deadline := time.Now().Add(5 * time.Second)
+	for pid <= 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("pid never registered during the readiness window (tracked only after waitReady?)")
+		}
+		time.Sleep(20 * time.Millisecond)
+		pid = d.trackedPID(id)
+	}
+
+	if err := d.Stop(id); err != nil {
+		t.Fatalf("Stop during readiness window: %v", err)
+	}
+	// Start must come back (its process died early once Stop killed the
+	// group) with an error — never ready — and must drop the registration.
+	select {
+	case err := <-started:
+		if err == nil {
+			t.Fatal("Start succeeded without ever writing a port file")
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatal("Start still blocked long after its process was stopped")
+	}
+	if got := d.trackedPID(id); got != 0 {
+		t.Fatalf("pid %d still tracked after the process was stopped", got)
+	}
+}
+
+// TestFailedStartDropsTrackedPid pins the other half of R4: the readiness
+// failure path untracks, so a Start that abandoned its process leaves no
+// dirty entry behind. The fixture exits immediately, so waitReady fails fast.
+func TestFailedStartDropsTrackedPid(t *testing.T) {
+	bin := filepath.Join(t.TempDir(), "fake-exit-serve.py")
+	script := `#!/usr/bin/env python3
+import sys
+if sys.argv[1:2] == ["--version"]:
+    print("reasonix v1.22.0")
+    sys.exit(0)
+sys.exit(3)
+`
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	d := &Driver{DataDir: t.TempDir(), ReasonixBin: bin}
+	const id = "rx-early-exit"
+
+	if _, err := d.Start(StartInput{InstanceID: id, WorktreePath: t.TempDir()}); err == nil {
+		t.Fatal("Start should fail when serve exits before it is ready")
+	}
+	if ids := d.trackedInstanceIDs(); len(ids) != 0 {
+		t.Fatalf("failed Start left %v tracked; the readiness failure path must untrack", ids)
+	}
+}
+
+// TestCleanupWarnsWhenStopWasSkipped pins R3 (issue #113): the documented
+// "Stop, then Cleanup" order is now observable. Cleanup with a live tracked
+// pid logs the call-order warning and still does NOT kill; Cleanup after a
+// successful Stop stays silent. Round 1 also walks the recovery: the Stop
+// that follows the warned Cleanup still reaches the process through the
+// in-memory pid, because Cleanup kept the entry.
+func TestCleanupWarnsWhenStopWasSkipped(t *testing.T) {
+	var buf bytes.Buffer
+	d := &Driver{DataDir: t.TempDir(), ReasonixBin: fakeServeBin(t), Logger: log.New(&buf, "", 0)}
+	t.Cleanup(func() {
+		for _, id := range d.trackedInstanceIDs() {
+			_ = d.Stop(id)
+		}
+	})
+	const id = "rx-order"
+	worktree := t.TempDir()
+
+	info, err := d.Start(StartInput{InstanceID: id, WorktreePath: worktree})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if err := d.Cleanup(id); err != nil {
+		t.Fatalf("Cleanup before Stop: %v", err)
+	}
+	if !strings.Contains(buf.String(), "cleanup before stop") {
+		t.Fatalf("Cleanup with a live tracked pid must warn about the call order, got: %q", buf.String())
+	}
+	if !processAlive(info.PID) {
+		t.Fatalf("Cleanup must NOT kill the serve (issue #113 keeps it side-effect-free); pid %d died", info.PID)
+	}
+	// Recovery: the mis-ordered caller's Stop still lands, via memory.
+	if err := d.Stop(id); err != nil {
+		t.Fatalf("Stop after the warned Cleanup: %v", err)
+	}
+
+	// The correct order stays silent — otherwise the warning is Cleanup noise
+	// and carries no signal.
+	buf.Reset()
+	if _, err := d.Start(StartInput{InstanceID: id, WorktreePath: worktree}); err != nil {
+		t.Fatalf("Start (round 2): %v", err)
+	}
+	if err := d.Stop(id); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if err := d.Cleanup(id); err != nil {
+		t.Fatalf("Cleanup after Stop: %v", err)
+	}
+	if strings.Contains(buf.String(), "cleanup before stop") {
+		t.Fatalf("Cleanup after a successful Stop must not warn, got: %q", buf.String())
+	}
+}
+
+func TestStartStopFakeServe(t *testing.T) {
+	worktree := t.TempDir()
+	d := newFakeServeDriver(t)
 	id := "inst1"
 
 	info, err := d.Start(StartInput{InstanceID: id, WorktreePath: worktree})
@@ -450,9 +655,8 @@ func TestDriverVersionGateDevBuild(t *testing.T) {
 
 // cache after Start (no file reads), and Stop/Cleanup invalidate it.
 func TestDriverAddrCache(t *testing.T) {
-	dataDir := t.TempDir()
 	worktree := t.TempDir()
-	d := &Driver{DataDir: dataDir, ReasonixBin: fakeServeBin(t)}
+	d := newFakeServeDriver(t)
 	id := "inst1"
 	info, err := d.Start(StartInput{InstanceID: id, WorktreePath: worktree})
 	if err != nil {
@@ -494,15 +698,20 @@ func TestDriverAddrCache(t *testing.T) {
 // fresh cache entry with the new port/token, and the stale entry is dropped
 // with Cleanup.
 func TestDriverAddrCacheRefresh(t *testing.T) {
-	dataDir := t.TempDir()
 	worktree := t.TempDir()
-	d := &Driver{DataDir: dataDir, ReasonixBin: fakeServeBin(t)}
+	d := newFakeServeDriver(t)
 
 	oldID := "old"
 	oldInfo, err := d.Start(StartInput{InstanceID: oldID, WorktreePath: worktree})
 	if err != nil {
 		t.Fatalf("Start old: %v", err)
 	}
+	// The deferred Stop runs AFTER the Cleanup below removes oldID's pid
+	// file, and still kills the old serve through the driver's in-memory
+	// pid fallback (issue #113). Stopping oldID explicitly before Cleanup
+	// instead would drop the addr cache via Stop and make the "Addr old
+	// after Cleanup must fail" assertion below vacuous — Cleanup is the
+	// cache-dropping event under test — so the defer order stays as-is.
 	defer func() { _ = d.Stop(oldID) }()
 	if _, err := d.Addr(oldID); err != nil {
 		t.Fatalf("Addr old: %v", err)
@@ -541,7 +750,7 @@ func TestDriverAddrCacheRefresh(t *testing.T) {
 // bound across restarts (each restart allocates a fresh id; the old entry
 // would otherwise live forever).
 func TestCleanupDropsStartLock(t *testing.T) {
-	d := &Driver{DataDir: t.TempDir(), ReasonixBin: fakeServeBin(t)}
+	d := newFakeServeDriver(t)
 	unlock := d.lockStart("rx-drop")
 	unlock()
 	if _, ok := d.starts["rx-drop"]; !ok {
@@ -561,8 +770,7 @@ func TestCleanupDropsStartLock(t *testing.T) {
 }
 
 func TestDriverConcurrentStart(t *testing.T) {
-	dataDir := t.TempDir()
-	d := &Driver{DataDir: dataDir, ReasonixBin: fakeServeBin(t)}
+	d := newFakeServeDriver(t)
 	id := "rx-conc"
 	worktree := t.TempDir()
 
@@ -605,7 +813,7 @@ func TestDriverConcurrentStart(t *testing.T) {
 // TestDriverEnvInjection verifies StartInput.Env reaches the serve process
 // (DEFERRED §3: e.g. HTTP_PROXY injection).
 func TestDriverEnvInjection(t *testing.T) {
-	d := &Driver{DataDir: t.TempDir(), ReasonixBin: fakeServeBin(t)}
+	d := newFakeServeDriver(t)
 	info, err := d.Start(StartInput{
 		InstanceID:   "inst1",
 		WorktreePath: t.TempDir(),
@@ -631,7 +839,7 @@ func TestDriverEnvInjection(t *testing.T) {
 // error aborts Start without launching the process.
 func TestDriverPreStart(t *testing.T) {
 	ran := false
-	d := &Driver{DataDir: t.TempDir(), ReasonixBin: fakeServeBin(t)}
+	d := newFakeServeDriver(t)
 	info, err := d.Start(StartInput{
 		InstanceID:   "inst1",
 		WorktreePath: t.TempDir(),
@@ -649,8 +857,8 @@ func TestDriverPreStart(t *testing.T) {
 	}
 
 	// A failing preStart aborts Start; no serve process is launched, so no
-	// pid file appears.
-	bad := &Driver{DataDir: t.TempDir(), ReasonixBin: fakeServeBin(t)}
+	// pid file appears (the cleanup backstop then has nothing to stop).
+	bad := newFakeServeDriver(t)
 	if _, err := bad.Start(StartInput{
 		InstanceID:   "inst2",
 		WorktreePath: t.TempDir(),

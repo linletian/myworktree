@@ -1139,6 +1139,25 @@
             border-color: var(--active-color);
         }
 
+        /* Inline rename input on a sidebar worktree row (issue #122):
+           same variable palette as .tab-rename-input above, but fluid —
+           .wt-name is a block of whatever width the sidebar gives it, so
+           the input fills the cell instead of a hard-coded pixel width. */
+        .wt-rename-input {
+            background: var(--main-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 3px;
+            padding: 1px 4px;
+            font: inherit;
+            color: inherit;
+            width: 100%;
+            box-sizing: border-box;
+            outline: none;
+        }
+        .wt-rename-input:focus {
+            border-color: var(--active-color);
+        }
+
         .tab-status {
             width: 8px;
             height: 8px;
@@ -1340,6 +1359,30 @@
             color: var(--text-primary);
         }
         }
+        /* Alert highlight states (issue #111 P2): the bar's transport text
+           color stays exactly as it was (the tint is scoped to the badge
+           below, never the whole bar); the bar background and the badge
+           text carry the warning. Amber = a threshold crossed ("look now"),
+           red = oomd's own kill line mirrored (PSI>=50) — the colors are
+           the contract's, never invented per-view. (ARB-F12: an earlier cut
+           set `color` on #status-bar itself, which cascaded to
+           #status-bar-transport; the color now lives only on the badge.) */
+        #status-bar.status-alert-amber {
+            background: rgba(255, 179, 0, 0.30);
+        }
+        #status-bar.status-alert-red {
+            background: rgba(255, 68, 68, 0.34);
+        }
+        #status-bar.status-alert-amber #status-bar-alerts {
+            color: #ffd479;
+        }
+        #status-bar.status-alert-red #status-bar-alerts {
+            color: #ffb0b0;
+        }
+        #status-bar-alerts {
+            font-weight: 600;
+            margin-right: 6px;
+        }
 
         /* Resource Monitor Modal */
         #modal-monitor {
@@ -1424,6 +1467,55 @@
         #modal-monitor .conn-ws { color: var(--additions); }
         #modal-monitor .conn-sse { color: var(--conn-sse); }
         #modal-monitor .conn-none { color: var(--status-stopped); }
+        /* Alerts strip + subtree detail (issue #111 P2) */
+        #modal-monitor .monitor-alerts { display: flex; flex-direction: column; gap: 6px; }
+        #modal-monitor .monitor-alerts:empty { display: none; }
+        #modal-monitor .monitor-alert {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 4px 10px;
+            align-items: baseline;
+            padding: 6px 10px;
+            border-radius: 6px;
+            border: 1px solid var(--border-color);
+            font-size: 12px;
+        }
+        #modal-monitor .monitor-alert.alert-amber { background: rgba(255, 179, 0, 0.12); }
+        #modal-monitor .monitor-alert.alert-red { background: rgba(255, 68, 68, 0.14); }
+        #modal-monitor .monitor-alert-signal { font-weight: 600; color: var(--text-primary); }
+        #modal-monitor .monitor-alert-limits { color: var(--text-secondary); }
+        #modal-monitor .monitor-alert-advice { flex-basis: 100%; color: var(--text-secondary); font-size: 11px; }
+        #modal-monitor .subtree-note { font-size: 11px; color: var(--text-secondary); margin-top: 2px; }
+        #modal-monitor .subtree-toggle {
+            background: none;
+            border: 1px solid var(--border-color);
+            border-radius: 4px;
+            color: var(--text-secondary);
+            font-size: 10px;
+            cursor: pointer;
+            padding: 0 5px;
+            margin-right: 5px;
+        }
+        #modal-monitor .subtree-toggle svg { transition: transform 0.2s; }
+        #modal-monitor .subtree-toggle.open svg { transform: rotate(90deg); }
+        #modal-monitor .subtree-detail-row td { background: var(--hover-bg); }
+        #modal-monitor .subtree-table { width: 100%; font-size: 11px; }
+        #modal-monitor .subtree-table td { padding: 2px 8px; border-bottom: none; }
+        #modal-monitor .subtree-more, #modal-monitor .subtree-trunc {
+            font-size: 11px;
+            color: var(--text-secondary);
+            padding-top: 2px;
+        }
+        /* Subtree-empty note (ARB-subtree-empty-CSS): the in-expand status
+           messages ("No live child processes" / "Tree unavailable …") carry
+           the same sibling-note sizing + secondary color, italicized as a
+           hint rather than a measurement. */
+        #modal-monitor .subtree-empty {
+            font-size: 11px;
+            color: var(--text-secondary);
+            padding-top: 2px;
+            font-style: italic;
+        }
         #modal-monitor .empty-state {
             text-align: center;
             color: var(--text-secondary);
@@ -2150,7 +2242,7 @@
                         <svg viewBox="0 0 24 24"><path d="M12 5v14"></path><path d="M19 12l-7 7-7-7"></path></svg>
                     </button>
                 </div>
-                <div id="status-bar">Transport: idle</div>
+                <div id="status-bar"><span id="status-bar-alerts" hidden></span><span id="status-bar-transport">Transport: idle</span></div>
             </div>
         </div>
     </div>
@@ -2433,6 +2525,11 @@
                 </svg>
             </button>
         </div>
+        <!-- Alerts strip (issue #111 P2): signal / threshold / current /
+             advice per active warning; advice lines point at
+             docs/PLAYBOOK-memory-alerts.md anchors. Detection only — every
+             advice is a USER action. -->
+        <div class="monitor-alerts" id="monitor-alerts"></div>
         <div class="monitor-summary" id="monitor-summary">
             <!-- filled by JS -->
         </div>
@@ -2767,6 +2864,57 @@
             };
         }
 
+        // --- [tty-metrics] diagnostics (issue #114) ---
+        // Passive collection for the subscriber-overflow reconnect loop,
+        // sharing the server side's "[tty-metrics]" log prefix
+        // (internal/app/tty_metrics.go). ACTIVE ONLY ON BETA BUILDS: the
+        // server hands out a mw_tty_metrics=1 cookie only when compiled
+        // with -tags ttymetrics (release-beta.yml), so on stable builds
+        // ttyMetricsEnabled() is false and every piece below stays inert.
+        // Module-level on purpose: the node tests slice named blocks out
+        // of this script and never execute top-level statements, and the
+        // typeof guards additionally keep a partial environment from
+        // throwing at load. connectTTY CANNOT call ttyMetricsEnabled()
+        // (it is sliced into node tests with a fixed dependency list, so
+        // no new free identifier may appear there) and reads the cookie
+        // through its own typeof-guarded local instead.
+        function ttyMetricsEnabled() {
+            // Boundary-bracketed match: document.cookie joins entries with
+            // "; ", so wrapping the string makes every entry look like
+            // "; name=value;" and a suffix-named lookalike
+            // (x_mw_tty_metrics=1) cannot false-positive the gate.
+            return typeof document !== "undefined"
+                && ("; " + (document.cookie || "") + ";").indexOf("; mw_tty_metrics=1;") !== -1;
+        }
+        if (ttyMetricsEnabled()) {
+            document.addEventListener("visibilitychange", () => {
+                console.log("[tty-metrics] visibility=" + document.visibilityState
+                    + " activeInst=" + (typeof state !== "undefined" ? state.activeInst : "?"));
+            });
+        }
+        if (ttyMetricsEnabled() && typeof window !== "undefined") {
+            // Console entry point for manual capture:
+            //   copy(JSON.stringify(__ttyMetrics(), null, 2))
+            window.__ttyMetrics = function () {
+                const out = { now: new Date().toISOString(), sessions: {} };
+                if (typeof terminalSessions !== "undefined") {
+                    for (const sid of Object.keys(terminalSessions)) {
+                        const s = terminalSessions[sid];
+                        if (!s) continue;
+                        out.sessions[sid] = {
+                            ttyState: s.ttyState,
+                            ttyOffset: s.ttyOffset,
+                            lastDataAgoMs: s.lastDataAt ? Date.now() - s.lastDataAt : null,
+                            writeCalls: s.ttyMetrics ? s.ttyMetrics.writeCalls : 0,
+                            writeWaitTotalMs: s.ttyMetrics ? s.ttyMetrics.writeWaitTotalMs : 0,
+                            writeWaitMaxMs: s.ttyMetrics ? s.ttyMetrics.writeWaitMaxMs : 0,
+                        };
+                    }
+                }
+                return out;
+            };
+        }
+
         // True when a NOMINALLY LIVE connection (READY, socket OPEN) has
         // heard no heartbeat traffic for TTY_LIVENESS_STALE_MS. Handshake
         // states never count: a socket that has not reached READY has no
@@ -2919,7 +3067,13 @@
                     api("/api/main").then(main => {
                         const prevBranch = state.mainRepo ? state.mainRepo.branch : null;
                         state.mainRepo = main;
-                        renderSidebar(); // Only re-render sidebar, not the full UI.
+                        // Guarded: the sidebar hosts the worktree rename input,
+                        // so a background poll must not rebuild #wt-list (and
+                        // tear the input plus its IME composition down) while
+                        // a row is being renamed (issue #122 pitfall #4).
+                        if (!state.renamingWT) {
+                            renderSidebar(); // Only re-render sidebar, not the full UI.
+                        }
                         // If main repo branch changed while it's selected, refresh its git changes.
                         if (state.activeWT === MAIN_WT_ID && prevBranch && prevBranch !== main.branch) {
                             refreshGitChanges();
@@ -2936,11 +3090,16 @@
 
                     // Skip full re-render during rename — preserve input DOM and IME composition.
                     // State data (instances, etc.) is already updated above.
-                    if (state.renamingInst) {
+                    if (state.renamingInst || state.renamingWT) {
                         refreshInFlight = null;
                         return;
                     }
                     render();
+                    // Self-heal the active web-UI iframe from the polled
+                    // status (issue #120): a cross-browser stop never
+                    // re-runs activate(), so this tick is what tears the
+                    // live page down once the instance reads terminal.
+                    syncActiveWebStatus();
                 } catch (e) {
                     console.error(e);
                     const inst = getActiveInstance();
@@ -2962,7 +3121,13 @@
                 const data = await api("/api/worktrees/diverged");
                 if (!state.diverged) state.diverged = {};
                 state.diverged = data.items || {};
-                renderSidebar();
+                // Guarded INSIDE the callee (issue #122 pitfall #4): this
+                // runs both from refresh()'s 2s poll and from its own 60s
+                // divergeTimer, so a guard at one call site would leave the
+                // other timer free to rebuild #wt-list mid-rename.
+                if (!state.renamingWT) {
+                    renderSidebar();
+                }
             } catch (e) {
                 console.error("fetch diverge failed:", e);
             }
@@ -2975,7 +3140,18 @@
                 if (data.items) {
                     Object.assign(state.diverged, data.items);
                 }
-                renderSidebar();
+                // Guarded (issue #122 review B-F1): selectWorktree starts this
+                // request SYNCHRONOUSLY on the first click of a double-click,
+                // while the rename input does not exist until the dblclick
+                // builds it — so the blur-commits-first argument cannot cover
+                // this path. A response landing after the dblclick has entered
+                // the editing state would rebuild #wt-list mid-IME-composition
+                // and take the input's focus, selection and half-typed text
+                // with it. The diverged badge is state, not the input: it
+                // simply rides the next repaint.
+                if (!state.renamingWT) {
+                    renderSidebar();
+                }
             } catch (e) {
                 console.error("fetch diverge single failed:", e);
             }
@@ -3847,6 +4023,419 @@
             updateStatus(ok ? "Copied" : "Copy failed");
         }
 
+        // ==== ios-ime bridge (issue #115) BEGIN - removable block ====
+
+        // iOS/iPadOS Chinese-IME direct commit (digits/punctuation typed
+        // without a composition) never reaches the PTY: xterm 6.0.0's
+        // keyCode-229 keydown path short-circuits into a setTimeout(0)
+        // textarea diff, and on iOS the IME insertion lands AFTER that
+        // callback, so the diff sees nothing and the composed-input guard
+        // structurally drops the event (plan.md section one). T0 shipped
+        // diagnostics only; T1 adds the rescue on the SAME binding function
+        // and the SAME idempotency flag (plan.md 3.1, review G2) - the
+        // bridge listeners are now UNCONDITIONAL and the T0 diagnostics are
+        // the only listeners still gated behind ?iosime-debug=1, so one
+        // textarea never carries two parallel sets of the same listener.
+
+        // Debug gate (DATA-COLLECTION.md): ?iosime-debug=1 only. location
+        // sits behind a typeof guard - the node slice harness evaluates
+        // this block with no location and must not throw (review MED-3).
+        function iosImeDebugEnabled() {
+            if (typeof location === "undefined") return false;
+            return /(?:^|[?&])iosime-debug=1(?:&|$)/.test(location.search || "");
+        }
+
+        // One console line per event, unified "[ios-ime] " prefix so the
+        // device capture in DATA-COLLECTION.md section 2 greps clean.
+        function iosImeLog(name, fields) {
+            // fail-soft: a throwing console must not abort a handler
+            try {
+                console.log("[ios-ime] " + name, fields);
+            } catch (e) { }
+        }
+
+        // --- block-level constants (T1) -------------------------------------
+        // Failsafe window: flush if a keyup was missed (plan.md 3.2). T0
+        // data may re-calibrate it later - it lives here, in one place.
+        const iosImeFailsafeMs = 750;
+        // Emissions caps (plan.md 3.3, the "count / length cap" fail-safe):
+        // past either cap the watermark STOPS appending and never throws.
+        // Accepted trade-off: windows that hit a cap are pathological and
+        // branch-C suppression may degrade there, but the cap bounds memory.
+        // The B side of the SAME trade-off: a cap-hit leaves `joined` a
+        // truncated prefix, so branch B could strip only that prefix and
+        // re-send already-delivered bytes -- pathological windows only, and
+        // bounded by the same stop-appending rule that halts the growth.
+        const iosImeEmissionsMaxCount = 64;
+        const iosImeEmissionsMaxChars = 4096;
+
+        // --- pure delta helpers (T1, sliceable, no session access) ------
+        // LCP-difference delta, EXACTLY in plan.md 3.3 branch order (the
+        // order is load-bearing). Pinned by upstream #5835: baseline
+        // "   ! " -> current "   !." yields "\x7f." (drop the trailing
+        // space, insert the new char) once the residue is already delivered.
+        // LCP granularity is CODE POINTS (Array.from), NOT UTF-16 units
+        // (plan.md 3.3, PR round M5): unit granularity splits a surrogate pair
+        // on an astral replace (a\uD83D\uDE00 -> a\uD83D\uDE03), computing a mid-pair LCP and then
+        // emitting the dangling LOW surrogate to the PTY. Code-point LCP treats
+        // the pair as one removed unit -> one \x7f + the whole new char; every
+        // ASCII/BMP sequence is bit-identical to the unit form.
+        function iosImeDeltaBytes(baseline, current) {
+            if (current === baseline) return "";
+            const cpsB = Array.from(baseline);
+            const cpsC = Array.from(current);
+            let p = 0;
+            const n = Math.min(cpsB.length, cpsC.length);
+            while (p < n && cpsB[p] === cpsC[p]) p++;
+            const removed = cpsB.length - p;
+            const appended = cpsC.slice(p).join("");
+            if (cpsC.length < cpsB.length) return "\x7f";                // pure shrink: ONE DEL (xterm semantics) -- vendored _handleAnyTextareaChanges shrink branch is t.length<e.length?triggerDataEvent(DEL): exactly ONE DEL for ANY shrink; do NOT "fix" it to a per-removed count (upstream parity, not our regression)
+            if (removed > 0) return "\x7f".repeat(removed) + appended;    // replace: DEL x removed + insert
+            return appended;                                               // pure append
+        }
+
+        // Residual branch, in A/B/C/D order (plan.md 3.3). current is
+        // threaded through for branch C's guard (see iosImeResidualBranch).
+        // Branch-B boundary invariant (plan.md 3.3, PR round 2 R2-MINOR-3):
+        // delta.slice(joined.length) is UTF-16-unit slicing and is SAFE only
+        // because emissions enter WHOLE (the watermark pushes complete onData
+        // strings, the caps reject whole entries) -- delta.startsWith(joined)
+        // then guarantees joined's end sits on a code-point boundary of delta;
+        // breaking that premise (slicing emissions into units) could emit a
+        // split surrogate.
+        function iosImeResidualPayload(delta, emissions, current) {
+            switch (iosImeResidualBranch(delta, emissions, current)) {
+                case "A": return delta;
+                case "B": return delta.slice(emissions.join("").length);
+                case "C": return "";
+                default: return delta;
+            }
+        }
+
+        // Shared branch predicate so iosImeResidualPayload's return value
+        // and the [ios-ime] deliver row's `branch` label can never drift.
+        // C's `contains current` clause is guarded by current !== "":
+        // joined.includes("") is vacuously true, so unguarded it would
+        // swallow a real deletion payload whenever current is empty. This
+        // is the one deliberate divergence from plan.md 3.3's literal text,
+        // recorded for the T4 plan amendment.
+        function iosImeResidualBranch(delta, emissions, current) {
+            if (!emissions || emissions.length === 0) return "A";
+            const joined = emissions.join("");
+            if (joined.length > 0 && delta.slice(0, joined.length) === joined) return "B";
+            if (joined.indexOf(delta) !== -1 || (current !== "" && joined.indexOf(current) !== -1)) return "C";
+            return "D";
+        }
+
+        // Close the pending window. MUST be called before any send (plan.md
+        // 3.3 close order). Resets every window field and logs the clear row.
+        function closeIosImeWindow(session) {
+            session.iosImePending = null;
+            if (session.iosImeFailsafeTimer) {
+                clearTimeout(session.iosImeFailsafeTimer);
+                session.iosImeFailsafeTimer = null;
+            }
+            session.iosImeEmissions = [];
+            session.iosImeFailsafeArmed = false;
+            if (iosImeDebugEnabled()) iosImeLog("clear", { reason: "close-window" });
+        }
+
+        // Flush truth table (plan.md 3.3 verbatim), via in
+        // {"keyup-defer","failsafe","blur","external-rewrite"}. Empty-delta
+        // paths also emit a deliver row (branch null, payload "") - a
+        // judgment result too.
+        function flushIosIme(session, via) {
+            if (!session.iosImePending) return;   // F6: FIRST line, before the term guard
+            if (!session.term) return;             // dead session (a timer outlives destroy paths)
+            const textarea = session.term.textarea;
+            if (!textarea) return;
+            // lastSeen guard (plan.md 3.2): current is ALWAYS the lastSeen
+            // snapshot. When live===seen they are the SAME string; when they
+            // diverge (an external programmatic rewrite -- xterm's blur /^C
+            // clears, mid-key selection) seen is the ONLY trustworthy source.
+            // NEVER read the live value here: diffing a value xterm rewrote
+            // out from under us computes a shrink and re-imports the ghost
+            // \x7f this guard exists to prevent. (A live===seen ? live : seen
+            // shape here is a trap -- it reads as "live wins when trusted"
+            // and invites a backwards "fix".)
+            const current = session.iosImeSeen;
+            const delta = iosImeDeltaBytes(session.iosImePending.baseline, current);
+            // capture log context BEFORE any state change
+            const baseline = session.iosImePending.baseline;
+            const emissionsSnapshot = (session.iosImeEmissions || []).slice();
+            const armedAtEntry = !!session.iosImeFailsafeArmed;
+
+            if (delta === "") {
+                if (via === "failsafe") {            // unconditional close (N2)
+                    if (iosImeDebugEnabled()) iosImeLog("deliver", { baseline: baseline, current: current, delta: delta, emissions: emissionsSnapshot, branch: null, payload: "", via: via, armed: armedAtEntry });
+                    closeIosImeWindow(session);
+                    return;
+                }
+                if (session.iosImeFailsafeArmed) {   // second chance spent (G1)
+                    if (iosImeDebugEnabled()) iosImeLog("deliver", { baseline: baseline, current: current, delta: delta, emissions: emissionsSnapshot, branch: null, payload: "", via: via, armed: armedAtEntry });
+                    closeIosImeWindow(session);
+                    return;
+                }
+                session.iosImeFailsafeArmed = true;  // the ONE bounded second chance; emissions untouched
+                if (iosImeDebugEnabled()) iosImeLog("deliver", { baseline: baseline, current: current, delta: delta, emissions: emissionsSnapshot, branch: null, payload: "", via: via, armed: armedAtEntry });
+                return;
+            }
+
+            const branch = iosImeResidualBranch(delta, session.iosImeEmissions, current);
+            const payload = iosImeResidualPayload(delta, session.iosImeEmissions, current);
+            if (iosImeDebugEnabled()) iosImeLog("deliver", { baseline: baseline, current: current, delta: delta, emissions: emissionsSnapshot, branch: branch, payload: payload, via: via, armed: armedAtEntry });
+            closeIosImeWindow(session);              // close BEFORE send, always for a non-empty delta
+            if (!payload) return;                    // branch C silence
+            session.iosImeSending = true;            // reentrancy: the watermark must ignore our own echo
+            try {
+                // PER CODE POINT (plan.md 3.3, review M6), never a bulk send:
+                // a multi-tap delta could match isTerminalQueryResponse whole.
+                const cps = Array.from(payload);
+                for (let i = 0; i < cps.length; i++) session.term.input(cps[i]);
+            } catch (e) {
+                // term destroyed mid-send: drop the remainder silently
+                // (flushQuickKeysQueue precedent)
+            } finally {
+                session.iosImeSending = false;
+            }
+        }
+
+        // The single binding function for the whole issue (plan.md 3.1):
+        // idempotency is TERM-scoped (iosImeBridgeTerm === the live term),
+        // so a Terminal rebuilt onto the same session object re-binds
+        // instead of being silently skipped (review M10). ALWAYS-ON listeners
+        // are keydown/input/keyup/compositionstart/compositionend/blur plus
+        // the onData watermark; debug-only is beforeinput (plus the keydown
+        // probe timer) - review G2 - and every [ios-ime] log row is
+        // debug-gated. compositionend is ALWAYS-ON because it clears the
+        // bridge-owned composing flag the 229 guard consults (review HIGH).
+        function ensureIosImeDirectInputBridge(session) {
+            if (!session || !session.term || !session.term.textarea) return;
+            if (session.iosImeBridgeTerm === session.term) return;
+            session.iosImeBridgeTerm = session.term;
+            const textarea = session.term.textarea;
+            // Defensive init; the state machine maintains it afterwards.
+            session.iosImeSeen = textarea.value;
+            // Bind is term-scoped: stale window state from a dead term must
+            // not leak into the new one -- an old baseline vs the freshly
+            // re-initialized iosImeSeen is a pure shrink (ghost \x7f into
+            // the NEW terminal), and a latched composing or stale armed
+            // flag would mute/mis-close the first window on the new term.
+            session.iosImePending = null;
+            if (session.iosImeFailsafeTimer) { clearTimeout(session.iosImeFailsafeTimer); session.iosImeFailsafeTimer = null; }
+            session.iosImeEmissions = [];
+            session.iosImeFailsafeArmed = false;
+            session.iosImeComposing = false;
+            // keydown: keyCode 229 is the IME-tap signature (upstream
+            // #5835); keyCode/key are observation only, never filtered.
+            function iosImeHandleKeydown(event) {
+                session.iosImeProbeT1 = null;
+                if (iosImeDebugEnabled()) {
+                    const t0 = Date.now();
+                    iosImeLog("keydown", { t: t0, keyCode: event.keyCode, key: event.key, value: textarea.value, len: textarea.value.length });
+                    // The isomorphic probe (review M3): meaningful when
+                    // keyCode === 229 and no compositionstart intervened for
+                    // this tap - only then did xterm queue its own
+                    // _handleAnyTextareaChanges setTimeout(0) at this keydown
+                    // (vendored xterm.js queues the 0ms diff for keyCode 229
+                    // only outside a composition), and FIFO puts it before this
+                    // callback - so "t1 already passed and valueAtProbe lacks
+                    // the new char" IS the section-1 link-3 assumption, on
+                    // device. For other keys, or during a composition, this
+                    // probe row is context only. Debug-only: a production
+                    // keydown must never schedule a probe timer (review G2).
+                    setTimeout(function iosImeRunProbe() {
+                        const t1 = Date.now();
+                        session.iosImeProbeT1 = t1;
+                        iosImeLog("probe", { t0: t0, t1: t1, valueAtProbe: textarea.value });
+                    }, 0);
+                }
+                // STATE MACHINE (always on): external-rewrite termination +
+                // baseline capture + per-229 failsafe re-arm, in that order.
+                // Guarded against composition: the vendored bundle delivers
+                // composition text ONLY at compositionend (_finalizeComposition),
+                // so the onData watermark is EMPTY mid-composition; a 229
+                // window opened there would take branch A and leak the interim
+                // pinyin into the terminal. The iOS direct-commit failure path
+                // has NO composition at all (isComposing false - upstream #5835
+                // shows no composition events), so this guard cannot mute the
+                // fix. When guarded out: NO pending window, NO timer arm, NO
+                // pending row; the debug keydown row above still fires.
+                if (event.keyCode === 229 && event.isComposing !== true && session.iosImeComposing !== true) {
+                    // EXTERNAL-REWRITE TERMINATION (plan.md 3.2, PR round M1 +
+                    // round 2 R2-M1): xterm's programmatic textarea.value= writes
+                    // (the ^C/ETX clear, mid-key selection) dispatch NO input
+                    // event, so a live-vs-seen divergence seen here means BOTH the
+                    // old window's baseline AND seen are stale -- the old window's
+                    // diff would be nonsense. Disposition is FLUSH-THEN-TERMINATE
+                    // (plan.md 3.2, PR round 2 R2-M1: round 1's terminate-and-drop
+                    // replay proved a lost keystroke -- the undelivered increment
+                    // was silently dropped before the keyup-defer ever ran): flush
+                    // FIRST -- the window's undelivered increment must ride its
+                    // LAST delivery chance before the rewrite makes baseline/seen
+                    // meaningless; current = iosImeSeen is still trustworthy here
+                    // (the external rewrite never went through the input handler).
+                    // Same reason blur flushes before clearing (M7): terminating/
+                    // interrupting must not eat keystrokes the user already made --
+                    // on a physical keyboard they would have reached the shell
+                    // before the interrupt. The empty-delta arm/close rules apply
+                    // AS-IS; whatever survives the flush (an armed empty window) is
+                    // terminated below (pending/timer/armed; emissions untouched --
+                    // the fresh baseline creation below resets them). Loss window
+                    // was mainly the iOS long-press stream where no keyup-defer
+                    // ever runs.
+                    if (textarea.value !== session.iosImeSeen) {
+                        flushIosIme(session, "external-rewrite");
+                        // A flush that CLOSED the window already logged its own
+                        // close-window row; log the terminator's row ONLY when
+                        // pending was still non-null right after the flush (the
+                        // blur pattern, no double log).
+                        if (session.iosImePending) {
+                            session.iosImePending = null;
+                            if (session.iosImeFailsafeTimer) { clearTimeout(session.iosImeFailsafeTimer); session.iosImeFailsafeTimer = null; }
+                            session.iosImeFailsafeArmed = false;
+                            if (iosImeDebugEnabled()) iosImeLog("clear", { reason: "external-rewrite" });
+                        }
+                    }
+                    // normal path: refresh seen, then create/keep the baseline
+                    // (a terminated window means "no pending" -> fresh baseline
+                    // = the live value).
+                    session.iosImeSeen = textarea.value;
+                    let keptEarliest = false;
+                    if (!session.iosImePending) {
+                        session.iosImePending = { baseline: textarea.value };
+                        session.iosImeEmissions = [];   // emissions reset (1): baseline creation
+                        keptEarliest = false;
+                    } else {
+                        // keep the EARLIEST baseline, never re-read (upstream semantics)
+                        keptEarliest = true;
+                    }
+                    // re-arm EVERY 229 keydown (plan.md 3.2, review M17): iOS
+                    // long-press streams 229s, so the failsafe runs from the last
+                    if (session.iosImeFailsafeTimer) clearTimeout(session.iosImeFailsafeTimer);
+                    session.iosImeFailsafeTimer = setTimeout(function iosImeFailsafe() { flushIosIme(session, "failsafe"); }, iosImeFailsafeMs);
+                    if (iosImeDebugEnabled()) iosImeLog("pending", { baseline: session.iosImePending.baseline, len: session.iosImePending.baseline.length, keptEarliest: keptEarliest, rearmed: keptEarliest });
+                }
+            }
+            function iosImeHandleInput(event) {
+                session.iosImeSeen = textarea.value;   // lastSeen refresh (plan.md 3.2)
+                if (iosImeDebugEnabled()) {
+                    // dt pins the input against the CURRENT tap's probe t1
+                    // (reset to null at every keydown): a number means this
+                    // tap's probe already ran (positive = insertion after the
+                    // 0ms callback); null means this tap's probe has not fired
+                    // yet - the insertion-before-callback case the probe exists
+                    // to detect. dt is only meaningful when the input follows a
+                    // keydown of the same tap; for an input with no preceding
+                    // keydown (paste, composition-driven) the number is
+                    // meaningless and must be ignored by the transcriber.
+                    iosImeLog("input", { inputType: event.inputType, data: event.data, composed: event.composed, value: textarea.value, dt: session.iosImeProbeT1 == null ? null : Date.now() - session.iosImeProbeT1 });
+                }
+            }
+            function iosImeHandleKeyUp(event) {
+                if (iosImeDebugEnabled()) iosImeLog("keyup", { t: Date.now(), keyCode: event.keyCode, key: event.key, value: textarea.value, len: textarea.value.length });
+                // NEVER flush synchronously (review HIGH-2): xterm's keydown
+                // timer is queued first, FIFO lets it finish, the watermark
+                // adjudicates - so defer by one macrotask. The !composing
+                // clause is belt-and-braces: a window can never legitimately
+                // exist while composing (the 229 guard never opens one and
+                // compositionstart closes any), and it documents that invariant.
+                if (session.iosImePending && !session.iosImeComposing) setTimeout(function iosImeKeyupFlush() { flushIosIme(session, "keyup-defer"); }, 0);
+            }
+            function iosImeHandleCompositionStart(event) {
+                // Bridge-owned composing flag set FIRST, so the 229 state
+                // machine ignores every composing keystroke: the vendored
+                // bundle delivers composition text only at compositionend, so
+                // the watermark is empty during composition and a 229 window
+                // would take branch A and leak the interim pinyin.
+                // compositionstart now terminates a window fully, like
+                // close/blur - hence the failsafeArmed reset (arbitrator-
+                // approved, recorded for the T4 plan amendment).
+                session.iosImeComposing = true;
+                if (iosImeDebugEnabled()) iosImeLog("compositionstart", { value: textarea.value });
+                if (session.iosImePending) {
+                    // composition self-delivers; do NOT touch emissions here -
+                    // the next baseline creation resets them.
+                    session.iosImePending = null;
+                    if (session.iosImeFailsafeTimer) { clearTimeout(session.iosImeFailsafeTimer); session.iosImeFailsafeTimer = null; }
+                    session.iosImeFailsafeArmed = false;
+                    if (iosImeDebugEnabled()) iosImeLog("clear", { reason: "compositionstart" });
+                }
+            }
+            function iosImeHandleCompositionEnd(event) {
+                // ALWAYS-ON. Its ONLY state action is clearing the composing
+                // flag, which re-admits the next direct-commit tap to the 229
+                // state machine. The flag exists because the vendored bundle
+                // delivers composition text only at compositionend, so the
+                // watermark is empty during composition and an unguarded 229
+                // window would take branch A and leak the interim pinyin. The
+                // log row stays debug-gated.
+                session.iosImeComposing = false;
+                if (iosImeDebugEnabled()) iosImeLog("compositionend", { data: event.data, value: textarea.value });
+            }
+            function iosImeHandleBlur(event) {
+                // flush-then-clear (review M7): flush first so a blur does
+                // not drop the pending bytes...
+                flushIosIme(session, "blur");
+                // ...then, if the empty-delta arm path left pending behind,
+                // clear it. If the blur flush closed the window,
+                // closeIosImeWindow already logged "close-window" - no double log.
+                if (session.iosImePending) {
+                    session.iosImePending = null;
+                    if (session.iosImeFailsafeTimer) { clearTimeout(session.iosImeFailsafeTimer); session.iosImeFailsafeTimer = null; }
+                    // blur terminating a window resets armed too (terminator
+                    // unification, like close/compositionstart): stale armed
+                    // would close the NEXT window on its first empty delta,
+                    // losing that window's bounded second chance.
+                    session.iosImeFailsafeArmed = false;
+                    if (iosImeDebugEnabled()) iosImeLog("clear", { reason: "blur" });
+                }
+                // Missed-compositionend self-heal: focus loss can abort a
+                // composition with NO compositionend delivered, latching
+                // iosImeComposing forever and muting the state machine for
+                // the life of the term. Unconditional unlatch, outside the
+                // pending branch -- same precedent as ensureQuickKeysImeBinding's
+                // blur listener clearing session.composing.
+                session.iosImeComposing = false;
+            }
+            textarea.addEventListener("keydown", iosImeHandleKeydown);
+            textarea.addEventListener("input", iosImeHandleInput);
+            textarea.addEventListener("keyup", iosImeHandleKeyUp);
+            textarea.addEventListener("compositionstart", iosImeHandleCompositionStart);
+            textarea.addEventListener("compositionend", iosImeHandleCompositionEnd);
+            textarea.addEventListener("blur", iosImeHandleBlur);
+            // Watermark: records what xterm's own onData already delivered in
+            // THIS pending window, so flush can suppress a double send. It
+            // watches BEFORE the app's own gates (isInstanceTerminalStatus /
+            // isTerminalQueryResponse live inside the onData consumer) -
+            // reviewed and accepted position (review MEDIUM-4).
+            if (session.iosImeDataDisposable && typeof session.iosImeDataDisposable.dispose === "function") {
+                try { session.iosImeDataDisposable.dispose(); } catch (e) { }
+            }
+            session.iosImeDataDisposable = session.term.onData(function iosImeWatermark(data) {
+                if (!session.iosImePending) return;
+                if (session.iosImeSending) return;   // exclude our own term.input echo (review HIGH-1/M5)
+                if (!session.iosImeEmissions) session.iosImeEmissions = [];
+                if (session.iosImeEmissions.length >= iosImeEmissionsMaxCount) return;   // count cap
+                let totalChars = 0;
+                for (let i = 0; i < session.iosImeEmissions.length; i++) totalChars += session.iosImeEmissions[i].length;
+                if (totalChars + (data ? data.length : 0) > iosImeEmissionsMaxChars) return;   // length cap
+                session.iosImeEmissions.push(data);
+            });
+            // Debug-only diagnostic listener (pure observation, review G2):
+            // beforeinput never touches bridge state. compositionend is NOT
+            // here anymore - it is always-on now (it clears the composing flag
+            // the 229 guard consults), only its log row stays debug-gated.
+            if (iosImeDebugEnabled()) {
+                textarea.addEventListener("beforeinput", function iosImeHandleBeforeInput(event) {
+                    iosImeLog("beforeinput", { inputType: event.inputType, data: event.data, composed: event.composed, isComposing: event.isComposing, value: textarea.value });
+                });
+            }
+            if (iosImeDebugEnabled()) iosImeLog("bound", { sessionId: session.id });
+        }
+
+        // ==== ios-ime bridge (issue #115) END - removable block ====
+
         function init() {
             if (sessionStorage.getItem(SERVER_UPGRADED_FLAG) === "1") {
                 sessionStorage.removeItem(SERVER_UPGRADED_FLAG);
@@ -3875,8 +4464,29 @@
             if (divergeTimer) clearInterval(divergeTimer);
             divergeTimer = setInterval(fetchDiverge, 60000);
 
+            // Persistent alert channel (~10s, issue #111 P2): feeds the
+            // status-bar badge from the cached lightweight endpoint. Lives
+            // for the whole page — stopped on visibilitychange(hidden) and
+            // beforeunload (see the lifecycle handlers below).
+            startMonitorAlertsPolling();
+
             // Status bar click -> resource monitor
             document.getElementById("status-bar").addEventListener("click", openModalMonitor);
+
+            // Subtree toggle delegation (review G6): #monitor-tbody is
+            // static markup whose ROWS churn every 2s — one listener on the
+            // tbody outlives every repaint, so re-rendering never has to
+            // re-encode instance ids into inline JS (the quoting bug the
+            // review named).
+            document.getElementById("monitor-tbody").addEventListener("click", handleMonitorTbodyClick);
+
+            // Resource Monitor close, ONE listener for every door (F-N1):
+            // a native <dialog> fires 'close' for the button's
+            // closeMonitorModal() AND for ESC (cancel -> close), which
+            // never runs closeMonitorModal. Binding the cleanup to the
+            // event instead of the button is what stops the 2s poll and
+            // converges the badge on both paths alike.
+            document.getElementById("modal-monitor").addEventListener("close", handleMonitorDialogClose);
 
             // Initial focus attempt after a short delay
             setTimeout(() => focusTerminalIfPossible(), 100);
@@ -4253,6 +4863,8 @@
                             <path d="M12 .5C5.65.5.5 5.65.5 12c0 5.08 3.29 9.39 7.86 10.91.58.11.79-.25.79-.56 0-.28-.01-1.02-.02-2-3.2.7-3.87-1.54-3.87-1.54-.52-1.33-1.27-1.69-1.27-1.69-1.04-.71.08-.7.08-.7 1.15.08 1.76 1.18 1.76 1.18 1.02 1.76 2.69 1.25 3.34.96.1-.74.4-1.25.72-1.54-2.55-.29-5.24-1.28-5.24-5.7 0-1.26.45-2.29 1.18-3.1-.12-.29-.51-1.46.11-3.04 0 0 .97-.31 3.18 1.18a11.1 11.1 0 0 1 5.79 0c2.21-1.5 3.18-1.18 3.18-1.18.63 1.58.24 2.75.12 3.04.74.81 1.18 1.84 1.18 3.1 0 4.43-2.7 5.41-5.26 5.69.41.36.78 1.06.78 2.14 0 1.55-.01 2.79-.01 3.17 0 .31.21.68.8.56C20.21 21.39 23.5 17.08 23.5 12 23.5 5.65 18.35.5 12 .5Z"/>
                         </svg>
                     </a>` : '';
+                // No inline rename here on purpose: the pinned main row is
+                // out of scope for v1 (issue #122), so it stays static text.
                 html += `
             <li class="wt-item wt-item-main ${isMainActive ? 'active' : ''}" onclick="selectWorktree(MAIN_WT_ID)">
               <div class="wt-name">
@@ -4276,12 +4888,34 @@
             html += state.worktrees.map(w => {
                 const isActive = state.activeWT === w.id;
                 const wIdEsc = escapeHtml(w.id);
+                // Verbatim mirror of renderTabs' rename branch (issue #122).
+                // renamingWTValue started life as the write-only leftover the
+                // tab side ships (issue named the two as isomorphic, plan F5
+                // kept it) — review #7 hardened it into a LIVE binding below:
+                // oninput keeps the field current, so a repaint that slips
+                // past the six guards rebuilds the input from what the user
+                // has typed instead of falling back to w.name and silently
+                // losing text (same disease class as the blur re-entrancy the
+                // browser verification caught). The TAB side stays the dead
+                // write-only leftover — that is the deliberate parity edge:
+                // zero behaviour change there, hardening on the new surface
+                // only (explicitly approved boundary, review #7).
+                const renameValue = state.renamingWT === w.id && state.renamingWTValue ? state.renamingWTValue : w.name;
+                // The row itself stays a row while editing — only the name
+                // cell swaps to an input. EVERY non-main row carries the
+                // ondblclick (not just the active one): the first click of a
+                // double-click activates the row and rebuilds #wt-list
+                // synchronously, and the dblclick then lands on the rebuilt
+                // node, which carries the very same inline handler.
+                const nameCell = state.renamingWT === w.id
+                    ? `<input id="wt-rename-input-${wIdEsc}" class="wt-rename-input" value="${escapeHtml(renameValue)}" oninput="state.renamingWTValue = this.value" onkeydown="handleWTRenameKeydown('${wIdEsc}', event)" onblur="commitWTRename('${wIdEsc}', event)">`
+                    : escapeHtml(w.name);
                 return `
-            <li class="wt-item ${isActive ? 'active' : ''}" onclick="selectWorktree('${wIdEsc}')">
-              <div class="wt-name">${escapeHtml(w.name)}</div>
+            <li class="wt-item ${isActive ? 'active' : ''}" onclick="selectWorktree('${wIdEsc}')" ondblclick="startWTRename('${wIdEsc}', event)" title="Double-click to rename">
+              <div class="wt-name">${nameCell}</div>
               <div class="wt-branch">
                 <span>🌱</span> ${escapeHtml(w.branch)}${divergeBadges(w.id)}
-                <div style="margin-left: auto; display: flex; gap: 4px; align-items: center;">
+                <div class="wt-row-actions" style="margin-left: auto; display: flex; gap: 4px; align-items: center;">
                     ${shortcuts(w.id)}
                     ${isActive ? `<span style="font-size:10px;cursor:pointer;padding:2px 4px;" onclick="deleteWorktree('${wIdEsc}', event)">✕</span>` : ''}
                 </div>
@@ -4305,6 +4939,11 @@
         // Rename handlers
         function startRename(id, event) {
             event.stopPropagation();
+            // Mutual exclusion with the sidebar rename state machine (at most
+            // one input in the page, issue #122): tear the sidebar input
+            // down before this tab's input gets built.
+            state.renamingWT = null;
+            renderSidebar();
             state.renamingInst = id;
             state.renamingInstValue = "";
             renderTabs(); // Create the input DOM before focusing
@@ -4319,6 +4958,14 @@
 
         function commitRename(id, event) {
             event.stopPropagation();
+            // Re-entrancy guard, mirror of commitWTRename (issue #122):
+            // renderTabs() below removes the focused tab input and Chrome
+            // re-enters via onblur while the node is still findable — a
+            // duplicate PATCH /api/instances would go out. Also covers the
+            // mutual-exclusion path added by this issue: startWTRename tears
+            // the tab input down via renderTabs(), and that blur must not
+            // commit a self-rename of a tab nobody edited.
+            if (state.renamingInst !== id) return;
             const input = document.getElementById('rename-input-' + id);
             if (!input) return;
             const newName = input.value.trim();
@@ -4338,7 +4985,19 @@
                 if (idx >= 0) {
                     state.instances[idx] = updated;
                 }
-                render();
+                // Guarded on BOTH rename states (issue #122 review A-F1):
+                // render() rebuilds the tabs AND the sidebar, so this is the
+                // tab-side twin of the B-F2 window the worktree handler just
+                // closed — and this issue's mutual exclusion made it newly
+                // reachable, since a tab PATCH can now be in flight while a
+                // SIDEBAR row is being renamed and an unguarded render() here
+                // would tear that row's input down. The handler's own state
+                // guard cannot cover it: the row's state is still set at this
+                // point, so the teardown would pass as legitimate. The tab's
+                // new name rides the next poll — the same trade as B-F2.
+                if (!state.renamingInst && !state.renamingWT) {
+                    render();
+                }
             }).catch(err => {
                 console.error('rename failed:', err);
                 refresh();
@@ -4352,10 +5011,122 @@
         }
 
         function handleRenameKeydown(id, event) {
+            // Same IME guard as handleWTRenameKeydown, the exact same line —
+            // Enter mid-composition is the input method confirming a
+            // candidate, not the user committing (issue #122 review V4; the
+            // tab side had the same pre-existing hole and parity demands both
+            // state machines move together).
+            if (event.isComposing) return;
             if (event.key === 'Enter') {
                 commitRename(id, event);
             } else if (event.key === 'Escape') {
                 cancelRename();
+            }
+            event.stopPropagation();
+        }
+
+        // Sidebar worktree-row rename handlers (issue #122) — the tab rename
+        // handlers above mirrored one-for-one onto the worktree rows, with
+        // PATCH /api/worktrees in place of PATCH /api/instances.
+
+        function startWTRename(id, event) {
+            event.stopPropagation();
+            // The row's own controls (delete ✕, terminal, finder) stop propagation on
+            // click but NOT on the separate dblclick event — without this check a
+            // double-click on them would pop the delete confirm / open the terminal
+            // AND drop the row into rename at the same time (issue #122 review).
+            if (event.target.closest('.wt-row-actions')) return;
+            // Mutual exclusion with the tab rename state machine (at most one
+            // input in the page): tear the tab input down first, so a
+            // double-click on a row while a tab is being renamed cannot leave
+            // two live inputs (and two competing blur-commit paths) behind.
+            state.renamingInst = null;
+            renderTabs();
+            state.renamingWT = id;
+            state.renamingWTValue = "";
+            renderSidebar(); // Create the input DOM before focusing
+            requestAnimationFrame(() => {
+                const input = document.getElementById('wt-rename-input-' + id);
+                if (input) {
+                    input.focus();
+                    input.select();
+                }
+            });
+        }
+
+        function commitWTRename(id, event) {
+            event.stopPropagation();
+            // Re-entrancy guard (issue #122 browser verification): the
+            // renderSidebar() below removes the focused input, and Chrome
+            // dispatches blur on the node while it is still findable via
+            // getElementById — the onblur re-enters this function with
+            // state.renamingWT already cleared, which would send a second,
+            // identical PATCH and nest an innerHTML write inside the first
+            // one. State is the source of truth: a commit is legitimate only
+            // while this row still owns the editing state (Enter / user-click-
+            // away blur both satisfy it).
+            if (state.renamingWT !== id) return;
+            const input = document.getElementById('wt-rename-input-' + id);
+            if (!input) return;
+            const newName = input.value.trim();
+            state.renamingWT = null;
+            state.renamingWTValue = "";
+            // Don't re-render during rename commit — caller handles render
+            // after API response. (Same order as commitRename: the row goes
+            // back to static text BEFORE the round trip, so a slow PATCH
+            // never leaves a live input pointing at a settled state.)
+            renderSidebar();
+            if (newName === '') {
+                return;
+            }
+            api('/api/worktrees', {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ id: id, name: newName })
+            }).then(updated => {
+                const idx = state.worktrees.findIndex(w => w.id === id);
+                if (idx >= 0) {
+                    state.worktrees[idx] = updated;
+                }
+                // Guarded (issue #122 review B-F2): the PATCH round trip is a
+                // window in which the user can have double-clicked ANOTHER row
+                // into its own editing state, and an unconditional repaint here
+                // would tear that fresh input down. The state splice above and
+                // the refresh() below stay unconditional — refresh() carries its
+                // own rename guard — so the renamed row repaints on the next
+                // poll tick at worst.
+                if (!state.renamingWT) {
+                    renderSidebar();
+                }
+                // Resync the live branch: the PATCH response carries the
+                // stored branch, while the sidebar badge shows List()'s live
+                // `git rev-parse` value. Without this the badge would fall
+                // back to the stored value until the next poll tick.
+                refresh();
+            }).catch(err => {
+                console.error('worktree rename failed:', err);
+                refresh();
+            });
+        }
+
+        function cancelWTRename() {
+            state.renamingWT = null;
+            state.renamingWTValue = "";
+            renderSidebar();
+        }
+
+        function handleWTRenameKeydown(id, event) {
+            // IME guard (issue #122 review V4): Enter / Escape during IME
+            // composition are the input method's candidate-confirm / cancel
+            // keys, not commit / cancel — without this a half-composed string
+            // would be PATCHed the moment the user pressed Enter to accept a
+            // candidate. Mirrored on the tab side in handleRenameKeydown so
+            // the two state machines keep identical semantics (parity).
+            if (event.isComposing) return;
+            if (event.key === 'Enter') {
+                commitWTRename(id, event);
+            } else if (event.key === 'Escape') {
+                cancelWTRename();
             }
             event.stopPropagation();
         }
@@ -4798,11 +5569,6 @@
             const kind = (inst && inst.kind) || 'pty';
             const renderer = (window.KindRenderers || {})[kind];
             const session = { id: id, instance: inst };
-            // Web-ui panels are mutually exclusive: hide them all before
-            // dispatching so the activated renderer's panel is the only
-            // visible one (prevents the stacked half/half layout when
-            // switching between web-ui kinds).
-            hideWebPanels();
             // Deactivate the previously-active renderer first so it
             // can release any listeners / hide its panel cleanly.
             if (previousID) {
@@ -4814,6 +5580,40 @@
                 }
             }
             if (id && renderer) {
+                // Web-ui panels are mutually exclusive: hide them all before
+                // dispatching so the activated renderer's panel is the only
+                // visible one (prevents the stacked half/half layout when
+                // switching between web-ui kinds). The hide lives INSIDE this
+                // branch on purpose: render() above may have nested-activated
+                // a renderer already — deleting the active instance ALWAYS
+                // runs selectInstance(null) (renderTabs computes a neighbour
+                // only while the deleted instance is still in the list, so
+                // the newId branch is unreachable for deletes) → render() →
+                // renderTabs' auto-select → selectInstance(B) → activate(B)
+                // shows B's panel — and an unconditional hide here would erase
+                // the panel the nested activation just showed: a black
+                // workspace with no iframe, no stopped placeholder and no
+                // empty state, with NO SELF-HEAL — the 2s poll never refills
+                // panel visibility (activate() is the sole panel-show entry
+                // point) and re-clicking B's tab dies on the same-id
+                // early-return above; only another instance's tab, or a
+                // reload, brings it back. Nothing else needs the
+                // unconditional hide: a registered terminal kind dispatches
+                // through THIS branch (the hide runs for it too) with
+                // renderWorkspace's non-web branch as the second backstop;
+                // the null-id / no-instances case is hidden by
+                // renderWorkspace's empty branch; and a web kind whose
+                // renderer script failed to load never showed its own panel
+                // to begin with, while the previous kind's panel was hidden
+                // by the deactivate() above (issue #101's contract untouched).
+                // One load-bearing fact for the delete path: the OUTER
+                // frame's prevRenderer.deactivate() above is SKIPPED there —
+                // the deleted id resolves to no instance → prevKind defaults
+                // to 'pty' → the same pty-defaulted renderer as this
+                // null-id frame → guard skips — so it cannot re-cover the
+                // panel after the nested activate; changing the prevKind
+                // default would re-open the black screen.
+                hideWebPanels();
                 renderer.activate(session, document.getElementById('workspace'));
                 if (kind === 'opencode-web') {
                     updateStatus('opencode web ui');
@@ -5768,6 +6568,29 @@
             }
         }
 
+        // Poll-driven status self-heal for the embedded web-UI kinds
+        // (issue #120): a stop performed in ANOTHER browser never changes
+        // this page's selection, so selectInstance()'s early-return keeps
+        // activate() from re-running and the live iframe would never be
+        // torn down. refresh() calls this after render() on every tick;
+        // the renderer's own syncStatus applies the entering-terminal-
+        // bucket gate and does nothing on every other status. reasonix
+        // self-heals through its own 2s tick and exposes no syncStatus,
+        // so the guard below skips it by design.
+        function syncActiveWebStatus() {
+            const inst = getActiveInstance();
+            if (!inst || !WEB_UI_KINDS.includes(inst.kind)) return;
+            const renderer = (window.KindRenderers || {})[inst.kind];
+            if (!renderer || typeof renderer.syncStatus !== 'function') return;
+            try {
+                renderer.syncStatus(inst);
+            } catch (e) {
+                // A renderer error must never break the refresh loop —
+                // the PTY reconcile and every other tick still has to run.
+                console.error(e);
+            }
+        }
+
         // True when something other than a fresh caller already owns this
         // session's bring-up: a poll-driven promotion, an activation still
         // inside its `await loadLog()`, an open or closing socket, a live SSE
@@ -5900,6 +6723,7 @@
                 ? r.allSessions()
                 : Object.values(terminalSessions);
             for (const session of sessions) {
+                ensureIosImeDirectInputBridge(session); // ios-ime-115 binding point
                 // Defensive: map-resident sessions always have a
                 // container today (destroy paths remove them from the
                 // maps synchronously); the guard protects future
@@ -6350,14 +7174,16 @@
         function focusTerminalIfPossible() {
             const session = getActiveTerminalSession();
             if (!session || !session.term) return;
+            ensureIosImeDirectInputBridge(session); // ios-ime-115 binding point
             if (!windowHasFocus) return;
             if (openDialogs.size > 0) return;
             if (!state.activeInst) return;
             if (session.ttyState !== 'READY') return;
             const inst = state.instances.find(i => i.id === state.activeInst);
             if (inst && !isInstanceLiveStatus(inst.status)) return;
-            // Don't steal focus from the rename input
-            if (state.renamingInst) return;
+            // Don't steal focus from the rename input — the tab's, or the
+            // sidebar worktree row's (issue #122).
+            if (state.renamingInst || state.renamingWT) return;
 
             session.term.focus();
         }
@@ -6399,14 +7225,22 @@
             event.returnValue = '';
             // Clean up timers and measurement span when the page is unloaded or hidden.
             if (gitChangesTimer) clearInterval(gitChangesTimer);
+            stopMonitorAlertsPolling();
             if (_truncateSpan) { _truncateSpan.remove(); _truncateSpan = null; }
         });
         document.addEventListener('visibilitychange', () => {
             if (document.visibilityState === 'hidden') {
                 if (gitChangesTimer) clearInterval(gitChangesTimer);
-            } else if (document.visibilityState === 'visible' && state.activeWT) {
-                refreshGitChanges();
-                gitChangesTimer = setInterval(refreshGitChanges, 10000);
+                stopMonitorAlertsPolling();
+            } else if (document.visibilityState === 'visible') {
+                // The alert channel is global (the status bar shows on every
+                // worktree), so it restarts unconditionally; git changes stay
+                // gated on the active worktree.
+                startMonitorAlertsPolling();
+                if (state.activeWT) {
+                    refreshGitChanges();
+                    gitChangesTimer = setInterval(refreshGitChanges, 10000);
+                }
             }
         });
 
@@ -6424,7 +7258,13 @@
         };
 
         function updateStatus(msg) {
-            document.getElementById("status-bar").textContent = "Transport: " + msg;
+            // Transport text lives in its own span since issue #111 P2 —
+            // the alert badge is a sibling, and a textContent write to the
+            // whole bar would erase it. The bar's click wiring (opens the
+            // Resource Monitor) is untouched and still catches both spans.
+            if (typeof document === "undefined") return;
+            const el = document.getElementById("status-bar-transport");
+            if (el) el.textContent = "Transport: " + msg;
         }
 
         function reportSessionError(session, prefix, err) {
@@ -7521,7 +8361,18 @@
                 alert("Failed to open terminal: " + e.message);
             } finally {
                 loadingActions.delete(key);
-                renderSidebar();
+                // Guarded (issue #122 review A-F1): the exemption plan R1
+                // argued that a user action blurs the open input BEFORE the
+                // render — true of the spinner-ON renderSidebar above this
+                // await, NOT of this finally. The await can run up to 10s
+                // (AbortController), and inside that window the user can
+                // double-click a row into its editing state; this repaint would
+                // then tear that input down mid-composition. The spinner's
+                // cosmetic repaint just rides the next poll, and refresh()
+                // self-heals it.
+                if (!state.renamingWT) {
+                    renderSidebar();
+                }
             }
         }
 
@@ -7565,12 +8416,256 @@
                 alert("Failed to open finder: " + e.message);
             } finally {
                 loadingActions.delete(key);
-                renderSidebar();
+                // Guarded, same reasoning as openTerminal's finally (issue #122
+                // review A-F1): the repaint lands after a window of up to 10s
+                // and must not rebuild a #wt-list that is mid-rename.
+                if (!state.renamingWT) {
+                    renderSidebar();
+                }
             }
         }
 
         // Resource Monitor
         let monitorTimer = null;
+
+        // --- Alerts & subtree visibility (issue #111 P2) ---
+        //
+        // Layered polling: the modal (above) polls the FULL stats endpoint
+        // every 2s — tree aggregates included, all fresh; this channel
+        // polls the lightweight /api/monitor/alerts every ~10s and paints
+        // ONLY the status-bar badge from the server's cached system-level
+        // alerts. The page owns this timer's lifecycle: started at init,
+        // cleared on visibilitychange(hidden) and beforeunload — a hidden
+        // tab must not keep a daemon endpoint warm.
+        //
+        // Zero-intervention on this side too: the badge says "go look",
+        // every click goes to the Resource Monitor, and every advice line
+        // is a user action — the UI never acts on a process.
+        const MONITOR_ALERTS_POLL_MS = 10000;
+        let monitorAlertsTimer = null;
+        // Expanded subtree rows survive the modal's 2s re-renders; this
+        // Set is the single source of "which instance trees are open".
+        const monitorExpandedTrees = new Set();
+
+        // --- pure display helpers (node-tested: testdata/monitor_alerts.test.mjs) ---
+
+        // alertWorstSeverity: "red" beats "amber", "" when all clear.
+        function alertWorstSeverity(alerts) {
+            let worst = "";
+            for (const a of (alerts || [])) {
+                if (a && a.severity === "red") return "red";
+                if (a && a.severity === "amber") worst = "amber";
+            }
+            return worst;
+        }
+
+        // alertBadgeText: "⚠ 2 alerts" / "⚠ 1 alert" / "" — the Transport
+        // text lives in its own span and is never touched here.
+        function alertBadgeText(alerts) {
+            const n = (alerts || []).length;
+            if (n === 0) return "";
+            return "\u26A0 " + n + (n === 1 ? " alert" : " alerts");
+        }
+
+        // monitorAlertsHTML: one row per alert — signal / threshold /
+        // current / advice. Server pre-formats threshold+current with
+        // units; the UI renders verbatim.
+        function monitorAlertsHTML(alerts) {
+            if (!alerts || alerts.length === 0) return "";
+            let html = "";
+            for (const a of alerts) {
+                if (!a) continue;
+                const sev = a.severity === "red" ? "alert-red" : "alert-amber";
+                html += '<div class="monitor-alert ' + sev + '">'
+                    + '<span class="monitor-alert-signal">' + escapeHTML(a.signal) + '</span>'
+                    + '<span class="monitor-alert-limits">threshold ' + escapeHTML(a.threshold)
+                    + ' \u00B7 now ' + escapeHTML(a.current) + '</span>'
+                    + '<span class="monitor-alert-advice">' + escapeHTML(a.advice) + '</span>'
+                    + '</div>';
+            }
+            return html;
+        }
+
+        // subtreeNoteText: "tree 37 \u00B7 1.2 GB" under the instance name;
+        // "" when the instance has no collected children. A tree whose
+        // procfs walk FAILED (tree_unavailable, review G3) says so —
+        // rendering the fabricated zero of an unreadable tree as a measured
+        // one would be the exact lie this feature exists to remove.
+        function subtreeNoteText(inst) {
+            if (inst && inst.tree_unavailable) return "tree unavailable";
+            const n = (inst && inst.child_count) || 0;
+            if (n <= 0) return "";
+            return "tree " + n + " \u00B7 " + formatBytes((inst && inst.subtree_rss_bytes) || 0);
+        }
+
+        // subtreeAgeText: coarse age of a child ("42s" / "7m" / "3h" /
+        // "12d"); "" on missing or future timestamps — a clock we cannot
+        // trust renders as nothing, never as a negative age.
+        function subtreeAgeText(createdMs, nowMs) {
+            if (!createdMs || !nowMs || nowMs < createdMs) return "";
+            const s = Math.floor((nowMs - createdMs) / 1000);
+            if (s < 60) return s + "s";
+            if (s < 3600) return Math.floor(s / 60) + "m";
+            if (s < 86400) return Math.floor(s / 3600) + "h";
+            return Math.floor(s / 86400) + "d";
+        }
+
+        // monitorSubtreeRowsHTML: the expanded detail block for one
+        // instance — top-N descendants by RSS (server already sorted),
+        // then "and M more" when the census is longer than the list, then
+        // the truncation note when the walk itself was capped.
+        function monitorSubtreeRowsHTML(inst, nowMs) {
+            // Review G3: an unreadable tree renders its state, never its
+            // zeros — "No live child processes" over a failed walk would
+            // dress up a procfs error as a measured all-clear.
+            //
+            // F-A3m1: the old sentence claimed "child count and RSS are
+            // unknown, not zero", which is only half true — child_count IS
+            // unknown, but subtree RSS is a MEASURED number (the main PID
+            // alone), and the subtree-rss alert on the very same screen
+            // renders it as "≥ X% (≥ Y; main PID measured, …)". Saying
+            // "unknown" above a measured lower bound is the same
+            // disagreement the feature exists to remove, so the note now
+            // states each half of the truth separately.
+            if (inst && inst.tree_unavailable) {
+                return '<span class="subtree-empty">Tree unavailable \u2014 /proc walk failed; child count is unknown (not zero), subtree RSS is the measured main PID alone \u2014 a lower bound, actual is higher</span>';
+            }
+            const kids = (inst && inst.children) || [];
+            const count = (inst && inst.child_count) || 0;
+            const more = count > kids.length ? count - kids.length : 0;
+            let inner = "";
+            if (kids.length === 0) {
+                inner = '<span class="subtree-empty">No live child processes</span>';
+            } else {
+                inner += '<table class="subtree-table"><tbody>';
+                for (const c of kids) {
+                    inner += '<tr>'
+                        + '<td>' + escapeHTML(c.name || "?") + '</td>'
+                        + '<td>' + escapeHTML(String(c.pid)) + '</td>'
+                        + '<td>' + escapeHTML(String(c.ppid)) + '</td>'
+                        + '<td style="text-align:right">' + formatBytes(c.rss_bytes || 0) + '</td>'
+                        + '<td style="text-align:right">' + (Number(c.cpu_percent) || 0).toFixed(1) + '%</td>'
+                        + '<td>' + escapeHTML(subtreeAgeText(c.created_at_ms, nowMs)) + '</td>'
+                        + '</tr>';
+                }
+                inner += '</tbody></table>';
+            }
+            if (more > 0) inner += '<div class="subtree-more">and ' + more + ' more</div>';
+            if (inst && inst.children_truncated) {
+                inner += '<div class="subtree-trunc">walk capped at depth/size limits \u2014 counts are floors</div>';
+            }
+            return inner;
+        }
+
+        // monitorFootnoteText: replaces the pre-#111 "Child processes
+        // spawned by instances are not counted" disclaimer with the
+        // MEASURED subtree totals and the honest visibility boundary:
+        // myworktree sees its own instance trees + system signals; sibling
+        // processes in the same terminal scope (other daemons, session
+        // CLIs) are not visible here — the alerts are a local truth, and
+        // acting on them is the user's call.
+        //
+        // F-A3m1: the tree_unavailable sentence used to say "its numbers
+        // are unknown, not measured" — true of child_count, false of
+        // subtree RSS, which is measured (main PID alone) and rendered as
+        // a "≥" lower bound by the alert on the same screen. Each half now
+        // states its own truth.
+        function monitorFootnoteText(data) {
+            let kids = 0, ram = 0, running = 0;
+            for (const i of ((data && data.instances) || [])) {
+                if (!i || i.status !== "running") continue;
+                running++;
+                kids += i.child_count || 0;
+                ram += i.subtree_rss_bytes || 0;
+            }
+            return "Subtree measured: " + running + " running " + (running === 1 ? "instance" : "instances")
+                + " \u00B7 " + kids + " child processes \u00B7 " + formatBytes(ram) + " subtree RSS (main PID + descendants)."
+                + " myworktree sees its own instance trees + system signals (PSI / available RAM) \u2014 sibling processes in the same terminal scope are not visible here, so alerts are a local truth."
+                + " A row marked \u201ctree unavailable\u201d had an unreadable /proc walk \u2014 its child count is unknown, its subtree RSS is a measured lower bound (main PID only); walk-capped counts are floors."
+                + " \u00B7 Counts can also be floors without any walk cap: a process that exits between the enumeration and the read drops its branch silently (churn is normal, not an error), so child_count / subtree RSS may be a lower bound even when no row reports a cap."
+                + " Detection only: every action is yours (docs/PLAYBOOK-memory-alerts.md).";
+        }
+
+        // --- glue: DOM application of the pure parts above ---
+
+        function applyMonitorAlerts(alerts) {
+            if (typeof document === "undefined") return;
+            const bar = document.getElementById("status-bar");
+            const badge = document.getElementById("status-bar-alerts");
+            if (!bar || !badge) return;
+            badge.textContent = alertBadgeText(alerts);
+            badge.hidden = (alerts || []).length === 0;
+            bar.classList.remove("status-alert-amber", "status-alert-red");
+            const worst = alertWorstSeverity(alerts);
+            if (worst) bar.classList.add("status-alert-" + worst);
+        }
+
+        async function fetchMonitorAlerts() {
+            // While the Resource Monitor dialog is OPEN, its own 2s full
+            // poll (renderMonitorStats) owns the status-bar badge and paints
+            // the fresh FULL alert set on it; this ~10s light poll carries
+            // only the system-only cached set, so repainting here would
+            // flicker the badge (full ⇄ system-only) and misreport "the
+            // problem disappeared". It stands down entirely until the modal
+            // closes, then resumes as the closed-modal badge's sole owner
+            // (ARB-F8; matches the renderMonitorStats comment).
+            if (typeof document !== "undefined") {
+                const dialog = document.getElementById("modal-monitor");
+                if (dialog && dialog.open) return;
+            }
+            try {
+                const data = await api("/api/monitor/alerts");
+                // sampled_at_ms gate (ARB-F6): a COLD cache (0 = "never
+                // sampled") is not an all-clear — never dress up silence as a
+                // fresh no-alerts state. The endpoint documents this; honor
+                // it rather than painting a stale-empty badge.
+                if (!data || !(data.sampled_at_ms > 0)) return;
+                applyMonitorAlerts(data.alerts);
+            } catch (e) {
+                console.error("Failed to fetch monitor alerts:", e);
+            }
+        }
+
+        function startMonitorAlertsPolling() {
+            if (monitorAlertsTimer) clearInterval(monitorAlertsTimer);
+            monitorAlertsTimer = setInterval(fetchMonitorAlerts, MONITOR_ALERTS_POLL_MS);
+            fetchMonitorAlerts();
+        }
+
+        function stopMonitorAlertsPolling() {
+            if (monitorAlertsTimer) {
+                clearInterval(monitorAlertsTimer);
+                monitorAlertsTimer = null;
+            }
+        }
+
+        // toggleMonitorTree flips the expanded subtree detail row of one
+        // instance. The Set keeps the state across the modal's 2s
+        // re-renders; the DOM update here is the optimistic paint so the
+        // chevron answers immediately without waiting for the next poll.
+        function toggleMonitorTree(id) {
+            const open = !monitorExpandedTrees.has(id);
+            if (open) monitorExpandedTrees.add(id); else monitorExpandedTrees.delete(id);
+            if (typeof document === "undefined") return;
+            const row = document.getElementById("subtree-row-" + id);
+            if (row) row.hidden = !open;
+            const btn = document.getElementById("subtree-toggle-" + id);
+            if (btn) btn.classList.toggle("open", open);
+        }
+
+        // handleMonitorTbodyClick: the ONE delegated listener for every
+        // subtree toggle button (review G6). The buttons live in
+        // #monitor-tbody, which the modal's 2s poll replaces wholesale via
+        // innerHTML — inline onclick strings re-encoded the instance id
+        // into a JS literal on every repaint, and escapeHTML does not
+        // cover single quotes. A data attribute + this listener means the
+        // id travels as DATA, never as code, and survives every repaint
+        // without re-escaping.
+        function handleMonitorTbodyClick(e) {
+            const btn = e && e.target && e.target.closest ? e.target.closest(".subtree-toggle") : null;
+            if (!btn || btn.dataset.treeId === undefined) return;
+            toggleMonitorTree(btn.dataset.treeId);
+        }
 
         function openModalMonitor() {
             const dlg = document.getElementById("modal-monitor");
@@ -7580,12 +8675,40 @@
         }
 
         function closeMonitorModal() {
+            // Deliberately ONLY the close (F-N1). A native <dialog> fires
+            // 'close' for EVERY door that closes it — this button,
+            // ESC (cancel -> close), requestClose() — and the one-time
+            // listener bound at init (handleMonitorDialogClose) owns the
+            // timer clear and the badge convergence. Doing that work here
+            // instead would (a) miss ESC entirely, leaking monitorTimer so
+            // fetchMonitorStats kept enumerating /proc and repainting a
+            // closed dialog forever, and (b) double it on the button path.
+            document.getElementById("modal-monitor").close();
+        }
+
+        // F-N1: the ONE close handler for the Resource Monitor, driven by
+        // the dialog's 'close' event rather than by any single button.
+        // closeMonitorModal() used to own this work, but ESC reaches the
+        // dialog's cancel->close path without ever running it — so the 2s
+        // poll's interval outlived the modal and the modal's FULL alert set
+        // stayed painted on the status-bar badge for up to one ~10s light
+        // poll (and flickered against it in the meantime).
+        function handleMonitorDialogClose() {
             if (monitorTimer) {
                 clearInterval(monitorTimer);
                 monitorTimer = null;
             }
-            const dlg = document.getElementById("modal-monitor");
-            if (dlg.open) dlg.close();
+            // The modal's 2s full poll painted the FULL alert set on the
+            // badge while it was open, and the ~10s light poll stood down
+            // for exactly that reason (ARB-F8) — so without a repaint HERE
+            // the badge would keep showing that full set after the modal
+            // closed, behaving as if the problem were still the one the
+            // modal last saw. dialog.open is false again, so the light
+            // poll's guard passes: repaint now and the badge converges to
+            // the cache-only system set immediately (F-R1n1). The event
+            // fires once per ACTUAL close, so a second click on an
+            // already-closed dialog cannot kick a needless fetch.
+            fetchMonitorAlerts();
         }
 
         function toggleMonitorLicenses() {
@@ -7596,8 +8719,24 @@
         }
 
         async function fetchMonitorStats() {
+            // Defense in depth (F-N1): a stray or leaked tick must be a
+            // no-op. This pre-await check is the BACKSTOP for a tick that
+            // had NOT YET STARTED — one queued behind the dialog's own
+            // close (the interval already cleared by handleMonitorDialogClose,
+            // or a click-shaped call racing it) never pays for the full
+            // /proc enumeration.
+            const dlg = document.getElementById("modal-monitor");
+            if (dlg && !dlg.open) return;
             try {
                 const data = await api("/api/instances/stats");
+                // F-N4: re-check AFTER the await, before the repaint. The
+                // pre-await guard above has already been passed by the tick
+                // that was IN FLIGHT when the dialog closed — a stats
+                // request can straddle the close — and rendering here would
+                // paint the modal's FULL alert set on the badge after close
+                // (F-N1's symptom, back for one tick). The post-await check
+                // is what covers that one; the pre-await check cannot.
+                if (!document.getElementById("modal-monitor").open) return;
                 renderMonitorStats(data);
             } catch (e) {
                 console.error("Failed to fetch monitor stats:", e);
@@ -7605,6 +8744,18 @@
         }
 
         function renderMonitorStats(data) {
+            // Alerts strip (issue #111 P2): fresh FULL alert set — system
+            // signals AND per-instance subtree signals. The status bar gets
+            // the same fresh set here: while the modal is open THIS 2s poll
+            // owns the badge, and the ~10s light poll stands down
+            // (fetchMonitorAlerts guards on dialog.open), so its flicker
+            // cannot reach the badge; the light poll resumes when the modal
+            // closes. The modal's data is strictly fresher, so painting it
+            // on the badge too keeps the two honest.
+            const alertsEl = document.getElementById("monitor-alerts");
+            if (alertsEl) alertsEl.innerHTML = monitorAlertsHTML(data ? data.alerts : null);
+            applyMonitorAlerts(data ? data.alerts : null);
+
             // Render global summary
             const summaryEl = document.getElementById("monitor-summary");
             summaryEl.innerHTML = `
@@ -7665,14 +8816,36 @@
                 for (const inst of group.instances) {
                     const connClass = inst.connection_type === "websocket" ? "conn-ws" : inst.connection_type === "sse" ? "conn-sse" : "conn-none";
                     const connLabel = inst.connection_type === "websocket" ? "WS" : inst.connection_type === "sse" ? "SSE" : "none";
+                    const running = inst.status === "running";
+                    const treeOpen = monitorExpandedTrees.has(inst.id);
+                    // Subtree toggle only for running instances — a stopped
+                    // one has no live tree to expand ("no data" would be a
+                    // lie for "not running").
+                    // Review G6: NO inline event-handler attribute here —
+                    // the old shape put an instance id inside a
+                    // single-quoted JS string nested in a double-quoted
+                    // attribute, and escapeHTML does not escape single
+                    // quotes: an id containing ' tore the attribute apart
+                    // (broken button at best, injected JS at worst). The id
+                    // now rides a plain data attribute (escapeHTML's
+                    // &quot; is all attribute context needs) and ONE
+                    // delegated listener on the tbody —
+                    // handleMonitorTbodyClick — reads it back.
+                    const toggle = running
+                        ? '<button class="subtree-toggle' + (treeOpen ? " open" : "") + '" id="subtree-toggle-' + escapeHTML(inst.id) + '" data-tree-id="' + escapeHTML(inst.id) + '" title="Show child processes"><svg width="8" height="8" viewBox="0 0 8 8"><path d="M3 1L7 4L3 7" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg></button>'
+                        : "";
+                    const note = running ? '<div class="subtree-note">' + escapeHTML(subtreeNoteText(inst)) + '</div>' : "";
                     html += `<tr>
-                        <td>${escapeHTML(inst.name || inst.id)}</td>
+                        <td>${toggle}${escapeHTML(inst.name || inst.id)}${note}</td>
                         <td>${inst.pid > 0 ? inst.pid : "-"}</td>
                         <td>${escapeHTML(inst.status)}</td>
                         <td class="${connClass}">${escapeHTML(connLabel)}</td>
                         <td style="text-align:right">${inst.cpu_percent.toFixed(1)}%</td>
                         <td style="text-align:right">${formatBytes((inst.memory_rss_bytes || 0) + (inst.memory_buffer_bytes || 0))}<span style="font-size:11px;color:var(--text-secondary)">${buildBufferNote(inst)}</span></td>
                     </tr>`;
+                    if (running) {
+                        html += `<tr class="subtree-detail-row" id="subtree-row-${escapeHTML(inst.id)}"${treeOpen ? "" : " hidden"}><td colspan="6">${monitorSubtreeRowsHTML(inst, Date.now())}</td></tr>`;
+                    }
                 }
             }
             if (data.global) {
@@ -7680,7 +8853,12 @@
             }
             tbody.innerHTML = html;
             const discRow = document.createElement('tr');
-            discRow.innerHTML = '<td colspan="6" style="font-size:12px;color:var(--text-secondary);padding-top:8px;border-top:1px solid var(--border);text-align:center;">Child processes spawned by instances are not counted</td>';
+            // Issue #111 P2: the old "Child processes spawned by instances
+            // are not counted" disclaimer is replaced by the MEASURED
+            // subtree numbers plus the visibility boundary — children ARE
+            // counted now (own instance trees), and what remains invisible
+            // (same-scope siblings) is stated as such, not glossed.
+            discRow.innerHTML = '<td colspan="6" style="font-size:12px;color:var(--text-secondary);padding-top:8px;border-top:1px solid var(--border);text-align:center;">' + escapeHTML(monitorFootnoteText(data)) + '</td>';
             tbody.appendChild(discRow);
         }
 

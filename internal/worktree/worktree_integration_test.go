@@ -432,3 +432,76 @@ func TestDeleteCleanWorktreeReportsIgnoredDestroyed(t *testing.T) {
 		t.Fatalf("ignoredDestroyed = %d, want 3 (debug.log + buildcache/x.o + buildcache/y.o — the ignored dir must count file-by-file)", ignored)
 	}
 }
+
+// TestUpdateNameKeepsGitWorktreeIntact pins the issue #122 acceptance
+// criterion "git worktree list is unaffected": renaming a managed worktree
+// touches only the stored display name — Branch and Path survive in the
+// returned record and on disk, and git's own worktree list still registers
+// the path.
+func TestUpdateNameKeepsGitWorktreeIntact(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is required")
+	}
+	repo := initGitRepo(t)
+	dataDir := t.TempDir()
+	fs := store.FileStore{Path: filepath.Join(dataDir, "state.json")}
+	m := Manager{
+		GitRoot: repo,
+		DataDir: dataDir,
+		Store:   fs,
+	}
+
+	wt, err := m.Create("desc", "HEAD")
+	if err != nil {
+		t.Fatalf("Create failed: %v", err)
+	}
+
+	updated, err := m.UpdateName(wt.ID, "renamed")
+	if err != nil {
+		t.Fatalf("UpdateName failed: %v", err)
+	}
+	if updated.Name != "renamed" {
+		t.Fatalf("Name = %q, want %q", updated.Name, "renamed")
+	}
+	if updated.Branch != wt.Branch || updated.Path != wt.Path || updated.ID != wt.ID {
+		t.Fatalf("rename must not touch git-facing fields: before=%#v after=%#v", wt, updated)
+	}
+
+	st, err := fs.Load()
+	if err != nil {
+		t.Fatalf("load state failed: %v", err)
+	}
+	if len(st.Worktrees) != 1 {
+		t.Fatalf("worktree count = %d, want 1", len(st.Worktrees))
+	}
+	if st.Worktrees[0].Name != "renamed" || st.Worktrees[0].Branch != wt.Branch || st.Worktrees[0].Path != wt.Path {
+		t.Fatalf("persisted record drifted: %#v", st.Worktrees[0])
+	}
+
+	items, err := listGitWorktrees(repo)
+	if err != nil {
+		t.Fatalf("list git worktrees failed: %v", err)
+	}
+	// Compare symlink-resolved paths: on macOS t.TempDir() lives under
+	// /var/folders (a symlink to /private/var) while `git worktree list
+	// --porcelain` reports the resolved /private/var form — filepath.Clean
+	// alone cannot bridge that, so the positive membership check would fail
+	// there (PR #125 macOS CI). EvalSymlinks normalises both sides; fall
+	// back to Clean when resolution fails (e.g. the path no longer exists).
+	resolve := func(p string) string {
+		if r, err := filepath.EvalSymlinks(p); err == nil {
+			return r
+		}
+		return filepath.Clean(p)
+	}
+	found := false
+	for _, item := range items {
+		if resolve(item.Path) == resolve(wt.Path) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("renamed worktree must still be listed by git, got %#v", items)
+	}
+}

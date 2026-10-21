@@ -90,6 +90,15 @@ func newReasonixTestManagerOn(t *testing.T, fs store.FileStore, dataDir string, 
 	m := framework.NewManager(reg, fs, nil)
 	m.DataDir = dataDir
 	m.Tags = tag.Manager{ProjectPath: filepath.Join(dataDir, "tags.json")}
+	// Backstop (issue #113): the fake serve fixtures serve forever until
+	// explicitly killed, and `go test` exit does not take them down — a
+	// forgotten Stop leaked a ~16MB python process per occurrence. Stop
+	// every reasonix instance still registered in this manager when the
+	// test ends. StopAllKind is the production shutdown path
+	// (Server.Shutdown parity), reused rather than a test-only API; the
+	// t.Cleanup LIFO order guarantees this runs before the rxTempDir
+	// RemoveAll cleanups registered earlier.
+	t.Cleanup(func() { m.StopAllKind(reasonix.KindName) })
 	return m
 }
 
@@ -413,9 +422,16 @@ func TestRestartReasonixCleansOldDir(t *testing.T) {
 		t.Fatalf("stale reasonix dir missing before restart: %v", err)
 	}
 
-	if _, err := m.Restart(inst.ID); err != nil {
+	newInst, err := m.Restart(inst.ID)
+	if err != nil {
 		t.Fatalf("Restart failed: %v", err)
 	}
+	// Restart migrates onto a FRESH id (never reuses the old one), so the
+	// live serve process now belongs to newInst.ID — the old id has no
+	// process left to stop. Without stopping the new id the restarted
+	// fixture leaks (issue #113); the manager t.Cleanup backstop would
+	// catch it, but the test's own teardown should be complete on its own.
+	defer func() { _ = m.Stop(newInst.ID) }()
 	if _, err := os.Stat(oldDir); !os.IsNotExist(err) {
 		t.Fatalf("old reasonix dir still exists after restart: %v", err)
 	}
