@@ -1392,11 +1392,14 @@ func captureLog(w io.Writer) func() {
 // TestRemoveStaleRegistration_MissingFileLogsBenignAlreadyGone.
 //
 // The benign anchor exists because ENOENT is NOT a failure: two daemons sweeping
-// on the same cadence with a fixed phase offset race on the same entry, and the
-// owner's own Stop() unlink races a peer's sweep too. Those are the outcomes
-// cleanup wanted, so they must not be tallied on the failure channel — an
-// assertion of "no failure line" only means something if the benign branch has
-// its own line to be counted on instead.
+// on the same cadence with a fixed phase offset race on the same entry, the
+// owner's own Stop() unlink races a peer's sweep too, and a hand-run `rm` or an
+// external cleanup tool empties the path from outside the daemon. Those are the
+// outcomes cleanup wanted, so they must not be tallied on the failure channel — an
+// assertion of "no failure line" only means something if the benign branch has its
+// own line to be counted on instead. The benign line's enumerated tail ("— removed
+// by a peer sweep, its own Stop, or manual removal") still cannot collide with the
+// success anchor, which requires "removed " immediately after "[portal] cleanup: ".
 const (
 	cleanupSuccessLogPrefix  = "[portal] cleanup: removed "
 	cleanupFailureLogPrefix  = "[portal] cleanup: failed to remove "
@@ -2031,18 +2034,20 @@ func TestRemoveStaleRegistration_RemoveFailureLogsFailure(t *testing.T) {
 // cleanup wanted, not a failure. Every daemon runs this sweep on the same
 // cleanupInterval with a fixed phase offset, so two daemons race on the same
 // entry and the loser gets ENOENT; the owner's own graceful Stop() unlinks its
-// file against a peer's sweep the same way. Both stay OFF the failure channel —
-// routing them there would dilute the failures D3 exists to surface (ENOTEMPTY,
-// permissions, a full disk) into noise a reader learns to ignore, and it would
-// make "no failure line" unassertable in exactly the situation where the entry
-// really is gone.
+// file against a peer's sweep the same way, and a hand-run `rm` (or an external
+// cleanup tool) empties the same path from outside the daemon. All three stay OFF
+// the failure channel — routing them there would dilute the failures D3 exists to
+// surface (ENOTEMPTY, permissions, a full disk) into noise a reader learns to
+// ignore, and it would make "no failure line" unassertable in exactly the
+// situation where the entry really is gone.
 func TestRemoveStaleRegistration_MissingFileLogsBenignAlreadyGone(t *testing.T) {
 	tmpDir := t.TempDir()
 	victim := filepath.Join(tmpDir, "gone.json")
 
 	// The race staged: the entry is created and then unlinked before this
-	// sweep reaches it. From here a peer's sweep and the owner's Stop() are
-	// the same observable state, which is precisely why the line names both.
+	// sweep reaches it. From here a peer's sweep, the owner's Stop() and a
+	// manual `rm` are the same observable state, which is precisely why the
+	// line enumerates all three instead of asserting one cause.
 	if err := os.WriteFile(victim, []byte("{}"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -2081,6 +2086,7 @@ func TestRemoveStaleRegistration_MissingFileLogsBenignAlreadyGone(t *testing.T) 
 	for _, frag := range []string{
 		"stale registration gone-id ", benignGoneFragment, "file=gone.json",
 		"reason=lease-expired-tcp-unreachable", "peer sweep", "its own Stop",
+		"manual removal",
 	} {
 		if !strings.Contains(out, frag) {
 			t.Errorf("benign already-gone line must contain %q:\n%s", frag, out)
@@ -2217,8 +2223,11 @@ func TestHeartbeatLoopLogsRegistrationWriteFailures(t *testing.T) {
 	}
 	// Stay in the streak past its tenth tick so the SECOND line is observed too:
 	// a rate limit that goes silent forever is indistinguishable from a healed
-	// daemon. ≥15 ticks at 20 ms, so #1 and #10 are both in the window.
-	for time.Since(started) < 350*time.Millisecond {
+	// daemon. ~25 ticks expected at 20 ms, so #1/#10/#20 may all appear; the
+	// lower bound still only demands #1 and #10 — pinning it at 3 would need
+	// ≥20 ticks of real progress (400 ms) inside this 500 ms window, a 1.25×
+	// margin that only replaces one tight assumption with a tighter one.
+	for time.Since(started) < 500*time.Millisecond {
 		time.Sleep(10 * time.Millisecond)
 	}
 	close(p.done)
@@ -2227,10 +2236,10 @@ func TestHeartbeatLoopLogsRegistrationWriteFailures(t *testing.T) {
 	out := w.String()
 	lines := strings.Count(out, heartbeatWriteFailPrefix)
 	if lines < 2 {
-		t.Errorf("a streak of ≥15 failed ticks must have produced at least the #1 and #10 lines, got %d:\n%s", lines, out)
+		t.Errorf("a streak of ~25 failed ticks must have produced at least the #1 and #10 lines, got %d:\n%s", lines, out)
 	}
 	if lines > 8 {
-		t.Errorf("the failure channel is rate-limited (every 10th tick), got %d lines for ≥15 ticks:\n%s", lines, out)
+		t.Errorf("the failure channel is rate-limited (every 10th tick), got %d lines for ~25 ticks:\n%s", lines, out)
 	}
 	for _, frag := range []string{"mkdir registry dir", "not a directory", blocker} {
 		if !strings.Contains(out, frag) {

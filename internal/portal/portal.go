@@ -638,7 +638,8 @@ func (p *Portal) cleanupStaleRegistrations() {
 //     Every daemon runs this sweep on the same cadence with a fixed phase
 //     offset, so two daemons can race on the same entry and the loser sees
 //     ENOENT; the same happens against the owner's own graceful Stop()
-//     unlinking its file. Both are the outcome cleanup wanted — the entry is
+//     unlinking its file, and against a hand-run `rm` or an external cleanup
+//     tool. All three are the outcome cleanup wanted — the entry is
 //     gone — and routing them through the failure line would dilute the
 //     failures this function exists to surface (ENOTEMPTY, permissions, a
 //     full disk). errors.Is, not ==, because the sentinel arrives wrapped in
@@ -652,7 +653,7 @@ func removeStaleRegistration(path string, reg registration, reason string) {
 		return
 	}
 	if errors.Is(err, fs.ErrNotExist) {
-		log.Printf("[portal] cleanup: stale registration %s already gone (file=%s reason=%s) — removed by a peer sweep or its own Stop",
+		log.Printf("[portal] cleanup: stale registration %s already gone (file=%s reason=%s) — removed by a peer sweep, its own Stop, or manual removal",
 			reg.InstanceID, filepath.Base(path), reason)
 		return
 	}

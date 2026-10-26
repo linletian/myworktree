@@ -1,6 +1,6 @@
 # Issue #131 修复计划：Portal 注册表误删与心跳自愈
 
-**状态**：v1.2（PR #134 评审轮 F1–F6 已实现并全绿；v1.1 的仲裁修订保持不动）。
+**状态**：v1.3（PR #134 评审轮 F1–F6 已实现并全绿，评审总判决「可以合入」；本轮为第二轮评审余下 3 条收尾 nit N1–N3 的落实；v1.1 的仲裁修订保持不动）。
 **Issue**：#131（bug，GitHub `linletian/myworktree#131`）。
 **范围**：`internal/portal/portal.go`、`internal/portal/portal_test.go`、本文档、`CHANGELOG.md` 一条 Unreleased 条目。
 **索引约定**：本文档的「修复后」索引一律使用**符号锚点**（函数名 / 字段名 / 常量名），不写行号——行号会随任何一次无关改动而失真，符号锚点不会。「修复前」行号是 issue 提出时已核实的源码位置，作为历史证据保留。
@@ -169,18 +169,28 @@ unlink 的返回值，所以失败的删除不可能被记成成功的删除。�
 
 ```
 [portal] cleanup: removed stale registration <instance_id> (file=<entry_name> pid=<pid> port=<port> repo=<repo> reason=<reason>)
-[portal] cleanup: stale registration <instance_id> already gone (file=<entry_name> reason=<reason>) — removed by a peer sweep or its own Stop
+[portal] cleanup: stale registration <instance_id> already gone (file=<entry_name> reason=<reason>) — removed by a peer sweep, its own Stop, or manual removal
 [portal] cleanup: failed to remove stale registration <instance_id> (file=<entry_name> pid=<pid> port=<port> repo=<repo> reason=<reason>): <err>
 ```
 
 - **ENOENT 走独立的良性行，不进 failure 通道（评审 F1）**：清理想要的结果就
   是"这条目不在了"，而条目在扫描与 unlink 之间被别人删掉是**常态而非异常**
   ——每个 daemon 都按 `cleanupInterval` 扫除、相位差固定，同一条目上两个 daemon
-  竞争时后到者必得 ENOENT；属主自己优雅 `Stop()` 的 unlink 与对端扫除同理。
-  把这些算进 failure 通道，会把 D3 真正要浮出来的故障（ENOTEMPTY、权限、磁盘
-  满）稀释成读者学会忽略的噪音，也会让"本轮无失败行"这类断言在条目其实已消失
-  时无法成立。判定用 `errors.Is(err, fs.ErrNotExist)` 而不是 `err ==
-  fs.ErrNotExist`——哨兵是被 `*PathError` 包着的，`==` 在这里恒为 false。
+  竞争时后到者必得 ENOENT；属主自己优雅 `Stop()` 的 unlink 与对端扫除同理；
+  此外还有第三种成因——人工 `rm` 或外部清理工具直接从注册目录里把它删掉。
+  三种都是清理想要的结局，把这些算进 failure 通道，会把 D3 真正要浮出来的故障
+  （ENOTEMPTY、权限、磁盘满）稀释成读者学会忽略的噪音，也会让"本轮无失败行"这类
+  断言在条目其实已消失时无法成立。判定用 `errors.Is(err, fs.ErrNotExist)` 而不是
+  `err == fs.ErrNotExist`——哨兵是被 `*PathError` 包着的，`==` 在这里恒为 false。
+- **良性行尾巴枚举三种成因，而不是完全中性（评审 N1）**：文案取 `— removed by a
+  peer sweep, its own Stop, or manual removal`。不取 "the entry was already gone"
+  那种中性写法，因为排查时"谁删的"正是读者要的那条线索；句式是**列举候选成因**
+  而非断言唯一成因，所以补上人工删除只是把归因补全，不会引入误归因。测试侧由
+  `TestRemoveStaleRegistration_MissingFileLogsBenignAlreadyGone` 的
+  `peer sweep` / `its own Stop` / `manual removal` 三个片段钉住；三个前缀锚点
+  （`removed` / `failed` / `stale`）互不误匹配不受影响——成功锚点要求
+  `[portal] cleanup: ` 之后紧跟 `removed `，而良性行该位置是 `stale`，尾巴里的
+  "or manual removal" 无法被算成成功行。
 - `file=` 取 `filepath.Base(path)`，即**实际被操作的目录项名**；
   `instance_id` 等取自**文件内容**。两者并存是刻意的：手工改过或写坏的注册
   文件里，文件名和内容里的 instance id 可以不一致，诊断时两个都要看见。
@@ -241,6 +251,26 @@ unlink 的返回值，所以失败的删除不可能被记成成功的删除。�
    活 daemon，因此接受；彻底修掉挂起需要在 `claimerLoop` bind 成功后复查
    `p.done`（复查不过就关掉刚拿到的 listener 并退出），那是一次独立的
    `claimerLoop` 改动，超出 #131 的范围。
+7. **`deleteRegistration()` 仍是文件里最后一个静默 unlink（评审 N2：记录，非
+   修改请求）**：`Stop()` 路径上的 `deleteRegistration()` 删两处——自己的
+   `<instance_id>.json`，以及 `wasHolder` 时的 `portal.json`——两次都是裸
+   `os.Remove`，返回的 error 被丢弃，日志里不会留下这次删除的任何痕迹。本轮
+   **不改**：§七 已把 `deleteRegistration()` 的内部列为不改基线，这条与之互相
+   引用、保持一致。把它的失败模式如实记清——失败是**自限**的：
+   - `<instance_id>.json` 删失败后，属主进程随即退出，文件成为"死 PID 的注册"。
+     任一对端 daemon 的下一轮扫除在 **≤1 个 `cleanupInterval`** 内经矩阵格①
+     （PID 已退出）把它回收；这期间列表侧 `isProcessAlive` 对死 PID 直接返回
+     false，Dashboard 显示 `alive=false`，**不会把已停机实例误报为存活**。
+   - **单 daemon 主机的边界**：没有对端扫除时，这个残留文件不会被任何清扫碰过，
+     要等到**下一次任一 daemon 启动后的首轮扫除**才被回收（`cleanupRegistrationLoop`
+     只按 ticker 扫，启动时不立即扫，所以这仍是"该 daemon 启动后 ≤1 个
+     `cleanupInterval`"）。期间列表侧同样显示 `alive=false`，不误判存活。
+   - `portal.json` 删失败则留下一个指向已退出 holder 的陈旧文件：它在 shipped
+     代码里**没有任何读取方**（`handleList` 与清理扫描都显式跳过 `portal.json`），
+     所以残留只体现在磁盘上多一个惰性文件，不影响列表展示。
+   - 因此静默 unlink 的代价是"日志里少一行删除记录"，不是"幽灵实例长期挂在
+     Dashboard 上"。若将来要把这一格也变成可观测，那是一次独立的
+     `deleteRegistration()` 改动，与 §七 基线一并重开，不属于 #131 的收尾范围。
 
 ## 六、D4 范围裁决（记录，不实现）
 
@@ -256,7 +286,10 @@ server.json` 补全列表）」**本次不做**：
 
 `handleList` 的 `alive` 展示语义、`deleteRegistration()` 的内部实现与
 `portal.json` 的语义、`claimerLoop` 均未改动（`isProcessAlive` 仅收敛到共享
-的 `pidAlive`/`tcpProbe` 实现，判活语义逐行等价）。
+的 `pidAlive`/`tcpProbe` 实现，判活语义逐行等价）。`deleteRegistration()` 里
+那两个静默 `os.Remove`（own `<instance_id>.json`、holder 时的 `portal.json`）
+因而保持原样：本轮评审对它们是**记录、非修改请求**，失败模式与自限边界完整
+记在 §五-7，两处口径互相引用、保持一致。
 
 `Portal.Stop()` 是本轮破例处，而它的**唯一改动是把 `p.wg.Wait()` 上移到
 `p.deleteRegistration()` 之前**：`close(done)` 仍在最前（后移会死锁——所有
@@ -287,9 +320,9 @@ connection refused）：
 | `TestHeartbeatLoopExitsOnDone` | 心跳 goroutine 随 `p.done` 退出，`Stop()` 不悬挂；goroutine 手工 spawn 时**显式传入** `p.heartbeatInterval`（与 `Start()` 同一形态） |
 | `TestStopRemovesRegistrationAfterHeartbeatExit` | **Stop 顺序**：200 轮独立 Portal + 独立临时 RegistryDir，启动前把 `heartbeatInterval` 钉到 1ns 让写者全程滚烫，手工 `writeRegistration()`（断言 `err == nil`）+ `wg.Add(1)` + `go p.heartbeatLoop(p.heartbeatInterval)`，跑约 100µs 后 `Stop()`，断言 Stop 返回后 `<instance_id>.json` 确定不存在 |
 | `TestRemoveStaleRegistration_RemoveFailureLogsFailure` | **删除失败可见**：非空目录 `victim.json/` 使 `os.Remove` 确定性失败（ENOTEMPTY），内容 instance_id 用 `content-id`；断言目标仍存在、日志含 `failed to remove`、`victim.json`、`content-id`、reason 与 OS 错误原文，且**成功行数为零**（按前缀锚点 `[portal] cleanup: removed ` 计数 `== 0`，不用裸子串 `removed stale registration`——文案一改裸子串就会静默匹配不到而让断言变空；失败行不会被误计，`[portal] cleanup: ` 之后是 `failed`） |
-| `TestRemoveStaleRegistration_MissingFileLogsBenignAlreadyGone` | **D3 第三支（评审 F1）**：目标先建后删，再调 `removeStaleRegistration` → 得 ENOENT。断言**failure 通道为 0**、**success 通道为 0**、**良性行恰好 1 条**（新锚点 `[portal] cleanup: stale registration `）、`[portal] cleanup:` 总数恰好 1、目标仍不存在，且良性行携带 instance id / `file=` / reason 与"peer sweep or its own Stop"两种成因。ENOTEMPTY 夹具（上一条）不受影响——真失败仍走真失败通道 |
+| `TestRemoveStaleRegistration_MissingFileLogsBenignAlreadyGone` | **D3 第三支（评审 F1）**：目标先建后删，再调 `removeStaleRegistration` → 得 ENOENT。断言**failure 通道为 0**、**success 通道为 0**、**良性行恰好 1 条**（新锚点 `[portal] cleanup: stale registration `）、`[portal] cleanup:` 总数恰好 1、目标仍不存在，且良性行携带 instance id / `file=` / reason 与"peer sweep / its own Stop / manual removal"**三种成因**（评审 N1：文案补全第三个成因"人工删除"，测试片段同步补 `manual removal`，三个片段各自钉住一条成因，缺任何一条即红）。ENOTEMPTY 夹具（上一条）不受影响——真失败仍走真失败通道 |
 | `TestRegistrationWriteLoggerRateLimitsFailureStreaks` | **心跳写失败限频的纯单测（评审 F2）**：无时钟、无 goroutine、无文件系统，单遍过规则——健康态静默；#1 立即打且带原始 error 文本；#2..#9 静默；#10 再打；#11..#19 静默；#20 再打；成功 → 恢复行且**带 streak 长度 20**；清零后再失败是新的 #1（立即打），其恢复说 1；再起一条全新串仍是 #1 立即 / #2..#9 静默 / #10 打 / 恢复说 10——证明清零触及的是计数而不只是"已记过"标志 |
-| `TestHeartbeatLoopLogsRegistrationWriteFailures` | **写失败的真实路径（评审 F2）**：`RegistryDir` 指向一个**普通文件**，`os.MkdirAll` 确定性 ENOTDIR——无 chmod、无 root、无文件系统权限语义可争、也没有可注入的 seam；心跳以注入的 20ms 走**真实 goroutine**，日志用带锁的 `syncLogWriter` **并发轮询**（首行落在测试不掌控的 tick 上）：3s 内必见首条 `[portal] warning: heartbeat registration write failed:`；跑到 ≥15 tick 后断言行数 ≥2（#1 与 #10 都在）**且 ≤8**（限频生效，不是每 tick 一行），并断言行内带 `mkdir registry dir` / `not a directory` / 具体目录路径；全程无恢复行 |
+| `TestHeartbeatLoopLogsRegistrationWriteFailures` | **写失败的真实路径（评审 F2）**：`RegistryDir` 指向一个**普通文件**，`os.MkdirAll` 确定性 ENOTDIR——无 chmod、无 root、无文件系统权限语义可争、也没有可注入的 seam；心跳以注入的 20ms 走**真实 goroutine**，日志用带锁的 `syncLogWriter` **并发轮询**（首行落在测试不掌控的 tick 上）：3s 内必见首条 `[portal] warning: heartbeat registration write failed:`；再跑到 **500ms 窗口**（20ms tick → 期望 ~25 tick，评审 N3 把原先的 350ms/≥15 tick 放宽，全套件最紧的时序余量因此从 1.75× 变成 2.5×）后断言行数 ≥2（#1 与 #10 都在，**下界刻意不收紧到 3**：见到第 3 行需要 ≥20 tick=400ms 的真实进度，500ms 窗口下只剩 1.25× 余量，等于用一个更紧的假设换一个较松的假设）**且 ≤8**（限频生效，不是每 tick 一行；~25 tick 最多产出 #1/#10/#20 三条，上界仍远未触顶），并断言行内带 `mkdir registry dir` / `not a directory` / 具体目录路径；全程无恢复行 |
 | `TestHeartbeatLoopStaysSilentWhileWritesSucceed` | 上一条的另一半：健康心跳**一条都不打**（failure/recovery 计数均为 0）而文件确实被反复写好——没有这条，"告警通道出现了一行"毫无信息量，因为通道本来就吵 |
 | `TestStartLogsInitialRegistrationWriteFailure` | **`Start()` 初始写单独成行**（超出评审字面的最小补充，§D2 已明示）：`RegistryDir` 是普通文件 → `Start()` 仍返回 nil 并把四个循环接上，同时打出恰好一条 `[portal] warning: initial registration write failed:`，带 operation 语境与 OS 错误；心跳通道此时为 0（默认 60s，本测试毫秒级）——两条通道不互相冒充 |
 | `TestCell5DeletionThenHeartbeatRestores` | **格⑤误删 → 属主心跳全量恢复的端到端组合（评审 F6）**：共享同一 `t.TempDir()` 的两个 Portal。属主 B：`PortalPort` 被 `openPort` 占住（通常挡住真 HTTP，双栈说明同上）、`InstancePort` 是 `closedPort`（TCP 必不通）、`heartbeatInterval` 启动前覆盖为**较长**的 1s（保证"篡改→对端扫除"稳定落在 B 的下一个 tick 之前）、`B.Start()` 真实接线，轮询等首写且心跳新鲜。篡改：用 `staleHeartbeat()` + 关闭端口覆写 B 的文件（模拟时钟前跳/漏跳落进格⑤；若某个 tick 抢先，格③正确拒删，重试对即"这一对才算数"）。对端 A：`New(Config{RegistryDir: 同一目录})` **不 Start**，直接 `cleanupStaleRegistrations()` → 断言 B 的文件被删（PID=测试进程存活 + 心跳过期 + 探测必失败 → 格⑤，`reason=lease-expired-tcp-unreachable`）。恢复：3s 内轮询等 B 的下一个 tick 重建 → 断言可完整解析、`instance_id`/`pid`/`port`/`host`/`repo_*`/`path` 全字段完整、`started_at` 与删除前逐字相同、`heartbeat_at` 不早于篡改所在秒（RFC3339 秒粒度下最紧的诚实表述，且文件是在该时刻之后被观测为"已删除"的，故该戳只可能来自删除之后的重写）且仍在租约内；最后再扫一遍，格③必须保住这份新文件 |
@@ -307,9 +340,12 @@ connection refused）：
   registration "` 为包级测试常量，集成测试、失败测试与良性测试共用同一拼写。锚点
   **不含尾部文案**，"某一支一条都没打"这类断言在文案改写后仍然有效（裸子串则会静默
   匹配不到）；三锚点互不误匹配（`[portal] cleanup: ` 之后分别是 `removed` /
-  `failed` / `stale`），良性行尾巴里的 "removed by a peer sweep" 因而不会被算成成功
-  行。精确文案仍由集成测试里的 `removed stale registration <id> (` 片段与良性测试里
-  的 `already gone` / `peer sweep` / `its own Stop` 片段钉住。心跳侧的三条通道
+  `failed` / `stale`），良性行尾巴在 N1 改写后变成 "— removed by a peer sweep, its
+  own Stop, or manual removal"，仍不会被算成成功行——成功锚点要求 `removed ` 紧跟在
+  `[portal] cleanup: ` 之后，尾巴里的 `removed` / `removal` 都不在那个位置。精确
+  文案仍由集成测试里的 `removed stale registration <id> (` 片段与良性测试里的
+  `already gone` / `peer sweep` / `its own Stop` / `manual removal` 片段钉住
+  （三种成因各钉一条，缺一条即红，评审 N1）。心跳侧的三条通道
   （`heartbeatWriteFailPrefix` / `initialWriteFailPrefix` / `writeRecoveredInfix`）
   同样各自只写一次拼写，"首次失败"与"初始写失败"两条通道因此无法互相冒充。
 - **可删夹具至少有一个文件名与内容 instance_id 不一致**（`mislabeled.json`），否则
@@ -347,24 +383,33 @@ auth_token"依然成立），`TestHeartbeatLoopExitsOnDone` /
 
 ## 九、验证
 
-本轮（v1.2，评审 F1–F6）：
+本轮（v1.3，PR #134 第二轮评审余下 3 条 nit N1–N3）：
 
-- `test -z "$(gofmt -l .)"` ✅（全仓零输出）
+- `test -z "$(gofmt -l .)"` ✅（全仓零输出；N1/N3 的注释与文案改写后复跑一次仍零输出）
 - `go vet ./internal/portal/` ✅
 - `go build ./...` ✅
-- `go test ./internal/portal/ -count=1` ✅（≈9.0 s）
-- `go test ./internal/portal/ -count=1 -race` ✅（≈9.4 s，含并发轮询日志的
-  `syncLogWriter` 与真实心跳 goroutine）
-- 时序敏感的新测试（`TestCell5DeletionThenHeartbeatRestores` /
-  `TestHeartbeatLoopLogsRegistrationWriteFailures` /
+- `go test ./internal/portal/ -count=1 -race` ✅（两轮分别 ≈10.1 s / ≈11.2 s，含并发
+  轮询日志的 `syncLogWriter` 与真实心跳 goroutine；良性行改写后 `manual removal`
+  片段断言在这条通道上被真实执行）
+- 时序敏感测试（`TestHeartbeatLoopLogsRegistrationWriteFailures`（N3 放宽窗口的
+  主角）/ `TestRemoveStaleRegistration_MissingFileLogsBenignAlreadyGone`（N1 补
+  片段）/ `TestCleanupStaleRegistrations_MatrixAndRemovalLogs` /
+  `TestRemoveStaleRegistration_RemoveFailureLogsFailure` /
   `TestHeartbeatLoopStaysSilentWhileWritesSucceed` /
   `TestStartLogsInitialRegistrationWriteFailure` /
-  `TestRemoveStaleRegistration_MissingFileLogsBenignAlreadyGone` /
-  `TestRegistrationWriteLoggerRateLimitsFailureStreaks`）`-count=5` ✅（≈8.6 s，
-  无抖动）
-- `go test -p 2 ./... -count=1` ✅（全 22 个含测试包全绿；宿主磁盘紧张，按低
-  并行跑，未触发 quota）
+  `TestCell5DeletionThenHeartbeatRestores` /
+  `TestRegistrationWriteLoggerRateLimitsFailureStreaks`）`-count=5 -race` ✅
+  （≈10.6 s，无抖动；`TestHeartbeatLoopLogsRegistrationWriteFailures` 稳定 0.50 s
+  一轮，即 500 ms 窗口跑满，实测行数落在 ≥2 且远低于 ≤8 上界）
+- `go test -p 2 ./... -count=1` ✅（全 22 个含测试包全绿，改动落地后复跑一次仍
+  全绿；最慢 `internal/app` ≈25.3 s、`internal/instance/dsh_web` ≈25.6 s、
+  `internal/portal` ≈8.7–12.5 s。宿主 /tmp 为 12G tmpfs、本轮可用 ≈6.5 G
+  （已用 44%），余量充足，未触发 quota）
 - `git status --porcelain` 恰好 4 个允许路径（`internal/portal/portal.go`、
   `internal/portal/portal_test.go`、本文档、`CHANGELOG.md`），未提交。
 
-历史（v1.0/v1.1）：`go test ./... -count=1` ✅（见最终报告）。
+历史（v1.2，评审 F1–F6）：`go test ./internal/portal/ -count=1` ✅（≈9.0 s）、
+`-count=1 -race` ✅（≈9.4 s）、时序敏感新测试 `-count=5` ✅（≈8.6 s，当时
+`TestHeartbeatLoopLogsRegistrationWriteFailures` 的窗口还是 350ms/≥15 tick）、
+`go test -p 2 ./... -count=1` ✅（全 22 个含测试包全绿；宿主磁盘紧张，按低并行跑，
+未触发 quota）。历史（v1.0/v1.1）：`go test ./... -count=1` ✅（见最终报告）。
