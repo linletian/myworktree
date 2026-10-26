@@ -686,6 +686,59 @@ func TestEmptyWorktreeSwitchHidesAllWebPanels(t *testing.T) {
 	}
 }
 
+// TestSelectInstanceStopsWhenRenderTookOver pins the issue #127 takeover
+// guard — the last tail of the issue #120 / PR #126 family. An id
+// state.instances cannot resolve (the create/restart flows'
+// `await refresh(); selectInstance(res.id)` when the refreshed list does
+// not carry the id yet) makes render() nest renderTabs' invalid-selection
+// fix → selectInstance(null) → auto-select → selectInstance(B) →
+// activate(B); the outer frame then continued with stale locals and
+// re-hid the panel the nested activation had just shown, opened an empty
+// terminal for the nonexistent id, and left the tab highlight and the
+// screen disagreeing — with no self-heal (re-clicking B's tab dies on the
+// same-id early-return and the 2s poll never re-runs activate()). The fix
+// is one early return AFTER render() (where the takeover is observable)
+// and BEFORE the prevRenderer.deactivate() block and the
+// `if (id && renderer)` dispatch (the two tails) — presence alone pins
+// neither position: slid BEFORE render() the guard reads the pre-render
+// selection and never fires; slid after the tails the damage is already
+// done. Behavioural coverage: testdata/web_ghost_select.test.mjs
+// (TestWebGhostSelectHandling).
+func TestSelectInstanceStopsWhenRenderTookOver(t *testing.T) {
+	indexJS := fetchStaticAsset(t, "/")
+	si := sliceJSFunction(t, indexJS, "selectInstance")
+
+	guard := "if (state.activeInst !== id) return;"
+	guardAt := strings.Index(si, guard)
+	if guardAt < 0 {
+		t.Fatal("selectInstance lost the issue #127 takeover guard `" + guard + "` — an unknown id re-covers the auto-selected panel and opens an empty ghost terminal")
+	}
+	if n := strings.Count(si, guard); n != 1 {
+		t.Fatalf("the takeover guard occurs %d times in selectInstance, want exactly 1 — a second copy makes the guard's position ambiguous (issue #127)", n)
+	}
+	renderAt := strings.Index(si, "render();")
+	if renderAt < 0 {
+		t.Fatal("selectInstance lost its render() call — the guard's whole premise is the re-pointing that happens INSIDE render()")
+	}
+	if renderAt > guardAt {
+		t.Fatal("the takeover guard runs before render() — it would read the PRE-render selection and never fire on the nested takeover (issue #127)")
+	}
+	deactAt := strings.Index(si, "prevRenderer.deactivate();")
+	if deactAt < 0 {
+		t.Fatal("selectInstance lost its prevRenderer.deactivate() block — the slice moved, re-check this guard")
+	}
+	if guardAt > deactAt {
+		t.Fatal("the takeover guard sits after prevRenderer.deactivate() — the stale frame re-hides the auto-selected panel before the guard can stop it (issue #127)")
+	}
+	dispatchAt := strings.Index(si, "if (id && renderer) {")
+	if dispatchAt < 0 {
+		t.Fatal("selectInstance lost its `if (id && renderer)` dispatch branch — the slice moved, re-check this guard")
+	}
+	if guardAt > dispatchAt {
+		t.Fatal("the takeover guard sits after the renderer dispatch — renderer.activate({id, instance: undefined}) already opened the empty ghost terminal before the guard can stop it (issue #127)")
+	}
+}
+
 // TestWorktreeDirtyDeleteDialog pins the issue #102 UI contract: a
 // dirty-worktree delete refusal is STRUCTURED (error code "worktree_dirty"
 // plus a breakdown), and the dashboard must open the details dialog —
@@ -3195,8 +3248,15 @@ func TestSidebarWorktreeRenameAnchors(t *testing.T) {
 	if !(guardTab >= 0 && readTab >= 0 && guardTab < readTab) {
 		t.Fatal("commitRename's re-entrancy guard must precede the input read (issue #122 browser verification)")
 	}
-	if n := strings.Count(index, "!== id) return;"); n != 2 {
-		t.Fatalf("index.html has %d re-entrancy guards, want exactly 2 (commitWTRename + commitRename, issue #122)", n)
+	if n := strings.Count(index, "!== id) return;"); n != 3 {
+		// Exactly three pages-wide by design: the #122 re-entrancy pair
+		// (commitWTRename + commitRename) plus the issue #127 takeover
+		// guard in selectInstance (`if (state.activeInst !== id) return;`),
+		// which shares the substring but not the machine — it stops a
+		// STALE frame, not a re-entrant one. A fourth occurrence must be
+		// enumerated here, not absorbed silently (issue #122 canary,
+		// amended by issue #127).
+		t.Fatalf("index.html has %d `!== id) return;` guards, want exactly 3 (commitWTRename + commitRename issue #122, selectInstance takeover guard issue #127)", n)
 	}
 	// commitRename's success continuation repaints through render(), which
 	// rebuilds the tabs AND the sidebar — the tab-side twin of the B-F2

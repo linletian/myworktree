@@ -5529,6 +5529,46 @@
 
             render(); // update UI highlights
 
+            // Issue #127 (issue #120 / PR #126 family): if render()
+            // re-pointed the selection, this frame was taken over by a
+            // nested selectInstance and must stop here. An id that
+            // state.instances cannot resolve falls through renderTabs'
+            // invalid-selection fix into selectInstance(null) → auto-select
+            // → selectInstance(B), which activates B and re-points
+            // state.activeInst. Continuing with this frame's stale locals
+            // was the remaining tail of that disease: previousID still
+            // names the previously-shown instance, so prevRenderer is the
+            // OLD kind's renderer while renderer defaulted to 'pty' for the
+            // unresolvable id — prevRenderer.deactivate() re-hid the panel
+            // the nested activation had just shown whenever the previous
+            // instance was any non-pty kind — the guard evaluates
+            // `prevRenderer !== renderer`, and any web kind's renderer
+            // differs from the ghost id's pty default — and the dispatch
+            // below runs hideWebPanels()
+            // over EVERY web panel and renderer.activate({id, instance:
+            // undefined}) opens an EMPTY terminal for an id the server
+            // does not know (kinds/pty.js creates and shows its session
+            // before its own `if (!inst) return`) — while the tab highlight
+            // stayed on B, screen and selection disagreeing with no
+            // self-heal: re-clicking B's tab dies on the same-id
+            // early-return above and the 2s poll never re-runs activate().
+            // The only cleanup this return skips is the tail
+            // maybeDestroyInactiveStoppedSession(previousID): after a
+            // takeover it is a no-op exactly when the auto-select picked
+            // previousID again (its own `id === state.activeInst` guard),
+            // and otherwise reconcileTerminalSessions() destroys
+            // previousID's session anyway — it runs on EVERY refresh tick,
+            // ahead of render(): in the SAME tick when previousID is
+            // already gone from state.instances (the delete path, whose
+            // takeover happens inside that render()), and at the latest on
+            // the tick AFTER the takeover otherwise (the create/restart
+            // ghost: selectInstance(res.id) runs after await refresh()
+            // returned, so that tick's reconcile still found previousID
+            // active and only synced it; a STOPPED previousID is then torn
+            // down by the terminal-status branch on the next 2s poll). A
+            // stopped session lingers at most one tick — never a leak.
+            if (state.activeInst !== id) return;
+
             // Dispatch to the per-kind renderer. The framework
             // does not know about PTY / opencode-web specifics; each
             // kind's renderer is responsible for showing its panel,
@@ -5579,7 +5619,12 @@
                 // to 'pty' → the same pty-defaulted renderer as this
                 // null-id frame → guard skips — so it cannot re-cover the
                 // panel after the nested activate; changing the prevKind
-                // default would re-open the black screen.
+                // default would re-open the black screen. Since issue #127
+                // this frame usually never reaches that deactivate: when
+                // the nested auto-select re-points state.activeInst the
+                // takeover guard above returns first, and the prevKind
+                // default stays as the second line of defence for the
+                // frames that still run through it (nothing auto-selected).
                 hideWebPanels();
                 renderer.activate(session, document.getElementById('workspace'));
                 if (kind === 'opencode-web') {
