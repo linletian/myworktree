@@ -83,6 +83,38 @@ func TestWebDeleteAutoSelectHandling(t *testing.T) {
 	t.Logf("%s", out)
 }
 
+// TestWebGhostSelectHandling runs the Node unit tests for the issue #127
+// unknown-id ghost selection (testdata/web_ghost_select.test.mjs):
+// selectInstance(id) with an id state.instances cannot resolve runs
+// render() first, and renderTabs' invalid-selection fix nests
+// selectInstance(null) → auto-select → selectInstance(B) → activate(B),
+// which shows B's panel; the outer frame then kept running with stale
+// locals — prevRenderer.deactivate() re-hid that panel, hideWebPanels()
+// erased every web panel, and renderer.activate({id, instance: undefined})
+// opened an EMPTY terminal for the nonexistent id while the tab highlight
+// stayed on B, with no self-heal (the same-id early-return and the 2s
+// poll that never re-runs activate()). The fix is the takeover guard right
+// after render() (`if (state.activeInst !== id) return;`). The cases drive
+// the shipped selectInstance/renderTabs/renderWorkspace slices, pin the
+// issue's measured GHOST probe, the untouched normal switch and
+// #120/#126 delete-path survivors, the create-flow missing-id semantics,
+// and — statically and at runtime in one vm global — that index.html's
+// inline function selectInstance shadows framework.js's dead window
+// copy (which therefore stays un-guarded by evidence, not by assumption).
+// Same arrangement as TestWebDeleteAutoSelectHandling. Skips when node is
+// absent.
+func TestWebGhostSelectHandling(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not on PATH; skipping web ghost select JS tests")
+	}
+	out, err := exec.Command(node, "--test", "testdata/web_ghost_select.test.mjs").CombinedOutput()
+	if err != nil {
+		t.Fatalf("node --test testdata/web_ghost_select.test.mjs: %v\n%s", err, out)
+	}
+	t.Logf("%s", out)
+}
+
 // TestSidebarCollapseHandling runs the Node unit tests for the issue #99
 // desktop sidebar collapse semantics (testdata/sidebar_collapse.test.mjs):
 // localStorage round-trip and degradation defaults (R3), the class-only
