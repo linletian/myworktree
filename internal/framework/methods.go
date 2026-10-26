@@ -420,6 +420,39 @@ func (m *Manager) SubscribeOutput(id string) (<-chan string, func(), error) {
 	return nil, nil, fmt.Errorf("kind %q does not support output subscription", ri.handle.KindName)
 }
 
+// SubscribeOutputWith is the callback form of SubscribeOutput (issue
+// #114): it performs the SAME liveness gate and kind resolution that
+// SubscribeOutput does — m.running is the single source of truth for
+// liveness, checked behind the same door, so an id absent from the map
+// answers the byte-identical "instance not running: %s" — and then hands
+// the kind resolved through Registry.Get(ri.handle.KindName) to fn,
+// returning fn's result verbatim.
+//
+// It exists so callers that need more of the kind than SubscribeOutput's
+// fixed surface (e.g. an optional policy-aware subscription interface) can
+// reach it WITHOUT re-implementing the liveness gate on a store read: the
+// store copy and m.running are two records, and letting a caller gate on
+// the store forks liveness into two authorities that may disagree. What fn
+// does with the kind — policy subscription, plain-subscription fallback,
+// anything — is the caller's contract; this method adds no interpretation
+// of fn's result.
+func (m *Manager) SubscribeOutputWith(id string, fn func(k Kind) (<-chan string, func(), error)) (<-chan string, func(), error) {
+	if fn == nil {
+		return nil, nil, errors.New("SubscribeOutputWith requires a non-nil callback")
+	}
+	m.mu.Lock()
+	ri, ok := m.running[id]
+	m.mu.Unlock()
+	if !ok {
+		return nil, nil, fmt.Errorf("instance not running: %s", id)
+	}
+	k, kerr := m.Registry.Get(ri.handle.KindName)
+	if kerr != nil {
+		return nil, nil, kerr
+	}
+	return fn(k)
+}
+
 // --- connection type tracking ---
 
 // SetConnectionType records the active transport for an instance.

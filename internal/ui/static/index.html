@@ -2746,9 +2746,90 @@
         // reap that self-heals on the immediate reconnect. Accepted, and
         // consistent with lastResizeTime/lastLogLoadAttemptAt in this file.
         const TTY_LIVENESS_STALE_MS = 30000;
-        // The reconnect delay was a bare 5000 in ws.onclose; named now
-        // because the watchdog schedules the same retry.
-        const TTY_RECONNECT_DELAY_MS = 5000;
+        // Exponential backoff constants (issue #114 decision 2, replaces
+        // the old fixed TTY_RECONNECT_DELAY_MS = 5000; the two sites that
+        // armed a retry now go through armTTYBackoffReconnect). Delay =
+        // min(TTY_RECONNECT_BASE_MS * 2**attempts, cap) * (0.75+rand*0.5):
+        // base 1s, +/-25% jitter, capped at 8s while the page is visible
+        // (R10: a user staring at a black screen must not wait 30s) and
+        // 30s while hidden. The reset anchor is a CLOSING sync followed by
+        // >=60s of that same connection staying the session's live socket
+        // - a mid-replay drop or a notice->tail reconnect that never
+        // reaches 60s must NOT clear the counter (v4 MED-1).
+        const TTY_RECONNECT_BASE_MS = 1000;
+        const TTY_RECONNECT_CAP_MS = 8000;
+        const TTY_RECONNECT_CAP_MS_HIDDEN = 30000;
+        const TTY_BACKOFF_RESET_ALIVE_MS = 60000;
+
+        // --- issue #114 Phase B: compressed-consumption guards -------------
+        // The inflation-ratio guard (v7 pin 5) was RETIRED by the v8
+        // re-arbitration (PR #129 review R1-P1/R2-P1, PR129-ADJUDICATION):
+        // legit BestSpeed terminal output measures 118-209x at 64KB frames
+        // (a `yes`-style stream), and no fixed ratio threshold can separate
+        // it from a degenerate stream, while the windowed denominator
+        // collapses to <=0 whenever one frame inflates past the window - the
+        // guard false-killed healthy streams by construction. Corruption is
+        // caught by the inflate/read/write failure paths (which reset +
+        // reconnect visibly), not by a ratio. What remains here is the one
+        // guard that bounds resident memory:
+        // B-1.6 client-side bound (arbitration value 2MB): wire bytes
+        // queued into the per-connection DecompressionStream (pending
+        // decode) plus inflated bytes awaiting the xterm write callback
+        // (pending write) must not exceed this on one connection - the
+        // browser offers no way to pause onmessage, so the page counts it
+        // itself. Over the line: reset + abandon + tail reconnect.
+        const TTY_CLIENT_BACKLOG_MAX_BYTES = 2000000;
+
+        // --- [tty-metrics] diagnostics (issue #114) ---
+        // Passive collection for the subscriber-overflow reconnect loop,
+        // sharing the server side's "[tty-metrics]" log prefix
+        // (internal/app/tty_metrics.go). ACTIVE ONLY ON BETA BUILDS: the
+        // server hands out a mw_tty_metrics=1 cookie only when compiled
+        // with -tags ttymetrics (release-beta.yml), so on stable builds
+        // ttyMetricsEnabled() is false and every piece below stays inert.
+        // Module-level on purpose: the node tests slice named blocks out
+        // of this script and never execute top-level statements, and the
+        // typeof guards additionally keep a partial environment from
+        // throwing at load. connectTTY CANNOT call ttyMetricsEnabled()
+        // (it is sliced into node tests with a fixed dependency list, so
+        // no new free identifier may appear there) and reads the cookie
+        // through its own typeof-guarded local instead.
+        function ttyMetricsEnabled() {
+            // Boundary-bracketed match: document.cookie joins entries with
+            // "; ", so wrapping the string makes every entry look like
+            // "; name=value;" and a suffix-named lookalike
+            // (x_mw_tty_metrics=1) cannot false-positive the gate.
+            return typeof document !== "undefined"
+                && ("; " + (document.cookie || "") + ";").indexOf("; mw_tty_metrics=1;") !== -1;
+        }
+        if (ttyMetricsEnabled()) {
+            document.addEventListener("visibilitychange", () => {
+                console.log("[tty-metrics] visibility=" + document.visibilityState
+                    + " activeInst=" + (typeof state !== "undefined" ? state.activeInst : "?"));
+            });
+        }
+        if (ttyMetricsEnabled() && typeof window !== "undefined") {
+            // Console entry point for manual capture:
+            //   copy(JSON.stringify(__ttyMetrics(), null, 2))
+            window.__ttyMetrics = function () {
+                const out = { now: new Date().toISOString(), sessions: {} };
+                if (typeof terminalSessions !== "undefined") {
+                    for (const sid of Object.keys(terminalSessions)) {
+                        const s = terminalSessions[sid];
+                        if (!s) continue;
+                        out.sessions[sid] = {
+                            ttyState: s.ttyState,
+                            ttyOffset: s.ttyOffset,
+                            lastDataAgoMs: s.lastDataAt ? Date.now() - s.lastDataAt : null,
+                            writeCalls: s.ttyMetrics ? s.ttyMetrics.writeCalls : 0,
+                            writeWaitTotalMs: s.ttyMetrics ? s.ttyMetrics.writeWaitTotalMs : 0,
+                            writeWaitMaxMs: s.ttyMetrics ? s.ttyMetrics.writeWaitMaxMs : 0,
+                        };
+                    }
+                }
+                return out;
+            };
+        }
 
         // --- [tty-metrics] diagnostics (issue #114) ---
         // Passive collection for the subscriber-overflow reconnect loop,
@@ -6161,6 +6242,27 @@
                 ttyOffset: CURSOR_UNKNOWN,
                 ttySocket: null,
                 ttyReconnectTimer: null,
+                // Issue #114 Phase B. Every reader of these fields guards
+                // with `|| 0` / falsy checks, so the kinds/pty.js factory
+                // (which must mirror this one but is outside this change's
+                // allowlist) works without them. ttyReconnectAttempts is
+                // the session-level exponential-backoff exponent (decision
+                // 2); ttyGeneration is the monotonic fence counter — late
+                // frames, in-flight decompressor output and stale xterm
+                // callbacks that carry another generation are dropped, not
+                // "best-effort checked" (decision 1 v4 pin 3);
+                // ttyClosingSyncAt is the 60s backoff-reset anchor stamped
+                // by the closing `sync` frame; ttyCompressed/ttyBacklogBytes/
+                // ttyDecompressor own the compressed consumption state (one
+                // persistent DecompressionStream('deflate-raw') per connection,
+                // whose sync-base latch lives on the pipe, not the session -
+                // rework W11 dropped the dead session-level mirror).
+                ttyReconnectAttempts: 0,
+                ttyGeneration: 0,
+                ttyClosingSyncAt: 0,
+                ttyCompressed: false,
+                ttyBacklogBytes: 0,
+                ttyDecompressor: null,
                 // Status seen by the previous reconcileTerminalSessions() tick.
                 // Null until the first observation; lets the reconciler tell a
                 // genuine terminal transition from a session that was already
@@ -6533,7 +6635,7 @@
             // pending instance - symmetric with the connectTTY arm it
             // mirrors. The watchdog still reaps such sessions independently.
             // Returns FALSE: the reconnect is merely queued
-            // TTY_RECONNECT_DELAY_MS out - no live transport exists yet.
+            // (armTTYBackoffReconnect) out - no live transport exists yet.
             // The only present caller discards the value, but a function
             // named ensure...LiveTransport must not claim liveness it has
             // not established.
@@ -6659,6 +6761,331 @@
                 session.ttyOutputDecoder = new TextDecoder();
             }
             return session.ttyOutputDecoder.decode(bytes, { stream: true });
+        }
+
+        // --- issue #114 Phase B: generation fencing + compressed pump ----
+        // Monotonic per-session fence (decision 1 v4 pin 3): bumped on
+        // every new connection (via disconnectTTY), every overflow notice
+        // and every stream reset. Anything asynchronous - WS-buffer
+        // residue, in-flight inflate output, a pending xterm write
+        // callback - captures the generation it belongs to and drops its
+        // work the moment the session's counter has moved on. The existing
+        // socket-identity guards stay; the fence rides on top of them.
+        function bumpTTYGeneration(session) {
+            if (!session) return 0;
+            session.ttyGeneration = (session.ttyGeneration || 0) + 1;
+            return session.ttyGeneration;
+        }
+
+        // Drops the per-connection inflate state. FENCE FIRST, tear down
+        // second (rework W10): bump the generation so the pump exits at its
+        // next checkpoint BEFORE anything touches the stream, then abort the
+        // writer so a pump parked on reader.read() unwinds instead of leaking
+        // a pending promise per reconnect.
+        // NO reader.cancel() (rework W14/N3): empirically (variant probe)
+        // cancelling the readable RACES the transform's in-flight output and
+        // throws ERR_INVALID_STATE while the transform is still producing
+        // bytes; aborting the WRITER alone is enough - the pump then unwinds
+        // cleanly through the reader's rejection (a cancelled/aborted source
+        // makes reader.read() reject, which the pump's try/catch already
+        // turns into a normal return). abort() returns a PROMISE that rejects
+        // asynchronously on an already-errored stream - a rejection a
+        // synchronous try/catch does NOT catch (it lands after this function
+        // returns) - so it carries a .catch(()=>{}) to keep it from
+        // surfacing as an unhandled rejection.
+        function teardownTTYDecompressor(session) {
+            if (!session) return;
+            session.ttyCompressed = false;
+            session.ttyBacklogBytes = 0;
+            const pipe = session.ttyDecompressor;
+            session.ttyDecompressor = null;
+            if (!pipe) return;
+            bumpTTYGeneration(session); // stop the pump at its next check
+            if (pipe.writer && typeof pipe.writer.abort === "function") {
+                Promise.resolve(pipe.writer.abort(new Error("tty decompressor torn down"))).catch(() => {});
+            }
+        }
+
+        // Common reset shape of every "the stream is done for" path —
+        // overflow notice, backlog bound, and (v8 P2) the compressed pipe's
+        // construct/read/write failure paths (they are isomorphic by design,
+        // TASK-B B1.6/B2). FENCE
+        // FIRST, close second: once the counter has moved no output of
+        // this stream may reach the screen, whatever layer it is stuck
+        // in. The cursors go to CURSOR_UNKNOWN so the reconnect sends no
+        // `since` and the server replays its tail (the same sentinel a
+        // cleared screen uses, issues #86/#87).
+        function resetTTYStreamAndReconnect(session, reason) {
+            if (!session) return;
+            console.error("[tty] " + reason + " - resetting stream, tail reconnect (issue #114)");
+            bumpTTYGeneration(session);
+            if (session.term) session.term.reset();
+            session.ttyOffset = CURSOR_UNKNOWN;
+            session.logCursor = CURSOR_UNKNOWN;
+            session.ttyBacklogBytes = 0;
+            teardownTTYDecompressor(session);
+            reconnectStaleTTY(session);
+        }
+
+        // Arms the compressed consumption state for ONE connection
+        // (decision 5a). The server flushes the shared deflate stream
+        // after every WS binary frame, so each frame is one flushed
+        // segment of a single stream: one persistent
+        // DecompressionStream('deflate-raw'), one sequential reader,
+        // for the life of the connection. BOTH "cannot inflate" branches
+        // are reset-and-reconnect by design (v8 P2, PR129-ADJUDICATION P2):
+        // no DecompressionStream at all, or a construction that throws,
+        // shows the VISIBLE stream-error status line and tail-reconnects -
+        // NEVER falls back to plaintext consumption, because the server is
+        // already committed to sending deflate frames by the ready echo and
+        // plaintext consumption would paint compressed garbage. The ready
+        // call site therefore CHECKS the return and early-returns on false
+        // (v8 review A P2-1): every failure path owns its own reset AND its
+        // visible status line, and the ready tail - liveness arm, the
+        // "websocket live" status, resize, focus - must NOT run on the
+        // abandoned socket: it would overwrite the reset line the user is
+        // meant to see and arm a watchdog on a dead connection. (A
+        // construction throw past the connect-time probe is rare - resource
+        // exhaustion - but it exists, and silence here once meant a frozen
+        // terminal.)
+        function startTTYCompressedPipe(session, ws) {
+            // Unreachable today (the single ready call site always passes
+            // both) - and the ONE false return that neither resets nor arms
+            // a reconnect: under the ready gate's early-return it would skip
+            // the tail silently. A future caller that could pass a null here
+            // must route this through reset-and-reconnect first.
+            if (!session || !ws) return false;
+            if (typeof DecompressionStream === "undefined") {
+                console.error("[tty] server echoed compress=true but DecompressionStream is unavailable - plaintext consumption would paint garbage, resetting (issue #114)");
+                // v8 review A N1: this branch and the construction catch below
+                // are isomorphic by design - BOTH show the same VISIBLE status
+                // line (active-session gated) before the reset, so "cannot
+                // inflate" is never silent whichever way it fails.
+                if (state.activeInst === session.id) {
+                    updateStatus("stream reset: stream error, data dropped");
+                }
+                resetTTYStreamAndReconnect(session, "deflate-raw unsupported despite ready.compress echo");
+                return false;
+            }
+            try {
+                const ds = new DecompressionStream("deflate-raw");
+                session.ttyDecompressor = {
+                    stream: ds,
+                    writer: ds.writable.getWriter(),
+                    reader: ds.readable.getReader(),
+                    gen: session.ttyGeneration || 0,
+                    // Per-frame FIFO ledger (issue #114 rework W1/W8). Each
+                    // inbound WS frame pushes ONE token at feed time carrying
+                    // its replay/live identity CAPTURED AT FEED (the same
+                    // message-task order the closing sync rides), so the pump
+                    // attributes its opaque byte stream to frames WITHOUT ever
+                    // reading a session-level latch (the W1 overshoot root).
+                    // Each token: { seq, live, inflating }.
+                    frameLedger: [],
+                    framesFed: 0,
+                    syncBaseKnown: false,
+                };
+                session.ttyCompressed = true;
+                session.ttyBacklogBytes = 0;
+                pumpTTYDecompressor(session, ws);
+                return true;
+            } catch (e) {
+                // v8 P2: construction failed on a platform that passed the
+                // connect-time probe (resource exhaustion). Isomorphic to
+                // the unavailable branch above - console.error + VISIBLE
+                // status line + reset + tail reconnect, never plaintext.
+                console.error("[tty] DecompressionStream('deflate-raw') construction failed:", e && e.message);
+                session.ttyDecompressor = null;
+                session.ttyCompressed = false;
+                if (state.activeInst === session.id) {
+                    updateStatus("stream reset: stream error, data dropped");
+                }
+                resetTTYStreamAndReconnect(session, "deflate-raw stream construction failed");
+                return false;
+            }
+        }
+
+        // The single sequential consumer of the inflate stream (pin 3):
+        // every output chunk is sanitized and painted with AWAITED
+        // term.write(data, cb) - without the await the "one stream keeps
+        // order" claim is hollow and there is no parse backpressure.
+        //
+        // FRAME ATTRIBUTION (issue #114 rework W1/W8). The inflate stream is
+        // CONTINUOUS and the server shares ONE deflate context flushed per
+        // frame (app.go:2656/:2919), so the pump CANNOT see frame
+        // boundaries in the opaque byte stream - a large frame (the server's
+        // 64KB replay-read cap) surfaces as MULTIPLE read() chunks, output
+        // enqueues asynchronously to write() resolve, and naive burst/empty
+        // detection drops or splits frames (all proven by probe suites). So
+        // the pump attributes its opaque byte stream to the HEAD token of
+        // pipe.frameLedger, whose replay/live identity AND closing-pending
+        // state were CAPTURED AT FEED TIME (the same message-task order the
+        // closing sync rides), consumed strictly IN STREAM ORDER:
+        // - the cursor advances when the sync base is known AND (the head was
+        //   LIVE at feed OR its closing sync was still pending at feed) - W8.
+        //   This lets replay bytes painted DURING replay advance the cursor
+        //   from the start-sync base (so a mid-replay drop resumes at the
+        //   painted position, isomorphic to the plaintext #94 path) while the
+        //   closing sync's absolute assignment stays the SOLE terminal
+        //   authority: the advance is evaluated at PAINT time against
+        //   ttyClosingSyncAt, so a replay frame painted AFTER the closing sync
+        //   (ttyClosingSyncAt>0, head.live=false) cannot re-open the cursor and overshoot the head it pinned (the W1
+        //   overshoot stays fixed - the burst-exact test still pins it).
+        //   With NO sync base (a cursorless first connect) it NEVER advances.
+        // - the head advances once its wire was fully fed AND a LATER token
+        //   sits in the ledger (frameLedger.length > 1): the next frame was
+        //   fed, so this head's flush surfaced and FIFO consumption drained it.
+        // RESIDUAL (rework W9, documented, bounded, safe): because frame
+        // boundaries are invisible, if the pump lags and the head pops while
+        // the head frame's tail is still queued, that tail (<= one frame tail,
+        // in practice <= one read chunk) is attributed to the NEXT token. The
+        // error is UNDER-CEILING in the dominant replay-then-live shape (the
+        // tail lands on a live token whose own paint also advances, so the
+        // cursor runs a little SHORT): a short cursor means the next `since`
+        // re-asks bytes already painted -> a bounded duplicate the closing
+        // sync then self-heals. The opposite (over-ceiling -> silent loss) is
+        // the direction we refuse, and the server's beyond-head branch
+        // (app.go:3577 `cursor > head` -> first-connect tail replay) clamps
+        // even a rare overshoot back to the tail. Every step re-checks socket
+        // identity AND the fence (pin 4).
+        async function pumpTTYDecompressor(session, ws) {
+            const pipe = session.ttyDecompressor;
+            if (!pipe) return;
+            for (;;) {
+                if (session.ttySocket !== ws || session.ttyGeneration !== pipe.gen) return;
+                let r = null;
+                try {
+                    r = await pipe.reader.read();
+                } catch (e) {
+                    // v8 P2: THIS is where a corrupt or out-of-sync deflate
+                    // stream surfaces (the inflate transform throws) - the
+                    // NORMAL failure path, not a rare one. If this pipe is
+                    // still the session's current connection and generation
+                    // the stream is done for: VISIBLE status line + reset +
+                    // tail reconnect (isomorphic to the notice path), never
+                    // a silent freeze with a live socket. A teardown abort
+                    // (bumpTTYGeneration before writer.abort) lands here
+                    // too with the fence already moved - that rejection is
+                    // expected and stays silent.
+                    if (session.ttySocket === ws && session.ttyGeneration === pipe.gen) {
+                        if (state.activeInst === session.id) {
+                            updateStatus("stream reset: stream error, data dropped");
+                        }
+                        resetTTYStreamAndReconnect(session, "inflate stream error (read): " + ((e && e.message) || "unknown"));
+                    }
+                    return;
+                }
+                if (r.done) return;
+                if (session.ttySocket !== ws || session.ttyGeneration !== pipe.gen) return;
+                const chunk = r.value;
+                if (!chunk || !chunk.byteLength) continue;
+                session.ttyBacklogBytes = (session.ttyBacklogBytes || 0) + chunk.byteLength;
+                if (session.ttyBacklogBytes > TTY_CLIENT_BACKLOG_MAX_BYTES) {
+                    // Backlog guard, notice-isomorphic (rework W16/N5): a
+                    // VISIBLE status line, not just console. The reset REASON
+                    // carries the trip site "(pump)" (v8 review B N-3) — the
+                    // two backlog trip points share the user-facing line, so
+                    // the log alone must say which side tripped.
+                    if (state.activeInst === session.id) {
+                        updateStatus("stream reset: backlog exceeded, data dropped");
+                    }
+                    resetTTYStreamAndReconnect(session, "client backlog exceeded " + TTY_CLIENT_BACKLOG_MAX_BYTES + " bytes (pump)");
+                    return;
+                }
+                const text = sanitizeTerminalOutput(decodeTTYOutputChunk(session, chunk));
+                if (text && session.term) {
+                    await new Promise((res) => session.term.write(text, res));
+                    if (session.ttySocket !== ws || session.ttyGeneration !== pipe.gen) return;
+                }
+                session.ttyBacklogBytes -= chunk.byteLength;
+                // Cursor advance (rework W8), evaluated at PAINT time: advance
+                // once a sync base is known AND (this head was LIVE at feed OR
+                // the closing sync has NOT yet landed). The paint-time read of
+                // ttyClosingSyncAt is what keeps the W1 burst exact: a replay
+                // frame painted AFTER the closing sync sees ttyClosingSyncAt>0
+                // with head.live=false and cannot re-open the cursor the sync
+                // pinned, while replay painted DURING replay (ttyClosingSyncAt
+                // still 0) advances from the start-sync base so a mid-replay
+                // drop resumes at the painted position (#94-isomorphic). With
+                // NO sync base (cursorless first connect) it never advances.
+                const head = pipe.frameLedger[0];
+                if (pipe.syncBaseKnown && head && (head.live || session.ttyClosingSyncAt === 0)) {
+                    session.ttyOffset += chunk.byteLength;
+                }
+                // Advance the head once its wire was fully fed AND a LATER
+                // token already sits in the ledger (the next frame was fed, so
+                // this head's flush surfaced and FIFO consumption drained it).
+                if (head && !head.inflating && pipe.frameLedger.length > 1) {
+                    pipe.frameLedger.shift();
+                }
+            }
+        }
+
+        // One inbound BINARY frame in compressed state. TWO things are
+        // handled HERE, synchronously in this message task:
+        // - the replay/live identity captured at feed (issue #114 rework W1/
+        //   W8): `live` is true once the closing sync stamped ttyClosingSyncAt.
+        //   The pump advances the cursor at PAINT time by a LIVE head, or by a
+        //   replay head while the closing sync has not yet landed - so replay
+        //   painted during replay advances from the sync base (mid-replay
+        //   resume), yet replay painted after the closing sync cannot re-open
+        //   the pinned cursor (W1 burst exactness).
+        // - the backlog ledger: wire bytes join it on the way in and leave
+        //   it when the transform consumed them (writer.write resolved); the
+        //   inflated chunk then rides it as pending write inside the pump
+        //   until xterm's callback. This is the only consumption bound left
+        //   after the v8 retirement of the inflation-ratio guard.
+        async function feedTTYCompressedFrame(session, ws, u8) {
+            const pipe = session.ttyDecompressor;
+            if (!pipe || session.ttySocket !== ws || session.ttyGeneration !== pipe.gen) return;
+            const seq = pipe.framesFed++;
+            const token = {
+                seq: seq,
+                live: (session.ttyClosingSyncAt || 0) > 0,
+                inflating: true,
+            };
+            pipe.frameLedger.push(token);
+            session.ttyBacklogBytes = (session.ttyBacklogBytes || 0) + u8.length;
+            if (session.ttyBacklogBytes > TTY_CLIENT_BACKLOG_MAX_BYTES) {
+                // Backlog guard, notice-isomorphic (rework W16/N5): a VISIBLE
+                // status line, not just console. The reset REASON carries the
+                // trip site "(feed)" (v8 review B N-3) - both trip points
+                // share the user-facing line, so the log alone distinguishes
+                // feed-side admission pressure from pump-side drain pressure.
+                if (state.activeInst === session.id) {
+                    updateStatus("stream reset: backlog exceeded, data dropped");
+                }
+                resetTTYStreamAndReconnect(session, "client backlog exceeded " + TTY_CLIENT_BACKLOG_MAX_BYTES + " bytes (feed)");
+                return;
+            }
+            try {
+                await pipe.writer.write(u8);
+            } catch (e) {
+                // v8 P2: writer.write rejected - the deflate context is
+                // errored (corrupt stream / aborted pipe). Current
+                // connection and generation -> VISIBLE status line + reset +
+                // tail reconnect; a pipe fenced by teardown is fenced
+                // already -> silent. NOTE: this frame's wire bytes stay
+                // counted in session.ttyBacklogBytes on the bare return -
+                // deliberate status quo: the reset path destroys this
+                // stream's session state and zeroes the ledger itself, so
+                // no compensating subtraction is required (and doing one
+                // after the reset could only miscount a ledger nobody reads
+                // anymore).
+                if (session.ttySocket === ws && session.ttyGeneration === pipe.gen) {
+                    if (state.activeInst === session.id) {
+                        updateStatus("stream reset: stream error, data dropped");
+                    }
+                    resetTTYStreamAndReconnect(session, "inflate stream error (write): " + ((e && e.message) || "unknown"));
+                }
+                return;
+            }
+            if (session.ttySocket !== ws || session.ttyGeneration !== pipe.gen) return;
+            // writer.write resolved: the transform has ACCEPTED this wire, so
+            // the frame's inflating latch clears and its wire leaves the
+            // backlog ledger.
+            token.inflating = false;
+            session.ttyBacklogBytes -= u8.length;
         }
 
         function resetTerminalForSwitch(session) {
@@ -6820,15 +7247,46 @@
             try {
                 const msg = JSON.parse(data);
                 // "sync" is the handshake offset echo (issue #87), "ping"
-                // and "pong" are the liveness heartbeat frames (issue #83):
-                // anything not whitelisted here falls through ws.onmessage
-                // and gets painted into the terminal as literal text - so
-                // every control type the server emits MUST be listed.
-                if (!msg || (msg.type !== "ready" && msg.type !== "resize" && msg.type !== "sync" && msg.type !== "ping" && msg.type !== "pong")) return null;
+                // and "pong" are the liveness heartbeat frames (issue #83),
+                // and "overflow" is the drop notice the server sends to
+                // overflow-notice-cap clients (issue #114: {"type":"overflow",
+                // "droppedBytes":N,"droppedChunks":M}, 250ms-aggregated
+                // increments): anything not whitelisted here falls through
+                // ws.onmessage and gets painted into the terminal as literal
+                // text - so every control type the server emits MUST be
+                // listed.
+                if (!msg || (msg.type !== "ready" && msg.type !== "resize" && msg.type !== "sync" && msg.type !== "ping" && msg.type !== "pong" && msg.type !== "overflow")) return null;
                 return msg;
             } catch (e) {
                 return null;
             }
+        }
+
+        // Overflow notice handler (issue #114 Phase B, decision 1/R6):
+        // the server dropped OLDEST queued chunks to keep this connection
+        // alive and counts them in 250ms-aggregated INCREMENT frames, so
+        // the screen is now missing a middle segment that a byte-cursor
+        // client can never see (#87: live chunks carry no offset). The
+        // response is the consumption-degradation shape shared with the
+        // backlog/frame-size guards: log, ONE VISIBLE status-line notice
+        // (MED-3 - the reset must not be silent), FENCE + reset the
+        // screen, abandon the socket, tail-reconnect WITHOUT `since`,
+        // counted into the exponential backoff sequence.
+        function handleTTYOverflow(session, msg) {
+            if (!session) return;
+            console.log("[tty] overflow notice id=" + (session.id || "")
+                + " droppedBytes=" + ((msg && msg.droppedBytes) || 0)
+                + " droppedChunks=" + ((msg && msg.droppedChunks) || 0)
+                + " - scrollback reset, tail reconnect (issue #114)");
+            if (state.activeInst === session.id) {
+                // The MED-3 visible degradation notice. Wording is English
+                // because the shipped TestUICopyIsEnglishOnly (issue #73)
+                // forbids CJK in served UI copy - the TASK-B/B2 Chinese
+                // wording is carried with the SAME meaning (stream reset:
+                // slow link, data dropped); see the Phase B report query.
+                updateStatus("stream reset: slow link, data dropped");
+            }
+            resetTTYStreamAndReconnect(session, "overflow notice");
         }
 
         function sendResize(session, cols, rows) {
@@ -6968,6 +7426,12 @@
         function disconnectTTY(session) {
             if (!session) return;
             resetTTYOutputDecoder(session);
+            // Fence FIRST (issue #114): every teardown bumps the generation
+            // and unwinds the inflate pipe, so no async residue of the
+            // dying connection - WS-buffer frame, in-flight inflate output,
+            // pending xterm callback - can touch the session afterwards.
+            bumpTTYGeneration(session);
+            teardownTTYDecompressor(session);
             if (session.term && typeof session.term.blur === "function" && state.activeInst === session.id) {
                 session.term.blur();
             }
@@ -7038,6 +7502,55 @@
         // Used by the watchdog tick, the 2s poll's stale arm in
         // ensureTerminalLiveTransport (the primary healer for the active
         // session) and reconnectRunningTerminalSessions.
+        // The jittered backoff delay for the NEXT retry (decision 2):
+        // min(base * 2^attempts, cap) * (0.75 + rand*0.5). attempts is
+        // SESSION-level (ttyReconnectAttempts) and the cap follows tab
+        // visibility at arm time. Math.random stays a direct call so the
+        // node suite can stub Math through the harness dependency list and
+        // pin the sequence deterministically.
+        function ttyReconnectDelayMs(session) {
+            const attempts = (session && session.ttyReconnectAttempts) || 0;
+            const hidden = (typeof document !== "undefined" && document && document.hidden) ? true : false;
+            const capMs = hidden ? TTY_RECONNECT_CAP_MS_HIDDEN : TTY_RECONNECT_CAP_MS;
+            return Math.min(TTY_RECONNECT_BASE_MS * 2 ** attempts, capMs) * (0.75 + Math.random() * 0.5);
+        }
+
+        // The single choke point for every DELAYED tty reconnect
+        // (issue #114 decision 2 - exactly two call sites, the
+        // reconnectStaleTTY socket arm and ws.onclose). Order: check the
+        // stability anchor FIRST (a closing sync arrived on THIS
+        // connection and it has since stayed the session's live socket
+        // for >= 60s - connectTTY zeroes ttyClosingSyncAt at connect, so
+        // the anchor can never be inherited across connections and a
+        // mid-replay death never resets), then read the delay for the
+        // current attempts, then increment attempts, then arm. The first
+        // reconnect therefore schedules at attempts=0 (~1s x jitter).
+        function armTTYBackoffReconnect(session) {
+            if (!session) return 0;
+            // Single-arm invariant (issue #114 rework W6): this is the ONLY
+            // entry that schedules a delayed reconnect, so it clears any
+            // still-pending timer BEFORE arming a new one - clear-then-arm
+            // makes double-arming impossible by construction here, not by the
+            // cross-function reasoning that currently covers it (onclose is
+            // gated on `session.ttySocket === ws`, and reconnectStaleTTY
+            // clears through disconnectTTY first; a pending timer therefore
+            // always implies a nulled socket, which in turn fails that guard).
+            // The local clear keeps the invariant colocated with the schedule
+            // so a future second caller cannot stack a reconnect.
+            if (session.ttyReconnectTimer) {
+                clearTimeout(session.ttyReconnectTimer);
+                session.ttyReconnectTimer = null;
+            }
+            const anchorAt = session.ttyClosingSyncAt || 0;
+            if (anchorAt > 0 && Date.now() - anchorAt >= TTY_BACKOFF_RESET_ALIVE_MS) {
+                session.ttyReconnectAttempts = 0;
+            }
+            const delayMs = ttyReconnectDelayMs(session);
+            session.ttyReconnectAttempts = (session.ttyReconnectAttempts || 0) + 1;
+            session.ttyReconnectTimer = setTimeout(() => connectTTY(session), delayMs);
+            return delayMs;
+        }
+
         function reconnectStaleTTY(session) {
             if (!session) return;
             if (!session.ttySocket) {
@@ -7055,7 +7568,7 @@
             }
             disconnectTTY(session);
             session.ttyState = 'IDLE';
-            session.ttyReconnectTimer = setTimeout(() => connectTTY(session), TTY_RECONNECT_DELAY_MS);
+            armTTYBackoffReconnect(session);
         }
 
         function connectTTY(session) {
@@ -7169,7 +7682,37 @@
                 // together in #87, so presenting one proves parsing the
                 // other.) Older servers ignore the parameter, so this
                 // is safe against every daemon version.
+                //
+                // Issue #114 Phase B adds two whole-token caps, both
+                // parsed and acted on in this file:
+                // - `overflow-notice`: the whitelist accepts the TEXT
+                //   {"type":"overflow","droppedBytes":N,"droppedChunks":M}
+                //   notice (250ms-aggregated INCREMENTS) and the client
+                //   answers it with fence + reset + tail reconnect.
+                // - `compress`: appended ONLY when this browser can
+                //   inflate deflate-raw (decision 5a pin 2 - the probe
+                //   constructs and discards one; a platform without the
+                //   format throws and simply stays on the plaintext wire,
+                //   console-noted). Older servers ignore unknown caps
+                //   (R16), so declaring them is safe everywhere.
+                // `replay-window` / `slow-link` are deliberately NOT
+                // declared (arbitration, TASK-B B1.2): operator knobs
+                // without client-side scenario data. The `&caps=ping,sync`
+                // literal stays intact so the #98 opt-in contract remains
+                // greppable; the new caps ride on the end.
                 url += `&caps=ping,sync`;
+                url += `,overflow-notice`;
+                try {
+                    if (typeof DecompressionStream !== "undefined") {
+                        const deflateRawProbe = new DecompressionStream("deflate-raw");
+                        try { deflateRawProbe.readable.cancel(); } catch (e) { /* probe only */ }
+                        url += `,compress`;
+                    } else {
+                        console.warn("[tty] DecompressionStream unavailable - declaring no compress cap (plaintext wire)");
+                    }
+                } catch (e) {
+                    console.warn("[tty] deflate-raw probe failed - declaring no compress cap (plaintext wire):", e && e.message);
+                }
 
                 resetTTYOutputDecoder(session);
                 const ws = new WebSocket(url);
@@ -7227,6 +7770,12 @@
                 // has always had the same trade-off: cosmetic only, and
                 // the split character is unrecoverable on both.
                 let handshakeSynced = false;
+                // Per-connection state the ASYNC inflate pump reads, which
+                // lives outside this closure: ttyClosingSyncAt is the live/
+                // replay divider the pump's tokens capture at feed, and the
+                // pump's own sync-base latch now lives on the pipe (rework
+                // W8/W11 - the old session-level mirror was never read).
+                session.ttyClosingSyncAt = 0;
                 let handshakeTimeout = null;
                 let connectTimeout = setTimeout(() => {
                     if (session.ttySocket === ws && ws.readyState !== WebSocket.OPEN) {
@@ -7273,6 +7822,22 @@
                     // ws === session.ttySocket checks: identity can change
                     // between scheduling and firing.
                     if (session.ttySocket !== ws) return;
+                    // Generation fence at THIS dispatch layer is delegated to
+                    // the socket-identity guard just above (issue #114 rework
+                    // W4): every path that bumps ttyGeneration (notice/reset
+                    // via resetTTYStreamAndReconnect, disconnectTTY, onclose)
+                    // nulls session.ttySocket in the SAME synchronous task
+                    // BEFORE or AS it bumps, so a fenced connection is already
+                    // caught by `session.ttySocket !== ws` above and no frame
+                    // of the dead generation reaches the handlers below. The
+                    // pump/feed re-check the generation explicitly because they
+                    // run across await points where the socket field may still
+                    // name this ws while the fence moved on. IF a future path
+                    // ever bumps the generation WITHOUT nulling/replacing the
+                    // socket, this dispatch MUST add an explicit
+                    // `session.ttyGeneration !== <conn gen>` check here - the
+                    // identity guard would otherwise let a fenced-but-attached
+                    // socket keep dispatching.
                     // Liveness stamp (issue #83): EVERY frame counts - the
                     // TEXT {"type":"ping"} heartbeats, the {"type":"pong"}
                     // probe answers, resize/sync echoes and binary output
@@ -7293,6 +7858,30 @@
                         if (handshakeTimeout) {
                             clearTimeout(handshakeTimeout);
                             handshakeTimeout = null;
+                        }
+                        // Compressed-state gate (issue #114 TASK-B B1.4):
+                        // the ready echo's `compress === true` is THE
+                        // switch. Absent or false (every server before
+                        // Phase A-3, and every connection that did not
+                        // declare the cap) keeps the plaintext consumption
+                        // path byte-for-byte - the R16 rollback graceful
+                        // degradation, pinned by the node suite.
+                        // FAILURE FAILS FAST (v8 review A P2-1): when the
+                        // pipe cannot be armed (no DecompressionStream, or a
+                        // construction that throws) startTTYCompressedPipe has
+                        // ALREADY reset + abandoned this socket and armed a
+                        // backoff reconnect, and it returns false. The handler
+                        // tail below (liveness watchdog, "websocket live",
+                        // sendResize, focus) belongs to a LIVE socket only -
+                        // running it on the just-abandoned one would arm a
+                        // watchdog on a dead socket and, worst, OVERWRITE the
+                        // visible "stream reset: stream error" line the failure
+                        // branch just painted with "websocket live", hiding the
+                        // very reason the user needs to see. So `!ok -> return`
+                        // skips the whole tail; the replacement connection's own
+                        // ready runs it in full.
+                        if (controlMsg.compress === true && !startTTYCompressedPipe(session, ws)) {
+                            return;
                         }
                         // Arm the liveness watchdog (issue #83) once READY
                         // (the 5s handshake timeout above owns the window
@@ -7428,6 +8017,13 @@
                         // already lives by.
                         if (Number.isFinite(controlMsg.offset) && controlMsg.offset >= 0) session.ttyOffset = controlMsg.offset;
                         handshakeSynced = true;
+                        // Compressed pump sync base (rework W8): a sync of
+                        // ANY kind - start or closing - adopts an ABSOLUTE
+                        // offset, so the inflate pump now has a truthful base
+                        // and may advance the cursor by replay bytes painted
+                        // during replay (mid-replay resume). Set on the live
+                        // pipe so the async pump sees it.
+                        if (session.ttyDecompressor) session.ttyDecompressor.syncBaseKnown = true;
                         // [tty-metrics]: the #94 START sync opens the replay
                         // window and the closing sync closes it, so the
                         // rxBytes delta between them is this connection's
@@ -7441,6 +8037,17 @@
                             connStats.replayBytes = connStats.rxBytes - connStats.replayMark;
                             connStats.replayMark = -1;
                         }
+                        // Backoff-reset anchor (issue #114 decision 2, MED-1):
+                        // a CLOSING sync (no start===true) stamps the instant
+                        // this connection became fully usable. armTTYBackoff-
+                        // Reconnect resets ttyReconnectAttempts only if the
+                        // connection then survived >=60s as the session's live
+                        // socket; connectTTY zeroes this at connect, so a
+                        // mid-replay drop (no closing sync yet) or a
+                        // notice->tail reconnect under 60s never resets.
+                        if (controlMsg.start !== true) {
+                            session.ttyClosingSyncAt = Date.now();
+                        }
                         return;
                     }
 
@@ -7453,11 +8060,30 @@
                         return;
                     }
 
+                    if (controlMsg && controlMsg.type === 'overflow') {
+                        // Overflow notice (issue #114): fence + reset +
+                        // abandon + tail reconnect, all synchronously
+                        // inside this dispatch - nothing below this line
+                        // runs for this frame, and every later artifact of
+                        // this connection is fenced by the bumped
+                        // generation.
+                        handleTTYOverflow(session, controlMsg);
+                        return;
+                    }
+
                     if (ev.data instanceof ArrayBuffer) {
                         const u8 = new Uint8Array(ev.data);
                         connStats.rxBytes += u8.length;
                         connStats.rxFrames++;
-                        if (u8.length && session.term) {
+                        if (session.ttyCompressed && session.ttyDecompressor) {
+                            // Compressed state (issue #114 5a): the frame's
+                            // wire bytes join the single inflate stream and
+                            // the pump paints, counts and advances the
+                            // cursor on the OTHER side. rxBytes stays the
+                            // WIRE count - the server's own wire/logical
+                            // split already covers the metrics side.
+                            feedTTYCompressedFrame(session, ws, u8);
+                        } else if (u8.length && session.term) {
                             writeSanitizedTerminalOutput(session, decodeTTYOutputChunk(session, u8));
                             // Every binary frame is ring-buffer output: the
                             // server never writes a diagnostic as a binary
@@ -7558,6 +8184,13 @@
                     // the exported helper cannot survive with a cursor claiming
                     // bytes a blank screen no longer holds.
                     resetTTYOutputDecoder(session);
+                    // The inflate stream dies with its socket (issue #114):
+                    // abort the pipe and bump the fence so a pump parked on
+                    // reader.read() unwinds and nothing of this connection
+                    // paints after this point. The context is unreusable
+                    // anyway - the server never closes it mid-connection.
+                    bumpTTYGeneration(session);
+                    teardownTTYDecompressor(session);
                     if (connectTimeout) { clearTimeout(connectTimeout); connectTimeout = null; }
                     if (handshakeTimeout) { clearTimeout(handshakeTimeout); handshakeTimeout = null; }
                     session.ttyState = 'IDLE';
@@ -7573,7 +8206,7 @@
                         // when the process really is gone.
                         if (latest && isInstanceLiveStatus(latest.status)) {
                             if (state.activeInst === session.id) updateStatus("ws closed, retrying...");
-                            session.ttyReconnectTimer = setTimeout(() => connectTTY(session), TTY_RECONNECT_DELAY_MS);
+                            armTTYBackoffReconnect(session);
                         } else if (state.activeInst === session.id) {
                             updateStatus(latest && isInstancePendingStatus(latest.status) ? latest.status + "..." : "stopped");
                         }

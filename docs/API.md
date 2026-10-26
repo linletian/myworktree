@@ -569,7 +569,14 @@ Bi-directional stream for terminal output/input with PTY support.
 `caps` is an optional, comma-separated capability list (issue #98), and the
 parameter may be **repeated** (`?caps=pong&caps=ping` — every value is
 scanned, not just the first). Matching is by whole, case-sensitive token:
-`caps=pinger` and `caps=PING` do NOT opt in. Two capabilities are defined:
+`caps=pinger` and `caps=PING` do NOT opt in. Six capabilities are defined.
+One of them, `replay-window`, carries a value (`replay-window=<bytes>`), so
+it is matched by key up to the first `=` rather than as a whole token —
+whitespace around the key and the value is trimmed, an empty value
+(`replay-window=`) names nothing and is ignored, and a malformed value
+(`replay-window=abc`) is ignored rather than a reason to refuse the
+connection; where a list declares the same key more than once the first
+**parseable** value wins (issue #114 review R15):
 - **`ping`** — the client whitelists the TEXT `{"type":"ping"}` heartbeat
   (stamps its liveness clock, never renders it), so the server may send that
   frame. A client that does NOT opt in — a page loaded before the whitelist
@@ -595,11 +602,202 @@ scanned, not just the first). Matching is by whole, case-sensitive token:
   cursor handoff (the replay is empty by design) — which is exactly why the
   explicit-`since` inference matters: a pre-caps page in that mode still
   receives it.
+- **`overflow-notice`** (issue #114) — the client whitelists the TEXT
+  `{"type":"overflow","droppedBytes":<int64>,"droppedChunks":<int64>}`
+  control frame and RESETS + repaints from a cursorless (tail) reconnect when
+  it sees one. Declaring it opts the connection into the kind's
+  `OverflowDropOldest` output subscription: a full live queue then discards the
+  OLDEST queued chunks and COUNTS them, instead of closing the subscription —
+  so a slow viewer degrades to one redraw rather than issue #82's
+  close-on-every-overflow `1013` reconnect storm. A client that does NOT opt
+  in is never sent the frame (the same #98 leak class as the TEXT ping: an
+  unwhitelisted page paints it into the terminal as output) and keeps the #82
+  contract verbatim — overflow closes the subscription and the socket answers
+  `1013 / subscriber overflow: slow consumer`. That same #82 contract is what
+  a cap client gets on a kind with no policy subscription at all: there is
+  nothing to count there, so the server never fabricates a notice, and it logs
+  the degradation (`tty overflow-notice cap degraded for <id>…`) rather than
+  silently downgrading the subscription the client asked for.
+- **`slow-link`** (issue #114) — a whole-token cap, no value: the client says
+  it is on a link where the heartbeat's cost matters (cross-border, high RTT,
+  packet loss). The server then sends its heartbeat — the RFC 6455 ping and
+  the observable TEXT `{"type":"ping"}`, one ticker, so they cannot drift —
+  every **15 s** instead of every 10 s, and the 45 s read deadline stays
+  exactly where it is (three unanswered rounds still means peer-dead, not
+  peer-busy). A client that does NOT declare it keeps 10 s / 45 s **verbatim**,
+  which is the point of making it opt-in: the widening must never cost an
+  ordinary connection five seconds of liveness detection it did not ask for.
+  The client's matching staleness threshold (60 s, against the 30 s it uses
+  today) is the client half of this pair and is NOT part of this server
+  change — a client that declares `slow-link` and keeps a 30 s threshold will
+  simply reconnect on its own schedule, which is safe, not wrong.
+- **`compress`** (issue #114, decision 5a) — the client can consume
+  app-layer-compressed BINARY frames: the server feeds every binary frame
+  through ONE persistent per-connection raw-deflate stream
+  (`compress/flate`, level BestSpeed, RFC 1951 — no zlib wrapper), sync
+  flushing after each frame, so each WS binary frame carries one flushed
+  segment of that single stream and the client inflates the binary frames
+  through one persistent `DecompressionStream('deflate-raw')` pipe, in
+  order, for the life of the connection. The negotiation is echoed in the
+  ready frame: a compressed connection gets
+  `{"type":"ready","compress":true}`, every other connection gets the
+  legacy `{"type":"ready"}` byte-for-byte — the echo is the switch the
+  client wires its decoder on, and its absence (an old server) means the
+  plaintext path. **TEXT frames are never compressed** (ready, sync, ping,
+  overflow notice, resize, pong ride the wire as plaintext JSON), and so
+  are RFC 6455 ping/pong and close frames — the inflate stream only ever
+  consumes binary frames. The stream is **never closed mid-connection**
+  (a Close would end the shared context and desync every later frame; the
+  context dies with the socket). A deflate failure closes the connection
+  with **1011** — never 1013, whose "retry" semantics belong to the
+  overflow contract alone. **Cursor arithmetic is untouched:** every
+  offset, sync, and dropped-bytes figure stays a LOGICAL (uncompressed,
+  ring) byte count — compression lives only in the delivery layer, so the
+  client advances its cursor by the INFLATED length of each frame, never
+  by the frame's wire length; dropped chunks never entered the deflate
+  stream (a chunk is compressed exactly once, when it is written, in
+  write order), so the two ends' contexts cannot diverge across a drop. A
+  client that does NOT declare `compress` — every non-web client, and the
+  shipped web client on a platform without
+  `DecompressionStream('deflate-raw')` (decision 5a pin 2) — keeps the
+  plaintext wire verbatim: no flate object is even constructed on that
+  path. (The shipped web client declares `compress` whenever its browser
+  can inflate deflate-raw; see the client consumption contract below.) Wire-vs-logical observability rides the
+  `[tty-metrics]` lines: `wireBytes` (compressed delivery) and
+  `logicalBytes` (pre-compression) on slow-write/conn-closed rows (equal
+  on plaintext connections, so the columns stay historically comparable),
+  and `compress=true` appended to the handshake row of compressed
+  connections only. The replay/drain columns carry the same two families
+  (issue #114 review R1): `replayBytes` stays the WIRE replay and
+  `replayLogicalBytes` is its LOGICAL pair on the handshake row;
+  `liveBytes` stays the WIRE drain and `liveLogicalBytes` its LOGICAL
+  pair on the overflow row. What is frozen — so the collector's grep/awk
+  never breaks — is the column NAMES and POSITIONS, not any single column's
+  unit across connection types: on a compressed connection `replayBytes` /
+  `liveBytes` are WIRE counts, so any comparison that must hold across
+  compressed and plaintext connections has to read the LOGICAL family
+  (`replayLogicalBytes` / `liveLogicalBytes`), which is the one unit the
+  client's cursor speaks.
+- **`replay-window=<bytes>`** (issue #114) — the client asks for a **smaller**
+  handshake replay window than the operator's default. The window bounds a
+  catch-up replay at both ends: the replay starts no earlier than
+  `head − W`, and it stops once `W` bytes have been written. The claim may
+  only **shrink** the window — a value at or above the operator's default is
+  ignored, because the default (`MYWORKTREE_TTY_REPLAY_WINDOW_BYTES`, 1 MiB)
+  is the operator's ceiling and a client asking for 512 MiB would be buying
+  the multi-minute frozen screen the window exists to prevent. `0` is honoured
+  and means "no replay bytes, go straight to live" — scoped to the **catch-up
+  replay only**: a cursorless first connect still replays its 64KB tail (the
+  pre-existing #86 behavior; the window does not govern that path).
+  Malformed values are ignored, never refused. See the replay section below
+  for the cursor semantics, which need no new frame type.
+
+The four capabilities compose independently; the resulting wire contract per
+combination (issue #114 review R12), each cell pinned by its own test:
+
+| caps | overflow behaviour | binary wire | cursor unit |
+| --- | --- | --- | --- |
+| (none, legacy) | 1013 close | plaintext | wire = logical |
+| `overflow-notice` | notice + drop, connection kept | plaintext | wire = logical |
+| `compress` | 1013 close | deflate-raw | logical (inflated) |
+| both | notice + drop, connection kept | deflate-raw | logical (inflated) |
+
 The rule is deliberately opt-IN rather than version-gated: the server can
 never again leak a future visible control frame to a client that did not
 declare it. Older servers ignore unknown query parameters, so a new client
 against an old daemon behaves exactly as before (the old daemon sends the
 TEXT ping unconditionally, and the new client whitelists it).
+
+**The client consumption contract (issue #114 Phase B).** The shipped web
+client (`internal/ui/static/index.html`) now declares
+`caps=ping,sync,overflow-notice` always, and appends `compress` only when
+`new DecompressionStream('deflate-raw')` constructs successfully — a platform
+without the format (pre-Chrome 103 / pre-Safari 16.4, decision 5a pin 2)
+declares no `compress` cap and stays on the plaintext wire, console-noted. It
+deliberately declares NEITHER `replay-window` NOR `slow-link` (arbitration:
+operator knobs with no client-side scenario data), so it keeps the operator's
+default window and heartbeat cadence.
+
+- **Ready-frame gate.** The client wires its inflate path on the ready echo:
+  `{"type":"ready","compress":true}` switches it to the compressed state
+  (one persistent `DecompressionStream('deflate-raw')`, one sequential
+  reader, `term.write` awaited per output chunk for parse backpressure); an
+  absent or false field — every server before Phase A-3, and every connection
+  that did not declare the cap — keeps the plaintext consumption path
+  byte-for-byte (the R16 rollback). The cursor advances by the **inflated**
+  length in the compressed state and by the **wire** length in the plaintext
+  state. In the compressed state the pump attributes its opaque byte stream to
+  the HEAD token of a feed-time FIFO (`pipe.frameLedger`), each token's
+  replay/live identity captured at feed and consumed strictly IN STREAM ORDER.
+  The advance is evaluated at PAINT time: once a sync base is known (a start or
+  closing sync has adopted an absolute offset, latched on the pipe), the cursor
+  advances by a head that was LIVE at feed time OR while the closing sync has
+  not yet landed (`ttyClosingSyncAt === 0`). So replay bytes painted DURING
+  replay advance from the start-sync base — a mid-replay drop reconnects with
+  `since` at the painted position, isomorphic to the plaintext #94 path — while
+  the closing sync's absolute assignment stays the SOLE terminal authority: a
+  replay frame painted AFTER the closing sync sees `ttyClosingSyncAt > 0` with
+  `head.live === false` and cannot re-open the cursor it pinned, so the W1
+  burst-exactness (cursor lands exactly on `sync.offset`) holds. With NO sync
+  base (a cursorless first connect) it never advances. The residual of this
+  frame-boundary-blind attribution — a lagged head popping while the head frame's
+  tail is still queued misattributes <= one frame tail (in practice <= one read
+  chunk) onto the NEXT token — is a DELIBERATE trade-off: in the dominant
+  replay-then-live shape the error is UNDER-CEILING (the tail lands on a live
+  token whose own paint also advances, so the cursor runs a little SHORT), so
+  the next `since` merely re-asks bytes already painted -> a bounded duplicate
+  the closing sync then self-heals. The opposite direction (over-ceiling ->
+  silent loss) is the one we refuse, and the server's beyond-head branch
+  (`cursor > head` -> first-connect tail replay, app.go:3577) clamps even a
+  rare overshoot back to the tail (rework W8/W9). In the plaintext state the
+  cursor advances by wire length only after the `sync` latch, unchanged.
+- **Overflow notice.** A `{"type":"overflow",...}` frame (whitelisted in
+  `parseTTYControlMessage`) drives the consumption-degradation shape: log
+  the dropped counters, show ONE visible status line, bump the session
+  generation (fence), reset the screen, abandon the socket, and tail-reconnect
+  WITHOUT `since` — a notice therefore **clears the client scrollback** by
+  design. The visible status line shows ONLY on the active (foreground) session
+  — a background session's notice is handled silently (the console log, the
+  fence bump, the reset and the tail reconnect still run; only the status line
+  is gated on `state.activeInst === session.id`). Late artifacts of the fenced
+  generation (WS-buffer residue, in-flight inflate output, a pending
+  `term.write` callback) are dropped, not best-effort skipped.
+- **Exponential reconnect backoff (decision 2).** Every delayed reconnect
+  schedules at `min(1000ms * 2**attempts, cap) * (0.75 + rand*0.5)` — base
+  1 s, ±25 % jitter, capped at **8 s while the tab is visible** and **30 s
+  while hidden** (a user watching a black screen must not wait 30 s). The
+  attempt counter is session-level and its ONLY reset anchor is a closing
+  `sync` followed by that same connection staying the live socket for
+  **≥ 60 s**; a mid-replay drop or a notice→tail reconnect under 60 s never
+  clears it, so the notice loop's fast closing sync cannot self-erase the
+  backoff (MED-1).
+- **Client-side bounds.** One memory guard and one failure path bound the
+  compressed path. A per-WS-frame decompressed-output ceiling is
+  UNIMPLEMENTABLE under the server's shared deflate context (flushed per
+  frame into ONE stream, app.go:2656/:2919): the pump cannot see frame
+  boundaries, so any head-stuck per-frame counter false-trips a healthy
+  multi-frame burst (probes 8-14, review probe12). Its v7 successor - a
+  sliding-window inflation-ratio guard - was RETIRED by the v8
+  re-arbitration (PR #129 review R1-P1/R2-P1, PR129-ADJUDICATION): legit
+  BestSpeed terminal output measures 118-209x at 64KB frames (a `yes`-style
+  stream), so NO fixed ratio threshold separates legit output from a
+  degenerate stream, and the windowed denominator collapses to <=0 whenever
+  one frame inflates past the trailing window, fail-closing on healthy
+  streams. Painting legit high-inflation output is the correct behavior.
+  What remains: the **2 MB backlog** of pending-decode (wire bytes queued
+  into the inflate stream) plus pending-write (inflated bytes awaiting the
+  `term.write` callback) bounds resident memory - over the line it resets
+  the screen, abandons the socket and tail-reconnects with its OWN VISIBLE
+  status line (`"stream reset: backlog exceeded, data dropped"`) at BOTH
+  its trip points (pump-side and feed-side). Corruption is not counted, it
+  is CAUGHT: a `DecompressionStream` construction failure or an inflate
+  read/write error (the normal surfacing of a corrupt or out-of-sync
+  deflate stream) resets + tail-reconnects with the visible status line
+  `"stream reset: stream error, data dropped"` and NEVER falls back to
+  painting deflate bytes as plaintext (v8 P2). All these lines sit beside
+  the overflow notice's `"stream reset: slow link, data dropped"`, are
+  gated on the active session, and none is ever silent (rework D2 / review
+  A round4 gap).
 
 Each replay read is capped at 64KB. When the delta since `since` exceeds
 64KB, the server loops reads until it is caught up and **streams each chunk
@@ -614,21 +812,86 @@ head, and neither re-delivers anything a healthy client still had coming: a
 path that writes nothing has no last chunk to name, and a ring whose process
 has exited and whose buffer has been dropped publishes head precisely because
 the bytes behind it are permanently undeliverable — publishing 0 there would
-instead throw the client into a full tail replay. One handshake replays at
-most 8 MB
-(`ttyHandshakeReplayBudget` in `internal/app/app.go`), counted in bytes
-already written and checked before the next read: once the budget is spent
-the loop stops, and the undelivered remainder sits **ahead** of the published
-cursor, so the next reconnect re-requests exactly those bytes — truncation is
-**deferred to the next reconnect, never a skip**. The deferral has a cost:
-ring caps are 16–256 MB, so a badly lagged client can need up to 32 reconnects
-to converge, and until it reconnects the deferred bytes stay off a screen whose
-socket still looks healthy (the replay lands in xterm.js `scrollback: 10000`,
-so it is the older replayed content that scrolls out, never the live output
-that follows it). There is deliberately no write deadline on this path: the
-handshake is not yet subscribed to the output stream, so a blocked write does
-not stall the pump, and a wall-clock deadline would livelock a slow-but-
-progressing consumer where a byte budget simply resumes next reconnect. Output produced between the
+instead throw the client into a full tail replay.
+
+**The replay window (issue #114).** A catch-up replay is bounded by a window
+`W`, applied at BOTH ends:
+
+- **front — the start clamp:** a `since` older than `head − W` does not buy a
+  replay of everything missed. The replay begins at `head − W`, and the client
+  learns that start from the `{"type":"sync","offset":<S>,"start":true}` frame
+  it already implements (issue #94) — `S` is simply the clamped offset, never
+  the refused request. No new frame type, no client change.
+- **back — the total cap:** the loop stops once `W` bytes have been **written**.
+  Clamping the front does not bound the duration, because each read runs to
+  whatever the ring's head is *at that instant*: under sustained output the
+  replay follows a head that keeps moving, and only a count of the bytes
+  actually written stops it. Measured in production before this cap existed,
+  one replay ran 84.6 s with the client's screen frozen throughout. **`W` and
+  this byte count are LOGICAL (ring) bytes, never compressed wire bytes:** the
+  replay window and the `compress` cap are orthogonal — a compressed
+  connection's replay is still capped at `W` logical bytes out of the ring,
+  whatever those bytes shrink to on the wire (issue #114, decision 4 ∩ 5a).
+
+`W` resolves once per handshake as `min(MYWORKTREE_TTY_REPLAY_WINDOW_BYTES,
+the client's caps replay-window=<bytes>)`, default **1 MiB**
+(`MYWORKTREE_TTY_REPLAY_WINDOW_BYTES=1048576`; missing, unparsable, zero or
+negative falls back to the default). The client's claim may only shrink it;
+`0` is honoured and means pure tail — scoped to the catch-up replay, while a
+cursorless first connect still replays its 64KB tail (#86 behavior, outside
+the window's scope). The result is clamped to
+`ttyHandshakeReplayBudget` on the way in, so `W ≤ 8 MB` holds by construction
+and the 8 MB budget (`ttyHandshakeReplayBudget` in `internal/app/app.go`)
+remains the hard backstop above the window rather than a second opinion.
+
+`W` is a **line-loss budget, not a scrollback line count**. Bytes↔lines is
+non-linear under ANSI escape traffic — a 1 MiB window is roughly 10,000 rows
+× ~100 B, which is an engineering estimate of xterm.js's `scrollback: 10000`,
+never a provable equivalence, and a client that needs more history than the
+window delivers needs it from a log endpoint, not from a live reconnect.
+
+What each bound costs, and what it does not:
+
+- a replay stopped by the **total cap** publishes the end offset of the last
+  chunk it actually wrote — the **truncation point**, strictly behind head —
+  so the undelivered remainder sits **ahead** of the client's cursor and the
+  next reconnect re-requests exactly those bytes. Truncation is **deferred,
+  never skipped**, and the deferral is recoverable *while those bytes are
+  still in the ring buffer*: ring caps are 16–256 MB, so a badly lagged
+  client can need up to 32 reconnects to converge, and a client that waits
+  longer than the ring takes to roll past them loses them for good, which is
+  the same boundary every other replay path already lives by. Until it
+  reconnects the deferred bytes stay off a screen whose socket still looks
+  healthy (the replay lands in xterm.js `scrollback: 10000`, so it is the
+  older replayed content that scrolls out, never the live output that follows
+  it).
+- bytes refused by the **start clamp** are the opposite case: they are
+  **behind** the cursor the client adopts from the start sync, so for that
+  client they are not deferred but skipped — a window is chosen precisely
+  because the client's scrollback cannot render them anyway. A client that
+  needs them asks for a bigger window (or reads the log endpoint).
+  Instrumentation note: the clamp term of `droppedFromWindow` is the
+  window's own arithmetic (`clampedStart − since`); when `since` is ALSO
+  stale (behind the ring's oldest live byte) it **overlaps** the region
+  the issue #94 start-sync already re-based the client onto — the two
+  figures describe the same skipped bytes, **not two independent losses**.
+
+Every liveness knob on this endpoint is now explicit: the server pings every
+10 s (15 s for a `slow-link` client), arms a 45 s read deadline before every
+read, and — since issue #114 — arms a per-write deadline of **15 s**
+(`MYWORKTREE_TTY_WRITE_TIMEOUT_MS`, milliseconds; missing, unparsable, zero or
+negative falls back to 15 s) directly after the `ready` frame, so the
+handshake replay is inside the bound and not the hole in it. The deadline is
+re-armed at the start of every write, so it measures one blocked write and
+never the gap between frames: a slow-but-progressing consumer re-arms it with
+its own bytes and is never mistaken for a stall, while a consumer that stops
+taking bytes at all releases the handler, `ws.Conn`'s mutex and every frame
+queued behind it. 15 s is a default, not a verdict: on a 50 KB/s link with 2%
+loss a single 64 KB write can legitimately block longer, and an operator on
+such a link raises the bound rather than watching a reconnect loop that the
+deadline itself causes. The only other bounded write on this socket is the
+5 s deadline on #82's overflow close-frame, which disarms the per-write
+deadline first and keeps its own tighter bound. Output produced between the
 last chunk written and the live subscription sits behind
 the published cursor and is re-requested by the next reconnect (self-healing
 contiguity, not absolute coverage). A `since` older than the oldest byte
@@ -697,6 +960,9 @@ conflate them:
 
 **Handshake Protocol:**
 1. Server sends `{"type":"ready"}` immediately after connection
+   (`{"type":"ready","compress":true}` for a connection that declared
+   `caps=compress` — the echo is the client's decoder switch; the legacy
+   frame is unchanged byte-for-byte for every other connection)
 2. Client should wait for this message before sending resize
 3. Client sends `{"type":"resize","cols":80,"rows":24}` to start data flow
 4. Server sends `{"type":"sync","offset":<S>,"start":true}` (text frame,
@@ -722,11 +988,16 @@ conflate them:
    replay; everywhere else it is the only one
 7. Real-time output continues as binary frames
 8. Client receives first data and triggers second resize (50ms delay) for TUI redraw
-9. If the client stops draining the live stream, the server closes the
-   connection with **`1013` / reason `subscriber overflow: slow consumer`**
-   (issue #82) instead of silently dropping output — see Close codes below;
-   the client reconnects with the `since` cursor it already holds, exactly
-   as after any abnormal close
+9. If the client stops draining the live stream, the server's behaviour
+   depends on the handshake (issue #114): a client that declared
+   `caps=overflow-notice` has its queue's OLDEST chunks dropped and counted,
+   the connection stays up, and the counted `{"type":"overflow",…}` notice
+   arrives ahead of the next chunk — first increment immediately, later ones
+   aggregated at ≤4 frames/s. A client that did NOT declare it gets issue #82
+   verbatim: the server closes the connection with **`1013` / reason
+   `subscriber overflow: slow consumer`** rather than silently dropping output
+   — see Close codes below; the client reconnects with the `since` cursor it
+   already holds, exactly as after any abnormal close
 
 **Frontend session model:**
 - The current UI keeps transport state per running instance rather than sharing a single terminal across tabs.
@@ -741,12 +1012,13 @@ conflate them:
 - Liveness probe: `{"type":"ping"}` (text frame, issue #83) — answered with `{"type":"pong"}` and **not** treated as input: the server consumes it before the input fallthrough, so the probe JSON is never typed into the instance's PTY. (A user literally typing that exact JSON is swallowed the same way `{"type":"resize",...}` already is.)
 
 *Server → Client:*
-- Ready: `{"type":"ready"}` (text frame)
-- Output: binary frames (terminal output chunks)
+- Ready: `{"type":"ready"}` (text frame; `{"type":"ready","compress":true}` for a client that declared `caps=compress` — see the capability list above)
+- Output: binary frames (terminal output chunks; for a `caps=compress` client these are flushed segments of ONE persistent raw-deflate stream — inflate through a single `DecompressionStream('deflate-raw')` for the life of the connection, advance the cursor by the INFLATED length; TEXT frames and this stream never mix)
 - Sync: `{"type":"sync","offset":<int64>}` (text frame, **opt-in via `caps=sync` — or inferred from an explicit `since` parameter — since issue #98**), the cursor handoff of the handshake, sent even when the replay was empty. Since issue #94 a replay addressed to a cursor-bearing client is bracketed by TWO of these: `{"type":"sync","offset":<S>,"start":true}` ahead of the FIRST replay chunk carries the replay's real (possibly clamped) start offset, and the closing sync after the last chunk carries its end offset — every other path (the cursor-less tail, `since=-2`, an empty replay) sends the closing sync alone. The client latches per connection: a replay frame advances the cursor by its wire byte count only once SOME sync has arrived — against a post-#94 server that is the start sync, so frames count from chunk 1 on (S and chunk 1 come from the same server-side read, so the base is truthful); against a pre-#94 server the latch lifts only at the closing sync, which publishes the end of the whole replay in one step. Either way the closing sync is the absolute authority — whenever the summed frames and it drift (a ring rollover mid-replay can evict unsent bytes, landing the sum short), it wins. Counting binary frames is sound at all because every one of them is ring-buffer output: the server closes the connection rather than writing diagnostics as binary. The `"start":true` marker exists for consumers that must know WHEN the replay ends; a client that ignores it and treats both syncs as absolute offsets to adopt implements the full contract)
 - Heartbeat: `{"type":"ping"}` (text frame, every 10 s, issue #83; **opt-in via `caps=ping` since issue #98**) — the application-level mirror of the RFC 6455 ping the server sends on the same tick. Browsers answer the protocol ping automatically from their network stack (which refreshes the server's 45 s read deadline); this text frame is the heartbeat browser JavaScript can observe, since `onmessage` never fires for control frames. Clients MUST whitelist `ping` (and `pong`) as control types and MUST NOT render them as terminal output — and the server only sends this frame to clients that declared `ping` in the handshake `caps` list, so a client without the whitelist never receives it.
+- Overflow notice: `{"type":"overflow","droppedBytes":<int64>,"droppedChunks":<int64>}` (text frame, issue #114; **opt-in via `caps=overflow-notice`**) — the counted proof that this client's live queue overflowed and the server kept it streaming anyway: `droppedChunks` chunks totalling `droppedBytes` were discarded from the OLDEST end of its queue to make room for the newest. The counts are **INCREMENTAL** (everything dropped since the previous notice on this connection), never a cumulative total — a client needs no baseline to act on one, and a total it had to diff itself would silently under-report if it ever missed a frame. **The frame is rate-aggregated on the wire at 250 ms** (`ttyOverflowNoticeInterval`, issue #114 decision 1 补 1 / review R5): the **first** drop increment of a connection notices **immediately**, and after that at most **one frame per 250 ms (≤4/s)** carrying the **Σ** of every increment since the previous notice. That ceiling exists because a notice per increment is ~150 TEXT frames/s in a storm, each one taking `ws.Conn`'s write mutex away from the binary chunk it precedes — the notice was amplifying the congestion it reported. Aggregation never costs a count: the server advances its drop baseline on every sample whether or not a frame goes out, so a deferred increment is grouped into the next notice, not lost; and since issue #114 review round one the flush contract closes the one remaining gap: a pending pair stranded by the gate is flushed by the **heartbeat branch**, so it reaches the wire **within one heartbeat cycle** — the 10 s/15 s interval normally leaves the 250 ms gate long since open on the tick that sees the debt, and the one exception (a chunk-path notice written <250 ms before the tick) defers the flush by at most one further 250 ms gate window onto the following tick — even when output has stopped entirely and the connection stays alive with no further chunks, the pending notice still arrives within ≤1 heartbeat period. Whatever frame does go out is still written **ahead of the binary chunk of its own iteration**, because the client's cursor advances by binary frame length: a notice that trailed the bytes it describes could be processed after those bytes were already painted under a torn screen — and every byte it reports is older than that chunk, since they were evicted to make room for chunks up to and including it. A client therefore MUST NOT assume a notice arrives within 250 ms of every drop: the correct reading is "the first one is immediate, and later ones are the running total, at ≤4/s". On receiving one, the client MUST reset its screen and repaint from a cursorless (tail) reconnect: the bytes it is missing are gone from its side of the cursor, and a cursor advanced past a gap would skip them forever. Sent ONLY to clients that declared `overflow-notice` — an unwhitelisted page paints it into the terminal (issue #98) — and never for a subscriber whose drops nobody counted, so a legacy (#82) client sees only the close. The server's own log line for this path is throttled separately, at 500 ms (`ttyDropLogInterval`), and a sampled line carries its own increment rather than the suppressed sum: the log is a sample, the notices are the complete record.
 
-**Liveness (issue #83):** half-open TCP sockets (laptop sleep, NAT/proxy idle timeout) keep `readyState === OPEN` without ever firing `onclose`, so liveness rides on heartbeat traffic in both directions. Server: pings every 10 s; arms a 45 s read deadline before every read and reaps a peer that has sent nothing for that long (the browser's automatic Pong refreshes it). **Non-browser clients get no automatic Pong** — `internal/ws`'s own client returns `opPing` as an ordinary message and installs no responder — so any Go or embedded client of this endpoint MUST answer protocol pings with Pong and/or send `{"type":"ping"}` periodically, or it will be reaped at the 45 s deadline. Client: stamps the arrival of every frame, probes `{"type":"ping"}` every 5 s once READY, and reconnects after 30 s without heartbeat traffic (3 × the ping interval, under the server's 45 s backstop). The web UI's **primary detector is the 2 s poll** — `ensureTerminalLiveTransport()` notices the stale stamp on the active session at ~30 s and queues the reconnect (returning `false`: a queued reconnect is not yet a live transport); the 5 s watchdog is the fallback that also covers sessions the poll does not promote. Liveness is never inferred from the absence of program output — a prompt, `vim` or `top` emit zero bytes for hours and stay connected. A write deadline was deliberately **not** part of issue #83: normal-traffic writes on this socket carry none (the only bounded write here is the 5 s deadline on #82's overflow close-frame), so a handler blocked mid-write is reclaimed when that write fails or returns, not by the read deadline.
+**Liveness (issue #83):** half-open TCP sockets (laptop sleep, NAT/proxy idle timeout) keep `readyState === OPEN` without ever firing `onclose`, so liveness rides on heartbeat traffic in both directions. Server: pings every 10 s (**15 s for a client that declared `caps=slow-link`**, issue #114 decision 3(c) — the RFC ping and the TEXT heartbeat ride one ticker, so both widen together and the 45 s read deadline does not move); arms a 45 s read deadline before every read and reaps a peer that has sent nothing for that long (the browser's automatic Pong refreshes it). **Non-browser clients get no automatic Pong** — `internal/ws`'s own client returns `opPing` as an ordinary message and installs no responder — so any Go or embedded client of this endpoint MUST answer protocol pings with Pong and/or send `{"type":"ping"}` periodically, or it will be reaped at the 45 s deadline. Client: stamps the arrival of every frame, probes `{"type":"ping"}` every 5 s once READY, and reconnects after 30 s without heartbeat traffic (3 × the ping interval, under the server's 45 s backstop). The web UI's **primary detector is the 2 s poll** — `ensureTerminalLiveTransport()` notices the stale stamp on the active session at ~30 s and queues the reconnect (returning `false`: a queued reconnect is not yet a live transport); the 5 s watchdog is the fallback that also covers sessions the poll does not promote. Liveness is never inferred from the absence of program output — a prompt, `vim` or `top` emit zero bytes for hours and stay connected. A write deadline was deliberately **not** part of issue #83, and issue #114 landed it: every write on this socket from the `ready` frame onward is armed with a **15 s** per-write deadline (`MYWORKTREE_TTY_WRITE_TIMEOUT_MS`, re-armed at the start of each write, so it bounds one blocked write and not the interval between frames). That closes the amplification #83 left open — a handler blocked mid-write used to pin the goroutine, the instance's subscriber registry entry and every frame queued behind it, heartbeats included, for as long as the OS let the write block; now it errors and unwinds through the handler's own teardown. The bound is a default rather than a verdict on link health: on a genuinely slow link an operator raises it, because killing a connection that is still making progress only replays the same stall. The 5 s deadline on #82's overflow close-frame is unchanged and disarms the per-write deadline first.
 
 *Server → Client close codes:*
 - `1013` with reason `subscriber overflow: slow consumer` (issue #82) — the live
@@ -771,13 +1043,17 @@ conflate them:
   pre-drain — the same post-swap loss ARCHITECTURE §4.1 already declares intentional
   for the buffer swap itself. The close frame itself is BEST-EFFORT (the stalled
   socket may never drain it; its write carries a bounded 5 s deadline set on this
-  teardown path only — normal-traffic writes on this socket carry **no** write
-  deadline, and that is unchanged after issue #83, which deliberately scoped a
-  write deadline out and shipped read-deadline liveness only), so the
+  teardown path only — every other write on this socket carries the 15 s
+  per-write deadline issue #114 armed after the `ready` frame
+  (`MYWORKTREE_TTY_WRITE_TIMEOUT_MS` to move it), which replaces the
+  "no write deadline at all" boundary issue #83 deliberately shipped), so the
   client must treat **any** abnormal close as "reconnect with your stored `since`
   cursor", not only this one. The shipped UI's `ws.onclose` logs the code and reason
   and reconnects after 5 s; the server logs the overflow at the disconnect too
   (`tty output subscriber overflow for <id>…`), which is its only server-side trace.
+  For a client that declared `caps=overflow-notice` this close does not happen at
+  all: its queue drops and counts its oldest chunks, and the overflow notice above
+  is the event that client sees instead (issue #114).
 - `1013` with a dynamic error reason — handshake/setup failures on this endpoint
   (upgrade, replay-read or subscribe errors); the connection is closed rather than
   served half-configured, and the client retries like any other abnormal close.

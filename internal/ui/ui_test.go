@@ -2404,7 +2404,13 @@ func TestIndexHTMLCoversPerSessionConnectionManagement(t *testing.T) {
 		"if (session.ttySocket) { session.ttySocket.close(); session.ttySocket = null; }",
 		"session.ttySocket = ws;",
 		"if (session.ttySocket === ws) {",
-		"session.ttyReconnectTimer = setTimeout(() => connectTTY(session), TTY_RECONNECT_DELAY_MS);",
+		// Issue #114 decision 2: the fixed delay is replaced by a single
+		// backoff choke point. The two reconnect sites (reconnectStaleTTY's
+		// socket arm and ws.onclose) call armTTYBackoffReconnect, and the
+		// helper is the ONLY place that arms the timer, so it must contain
+		// the setTimeout(connectTTY, delayMs) that the old literal carried.
+		"armTTYBackoffReconnect(session);",
+		"session.ttyReconnectTimer = setTimeout(() => connectTTY(session), delayMs);",
 	}
 	for _, check := range checks {
 		if !strings.Contains(bodyText, check) {

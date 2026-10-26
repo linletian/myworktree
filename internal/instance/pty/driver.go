@@ -22,8 +22,10 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -278,6 +280,17 @@ func (d Driver) SubscribeOutput(id string) (<-chan string, func(), error) {
 	return SubscribeOutput(id)
 }
 
+// SubscribeOutputWithPolicy (extension interface) is SubscribeOutput with
+// the overflow behaviour chosen per subscription (issue #114): the TTY WS
+// handler hands OverflowDropOldest to clients that declared the
+// `overflow-notice` capability and never touches this method otherwise, so
+// framework.Manager.SubscribeOutput — which knows only the plain
+// SubscribeOutput surface — keeps serving every other caller the #82 close
+// contract unchanged.
+func (d Driver) SubscribeOutputWithPolicy(id string, policy OverflowPolicy) (<-chan string, func(), *DropStats, error) {
+	return SubscribeOutputWithPolicy(id, policy)
+}
+
 // --- handle internals ---
 
 func (h *Handle) pumpLogs() {
@@ -350,12 +363,248 @@ var (
 	subs   map[string]map[*subscriber]struct{}
 )
 
+// OverflowPolicy selects what a full subscriber queue MEANS in broadcast.
+// It is chosen per subscription (see SubscribeOutputWithPolicy) and lets
+// issue #114 negotiate the trade per client: the #82 close-on-overflow
+// contract stays the default and the untouched SubscribeOutput keeps it,
+// while clients that declare the `overflow-notice` cap (internal/app
+// handleInstanceTTYWSLiveness) opt into drop-oldest plus an in-band
+// notice, so a slow-but-alive viewer degrades to a redraw instead of a
+// 1013 reconnect storm.
+type OverflowPolicy uint8
+
+const (
+	// OverflowClose is the default and the legacy behaviour (issue #82):
+	// an overflowing subscriber is deleted from the registry, its channel
+	// closed, and its backlog drained at the source, so the consumer sees
+	// "resync" rather than a silently corrupt stream.
+	OverflowClose OverflowPolicy = iota
+	// OverflowDropOldest keeps the subscriber registered through an
+	// overflow: broadcast discards the OLDEST queued chunks to make room
+	// for the newest, so the consumer's screen lags instead of tearing
+	// down. Every discarded chunk is counted in the subscriber's
+	// DropStats, which is what makes the loss visible to the client (the
+	// overflow notice) — the silence that issue #82 condemned is exactly
+	// what this policy must never fall back to.
+	OverflowDropOldest
+)
+
+// --- subscriber queue capacity (issue #114, FIX-PLAN 决策 1b) -------------
+//
+// The two overflow policies get two DIFFERENT capacities, and that split IS
+// the decision: the close-policy queue keeps the number issue #82 was
+// designed and tested around, while the drop-policy queue gets a queue big
+// enough to ride out a burst instead of evicting inside the same second.
+const (
+	// subscriberQueueChunksClose is issue #82's capacity, verbatim: 64 of
+	// the 1024-byte chunks pumpLogs reads, so a close-policy subscriber is
+	// disconnected after ~64 KB it has not taken.
+	//
+	// The number is FIXED on purpose and there is NO env override for it —
+	// not even the drop queue's env below. #82's contract is "fall ~64 KB
+	// behind and you are disconnected, with a resync signal"; every #82/#87
+	// regression test, doc and CHANGELOG entry reasons about that number,
+	// and making it tunable would let an operator silently postpone the
+	// disconnect the contract promises. The two capacities never move
+	// together: MYWORKTREE_TTY_DROP_QUEUE_CHUNKS cannot reach this one.
+	subscriberQueueChunksClose = 64
+
+	// defaultSubscriberQueueChunksDrop is the capacity of an
+	// OverflowDropOldest subscriber when the env override is absent or
+	// unusable: 4096 chunks × 1024 B (pumpLogs' read size) = 4,194,304 B
+	// ≈ 4.19 MB (10^6 口径; 习称 4MB) — the precise per-subscriber upper
+	// bound 决策 1b quotes, and the reason the unit here is CHUNKS and not
+	// bytes: the bound is exact only because a chunk can never exceed the
+	// 1024-byte read that produced it.
+	//
+	// The arithmetic that picked 4096 (FIX-PLAN 决策 1b, measured on the
+	// storm day; KB = 10^3, drain = liveBytes/subAgeMs, n=52):
+	//
+	//	burst production 150–358 KB/s − median drain 47 KB/s
+	//		= a live gap of ~103–311 KB/s
+	//	4×10^6 B ÷ (103–311 KB/s) ≈ ~13–39 s before the first drop
+	//	64×10^3 B ÷ (103–311 KB/s) ≈ ~0.2–0.6 s before the first drop
+	//
+	// (The cadence divides the 习称 4 MB/64 KB figures, i.e. 10^6/10^3,
+	// the plan's own 口径 — with the exact 4,194,304 B the 4 MB row reads
+	// ~13–41 s, the same order, and nothing here depends on the difference.)
+	//
+	// The 64 KB row is the same order as the 19 sub-second re-overflows the
+	// production log records, which is the cross-check that the queue — not
+	// the client's backoff — was setting the storm's tempo. So 4096 buys a
+	// typical consumer a reset cadence of tens of seconds instead of
+	// sub-seconds. It does NOT rescue a pathological consumer (p25 drain
+	// 6.4 KB/s, floor 0.6 KB/s): no fixed queue can, and that case is
+	// answered by the client's reset+tail degradation, not by capacity.
+	//
+	// Overridable per subscription by MYWORKTREE_TTY_DROP_QUEUE_CHUNKS
+	// (see subscriberQueueChunksDrop). Tuning it DOWN is the operator's
+	// lever against RSS; tuning it UP only postpones the same notice.
+	defaultSubscriberQueueChunksDrop = 4096
+
+	// envSubscriberQueueChunksDrop is the operator override for the
+	// DROP-POLICY capacity and for nothing else: an integer > 0 wins, and
+	// anything missing, unparsable, zero or negative falls back to
+	// defaultSubscriberQueueChunksDrop. It has no effect on
+	// subscriberQueueChunksClose and no effect on SubscribeOutput, which is
+	// close-policy by construction (issue #82, verbatim).
+	envSubscriberQueueChunksDrop = "MYWORKTREE_TTY_DROP_QUEUE_CHUNKS"
+
+	// maxSubscriberQueueChunksDrop is the UPPER bound of the env override:
+	// 1<<20 = 1,048,576 chunks × 1024 B ≈ 1 GB of queue per subscriber at
+	// the pump's read size — already far past any legitimate RSS budget.
+	// The env already resolves INVALID values (missing, unparsable, zero,
+	// negative) to defaultSubscriberQueueChunksDrop — the "invalid →
+	// default" family it shares with ttyWriteTimeout() and
+	// ttyReplayWindowDefaultBytes() — and this bound is a SECOND, different
+	// guard on top of that family: a hard ceiling on VALID values, past
+	// which the value falls back to the default too. The ceiling is not
+	// about RSS politeness (huge-but-allocatable sizes below the ceiling
+	// stay honored, the operator owns that memory): a maxInt-scale value PANICS the
+	// subscription at makechan ("size out of range", reproduced in
+	// arbitration for PR #129 R2-A), killing the connection with a runtime
+	// stack instead of serving it the default.
+	maxSubscriberQueueChunksDrop = 1 << 20
+)
+
+// subscriberQueueChunksDrop resolves the drop-policy queue capacity, read
+// from the environment at the moment of each subscription — a snapshot per
+// subscription, not a package init value. That is deliberate: subscriptions
+// are rare (one per TTY WS connection) compared to the per-chunk work the
+// queue then serves, so an env read here costs nothing measurable, and in
+// exchange the value is always the one the operator set most recently, with
+// no restart and no init-order dependency. It also keeps the resolution
+// local to the only policy that consults it: this is called for
+// OverflowDropOldest subscriptions and never for a close-policy one.
+//
+// A missing, unparsable, zero or negative value yields
+// defaultSubscriberQueueChunksDrop rather than an error: the queue size is
+// not a knob worth failing a subscription over, and a fallback that keeps
+// the service up beats a rejected connection. A huge-but-allocatable value
+// is still NOT clamped down to the default — an operator who sets
+// 1000000 owns the RSS that buys, and the bound that matters (4 MB per
+// subscriber at the default) is documented at
+// defaultSubscriberQueueChunksDrop — but a value PAST
+// maxSubscriberQueueChunksDrop falls back to the default: past that ceiling
+// the channel is no longer a big allocation, it is a makechan panic
+// ("size out of range" at maxInt scale, PR #129 R2-A), and a subscription
+// that panics serves nobody.
+func subscriberQueueChunksDrop() int {
+	raw, ok := os.LookupEnv(envSubscriberQueueChunksDrop)
+	if !ok {
+		return defaultSubscriberQueueChunksDrop
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n <= 0 {
+		return defaultSubscriberQueueChunksDrop
+	}
+	if n > maxSubscriberQueueChunksDrop {
+		return defaultSubscriberQueueChunksDrop
+	}
+	return n
+}
+
+// dropSnapshot is the immutable counter pair DropStats publishes: one
+// allocation per Add, never mutated after the Store that makes it visible.
+// Pairing the two counts inside one value is what lets a reader see them
+// as they stood at a single instant — two independent counters could not,
+// because a producer's Add lands on them one at a time.
+type dropSnapshot struct {
+	chunks int64
+	bytes  int64
+}
+
+// DropStats counts chunks an OverflowDropOldest subscriber never received.
+// The producer (broadcast) Adds under subsMu; any goroutine may read at any
+// time. The two counters are published as a SINGLE atomic unit — an
+// atomic.Pointer to an immutable dropSnapshot — so every read here goes
+// through the same atomic load of that pointer and can never return a
+// chunks/bytes combination no producer ever produced: Add builds the new
+// pair from the old one and publishes it in one CAS, and Chunks(), Bytes()
+// and Snapshot() all derive from one Load of it. A reader that needs the
+// PAIR together (the WS handler's incremental overflow notice) calls
+// Snapshot(); the single-counter conveniences answer from that same unit,
+// so even two of their own loads straddle only whole published pairs.
+// (That is the contract the WS handler needs: it reports INCREMENTAL
+// deltas off one Snapshot between live chunks, and the client resets and
+// repaints on any notice.)
+//
+// SubscribeOutputWithPolicy always hands back a non-nil *DropStats — zero
+// for OverflowClose subscriptions, where nothing is ever dropped — so
+// callers never nil-guard the handle. The zero value is ready to use too:
+// the first Add publishes the first snapshot, reads before that report zero.
+type DropStats struct {
+	snap atomic.Pointer[dropSnapshot]
+}
+
+// Add records n discarded chunks totalling nbytes. Producers only.
+//
+// Why it is exported, stated plainly: the cross-package test double needs
+// it. internal/app's ttySubscriber mirrors this package's subscriber so the
+// overflow-notice e2e test drives the same broadcast shape the pty kind
+// produces in production — drop arm, retry arm and all — and a mirror that
+// could not count its own drops would have to approximate that shape
+// instead, which is precisely what makes such a double useless. There is no
+// production caller outside this package today: broadcast's overflow arm is
+// the only producer here. The CAS loop is what makes the export safe to
+// share anyway — the pair is published in one CAS on a fresh immutable
+// snapshot, so a concurrent reader never observes chunks advanced while bytes
+// lagged behind (or the reverse), and the totals stay exact even when
+// producers other than broadcast's (which serialises under subsMu) share a
+// handle.
+func (s *DropStats) Add(n int64, nbytes int64) {
+	for {
+		cur := s.snap.Load()
+		next := dropSnapshot{chunks: n, bytes: nbytes}
+		if cur != nil {
+			next.chunks = cur.chunks + n
+			next.bytes = cur.bytes + nbytes
+		}
+		if s.snap.CompareAndSwap(cur, &next) {
+			return
+		}
+	}
+}
+
+// Snapshot returns the discarded-chunk and discarded-byte totals read from
+// ONE atomic load — a snapshot-consistent pair by construction (see type
+// doc). This is the accessor for callers that consult both counters
+// together; the WS handler's incremental notice uses it.
+func (s *DropStats) Snapshot() (chunks, bytes int64) {
+	cur := s.snap.Load()
+	if cur == nil {
+		return 0, 0
+	}
+	return cur.chunks, cur.bytes
+}
+
+// Chunks returns the total number of chunks discarded so far, read from the
+// same atomic unit as Bytes and Snapshot (see type doc).
+func (s *DropStats) Chunks() int64 { chunks, _ := s.Snapshot(); return chunks }
+
+// Bytes returns the total payload bytes discarded so far, read from the
+// same atomic unit as Chunks and Snapshot (see type doc).
+func (s *DropStats) Bytes() int64 { _, bytes := s.Snapshot(); return bytes }
+
 // subscriber is one output sink: its channel plus the exactly-once close
 // flag that guards it. Both closers (the caller's cancel and an overflow
 // in broadcast) go through closeLocked under subsMu.
+//
+// policy/stats carry the issue #114 overflow choice: broadcast's overflow
+// arm consults policy, and only OverflowDropOldest subscribers touch stats.
+// A close-policy subscriber therefore behaves byte-identically to the
+// pre-#114 struct — the new fields are inert there.
 type subscriber struct {
 	ch     chan string
 	closed bool
+	policy OverflowPolicy
+	// stats is non-nil for EVERY subscriber — both constructors allocate
+	// it — and stays exactly zero under OverflowClose, whose overflow path
+	// signals by close and never counts. broadcast's drop arm is reachable
+	// only for OverflowDropOldest subscribers, so the close-policy handle
+	// is never written; callers of SubscribeOutputWithPolicy may read it
+	// without a nil guard.
+	stats *DropStats
 }
 
 // drain discards everything still buffered on this subscriber's channel.
@@ -417,7 +666,8 @@ func (s *subscriber) closeLocked() bool {
 // discarded at the source, so that backlog never reaches the socket writer.
 // What that GUARANTEES is bounded and structural: the queue is empty by the
 // time broadcast returns, so the WS handler can never be made to write a full
-// queue — up to 64 chunks, ~64 KB — onto a socket that has already stalled.
+// queue — up to 64 chunks, ~64 KB on a close-policy subscriber — onto a
+// socket that has already stalled.
 // What it does NOT guarantee is that the handler's very next receive is the
 // close itself. close() readies any receiver already parked on the channel,
 // and a readied receiver races the drain loop for the values still buffered,
@@ -432,7 +682,8 @@ func (s *subscriber) closeLocked() bool {
 // WHY discarding the backlog is the right thing: Go delivers a closed
 // channel's BUFFERED values with ok == true before it ever reports ok ==
 // false, so an undrained queue would have the WS handler WriteBinary every
-// queued chunk — up to 64 of them, ~64 KB — onto the socket that stalled in
+// queued chunk — up to 64 of them, ~64 KB on a close-policy subscriber —
+// onto the socket that stalled in
 // the first place, and only then reach the `!ok` teardown branch (app.go).
 // Draining cuts that exposure down, but it does not order it: close() readies
 // any receiver already parked on the channel, so a consumer that is already
@@ -469,8 +720,12 @@ func (s *subscriber) closeLocked() bool {
 // this critical section closed" is provable, not assumed.
 //
 // The threshold is concrete, not "a bit slow": pumpLogs reads the PTY in
-// 1024-byte chunks and each subscriber queue holds 64 of them, so a
-// consumer is disconnected after roughly 64 KB of output it has not taken.
+// 1024-byte chunks and each close-policy subscriber queue holds 64 of them
+// (subscriberQueueChunksClose), so such a consumer is disconnected after
+// roughly 64 KB of output it has not taken. A drop-policy subscriber holds
+// 4096 of them instead (决策 1b) and is never disconnected at all — for it
+// this paragraph's threshold is not a teardown but the point at which the
+// counted evictions begin.
 // That is the price of this design, and it is the right price — recovery
 // costs the client one reconnect (the browser retries after a hard-coded
 // 5 s, index.html) and then resumes incrementally from its own cursor.
@@ -479,14 +734,32 @@ func (s *subscriber) closeLocked() bool {
 // bounded stall; that is deliberately NOT done here and belongs to the
 // separate liveness issue #83 (app.go sets a deadline only on its own
 // teardown write, so the close frame cannot re-block the handler). Raising
-// the buffer capacity is likewise deliberately not done: a bigger queue only
-// postpones the disconnect of a consumer that cannot keep up, which is the
-// correct outcome anyway.
+// the buffer capacity was likewise deliberately not done HERE, for the close
+// policy: a bigger queue only postpones the disconnect of a consumer that
+// cannot keep up, which is the correct outcome anyway. Issue #114 决策 1b
+// later raised it for the DROP policy only — 4096 chunks, see
+// defaultSubscriberQueueChunksDrop for the gap arithmetic — because a
+// drop subscriber has no disconnect to postpone: capacity is the only thing
+// that sets its eviction tempo, and at 64 chunks that tempo was the
+// sub-second notice storm this issue is about. subscriberQueueChunksClose
+// stays 64, and the argument in this paragraph still governs it verbatim.
 //
 // Dropping the chunk and keeping the subscriber registered — the old
 // empty `default:` — was issue #82: a lost clear-screen or cursor move
 // corrupts everything the client renders afterwards, unboundedly and with
 // nothing on either side able to notice.
+//
+// Issue #114 adds a SECOND, negotiated answer to the same full queue: an
+// OverflowDropOldest subscriber (see OverflowPolicy, SubscribeOutputWithPolicy)
+// is kept registered and streaming, its oldest buffered chunks discarded to
+// make room for the newest, every discard counted in its DropStats. That is
+// NOT the #82 silence — the counts travel to the client as an in-band
+// overflow notice (internal/app handleInstanceTTYWSLiveness), and the
+// client resets and repaints from the tail instead of trusting a torn
+// screen. It ships ONLY behind the `overflow-notice` capability, so every
+// client that did not declare it still gets the close path above, verbatim,
+// and every default-constructed subscriber (every plain SubscribeOutput)
+// still carries OverflowClose.
 func broadcast(id string, chunk string) {
 	if chunk == "" || id == "" {
 		return
@@ -511,6 +784,47 @@ func broadcast(id string, chunk string) {
 		select {
 		case sub.ch <- chunk:
 		default:
+			if sub.policy == OverflowDropOldest {
+				// Issue #114 drop-oldest (issue #82's close path is kept
+				// verbatim below for every other subscriber): make room for
+				// the NEWEST chunk by discarding the OLDEST buffered one,
+				// counted, channel kept open and subscriber kept in the
+				// map. A channel cannot be popped from its head without a
+				// receive, so the drop IS a non-blocking receive — and it
+				// is bounded to one attempt per overflow because it cannot
+				// fail to make room: the failed send just proved the queue
+				// was full, every producer of this channel serialises
+				// behind this same subsMu (all sends happen inside this
+				// loop, under the lock), and the only concurrent actor left
+				// is the consumer, which can only FREE slots. So either
+				// this receive takes a chunk (one slot provably free) or
+				// the consumer drained everything in between (even more
+				// free) — and the retry send below takes it. The second
+				// default arm counting the INCOMING chunk as dropped is
+				// therefore defensive-unreachable, never silent: if it
+				// ever fired, the loss lands in stats, not in the silence
+				// issue #82 condemned.
+				select {
+				case dropped := <-sub.ch:
+					sub.stats.Add(1, int64(len(dropped)))
+				default:
+				}
+				select {
+				case sub.ch <- chunk:
+				default:
+					// UNREACHABLE today, and kept to make the invariant
+					// explicit rather than to handle a case: the failed send
+					// above proved the queue full, every producer serialises
+					// behind subsMu, and the consumer can only free slots —
+					// so the receive just taken (or a consumer that drained
+					// everything) provably leaves room for this retry. If it
+					// ever did fire the loss still lands in stats, never in
+					// the #82 silence; deleting the arm would assert the
+					// invariant by making its violation invisible.
+					sub.stats.Add(1, int64(len(chunk)))
+				}
+				continue
+			}
 			// Deleting from a map while ranging over it is
 			// documented-safe: the deleted entry is simply never
 			// produced again.
@@ -566,7 +880,11 @@ func SubscribeOutput(id string) (<-chan string, func(), error) {
 	if subs[id] == nil {
 		subs[id] = map[*subscriber]struct{}{}
 	}
-	sub := &subscriber{ch: make(chan string, 64)}
+	// The zero-value stats keeps the subscriber.stats invariant — non-nil
+	// for every subscriber, zero under OverflowClose — true here too; this
+	// path's overflow signals by close (issue #82) and never counts, so
+	// the handle is inert exactly as the pre-#114 struct was.
+	sub := &subscriber{ch: make(chan string, 64), stats: &DropStats{}}
 	subs[id][sub] = struct{}{}
 	subsMu.Unlock()
 	cancel := func() {
@@ -589,6 +907,83 @@ func SubscribeOutput(id string) (<-chan string, func(), error) {
 		sub.closeLocked()
 	}
 	return sub.ch, cancel, nil
+}
+
+// SubscribeOutputWithPolicy is SubscribeOutput with the overflow behaviour
+// chosen per subscription (issue #114). It is strictly ADDITIVE: same
+// registry, same exactly-once close contract, same idempotent cancel — the
+// only differences are what a full queue does, and how big "full" is.
+// OverflowClose selects today's behaviour, byte-for-byte, capacity included
+// (subscriberQueueChunksClose = 64, the #82 number, untouched and
+// env-proof), so the default policy of this API and of SubscribeOutput are
+// the same thing. OverflowDropOldest gets the larger queue of 决策 1b
+// (defaultSubscriberQueueChunksDrop = 4096, env-tunable), because a
+// queue that only survives 0.2–0.6 s of burst would set the same sub-second
+// reconnect tempo the fix exists to remove.
+//
+// Under OverflowDropOldest a full queue never closes the channel and never
+// deletes the subscriber: broadcast discards the oldest buffered chunks to
+// make room for the newest and counts them in the returned DropStats, so
+// the consumer keeps streaming a lagging view whose loss is COUNTED, not
+// silent — the app layer turns those counts into the in-band overflow
+// notice the client resets on. The channel still closes on cancel, so
+// "closed means resync" holds here too (cancel is the only closer for a
+// drop subscriber); the consumer must still treat a close as resync.
+//
+// The returned *DropStats is always non-nil, zero for OverflowClose, and
+// is the SAME handle broadcast counts into — readers see every discard the
+// instant it happens, and always as the consistent pair the producer
+// published (one atomic unit per Add; see DropStats).
+//
+// id is required, same as SubscribeOutput: an empty id is rejected so a
+// buggy caller does not accidentally receive every PTY instance's output.
+func SubscribeOutputWithPolicy(id string, policy OverflowPolicy) (<-chan string, func(), *DropStats, error) {
+	if id == "" {
+		return nil, nil, nil, errors.New("pty: SubscribeOutputWithPolicy requires instance id")
+	}
+	stats := &DropStats{}
+	subsMu.Lock()
+	if subs == nil {
+		subs = map[string]map[*subscriber]struct{}{}
+	}
+	if subs[id] == nil {
+		subs[id] = map[*subscriber]struct{}{}
+	}
+	// Capacity is policy-dependent (FIX-PLAN 决策 1b), and the two branches
+	// are asymmetric on purpose: the close-policy capacity stays the 64 the
+	// #82 contract is stated in — named at subscriberQueueChunksClose so the
+	// number lives beside the code honouring it, and read from NOTHING else,
+	// never from the environment, so no operator setting can move a #82
+	// number — while only a drop subscriber consults
+	// envSubscriberQueueChunksDrop, at this instant, per subscription (see
+	// subscriberQueueChunksDrop for why resolving here is cheap and right).
+	// A default-constructed subscriber — every plain SubscribeOutput, whose
+	// own make(chan string, 64) is untouched — lands on OverflowClose and
+	// therefore on 64 as well.
+	capacity := subscriberQueueChunksClose
+	if policy == OverflowDropOldest {
+		capacity = subscriberQueueChunksDrop()
+	}
+	sub := &subscriber{ch: make(chan string, capacity), policy: policy, stats: stats}
+	subs[id][sub] = struct{}{}
+	subsMu.Unlock()
+	cancel := func() {
+		subsMu.Lock()
+		defer subsMu.Unlock()
+		delete(subs[id], sub)
+		if len(subs[id]) == 0 {
+			delete(subs, id)
+		}
+		// Same exactly-once contract as SubscribeOutput's cancel (see the
+		// comment there): under OverflowClose an overflow may have closed
+		// this channel first; under OverflowDropOldest broadcast never
+		// closes it, so this is the only closer, but the flag makes cancel
+		// idempotent here exactly where it makes it idempotent there, and
+		// cancel must NOT drain for the same reason — the consumer is
+		// entitled to what it queued.
+		sub.closeLocked()
+	}
+	return sub.ch, cancel, stats, nil
 }
 
 // Register registers the PTY kind with the framework registry on

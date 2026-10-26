@@ -106,7 +106,13 @@ const indexFactory = new Function("deps", `
     "const INSTANCE_PENDING_STATUSES",
     "const TTY_LIVENESS_CHECK_MS",
     "const TTY_LIVENESS_STALE_MS",
-    "const TTY_RECONNECT_DELAY_MS",
+    // Issue #114 decision 2: the fixed TTY_RECONNECT_DELAY_MS is gone;
+    // reconnectStaleTTY's socket arm now schedules through
+    // armTTYBackoffReconnect, so the backoff constants must be sliced in.
+    "const TTY_RECONNECT_BASE_MS",
+    "const TTY_RECONNECT_CAP_MS",
+    "const TTY_RECONNECT_CAP_MS_HIDDEN",
+    "const TTY_BACKOFF_RESET_ALIVE_MS",
   ].map(h => sliceStatement(inlineScript(indexSource), h)).join("\n")}
   ${[
     "function isInstanceLiveStatus",
@@ -124,6 +130,11 @@ const indexFactory = new Function("deps", `
     "function reconcileTerminalSessions",
     "function syncActiveTerminalStatus",
     "function hasTerminalTransportInFlight",
+    // Issue #114 decision 2: reconnectStaleTTY's socket arm schedules
+    // through the backoff helper - sliced, never stubbed, so the tests
+    // exercise the shipped cadence instead of a stub's.
+    "function ttyReconnectDelayMs",
+    "function armTTYBackoffReconnect",
     "function reconnectStaleTTY",
     "function ensureTerminalLiveTransport",
     "function maybeDestroyInactiveStoppedSession",
@@ -906,13 +917,25 @@ const ttyWsFactory = new Function("deps", `
     syncTerminalToAppliedSize, focusTerminalIfPossible,
     writeSanitizedTerminalOutput, decodeTTYOutputChunk, startSSE,
     setTimeout, clearTimeout, setInterval, clearInterval, console,
+    // Issue #114: the backoff helper is sliced (never stubbed), so the
+    // harness injects a deterministic Math - random()=0.5 lands the jitter
+    // factor on exactly 1.0 and the first reconnect arms at exactly
+    // TTY_RECONNECT_BASE_MS.
+    Math,
   } = deps;
   ${[
     "const INSTANCE_LIVE_STATUSES",
     "const INSTANCE_PENDING_STATUSES",
     "const TTY_LIVENESS_CHECK_MS",
     "const TTY_LIVENESS_STALE_MS",
-    "const TTY_RECONNECT_DELAY_MS",
+    // Issue #114 decision 2 replaces the fixed delay with backoff caps.
+    "const TTY_RECONNECT_BASE_MS",
+    "const TTY_RECONNECT_CAP_MS",
+    "const TTY_RECONNECT_CAP_MS_HIDDEN",
+    "const TTY_BACKOFF_RESET_ALIVE_MS",
+    // Issue #114 Phase B compressed-consumption guard (the inflation-ratio
+    // guard was retired by the v8 re-arbitration; the backlog stays).
+    "const TTY_CLIENT_BACKLOG_MAX_BYTES",
     // connectTTY's three-state `since` (issue #86) branches on these.
     "const CURSOR_UNKNOWN",
     "const CURSOR_FOLLOW_LIVE_END",
@@ -924,6 +947,20 @@ const ttyWsFactory = new Function("deps", `
     "function getTerminalSession",
     "function isTTYHeartbeatStale",
     "function hasLiveTTYConnection",
+    // Issue #114 Phase B, sliced with their consumers (a stub would make
+    // the notice/fencing/backoff assertions assert nothing): the fence
+    // bumps inside disconnectTTY/onclose, the inflate pump and feed, the
+    // shared stream reset, the notice handler and the backoff scheduler.
+    "function bumpTTYGeneration",
+    "function teardownTTYDecompressor",
+    "function resetTTYStreamAndReconnect",
+    "function sanitizeTerminalOutput",
+    "function startTTYCompressedPipe",
+    "async function pumpTTYDecompressor",
+    "async function feedTTYCompressedFrame",
+    "function handleTTYOverflow",
+    "function ttyReconnectDelayMs",
+    "function armTTYBackoffReconnect",
     "function disconnectTTY",
     "function reconnectStaleTTY",
     "function hasTerminalTransportInFlight",
@@ -941,9 +978,16 @@ const ttyWsFactory = new Function("deps", `
     hasLiveTTYConnection,
     isTTYHeartbeatStale,
     hasTerminalTransportInFlight,
+    handleTTYOverflow,
+    ttyReconnectDelayMs,
+    armTTYBackoffReconnect,
     TTY_LIVENESS_STALE_MS,
     TTY_LIVENESS_CHECK_MS,
-    TTY_RECONNECT_DELAY_MS,
+    TTY_RECONNECT_BASE_MS,
+    TTY_RECONNECT_CAP_MS,
+    TTY_RECONNECT_CAP_MS_HIDDEN,
+    TTY_BACKOFF_RESET_ALIVE_MS,
+    TTY_CLIENT_BACKLOG_MAX_BYTES,
   };
 `);
 
@@ -1011,6 +1055,11 @@ function ttyWsHarness({ ttyOffset = -1, status = "running", token = "" } = {}) {
     setInterval: (fn, ms) => { const t = { id: nextTimerId++, fn, ms }; intervals.push(t); return t.id; },
     clearInterval: (id) => { const at = intervals.findIndex(t => t.id === id); if (at >= 0) intervals.splice(at, 1); },
     console: { warn: (...args) => { consoleWarns.push(args.join(" ")); }, error: () => {}, log: () => {} },
+    // Issue #114 decision 2: deterministic jitter for the sliced backoff -
+    // random()=0.5 lands the ±25% factor on exactly 1.0, so the first
+    // reconnect arms at exactly TTY_RECONNECT_BASE_MS (1000), the second
+    // at 2000, and so on up to the visibility cap.
+    Math: { min: (...a) => Math.min(...a), pow: Math.pow, random: () => 0.5 },
   });
   const enc = new TextEncoder();
   return { api, session, sockets, writes, timers, intervals, consoleWarns, fireTimers, fireIntervals, enc, connect: () => api.connectTTY(session) };
@@ -1101,7 +1150,9 @@ test("issue #94: the start sync lifts the latch at chunk 1, so a mid-replay drop
   // re-pulling the whole replay from 13 (the pre-#94 death window, up to
   // ttyHandshakeReplayBudget under a degrading link).
   ws.close();
-  h.fireTimers(5000);
+  // Issue #114 decision 2: the retry now rides the backoff - with the
+  // harness Math stub the FIRST one lands at exactly base 1000ms.
+  h.fireTimers(1000);
   assert.equal(h.sockets.length, 2, "the reconnect opened a new socket");
   assert.ok(h.sockets[1].url.includes("&since=28"),
     `a mid-replay drop must resume from the rendered cursor, got ${h.sockets[1].url}`);
@@ -1137,8 +1188,9 @@ test("issue #87: the cursor survives the drop and the reconnect resumes from it"
   assert.equal(h.session.ttyOffset, 13, "onclose must preserve the cursor");
   assert.equal(h.session.ttySocket, null, "the dead socket is dropped");
 
-  // Fire the queued 5s reconnect: it carries the cursor as `since`.
-  h.fireTimers(5000);
+  // Fire the queued backoff reconnect (first step = base 1000ms with the
+  // harness Math stub): it carries the cursor as `since`.
+  h.fireTimers(1000);
   assert.equal(h.sockets.length, 2, "the reconnect opened a new socket");
   assert.ok(h.sockets[1].url.includes("&since=13"),
     `reconnect must resume from the cursor, got ${h.sockets[1].url}`);
@@ -1290,9 +1342,9 @@ test("issue #87 review: a queued frame from a replaced socket never moves the li
   assert.equal(h.session.ttyOffset, 104, "the live socket advances the cursor normally");
 
   // Drop and reconnect exactly the way the shipped onclose does: the old
-  // socket releases the session and the queued 5s retry opens a new one.
+  // socket releases the session and the queued backoff retry opens a new one.
   stale.close();
-  h.fireTimers(5000);
+  h.fireTimers(1000);
   assert.equal(h.sockets.length, 2, "the reconnect opened a new socket");
   const live = h.sockets[1];
   assert.equal(h.session.ttySocket, live, "the new socket owns the session now");
@@ -1641,9 +1693,10 @@ test("issue #83: a stale-but-OPEN socket is reaped and reconnects from the curso
 
   // Firing the reconnect reopens from the surviving byte cursor (issue #87),
   // not the full tail, and arms exactly one fresh watchdog (no stacking).
-  // The reconnect timer is the only 5000ms one-shot outstanding: the
+  // The reconnect timer is the only 1000ms one-shot outstanding (issue
+  // #114 backoff first step): the
   // connect/handshake timeouts were already cleared at open/ready.
-  h.fireTimers(5000);
+  h.fireTimers(1000);
   assert.equal(h.sockets.length, 2, "reconnect opened a new socket");
   assert.ok(h.sockets[1].url.includes("&since=42"), "reconnect resumes from the cursor");
   const ws2 = h.sockets[1];
@@ -1655,9 +1708,13 @@ test("issue #83: a stale-but-OPEN socket is reaped and reconnects from the curso
 
 test("issue #83 review FIX-K: the poll's stale arm queues reconnectStaleTTY, never the DISCONNECTING wait-loop", () => {
   const h = ttyWsHarness({ ttyOffset: 42 });
-  // The reconnect delay is literally the pinned value: the reap tests guard
-  // it transitively through fireTimers(5000), this pins it directly.
-  assert.equal(h.api.TTY_RECONNECT_DELAY_MS, 5000);
+  // The reconnect delay is now exponential backoff (issue #114 decision 2);
+  // the reap tests guard it transitively through fireTimers(1000) (the
+  // first step), this pins the base + caps + reset anchor directly.
+  assert.equal(h.api.TTY_RECONNECT_BASE_MS, 1000);
+  assert.equal(h.api.TTY_RECONNECT_CAP_MS, 8000);
+  assert.equal(h.api.TTY_RECONNECT_CAP_MS_HIDDEN, 30000);
+  assert.equal(h.api.TTY_BACKOFF_RESET_ALIVE_MS, 60000);
   toReady(h);
   h.session.lastDataAt = Date.now() - h.api.TTY_LIVENESS_STALE_MS - 1000;
 
@@ -1684,7 +1741,7 @@ test("issue #83 review FIX-K: the poll's stale arm queues reconnectStaleTTY, nev
 
   // And the queued reconnect lands on the pinned delay and resumes from
   // the surviving cursor - the helper's whole point.
-  h.fireTimers(h.api.TTY_RECONNECT_DELAY_MS);
+  h.fireTimers(h.api.TTY_RECONNECT_BASE_MS);
   assert.equal(h.sockets.length, 2, "the delayed reconnect opened exactly one socket");
   assert.ok(h.sockets[1].url.includes("&since=42"), "resumes from the cursor");
 });
@@ -1699,7 +1756,7 @@ test("issue #83 FIX-T: no-socket reconnect is immediate, socket-teardown reconne
   assert.equal(h.session.ttySocket, null);
   h.api.reconnectRunningTerminalSessions();
   assert.equal(h.sockets.length, 1, "no-socket session opens its socket immediately");
-  assert.equal(h.timers.filter(t => t.ms === h.api.TTY_RECONNECT_DELAY_MS).length, 0,
+  assert.equal(h.timers.filter(t => t.ms === h.api.TTY_RECONNECT_BASE_MS).length, 0,
     "no backoff armed when there was no socket to tear down");
   assert.equal(h.session.ttyReconnectTimer, null, "the connect was inline, not queued");
 
@@ -1712,9 +1769,9 @@ test("issue #83 FIX-T: no-socket reconnect is immediate, socket-teardown reconne
   h2.api.reconnectRunningTerminalSessions();
   assert.equal(h2.sockets.length, 1, "nothing opens inline on the teardown path");
   assert.equal(h2.session.ttySocket, null, "the stale socket was torn down");
-  assert.equal(h2.timers.filter(t => t.ms === 5000).length, 1, "the pinned backoff is armed");
+  assert.equal(h2.timers.filter(t => t.ms === 1000).length, 1, "the first backoff step is armed");
   assert.notEqual(h2.session.ttyReconnectTimer, null, "the retry is queued");
-  h2.fireTimers(5000);
+  h2.fireTimers(1000);
   assert.equal(h2.sockets.length, 2, "and the queued retry reconnects from the cursor");
   assert.ok(h2.sockets[1].url.includes("&since=42"), "cursor preserved across the backed-off reconnect");
 
@@ -1729,7 +1786,7 @@ test("issue #83 FIX-T: no-socket reconnect is immediate, socket-teardown reconne
   assert.equal(h3.api.isTTYHeartbeatStale(h3.session), false, "CONNECTING is never stale");
   h3.api.reconnectRunningTerminalSessions();
   assert.equal(h3.sockets.length, 2, "mid-CONNECTING session reconnected directly, inline");
-  assert.equal(h3.timers.filter(t => t.ms === 5000).length, 0, "no backoff for a non-stale socket");
+  assert.equal(h3.timers.filter(t => t.ms === 1000).length, 0, "no backoff for a non-stale socket");
   assert.equal(h3.intervals.filter(t => t.ms === 100).length, 0, "FIX-V guard: connectTTY's wait-loop must not arm");
 
   // FIX-X: the state that would re-introduce the wait loop if the
@@ -1742,7 +1799,7 @@ test("issue #83 FIX-T: no-socket reconnect is immediate, socket-teardown reconne
   h4.api.reconnectStaleTTY(h4.session);
   assert.equal(h4.sockets.length, 1, "DISCONNECTING-with-no-socket still connects inline");
   assert.equal(h4.intervals.filter(t => t.ms === 100).length, 0, "the wait-loop must never arm here");
-  assert.equal(h4.timers.filter(t => t.ms === 5000).length, 0, "nothing to tear down, nothing to back off");
+  assert.equal(h4.timers.filter(t => t.ms === 1000).length, 0, "nothing to tear down, nothing to back off");
   assert.ok(h4.sockets[0].url.includes("&since=7"), "cursor still rides the immediate connect");
 
   // FIX-W: an ARMED retry survives the overlay pass. During the backoff
@@ -1872,10 +1929,10 @@ test("issue #87 x #83: a replaced socket never refreshes the live session's live
   assert.ok(stamped > 0, "the live socket stamped the session's liveness clock");
 
   // Replacement exactly as the shipped onclose drives it: the old socket
-  // releases the session, the queued 5s retry opens the successor, and
+  // releases the session, the queued backoff retry opens the successor, and
   // connectTTY hands it session.ttySocket synchronously.
   stale.close();
-  h.fireTimers(5000);
+  h.fireTimers(1000);
   assert.equal(h.sockets.length, 2, "the reconnect opened a new socket");
   const live = h.sockets[1];
   assert.equal(h.session.ttySocket, live, "the new socket owns the session now");
@@ -2141,7 +2198,14 @@ const followLiveEndFactory = new Function("deps", `
     // without these would ReferenceError the moment the handshake runs.
     "const TTY_LIVENESS_CHECK_MS",
     "const TTY_LIVENESS_STALE_MS",
-    "const TTY_RECONNECT_DELAY_MS",
+    // Issue #114: Phase B constants - backoff (decision 2) and the
+    // compressed-consumption backlog guard (B-1.6; the v7 inflation-ratio
+    // guard was retired by the v8 re-arbitration).
+    "const TTY_RECONNECT_BASE_MS",
+    "const TTY_RECONNECT_CAP_MS",
+    "const TTY_RECONNECT_CAP_MS_HIDDEN",
+    "const TTY_BACKOFF_RESET_ALIVE_MS",
+    "const TTY_CLIENT_BACKLOG_MAX_BYTES",
   ].map(h => sliceStatement(inlineScript(indexSource), h)).join("\n")}
   ${[
     "function isInstanceLiveStatus",
@@ -2152,6 +2216,18 @@ const followLiveEndFactory = new Function("deps", `
     "function isTTYHeartbeatStale",
     "function hasLiveTTYConnection",
     "function hasTerminalTransportInFlight",
+    // Issue #114 Phase B: the merged connectTTY/disconnectTTY/
+    // reconnectStaleTTY call these - sliced with their consumers.
+    "function bumpTTYGeneration",
+    "function teardownTTYDecompressor",
+    "function resetTTYStreamAndReconnect",
+    "function sanitizeTerminalOutput",
+    "function startTTYCompressedPipe",
+    "async function pumpTTYDecompressor",
+    "async function feedTTYCompressedFrame",
+    "function handleTTYOverflow",
+    "function ttyReconnectDelayMs",
+    "function armTTYBackoffReconnect",
     "function reconnectStaleTTY",
     "async function loadLog",
     "function connectTTY",
