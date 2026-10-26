@@ -31,6 +31,7 @@
 | `[tty-metrics] overflow` | subscriber 队列溢出（drop 策略连接：发 overflow notice，连接保留；close 策略：以 1013 断开前） | `subAgeMs`（订阅存活时长）、`liveBytes`/`liveFrames`（本次连接已交付的 live 输出）、`headNow`（溢出时 ring head）、`maxWriteBlockMs`、`slowWrites`、`liveLogicalBytes`（逻辑口径 live drain，与客户端 cursor 配对；明文连接下与 `liveBytes` 相等）。**注意（2026-10-17 实测）**：drop 策略连接的该日志行受 `ttyDropLogInterval=500ms` 节流（首增量即打、后续每连接 ≤2 行/s），**日志是采样、wire notice 才是完整记录**；按日志行数推算 drop 总数会偏低 |
 | `[tty-metrics] conn-closed` | 每条 TTY WS 连接消亡时（任何原因） | `aliveMs`、`binBytes`/`binFrames`、`txtFrames`/`pingFrames`、`slowWrites`、`maxWriteBlockMs`、`totalWriteBlockMs`、`wireBytes`（压缩后累计）、`logicalBytes`（解压后累计）——压缩连接双口径并列，明文连接两者相等 |
 | `[tty-metrics] slow-write` | 单次 socket 写阻塞 ≥1s | `op`（binary/text/ping）、`bytes`（本次写入字节）、`blockMs`、`wireBytes`（本次连接累计 wire/压缩后）、`logicalBytes`（累计逻辑/解压后）——压缩连接双口径并列，明文连接两者相等 |
+| `ringCapBytes` / `ringLagBytes`（**#130 追加的 ring 二元组，不属于本表原始列集**） | **所有** TTY WS 连接的 `handshake` 与 `conn-closed` 行尾（仅 `-tags ttymetrics` 构建；`conn-closed` 重复的是握手时冻结的快照，不声称实时 lag） | `ringCapBytes`（`>0` 探针实测容量 / `=0` 探针跑了但当时无 ring / `=-1` 探针根本没跑）、`ringLagBytes`（`≥0` 已知 lag / `=0` 已追平含向下钳位 / `=-1` 未知，绝不印成 0）——两列的完整 sentinel 语义见 `docs/ARCHITECTURE.md` §10 |
 
 字段解读：
 

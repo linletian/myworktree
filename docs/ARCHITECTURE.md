@@ -624,3 +624,131 @@ Every review that touches dsh-web, the loopback proxy, or remote access must ver
 - `internal/app/app.go` — API endpoints `GET /api/instances/dsh`, `GET /api/instances/dsh/scope`, `POST /api/instances/dsh/launch`, `POST /api/instances/dsh/install`; shutdown `StopAllKind("dsh-web")`
 - `internal/ui/static/index.html` + `internal/ui/static/kinds/dsh_web.js` — iframe panel, missing-dependency dialog, warning bar, scope polling
 - `docs/plans/dsh-native-ui/FEASIBILITY.md` — decision record; `docs/plans/dsh-native-ui/PLAN.md` / `TASK.md` — implementation plan
+
+## 10. Runtime health instrumentation (issue #130)
+
+An unattended daemon ran 82.7 h and killed itself with Go's `fatal error: fault`
+— a wild-pointer SIGSEGV (`SEGV_MAPERR`, non-nil address ≥ 0x1000) inside
+`net/http`'s per-connection teardown defer (`inFlightResponse.cancelCtx()`). A
+fault there is not a nil dereference, so `runtime.sigpanic` prints the fault
+address and calls `throw("fault")`: the throw prints a traceback that names the
+crash frame, but it cannot recover, and with one dump and no core the root cause
+stays undecided — this section documents the safety net, its boundary, and the
+attribution instrument, not a verdict.
+
+- **Fault rescue (`debug.SetPanicOnFault`, default ON) — the promise at its
+  real width.** D1 arms `SetPanicOnFault` by default on the HTTP connection
+  goroutines that pass through the mounted middleware: a fault at a non-nil
+  address **inside a handler body** becomes a recoverable `runtime.Error`,
+  which `net/http`'s per-conn defer catches at its `recover()`, logs
+  `http: panic serving <addr>` with the faulting goroutine's stack, closes
+  that one connection, and the daemon keeps serving. A fault that happens
+  **after that `recover()` has returned** — the #130 `cancelCtx()` shape —
+  cannot be caught by the same defer (recover ends only the panic already in
+  flight), so the process still exits, as an unrecovered `panic:` carrying the
+  faulting goroutine's stack. **No survival is claimed for a recover-after
+  teardown fault**, and that path never prints `http: panic serving`; it is
+  pinned by a subprocess test that asserts exit 2 + `panic:`, never liveness.
+  The flag is **per-goroutine** — it covers only the goroutine that calls
+  `debug.SetPanicOnFault`, and a new goroutine does not inherit it — so
+  `Server.Start()` only parses the env, logs the resolved switch and arms the
+  goroutine that *calls Start()* (not the accept loop: `Serve` runs on a
+  goroutine Start() spawns); the `withPanicOnFault` middleware re-arms every
+  request on its own connection goroutine, on **both listeners**, and never
+  disarms — staying armed keeps the fault→panic *conversion* alive into
+  net/http's teardown defer (a teardown fault there names its frame in a
+  `panic:`), which is not the same as surviving it. Cost, stated honestly: a
+  fault is still memory corruption and continuing after one may expose more of
+  it; the trade is a full-stack log line and a live daemon for the other
+  connections *when the fault was inside a handler*. Rollback:
+  `MYWORKTREE_PANIC_ON_FAULT=0` (or `false`) restores the runtime's own
+  behaviour — the middleware then mounts nothing.
+- **Dump width (`GOTRACEBACK`).** An armed teardown fault exits as a Go panic,
+  and traceback width is decided by `GOTRACEBACK`: the default `single` prints
+  only the panicking goroutine — **narrower than the all-goroutine view a
+  `fatal error:` throw can carry** — so an unattended forensics deployment
+  should set **`GOTRACEBACK=all`** (`all` ≠ `system` ≠ `crash`; `system` adds
+  runtime/internal frames, `crash` writes a core). The code never mutates the
+  operator's `GOTRACEBACK`; a single-vs-all subprocess pair over a parked
+  marker goroutine pins the difference, exit 2 in both — width never changes
+  the liveness verdict.
+- **`[runtime-health]` tick (default 60 s).** One line per tick:
+  `tick uptMs=… goroutines=… heapMB=… sysMB=… gcCount=… inflight=… reqTotal=… top=(pattern inflight/total, …)`
+  from `runtime.NumGoroutine` + `runtime.ReadMemStats`. Uptime starts at
+  `Start()`, not at construction. The one expensive call is `ReadMemStats`,
+  which stops the world — measured mean ~137 µs at ~200 live goroutines, a
+  duty cycle of ~0.0002 % at 60 s. Knobs
+  (`MYWORKTREE_RUNTIME_HEALTH_INTERVAL_MS`, read once at construction): ≤ 0 =
+  the loop never launches; unparsable = the default.
+- **Goroutine alert + dump (threshold default 1000).** Over threshold every
+  tick prints `[runtime-health] alert goroutines=… threshold=…`; the alert
+  *line* is not rate-limited, so a threshold crossed all day at 60 s cadence
+  prints on the order of **1.4 k lines/day** — the magnitude is accepted
+  deliberately (the crossing is the fact a reader scans for, and one line per
+  minute is the cheapest possible "still leaking" heartbeat); the aggregated
+  goroutine profile (`pprof.Lookup("goroutine").WriteTo(w, 1)` — TEXT, not
+  gzipped protobuf) is what the 30 min cooldown bounds (≤ ~48 dumps/day), so
+  a stuck leak shows its slope without flooding the log. The profile is a
+  standing instrument, never a crash traceback.
+  `MYWORKTREE_RUNTIME_HEALTH_GOROUTINE_ALERT` moves the threshold; ≤ 0 falls
+  back to the default (an alert on every tick is noise, not an alert).
+- **Per-endpoint attribution.** *#130 died with 48 live goroutines out of
+  ~1.88 M created and no way to attribute the churn.* Middlewares mounted at
+  `http.Server.Handler` on **both listeners** — outside the muxes, so no
+  route registration changes — key an atomic in-flight gauge + cumulative
+  counter by registered pattern, resolved via the non-mutating `mux.Handler(r)`
+  lookup against **the listener's own mux** (main = `s.mux`, rx listener =
+  its `rxMux`; `r.Pattern` is only populated *inside* the mux). Unmatched
+  requests fall back to `(!pattern:METHOD:/path)` built from
+  `r.URL.EscapedPath()` — never the decoded `URL.Path`, because the fallback
+  key is unauthenticated input and a decoded space/newline would break the
+  space-delimited layout and forge `[runtime-health]` tokens. The whole map is
+  capped at 64 keys with everything past the cap folding into `(!capped)`;
+  accepted limitation: before folding starts, unauthenticated random paths can
+  occupy real keys and crowd the visible top-5 — the bound is the contract,
+  not the ranking. Both listeners share ONE meter, one cap, one sampling loop
+  (no second ticker); rx traffic aggregates into `/rx/` (rxMux registers only
+  `/rx/`; no per-instance rx attribution is claimed); auth/CORS/cookie/proxy
+  behaviour is unchanged. A long-lived TTY/SSE socket holds its gauge for the
+  life of the connection by construction.
+- **TTY ring steady-state fields (`-tags ttymetrics` only).** The handshake
+  and conn-closed `[tty-metrics]` lines append `ringCapBytes=` and
+  `ringLagBytes=` — the incident's 256 MiB ceiling and ~194 MiB lag,
+  greppable in one pass. **Logs are emitted only in tagged builds**; the
+  stable build keeps the existing shared-struct convention with its few dead
+  field stores and gains no manager read, no real timer and no log output
+  (this is *not* a claim that stable contains zero writes). Distinct
+  sentinels, never merged:
+  - `ringCapBytes > 0`: capacity measured by the handshake probe; `= 0`: the
+    probe ran but there was no ring at that moment (stopped/never-started or
+    no buffer); `= -1`: the probe never ran, e.g. the connection closed
+    before `completeHandshake`.
+  - `ringLagBytes ≥ 0`: known lag, normally `max(headAtStart − since, 0)`;
+    `= 0` means caught up, including the `since > head` downward clamp;
+    `= -1` means unknown — head read failed, `since = -1` cursorless first
+    connect, or `since = -2` follow-live-end. Unknown is never printed as 0.
+  Both values are frozen at handshake start; the conn-closed line repeats that
+  snapshot and does not claim a live lag at close. Pre-existing columns keep
+  their names, order and values; the pair appends before the conditional
+  `compress=true` flag. (`tty_ws_test.go`'s frozen-layout assertion
+  correspondingly moved from `HasSuffix` to `Contains` plus a new tail regex —
+  recorded in the CHANGELOG as a contract change.)
+
+Lifecycle: the sampler starts in `Start()` and is **joined** by `Shutdown()`
+(`done` closed by the loop itself — the no-leak proof), sticky in both orders,
+mirroring `internal/monitor`'s `AlertSampler` contract. Goroutines a handler
+spawns itself (TTY read pump, SSE pumps, proxy pumps) stay un-armed by design —
+no claim is made that every fault path in the process is converted. Out of
+scope here, by plan: the wild-pointer root cause (no evidence supports any
+theory yet), teardown-point in-process survival or service-level auto-restart
+(needs a stdlib replacement or a supervisor design), ring capacity / memory
+policy, #114's replay semantics, and orphan-`dsh web` cleanup.
+
+### Related files
+
+- `internal/app/runtime_health.go` — the sampler, the alert dumper, the two middlewares, the env resolvers.
+- `internal/app/runtime_health_test.go` — resolvers, tick/alert/key/cap/lifecycle tests, rx-listener coverage.
+- `internal/app/runtime_health_fault_test.go` — the real-fault subprocess trio (survive / teardown-exit / dump width), plain and `-race`.
+- `internal/app/app.go` — `Start()`/`Shutdown()` wiring, the middleware chains on both listeners, the handshake probe that fills the ring pair.
+- `internal/app/tty_metrics.go` + `tty_metrics_on.go` — the ring pair on the frozen metric lines.
+- `docs/plans/fix-issue130-runtime-health/FIX-PLAN.md` — the plan this implements (D1–D4).

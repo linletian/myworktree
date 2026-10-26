@@ -35,6 +35,7 @@ package app
 
 import (
 	"log"
+	"strconv"
 	"time"
 
 	"myworktree/internal/ws"
@@ -87,6 +88,55 @@ type ttyConnMetrics struct {
 	replayBytes     int64 // binBytes snapshot at handshake end
 	replayFrames    int64 // binFrames snapshot at handshake end
 	replayDur       time.Duration
+	// ringCapBytes is the instance's ring-buffer capacity in bytes
+	// (RingBuffer.CapBytes, internal/framework/ringbuffer.go:176 — already
+	// public, so no new Manager surface), and ringLagBytes is
+	// headAtStart−since: how far behind the live head the client's cursor
+	// was when this handshake began.
+	//
+	// Both exist because issue #130 could read the replay STARVATION but not
+	// the steady state it was starving inside: the incident's daemon was
+	// pinned at the 256 MiB ring ceiling while each reconnect advanced the
+	// cursor by only the 8 MiB budget. `headAtStart` and `since` are both on
+	// the handshake line already, so the lag is derivable — but only by a
+	// reader who knows to subtract them, and only for the handshake line;
+	// spelling it out on BOTH lines (the conn-closed summary has neither
+	// field today) makes the two numbers the incident needs greppable in one
+	// pass. Fixing the ring capacity or the replay semantics is explicitly
+	// out of scope here (issue #130 §7): these fields change nothing, they
+	// make the shape of the next incident visible without a second dump.
+	//
+	// Both are FROZEN at handshake start, and ringLagBytes on the conn-closed
+	// line therefore repeats the handshake's figure rather than reporting a
+	// live lag. That is deliberate, not an oversight: the live head at close
+	// would need a second manager read (stateMu against the live pumpLogs
+	// writer) on the teardown path of every connection, to produce a number
+	// whose only reader is a comparison against headNow — which the overflow
+	// line already carries. One frozen pair, zero teardown cost.
+	//
+	// The scope of the -1 below, stated first: this paragraph is about
+	// ringLagBytes, whose -1 means the LAG is unknown. ringCapBytes' -1 is a
+	// different fact and is not what follows — it means the probe never ran at
+	// all (the connection died before completeHandshake), not "capacity
+	// unknown"; the sentinel table for BOTH fields is docs/ARCHITECTURE.md
+	// §10.
+	//
+	// -1 means unknown, and it is reachable: headAtStart is -1 when the
+	// EndOffset probe errored (e.g. an EndOffset error; a merely-stopped
+	// instance returns head 0 with cap 0, which still reads honestly
+	// alongside cap=0 — Manager.EndOffset answers (0, nil) for a non-running
+	// instance at manager.go:464-470, and only a Registry.Get failure gives
+	// an error), and `since` is -1 for a cursorless first connect or -2
+	// (sinceFollowLiveEnd) for the painted-screen-no-cursor state. In every
+	// one of those cases the lag is undefined — NOT zero, which would read as
+	// "caught up" and dress an unknown as an all-clear, the dishonesty this
+	// repo's cold-cache contracts refuse everywhere else.
+	ringCapBytes int64
+	ringLagBytes int64
+	// ringLagKnown gates the -1 above: false means ringLagBytes must not be
+	// read as a measurement.
+	ringLagKnown bool
+
 	// replayLogicalBytes is the LOGICAL counterpart of replayBytes
 	// (issue #114 decision 5a, review R1): the snapshot of logicalBytes
 	// at handshake end. On a COMPRESSED connection replayBytes is the
@@ -140,6 +190,47 @@ type ttyConnMetrics struct {
 	droppedFromWindow int64
 }
 
+// ttyRingLagBytes is the pure arithmetic behind the ringLagBytes field
+// (issue #130): lag = headAtStart − since, the span the client's cursor sat
+// behind the live head when the handshake began.
+//
+// Three of the four inputs are sentinels, and each has to land somewhere
+// honest:
+//
+//	headAtStart < 0  → the EndOffset probe errored (e.g. Registry.Get
+//	                  failed; a merely-stopped instance answers (0, nil) at
+//	                  manager.go:464-470 and reads as head 0 + cap 0) → unknown
+//	since == -1      → cursorless first connect, nothing painted → unknown
+//	since == -2      → sinceFollowLiveEnd: painted, offset unknown → unknown
+//	since > head     → the beyond-head degrade → 0, the client is NOT behind
+//
+// Unknown returns ok=false and the caller prints -1. It must never print 0
+// for unknown: 0 reads as "caught up", which is the opposite of "we could
+// not tell you", and the incident this instrument is for is precisely a
+// lag nobody could see.
+func ttyRingLagBytes(headAtStart, since int64) (lag int64, ok bool) {
+	if headAtStart < 0 || since < 0 {
+		return -1, false
+	}
+	if headAtStart < since {
+		return 0, true
+	}
+	return headAtStart - since, true
+}
+
+// ringFields renders the two issue-#130 fields as they appear on BOTH the
+// handshake and the conn-closed lines, appended after every column that
+// existed before them so the frozen layout the collector greps never shifts
+// (same rule the window and logical fields follow).
+func (m *ttyConnMetrics) ringFields() string {
+	lag := m.ringLagBytes
+	if !m.ringLagKnown {
+		lag = -1
+	}
+	return " ringCapBytes=" + strconv.FormatInt(m.ringCapBytes, 10) +
+		" ringLagBytes=" + strconv.FormatInt(lag, 10)
+}
+
 // ttyMeteredConn wraps *ws.Conn and times every write on the TTY handler
 // path. Embedding keeps the rest of the handler source untouched: deadline
 // setters, ReadMessage, WriteClose, WritePong and Close promote unchanged.
@@ -155,7 +246,12 @@ func newTTYMeteredConn(conn *ws.Conn, logger *log.Logger, id string) *ttyMetered
 		Conn:   conn,
 		id:     id,
 		logger: logger,
-		m:      &ttyConnMetrics{openedAt: time.Now(), headAtStart: -1},
+		// headAtStart, ringCapBytes and ringLagBytes all start at the
+		// UNKNOWN sentinel (-1, ringLagKnown=false): the ring may be gone by
+		// the time the probe runs, and a connection that never reaches
+		// completeHandshake still reaches the conn-closed line (it is in a
+		// defer). Zero would print as "caught up on a zero-byte ring".
+		m: &ttyConnMetrics{openedAt: time.Now(), headAtStart: -1, ringCapBytes: -1, ringLagBytes: -1},
 	}
 }
 
