@@ -16,6 +16,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1299,5 +1300,643 @@ func TestPortalWithAuthSyncsCookie(t *testing.T) {
 	}
 	if got.Value != "test-token" || !got.HttpOnly {
 		t.Fatalf("mw_token cookie = %+v, want value test-token, HttpOnly", got)
+	}
+}
+
+// === issue #131: registration cleanup matrix, heartbeat self-heal ===
+
+// openPort returns a live TCP listener port; the listener stays open until
+// the test ends (dial succeeds without accept — the kernel answers SYN from
+// the listen backlog).
+func openPort(t *testing.T) int {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("no available port: %v", err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	return ln.Addr().(*net.TCPAddr).Port
+}
+
+// closedPort returns a port with no listener: dialing it fails fast with
+// connection refused.
+func closedPort(t *testing.T) int {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("no available port: %v", err)
+	}
+	port := ln.Addr().(*net.TCPAddr).Port
+	ln.Close()
+	return port
+}
+
+// The two mutually exclusive D3 log branches, anchored on their PREFIX ONLY and
+// spelled exactly once here. The tails are deliberately NOT part of the anchor:
+// an assertion of the form "this branch logged nothing" must keep matching even
+// after the wording after the prefix changes, otherwise a future rewording makes
+// it match nothing and pass vacuously. The two anchors cannot match each other —
+// after "[portal] cleanup: " the success branch says "removed", the failure
+// branch says "failed". The exact wording is still pinned, by the fragment
+// checks inside TestCleanupStaleRegistrations_MatrixAndRemovalLogs.
+const (
+	cleanupSuccessLogPrefix = "[portal] cleanup: removed "
+	cleanupFailureLogPrefix = "[portal] cleanup: failed to remove "
+)
+
+// staleHeartbeat returns a heartbeat stamp that is EXPIRED by any sane lease.
+// The age is a FIXED 2 h and deliberately does NOT reference registrationLease:
+// a fixture built as -registrationLease-1m moves in lockstep with the constant
+// under test, so shortening the lease (down to less than one heartbeat
+// interval, which silently voids matrix cell 3's protection — the original
+// issue #131 bug) would keep every behavioural test here green. The lease
+// floors are nailed separately by TestRegistrationLivenessConstantsPinned.
+func staleHeartbeat() string {
+	return time.Now().Add(-2 * time.Hour).Format(time.RFC3339)
+}
+
+func freshHeartbeat() string {
+	return time.Now().Format(time.RFC3339)
+}
+
+// TestRegistrationLivenessConstantsPinned nails the VALUES plan §四 wrote down,
+// not just the behaviour they currently produce. The behavioural matrix tests
+// cannot cover this on their own: they construct staleness relative to the
+// lease (see staleHeartbeat above) or in absolute terms that stay stale for any
+// lease, so shrinking registrationLease below defaultHeartbeatInterval — which
+// makes a LIVE daemon's fresh heartbeat look expired and restores the exact
+// issue #131 deletion — passes every one of them. The floors below are the two
+// lower bounds the plan states for the lease, plus the 1 s probe timeout the
+// plan and CHANGELOG promise and that keeps the cleanup side's observation
+// window identical to the list side's. defaultHeartbeatInterval == 60 s is
+// already pinned by TestHeartbeatLoopPeriodicallyRewritesRegistrationFile, so
+// it is not restated here; it only appears in the first floor as a multiplier.
+func TestRegistrationLivenessConstantsPinned(t *testing.T) {
+	hbFloor := 10 * defaultHeartbeatInterval
+	if registrationLease < hbFloor {
+		t.Fatalf("registrationLease = %v, want >= 10*defaultHeartbeatInterval (%v): a lease shorter than ten heartbeats lets one GC pause, RFC3339 second-truncation or scheduler stall expire a LIVE daemon's lease, re-opening issue #131 (matrix cell 3 must keep it)", registrationLease, hbFloor)
+	}
+	twoSweeps := 2 * 5 * time.Minute
+	if registrationLease < twoSweeps {
+		t.Fatalf("registrationLease = %v, want >= 2 cleanup ticker periods (%v): the cleaner must not expire a foreign lease inside its own sweep gap", registrationLease, twoSweeps)
+	}
+	if tcpProbeTimeout != 1*time.Second {
+		t.Fatalf("tcpProbeTimeout = %v, want the 1 s both plan §四 and the CHANGELOG promise, and the same dial timeout the list side uses in isProcessAlive so the two sides' observations stay cross-comparable", tcpProbeTimeout)
+	}
+}
+
+// Matrix cell 1: PID not alive → remove, reason pid-exited — regardless of
+// heartbeat freshness or TCP reachability.
+func TestDecideRegistrationCleanup_PidExitedRemoved(t *testing.T) {
+	port := openPort(t)
+	for _, pid := range []int{999999, 0, -1} {
+		remove, reason := decideRegistrationCleanup(registration{
+			InstanceID:  "dead",
+			PID:         pid,
+			Port:        port,
+			HeartbeatAt: freshHeartbeat(),
+		}, time.Now())
+		if !remove || reason != "pid-exited" {
+			t.Errorf("pid=%d: remove=%v reason=%q, want true/pid-exited", pid, remove, reason)
+		}
+	}
+}
+
+// Matrix cell 2: PID alive + legacy file (missing or unparseable heartbeat)
+// → keep. During the upgrade-coexistence window cleanup never deletes on
+// TCP/lease grounds; the owner upgrades the file on its next restart.
+func TestDecideRegistrationCleanup_LegacyHeartbeatKept(t *testing.T) {
+	for _, hb := range []string{"", "not-a-timestamp", "2026-13-45T99:99:99Z"} {
+		remove, reason := decideRegistrationCleanup(registration{
+			InstanceID:  "legacy",
+			PID:         os.Getpid(),
+			Port:        closedPort(t),
+			HeartbeatAt: hb,
+		}, time.Now())
+		if remove {
+			t.Errorf("heartbeat=%q: legacy registration was removed (reason=%q), want kept", hb, reason)
+		}
+	}
+}
+
+// Matrix cell 3 — THE issue #131 regression test: PID alive + fresh
+// heartbeat + TCP probe target unreachable → MUST stay alive and be kept.
+// The old cleanup deleted exactly here (PID alive, 1s loopback dial failed),
+// making the project vanish from the Dashboard permanently.
+func TestDecideRegistrationCleanup_FreshHeartbeatSurvivesTcpFailure(t *testing.T) {
+	remove, reason := decideRegistrationCleanup(registration{
+		InstanceID:  "alive-fresh-hb",
+		PID:         os.Getpid(),
+		Port:        closedPort(t),
+		HeartbeatAt: freshHeartbeat(),
+	}, time.Now())
+	if remove {
+		t.Fatalf("issue #131 regression: live daemon with fresh heartbeat was marked for removal (reason=%q)", reason)
+	}
+}
+
+// Matrix cell 4: PID alive + lease expired + TCP reachable → keep.
+func TestDecideRegistrationCleanup_LeaseExpiredTcpReachableKept(t *testing.T) {
+	remove, reason := decideRegistrationCleanup(registration{
+		InstanceID:  "expired-reachable",
+		PID:         os.Getpid(),
+		Port:        openPort(t),
+		HeartbeatAt: staleHeartbeat(),
+	}, time.Now())
+	if remove {
+		t.Fatalf("registration with reachable port was marked for removal (reason=%q), want kept", reason)
+	}
+}
+
+// Matrix cell 5: PID alive + lease expired + TCP unreachable → remove.
+// Safe because the owner's heartbeat rewrites the file whole within one
+// heartbeatInterval if the verdict was wrong.
+func TestDecideRegistrationCleanup_LeaseExpiredTcpUnreachableRemoved(t *testing.T) {
+	remove, reason := decideRegistrationCleanup(registration{
+		InstanceID:  "expired-unreachable",
+		PID:         os.Getpid(),
+		Port:        closedPort(t),
+		HeartbeatAt: staleHeartbeat(),
+	}, time.Now())
+	if !remove || reason != "lease-expired-tcp-unreachable" {
+		t.Fatalf("remove=%v reason=%q, want true/lease-expired-tcp-unreachable", remove, reason)
+	}
+}
+
+// A port-less registration cannot be TCP-probed, so it can never be
+// disproved — kept even with an expired lease.
+func TestDecideRegistrationCleanup_NoPortNeverRemoved(t *testing.T) {
+	remove, reason := decideRegistrationCleanup(registration{
+		InstanceID:  "no-port",
+		PID:         os.Getpid(),
+		Port:        0,
+		HeartbeatAt: staleHeartbeat(),
+	}, time.Now())
+	if remove {
+		t.Fatalf("port-less registration was marked for removal (reason=%q), want kept", reason)
+	}
+}
+
+func TestCleanupStaleRegistrations_MatrixAndRemovalLogs(t *testing.T) {
+	tmpDir := t.TempDir()
+	p := New(Config{
+		PortalPort:  12352,
+		Host:        "localhost",
+		AuthToken:   "test-token",
+		RegistryDir: tmpDir,
+		RepoName:    "test-repo",
+		RepoHash:    "matrix131",
+	})
+
+	writeRegFile := func(name string, reg registration) {
+		t.Helper()
+		data, err := json.Marshal(reg)
+		if err != nil {
+			t.Fatalf("marshal %s: %v", name, err)
+		}
+		if err := os.WriteFile(filepath.Join(tmpDir, name), data, 0o600); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+
+	// Own entry: written by the portal itself, then sabotaged with a dead
+	// PID and an expired lease — cleanup must skip it by instance ID alone.
+	p.writeRegistration()
+	writeRegFile(p.instanceID+".json", registration{
+		InstanceID:  p.instanceID,
+		PID:         999999,
+		Port:        closedPort(t),
+		RepoName:    "self",
+		HeartbeatAt: staleHeartbeat(),
+	})
+
+	// Non-registration files in the registry dir must never be touched.
+	if err := os.WriteFile(filepath.Join(tmpDir, "portal.json"), []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, "notes.txt"), []byte("keep me"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, "broken.json"), []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Matrix cells as external files: cells 2-5 one file each, cell 1 twice —
+	// the plain victim below and the mislabeled fixture further down.
+	writeRegFile("dead-pid.json", registration{
+		InstanceID: "dead-pid", PID: 999999, Port: closedPort(t),
+		RepoName: "dead-repo", HeartbeatAt: freshHeartbeat(),
+	})
+	writeRegFile("fresh-hb.json", registration{
+		InstanceID: "fresh-hb", PID: os.Getpid(), Port: closedPort(t),
+		RepoName: "alive-repo", HeartbeatAt: freshHeartbeat(),
+	})
+	// True legacy file: raw JSON with NO heartbeat_at key at all.
+	if err := os.WriteFile(filepath.Join(tmpDir, "legacy.json"),
+		[]byte(`{"instance_id":"legacy","pid":`+strconv.Itoa(os.Getpid())+`,"port":`+strconv.Itoa(closedPort(t))+`,"repo_name":"legacy-repo","started_at":"2026-10-25T00:00:00Z","path":"/tmp/legacy"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	writeRegFile("expired-reachable.json", registration{
+		InstanceID: "expired-reachable", PID: os.Getpid(), Port: openPort(t),
+		RepoName: "reachable-repo", HeartbeatAt: staleHeartbeat(),
+	})
+	writeRegFile("expired-unreachable.json", registration{
+		InstanceID: "expired-unreachable", PID: os.Getpid(), Port: closedPort(t),
+		RepoName: "unreachable-repo", HeartbeatAt: staleHeartbeat(),
+	})
+	// MISLABELED fixture (matrix cell 1, removable): the DIRECTORY ENTRY NAME
+	// deliberately disagrees with the instance_id inside the file. Every other
+	// REMOVABLE fixture here is named <its own instance_id>.json, so a log line
+	// that derived file= from the parsed content instead of from the directory
+	// entry would still match this test's expectations verbatim for all of them.
+	// This fixture is the only one that separates the two identity fields, and it
+	// makes both halves of the D3 contract observable on the SAME line: file= must
+	// be mislabeled.json (the entry actually unlinked) while the positional id
+	// must stay content-id-mislabeled (the content that was parsed).
+	writeRegFile("mislabeled.json", registration{
+		InstanceID: "content-id-mislabeled", PID: 999999, Port: closedPort(t),
+		RepoName: "mislabeled-repo", HeartbeatAt: freshHeartbeat(),
+	})
+
+	var logBuf bytes.Buffer
+	origOutput := log.Writer()
+	log.SetOutput(&logBuf)
+	defer log.SetOutput(origOutput)
+
+	p.cleanupStaleRegistrations()
+
+	for _, kept := range []string{
+		p.instanceID + ".json", "portal.json", "notes.txt", "broken.json",
+		"fresh-hb.json", "legacy.json", "expired-reachable.json",
+	} {
+		if _, err := os.Stat(filepath.Join(tmpDir, kept)); err != nil {
+			t.Errorf("%s should have been kept: %v", kept, err)
+		}
+	}
+	for _, removed := range []string{"dead-pid.json", "expired-unreachable.json", "mislabeled.json"} {
+		if _, err := os.Stat(filepath.Join(tmpDir, removed)); !os.IsNotExist(err) {
+			t.Errorf("%s should have been removed", removed)
+		}
+	}
+
+	// D3: every removal is logged with instance id, the actual directory entry
+	// name (file=) and reason; kept files never appear in a removal line. The
+	// two branches are tallied by cleanupSuccessLogPrefix / cleanupFailureLogPrefix
+	// — prefix-only anchors that survive a rewording of the tail — while the
+	// exact wording below is pinned by the "removed stale registration <id> ("
+	// fragments.
+	output := logBuf.String()
+	var removalLines []string
+	for _, line := range strings.Split(output, "\n") {
+		if strings.Contains(line, cleanupSuccessLogPrefix) {
+			removalLines = append(removalLines, line)
+		}
+	}
+	if len(removalLines) != 3 {
+		t.Fatalf("expected exactly 3 removal log lines, got %d:\n%s", len(removalLines), output)
+	}
+	joined := strings.Join(removalLines, "\n")
+	if n := strings.Count(output, cleanupFailureLogPrefix); n != 0 {
+		t.Errorf("all three deletions succeeded, so no failure line may be logged (found %d):\n%s", n, output)
+	}
+	// ARB-4: file= carries the REAL directory entry name, side by side with
+	// the instance_id read from the file's content. Each fixture is located by
+	// its file= name — the identifier unique per removal now that two cells
+	// share reason=pid-exited.
+	for _, want := range []struct{ file, id, reason string }{
+		{"file=dead-pid.json", "dead-pid", "reason=pid-exited"},
+		{"file=expired-unreachable.json", "expired-unreachable", "reason=lease-expired-tcp-unreachable"},
+		{"file=mislabeled.json", "content-id-mislabeled", "reason=pid-exited"},
+	} {
+		var line string
+		for _, l := range removalLines {
+			if strings.Contains(l, want.file) {
+				line = l
+			}
+		}
+		if line == "" {
+			t.Errorf("no removal line carries %s:\n%s", want.file, joined)
+			continue
+		}
+		for _, frag := range []string{"removed stale registration " + want.id + " (", want.file, want.reason} {
+			if !strings.Contains(line, frag) {
+				t.Errorf("removal line for %s must contain %q:\n%s", want.file, frag, line)
+			}
+		}
+	}
+	// The mislabeled fixture is what gives file= its discriminating power: the
+	// content-derived name must NEVER show up as a file= value.
+	if strings.Contains(output, "file=content-id-mislabeled.json") {
+		t.Errorf("file= must be the directory entry name, never instance_id+\".json\" of the parsed content:\n%s", output)
+	}
+	for _, line := range removalLines {
+		for _, keptID := range []string{"fresh-hb", "legacy", "expired-reachable", p.instanceID} {
+			if strings.Contains(line, "registration "+keptID+" ") {
+				t.Errorf("kept registration %s appeared in a removal log line: %s", keptID, line)
+			}
+		}
+	}
+}
+
+// D2 self-heal, UNIT level: a single writeRegistration() call is the whole
+// rebuild primitive — after any deletion (cleanup false positive, manual rm,
+// tmp cleaner) it recreates the file whole with a refreshed heartbeat and a
+// non-drifted started_at. It does NOT on its own prove the PERIODIC wiring
+// (ticker + Start); that is TestHeartbeatLoopPeriodicallyRewritesRegistrationFile.
+func TestHeartbeatSelfHealsRegistrationFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	p := New(Config{
+		PortalPort:   12353,
+		InstancePort: 54321,
+		Host:         "localhost",
+		AuthToken:    "test-token",
+		RegistryDir:  tmpDir,
+		RepoName:     "selfheal-repo",
+		RepoHash:     "heal131",
+		WorktreePath: "/path/to/heal131",
+	})
+
+	p.writeRegistration()
+	regFile := filepath.Join(tmpDir, p.instanceID+".json")
+
+	if _, err := os.Stat(regFile); err != nil {
+		t.Fatalf("registration file missing after first write: %v", err)
+	}
+	first, err := os.ReadFile(regFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reg1 registration
+	if err := json.Unmarshal(first, &reg1); err != nil {
+		t.Fatal(err)
+	}
+	if reg1.HeartbeatAt == "" {
+		t.Fatal("writeRegistration must stamp heartbeat_at")
+	}
+	hb1, err := time.Parse(time.RFC3339, reg1.HeartbeatAt)
+	if err != nil {
+		t.Fatalf("heartbeat_at %q is not RFC3339: %v", reg1.HeartbeatAt, err)
+	}
+
+	// Simulate the issue #131 failure: the registration file disappears.
+	if err := os.Remove(regFile); err != nil {
+		t.Fatal(err)
+	}
+
+	// RFC3339 has second granularity — wait past it to see the refresh.
+	time.Sleep(1100 * time.Millisecond)
+
+	// The heartbeat tick calls exactly this: the file comes back whole.
+	p.writeRegistration()
+
+	second, err := os.ReadFile(regFile)
+	if err != nil {
+		t.Fatalf("registration file not recreated by heartbeat write: %v", err)
+	}
+	var reg2 registration
+	if err := json.Unmarshal(second, &reg2); err != nil {
+		t.Fatal(err)
+	}
+	hb2, err := time.Parse(time.RFC3339, reg2.HeartbeatAt)
+	if err != nil {
+		t.Fatalf("refreshed heartbeat_at %q is not RFC3339: %v", reg2.HeartbeatAt, err)
+	}
+	if !hb2.After(hb1) {
+		t.Fatalf("heartbeat_at not refreshed: %v -> %v", hb1, hb2)
+	}
+	if reg2.InstanceID != p.instanceID || reg2.PID != os.Getpid() || reg2.Port != 54321 ||
+		reg2.RepoName != "selfheal-repo" || reg2.RepoHash != "heal131" || reg2.Path != "/path/to/heal131" {
+		t.Fatalf("recreated registration lost fields: %+v", reg2)
+	}
+	// started_at reports the process start, never the last heartbeat.
+	if reg2.StartedAt != p.startedAt.Format(time.RFC3339) {
+		t.Fatalf("started_at drifted to the heartbeat time: %q, want %q", reg2.StartedAt, p.startedAt.Format(time.RFC3339))
+	}
+}
+
+// The heartbeat goroutine must exit promptly when the portal stops, so
+// Stop() never blocks on a dangling writer.
+func TestHeartbeatLoopExitsOnDone(t *testing.T) {
+	p := New(Config{PortalPort: 12354, RegistryDir: t.TempDir()})
+
+	p.wg.Add(1)
+	go p.heartbeatLoop()
+	close(p.done)
+
+	done := make(chan struct{})
+	go func() { p.wg.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("heartbeatLoop did not exit after p.done was closed")
+	}
+}
+
+// ARB-1 / D2: the PERIODIC heartbeat wiring end to end. This drives the real
+// p.Start(), so it pins both ends of the chain at once — Start actually
+// spawns heartbeatLoop, and heartbeatLoop's ticker actually rewrites the file
+// on Portal.heartbeatInterval (injected before Start; defaultHeartbeatInterval
+// in production). A hand-called second writeRegistration() would pin neither;
+// TestHeartbeatSelfHealsRegistrationFile is the unit-level counterpart that
+// covers the rebuild primitive and the field integrity only.
+func TestHeartbeatLoopPeriodicallyRewritesRegistrationFile(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Take PortalPort first so claimerLoop USUALLY cannot bind it and no real
+	// HTTP server starts; the heartbeat does not depend on holding the portal
+	// port. Not a guarantee: on a dual-stack host "localhost" can resolve to
+	// ::1 while this listener sits on 127.0.0.1, so claimerLoop may still bind
+	// successfully. That is harmless for what this test asserts — the heartbeat
+	// rebuild, a strictly newer heartbeat_at and an unchanged started_at are all
+	// independent of who holds the portal port — and the deferred Stop()
+	// cleans up both branches (holder: srv/ln shutdown plus the portal.json
+	// unlink; non-holder: registration unlink only).
+	portalPort := openPort(t)
+
+	p := New(Config{
+		PortalPort:   portalPort,
+		InstancePort: 54321,
+		Host:         "localhost",
+		AuthToken:    "test-token",
+		RegistryDir:  tmpDir,
+		RepoName:     "period131",
+		RepoHash:     "period131",
+		WorktreePath: "/path/to/period131",
+	})
+	if defaultHeartbeatInterval != 60*time.Second {
+		t.Fatalf("defaultHeartbeatInterval = %v, want the 60 s production default", defaultHeartbeatInterval)
+	}
+	if p.heartbeatInterval != defaultHeartbeatInterval {
+		t.Fatalf("New() must seed heartbeatInterval from defaultHeartbeatInterval (%v), got %v", defaultHeartbeatInterval, p.heartbeatInterval)
+	}
+	// The only legal override point: BEFORE the heartbeat goroutine exists.
+	p.heartbeatInterval = 20 * time.Millisecond
+
+	if err := p.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer p.Stop()
+
+	regFile := filepath.Join(tmpDir, p.instanceID+".json")
+	data, err := os.ReadFile(regFile)
+	if err != nil {
+		t.Fatalf("Start() must write the registration file: %v", err)
+	}
+	var initial registration
+	if err := json.Unmarshal(data, &initial); err != nil {
+		t.Fatalf("initial registration is not valid JSON: %v", err)
+	}
+	hb1, err := time.Parse(time.RFC3339, initial.HeartbeatAt)
+	if err != nil {
+		t.Fatalf("initial heartbeat_at %q is not RFC3339: %v", initial.HeartbeatAt, err)
+	}
+	if initial.StartedAt == "" {
+		t.Fatal("initial started_at must be stamped")
+	}
+
+	// The issue #131 failure, verbatim: the file disappears under a live daemon.
+	if err := os.Remove(regFile); err != nil {
+		t.Fatalf("remove registration file: %v", err)
+	}
+
+	// RFC3339 has second granularity, so "the file came back" and "the file
+	// came back AGAIN with a newer stamp" are two different observations:
+	// waiting for a STRICTLY newer heartbeat_at is what proves the rewrite was
+	// periodic (a second tick after the rebuild), not a single rebuild.
+	var healed registration
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		if raw, rerr := os.ReadFile(regFile); rerr == nil {
+			var reg registration
+			if jerr := json.Unmarshal(raw, &reg); jerr == nil {
+				if hb2, perr := time.Parse(time.RFC3339, reg.HeartbeatAt); perr == nil && hb2.After(hb1) {
+					healed = reg
+					break
+				}
+			}
+		}
+		if !time.Now().Before(deadline) {
+			t.Fatalf("heartbeat never rewrote %s with a newer heartbeat_at within %v (initial heartbeat_at %q): the Start/ticker wiring is broken",
+				regFile, 3*time.Second, initial.HeartbeatAt)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	hb2, err := time.Parse(time.RFC3339, healed.HeartbeatAt)
+	if err != nil {
+		t.Fatalf("refreshed heartbeat_at %q is not RFC3339: %v", healed.HeartbeatAt, err)
+	}
+	if !hb2.After(hb1) {
+		t.Fatalf("heartbeat_at not refreshed by the ticker: %v -> %v", hb1, hb2)
+	}
+	if healed.StartedAt != initial.StartedAt {
+		t.Fatalf("started_at drifted across heartbeats: %q -> %q", initial.StartedAt, healed.StartedAt)
+	}
+	if healed.InstanceID != p.instanceID || healed.PID != os.Getpid() || healed.Port != 54321 ||
+		healed.RepoName != "period131" || healed.RepoHash != "period131" || healed.Path != "/path/to/period131" {
+		t.Fatalf("heartbeat rebuild lost fields: %+v", healed)
+	}
+}
+
+// ARB-3: Stop() unlinks the registration only AFTER the heartbeat goroutine
+// has exited (wg.Wait moved up), so a tick landing between the delete and the
+// writer's exit can no longer resurrect a stopped daemon's registration. This
+// is a lost race, not a deterministic bug, so it runs 200 independent rounds:
+// fresh Portal, fresh RegistryDir, heartbeatInterval pinned to 1 ns so a
+// writer is provably hot throughout the Stop window.
+func TestStopRemovesRegistrationAfterHeartbeatExit(t *testing.T) {
+	for round := 0; round < 200; round++ {
+		tmpDir := t.TempDir()
+		p := New(Config{
+			PortalPort:   12360,
+			InstancePort: 54321,
+			Host:         "localhost",
+			AuthToken:    "test-token",
+			RegistryDir:  tmpDir,
+			RepoName:     "stoporder131",
+			RepoHash:     "stoporder131",
+			WorktreePath: "/path/to/stoporder131",
+		})
+		// Before the goroutine starts — the only legal override point.
+		p.heartbeatInterval = time.Nanosecond
+
+		p.writeRegistration()
+		regFile := filepath.Join(tmpDir, p.instanceID+".json")
+		if _, err := os.Stat(regFile); err != nil {
+			t.Fatalf("round %d: writeRegistration did not create %s: %v", round, regFile, err)
+		}
+
+		p.wg.Add(1)
+		go p.heartbeatLoop()
+
+		time.Sleep(100 * time.Microsecond)
+		p.Stop()
+
+		if _, err := os.Stat(regFile); !os.IsNotExist(err) {
+			t.Fatalf("round %d: registration survived Stop (stat err=%v) — the unlink must follow wg.Wait()", round, err)
+		}
+	}
+}
+
+// ARB-4 / D3: the log line is emitted FROM the unlink's result, so a failed
+// deletion is reported as a failure and never as a success. The victim is a
+// NON-EMPTY DIRECTORY sitting at the .json path, which makes os.Remove fail
+// deterministically (ENOTEMPTY) instead of simulating the failure.
+func TestRemoveStaleRegistration_RemoveFailureLogsFailure(t *testing.T) {
+	tmpDir := t.TempDir()
+	victim := filepath.Join(tmpDir, "victim.json")
+	if err := os.Mkdir(victim, 0o755); err != nil {
+		t.Fatalf("mkdir victim: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(victim, "keep.txt"), []byte("not empty"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var logBuf bytes.Buffer
+	origOutput := log.Writer()
+	log.SetOutput(&logBuf)
+	defer log.SetOutput(origOutput)
+
+	// instance_id comes from the file's CONTENT ("content-id") while file=
+	// must carry the actual directory entry name ("victim.json"): both stay.
+	removeStaleRegistration(victim, registration{
+		InstanceID: "content-id",
+		PID:        4242,
+		Port:       4545,
+		RepoName:   "victim-repo",
+	}, "pid-exited")
+
+	if _, err := os.Stat(victim); err != nil {
+		t.Fatalf("a failed removal must leave the target in place: %v", err)
+	}
+
+	out := logBuf.String()
+	if !strings.Contains(out, cleanupFailureLogPrefix) {
+		t.Fatalf("expected a failure log line, got:\n%s", out)
+	}
+	// The "no success line" check counts the success branch by its PREFIX
+	// (cleanupSuccessLogPrefix) instead of the loose substring
+	// "removed stale registration": a loose substring stops matching the moment
+	// the success wording changes, and the assertion would then pass without ever
+	// having looked at a real success line. A prefix-only anchor stays live, and
+	// the failure line cannot be mistaken for it ("[portal] cleanup: failed …").
+	if n := strings.Count(out, cleanupSuccessLogPrefix); n != 0 {
+		t.Fatalf("os.Remove failed, so the success line must never be logged (found %d):\n%s", n, out)
+	}
+	for _, frag := range []string{
+		"failed to remove stale registration",
+		"content-id", "file=victim.json", "pid=4242", "port=4545",
+		"repo=victim-repo", "reason=pid-exited",
+	} {
+		if !strings.Contains(out, frag) {
+			t.Errorf("failure log line must contain %q:\n%s", frag, out)
+		}
+	}
+	// The unlink error itself must be visible, not just the reason.
+	if !strings.Contains(out, "reason=pid-exited): ") || !strings.Contains(out, "not empty") {
+		t.Errorf("failure log line must append the unlink error after the reason:\n%s", out)
+	}
+	if n := strings.Count(out, "[portal] cleanup:"); n != 1 {
+		t.Errorf("exactly one cleanup log line expected, got %d:\n%s", n, out)
 	}
 }

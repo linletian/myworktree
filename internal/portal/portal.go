@@ -84,6 +84,18 @@ type Portal struct {
 	tailscaleServeOK bool
 
 	csrfState *csrfState
+	// startedAt is captured once at construction so heartbeat rewrites of the
+	// registration file keep reporting the true process start time instead of
+	// the last heartbeat time (issue #131).
+	startedAt time.Time
+	// heartbeatInterval is the period heartbeatLoop ticks on. It is WRITTEN
+	// ONLY in New(), where it is seeded from defaultHeartbeatInterval so
+	// production keeps the 60 s cadence. A test may override it on its own
+	// instance ONLY before the heartbeat goroutine starts (before Start(), or
+	// before it spawns heartbeatLoop itself); from that point on the field is
+	// READ-ONLY — heartbeatLoop reads it unguarded, so an override after the
+	// goroutine is live would be a data race, not a knob (issue #131).
+	heartbeatInterval time.Duration
 }
 
 type registration struct {
@@ -95,6 +107,37 @@ type registration struct {
 	RepoHash   string `json:"repo_hash"`
 	StartedAt  string `json:"started_at"`
 	Path       string `json:"path"`
+	// HeartbeatAt is stamped by every heartbeat rewrite of the registration
+	// file (issue #131). Empty string means a legacy pre-heartbeat file,
+	// which cleanup must never delete on TCP/lease grounds.
+	HeartbeatAt string `json:"heartbeat_at,omitempty"`
+}
+
+// Registration liveness constants (issue #131).
+const (
+	// defaultHeartbeatInterval is the PRODUCTION default period at which the
+	// owner daemon rewrites its own registration file; New() seeds
+	// Portal.heartbeatInterval from it. Any accidental deletion by a peer's
+	// cleanup self-heals within one interval because writeRegistration()
+	// recreates the file whole.
+	defaultHeartbeatInterval = 60 * time.Second
+	// registrationLease is how long an external registration may go without a
+	// heartbeat before a failed TCP probe may delete it. Sized >= 2 cleanup
+	// ticker periods (5 min) and >= 10 heartbeat intervals, so GC pauses,
+	// clock granularity and transient scheduler stalls cannot expire the lease
+	// of a live daemon.
+	registrationLease = 10 * time.Minute
+	// tcpProbeTimeout matches the list-side dial timeout in isProcessAlive.
+	tcpProbeTimeout = 1 * time.Second
+)
+
+// tcpProbe is injectable for tests, mirroring the tsStatus seam above.
+var tcpProbe = func(port int, timeout time.Duration) error {
+	conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), timeout)
+	if err != nil {
+		return err
+	}
+	return conn.Close()
 }
 
 type portalStatus struct {
@@ -110,6 +153,10 @@ func New(cfg Config) *Portal {
 		done:       make(chan struct{}),
 		ready:      make(chan struct{}),
 		csrfState:  newCSRFState(),
+		startedAt:  time.Now(),
+		// The ONLY write of heartbeatInterval outside a pre-Start test
+		// override: production always gets defaultHeartbeatInterval.
+		heartbeatInterval: defaultHeartbeatInterval,
 	}
 }
 
@@ -123,10 +170,11 @@ func generateInstanceID() string {
 
 func (p *Portal) Start() error {
 	p.writeRegistration()
-	p.wg.Add(3)
+	p.wg.Add(4)
 	go p.claimerLoop()
 	go p.csrfState.cleanupLoop(p.done, &p.wg)
 	go p.cleanupRegistrationLoop()
+	go p.heartbeatLoop()
 	return nil
 }
 
@@ -146,8 +194,16 @@ func (p *Portal) Stop() {
 		}
 		p.mu.Unlock()
 		// stopTailscaleServe() not called here — disabled, see top of file
-		p.deleteRegistration(wasHolder)
+		//
+		// Ordering matters (issue #131): close(done) stays FIRST (moving it
+		// later would deadlock — every loop exits through it), and the
+		// registration unlink moves AFTER wg.Wait(). The heartbeat goroutine
+		// rewrites the file on every tick, so deleting before the writer has
+		// exited let a tick land between the delete and the goroutine's exit
+		// and resurrect a dead daemon's registration. Waiting first makes the
+		// unlink the last write, so it sticks.
 		p.wg.Wait()
+		p.deleteRegistration(wasHolder)
 	})
 }
 
@@ -273,6 +329,29 @@ func (p *Portal) cleanupRegistrationLoop() {
 		select {
 		case <-ticker.C:
 			p.cleanupStaleRegistrations()
+		case <-p.done:
+			return
+		}
+	}
+}
+
+// heartbeatLoop rewrites this instance's registration file every
+// p.heartbeatInterval — defaultHeartbeatInterval (60 s) in production, a
+// shorter injected value in tests (issue #131). The registration file was
+// previously a write-once artifact: one false "dead" verdict from a peer's
+// cleanup (a transient TCP probe failure while the PID stayed alive) removed
+// it from the Dashboard permanently. With the heartbeat, any such accidental
+// removal self-heals within one interval, because writeRegistration()
+// recreates the file whole. The self-heal is conditional on the owner being
+// alive and its write succeeding — a daemon that cannot write does not heal.
+func (p *Portal) heartbeatLoop() {
+	defer p.wg.Done()
+	ticker := time.NewTicker(p.heartbeatInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			p.writeRegistration()
 		case <-p.done:
 			return
 		}
@@ -451,32 +530,108 @@ func (p *Portal) cleanupStaleRegistrations() {
 			continue
 		}
 
-		if !isRegistrationAlive(reg) {
-			os.Remove(filepath.Join(p.cfg.RegistryDir, entry.Name()))
+		remove, reason := decideRegistrationCleanup(reg, time.Now())
+		if !remove {
+			continue
 		}
+
+		removeStaleRegistration(filepath.Join(p.cfg.RegistryDir, entry.Name()), reg, reason)
 	}
 }
 
-func isRegistrationAlive(reg registration) bool {
-	if reg.PID <= 0 {
-		return false
+// removeStaleRegistration performs one cleanup deletion and makes it visible
+// in the daemon log (issue #131). The unlink is attempted FIRST and the log
+// line is emitted from its result, so a failure can never be reported as a
+// success: an unlogged — or, worse, a falsely logged — removal made the
+// "project vanished from the Dashboard" report undiagnosable.
+//
+// file= is filepath.Base(path) — the directory entry actually touched —
+// while instance_id and the rest come from the file's CONTENT, because the
+// two can disagree (hand-edited or half-written file) and the diagnosis needs
+// both. The auth token is never logged.
+func removeStaleRegistration(path string, reg registration, reason string) {
+	err := os.Remove(path)
+	if err == nil {
+		log.Printf("[portal] cleanup: removed stale registration %s (file=%s pid=%d port=%d repo=%s reason=%s)",
+			reg.InstanceID, filepath.Base(path), reg.PID, reg.Port, reg.RepoName, reason)
+		return
 	}
-	proc, err := os.FindProcess(reg.PID)
+	log.Printf("[portal] cleanup: failed to remove stale registration %s (file=%s pid=%d port=%d repo=%s reason=%s): %v",
+		reg.InstanceID, filepath.Base(path), reg.PID, reg.Port, reg.RepoName, reason, err)
+}
+
+// decideRegistrationCleanup is the pure decision matrix cleanupStaleRegistrations
+// applies to an EXTERNAL registration file (issue #131). The owner daemon
+// rewrites its file with a fresh HeartbeatAt every heartbeat interval
+// (defaultHeartbeatInterval = 60 s in production), so:
+//
+//  1. PID not alive                        → remove, reason "pid-exited"
+//  2. PID alive, legacy/missing heartbeat → keep (no TCP-based deletion
+//     during the upgrade-coexistence window; the owner upgrades the file on
+//     its next restart)
+//  3. PID alive, heartbeat fresh          → keep REGARDLESS of TCP result
+//     (this is the exact issue #131 regression: a transient TCP probe failure
+//     must never delete a live daemon's registration)
+//  4. PID alive, lease expired, TCP OK    → keep
+//  5. PID alive, lease expired, TCP fails → remove, reason
+//     "lease-expired-tcp-unreachable"
+//
+// THIS MATRIX IS THE ONLY AUTHORITY on the cleanup side: nothing else in the
+// cleanup path may re-judge liveness, and cleanup never deletes on a verdict
+// it does not return here.
+//
+// Cell 5 is the ONE INTENTIONAL EXCEPTION to the semantics the /api/list side
+// reports. The list side (isProcessAlive) still says alive=true for a live PID
+// whose TCP probe fails, while cleanup may delete the same registration at
+// cell 5 and log reason=lease-expired-tcp-unreachable. That asymmetry is
+// deliberate and bounded: the list is a display judgement, the matrix is an
+// irreversible one, and a still-live owner's next successful heartbeat rebuilds
+// the file within one heartbeat interval.
+//
+// A port-less registration (Port <= 0) cannot be TCP-probed, so it can never
+// be disproved and is kept (same precedence the list side gives it).
+// Residual risk (accepted, see plan): a daemon SIGSTOPped for longer than
+// registrationLease with a full listen backlog could be deleted — and even
+// then the owner's next heartbeat rewrite self-heals it within one heartbeat
+// interval after it resumes. tcpProbe is read as a package var so tests can
+// inject results; now is a parameter so tests stay fast.
+func decideRegistrationCleanup(reg registration, now time.Time) (remove bool, reason string) {
+	if !pidAlive(reg.PID) {
+		return true, "pid-exited"
+	}
+	if reg.HeartbeatAt == "" {
+		return false, ""
+	}
+	heartbeat, err := time.Parse(time.RFC3339, reg.HeartbeatAt)
 	if err != nil {
-		return false
+		// Unparseable heartbeat: treat as legacy and keep.
+		return false, ""
 	}
-	if proc.Signal(syscall.Signal(0)) != nil {
-		return false
+	if now.Sub(heartbeat) <= registrationLease {
+		return false, ""
 	}
 	if reg.Port <= 0 {
-		return true
+		return false, ""
 	}
-	conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", reg.Port), 1*time.Second)
+	if tcpProbe(reg.Port, tcpProbeTimeout) == nil {
+		return false, ""
+	}
+	return true, "lease-expired-tcp-unreachable"
+}
+
+// pidAlive is the single PID-existence check shared by both sides (cleanup's
+// matrix and the list's isProcessAlive). The two sides still share the PID
+// verdict, but NOT the final liveness conclusion: see the cell-5 exception
+// documented on decideRegistrationCleanup.
+func pidAlive(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	proc, err := os.FindProcess(pid)
 	if err != nil {
 		return false
 	}
-	conn.Close()
-	return true
+	return proc.Signal(syscall.Signal(0)) == nil
 }
 
 func (p *Portal) writeRegistration() {
@@ -493,8 +648,14 @@ func (p *Portal) writeRegistration() {
 		Host:       p.cfg.Host,
 		RepoName:   p.cfg.RepoName,
 		RepoHash:   p.cfg.RepoHash,
-		StartedAt:  time.Now().Format(time.RFC3339),
-		Path:       p.cfg.WorktreePath,
+		// StartedAt stays the process start time captured at New(); a
+		// heartbeat rewrite must not drift it (issue #131).
+		StartedAt: p.startedAt.Format(time.RFC3339),
+		Path:      p.cfg.WorktreePath,
+		// HeartbeatAt is re-stamped on every write, including each heartbeat
+		// tick (defaultHeartbeatInterval = 60 s in production), so the file
+		// itself is the lease the cleanup matrix checks (issue #131).
+		HeartbeatAt: time.Now().Format(time.RFC3339),
 	}
 
 	data, _ := json.Marshal(reg)
@@ -809,20 +970,11 @@ func getIP(r *http.Request) string {
 }
 
 func isProcessAlive(pid int, port int) bool {
-	if pid <= 0 {
-		return false
-	}
-	proc, err := os.FindProcess(pid)
-	if err != nil {
-		return false
-	}
-	if proc.Signal(syscall.Signal(0)) != nil {
+	if !pidAlive(pid) {
 		return false
 	}
 	if port > 0 {
-		conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 1*time.Second)
-		if err == nil {
-			conn.Close()
+		if tcpProbe(port, tcpProbeTimeout) == nil {
 			return true
 		}
 		// TCP failed — port may be wrong (upgrade scenario) or not yet bound.
