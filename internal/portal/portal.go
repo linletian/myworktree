@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log"
 	"math/rand"
 	"net"
@@ -92,9 +93,12 @@ type Portal struct {
 	// ONLY in New(), where it is seeded from defaultHeartbeatInterval so
 	// production keeps the 60 s cadence. A test may override it on its own
 	// instance ONLY before the heartbeat goroutine starts (before Start(), or
-	// before it spawns heartbeatLoop itself); from that point on the field is
-	// READ-ONLY — heartbeatLoop reads it unguarded, so an override after the
-	// goroutine is live would be a data race, not a knob (issue #131).
+	// before it spawns heartbeatLoop itself). The read happens in the CALLER's
+	// goroutine — Start() reads this field and hands the value to
+	// heartbeatLoop(interval) as a parameter, so the goroutine itself never
+	// touches the field and an override that lands after the spawn is not
+	// merely unlikely to be observed but structurally invisible, which is what
+	// makes the pre-spawn override a knob instead of a race (issue #131).
 	heartbeatInterval time.Duration
 }
 
@@ -122,11 +126,19 @@ const (
 	// recreates the file whole.
 	defaultHeartbeatInterval = 60 * time.Second
 	// registrationLease is how long an external registration may go without a
-	// heartbeat before a failed TCP probe may delete it. Sized >= 2 cleanup
-	// ticker periods (5 min) and >= 10 heartbeat intervals, so GC pauses,
-	// clock granularity and transient scheduler stalls cannot expire the lease
-	// of a live daemon.
+	// heartbeat before a failed TCP probe may delete it. Sized >= 2 *
+	// cleanupInterval and >= 10 heartbeat intervals, so GC pauses, clock
+	// granularity and transient scheduler stalls cannot expire the lease of a
+	// live daemon.
 	registrationLease = 10 * time.Minute
+	// cleanupInterval is the period at which EVERY daemon sweeps the registry
+	// directory for stale foreign registrations (cleanupRegistrationLoop). It is
+	// a named constant rather than a literal at the one NewTicker call so the
+	// lease floor above and the sweep cadence stay the same fact in one place:
+	// the test that pins registrationLease >= 2 sweeps reads this symbol, so
+	// retuning the ticker can no longer silently invalidate the lease
+	// invariant (issue #131).
+	cleanupInterval = 5 * time.Minute
 	// tcpProbeTimeout matches the list-side dial timeout in isProcessAlive.
 	tcpProbeTimeout = 1 * time.Second
 )
@@ -169,12 +181,21 @@ func generateInstanceID() string {
 }
 
 func (p *Portal) Start() error {
-	p.writeRegistration()
+	// The registration file is this daemon's only claim on the Dashboard list,
+	// so the FIRST write reports its own failure: the heartbeat self-heal that
+	// is supposed to recover a vanished registration does not exist yet at this
+	// point, so a dropped error here would leave the process running and
+	// invisible with nothing in the log to explain it (issue #131).
+	if err := p.writeRegistration(); err != nil {
+		log.Printf("[portal] warning: initial registration write failed: %v", err)
+	}
 	p.wg.Add(4)
 	go p.claimerLoop()
 	go p.csrfState.cleanupLoop(p.done, &p.wg)
 	go p.cleanupRegistrationLoop()
-	go p.heartbeatLoop()
+	// The interval is read HERE, in the calling goroutine, and passed in as a
+	// value: heartbeatLoop never reads Portal state it could race with.
+	go p.heartbeatLoop(p.heartbeatInterval)
 	return nil
 }
 
@@ -323,7 +344,7 @@ func (p *Portal) withAuth(next http.HandlerFunc) http.HandlerFunc {
 
 func (p *Portal) cleanupRegistrationLoop() {
 	defer p.wg.Done()
-	ticker := time.NewTicker(5 * time.Minute)
+	ticker := time.NewTicker(cleanupInterval)
 	defer ticker.Stop()
 	for {
 		select {
@@ -335,23 +356,83 @@ func (p *Portal) cleanupRegistrationLoop() {
 	}
 }
 
-// heartbeatLoop rewrites this instance's registration file every
-// p.heartbeatInterval — defaultHeartbeatInterval (60 s) in production, a
-// shorter injected value in tests (issue #131). The registration file was
-// previously a write-once artifact: one false "dead" verdict from a peer's
-// cleanup (a transient TCP probe failure while the PID stayed alive) removed
-// it from the Dashboard permanently. With the heartbeat, any such accidental
-// removal self-heals within one interval, because writeRegistration()
-// recreates the file whole. The self-heal is conditional on the owner being
-// alive and its write succeeding — a daemon that cannot write does not heal.
-func (p *Portal) heartbeatLoop() {
+// registrationWriteLogger turns a stream of heartbeat registration-write
+// outcomes into a bounded set of log lines, on a pure counter — no clock, no
+// state outside the struct, nothing to wait for — so the rule is testable in a
+// single pass (issue #131).
+//
+// heartbeatLoop owns exactly one of these as a local variable and is its only
+// caller, which is why it needs no lock: the counter lives and dies inside one
+// goroutine. Attaching it to Portal instead would turn a goroutine-local
+// counter into shared mutable state for no gain.
+type registrationWriteLogger struct {
+	// consecutiveFailures counts failed writes since the last success.
+	consecutiveFailures int
+	// failureLogged records whether the streak in progress already has a line
+	// in the log, so the FIRST failure is reported at once instead of only
+	// when the streak reaches its tenth member.
+	failureLogged bool
+}
+
+// record folds one round's write error into the streak and returns the line to
+// log for that round, or "" when the round stays silent:
+//
+//   - first failure of a streak → report immediately (a daemon that cannot
+//     rewrite its registration is the one state that turns into a permanently
+//     invisible project, so it must not wait for a threshold);
+//   - every 10th consecutive failure after that → report again, so a stall that
+//     lasts hours stays visible without emitting one line per tick;
+//   - a success that ends a streak → report the recovery WITH the streak
+//     length, because "it failed for N ticks" is the fact a diagnosis needs,
+//     and then reset the counter;
+//   - a success in the steady state → silence. A healthy daemon writes this
+//     line never, which is what keeps the warning channel trustworthy.
+func (l *registrationWriteLogger) record(err error) string {
+	if err == nil {
+		if l.consecutiveFailures == 0 {
+			return ""
+		}
+		recovered := l.consecutiveFailures
+		l.consecutiveFailures = 0
+		l.failureLogged = false
+		return fmt.Sprintf("[portal] registration write recovered after %d failed attempts", recovered)
+	}
+	l.consecutiveFailures++
+	if !l.failureLogged || l.consecutiveFailures%10 == 0 {
+		l.failureLogged = true
+		return fmt.Sprintf("[portal] warning: heartbeat registration write failed: %v", err)
+	}
+	return ""
+}
+
+// heartbeatLoop rewrites this instance's registration file every interval —
+// defaultHeartbeatInterval (60 s) in production, a shorter injected value in
+// tests (issue #131). The registration file was previously a write-once artifact:
+// one false "dead" verdict from a peer's cleanup (a transient TCP probe failure
+// while the PID stayed alive) removed it from the Dashboard permanently. With
+// the heartbeat, any such accidental removal self-heals within one interval,
+// because writeRegistration() recreates the file whole. The self-heal is
+// conditional on the owner being alive and its write succeeding — a daemon that
+// cannot write does not heal, and that is now the point of the rate-limited
+// failure line below: the precondition of the self-heal is the thing that has
+// to be visible.
+//
+// interval is a PARAMETER, read by the caller before the goroutine is spawned,
+// so this loop reads no mutable Portal state.
+func (p *Portal) heartbeatLoop(interval time.Duration) {
 	defer p.wg.Done()
-	ticker := time.NewTicker(p.heartbeatInterval)
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
+	var writes registrationWriteLogger
 	for {
 		select {
 		case <-ticker.C:
-			p.writeRegistration()
+			// The error used to be dropped here, which made "this daemon cannot
+			// re-register" indistinguishable from "this daemon never registered"
+			// — the exact undiagnosable state issue #131 is about.
+			if line := writes.record(p.writeRegistration()); line != "" {
+				log.Print(line)
+			}
 		case <-p.done:
 			return
 		}
@@ -549,11 +630,30 @@ func (p *Portal) cleanupStaleRegistrations() {
 // while instance_id and the rest come from the file's CONTENT, because the
 // two can disagree (hand-edited or half-written file) and the diagnosis needs
 // both. The auth token is never logged.
+//
+// Three outcomes, mutually exclusive, and the third one is NOT a failure:
+//
+//   - unlinked → the success line;
+//   - already gone (ENOENT) → its own benign line, NOT the failure channel.
+//     Every daemon runs this sweep on the same cadence with a fixed phase
+//     offset, so two daemons can race on the same entry and the loser sees
+//     ENOENT; the same happens against the owner's own graceful Stop()
+//     unlinking its file. Both are the outcome cleanup wanted — the entry is
+//     gone — and routing them through the failure line would dilute the
+//     failures this function exists to surface (ENOTEMPTY, permissions, a
+//     full disk). errors.Is, not ==, because the sentinel arrives wrapped in
+//     a *PathError;
+//   - any other error → the failure line, with the OS error kept verbatim.
 func removeStaleRegistration(path string, reg registration, reason string) {
 	err := os.Remove(path)
 	if err == nil {
 		log.Printf("[portal] cleanup: removed stale registration %s (file=%s pid=%d port=%d repo=%s reason=%s)",
 			reg.InstanceID, filepath.Base(path), reg.PID, reg.Port, reg.RepoName, reason)
+		return
+	}
+	if errors.Is(err, fs.ErrNotExist) {
+		log.Printf("[portal] cleanup: stale registration %s already gone (file=%s reason=%s) — removed by a peer sweep or its own Stop",
+			reg.InstanceID, filepath.Base(path), reason)
 		return
 	}
 	log.Printf("[portal] cleanup: failed to remove stale registration %s (file=%s pid=%d port=%d repo=%s reason=%s): %v",
@@ -634,12 +734,24 @@ func pidAlive(pid int) bool {
 	return proc.Signal(syscall.Signal(0)) == nil
 }
 
-func (p *Portal) writeRegistration() {
+// writeRegistration atomically (re)creates this instance's registration file
+// and returns the first error it hits, each one wrapped with the operation that
+// failed (issue #131). Returning the error is the point: the heartbeat's
+// self-heal promise is conditional on this write SUCCEEDING, and every error
+// used to be dropped here, which made "this daemon cannot re-register" — disk
+// full, registry dir revoked, a file sitting where the directory should be —
+// indistinguishable from "this daemon never registered". The guard for an
+// unconfigured instance returns nil, because that case is not applicable and
+// not a failure; conflating the two would put a warning on every portal-less
+// daemon.
+func (p *Portal) writeRegistration() error {
 	if p.cfg.RegistryDir == "" || p.cfg.PortalPort == 0 {
-		return
+		return nil
 	}
 
-	os.MkdirAll(p.cfg.RegistryDir, 0o755)
+	if err := os.MkdirAll(p.cfg.RegistryDir, 0o755); err != nil {
+		return fmt.Errorf("mkdir registry dir: %w", err)
+	}
 
 	reg := registration{
 		InstanceID: p.instanceID,
@@ -658,10 +770,22 @@ func (p *Portal) writeRegistration() {
 		HeartbeatAt: time.Now().Format(time.RFC3339),
 	}
 
-	data, _ := json.Marshal(reg)
+	// Marshal of this struct cannot fail — every field is a string or an int —
+	// but the error is taken rather than discarded so a future field that CAN
+	// fail (a map, an interface) cannot smuggle a half-written registration
+	// into the rename below.
+	data, err := json.Marshal(reg)
+	if err != nil {
+		return fmt.Errorf("marshal registration: %w", err)
+	}
 	tmp := filepath.Join(p.cfg.RegistryDir, p.instanceID+".json.tmp")
-	os.WriteFile(tmp, data, 0o600)
-	os.Rename(tmp, filepath.Join(p.cfg.RegistryDir, p.instanceID+".json"))
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		return fmt.Errorf("write registration temp file: %w", err)
+	}
+	if err := os.Rename(tmp, filepath.Join(p.cfg.RegistryDir, p.instanceID+".json")); err != nil {
+		return fmt.Errorf("rename registration temp file into place: %w", err)
+	}
+	return nil
 }
 
 func (p *Portal) deleteRegistration(wasHolder bool) {

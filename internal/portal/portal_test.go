@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -60,7 +61,9 @@ func TestRegistrationFileWriteRead(t *testing.T) {
 	}
 
 	p := New(cfg)
-	p.writeRegistration()
+	if err := p.writeRegistration(); err != nil {
+		t.Fatalf("writeRegistration: %v", err)
+	}
 
 	regFile := filepath.Join(tmpDir, p.instanceID+".json")
 	data, err := os.ReadFile(regFile)
@@ -307,10 +310,17 @@ func TestRegistration_NoAuthTokenInFile(t *testing.T) {
 	}
 
 	p := New(cfg)
-	p.writeRegistration()
+	if err := p.writeRegistration(); err != nil {
+		t.Fatalf("writeRegistration: %v", err)
+	}
 
 	regFile := filepath.Join(tmpDir, p.instanceID+".json")
-	data, _ := os.ReadFile(regFile)
+	// The read is checked too: an unreadable file here would leave reg nil and
+	// make the absence of auth_token pass without ever having looked.
+	data, err := os.ReadFile(regFile)
+	if err != nil {
+		t.Fatalf("read registration file: %v", err)
+	}
 
 	var reg map[string]interface{}
 	json.Unmarshal(data, &reg)
@@ -974,7 +984,9 @@ func TestRegistryDirDeletionRecovery(t *testing.T) {
 		RepoHash:    "recovery123",
 	}
 	p := New(cfg)
-	p.writeRegistration()
+	if err := p.writeRegistration(); err != nil {
+		t.Fatalf("writeRegistration: %v", err)
+	}
 
 	os.RemoveAll(tmpDir)
 	if _, err := os.Stat(tmpDir); !os.IsNotExist(err) {
@@ -983,7 +995,11 @@ func TestRegistryDirDeletionRecovery(t *testing.T) {
 
 	p.cleanupStaleRegistrations()
 
-	p.writeRegistration()
+	// Recreating a deleted registry directory is part of what writeRegistration
+	// owes the self-heal, so its error is the assertion here.
+	if err := p.writeRegistration(); err != nil {
+		t.Fatalf("writeRegistration after the registry dir was removed: %v", err)
+	}
 	if _, err := os.Stat(tmpDir); os.IsNotExist(err) {
 		t.Fatal("registry dir was not recreated by writeRegistration()")
 	}
@@ -1331,17 +1347,64 @@ func closedPort(t *testing.T) int {
 	return port
 }
 
-// The two mutually exclusive D3 log branches, anchored on their PREFIX ONLY and
+// syncLogWriter is a mutex-guarded log sink. The heartbeat failure tests have to
+// POLL the log while the goroutine under test is still writing to it — the
+// warning line appears on a tick the test does not control — and a bare
+// bytes.Buffer polled from the test goroutine is a data race under -race. The
+// mutex is what lets those tests observe the real goroutine instead of working
+// around it; the tests that call the logger synchronously keep using a plain
+// bytes.Buffer.
+type syncLogWriter struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (w *syncLogWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.buf.Write(p)
+}
+
+func (w *syncLogWriter) String() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.buf.String()
+}
+
+// captureLog installs w as the global log output and returns the restore func.
+// Callers that spawn goroutines must stop them before reading the result if
+// they want a settled view; the mutex keeps any read race-free either way.
+func captureLog(w io.Writer) func() {
+	orig := log.Writer()
+	log.SetOutput(w)
+	return func() { log.SetOutput(orig) }
+}
+
+// The three mutually exclusive D3 log branches, anchored on their PREFIX ONLY and
 // spelled exactly once here. The tails are deliberately NOT part of the anchor:
 // an assertion of the form "this branch logged nothing" must keep matching even
 // after the wording after the prefix changes, otherwise a future rewording makes
-// it match nothing and pass vacuously. The two anchors cannot match each other —
+// it match nothing and pass vacuously. The three anchors cannot match each other —
 // after "[portal] cleanup: " the success branch says "removed", the failure
-// branch says "failed". The exact wording is still pinned, by the fragment
-// checks inside TestCleanupStaleRegistrations_MatrixAndRemovalLogs.
+// branch says "failed", the benign branch says "stale". The exact wording is
+// still pinned, by the fragment checks inside
+// TestCleanupStaleRegistrations_MatrixAndRemovalLogs and
+// TestRemoveStaleRegistration_MissingFileLogsBenignAlreadyGone.
+//
+// The benign anchor exists because ENOENT is NOT a failure: two daemons sweeping
+// on the same cadence with a fixed phase offset race on the same entry, and the
+// owner's own Stop() unlink races a peer's sweep too. Those are the outcomes
+// cleanup wanted, so they must not be tallied on the failure channel — an
+// assertion of "no failure line" only means something if the benign branch has
+// its own line to be counted on instead.
 const (
-	cleanupSuccessLogPrefix = "[portal] cleanup: removed "
-	cleanupFailureLogPrefix = "[portal] cleanup: failed to remove "
+	cleanupSuccessLogPrefix  = "[portal] cleanup: removed "
+	cleanupFailureLogPrefix  = "[portal] cleanup: failed to remove "
+	cleanupBenignGonePrefix  = "[portal] cleanup: stale registration "
+	benignGoneFragment       = "already gone"
+	heartbeatWriteFailPrefix = "[portal] warning: heartbeat registration write failed: "
+	initialWriteFailPrefix   = "[portal] warning: initial registration write failed: "
+	writeRecoveredInfix      = "registration write recovered after "
 )
 
 // staleHeartbeat returns a heartbeat stamp that is EXPIRED by any sane lease.
@@ -1368,7 +1431,10 @@ func freshHeartbeat() string {
 // issue #131 deletion — passes every one of them. The floors below are the two
 // lower bounds the plan states for the lease, plus the 1 s probe timeout the
 // plan and CHANGELOG promise and that keeps the cleanup side's observation
-// window identical to the list side's. defaultHeartbeatInterval == 60 s is
+// window identical to the list side's. The sweep floor reads cleanupInterval —
+// the SAME symbol cleanupRegistrationLoop builds its ticker from — so the
+// invariant is bound to the real cadence instead of to a copy of it that can
+// drift. defaultHeartbeatInterval == 60 s is
 // already pinned by TestHeartbeatLoopPeriodicallyRewritesRegistrationFile, so
 // it is not restated here; it only appears in the first floor as a multiplier.
 func TestRegistrationLivenessConstantsPinned(t *testing.T) {
@@ -1376,9 +1442,9 @@ func TestRegistrationLivenessConstantsPinned(t *testing.T) {
 	if registrationLease < hbFloor {
 		t.Fatalf("registrationLease = %v, want >= 10*defaultHeartbeatInterval (%v): a lease shorter than ten heartbeats lets one GC pause, RFC3339 second-truncation or scheduler stall expire a LIVE daemon's lease, re-opening issue #131 (matrix cell 3 must keep it)", registrationLease, hbFloor)
 	}
-	twoSweeps := 2 * 5 * time.Minute
+	twoSweeps := 2 * cleanupInterval
 	if registrationLease < twoSweeps {
-		t.Fatalf("registrationLease = %v, want >= 2 cleanup ticker periods (%v): the cleaner must not expire a foreign lease inside its own sweep gap", registrationLease, twoSweeps)
+		t.Fatalf("registrationLease = %v, want >= 2 * cleanupInterval (%v): the cleaner must not expire a foreign lease inside its own sweep gap", registrationLease, twoSweeps)
 	}
 	if tcpProbeTimeout != 1*time.Second {
 		t.Fatalf("tcpProbeTimeout = %v, want the 1 s both plan §四 and the CHANGELOG promise, and the same dial timeout the list side uses in isProcessAlive so the two sides' observations stay cross-comparable", tcpProbeTimeout)
@@ -1501,7 +1567,9 @@ func TestCleanupStaleRegistrations_MatrixAndRemovalLogs(t *testing.T) {
 
 	// Own entry: written by the portal itself, then sabotaged with a dead
 	// PID and an expired lease — cleanup must skip it by instance ID alone.
-	p.writeRegistration()
+	if err := p.writeRegistration(); err != nil {
+		t.Fatalf("writeRegistration: %v", err)
+	}
 	writeRegFile(p.instanceID+".json", registration{
 		InstanceID:  p.instanceID,
 		PID:         999999,
@@ -1599,6 +1667,12 @@ func TestCleanupStaleRegistrations_MatrixAndRemovalLogs(t *testing.T) {
 	if n := strings.Count(output, cleanupFailureLogPrefix); n != 0 {
 		t.Errorf("all three deletions succeeded, so no failure line may be logged (found %d):\n%s", n, output)
 	}
+	// Every victim existed when the sweep reached it, so the benign ENOENT
+	// branch stays empty here too — it has its own line and its own tally, and
+	// neither can be folded into the two above.
+	if n := strings.Count(output, cleanupBenignGonePrefix); n != 0 {
+		t.Errorf("every victim was present before the sweep, so no benign already-gone line may be logged (found %d):\n%s", n, output)
+	}
 	// ARB-4: file= carries the REAL directory entry name, side by side with
 	// the instance_id read from the file's content. Each fixture is located by
 	// its file= name — the identifier unique per removal now that two cells
@@ -1656,7 +1730,9 @@ func TestHeartbeatSelfHealsRegistrationFile(t *testing.T) {
 		WorktreePath: "/path/to/heal131",
 	})
 
-	p.writeRegistration()
+	if err := p.writeRegistration(); err != nil {
+		t.Fatalf("writeRegistration: %v", err)
+	}
 	regFile := filepath.Join(tmpDir, p.instanceID+".json")
 
 	if _, err := os.Stat(regFile); err != nil {
@@ -1686,8 +1762,11 @@ func TestHeartbeatSelfHealsRegistrationFile(t *testing.T) {
 	// RFC3339 has second granularity — wait past it to see the refresh.
 	time.Sleep(1100 * time.Millisecond)
 
-	// The heartbeat tick calls exactly this: the file comes back whole.
-	p.writeRegistration()
+	// The heartbeat tick calls exactly this: the file comes back whole, and the
+	// error it now returns is nil on that path.
+	if err := p.writeRegistration(); err != nil {
+		t.Fatalf("heartbeat write after the file vanished: %v", err)
+	}
 
 	second, err := os.ReadFile(regFile)
 	if err != nil {
@@ -1720,7 +1799,10 @@ func TestHeartbeatLoopExitsOnDone(t *testing.T) {
 	p := New(Config{PortalPort: 12354, RegistryDir: t.TempDir()})
 
 	p.wg.Add(1)
-	go p.heartbeatLoop()
+	// The interval is passed in, exactly as Start() does: the value is read in
+	// this (test) goroutine before the spawn, so the loop itself never reads
+	// mutable Portal state.
+	go p.heartbeatLoop(p.heartbeatInterval)
 	close(p.done)
 
 	done := make(chan struct{})
@@ -1860,14 +1942,18 @@ func TestStopRemovesRegistrationAfterHeartbeatExit(t *testing.T) {
 		// Before the goroutine starts — the only legal override point.
 		p.heartbeatInterval = time.Nanosecond
 
-		p.writeRegistration()
+		if err := p.writeRegistration(); err != nil {
+			t.Fatalf("round %d: writeRegistration: %v", round, err)
+		}
 		regFile := filepath.Join(tmpDir, p.instanceID+".json")
 		if _, err := os.Stat(regFile); err != nil {
 			t.Fatalf("round %d: writeRegistration did not create %s: %v", round, regFile, err)
 		}
 
 		p.wg.Add(1)
-		go p.heartbeatLoop()
+		// The overridden interval is handed to the loop as a value, the same
+		// shape Start() uses (issue #131).
+		go p.heartbeatLoop(p.heartbeatInterval)
 
 		time.Sleep(100 * time.Microsecond)
 		p.Stop()
@@ -1939,4 +2025,472 @@ func TestRemoveStaleRegistration_RemoveFailureLogsFailure(t *testing.T) {
 	if n := strings.Count(out, "[portal] cleanup:"); n != 1 {
 		t.Errorf("exactly one cleanup log line expected, got %d:\n%s", n, out)
 	}
+}
+
+// D3's third branch: an unlink that finds the entry ALREADY GONE is the outcome
+// cleanup wanted, not a failure. Every daemon runs this sweep on the same
+// cleanupInterval with a fixed phase offset, so two daemons race on the same
+// entry and the loser gets ENOENT; the owner's own graceful Stop() unlinks its
+// file against a peer's sweep the same way. Both stay OFF the failure channel —
+// routing them there would dilute the failures D3 exists to surface (ENOTEMPTY,
+// permissions, a full disk) into noise a reader learns to ignore, and it would
+// make "no failure line" unassertable in exactly the situation where the entry
+// really is gone.
+func TestRemoveStaleRegistration_MissingFileLogsBenignAlreadyGone(t *testing.T) {
+	tmpDir := t.TempDir()
+	victim := filepath.Join(tmpDir, "gone.json")
+
+	// The race staged: the entry is created and then unlinked before this
+	// sweep reaches it. From here a peer's sweep and the owner's Stop() are
+	// the same observable state, which is precisely why the line names both.
+	if err := os.WriteFile(victim, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(victim); err != nil {
+		t.Fatal(err)
+	}
+
+	var logBuf bytes.Buffer
+	restore := captureLog(&logBuf)
+	defer restore()
+
+	removeStaleRegistration(victim, registration{
+		InstanceID: "gone-id",
+		PID:        4242,
+		Port:       4545,
+		RepoName:   "gone-repo",
+	}, "lease-expired-tcp-unreachable")
+
+	if _, err := os.Stat(victim); !os.IsNotExist(err) {
+		t.Fatalf("a benign already-gone must not conjure the target back: %v", err)
+	}
+
+	out := logBuf.String()
+	if n := strings.Count(out, cleanupFailureLogPrefix); n != 0 {
+		t.Errorf("ENOENT is a benign outcome, so the failure channel must stay empty (found %d):\n%s", n, out)
+	}
+	if n := strings.Count(out, cleanupSuccessLogPrefix); n != 0 {
+		t.Errorf("this call unlinked nothing, so the success line must never be logged (found %d):\n%s", n, out)
+	}
+	if n := strings.Count(out, cleanupBenignGonePrefix); n != 1 {
+		t.Fatalf("expected exactly one benign already-gone line, got %d:\n%s", n, out)
+	}
+	if n := strings.Count(out, "[portal] cleanup:"); n != 1 {
+		t.Errorf("exactly one cleanup log line expected, got %d:\n%s", n, out)
+	}
+	for _, frag := range []string{
+		"stale registration gone-id ", benignGoneFragment, "file=gone.json",
+		"reason=lease-expired-tcp-unreachable", "peer sweep", "its own Stop",
+	} {
+		if !strings.Contains(out, frag) {
+			t.Errorf("benign already-gone line must contain %q:\n%s", frag, out)
+		}
+	}
+}
+
+// D2's precondition made visible, as a pure counter: no clock, no goroutine, no
+// filesystem — one pass over the rule. The rate limit has to be this small and
+// this explicit because it is the only thing standing between a dropped
+// writeRegistration error (the old code discarded every one) and "this daemon has
+// been unable to re-register for hours, and the log says nothing".
+func TestRegistrationWriteLoggerRateLimitsFailureStreaks(t *testing.T) {
+	var l registrationWriteLogger
+	boom := errors.New("mkdir registry dir: not a directory")
+
+	// Steady state: a healthy daemon never writes to this channel, which is
+	// what keeps the warning line trustworthy when it does appear.
+	if line := l.record(nil); line != "" {
+		t.Fatalf("a success before any failure must stay silent, got %q", line)
+	}
+
+	// #1 of a streak: reported at once, with the error kept verbatim.
+	if line := l.record(boom); !strings.HasPrefix(line, heartbeatWriteFailPrefix) || !strings.HasSuffix(line, boom.Error()) {
+		t.Fatalf("the first failure must be reported immediately with its error, got %q", line)
+	}
+	// #2..#9: silent, so a stall does not emit one line per tick.
+	for i := 2; i <= 9; i++ {
+		if line := l.record(boom); line != "" {
+			t.Fatalf("failure #%d of a streak must stay silent, got %q", i, line)
+		}
+	}
+	// #10: reported again — a streak that outlives its first line must not go
+	// quiet, or the rate limit would read as a recovery.
+	if line := l.record(boom); !strings.HasPrefix(line, heartbeatWriteFailPrefix) {
+		t.Fatalf("the 10th consecutive failure must be reported again, got %q", line)
+	}
+	for i := 11; i <= 19; i++ {
+		if line := l.record(boom); line != "" {
+			t.Fatalf("failure #%d of a streak must stay silent, got %q", i, line)
+		}
+	}
+	if line := l.record(boom); !strings.HasPrefix(line, heartbeatWriteFailPrefix) {
+		t.Fatalf("the 20th consecutive failure must be reported again, got %q", line)
+	}
+
+	// Success ends the streak and names its LENGTH: "it failed for 20 ticks" is
+	// the fact a diagnosis needs, and it is unrecoverable after a reset.
+	line := l.record(nil)
+	if !strings.Contains(line, writeRecoveredInfix+"20 ") {
+		t.Fatalf("recovery must report the streak length 20, got %q", line)
+	}
+	// The counter is really reset: the next failure is a FIRST failure again
+	// (immediate line), and the success that ends that one-tick streak reports
+	// 1 — not 11, not 21.
+	if line := l.record(boom); !strings.HasPrefix(line, heartbeatWriteFailPrefix) {
+		t.Fatalf("after a recovery the next failure is a first failure again and must be reported, got %q", line)
+	}
+	if line := l.record(nil); !strings.Contains(line, writeRecoveredInfix+"1 ") {
+		t.Fatalf("a streak of one failed attempt must recover reporting length 1, got %q", line)
+	}
+	if line := l.record(nil); line != "" {
+		t.Fatalf("back in the steady state, silence again, got %q", line)
+	}
+	// A brand-new streak restarts the THRESHOLD from one as well — #1 at once,
+	// #2..#9 silent, #10 again — which is what proves the reset reached the
+	// counter and not just the "already logged" flag.
+	if line := l.record(boom); !strings.HasPrefix(line, heartbeatWriteFailPrefix) {
+		t.Fatalf("the first failure of a brand-new streak must be reported at once, got %q", line)
+	}
+	for i := 2; i <= 9; i++ {
+		if line := l.record(boom); line != "" {
+			t.Fatalf("failure #%d of the NEW streak must stay silent, got %q", i, line)
+		}
+	}
+	if line := l.record(boom); !strings.HasPrefix(line, heartbeatWriteFailPrefix) {
+		t.Fatalf("the 10th failure of the new streak must be reported again, got %q", line)
+	}
+	if line := l.record(nil); !strings.Contains(line, writeRecoveredInfix+"10 ") {
+		t.Fatalf("the new streak's recovery must report ITS length (10), not carry over the old one, got %q", line)
+	}
+	if line := l.record(nil); line != "" {
+		t.Fatalf("silence again after the second recovery, got %q", line)
+	}
+}
+
+// D2's precondition through the REAL goroutine: registry dir is a plain FILE,
+// so os.MkdirAll fails deterministically with ENOTDIR — no chmod, no root, no
+// filesystem-specific permission semantics to lean on, and no injected seam to
+// argue about. The heartbeat runs for real on an injected 20 ms tick and the log
+// is polled concurrently (syncLogWriter), because the warning lands on a tick the
+// test does not control.
+func TestHeartbeatLoopLogsRegistrationWriteFailures(t *testing.T) {
+	tmpDir := t.TempDir()
+	blocker := filepath.Join(tmpDir, "blocked")
+	if err := os.WriteFile(blocker, []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	w := &syncLogWriter{}
+	restore := captureLog(w)
+	defer restore()
+
+	p := New(Config{
+		PortalPort:   openPort(t),
+		InstancePort: closedPort(t),
+		Host:         "localhost",
+		AuthToken:    "test-token",
+		RegistryDir:  blocker,
+		RepoName:     "wfail131",
+		RepoHash:     "wfail131",
+		WorktreePath: "/path/to/wfail131",
+	})
+	// Before the goroutine starts — the only legal override point.
+	p.heartbeatInterval = 20 * time.Millisecond
+
+	p.wg.Add(1)
+	started := time.Now()
+	go p.heartbeatLoop(p.heartbeatInterval)
+
+	// Poll for the FIRST failure line within 3 s; at 20 ms it lands in ~1 tick,
+	// so the deadline only absorbs scheduling noise, not a missing feature.
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		if strings.Contains(w.String(), heartbeatWriteFailPrefix) {
+			break
+		}
+		if !time.Now().Before(deadline) {
+			close(p.done)
+			p.wg.Wait()
+			t.Fatalf("heartbeat never logged a write failure within 3s against an unwritable registry dir:\n%s", w.String())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	// Stay in the streak past its tenth tick so the SECOND line is observed too:
+	// a rate limit that goes silent forever is indistinguishable from a healed
+	// daemon. ≥15 ticks at 20 ms, so #1 and #10 are both in the window.
+	for time.Since(started) < 350*time.Millisecond {
+		time.Sleep(10 * time.Millisecond)
+	}
+	close(p.done)
+	p.wg.Wait()
+
+	out := w.String()
+	lines := strings.Count(out, heartbeatWriteFailPrefix)
+	if lines < 2 {
+		t.Errorf("a streak of ≥15 failed ticks must have produced at least the #1 and #10 lines, got %d:\n%s", lines, out)
+	}
+	if lines > 8 {
+		t.Errorf("the failure channel is rate-limited (every 10th tick), got %d lines for ≥15 ticks:\n%s", lines, out)
+	}
+	for _, frag := range []string{"mkdir registry dir", "not a directory", blocker} {
+		if !strings.Contains(out, frag) {
+			t.Errorf("the failure line must carry %q (operation context + OS error + which dir):\n%s", frag, out)
+		}
+	}
+	// Nothing ever succeeded, so no recovery line may exist — the recovery line
+	// is only ever emitted by a success that ends a streak.
+	if n := strings.Count(out, writeRecoveredInfix); n != 0 {
+		t.Errorf("no write ever succeeded, so no recovery line may be logged (found %d):\n%s", n, out)
+	}
+}
+
+// The other half of the same wiring: a healthy heartbeat says NOTHING here. Without
+// this, "the warning channel got a line" would be uninteresting because the channel
+// was always noisy.
+func TestHeartbeatLoopStaysSilentWhileWritesSucceed(t *testing.T) {
+	w := &syncLogWriter{}
+	restore := captureLog(w)
+	defer restore()
+
+	p := New(Config{
+		PortalPort:   openPort(t),
+		InstancePort: closedPort(t),
+		Host:         "localhost",
+		AuthToken:    "test-token",
+		RegistryDir:  t.TempDir(),
+		RepoName:     "wsilent131",
+		RepoHash:     "wsilent131",
+		WorktreePath: "/path/to/wsilent131",
+	})
+	p.heartbeatInterval = 20 * time.Millisecond
+
+	p.wg.Add(1)
+	go p.heartbeatLoop(p.heartbeatInterval)
+	time.Sleep(350 * time.Millisecond) // ≥15 successful ticks
+	close(p.done)
+	p.wg.Wait()
+
+	out := w.String()
+	if n := strings.Count(out, heartbeatWriteFailPrefix); n != 0 {
+		t.Errorf("every write succeeded, so no failure line may be logged (found %d):\n%s", n, out)
+	}
+	if n := strings.Count(out, writeRecoveredInfix); n != 0 {
+		t.Errorf("no streak ever opened, so no recovery line may be logged (found %d):\n%s", n, out)
+	}
+	if _, err := os.Stat(filepath.Join(p.cfg.RegistryDir, p.instanceID+".json")); err != nil {
+		t.Fatalf("the silent ticks must still have written the registration: %v", err)
+	}
+}
+
+// Start()'s FIRST write gets its own line. This is beyond the review's literal
+// ask, and it closes the same hole one step earlier: at that point the heartbeat
+// loop does not exist yet, so a dropped error would leave a running daemon
+// invisible to the Dashboard with nothing in the log at all.
+func TestStartLogsInitialRegistrationWriteFailure(t *testing.T) {
+	tmpDir := t.TempDir()
+	blocker := filepath.Join(tmpDir, "blocked")
+	if err := os.WriteFile(blocker, []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	w := &syncLogWriter{}
+	restore := captureLog(w)
+	defer restore()
+
+	p := New(Config{
+		PortalPort:   openPort(t),
+		InstancePort: closedPort(t),
+		Host:         "localhost",
+		AuthToken:    "test-token",
+		RegistryDir:  blocker,
+		RepoName:     "startfail131",
+		RepoHash:     "startfail131",
+		WorktreePath: "/path/to/startfail131",
+	})
+	if err := p.Start(); err != nil {
+		t.Fatalf("Start must still come up and wire its loops despite the failed write: %v", err)
+	}
+	defer p.Stop()
+
+	out := w.String()
+	if n := strings.Count(out, initialWriteFailPrefix); n != 1 {
+		t.Fatalf("expected exactly one initial-write warning, got %d:\n%s", n, out)
+	}
+	for _, frag := range []string{"mkdir registry dir", "not a directory", blocker} {
+		if !strings.Contains(out, frag) {
+			t.Errorf("the initial-write warning must carry %q:\n%s", frag, out)
+		}
+	}
+	// The two channels stay distinct: the heartbeat never ticked (default
+	// 60 s, this test lasts milliseconds), so its line cannot be this one.
+	if n := strings.Count(out, heartbeatWriteFailPrefix); n != 0 {
+		t.Errorf("no heartbeat tick has happened yet, so only the initial-write line may appear (found %d):\n%s", n, out)
+	}
+}
+
+// TestCell5DeletionThenHeartbeatRestores nails the END-TO-END combination the
+// CHANGELOG promises for matrix cell 5 — the one intentional exception to the
+// list side's semantics — and D2's self-heal: a peer deletes a live owner's
+// registration because its heartbeat looks expired and its port is unreachable,
+// and the owner's own next heartbeat puts the file back whole. Both halves run
+// for real over one shared RegistryDir: owner B through Start()/heartbeatLoop,
+// cleaner A through cleanupStaleRegistrations. No hand-called primitive stands in
+// for the wiring — a hand-called writeRegistration would prove neither the tick
+// nor the sweep (issue #131).
+func TestCell5DeletionThenHeartbeatRestores(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// PortalPort is held by a live listener so claimerLoop USUALLY cannot bind
+	// it and no real HTTP server starts. Not a guarantee: on a dual-stack host
+	// "localhost" can resolve to ::1 while this listener sits on 127.0.0.1, in
+	// which case B does serve HTTP — harmless for every assertion below, and
+	// the deferred Stop() cleans up both branches. InstancePort is a CLOSED
+	// port: cell 5's TCP half must fail.
+	portalPort := openPort(t)
+	instancePort := closedPort(t)
+
+	b := New(Config{
+		PortalPort:   portalPort,
+		InstancePort: instancePort,
+		Host:         "localhost",
+		AuthToken:    "test-token",
+		RegistryDir:  tmpDir,
+		RepoName:     "cell5-repo",
+		RepoHash:     "cell5",
+		WorktreePath: "/path/to/cell5",
+	})
+	// Before Start() — the only legal override point. LONGER than the other
+	// heartbeat tests on purpose: the tamper→peer-sweep pair below has to land
+	// inside one tick, and at 1 s that window is generous rather than tight.
+	b.heartbeatInterval = time.Second
+
+	if err := b.Start(); err != nil {
+		t.Fatalf("owner Start: %v", err)
+	}
+	defer b.Stop()
+
+	regFile := filepath.Join(tmpDir, b.instanceID+".json")
+
+	// Wait for B's first write, and take started_at from the FILE: the
+	// post-restore comparison must be against what the cleaner saw, not against
+	// a value this test happens to hold in memory.
+	var startedAt string
+	firstDeadline := time.Now().Add(3 * time.Second)
+	for {
+		if raw, err := os.ReadFile(regFile); err == nil {
+			var reg registration
+			if json.Unmarshal(raw, &reg) == nil && reg.InstanceID == b.instanceID && reg.HeartbeatAt != "" {
+				startedAt = reg.StartedAt
+				break
+			}
+		}
+		if !time.Now().Before(firstDeadline) {
+			t.Fatalf("owner never wrote %s within 3s: Start()'s initial write is missing", regFile)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	stale := staleHeartbeat()
+	tampered, err := json.Marshal(registration{
+		InstanceID:  b.instanceID,
+		PID:         os.Getpid(),
+		Port:        instancePort,
+		Host:        "localhost",
+		RepoName:    "cell5-repo",
+		RepoHash:    "cell5",
+		StartedAt:   startedAt,
+		Path:        "/path/to/cell5",
+		HeartbeatAt: stale,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The peer cleaner: never started, so it contributes a sweep and nothing
+	// else — no heartbeat of its own, no portal port, no registration of its own
+	// in this directory.
+	a := New(Config{RegistryDir: tmpDir})
+
+	// Sabotage, then sweep. The tampered file stands for a clock step forward or
+	// a skipped tick landing the live owner in cell 5: PID alive (this test
+	// process), heartbeat expired (a fixed 2 h), TCP unreachable. The pair is
+	// retried because the tamper has to survive until the sweep reaches it — if a
+	// tick rewrote the file first, cell 3 correctly refuses to delete and the
+	// next attempt is the one that counts.
+	var tamperAt time.Time
+	sweepDeadline := time.Now().Add(3 * time.Second)
+	for {
+		tamperAt = time.Now()
+		if err := os.WriteFile(regFile, tampered, 0o600); err != nil {
+			t.Fatalf("tamper: %v", err)
+		}
+		a.cleanupStaleRegistrations()
+		if _, err := os.Stat(regFile); os.IsNotExist(err) {
+			break
+		}
+		if !time.Now().Before(sweepDeadline) {
+			t.Fatalf("the peer sweep never removed the tampered cell-5 registration (PID alive, heartbeat %q, port %d closed):\n%s",
+				stale, instancePort, mustRead(t, regFile))
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	// The self-heal: B's own next tick rebuilds the file, whole.
+	var restored registration
+	healDeadline := time.Now().Add(3 * time.Second)
+	for {
+		if raw, err := os.ReadFile(regFile); err == nil {
+			var reg registration
+			if json.Unmarshal(raw, &reg) == nil && reg.InstanceID == b.instanceID && reg.HeartbeatAt != stale {
+				restored = reg
+				break
+			}
+		}
+		if !time.Now().Before(healDeadline) {
+			t.Fatalf("owner heartbeat never rebuilt %s within 3s of its 1s tick: cell 5 deletion is not self-healing:\n%s",
+				regFile, mustRead(t, regFile))
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	if restored.PID != os.Getpid() || restored.Port != instancePort || restored.Host != "localhost" ||
+		restored.RepoName != "cell5-repo" || restored.RepoHash != "cell5" || restored.Path != "/path/to/cell5" {
+		t.Fatalf("the rebuilt registration lost fields: %+v", restored)
+	}
+	// started_at never drifts across the delete/rebuild cycle.
+	if restored.StartedAt != startedAt {
+		t.Fatalf("started_at drifted across the self-heal: %q -> %q", startedAt, restored.StartedAt)
+	}
+	hb, err := time.Parse(time.RFC3339, restored.HeartbeatAt)
+	if err != nil {
+		t.Fatalf("rebuilt heartbeat_at %q is not RFC3339: %v", restored.HeartbeatAt, err)
+	}
+	// RFC3339 has second granularity, so the tightest honest statement is that
+	// the stamp is not older than the second the tamper landed in — and since
+	// the file was observed DELETED after that instant, a stamp from that second
+	// or later can only come from a write after the deletion.
+	if hb.Before(tamperAt.Truncate(time.Second)) {
+		t.Fatalf("rebuilt heartbeat_at %v predates the tamper at %v — the file was never rewritten", hb, tamperAt)
+	}
+	if time.Since(hb) > registrationLease {
+		t.Fatalf("rebuilt heartbeat_at %v is already past the lease: the restored file is not a live lease", hb)
+	}
+
+	// The loop closes: the rebuilt file is now protected by cell 3, so the same
+	// cleaner that deleted it must leave it alone.
+	a.cleanupStaleRegistrations()
+	if _, err := os.Stat(regFile); err != nil {
+		t.Fatalf("the peer sweep deleted a registration whose heartbeat is fresh (cell 3 must keep it): %v", err)
+	}
+}
+
+// mustRead is a failure-path helper: it dumps a file's content into a Fatalf
+// message, and only ever runs on a path that is about to fail the test.
+func mustRead(t *testing.T, path string) string {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Sprintf("<unreadable: %v>", err)
+	}
+	return string(raw)
 }
