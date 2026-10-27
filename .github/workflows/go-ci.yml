@@ -60,11 +60,15 @@ jobs:
       - name: Run browser-layer node tests
         run: node --test 'internal/ui/testdata/*.test.mjs'
 
-      # Race detector scoped to this PR's concurrent code (WS mux + dsh-web
-      # bridge/proxy); the wider suite is intentionally not race-enabled —
-      # pre-existing unrelated races would turn CI red.
-      - name: Run tests with race detector (ws + dsh_web)
-        run: go test -race -count=1 ./internal/ws/ ./internal/instance/dsh_web/
+      # Race detector scoped to the concurrent code this PR touches: the WS
+      # mux, the dsh-web bridge/proxy, and internal/app's runtime-health
+      # sampler/meter/fault tests (~2.2k lines of new concurrent code in
+      # runtime_health*.go, verified green under -race on both review sides
+      # locally — which is exactly why it joins the gate instead of sitting
+      # outside it). The wider suite stays intentionally NOT race-enabled:
+      # pre-existing unrelated races in other packages would turn CI red.
+      - name: Run tests with race detector (app + ws + dsh_web)
+        run: go test -race -count=1 ./internal/app/ ./internal/ws/ ./internal/instance/dsh_web/
 
       # Reasonix upstream contract check (opt-in, see
       # internal/instance/reasonix/contract_test.go): runners without a

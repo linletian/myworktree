@@ -689,7 +689,17 @@ attribution instrument, not a verdict.
   goroutine profile (`pprof.Lookup("goroutine").WriteTo(w, 1)` — TEXT, not
   gzipped protobuf) is what the 30 min cooldown bounds (≤ ~48 dumps/day), so
   a stuck leak shows its slope without flooding the log. The profile is a
-  standing instrument, never a crash traceback.
+  standing instrument, never a crash traceback. A dump that FAILS hands its
+  cooldown slot back (the pre-claim stamp is restored exactly), so the retry
+  lands on the next tick (≤ 60 s) instead of losing half an hour of evidence
+  to a dump that never happened. The dump leaves in ONE `Printf`, which is
+  what makes it one grep-runnable block, and `bytes=` reports the size paid
+  for it; the price is logger-mutex hold time that scales with the leak it is
+  reporting — a few hundred KB (milliseconds) at the 1000-goroutine threshold,
+  several MB to tens of MB (tens to hundreds of milliseconds of write latency,
+  with `[tty-metrics]` and request logs queued behind it) at a few thousand to
+  tens of thousands of live goroutines — serialised, never dropped, and capped
+  at ~48 such writes a day.
   `MYWORKTREE_RUNTIME_HEALTH_GOROUTINE_ALERT` moves the threshold; ≤ 0 falls
   back to the default (an alert on every tick is noise, not an alert).
 - **Per-endpoint attribution.** *#130 died with 48 live goroutines out of
@@ -702,7 +712,11 @@ attribution instrument, not a verdict.
   requests fall back to `(!pattern:METHOD:/path)` built from
   `r.URL.EscapedPath()` — never the decoded `URL.Path`, because the fallback
   key is unauthenticated input and a decoded space/newline would break the
-  space-delimited layout and forge `[runtime-health]` tokens. The whole map is
+  space-delimited layout and forge `[runtime-health]` tokens. The same input is
+  bounded in LENGTH too (96 bytes per key, an ASCII `+over` marking a cut
+  path) and in DELIMITERS (`,` `(` `)` → `%2C %28 %29, which `EscapedPath()`
+  leaves raw), so 64 keys cost ~6 KB instead of up to ~64 MB of megabyte-long
+  paths, and `top=(…)` splits on `", "` with no ambiguity. The whole map is
   capped at 64 keys with everything past the cap folding into `(!capped)`;
   accepted limitation: before folding starts, unauthenticated random paths can
   occupy real keys and crowd the visible top-5 — the bound is the contract,

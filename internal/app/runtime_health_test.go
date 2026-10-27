@@ -2,6 +2,7 @@ package app
 
 import (
 	"bytes"
+	"errors"
 	"log"
 	"net/http"
 	"net/http/httptest"
@@ -288,6 +289,87 @@ func TestRuntimeHealthAlertDumpsOncePerCooldown(t *testing.T) {
 	}
 }
 
+// A dump that FAILS must not spend the cooldown it never used (issue #130
+// review R5). The CAS stamps the slot BEFORE the dump runs, so a transient
+// failure — pprof's own walk hitting a moment when the profile cannot be
+// written — would otherwise sit out the full 30 minutes for a dump that never
+// happened, and the operator loses the next ~30 samples of exactly the leak
+// being investigated. The rollback restores the pre-claim stamp exactly, so
+// the retry lands on the NEXT tick (≤60 s).
+//
+// Driven through the seam, on the production cooldown, and with every tick
+// called by this goroutine (no Start()), so no timing is in the balance: the
+// second tick is immediate, and the third proves the cooldown still works
+// after the retry succeeded.
+func TestRuntimeHealthDumpFailureRollsBackTheCooldown(t *testing.T) {
+	t.Parallel()
+	h, out, _ := newTestRuntimeHealth(t, time.Hour, 1)
+
+	// The seam counts attempts and fails exactly one named attempt, so the
+	// failure is a fact the test schedules rather than a race it hopes for.
+	var attempts atomic.Int64
+	var failOn atomic.Int64
+	failOn.Store(1)
+	h.dumpProfile = func(w *bytes.Buffer) error {
+		if attempts.Add(1) == failOn.Load() {
+			return errors.New("injected dump failure")
+		}
+		_, _ = w.WriteString("fake goroutine profile\n")
+		return nil
+	}
+
+	// Over the threshold of 1 for the whole test, so the alert condition is a
+	// STATE and every tick below really is an alert.
+	var wg sync.WaitGroup
+	release := make(chan struct{})
+	for i := 0; i < 3; i++ {
+		wg.Add(1)
+		go func() { defer wg.Done(); <-release }()
+	}
+	defer close(release)
+	time.Sleep(30 * time.Millisecond)
+
+	// Phase A — prev was 0 (never dumped): a failed dump must leave it 0, not
+	// a fresh stamp, and the retry must be the very next tick.
+	h.tick()
+	if got := attempts.Load(); got != 1 {
+		t.Fatalf("dump attempts = %d after the first alert, want 1", got)
+	}
+	if !strings.Contains(out.String(), "[runtime-health] goroutine-dump failed: injected dump failure") {
+		t.Fatalf("the failure must be logged as it happens, log=%q", out.String())
+	}
+	if got := h.lastDumpNano.Load(); got != 0 {
+		t.Fatalf("lastDumpNano = %d after a FAILED dump, want the 0 it was before the claim — a failed dump must hand the slot back", got)
+	}
+
+	h.tick()
+	if got := attempts.Load(); got != 2 {
+		t.Fatalf("dump attempts = %d on the tick right after a failed dump, want 2 — the retry belongs to the NEXT tick (≤60 s), not to the far side of a 30 min cooldown", got)
+	}
+	if !strings.Contains(out.String(), "[runtime-health] goroutine-dump bytes=") {
+		t.Fatalf("the retried dump must reach the log, log=%q", out.String())
+	}
+	if got := h.lastDumpNano.Load(); got == 0 {
+		t.Fatal("a SUCCESSFUL dump must stamp the cooldown — the rollback must not disable the guard")
+	}
+
+	// Phase B — the cooldown is live again: the next tick must NOT dump.
+	h.tick()
+	if got := attempts.Load(); got != 2 {
+		t.Fatalf("dump attempts = %d on a cooled tick, want 2 — the rollback is for failures only", got)
+	}
+
+	// Phase C — exact restore, not a zeroing: with a real earlier stamp, the
+	// failed dump must put THAT number back.
+	prev := time.Now().Add(-h.dumpCooldown - time.Second).UnixNano()
+	h.lastDumpNano.Store(prev)
+	failOn.Store(attempts.Load() + 1)
+	h.tick()
+	if got := h.lastDumpNano.Load(); got != prev {
+		t.Fatalf("lastDumpNano = %d after a failed dump that started from %d, want the exact pre-claim stamp restored — rolling back to 0 would discard a cooldown the process had already earned", got, prev)
+	}
+}
+
 // The alert must NOT fire at or below the threshold: an instrument that cries
 // wolf at the floor trains the reader to ignore the prefix.
 func TestRuntimeHealthAlertFiresOnlyAboveThreshold(t *testing.T) {
@@ -456,6 +538,149 @@ func TestRuntimeHealthKeyPatternAndFallback(t *testing.T) {
 	for _, c := range keyCtl {
 		if c < 0x20 {
 			t.Fatalf("fallback key %q contains a raw control character %#U", keyCtl, c)
+		}
+	}
+}
+
+// The fallback key is the only unauthenticated, unbounded input in the key
+// space, so BOTH of its dimensions are bounded (issue #130 review R5): the
+// COUNT by runtimeHealthMaxEndpointKeys, and here the DELIMITERS and the
+// LENGTH.
+//
+// The delimiter half is a real hazard, not a hypothetical one, and the test
+// proves the hazard before it pins the fix: `EscapedPath()` leaves `,` `(`
+// `)` RAW (`,` is a path sub-delim RFC 3986 §3.3 allows unescaped, and the
+// parens ride through RawPath) — verified by running it, see the precondition
+// below. A raw `,` breaks a reader that splits `top=(a 1/2, b 0/1)` on the
+// comma, and a raw `)` closes the `top=(…)` wrapper for a reader that matches
+// the first one. Both get percent form here, so every key is one token no
+// reader can split at the wrong place.
+func TestRuntimeHealthFallbackKeyEscapesDelimiters(t *testing.T) {
+	t.Parallel()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/instances/log", func(http.ResponseWriter, *http.Request) {})
+
+	target := "/scan/a,b(c)"
+	r := httptest.NewRequest(http.MethodGet, target, nil)
+	if !strings.Contains(r.URL.EscapedPath(), ",") || !strings.Contains(r.URL.EscapedPath(), "(") {
+		t.Fatalf("precondition broken: EscapedPath(%q) = %q, want the raw comma and parens still present — without that this test proves nothing", target, r.URL.EscapedPath())
+	}
+	key := runtimeHealthKey(mux, r)
+	if key != "(!pattern:GET:/scan/a%2Cb%28c%29)" {
+		t.Fatalf("key=%q, want \"(!pattern:GET:/scan/a%%2Cb%%28c%%29)\" — the fallback path's , ( ) in percent form, the wrapper's own parens raw", key)
+	}
+	body := strings.TrimSuffix(strings.TrimPrefix(key, runtimeHealthUnmatchedPrefix), ")")
+	if strings.ContainsAny(body, ",()") {
+		t.Fatalf("fallback key body %q still carries a raw , ( or ) — the top=(…) field would split at a delimiter the key does not own", body)
+	}
+	// Registered patterns pass through verbatim: this repo registers no comma
+	// and no parenthesis in any pattern (grep over internal/app/app.go's 41
+	// mux.Handle* calls: zero matches), so nothing real is rewritten here.
+	if got := runtimeHealthKey(mux, httptest.NewRequest(http.MethodGet, "/api/instances/log", nil)); got != "/api/instances/log" {
+		t.Fatalf("registered-pattern key=%q, want the verbatim pattern — the escaping is for the fallback path only", got)
+	}
+	// The whitespace/control-char contract the %20/%0A cases pin stays green
+	// on this input too (0x7f included: "no control characters" is the whole
+	// ASCII control range, not just newline).
+	if strings.ContainsAny(key, " \t\n\r") {
+		t.Fatalf("fallback key %q carries whitespace", key)
+	}
+	for _, c := range key {
+		if c < 0x20 || c == 0x7f {
+			t.Fatalf("fallback key %q contains a raw control character %#U", key, c)
+		}
+	}
+}
+
+// The LENGTH half of the same contract. An 8000-byte request path is legal —
+// the only ceiling on a request line is net/http's header budget, 1 MB by
+// default — so without the clamp the map could hold 64 keys of ~1 MB each
+// (~64 MB) in the process this file exists to keep alive, and every tick line
+// would print a megabyte-long top token. With it: one bounded, marked token.
+func TestRuntimeHealthFallbackKeyLengthIsClamped(t *testing.T) {
+	t.Parallel()
+	long := "/" + strings.Repeat("x", 8000)
+	key := runtimeHealthKey(nil, httptest.NewRequest(http.MethodGet, long, nil))
+	if len(key) > runtimeHealthMaxFallbackKeyLen {
+		t.Fatalf("fallback key = %d bytes from an %d-byte path, want ≤ %d: %q", len(key), len(long), runtimeHealthMaxFallbackKeyLen, key)
+	}
+	if !strings.HasSuffix(key, runtimeHealthFallbackTruncationMarker+")") {
+		t.Fatalf("key %q must end with the ASCII truncation marker before the closing paren, so a reader can tell a clamped key from a whole path", key)
+	}
+	if strings.ContainsAny(key, " \t\n\r") {
+		t.Fatalf("clamped key %q carries whitespace — truncation must not break the single-token contract", key)
+	}
+	for _, c := range key {
+		if c < 0x20 || c > 0x7e {
+			t.Fatalf("clamped key %q carries a non-ASCII or control byte %#U — the truncation marker and the cut are ASCII-only by contract", key, c)
+		}
+	}
+	// The retained half is the real prefix of the real path, not a stub: a
+	// reader must still be able to recognise the endpoint it is looking at.
+	body := strings.TrimSuffix(strings.TrimPrefix(key, runtimeHealthUnmatchedPrefix+http.MethodGet+":"), ")")
+	retained := strings.TrimSuffix(body, runtimeHealthFallbackTruncationMarker)
+	if len(retained) < 8 || !strings.HasPrefix(long, retained) {
+		t.Fatalf("retained path %q is not a prefix of the request path %q", retained, long)
+	}
+	// The bound holds for every method, not just GET — the method is
+	// attacker-chosen too, so it is clamped through the same helper.
+	for _, method := range []string{http.MethodGet, http.MethodDelete, "PROPFIND", strings.Repeat("M", 200)} {
+		k := runtimeHealthKey(nil, httptest.NewRequest(method, long, nil))
+		if len(k) > runtimeHealthMaxFallbackKeyLen {
+			t.Fatalf("method %q: key = %d bytes, want ≤ %d: %q", method, len(k), runtimeHealthMaxFallbackKeyLen, k)
+		}
+	}
+	// A path made of percent escapes must not be cut INSIDE one: a dangling
+	// `%` or `%2` is a broken escape a percent-decoding reader chokes on, and
+	// the cut position moves with the prefix, so this input walks the whole
+	// remainder class of the budget.
+	for _, pad := range []string{"", "a", "aa", "aaa", "aaaa"} {
+		target := "/" + pad + strings.Repeat("%2C", 4000)
+		k := runtimeHealthKey(nil, httptest.NewRequest(http.MethodGet, target, nil))
+		if len(k) > runtimeHealthMaxFallbackKeyLen {
+			t.Fatalf("key = %d bytes, want ≤ %d (pad %q)", len(k), runtimeHealthMaxFallbackKeyLen, pad)
+		}
+		b := strings.TrimSuffix(strings.TrimPrefix(k, runtimeHealthUnmatchedPrefix+http.MethodGet+":"), ")")
+		r := strings.TrimSuffix(b, runtimeHealthFallbackTruncationMarker)
+		if strings.HasSuffix(r, "%") || (len(r) >= 2 && r[len(r)-2] == '%') {
+			t.Fatalf("clamped path %q is cut inside a %%XX escape — the cut must back off to a whole escape boundary", r)
+		}
+	}
+}
+
+// The payoff of both bounds in one place: the rendered `top=(…)` field splits
+// on `", "` with NO ambiguity, even with comma-and-paren paths in the meter.
+// This is the reader contract every grep/awk collector of these lines rests
+// on, and before the escaping it was false — the raw comma inside
+// `/scan/a,b(c)` produced a fourth field.
+func TestRuntimeHealthTopFieldsSplitWithoutAmbiguity(t *testing.T) {
+	t.Parallel()
+	h, _, _ := newTestRuntimeHealth(t, time.Hour, 1<<31-1)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/instances/log", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
+	hm := (&Server{mux: mux, runtimeHealth: h}).withRuntimeHealth(mux)
+
+	for _, target := range []string{"/api/instances/log", "/scan/a,b(c)", "/scan/d,e(f)"} {
+		rec := httptest.NewRecorder()
+		hm.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, target, nil))
+	}
+
+	_, _, top := h.snapshot()
+	if !strings.HasPrefix(top, "(") || !strings.HasSuffix(top, ")") {
+		t.Fatalf("top=%q, want the parenthesised wrapper", top)
+	}
+	body := strings.TrimSuffix(strings.TrimPrefix(top, "("), ")")
+	fields := strings.Split(body, ", ")
+	if len(fields) != 3 {
+		t.Fatalf("top split on \", \" into %d fields %q, want exactly 3 — one per metered endpoint; a raw comma inside a key is what makes this wrong", len(fields), fields)
+	}
+	if strings.Count(body, ",") != len(fields)-1 {
+		t.Fatalf("body %q carries %d commas for %d separators — every comma in top=(…) must be a separator", body, strings.Count(body, ","), len(fields)-1)
+	}
+	fieldRE := regexp.MustCompile(`^\S+ \d+/\d+$`)
+	for _, f := range fields {
+		if fieldRE.FindStringSubmatch(f) == nil {
+			t.Fatalf("top field %q is not `pattern inflight/total` — the render or the key escaping is off: full top=%q", f, top)
 		}
 	}
 }

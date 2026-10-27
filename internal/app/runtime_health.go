@@ -210,6 +210,40 @@ const (
 	// lines is space-delimited, so a key with a space in it would break the
 	// grep/awk readers the way the [tty-metrics] columns already are.
 	runtimeHealthUnmatchedPrefix = "(!pattern:"
+
+	// runtimeHealthMaxFallbackKeyLen clamps the WHOLE fallback key, which
+	// until now was bounded in COUNT (runtimeHealthMaxEndpointKeys) but not
+	// in LENGTH. Two motivations, both arithmetic:
+	//
+	//   1. Worst-case residency. The key count is capped at 64, but a
+	//      fallback key carries an attacker-chosen path, and the only thing
+	//      bounding a request line is the header budget — net/http reads
+	//      headers through a buffer sized from MaxHeaderBytes, default
+	//      DefaultMaxHeaderBytes = 1<<20 (GOROOT go1.25.0
+	//      net/http/server.go:931, and the bufio sizing at :940-942). So 64
+	//      keys × ~1 MB paths ≈ 64 MB of attribution map standing in the
+	//      very process this file exists to keep alive. Clamped to 96 bytes
+	//      per key the same cap costs ~6 KB plus counters — three orders of
+	//      magnitude less, and no header budget can move it.
+	//   2. The top-N render. Every tick line and every alert line prints the
+	//      top 5 keys verbatim, so one megabyte-long key would make every
+	//      line a megabyte long, at one line per minute. The clamp keeps the
+	//      lines the size the reader greps.
+	//
+	// 96 is "a whole API path at a glance" — every registered pattern in
+	// this repo is shorter, so real endpoints are never truncated and only
+	// scanner noise is.
+	runtimeHealthMaxFallbackKeyLen = 96
+
+	// runtimeHealthFallbackTruncationMarker is the ASCII tail a clamped key
+	// carries, so a reader can tell "this key was cut" from "this is the
+	// whole path" instead of silently reading a prefix as the truth. ASCII
+	// only (no U+2026): the key's contract is a plain-ASCII, whitespace-free,
+	// grep-runnable token, and a non-ASCII marker would trade one readability
+	// problem for another. A path that happens to END with the marker text
+	// while also being over-length is the known ambiguity; it costs nothing
+	// but a slightly misleading tail on a key that was noise anyway.
+	runtimeHealthFallbackTruncationMarker = "+over"
 )
 
 // panicOnFaultSetting is the resolved answer to "should a fault panic
@@ -498,6 +532,30 @@ func (h *runtimeHealth) tick() {
 // The dump rides out in ONE Printf call, the way net/http's own panic log
 // does it, so the logger's mutex serialises it against other lines and the
 // profile cannot interleave with a concurrent tick mid-write.
+//
+// WHY ONE CALL, AND WHAT IT COSTS, QUANTIFIED. The buy: one write under the
+// logger's own mutex means the profile is one grep-runnable block — a reader
+// searching `goroutine-dump` gets the header and the body together, never a
+// header with another goroutine's tick wedged into the middle of its stack.
+// `bytes=` on the header line reports the actual size, so the cost below is
+// visible in the log rather than something the reader has to trust.
+//
+// The cost is lock hold time, and it scales with the leak it is reporting.
+// At the alert threshold (1000 live goroutines) a text profile is a few
+// hundred KB — a millisecond-scale hold. A daemon leaking for real, at a few
+// thousand to tens of thousands of live goroutines, reaches several MB to
+// tens of MB, and `log.Logger.Printf` holds its mutex across the whole write:
+// tens to hundreds of milliseconds during which every other log line in the
+// process — `[tty-metrics]`, `http: panic serving`, request logs — queues
+// behind it. Nothing is LOST (the mutex serialises, it does not drop, and a
+// ticker that misses ticks while its own goroutine is blocked simply
+// self-heals on the next interval); what is paid is latency on other
+// people's log lines, bounded by the cooldown at ≤48 such writes a day.
+//
+// Accepted deliberately: the alternative — chunked writes, or a dump that
+// releases the logger between header and body — trades a bounded, observable,
+// rare stall for the interleaved, half-a-profile output that made #130's
+// forensics ambiguous in the first place.
 func (h *runtimeHealth) alert(goroutines, inflight, total int64, top string) {
 	if h.logger != nil {
 		h.logger.Printf("[runtime-health] alert goroutines=%d threshold=%d inflight=%d reqTotal=%d top=%s",
@@ -505,19 +563,31 @@ func (h *runtimeHealth) alert(goroutines, inflight, total int64, top string) {
 	}
 
 	now := time.Now()
-	last := h.lastDumpNano.Load()
-	if last != 0 && now.Sub(time.Unix(0, last)) < h.dumpCooldown {
+	nowNano := now.UnixNano()
+	prev := h.lastDumpNano.Load()
+	if prev != 0 && now.Sub(time.Unix(0, prev)) < h.dumpCooldown {
 		return
 	}
 	// CAS claims the slot: two ticks cannot both decide to dump (they
 	// cannot — one loop — but a second producer added later inherits the
 	// guard for free rather than inheriting a race).
-	if !h.lastDumpNano.CompareAndSwap(last, now.UnixNano()) {
+	if !h.lastDumpNano.CompareAndSwap(prev, nowNano) {
 		return
 	}
 
 	var buf bytes.Buffer
 	if err := h.dumpProfile(&buf); err != nil {
+		// Give the slot back. The stamp above is a CLAIM on a dump, and this
+		// dump did not happen: leaving it stamped would make a transient
+		// failure cost the operator the next 30 minutes of evidence, with the
+		// retry landing an interval later than it needs to. Restoring `prev`
+		// — and not zero — is the exact undo: whatever the cooldown state was
+		// before the claim (including the never-dumped 0) is what stands
+		// after it, so the retry lands on the NEXT tick (≤60 s) instead of
+		// after the cooldown. The CAS only restores the value this call
+		// stamped; a producer that stamped a later slot in the meantime keeps
+		// its own claim, which is the right answer too.
+		h.lastDumpNano.CompareAndSwap(nowNano, prev)
 		if h.logger != nil {
 			h.logger.Printf("[runtime-health] goroutine-dump failed: %v", err)
 		}
@@ -665,7 +735,8 @@ func (h *runtimeHealth) snapshot() (inflight, total int64, top string) {
 //     about to do anyway.
 //  3. `(!pattern:METHOD:/path)` for a request no pattern claims (a 404, or
 //     a GODEBUG=httpmuxgo121=1 build where patterns are empty by
-//     construction) — bounded by the map cap above.
+//     construction) — bounded in COUNT by the map cap above and in LENGTH by
+//     runtimeHealthMaxFallbackKeyLen below.
 //
 // The path in the fallback key is `r.URL.EscapedPath()`, NOT `r.URL.Path`,
 // and that is a security contract, not cosmetics: `URL.Path` is the
@@ -678,12 +749,35 @@ func (h *runtimeHealth) snapshot() (inflight, total int64, top string) {
 // stays percent-escaped and the key remains exactly one whitespace-free,
 // newline-free token. The callers in this repo register no pattern with a
 // space, so patterns from step 1/2 need no cleaning; the fallback is the
-// only unbounded input and it is escaped at the source.
+// only unbounded input and it is escaped AND clamped at the source.
 //
 // The registered patterns here are path-only (`mux.HandleFunc("/api/…",
 // …)`), so the key is the endpoint path with no method on it; a pattern
 // that DOES declare a method carries it verbatim, because that is what was
-// registered.
+// registered. That pass-through — delimiters included, nothing rewritten — is
+// a checked claim, not an assumption: all 41 registrations on the main mux
+// plus the one on rxMux are `/api/…`, `/rx/`, `/login` or `/__opencode/`
+// forms, and a grep over `mux\.Handle` in internal/app/app.go finds zero
+// commas and zero parentheses inside a pattern. Cleaning them would rewrite
+// facts the route table owns, to fix a hazard that does not exist there.
+//
+// The FALLBACK path is the opposite: unauthenticated, unbounded input, so
+// both halves of the key contract are enforced at the source —
+//
+//   - delimiters: `,` `(` `)` become `%2C` `%28` `%29`. `EscapedPath()`
+//     leaves them raw (`,` is a path sub-delim RFC 3986 §3.3 allows, and
+//     `(` `)` survive verbatim through RawPath — both verified by running
+//     it), and a raw `,` splits a `top=(a 1/2, b 0/1)` field in the wrong
+//     place for any reader splitting on `,`, while a raw `)` closes the
+//     `top=(…)` wrapper early for one matching the first `)`. Escaping
+//     them keeps every key one unambiguous token.
+//   - length: the assembled key is clamped to runtimeHealthMaxFallbackKeyLen
+//     (see that constant for the 64 MB-vs-6 KB arithmetic), an over-length
+//     path keeping half of its budget plus an explicit ASCII marker.
+//
+// The method is clamped too — it is a token read off a request line capped
+// only by the header budget, so leaving it unbounded would let the same
+// megabyte of input back in through a different door.
 func runtimeHealthKey(mux *http.ServeMux, r *http.Request) string {
 	if r.Pattern != "" {
 		return r.Pattern
@@ -693,7 +787,49 @@ func runtimeHealthKey(mux *http.ServeMux, r *http.Request) string {
 			return pattern
 		}
 	}
-	return runtimeHealthUnmatchedPrefix + r.Method + ":" + r.URL.EscapedPath() + ")"
+	method := runtimeHealthClampToken(r.Method, runtimeHealthMaxFallbackKeyLen/4)
+	suffix := runtimeHealthUnmatchedPrefix + method + ":"
+	path := runtimeHealthFallbackDelimiters.Replace(r.URL.EscapedPath())
+	if budget := runtimeHealthMaxFallbackKeyLen - len(suffix) - 1; len(path) > budget {
+		path = runtimeHealthClampToken(path, budget)
+	}
+	return suffix + path + ")"
+}
+
+// runtimeHealthFallbackDelimiters is the delimiter→percent table above,
+// built once. Replace() returns the input untouched (no allocation) when no
+// delimiter is present, which is every normal path.
+var runtimeHealthFallbackDelimiters = strings.NewReplacer(",", "%2C", "(", "%28", ")", "%29")
+
+// runtimeHealthClampToken keeps s within budget bytes and says so out loud
+// with an ASCII marker, so a clamped key is visibly clamped rather than
+// quietly short.
+//
+// The cut keeps HALF of what fits, not the last byte before the wall: a
+// reader of `…/api/instances+over` still recognises the shape of the path,
+// while `…/api/instances/log/stream/…/<the whole 1 MB minus one byte>+over`
+// would have bought nothing. Bytes, not runes, are the unit because the
+// input is `EscapedPath()` output — every byte ≥0x80 is already percent
+// ASCII there, so no multi-byte sequence can be split (verified: `/ünïcode`
+// escapes to `/%C3%BCn%C3%AFcode`). The back-off keeps the cut out of the
+// middle of a `%XX` escape, which would leave a dangling `%` that a
+// percent-decoding reader would choke on.
+func runtimeHealthClampToken(s string, budget int) string {
+	if len(s) <= budget {
+		return s
+	}
+	marker := runtimeHealthFallbackTruncationMarker
+	if budget <= len(marker) {
+		// Unreachable through runtimeHealthKey (the method clamp leaves the
+		// path a ≥60-byte budget); kept because it is the branch that makes
+		// the length invariant unconditional.
+		return marker
+	}
+	keep := (budget - len(marker)) / 2
+	for keep > 0 && (s[keep-1] == '%' || (keep >= 2 && s[keep-2] == '%')) {
+		keep--
+	}
+	return s[:keep] + marker
 }
 
 // withRuntimeHealth meters one endpoint's in-flight and cumulative traffic
