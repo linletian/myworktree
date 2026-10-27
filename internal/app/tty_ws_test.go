@@ -4261,8 +4261,40 @@ func TestTTYMetricsHandshakeLineCarriesWindowFields(t *testing.T) {
 	if !strings.HasPrefix(line, wantPrefix) {
 		t.Fatalf("handshake line = %q, want the frozen column layout %q... — the columns that existed before issue #114 keep their names, order and values", line, wantPrefix)
 	}
-	if !strings.HasSuffix(line, " budgetExhausted=false windowed=true droppedFromWindow=60000 replayLogicalBytes=40000") {
-		t.Fatalf("handshake line = %q, want it to END with \" budgetExhausted=false windowed=true droppedFromWindow=60000 replayLogicalBytes=40000\" — budgetExhausted keeps its old slot, the window fields ride the end (head %d − window 40000 − since 0 = 60000 refused at the front), and replayLogicalBytes is the logical pair of replayBytes appended after them (issue #114 R1: always present, EQUAL to replayBytes on this plaintext connection; a compressed connection appends the conditional compress=true after it)", line, head)
+	// Everything up to and including replayLogicalBytes is the frozen
+	// column layout — byte-identical, in the old slots.
+	if !strings.Contains(line, " budgetExhausted=false windowed=true droppedFromWindow=60000 replayLogicalBytes=40000") {
+		t.Fatalf("handshake line = %q, want it to carry \" budgetExhausted=false windowed=true droppedFromWindow=60000 replayLogicalBytes=40000\" in that order — budgetExhausted keeps its old slot, the window fields ride the end (head %d − window 40000 − since 0 = 60000 refused at the front), and replayLogicalBytes is the logical pair of replayBytes appended after them (issue #114 R1: always present, EQUAL to replayBytes on this plaintext connection)", line, head)
+	}
+	// Issue #130 appended the ring pair AFTER replayLogicalBytes, and the
+	// two numbers are the whole point of the append: the lag is the
+	// arithmetic the incident could not see (headAtStart − since, computed
+	// here independently of the code under test), and the cap is the
+	// manager's own adaptive ring size — asserted positive rather than as a
+	// literal, because ResolveCap dispatches on the host's memory
+	// (LogBufferBytes is unset in this harness) and pinning a number would
+	// make the test machine-dependent.
+	ring := regexp.MustCompile(` replayLogicalBytes=\d+ ringCapBytes=(\d+) ringLagBytes=(\d+)$`).FindStringSubmatch(line)
+	if ring == nil {
+		t.Fatalf("handshake line = %q, want it to END with \" ringCapBytes=<n> ringLagBytes=<n>\" appended after replayLogicalBytes (issue #130: ring steady-state on the frozen line, nothing before it moved)", line)
+	}
+	// strconv inline, not the ttyParseInt helper: that one lives in
+	// tty_metrics_compress_test.go behind //go:build ttymetrics, and this
+	// file compiles in BOTH variants (it skips at runtime instead), so
+	// borrowing it here would break the untagged build outright.
+	capGot, err := strconv.ParseInt(ring[1], 10, 64)
+	if err != nil {
+		t.Fatalf("ringCapBytes %q unparsable: %v", ring[1], err)
+	}
+	lagGot, err := strconv.ParseInt(ring[2], 10, 64)
+	if err != nil {
+		t.Fatalf("ringLagBytes %q unparsable: %v", ring[2], err)
+	}
+	if lagGot != head {
+		t.Fatalf("ringLagBytes=%d, want headAtStart−since = %d−0 = %d — the lag is the arithmetic, not a re-read of the same field: %q", lagGot, head, head, line)
+	}
+	if capGot <= 0 {
+		t.Fatalf("ringCapBytes=%d, want the manager's positive adaptive ring cap: %q", capGot, line)
 	}
 }
 

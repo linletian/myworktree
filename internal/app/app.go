@@ -103,7 +103,33 @@ type Server struct {
 	// in Shutdown — see internal/monitor/sampler.go for the layered-
 	// polling contract (system signals only, never a tree walk).
 	alertSampler *monitor.AlertSampler
-	authMu       sync.Mutex
+	// runtimeHealth is the [runtime-health] tick sampler, goroutine-alert
+	// dumper and per-endpoint in-flight meter (issue #130): the instrument
+	// that has to be running when a daemon nobody is watching starts to
+	// churn goroutines. Started in Start and JOINED in Shutdown on the
+	// same contract as alertSampler next door — `done` closed by the loop
+	// itself is the no-leak proof.
+	runtimeHealth *runtimeHealth
+	// panicOnFault is the resolved MYWORKTREE_PANIC_ON_FAULT switch
+	// (issue #130), decided once in Start() and read per request by
+	// withPanicOnFault. It is a Server field and not a local because the
+	// decision has to outlive the call that made it: debug.SetPanicOnFault
+	// is PER-GOROUTINE — it sets gp.paniconfault on the calling goroutine
+	// and a new goroutine does not inherit it — so the per-request arm on
+	// each net/http connection goroutine (runtime_health.go's header) is
+	// what converts a handler-body fault into a recoverable panic; a fault
+	// in net/http's teardown defer after that defer's recover() has
+	// returned — the #130 shape — is converted but NOT caught, and still
+	// exits the process with the faulting stack.
+	panicOnFault bool
+	// setPanicOnFault is the seam over debug.SetPanicOnFault, wired to the
+	// real function in New(). A field on the Server rather than a package
+	// var so a test can record what the startup path asked for without
+	// mutating process-global runtime state out from under the parallel
+	// tests next door, which call Start() for real and must keep getting
+	// the real setter.
+	setPanicOnFault func(bool) bool
+	authMu          sync.Mutex
 	// authFails is keyed by client IP; authFailsNextSweep is the wall-clock
 	// instant at which the next piggybacked eviction of closed windows is
 	// due (see sweepExpiredAuthFailsLocked). Both are guarded by authMu, and
@@ -399,8 +425,16 @@ func New(cfg Config, logger *log.Logger) (*Server, error) {
 		// ~10s background system-level sampling (issue #111 P2); the
 		// goroutine starts in Start() and is reaped by Shutdown().
 		alertSampler: monitor.NewAlertSampler(alertSampleEvery),
-		authFails:    map[string]authFail{},
-		isSecure:     isSecure,
+		// [runtime-health] tick + goroutine alert + endpoint attribution
+		// (issue #130). Built here, started in Start(), joined in
+		// Shutdown() — and its env knobs are read ONCE here, at construction
+		// (MYWORKTREE_RUNTIME_HEALTH_INTERVAL_MS /
+		// MYWORKTREE_RUNTIME_HEALTH_GOROUTINE_ALERT), so a mid-life env edit
+		// cannot silently change the cadence of a running daemon's evidence.
+		runtimeHealth:   newRuntimeHealth(logger),
+		setPanicOnFault: debug.SetPanicOnFault,
+		authFails:       map[string]authFail{},
+		isSecure:        isSecure,
 	}
 	s.registerAPIs(mux)
 	if err := ui.Register(mux, filepath.Base(filepath.Clean(s.root)), func(r *http.Request) bool {
@@ -572,6 +606,16 @@ func (s *Server) Start() (string, error) {
 	if err := s.validateSecurity(); err != nil {
 		return "", err
 	}
+	// Issue #130: resolve the fault switch, arm the goroutine that calls
+	// Start(), and log the resolved setting once. What this call does NOT
+	// arm is the accept loop or any connection: `Serve` runs on a goroutine
+	// Start() spawns a few lines below, per-connection goroutines are
+	// spawned by Serve, and debug.SetPanicOnFault is a goroutine-local
+	// switch that a new goroutine does not inherit (runtime_health.go's
+	// header carries the GOROOT citations). The protection that would have
+	// converted #130's fault is the per-request arm inside withPanicOnFault
+	// below — on BOTH listeners.
+	s.applyPanicOnFault()
 	if err := os.MkdirAll(s.dataDir, 0o755); err != nil {
 		return "", err
 	}
@@ -630,7 +674,16 @@ func (s *Server) Start() (string, error) {
 		} else {
 			rxMux := http.NewServeMux()
 			rxMux.Handle("/rx/", &reasonixProxy{manager: s.instanceMgr, driver: s.rxDriver})
-			s.rxSrv = &http.Server{Handler: rxMux}
+			// Issue #130 (review P3): the rx listener gets the SAME two
+			// middlewares as the main listener, at the top of ITS chain —
+			// withPanicOnFault so rx connection goroutines are armed too,
+			// and withRuntimeHealth keyed by rxMux itself (NOT s.mux: rx
+			// requests dispatch against rxMux's table, which registers only
+			// /rx/, so every rx traffic lands in the /rx/ bucket). Both
+			// listeners share the one runtimeHealth — one 64-key cap, one
+			// meter, one sampling loop, no second ticker. Auth/CORS/cookie
+			// and proxy behaviour are untouched; this only meters and arms.
+			s.rxSrv = &http.Server{Handler: s.withPanicOnFault(s.withRuntimeHealthOn(rxMux, rxMux))}
 			s.rxAddr = rxLn.Addr().String()
 			go func() {
 				// A non-ErrServerClosed failure would leave web_url pointing
@@ -671,7 +724,32 @@ func (s *Server) Start() (string, error) {
 		}
 	}
 
-	h := s.withServerRevision(s.withAuth(s.mux))
+	// Issue #130: the two issue-#130 middlewares mount at the TOP of the
+	// chain, outside withAuth and outside s.mux — outside the mux on
+	// purpose, so no route registration changes, and outside auth so a
+	// rejected request still shows up in the attribution (a scanner
+	// hammering the daemon is traffic too, and the one thing this must not
+	// do is miss something).
+	//
+	// withPanicOnFault goes outermost of all: it arms THIS connection's
+	// goroutine so a non-nil-address SIGSEGV becomes a recoverable panic
+	// rather than an immediate `fatal error: fault`, and it has to be in
+	// place before the first line of handler code runs. What it buys, at
+	// its real width (v2 D1): a fault inside a handler body is caught by
+	// net/http's per-conn recover(), the connection dies, the daemon lives;
+	// a fault in net/http's teardown defer AFTER that recover() has
+	// returned — the #130 shape — still exits the process, just as an
+	// unrecovered panic naming the faulting frame instead of the runtime's
+	// own `fatal error: fault` throw. The swap trades breadth for
+	// recoverability, and the width runs the other way: the throw prints
+	// every goroutine's stack even at the default GOTRACEBACK=single, while
+	// the converted panic under `single` prints one — the evidence, with its
+	// line numbers, is in withPanicOnFault's header in runtime_health.go.
+	//
+	// withRuntimeHealth sits between them: in-flight and cumulative counts
+	// per registered pattern, and a long-lived TTY/SSE socket holds its
+	// gauge for the life of the connection by construction.
+	h := s.withPanicOnFault(s.withRuntimeHealth(s.withServerRevision(s.withAuth(s.mux))))
 	s.httpSrv = &http.Server{Handler: h}
 
 	// Background alert sampler (issue #111 P2): starts with the HTTP server
@@ -681,6 +759,13 @@ func (s *Server) Start() (string, error) {
 	if s.alertSampler != nil {
 		s.alertSampler.Start()
 	}
+
+	// [runtime-health] sampler (issue #130): the same Start/Stop pairing as
+	// the alert sampler above, for the same reason — Shutdown must not
+	// return with a loop still ticking. A zero interval (env ≤0) launches
+	// nothing at all, and that switch does NOT touch the fault arming or
+	// the endpoint meter, which ride the request path and stay live.
+	s.runtimeHealth.Start()
 
 	go func() {
 		if s.cfg.TLSCert != "" || s.cfg.TLSKey != "" {
@@ -750,6 +835,12 @@ func (s *Server) Shutdown() {
 	if s.alertSampler != nil {
 		s.alertSampler.Stop()
 	}
+	// Join the [runtime-health] loop too (issue #130), on the identical
+	// contract: Stop closes `stop` and waits on `done`, which the loop
+	// closes itself, so Shutdown returning IS the proof that no tick and
+	// no goroutine-profile dump survives it. A dump in flight during
+	// Shutdown would otherwise write into a log the process is closing.
+	s.runtimeHealth.Stop()
 	if s.rxSrv != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -3371,9 +3462,10 @@ func (s *Server) handleInstanceTTYWSLiveness(w http.ResponseWriter, r *http.Requ
 		// Issue #114 diagnostics: time the replay and record the ring's
 		// head at handshake start, so headAtStart-since sizes the replay
 		// demand even when the 8MB budget truncates it. EndOffset is a
-		// cheap read; its error (stopped instance) only degrades the
-		// metric to -1, and the branches below keep their own error
-		// handling untouched. The whole probe is const-gated: stable
+		// cheap read; its error (an unresolvable kind from Registry.Get — a
+		// merely-stopped instance answers (0, nil), manager.go:464-470) only
+		// degrades the metric to -1, and the branches below keep their own
+		// error handling untouched. The whole probe is const-gated: stable
 		// builds (no ttymetrics tag) compile this block away entirely,
 		// so the manager read happens only where the data is collected.
 		if ttyMetricsBuild {
@@ -3381,6 +3473,21 @@ func (s *Server) handleInstanceTTYWSLiveness(w http.ResponseWriter, r *http.Requ
 			if head, herr := s.instanceMgr.EndOffset(id); herr == nil {
 				conn.m.headAtStart = head
 			}
+			// Issue #130: the ring's steady-state shape on the SAME probe,
+			// so the two numbers that described the incident — the 256 MiB
+			// ceiling and the ~194 MiB the cursor was behind — come off one
+			// const-gated block instead of needing a second instrumentation
+			// pass. The two manager reads take DIFFERENT locks back to back
+			// and never nest: EndOffset acquires m.mu (manager.go:465) and
+			// releases it (manager.go:467) before returning, BufferCapBytesFor
+			// acquires stateMu (methods.go:367) — a sequential second
+			// acquisition under a different mutex, no nesting, no new lock
+			// ordering to reason about.
+			// 0 means the instance has no buffer at all (a stopped or
+			// never-started instance), which is a real answer and not a
+			// sentinel — unlike the lag, whose unknown is -1.
+			conn.m.ringCapBytes = s.instanceMgr.BufferCapBytesFor(id)
+			conn.m.ringLagBytes, conn.m.ringLagKnown = ttyRingLagBytes(conn.m.headAtStart, since)
 		}
 		if since == sinceFollowLiveEnd {
 			conn.m.mode = "follow-live-end"

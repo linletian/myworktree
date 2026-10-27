@@ -88,10 +88,15 @@ func (m *ttyConnMetrics) logHandshake(logger *log.Logger, id string, since int64
 	if m.compress {
 		compressField = " compress=true"
 	}
-	logger.Printf("[tty-metrics] handshake id=%s mode=%s since=%d headAtStart=%d published=%d replayBytes=%d replayMs=%d budgetExhausted=%v windowed=%v droppedFromWindow=%d replayLogicalBytes=%d%s",
+	// ringCapBytes/ringLagBytes (issue #130) ride AFTER
+	// replayLogicalBytes and BEFORE the conditional compress flag, so
+	// compress=true stays the last token it is today and every pre-#130
+	// column keeps its name and position — the same append-before-the-
+	// conditional-flag rule the R1 logical pair followed.
+	logger.Printf("[tty-metrics] handshake id=%s mode=%s since=%d headAtStart=%d published=%d replayBytes=%d replayMs=%d budgetExhausted=%v windowed=%v droppedFromWindow=%d replayLogicalBytes=%d%s%s",
 		id, m.mode, since, m.headAtStart, m.publishedOffset,
 		m.replayBytes, m.replayDur.Milliseconds(), m.budgetExhausted,
-		m.windowed, m.droppedFromWindow, m.replayLogicalBytes, compressField)
+		m.windowed, m.droppedFromWindow, m.replayLogicalBytes, m.ringFields(), compressField)
 }
 
 // logOverflow emits the subscriber-overflow line next to the existing
@@ -129,13 +134,22 @@ func (m *ttyConnMetrics) logOverflow(logger *log.Logger, id string, headNow int6
 
 // logSummary emits the per-connection line on handler exit, whatever the
 // exit path — normal close, overflow teardown, write error, read deadline.
+//
+// ringCapBytes/ringLagBytes (issue #130) are APPENDED at the end, after
+// logicalBytes, and repeat the pair the handshake line published — frozen at
+// handshake start, not re-sampled here (see ttyConnMetrics.ringCapBytes for
+// why a live lag is deliberately not measured on the teardown path). They
+// are on this line because the connection that matters is the one that never
+// completes a handshake: a client that dies before completeHandshake leaves
+// ONLY this line, and on that line the ring's capacity and the cursor's lag
+// were both invisible before #130.
 func (m *ttyConnMetrics) logSummary(logger *log.Logger, id string) {
 	if logger == nil {
 		return
 	}
-	logger.Printf("[tty-metrics] conn-closed id=%s aliveMs=%d binBytes=%d binFrames=%d txtFrames=%d pingFrames=%d slowWrites=%d maxWriteBlockMs=%d totalWriteBlockMs=%d wireBytes=%d logicalBytes=%d",
+	logger.Printf("[tty-metrics] conn-closed id=%s aliveMs=%d binBytes=%d binFrames=%d txtFrames=%d pingFrames=%d slowWrites=%d maxWriteBlockMs=%d totalWriteBlockMs=%d wireBytes=%d logicalBytes=%d%s",
 		id, time.Since(m.openedAt).Milliseconds(), m.binBytes, m.binFrames,
 		m.txtFrames, m.pingFrames, m.slowWrites,
 		m.maxWriteBlock.Milliseconds(), m.totalWriteBlock.Milliseconds(),
-		m.binBytes, m.logicalBytes)
+		m.binBytes, m.logicalBytes, m.ringFields())
 }
