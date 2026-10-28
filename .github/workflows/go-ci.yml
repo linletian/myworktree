@@ -84,8 +84,14 @@ jobs:
       - name: Run tests with ttymetrics tag (app + ws)
         run: go test -tags ttymetrics ./internal/app/ ./internal/ws/
 
+      # viewportdebug (issue #116) is also opt-in. Exercise the enabled path
+      # here; the default test run above proves the stable 404/no-script path.
+      - name: Run tests with viewportdebug tag (app + ui)
+        run: go test -tags viewportdebug ./internal/app/ ./internal/ui/
+
       - name: Build binaries
         run: |
           go build -v -o /tmp/myworktree ./cmd/myworktree
           go build -v -o /tmp/mw ./cmd/mw
           go build -v -tags ttymetrics -o /tmp/myworktree-ttymetrics ./cmd/myworktree
+          go build -v -tags viewportdebug -o /tmp/myworktree-viewportdebug ./cmd/myworktree

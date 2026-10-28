@@ -141,6 +141,8 @@ type Server struct {
 	ttyClients         map[string]map[string]*ttyClientState
 	ttyApplied         map[string]ttySize
 	ttyNextID          uint64
+	viewportDebug      *viewportDebugStore
+	viewportDebugOnce  sync.Once
 
 	gitRunner func(timeout time.Duration, gitRoot string, args ...string) ([]byte, error)
 }
@@ -434,6 +436,7 @@ func New(cfg Config, logger *log.Logger) (*Server, error) {
 		runtimeHealth:   newRuntimeHealth(logger),
 		setPanicOnFault: debug.SetPanicOnFault,
 		authFails:       map[string]authFail{},
+		viewportDebug:   newViewportDebugStore(),
 		isSecure:        isSecure,
 	}
 	s.registerAPIs(mux)
@@ -948,6 +951,7 @@ func (s *Server) registerAPIs(mux *http.ServeMux) {
 	mux.HandleFunc("/api/instances/log/stream", s.handleInstanceLogStream)
 	mux.HandleFunc("/api/instances/stats", s.handleInstanceStats)
 	mux.HandleFunc("/api/monitor/alerts", s.handleMonitorAlerts)
+	mux.HandleFunc("/api/viewport-debug/report", s.handleViewportDebugReport)
 	mux.HandleFunc("/api/instances/opencode", s.handleInstanceOpencodeInfo)
 	mux.HandleFunc("/api/instances/opencode/scope", s.handleInstanceOpencodeScope)
 	mux.HandleFunc("/api/instances/dsh", s.handleInstanceDshInfo)

@@ -8,7 +8,7 @@ import (
 	"net/http"
 )
 
-//go:embed static/*
+//go:embed static/index.html static/preview.html static/framework.js static/kinds static/vendor
 var staticFS embed.FS
 
 //go:embed static/preview.html
@@ -26,6 +26,11 @@ func Register(mux *http.ServeMux, repoName string, isRemote func(r *http.Request
 	}
 	title := fmt.Sprintf("<title>%s - myworktree</title>", html.EscapeString(repoName))
 	content = bytes.ReplaceAll(content, []byte("<title>myworktree</title>"), []byte(title))
+	if ViewportDebugEnabled {
+		content = bytes.ReplaceAll(content, []byte("<!-- viewport-debug -->"), []byte(`<script src="/static/viewport_debug.js"></script>`))
+	} else {
+		content = bytes.ReplaceAll(content, []byte("<!-- viewport-debug -->"), nil)
+	}
 
 	// Serve / as the embedded index.html.
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -53,7 +58,16 @@ func Register(mux *http.ServeMux, repoName string, isRemote func(r *http.Request
 		_, _ = w.Write(body)
 	})
 
-	// Static assets.
+	// Static assets. The diagnostic asset is compiled in only with the
+	// viewportdebug tag; stable builds neither embed nor serve it.
+	mux.HandleFunc("/static/viewport_debug.js", func(w http.ResponseWriter, r *http.Request) {
+		if !ViewportDebugEnabled {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
+		_, _ = w.Write(viewportDebugAsset)
+	})
 	fs := http.FS(staticFS)
 	mux.Handle("/static/", http.FileServer(fs))
 	return nil

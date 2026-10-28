@@ -220,6 +220,23 @@ func TestViewportHeightHandling(t *testing.T) {
 	t.Logf("%s", out)
 }
 
+// TestViewportDebugHandling runs the issue #116 diagnostic client tests
+// (testdata/viewport_debug.test.mjs): geometry-only snapshots, two-frame and
+// settled captures, bounded/coalesced uploads, retry, pause and stop. The Go
+// wrapper makes `go test` enforce the same shipped static asset; Node absence
+// skips here, while CI runs the file directly.
+func TestViewportDebugHandling(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not on PATH; skipping viewport diagnostics JS tests")
+	}
+	out, err := exec.Command(node, "--test", "testdata/viewport_debug.test.mjs").CombinedOutput()
+	if err != nil {
+		t.Fatalf("node --test testdata/viewport_debug.test.mjs: %v\n%s", err, out)
+	}
+	t.Logf("%s", out)
+}
+
 // TestNarrowDrawerHandling runs the Node unit tests for the issue #100 L2
 // breakpoint / drawer layer (testdata/narrow_drawer.test.mjs): the R14
 // viewport-dispatched default for a missing / unparseable persisted value
