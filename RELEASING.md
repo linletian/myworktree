@@ -167,6 +167,64 @@ Rules:
 - **`/releases/latest` ignores prereleases**, so the default one-line install
   keeps serving the latest stable; betas are strictly opt-in.
 
+### Beta-only diagnostics: build-time switches and usage
+
+The two diagnostic channels are **compile-time switches, not runtime feature
+flags**. Beta builds enable both by default; no additional server flag or
+browser setting is required. Stable builds exclude them and cannot be switched
+on without rebuilding:
+
+| Build command | `[tty-metrics]` (issue #114) | `[viewport-debug]` (issue #116) |
+| --- | --- | --- |
+| `go build ./cmd/myworktree` | Off: passthrough only; no `mw_tty_metrics` cookie | Off: no script; asset/report endpoint returns 404 |
+| `go build -tags ttymetrics ./cmd/myworktree` | On | Off |
+| `go build -tags viewportdebug ./cmd/myworktree` | Off | On |
+| `go build -tags ttymetrics,viewportdebug ./cmd/myworktree` | On | On (same as beta) |
+
+`release-beta.yml` uses the last row for every beta artifact. `go-ci.yml` tests
+both the default-off and enabled variants.
+
+#### `[tty-metrics]` — previous frontend/backend instrumentation
+
+- The tagged daemon emits the existing `[tty-metrics]` handshake, overflow and
+  connection-summary lines and hands the page an `mw_tty_metrics=1` cookie;
+  there is no separate enable switch to set.
+- Open a terminal instance and use the browser console to read the current
+  client snapshot:
+
+  ```js
+  JSON.stringify(window.__ttyMetrics(), null, 2)
+  ```
+
+- Field definitions and the acceptance matrix are in
+  `docs/plans/fix-issue114-tty-overflow/DATA-COLLECTION.md`; runtime-health
+  (`ringCapBytes` / `ringLagBytes`) is documented in `docs/ARCHITECTURE.md` §10.
+
+#### `[viewport-debug]` — geometry diagnostics without Web Inspector
+
+- Open the main UI with the normal auth token and `viewport-debug=1`:
+
+  ```text
+  http://<host>:<port>/?token=<token>&viewport-debug=1
+  ```
+
+- A `debug-session` is generated and capture starts automatically every
+  second. The panel can mark Magic Keyboard / software-keyboard states, pause,
+  or copy JSON; pointerdown handlers preserve terminal focus. Reusing a session
+  resumes from the server's `latestSeq`.
+- Read incremental reports through the same authenticated origin:
+
+  ```text
+  GET /api/viewport-debug/report?session=<debug-session>&after=<last-seen-seq>
+  ```
+
+- Reports contain geometry and limited device/UI metadata only, not terminal
+  text, tokens, worktree names/paths or instance IDs. Storage is in-memory:
+  at most 8 sessions × 120 events, 30-minute idle TTL, and `Cache-Control:
+  no-store`. A daemon restart clears reports. See `docs/API.md` §"Viewport
+  geometry diagnostics" for the schema and `docs/plans/fix-issue116/` for the
+  current iPad evidence.
+
 Cut a beta:
 
 ```bash
