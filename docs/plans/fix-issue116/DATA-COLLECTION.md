@@ -1,6 +1,6 @@
 # Issue #116 A0 真机测量记录
 
-**状态**：A0 主体数据已采集；坐标、准入守卫与根画布修复待实施；浮动栏分类复核和剩余设备矩阵待补。
+**状态**：A0 主体数据已采集（会话 `d5222b167a61be314fdba725fcfedff3` + `b90643bea91477cd`，合计逾 1700 事件）；妙控浮动栏**不进 visualViewport**已实测坐实；坐标、准入守卫与根画布修复待实施；软键盘 hint 与命名、quick-keys 同场、键盘打开时刷新待补。
 
 **诊断方式**：页面内 `?viewport-debug=1` + daemon 会话报告，不依赖 Safari Web Inspector。
 
@@ -48,6 +48,26 @@
 - **坐标结论**：当前 `applyVisualViewportHeight` 用 `visibleBottom=vv.offsetTop+vv.height` 直接设置高度，未扣除 `app.getBoundingClientRect().top`。目标高度应为 `visibleBottom - app.top`，否则滚动/系统自动聚焦平移时底边偏差等于拖动量。补偿条件也应是 `visibleBottom < clientHeight - 1` **或** `abs(visibleBottom - app.bottom) > 1`；scroll 仅在“无 inline 且底边已对齐”时保持纯平移不新建钉高，底边错位时应允许新建钉高。此项与 safe-area 是独立故障分量。
 - **尚未据此改变浮动栏政策**：后段没有人工 hint，不能把 vvHeight=274 或 633.5 直接命名为妙控浮动栏或软键盘。修改硬遮挡/浮层分类前，仍需按 seq 与用户操作顺序核对；但滚动坐标修复与根画布铺底可以先独立进行。
 
+## 5a. 第二轮采集（会话 `b90643bea91477cd`，2026-11-01，877 事件）
+
+本轮不需要重新操作就已关闭多个缺项；归类表由 `evidence/analyze-a0.mjs` 产出（`evidence/CLUSTER-b90643be.md`）。
+
+- **妙控浮动栏不改 visualViewport（本轮最重要结论）**：seq388 `magic-hint` 与前后 seq385–394 全程 `innerHeight=702 / vv.height=702 / offsetTop=0 / inline=""`，app 底边与可见底边一致。结论：浮动栏是**纯覆盖层**，不进 visualViewport 也不进 dvh，因此不需要为它做“少扣一点”的补偿分支；只要准入守卫不误触发，它天然不会吃工作区。
+- **钉高后的几何是对的**：本轮 483 个钉高事件的 `vvBottom − app.bottom` 全为 0.00。缺陷集中在**未钉高的准入条件**（seq190：`app.top=−95 / inline=""` 时底边错 44px），与上轮 seq624/736 的 340/428 同性质。因此 PR1 几何线的主战场是守卫，不是钉高公式本身。
+- **safe-area 不是常量**：`#app paddingBottom` 实测出现 **20px / 10px / 0px** 三值。上轮只见过 20px。**新约束：铺底与几何必须读 `env(safe-area-inset-*)`，不得写死 20px。**
+- **Split View 已覆盖**：`innerWidth` 实测 592（112 事件）/ 392（34）/ 618（12），对应半屏与窄分栏；上轮标“待采集”的 Split View 项就此基本关闭。
+- **iframe kind 已覆盖**：`opencode-web` 138 事件且 `webPanel` 有高度（含钉高态 `occl=206.1` 与全高态）；仍缺 dsh / reasonix。
+- **zoom 豁免的代价（需产品拍板）**：scale=0.75 静止段 `app.bottom=936` vs 可见底 `844.7`，**溢出 91.3 layout px**（含终端最后几行）。这是现有 zoom 豁免政策的固有行为，不是回归；是否给缩放态也建基准需单独决定。
+- **缩放态与遮挡缩减量清单**（待命名）：`inner − vv.height` 实测 68.5（210）、87（12）、126（6）、154.1（6）、157（36）、206.1（160）、428（53）。除 seq388 外本轮未打 hint，**不得凭数值命名遮挡类型**；软键盘 hint 仍缺。
+
+## 5b. 诊断浮层自身缺陷（已修，A0 采证因此中断过）
+
+- **缺陷**：诊断浮层原为 `fixed` 右上、`max-height:72vh`、按钮排在明细 JSON **之后**。iPad 软键盘弹出（`vv.height≈274/495.9/633.5`）时按钮整排在可视区外，**`Soft keyboard` 根本按不到**；又因其占住右上，**`#terminal-controls` 的 quick-keys 入口被遮**，quick-keys 同场场景无法采集。这不是产品缺陷，是 A0 探针缺陷。
+- **修复**（仅 `viewportdebug` 资产，不碰高度算法）：主按钮（Magic bar / Soft keyboard / Capture / Move / More）提到第一排；次要控件折进第二排默认隐藏；JSON 默认折叠；面板高度按 `visualViewport` 实时夹紧（`panelLayoutFor` 纯函数 + `applyPanelLayout`）；标题可拖拽、`Move` 循环四角、`?viewport-debug-pos=tl|tr|br|bl` 与 sessionStorage 记忆；靠右居位时为 `#terminal-controls` 预留宽度。
+- **证据**（headless Chromium + CDP，实测于本地隔离实例与 `~/GithubRepo/eur-lex-mcp`）：`evidence/panel-check.mjs` 在 vv 高 702/633.5/545/495.9/274 五档下主按钮全部可见且 `elementFromPoint` 命中自身；`evidence/panel-occlusion.mjs` 在 tr/tl/br/bl 四角 quick-keys 入口全部可命中（修前 tr 为 `hit=NO, blocker=viewport-debug-panel`）。截图与 JSON 在 `evidence/panel-visibility/`、`evidence/panel-occlusion/`。
+- **仸言**：headless Chrome **不模拟 iOS 软键盘**，上述档位是用实测 `visualViewport.height` 反向压视口，只证明浮层自身布局契约，**不能替代 iPadOS 真机**；无活动实例时控制列是 hidden，脚本会临时 unhide 它来量几何并在输出中标注 `harness-forced`。
+
+
 ## 5. 1–8 全量操作完成（latestSeq=747）
 
 - 用户已按清单完成 1–8 全部操作，缩放 100%；最新事件为 seq747 的 `settle`。
@@ -61,15 +81,15 @@
 
 | 场景 | 操作 | 报告 session / seq | 关键几何与截图 | 初步判定 |
 | --- | --- | --- | --- | --- |
-| 静止基线 | 软键盘和妙控浮动栏均不可见，URL 栏稳定 | ✅ seq1–3、46–47、337–338、739–747 | inline 为空，app 与 vv/innerHeight 一致；paddingBottom=20px，根背景透明 | 高度正确，safe-area/画布白缝为独立分量 |
-| 妙控浮动栏 | 让底部浮动提示/输入栏实际出现，再消失 | ✅ seq48 及后续完整操作 | 有 app/vv 变化及焦点事件；按用户操作顺序解释，不凭 vv 单值命名 | 已完成操作；修复后复核浮层不应重复扣高 |
-| 软键盘 | 终端聚焦弹出，再收起 | ✅ 已完成 | vv 缩小/恢复、inline 钉高与 scroll/focus 事件齐全 | 已完成操作；坐标与准入守卫先修，再复测输入行 |
+| 静止基线 | 软键盘与妙控浮动栏均不可见 | ✅ seq1–3、46–47、337–338、739–747；第二轮 scale=1 共 262 事件 | inline 为空，app 与 vv/innerHeight 一致；`paddingBottom` 实测 20/10/0px 三值，根背景全透明 | 高度正确；safe-area/画布白缝为独立分量，**inset 不是常量，铺底必须读 `env()`** |
+| 妙控浮动栏 | 底部浮动提示/输入条出现再消失 | ✅ `magic-hint` seq388（`b90643bea91477cd5d816445362604fd`） | seq385–394 全程 `vv.height=702=innerHeight`、`offsetTop=0`、`inline=""` | **已关闭：浮动栏不进 visualViewport/dvh**，属纯覆盖层；守卫不误触发即不多吃工作区 |
+| 软键盘 | 终端聚焦弹出，再收起 | ⚠️ 第一轮操作已完成；**第二轮无 `keyboard-hint`**（浮层按钮被键盘埋掉，已修） | vv 缩小/恢复、钉高与 scroll/focus 齐全；缩减量 68.5/157/206.1/428 未命名 | 不得凭数值命名遮挡类型；需在新浮层下重采并打 hint |
 | URL 栏 | 显示 → 收起 → 显示 | ✅ 已完成 | innerHeight/vv 与 app 底边序列完整 | 不使用常量偏移；按动态可见区判断 |
 | 横竖屏 | 竖屏 ↔ 横屏 | ✅ seq651 及后续方向变化 | portrait/landscape 与窗口高度重算完整 | 旧基线必须随方向失效 |
-| Split View / 窗口 | 1/3、1/2、2/3 或可调窗口 | 待采集 | 待采集 | 待判定 |
-| 缩放与平移 | 双指/双击缩放、平移、回 scale=1 | ✅ 75% 与 100%；seq305–312、330、333、624、736 | 负 app.top 与底边误差逐点对应；无 inline 时也出现 340/428 错位 | 已坐实 `visibleBottom-app.top` 及准入守卫两项修复需求 |
-| 子层 | pty、opencode/reasonix/dsh iframe、quick-keys | ⚠️ pty 已测；其余待采集 | xtermRows 与 workspace 有余量；webPanel/其他 kind 未覆盖 | xterm fit 余量与外壳 padding 分开；iframe/quick-keys 待补 |
-| 生命周期 | 前后台切换、键盘已打开时刷新 | ⚠️ visibilitychange 已测；刷新待补 | 有 visibilitychange/pageshow 事件，尚无完整键盘打开时刷新证据 | 不把未测生命周期项写成通过 |
+| Split View / 窗口 | 1/2、1/3 或可调窗口 | ✅ 第二轮 `innerWidth` 592×112、392×34、618×12 | 窄宽下 innerWidth/innerHeight 与钉高态完整 | 基本关闭；Stage Manager 仍未测 |
+| 缩放与平移 | 双指/双击缩放、平移、回 scale=1 | ✅ 75% 与 100%；seq305–312、330、333、624、736；第二轮 seq190 | 负 app.top 与底边误差逐点对应；无 inline 时 340/428/44 错位；scale=0.75 静止段 app 溢出可见底 91.3px | 坐实 `visibleBottom-app.top` 与准入守卫；**zoom 豁免的 91.3px 溢出属固有代价，待产品拍板** |
+| 子层 | pty、opencode/reasonix/dsh iframe、quick-keys | ⚠️ pty + **opencode-web 138 事件（`webPanel` 有高度）**；quick-keys **0 事件** | xtermRows 与 workspace 余量分开；钉高态下 webPanel 同步 | iframe kinds 部分关闭；quick-keys 因诊断浮层遮挡未采（已修，待重采） |
+| 生命周期 | 前后台切换、键盘已打开时刷新 | ❌ 第二轮 `pageshow`/`visibilitychange` 为 0 | 本轮未触发该两项 | 未采就是未采，不记为通过 |
 
 ## 7. 快检判读
 
@@ -86,8 +106,11 @@
 - iPadOS 版本：**27.0.1**（与报告 UA 中 Safari 27.0.1 一致）。
 - 浏览器：**Safari**，主要矩阵在 100% zoom 下完成，首轮另有 75% zoom 数据。
 - 测试构建：`fix/fix-issue116` 基线 `225c5d7` + `viewportdebug` 编译标签诊断实现；**尚未包含高度算法修复**。
-- 访问方式：**Tailscale**，地址 `100.86.87.23:38231`；同会话报告通过 daemon `GET /api/viewport-debug/report` 读取。
+- 访问方式：**Tailscale**，地址 `100.86.87.23:40751`（第二轮；首轮为 `:38231`）；同会话报告通过 daemon `GET /api/viewport-debug/report` 读取。主 UI 端口随 daemon 启动而变（默认 `0.0.0.0:0`），每轮记录实际端口。
 - 妙控键盘：iPad 配套妙控键盘，**无额外型号区分需求**；分析关注其系统浮动提示/输入窗，而非键盘硬件型号。
-- 会话：`d5222b167a61be314fdba725fcfedff3`，latestSeq=747；完整操作 1–8 已完成。
+- 会话：第一轮 `d5222b167a61be314fdba725fcfedff3`（latestSeq=747）；第二轮 `b90643bea91477cd5d816445362604fd`（latestSeq=622，本地留存 877 事件于 `evidence/raw/`）。
 - 原始证据：首轮 74 个事件、seq98–343 的 100% 平移数据、seq624–747 的末段数据，以及本文件中的几何差值和用户操作说明。
-- **剩余未覆盖**：Split View / Stage Manager；opencode/reasonix/dsh iframe 与 quick-keys 同场；键盘打开时刷新；iPhone、Chrome(iOS) 及其他 iPadOS 版本；实体截图逐像素比对（本轮以 JSON 几何 + 用户目视描述为主）。这些项目在矩阵补齐前不得标为通过。
+- **已由第二轮关闭**：Split View（`innerWidth` 592/392/618）、opencode-web iframe 子层（138 事件）、`magic-hint` 遮挡分类（seq388）、scale=1 静止基线补采（262 事件）、safe-area 非常量（20/10/0px）。
+- **剩余未覆盖**：`keyboard-hint` 与 68.5/157/206.1/428 缩减量的命名；quick-keys 同场（此前被诊断浮层遮挡，浮层已修待重采）；键盘打开时刷新（第二轮 `pageshow`/`visibilitychange` 为 0）；Stage Manager；dsh/reasonix iframe；竖屏静止基线（仅 8 事件）；iPhone、Chrome(iOS) 及其他 iPadOS 版本；实体截图逐像素比对。这些项目在矩阵补齐前不得标为通过。
+- **待产品拍板**：scale≠1 时 `#app` 按 `100vh` 铺到 936 而可见底为 844.7，**溢出 91.3 layout px**（终端最后几行落在可见区外）。这是 zoom 豁免的固有代价而非回归；是否给缩放态建基准需单独决定，不得顺手用常量偏移掩盖。
+- **诊断浮层缺陷（A0 工具侧，已修）**：见 §5b 与 `evidence/panel-check.mjs`、`evidence/panel-occlusion.mjs`。修前 `tr` 角下 `#quick-keys-toggle` 的 `elementFromPoint` 命中者为 `viewport-debug-panel`；修后四角均可命中。

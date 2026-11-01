@@ -311,3 +311,51 @@ test("createClient rejects an invalid session or missing upload", () => {
   assert.throws(() => api.createClient({ sessionId: "short", upload: async () => {} }), /invalid diagnostic session/);
   assert.throws(() => api.createClient({ sessionId: "0123456789abcdef" }), /upload is required/);
 });
+
+// A0 采证实测缺陷：原先面板固定 72vh 且按钮排在明细 JSON 之后，iPad 软键盘
+// 弹出（visualViewport.height≈274/633）时主按钮整排被键盘埋掉，无法上传
+// keyboard-hint。以下用例钉住"主按钮可达"的几何契约。
+test("viewport debug panel layout keeps primary controls above the keyboard", () => {
+  const api = loadAPI();
+  const px = (value) => parseFloat(value);
+
+  // 软键盘弹出：可视高 274，必须折叠且高度不超过可视区。
+  const kb = api.panelLayoutFor({ innerHeight: 702, vvHeight: 274, vvWidth: 1194, innerWidth: 1194, safeBottom: 20, safeTop: 24 });
+  assert.equal(kb.collapsed, true, "short visual viewport must collapse the panel");
+  assert.ok(px(kb.maxHeight) + px(kb.top) <= 274 + 1, `collapsed panel ${kb.maxHeight}+${kb.top} must fit vv 274`);
+
+  // 键盘收起回全高：允许展开，但仍不得超出可视区。
+  const full = api.panelLayoutFor({ innerHeight: 702, vvHeight: 702, vvWidth: 1194, innerWidth: 1194, safeBottom: 20, safeTop: 24, collapsed: false });
+  assert.equal(full.collapsed, false);
+  assert.ok(px(full.maxHeight) + px(full.top) <= 702 + 1, `expanded panel ${full.maxHeight}+${full.top} must fit vv 702`);
+
+  // 地址栏/滚动中间态：可视高 633.5（实测 seq269–276）仍应保持折叠阈值内的紧凑形态可用。
+  const mid = api.panelLayoutFor({ innerHeight: 702, vvHeight: 633.5, vvWidth: 1194, innerWidth: 1194, safeBottom: 20 });
+  assert.ok(px(mid.maxHeight) + px(mid.top) <= 633.5 + 1);
+
+  // 六分屏窄宽（实测 innerWidth=392/592）：面板宽度必须收缩且不越界。
+  for (const width of [392, 592, 618]) {
+    const narrow = api.panelLayoutFor({ innerWidth: width, innerHeight: 702, vvWidth: width, vvHeight: 702 });
+    assert.ok(px(narrow.width) <= width - 16 + 0.5, `panel ${narrow.width} must fit ${width}px Split View`);
+  }
+
+  // 左上角（避开右上 quick-keys toggle）与拖动夹紧。
+  const tl = api.panelLayoutFor({ innerWidth: 1194, innerHeight: 702, vvWidth: 1194, vvHeight: 702, corner: "tl", safeTop: 24 });
+  assert.equal(tl.right, "auto");
+  assert.equal(px(tl.top), 24 + 8);
+  const dragged = api.panelLayoutFor({ innerWidth: 1194, innerHeight: 702, vvWidth: 1194, vvHeight: 274, corner: "free", dragX: 9999, dragY: 9999 });
+  assert.ok(px(dragged.left) + px(dragged.width) <= 1194, "dragged panel must be clamped horizontally");
+  assert.ok(px(dragged.top) <= 274, "dragged panel must stay above the keyboard");
+});
+
+test("viewport debug panel reserves the quick-keys control column when docked right", () => {
+  const api = loadAPI();
+  const px = (value) => parseFloat(value);
+  const right = api.panelLayoutFor({ innerWidth: 1194, innerHeight: 702, vvWidth: 1194, vvHeight: 702, corner: "tr", reservedRight: 40 });
+  assert.equal(px(right.right), 48, "right inset must clear the control column plus margin");
+  const left = api.panelLayoutFor({ innerWidth: 1194, innerHeight: 702, vvWidth: 1194, vvHeight: 702, corner: "tl", reservedRight: 40 });
+  assert.equal(px(left.left), 8, "left docking ignores the right reservation");
+  const hidden = api.panelLayoutFor({ innerWidth: 1194, innerHeight: 702, vvWidth: 1194, vvHeight: 702, corner: "tr", reservedRight: 0 });
+  assert.equal(px(hidden.right), 8, "a hidden control column reserves nothing");
+  assert.ok(px(right.right) + px(right.width) <= 1194, "reserved panel must stay inside the viewport");
+});

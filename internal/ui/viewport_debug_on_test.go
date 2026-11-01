@@ -26,6 +26,11 @@ func TestViewportDebugAssetAnchors(t *testing.T) {
 		`"/api/viewport-debug/report"`, `"magic-hint"`, `"keyboard-hint"`, `"periodic"`,
 		"previous.latestSeq", "initialSeq",
 		`addEventListener("pointerdown"`, `event.preventDefault()`,
+		// A0 实测缺陷回归：主按钮必须先于次要控件入 DOM，面板高度按可视区夹紧，
+		// 否则 iPad 软键盘弹出时 keyboard-hint / magic-hint 无法按下。
+		"panelLayoutFor", "applyPanelLayout", "rowPrimary", "rowSecondary",
+		"PANEL_COLLAPSE_THRESHOLD", `visualViewport.addEventListener("resize", relayout)`,
+		`"viewport-debug-pos"`,
 	} {
 		if !strings.Contains(asset, want) {
 			t.Fatalf("viewport_debug.js missing %q", want)

@@ -2,7 +2,7 @@
 
 **日期**：2026-10-27
 
-**状态**：v1.5（D0-1/D0-2 设计稿与导出已生成，待设计评审；A0 剩余矩阵待补）；**本文件仅为修复计划，不代表高度问题已经修复**
+**状态**：v1.7（D0-1/D0-2 已随 `346ed62` 提交签署通过，UI 编码门禁解除；A0 第二轮采集关闭妙控浮动栏分类、Split View 与 iframe 子层三项，A0 诊断浮层自身遮挡缺陷已修；PR1 三条修复线的输入已齐，见 §3.3 与 §8）；**本文件仅为修复计划，不代表高度问题已经修复**
 
 **基线**：`fix/fix-issue116` @ `225c5d7`（与当时 `origin/develop` 一致）
 
@@ -117,6 +117,7 @@
 - `#main`、`#workspace`、活动 terminal host、活动 iframe panel 的 rect/computed height；
 - `.xterm-screen`、`.xterm-rows` 的底边、当前 rows/cols（只取几何，不取内容）；
 - `html/body/#app/#main/#workspace/host` 的背景链；
+- **浮层可达性契约（A0 实测缺陷后新增）**：主按钮（`Magic bar` / `Soft keyboard` / `Capture` / `Move` / `More`）必须排在明细 JSON **之前**，面板高度按 `visualViewport` 实时夹紧（`panelLayoutFor` 纯函数 + `applyPanelLayout`），可视区变矮自动折叠次要控件；靠右居位时为 `#terminal-controls` 预留宽度；可拖拽、`Move` 循环四角、`?viewport-debug-pos=tl|tr|br|bl` 与 sessionStorage 记忆。理由：原实现固定 `72vh` 且按钮排在 JSON 之后，iPad 软键盘弹出时 `Soft keyboard` 与 quick-keys 入口**全部按不到**，直接导致 `keyboard-hint` 与 quick-keys 同场两项采不到。验收见 `evidence/panel-check.mjs`（vv 高 702/633.5/545/495.9/274 五档主按钮命中自身）与 `evidence/panel-occlusion.mjs`（四角 quick-keys 入口可命中）。
 - **首项快检**：`getComputedStyle(#app).paddingBottom` 与白带 CSS 像素高度是否相近；并用截图物理像素 / `devicePixelRatio` 对照 `vv.height`、`100dvh` computed height，显式判定二者是否同时短报；
 - 白带位置的 `document.elementFromPoint()` 结果及截图，判断它落在外壳外、padding 内还是终端余量内；
 - 焦点宿主类别（xterm helper textarea、普通 input、quick-keys textarea、其他），不记录具体文本；
@@ -148,6 +149,12 @@
 | app 正确但 workspace/host 未跟随 | flex/min-size/resize 传导 | 修 flex 约束及 refit 时序；不把 app 再拉高补偿子层 |
 | host 正确，仅 xterm 最后一行上有小于行高的余量 | xterm fit 取整 | 保持同主题余量并验证行数；不为凑像素把壳多出一行 |
 | 妙控浮动栏使 vv/dvh 变小，但内容在浮层下仍应布局 | 浮层误当硬遮挡 | 进入 §4.2 的分类/稳定基线路线；若无法可靠分类，启用稳定壳 + 局部避让备选 |
+| **（已实测坐实）妙控浮动栏出现时 vv 与 innerHeight 完全相等、`inline` 为空** | 浮动栏是纯覆盖层，不进 visualViewport/dvh | **不需要**为浮动栏做“少扣一点”的补偿分支；只需保证准入守卫不误触发（`visibleBottom < clientHeight-1` 或 `abs(visibleBottom-app.bottom) > 1`），它天然不吃工作区。证据：`magic-hint` seq388 与前后 seq385–394 全程 `vv.height=702=innerHeight` |
+| **（已实测坐实）钉高态底边误差全为 0，误差只出现在未钉高的准入判定** | 守卫漏判，不是钉高公式错 | 修准入守卫（补 `abs(visibleBottom - app.bottom) > 1`，并在 `app.top ≠ 0` 时用 `visibleBottom - app.top`）；**不得**为“看起来更稳”而重写已验证正确的钉高路径。证据：第二轮 483 个钉高事件误差 0.00；seq190 未钉高错 44px、上轮 seq624/736 错 340/428px |
+| **（已实测坐实）`#app paddingBottom` 出现 20/10/0px 三值** | safe-area inset 不是常量 | 铺底与几何一律读 `env(safe-area-inset-*)`，**禁止写死 20px**（含 quick-keys、drawer、Portal 浮层） |
+| **（新增待拍板）scale≠1 时 `#app` 按 `100vh` 铺到 936 而可见底 844.7，溢出 91.3 layout px** | zoom 豁免的固有代价 | 保持 zoom 豁免则接受末行不可见并记入 §10；若不可接受，须为缩放态建立独立可见基准。**不接受常量偏移** |
+
+**第二轮（会话 `b90643bea91477cd5d816445362604fd`）已关闭的分支**：妙控浮动栏分类、Split View（`innerWidth` 592/392/618）、opencode-web iframe 子层、scale=1 静止基线补采、safe-area 非常量。**仍未关闭**：`keyboard-hint` 与缩减量命名、quick-keys 同场、键盘打开时刷新、Stage Manager、dsh/reasonix、竖屏静止基线、iPhone/Chrome(iOS)。归类与判读工具：`evidence/analyze-a0.mjs` → `evidence/CLUSTER-b90643be.md`。
 
 **A0 关闭条件**：至少一台能复现 #116 的 iPad 完成静止、软键盘、妙控浮动栏、横竖屏和缩放矩阵。归因按**高度分量的可加性**进行：静止白带与妙控浮层增量可以是 safe-area/画布与 VV 政策两个叠加根因；每个独立增量都必须可量化、可落入上表分支并有可重放 fixture，再做组合回归。不能强迫整个现象只有一个根因。没有此证据，不能签字“#116 已修复”。
 
@@ -348,6 +355,7 @@
 
 ### 7.3 设计门禁
 
+- **2026-10-28 设计门禁签署**：作者明确以稿件提交 `346ed62` 本身作为 D0-1 与 D0-2 的评审通过记录，本节下条"先评审再编码"及 PR1/PR2/PR3 的 UI 编码门禁视为**已解除**；上一条列举的全部产品决策（52px coarse 顶栏、图标内联与预算、`.wt-row-actions` 独立行、接受 +44px 密度、Portal 卡片化与 Path 全宽换行）一并按该稿件版本采纳。实施若偏离该版本稿件，仍须先回改 `.pen` 并记录原因。
 - **2026-10-28 稿件交付状态**：D0-1 已更新主 UI `.pen`、16 张必需 PNG 与 preview，并完成 quick-keys 契约注记及两张受影响 PNG；D0-2 已新增 Portal `.pen` 与 10 张必需 PNG。frame id、pen 0.3.11 校验/导出记录、实际像素与 preview-only 冒烟结果见 `design/EXPORT-MANIFEST.md`。**当前仅完成稿件产出，设计评审尚未签字，不解除下述编码门禁。**
 - 先评审 `.pen` 和 PNG，再开始 **PR1/PR2/PR3 的任何 UI 编码**；A0 探针、测量和纯数据分析可先行，但 PR1 的铺底、safe-area、flex/几何变更同样必须等待 D0-1，不得借高度 PR 绕过设计门禁。
 - 设计评审特别确认：52px coarse 顶栏、≤1024 当前全部动作以可访问图标完整内联及 320px/112px tabs 预算、starting 可 Stop 取消而 stopping 无动作、统一 `.wt-row-actions` 的 fine 不换行 / coarse wrap+full-basis 独立行、200/240px 的 172px 动作预算与 122/162px 主仓库名称预算、local/remote 空集合不渲染、**接受 coarse 每动作项约 +44px 的密度下降并以滚动兜底**、Portal 单列表语义卡片化与全宽度 Path 换行。
@@ -387,7 +395,7 @@ pen interactive --in <source-or-working.pen> --out <reviewed-working.pen>
 
 ### PR1：#116 高度、铺底与子层传导
 
-依赖 **A0 + D0-1**；A0 探针和测量可先于设计评审进行，但铺底、safe-area、flex 与几何修改必须等主 UI `.pen`/PNG 通过。不依赖 PR2 的顶栏改版。
+依赖 **A0 + D0-1（已签署）**；A0 依赖按 §3.3 的**分支闭合度**计算，不要求整张 §3.2 矩阵先跑完：已由真机 seq 坐实的分支（钉高坐标 `visibleBottom - app.top`、准入守卫补 `abs(visibleBottom - app.bottom)`、safe-area/根画布铺底、flex/min-height 传导）可以直接开工；尚未闭合的**遮挡分类**分支（§4.2 的阈值、"浮层不多扣高度"、稳定壳 vs 补偿模式）在带 hint 标记的妙控浮动栏/软键盘数据到手前**不得写入任何分类政策或常量**。不依赖 PR2 的顶栏改版。
 
 - 按 §3.3 选定路线修改 `applyVisualViewportHeight` / `reapplyPinnedVisualViewportHeight` / `initVisualViewportHandling`，必要时抽纯决策函数；保留 zoom/no-API 降级。若 A0 证明这些函数不是故障分量，允许且必须记录“不修改”，只修实际故障层。
 - 完成根画布、safe-area 全出血背景与 flex/min-height 传导；不改变终端数据/输入行为。两套 PTY 工厂同查，快速 VV 变化后若 100ms 门漏发最终尺寸则补 trailing，并验证 applied size 一致。
