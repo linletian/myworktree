@@ -77,18 +77,39 @@
 - 最新窗口覆盖 `periodic/scroll/resize/focusin/focusout/settle/manual/window-resize`，包含输入激活、页面上滑、URL 栏和横竖屏变化；没有使用 hint 按钮，浮动栏类型按用户完成的操作顺序解释，不凭单个 vv 值猜测。
 - 当前已完成的主要验收面：75% 与 100% 缩放、软键盘操作、妙控键盘及浮动窗操作、URL 栏、横竖屏、页面平移、前后台/visibilitychange、连续采集与续号。仍需补测的项目见下方矩阵。
 
+## 5d. 第三轮：白带现场被抓到（会话 `997d18dc48ee49c84f6fbf5b797969f7`，200 事件零缺口）
+
+本轮在带修复浮层的隔离实例上采集（仓库 `legal-court-mcp-server`、真 pty 实例 running、绑 `*:38233`），首次拿到 `keyboard-hint` 与 quick-keys 同场。
+
+- **★ 白带现场（seq184–186，约 3 秒自愈）**：
+
+  | seq | reason | vv.height | inline | app.bottom | 可见底 | 白带 |
+  | --- | --- | --- | --- | --- | --- | --- |
+  | 183 | periodic | 633.5 | 633.5px | 633.5 | 633.5 | 0.0 |
+  | **184** | settle | **702.0** | **633.5px** | **633.5** | **702.0** | **68.5** |
+  | **185** | periodic | **702.0** | **633.5px** | **633.5** | **702.0** | **68.5** |
+  | **186** | periodic | **702.0** | **633.5px** | **633.5** | **702.0** | **68.5** |
+  | 187 | resize | 702.0 | — | 702.0 | 702.0 | 0.0 |
+
+  `visualViewport.height` 恢复全高的那一帧起，`#app` 的 inline 仍钉在旧的 633.5px，底边因此比可见底边短 **68.5px**，露出默认白画布；直到 seq187 才由 `resize` 分支清掉 inline 自愈。**归因：钉高的撤销滞后于遮挡消失，属高度决策时序缺陷，不是外壳缺高，也不是纯铺底问题。** PR1 必须让每次决策都按当前可见矩形重算（`targetHeight = visibleBottom − app.top`）并在恢复帧立即生效，而不是等下一次 resize；同时保留铺底作为兜底。
+- **★ `keyboard-hint` 首次拿到（seq24）**：`vv.height=274 / occl=428 / inline=274px / focus=TEXTAREA` → **428px 缩减量归属全尺寸软键盘**，坐实。
+- **★ quick-keys 同场首次拿到（seq126–140，`quickKeysOpen=true`，含 manual seq131）**：此前两轮均为 0，浮层遮挡修复后闭合。
+- **68.5px 缩减量行为特征**：出现在终端 textarea 聚焦后（seq11、74、166、191），可持续数十秒，消失即触发上面的白带窗口。**用户确认：妙控候选条是浮在光标边、不影响布局**，因此 68.5 不是候选条；仍待确认是 Safari 底部工具栏还是妙控键盘输入条。
+- **刷新语义澄清**：主 UI 是固定壳（`overflow:hidden` + 抑制链式回弹），**页面下拉刷新按设计不会出现**，用户改用整页刷新（seq1、163 两次 `init`）；但两次刷新时键盘均已收起（focus=BODY），所以**“键盘打开时刷新”仍未覆盖**。
+- **仍未覆盖**：软键盘候选条（用户漏测）、68.5 的归属命名、键盘打开时刷新、Stage Manager、dsh/reasonix iframe、竖屏静止基线、iPhone/Chrome(iOS)、逐像素截图。
+
 ## 6. 真机记录模板
 
 | 场景 | 操作 | 报告 session / seq | 关键几何与截图 | 初步判定 |
 | --- | --- | --- | --- | --- |
 | 静止基线 | 软键盘与妙控浮动栏均不可见 | ✅ seq1–3、46–47、337–338、739–747；第二轮 scale=1 共 262 事件 | inline 为空，app 与 vv/innerHeight 一致；`paddingBottom` 实测 20/10/0px 三值，根背景全透明 | 高度正确；safe-area/画布白缝为独立分量，**inset 不是常量，铺底必须读 `env()`** |
 | 妙控浮动栏 | 底部浮动提示/输入条出现再消失 | ✅ `magic-hint` seq388（`b90643bea91477cd5d816445362604fd`） | seq385–394 全程 `vv.height=702=innerHeight`、`offsetTop=0`、`inline=""` | **已关闭：浮动栏不进 visualViewport/dvh**，属纯覆盖层；守卫不误触发即不多吃工作区 |
-| 软键盘 | 终端聚焦弹出，再收起 | ⚠️ 第一轮操作已完成；**第二轮无 `keyboard-hint`**（浮层按钮被键盘埋掉，已修） | vv 缩小/恢复、钉高与 scroll/focus 齐全；缩减量 68.5/157/206.1/428 未命名 | 不得凭数值命名遮挡类型；需在新浮层下重采并打 hint |
+| 软键盘 | 终端聚焦弹出，再收起 | ✅ **`keyboard-hint` seq24**（第三轮） | `vv.height=274`、缩减 **428px**、`inline=274px`、focus=TEXTAREA | **428px = 全尺寸软键盘，已坐实**；恢复态 seq29 回全高 |
 | URL 栏 | 显示 → 收起 → 显示 | ✅ 已完成 | innerHeight/vv 与 app 底边序列完整 | 不使用常量偏移；按动态可见区判断 |
 | 横竖屏 | 竖屏 ↔ 横屏 | ✅ seq651 及后续方向变化 | portrait/landscape 与窗口高度重算完整 | 旧基线必须随方向失效 |
 | Split View / 窗口 | 1/2、1/3 或可调窗口 | ✅ 第二轮 `innerWidth` 592×112、392×34、618×12 | 窄宽下 innerWidth/innerHeight 与钉高态完整 | 基本关闭；Stage Manager 仍未测 |
 | 缩放与平移 | 双指/双击缩放、平移、回 scale=1 | ✅ 75% 与 100%；seq305–312、330、333、624、736；第二轮 seq190 | 负 app.top 与底边误差逐点对应；无 inline 时 340/428/44 错位；scale=0.75 静止段 app 溢出可见底 91.3px | 坐实 `visibleBottom-app.top` 与准入守卫；**zoom 豁免的 91.3px 溢出属固有代价，待产品拍板** |
-| 子层 | pty、opencode/reasonix/dsh iframe、quick-keys | ⚠️ pty + **opencode-web 138 事件（`webPanel` 有高度）**；quick-keys **0 事件** | xtermRows 与 workspace 余量分开；钉高态下 webPanel 同步 | iframe kinds 部分关闭；quick-keys 因诊断浮层遮挡未采（已修，待重采） |
+| 子层 | pty、opencode/reasonix/dsh iframe、quick-keys | ✅ pty + opencode-web；**quick-keys seq126–140（`quickKeysOpen=true`）** | xtermRows 与 workspace 余量分开；钉高态下 webPanel 同步 | quick-keys 同场闭合；仍缺 dsh/reasonix |
 | 生命周期 | 前后台切换、键盘已打开时刷新 | ❌ 第二轮 `pageshow`/`visibilitychange` 为 0 | 本轮未触发该两项 | 未采就是未采，不记为通过 |
 
 ## 7. 快检判读

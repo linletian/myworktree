@@ -1,10 +1,10 @@
 {
-  "url": "http://127.0.0.1:38232/?token=<redacted>",
+  "url": "http://127.0.0.1:38233/?token=<redacted>",
   "width": 1194,
   "height": 702,
   "results": [
     {
-      "forced": true,
+      "forced": false,
       "corner": "top-right",
       "panelStyle": {
         "top": "8px",
