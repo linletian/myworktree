@@ -98,6 +98,31 @@
 - **刷新语义澄清**：主 UI 是固定壳（`overflow:hidden` + 抑制链式回弹），**页面下拉刷新按设计不会出现**，用户改用整页刷新（seq1、163 两次 `init`）；但两次刷新时键盘均已收起（focus=BODY），所以**“键盘打开时刷新”仍未覆盖**。
 - **仍未覆盖**：软键盘候选条（用户漏测）、68.5 的归属命名、键盘打开时刷新、Stage Manager、dsh/reasonix iframe、竖屏静止基线、iPhone/Chrome(iOS)、逐像素截图。
 
+## 5e. 白带根因定案 + 铺底修复落地（PR1a）
+
+### 定案证据（同一会话 263/263 快照，字段路径为 `document.htmlBackground` 等）
+
+| 层 | 实测 computed background | 真源 |
+| --- | --- | --- |
+| `html` | `rgba(0,0,0,0)` | `internal/ui/static/index.html` 的 `body, html` 规则原本无 `background` |
+| `body` | `rgba(0,0,0,0)` | 同上 |
+| `#app` | `rgba(0,0,0,0)` | `#app` 规则只有 `display:flex` + `padding: env(safe-area-inset-*)`，无 `background` |
+| `#workspace` | `rgb(11,16,32)` | `background: var(--term-bg)`（`--term-bg: #0b1020`，全文仅定义一次） |
+
+- **常量**：`#workspace.bottom → 可见底边` 在横屏、竖屏、软键盘展开、浮窗钉高**四种状态下恒为 20.0px**，等于 `#app` 的 `padding-bottom: env(safe-area-inset-bottom)`（实测 `paddingBottom=20px`，横竖屏同值）。
+- `color-scheme` 声明在修复前**全文不存在**（仅两处 `@media (prefers-color-scheme: dark)`）→ UA 按系统默认把根画布画成白色。
+- **结论**：那条始终存在、高度一致的白带 = 未被绘制的安全区 padding 透出 UA 白色根画布。属**铺底缺失**，不是高度缺失（`#app.bottom` 本就等于可见底边，任何高度算法改动都消不掉它）。浮窗出现时扩到 88.5px，是因为钉高使 `#app` 底边又比物理底高 68.5px。
+
+### 修复（PR1a，仅铺底，零布局改动）
+
+- `body, html` 增加 `background: var(--term-bg)` + `color-scheme: light dark`。
+- 选 `--term-bg` 的依据：它在 `@media (prefers-color-scheme: dark)` 块（79–142 行）内**未被覆盖**，两套主题同为 `#0b1020`，与 `#workspace` 实测 `rgb(11,16,32)` 逐字节一致 → 安全区与钉高缺口都读作终端延续（对设计 D0-1 的 letterbox 判定）。
+- 回归测试：`internal/ui/testdata/canvas_paint.test.mjs`（7 项），钉住"根画布必须是裸 token、不得为字面量、`--term-bg` 不得按主题分叉、`#workspace` 与 `#app` inset 前提不得漂移"。
+
+### 过程事故记录（工程纪律，勿删）
+
+首版 `canvas_paint.test.mjs` 在循环里组合了全局正则 `/([^{}]+)\{/g` 与手工 `open.lastIndex = i` 推进，导致 `node --test` **无限挂起 90 分钟无输出**；拆分单独测试各步均毫秒级，确认是二者组合的推进缺陷。重写为**一次线性扫描 + 缓存**后 7 项 0.237s 通过。教训：源码切片一律用线性扫描或既有 `sliceBlock()`，禁止在全局正则循环里手改 `lastIndex`；所有新增测试首跑必须套 `timeout`。
+
 ## 6. 真机记录模板
 
 | 场景 | 操作 | 报告 session / seq | 关键几何与截图 | 初步判定 |

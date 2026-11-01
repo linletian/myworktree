@@ -1,0 +1,154 @@
+// Regression tests for the iPadOS white-band paint (issue #116).
+//
+// A0 real-device calibration (docs/plans/fix-issue116/evidence/, session
+// 997d18dc48ee49c84f6fbf5b797969f7, 263/263 snapshots) established the root
+// cause as a MISSING PAINT, not a missing height:
+//
+//   html / body / #app  -> rgba(0,0,0,0)   (nothing paints)
+//   #workspace          -> rgb(11,16,32)   (var(--term-bg); the only painted layer)
+//   #workspace.bottom -> visible bottom = a CONSTANT 20.0px in EVERY state
+//                        (landscape, portrait, soft keyboard up, floating bar pinned)
+//
+// Those 20px are #app's `padding-bottom: env(safe-area-inset-bottom)`. With no
+// background beneath them the UA root canvas showed through, and `color-scheme`
+// was never declared in the document, so the canvas was WHITE — the band in the
+// issue report. #app.bottom already equalled the visible bottom, so no height
+// change could ever have removed it.
+//
+// Parse discipline: one linear pass over the <style> block, cached at module
+// load. No global regexes and no manual lastIndex mutation — an earlier version
+// of this file combined `/([^{}]+)\{/g` with `open.lastIndex = i` inside a loop
+// and hung the test runner indefinitely. Keep it boring.
+//
+// Run: node --test testdata/canvas_paint.test.mjs
+import test from "node:test";
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
+
+const here = dirname(fileURLToPath(import.meta.url));
+const indexSource = readFileSync(join(here, "..", "static", "index.html"), "utf8");
+
+function stripComments(text) {
+  return text.replace(/\/\*[\s\S]*?\*\//g, "");
+}
+
+// Collect `{selector: body}` for every rule in the document's <style> blocks via
+// a single O(n) scan. Comment-free text, so a declaration mentioned only in
+// prose cannot satisfy an assertion. `@media` wrappers are descended into so a
+// rule defined inside a media query is still found by its own selector.
+function collectRules(source) {
+  const css = stripComments(source);
+  const rules = [];
+  const stack = [];
+  let buf = "";
+  for (let i = 0; i < css.length; i++) {
+    const c = css[i];
+    if (c === "{") {
+      stack.push(buf.trim());
+      buf = "";
+    } else if (c === "}") {
+      const selector = stack.pop();
+      if (selector === undefined) {
+        buf = "";
+        continue;
+      }
+      // At-rules with blocks are containers, not style rules: keep walking
+      // their contents (already handled by the stack) and index them by
+      // their prelude so theme overrides stay distinguishable.
+      rules.push({ selector, body: buf });
+      buf = "";
+    } else {
+      buf += c;
+    }
+  }
+  return rules;
+}
+
+const rules = collectRules(indexSource);
+
+function bodiesFor(selectorRe) {
+  return rules.filter((r) => selectorRe.test(r.selector)).map((r) => r.body);
+}
+
+function decl(body, prop) {
+  const m = stripComments(body).match(new RegExp("(?:^|[;}])\\s*" + prop + "\\s*:([^;]+)", "i"));
+  return m ? m[1].trim() : null;
+}
+
+test("the root canvas rule exists", () => {
+  assert.equal(
+    bodiesFor(/^(?:body,\s*html|html,\s*body)$/).length,
+    1,
+    "expected exactly one `body, html` rule in index.html (the paint contract below pins it)",
+  );
+});
+
+test("the root canvas is painted with a theme token, not left transparent", () => {
+  const body = bodiesFor(/^(?:body,\s*html|html,\s*body)$/)[0] || "";
+  assert.equal(
+    decl(body, "background"),
+    "var(--term-bg)",
+    "issue #116: `body, html` must paint var(--term-bg). Without it, #app's " +
+      "env(safe-area-inset-bottom) padding (measured a constant 20.0px on-device) " +
+      "exposes the UA root canvas, which renders white — that is the reported band.",
+  );
+});
+
+test("the paint is a bare token, never a hard-coded colour", () => {
+  const body = bodiesFor(/^(?:body,\s*html|html,\s*body)$/)[0] || "";
+  const value = decl(body, "background") || "";
+  assert.match(value, /^var\(--[a-z-]+\)$/, `root background must be a bare var(--token), got "${value}"`);
+  assert.ok(
+    !/#[0-9a-f]{3,8}|rgba?\(|\bwhite\b|\bblack\b/i.test(value),
+    `root background must not hard-code a literal, got "${value}" — a literal drifts from the theme`,
+  );
+});
+
+test("color-scheme is declared so the UA canvas itself is theme-aware", () => {
+  const body = bodiesFor(/^(?:body,\s*html|html,\s*body)$/)[0] || "";
+  assert.equal(
+    decl(body, "color-scheme"),
+    "light dark",
+    "issue #116: the root rule must declare `color-scheme: light dark` — the same " +
+      "signal the @media (prefers-color-scheme) blocks already key off, so the UA " +
+      "canvas, form controls and scrollbars stop defaulting to light",
+  );
+});
+
+test("--term-bg resolves to one value in BOTH themes (no light/dark split)", () => {
+  // The claim pinned in the fix comment and in DATA-COLLECTION.md: --term-bg is
+  // defined once and is NOT redefined under prefers-color-scheme: dark, so
+  // painting it matches #workspace byte-identically in either theme.
+  const defined = rules
+    .flatMap((r) => stripComments(r.body).match(/--term-bg\s*:[^;]+;?/g) || [])
+    .map((d) => d.replace(/--term-bg\s*:\s*/, "").replace(/;$/, "").trim());
+  assert.equal(defined.length, 1, `--term-bg must be defined exactly once, got ${JSON.stringify(defined)}`);
+  assert.equal(defined[0], "#0b1020", `--term-bg must stay #0b1020 (measured rgb(11,16,32) on #workspace), got ${defined[0]}`);
+});
+
+test("#workspace keeps painting the terminal background the band must join", () => {
+  const bodies = bodiesFor(/^#workspace$/);
+  assert.equal(bodies.length, 1, "expected exactly one #workspace rule");
+  assert.equal(
+    decl(bodies[0], "background"),
+    "var(--term-bg)",
+    "#workspace is the layer the safe-area band must stay continuous with; if its " +
+      "background token changes, the root-canvas background must change with it",
+  );
+});
+
+test("#app still consumes the safe-area insets that create the band", () => {
+  // Guards the premise of the whole diagnosis: the band is #app's safe-area
+  // padding. If that consumption ever goes away, the root-canvas paint becomes
+  // dead weight and this test should be revisited — not deleted.
+  const bodies = bodiesFor(/^#app$/).join("\n");
+  const pad = decl(bodies, "padding") || "";
+  assert.match(
+    pad,
+    /env\(safe-area-inset-top/,
+    "#app must keep consuming env(safe-area-inset-*) — the bottom inset IS the " +
+      "band; the fix paints it rather than removing it (content stays inset, canvas fills)",
+  );
+});
