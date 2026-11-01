@@ -2,7 +2,7 @@
 
 **日期**：2026-10-27
 
-**状态**：v1.4（含页面内诊断通道），待真机数据；**本文件仅为修复计划，不代表高度问题已经修复**
+**状态**：v1.5（D0-1/D0-2 设计稿与导出已生成，待设计评审；A0 剩余矩阵待补）；**本文件仅为修复计划，不代表高度问题已经修复**
 
 **基线**：`fix/fix-issue116` @ `225c5d7`（与当时 `origin/develop` 一致）
 
@@ -50,7 +50,7 @@
 - 主 UI 测试：`internal/ui/ui_test.go`、`internal/ui/terminal_status_test.go`、`internal/ui/testdata/*.test.mjs`。
 - Portal：`internal/portal/dashboard.html`、`internal/portal/portal_test.go`（或新增 `dashboard_test.go`）、生成的 `internal/portal/csp_gen.go`，可新增 `internal/portal/testdata/*.test.mjs`。
 - CI：若新增 Portal Node 测试，同步 `.github/workflows/go-ci.yml` 的直接 Node 门禁。
-- 设计/文档：本目录、既有 `docs/plans/feature-v0.6.0-webui-sidebar-responsive/design/` 与 `preview-responsive.html`、`docs/plans/feature-v0.6.0-terminal-quick-keys/design/`（仅高度契约影响审查）、`docs/PRD.md`、`CHANGELOG.md`。
+- 设计/文档：本目录、根目录 `ui/` 下的 `sidebar-states.pen`、PNG 与 `preview-responsive.html`、`ui/quick-keys/`（仅高度契约影响审查）、`docs/PRD.md`、`CHANGELOG.md`。`docs/plans/feature-v0.6.0-*` 仅作历史记录，不再回写。
 
 ### 1.2 非目标
 
@@ -316,7 +316,7 @@
 
 ### 7.1 主 UI：更新既有稿件
 
-更新 `docs/plans/feature-v0.6.0-webui-sidebar-responsive/design/sidebar-states.pen`，并重新导出对应 PNG；不得只改导出图而不改 `.pen` 源。
+更新 `ui/sidebar-states.pen`，并重新导出对应 PNG；不得只改导出图而不改 `.pen` 源。
 
 必须覆盖：
 
@@ -330,7 +330,7 @@
 8. quick-keys 打开与矮视口，确认新顶栏与终端浮层不互相遮挡；
 9. `notes-decisions.png` 更新为本次状态矩阵、断点不变、全宽度动作内联与铺底/高度分离决策。
 
-同步 `docs/plans/feature-v0.6.0-webui-sidebar-responsive/preview-responsive.html` 作为交互预览；`.pen` 是设计源，preview 不能成为第二套漂移的设计真源。该 preview 没有完整 VV/真机系统 UI，不能作为 #116 高度证据。另需审查 `docs/plans/feature-v0.6.0-terminal-quick-keys/design/quick-keys-panel.pen` 及软键盘场景 PNG：若新高度契约改变其 R6 假定，必须同步更新源稿与导出图；若无需改形态，也在稿件中注明依赖的新契约。
+同步 `ui/preview-responsive.html` 作为交互预览；`.pen` 是设计源，preview 不能成为第二套漂移的设计真源。该 preview 没有完整 VV/真机系统 UI，不能作为 #116 高度证据。另需审查 `ui/quick-keys/quick-keys-panel.pen` 及软键盘场景 PNG：若新高度契约改变其 R6 假定，必须同步更新源稿与导出图；若无需改形态，也在稿件中注明依赖的新契约。
 
 ### 7.2 Portal：新增稿件
 
@@ -348,6 +348,7 @@
 
 ### 7.3 设计门禁
 
+- **2026-10-28 稿件交付状态**：D0-1 已更新主 UI `.pen`、16 张必需 PNG 与 preview，并完成 quick-keys 契约注记及两张受影响 PNG；D0-2 已新增 Portal `.pen` 与 10 张必需 PNG。frame id、pen 0.3.11 校验/导出记录、实际像素与 preview-only 冒烟结果见 `design/EXPORT-MANIFEST.md`。**当前仅完成稿件产出，设计评审尚未签字，不解除下述编码门禁。**
 - 先评审 `.pen` 和 PNG，再开始 **PR1/PR2/PR3 的任何 UI 编码**；A0 探针、测量和纯数据分析可先行，但 PR1 的铺底、safe-area、flex/几何变更同样必须等待 D0-1，不得借高度 PR 绕过设计门禁。
 - 设计评审特别确认：52px coarse 顶栏、≤1024 当前全部动作以可访问图标完整内联及 320px/112px tabs 预算、starting 可 Stop 取消而 stopping 无动作、统一 `.wt-row-actions` 的 fine 不换行 / coarse wrap+full-basis 独立行、200/240px 的 172px 动作预算与 122/162px 主仓库名称预算、local/remote 空集合不渲染、**接受 coarse 每动作项约 +44px 的密度下降并以滚动兜底**、Portal 单列表语义卡片化与全宽度 Path 换行。
 - 实施若偏离稿件，先回改 `.pen` 并记录原因，再改代码；最终截图必须能回溯到同一版本设计源。

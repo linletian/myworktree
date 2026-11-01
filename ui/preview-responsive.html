@@ -1,0 +1,579 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Issue #116 D0-1 · Gmail 式主 UI 响应式预览</title>
+<style>
+    :root {
+        --sidebar-width: 240px;
+        --header-height: 40px;
+        --control-size: 30px;
+        --bg-color: #0d1117;
+        --panel-bg: #161b22;
+        --border-color: #30363d;
+        --text-primary: #e6edf3;
+        --text-secondary: #8b949e;
+        --accent: #58a6ff;
+        --danger: #f85149;
+        --warning: #d29922;
+        --modal-backdrop: rgba(1, 4, 9, 0.6);
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    [hidden] { display: none !important; }
+    html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; background: var(--bg-color); }
+    body {
+        font: 13px/1.45 -apple-system, "Segoe UI", "Helvetica Neue", sans-serif;
+        color: var(--text-primary);
+    }
+    button, input, select { font: inherit; }
+    button { touch-action: manipulation; }
+
+    /* D0-1：根画布同主题铺底；几何修复仍属 PR1，不在 preview 伪造 VV 证据。 */
+    #app {
+        display: flex;
+        height: 100vh;
+        width: 100%;
+        position: relative;
+        background: var(--bg-color);
+        padding: env(safe-area-inset-top, 0px) env(safe-area-inset-right, 0px)
+                 env(safe-area-inset-bottom, 0px) env(safe-area-inset-left, 0px);
+    }
+    @supports (height: 100dvh) { #app { height: 100dvh; } }
+
+    #sidebar {
+        width: var(--sidebar-width);
+        background: var(--panel-bg);
+        border-right: 1px solid var(--border-color);
+        display: flex;
+        flex-direction: column;
+        min-height: 0;
+    }
+    .sidebar-title {
+        padding: 0 8px 0 12px;
+        height: var(--header-height);
+        flex: 0 0 var(--header-height);
+        font-weight: 600;
+        border-bottom: 1px solid var(--border-color);
+        display: flex;
+        align-items: center;
+    }
+    .sidebar-actions { margin-left: auto; display: flex; gap: 4px; }
+    @media not all and (max-width: 768px) {
+        #app.collapsed #sidebar { width: 0; overflow: hidden; visibility: hidden; }
+    }
+    @media (max-width: 768px) {
+        #sidebar {
+            position: absolute;
+            left: 0; top: 0; bottom: 0;
+            z-index: 30;
+            padding: env(safe-area-inset-top, 0px) env(safe-area-inset-right, 0px)
+                     env(safe-area-inset-bottom, 0px) env(safe-area-inset-left, 0px);
+        }
+        #app.collapsed #sidebar { transform: translateX(-100%); visibility: hidden; }
+        #app:not(.collapsed) #sidebar-mask {
+            display: block; position: absolute; inset: 0; z-index: 25;
+            background: var(--modal-backdrop);
+        }
+        #sidebar-toggle-btn { position: relative; z-index: 40; }
+        #app:not(.collapsed) #sidebar-toggle-btn {
+            position: fixed;
+            left: calc(var(--sidebar-width) - 1px);
+            top: calc(env(safe-area-inset-top, 0px) + 5px);
+            z-index: 40;
+            background: var(--panel-bg);
+            border: 1px solid var(--border-color);
+            border-left: none;
+            border-radius: 0 6px 6px 0;
+        }
+    }
+    #sidebar-mask { display: none; }
+    @media (min-width: 769px) and (max-width: 1024px) {
+        :root { --sidebar-width: 200px; }
+    }
+
+    #sidebar-top-panel { flex: none; height: 48%; overflow-y: auto; min-height: 120px; }
+    #sidebar-resize-handle {
+        flex: none; height: 4px; cursor: row-resize; background: transparent; touch-action: none;
+    }
+    #sidebar-resize-handle.dragging { background: var(--accent); user-select: none; }
+    #sidebar-bottom-panel { flex: 1; overflow-y: auto; min-height: 100px; }
+
+    #main { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+    #header {
+        height: var(--header-height);
+        flex: 0 0 var(--header-height);
+        border-bottom: 1px solid var(--border-color);
+        display: flex;
+        align-items: center;
+        padding: 0 8px;
+        gap: 4px;
+        background: var(--panel-bg);
+    }
+    .icon-btn, .action-btn, .wt-action-btn {
+        border: 1px solid transparent;
+        background: none;
+        color: var(--text-secondary);
+        cursor: pointer;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        border-radius: 6px;
+        line-height: 1;
+    }
+    .icon-btn { width: var(--control-size); height: var(--control-size); flex: 0 0 var(--control-size); }
+    .icon-btn svg, .action-btn svg { width: 17px; height: 17px; fill: currentColor; }
+    #new-instance-btn { gap: 6px; padding: 0 10px; width: auto; flex: none; }
+    #new-instance-btn .new-label { font-size: 12px; }
+    #tabs-container {
+        display: flex; gap: 2px; overflow-x: auto; flex: 1 1 auto; min-width: 0;
+        scrollbar-width: none;
+    }
+    #tabs-container::-webkit-scrollbar { display: none; }
+    @media (max-width: 768px) {
+        #tabs-container { scroll-snap-type: x proximity; }
+        .tab { scroll-snap-align: start; }
+    }
+    .tab {
+        padding: 6px 12px; border-radius: 6px 6px 0 0; white-space: nowrap;
+        color: var(--text-secondary); cursor: pointer; border: 1px solid transparent;
+        border-bottom: none; background: none; min-width: 0; max-width: 100%;
+        overflow: hidden; text-overflow: ellipsis; flex: none;
+    }
+    .tab.active { background: var(--bg-color); color: var(--text-primary); border-color: var(--border-color); }
+    #instance-actions { display: flex; gap: 8px; flex: none; margin-left: 0; align-items: center; }
+    .action-btn {
+        background: var(--panel-bg); border-color: var(--border-color);
+        padding: 5px 10px; gap: 6px; font-size: 12px; min-height: 28px;
+    }
+    .action-btn.danger { color: var(--danger); }
+    .action-btn:disabled { opacity: .5; cursor: wait; }
+    .action-icon { display: none; }
+    #instance-state-text { color: var(--text-secondary); font-size: 12px; white-space: nowrap; }
+    @media (max-width: 1024px) {
+        #new-instance-btn { width: var(--control-size); padding: 0; }
+        #new-instance-btn .new-label, .action-label { display: none; }
+        .action-icon { display: inline-flex; }
+        #instance-actions { gap: 4px; }
+        .action-btn { flex: 0 0 var(--control-size); width: var(--control-size); height: var(--control-size); padding: 0; }
+    }
+
+    #workspace { flex: 1; position: relative; min-height: 0; display: flex; background: var(--bg-color); }
+    #terminal {
+        flex: 1; margin: 8px; background: #010409; border: 1px solid var(--border-color);
+        border-radius: 6px; padding: 12px; font: 12px/1.5 "SF Mono", Menlo, Consolas, monospace;
+        color: #7ee787; overflow: hidden; white-space: pre-wrap; min-height: 0;
+    }
+    #terminal-controls { position: absolute; right: 18px; top: 18px; display: flex; gap: 4px; }
+    #quick-keys-panel {
+        position: absolute; right: 56px; top: 18px; max-height: calc(100% - 36px);
+        overflow-y: auto; width: 288px; max-width: calc(100% - 88px);
+        padding: 10px; border: 1px solid var(--border-color); border-radius: 8px;
+        background: var(--panel-bg); display: grid; grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 6px;
+    }
+    #quick-keys-panel button { min-height: 36px; background: var(--bg-color); color: var(--text-primary); border: 1px solid var(--border-color); border-radius: 5px; }
+    @media (max-width: 480px) {
+        #quick-keys-panel { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    }
+    #status-bar {
+        flex: none; height: 22px; border-top: 1px solid var(--border-color);
+        font-size: 11px; color: var(--text-secondary); display: flex;
+        align-items: center; padding: 0 8px; gap: 12px; background: var(--panel-bg);
+    }
+
+    /* 一份 .wt-row-actions 外层；fine 不换行，coarse 独立行。 */
+    /* 1px 侧栏分隔 + 3px 左标识 + 24px padding：200/240px 档内容宽恰为 172/212px。 */
+    .wt-item {
+        padding: 8px 12px; cursor: pointer; margin: 0;
+        border-left: 3px solid transparent; border-bottom: 1px solid var(--border-color); min-width: 0;
+    }
+    .wt-item.active { background: rgba(88, 166, 255, 0.15); border-left-color: var(--accent); }
+    .wt-name { display: flex; align-items: center; gap: 6px; min-width: 0; }
+    .wt-name-text { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+    .wt-github { flex: none; width: 28px; height: 28px; text-decoration: none; color: var(--text-secondary); }
+    .wt-branch { display: flex; align-items: center; gap: 6px; color: var(--text-secondary); font-size: 11px; min-width: 0; }
+    .wt-branch-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .wt-row-actions { margin-left: auto; display: flex; gap: 4px; align-items: center; }
+    .wt-actions { display: flex; gap: 4px; opacity: 0; }
+    .wt-action-btn { border-color: var(--border-color); background: var(--panel-bg); width: 30px; height: 30px; }
+    .wt-item:focus-within .wt-actions, .wt-item:focus-visible .wt-actions { opacity: 1; }
+    .wt-rename { width: 100%; min-width: 0; background: var(--bg-color); color: var(--text-primary); border: 1px solid var(--accent); }
+    @media (hover: hover) {
+        .icon-btn:hover, .action-btn:hover, .wt-action-btn:hover { background: rgba(110, 118, 129, 0.3); color: var(--text-primary); }
+        .wt-item:hover { background: rgba(110, 118, 129, 0.15); }
+        .wt-item:hover .wt-actions { opacity: 1; }
+        .tab:hover { color: var(--text-primary); }
+    }
+    @media (hover: none) {
+        .wt-actions { opacity: 1; pointer-events: auto; }
+    }
+    @media (pointer: coarse) {
+        :root { --header-height: 52px; --control-size: 44px; }
+        .icon-btn, .action-btn, .wt-action-btn, .tab, dialog button, dialog select, #quick-keys-panel button {
+            min-width: 44px; min-height: 44px;
+        }
+        #quick-keys-panel { right: 70px; }
+        .wt-github { width: 44px; height: 44px; flex: 0 0 44px; }
+        .wt-branch { flex-wrap: wrap; }
+        .wt-row-actions {
+            flex: 1 0 100%; margin-left: 0; min-width: 0; justify-content: flex-end;
+        }
+        .wt-actions { display: contents; opacity: 1; pointer-events: auto; }
+        .wt-action-btn { width: 44px; height: 44px; flex: 0 0 44px; }
+        #quick-keys-panel button { min-height: 44px; }
+    }
+
+    .git-section-header { padding: 8px 12px; font-weight: 600; color: var(--text-secondary); display: flex; gap: 6px; }
+    .git-change-item { padding: 4px 12px 4px 24px; color: var(--text-secondary); }
+    dialog { background: var(--panel-bg); color: var(--text-primary); border: 1px solid var(--border-color); border-radius: 8px; padding: 20px; min-width: 300px; }
+    dialog::backdrop { background: var(--modal-backdrop); }
+    dialog select, dialog button { background: var(--bg-color); color: var(--text-primary); border: 1px solid var(--border-color); border-radius: 4px; padding: 6px 10px; }
+    dialog button.danger { color: var(--danger); border-color: var(--danger); }
+    #hint {
+        position: fixed; right: 12px; bottom: 12px; z-index: 9999;
+        background: rgba(22, 27, 34, 0.97); border: 1px solid var(--border-color);
+        border-radius: 8px; padding: 10px 12px; width: 360px; max-width: calc(100vw - 24px);
+        max-height: 55vh; overflow-y: auto; font-size: 12px; color: var(--text-secondary); line-height: 1.55;
+    }
+    #hint b { color: var(--text-primary); }
+    #hint-close { float: right; margin-left: 8px; }
+    #hint label { display: flex; align-items: center; gap: 8px; margin: 8px 0; }
+    #hint select, #hint button.demo { background: var(--bg-color); color: var(--text-primary); border: 1px solid var(--border-color); border-radius: 4px; padding: 5px 8px; }
+    .preview-note { border-top: 1px solid var(--border-color); padding-top: 8px; margin-top: 8px; }
+</style>
+</head>
+<body>
+<div id="app">
+    <div id="sidebar-mask" onclick="closeSidebarDrawer()"></div>
+    <div id="sidebar">
+        <div class="sidebar-title">
+            Worktrees
+            <span class="sidebar-actions">
+                <button class="icon-btn" title="New Worktree" aria-label="New Worktree" onclick="alert('demo')">+</button>
+                <button class="icon-btn" title="Import Worktree" aria-label="Import Worktree" onclick="alert('demo')">↓</button>
+            </span>
+        </div>
+        <div id="sidebar-top-panel"><div id="wt-list"></div></div>
+        <div id="sidebar-resize-handle" onpointerdown="startSidebarResize(event)"></div>
+        <div id="sidebar-bottom-panel">
+            <div class="git-section-header">▾ Staged (2)</div>
+            <div class="git-change-item">M internal/ui/static/index.html</div>
+            <div class="git-change-item">A testdata/touch_interaction.test.mjs</div>
+            <div class="git-section-header">▸ Unstaged (3)</div>
+        </div>
+    </div>
+    <div id="main">
+        <div id="header">
+            <button id="sidebar-toggle-btn" class="icon-btn" onclick="toggleSidebarCollapse()"
+                    aria-label="Toggle sidebar" aria-controls="sidebar" aria-expanded="true">☰</button>
+            <button id="new-instance-btn" class="icon-btn" title="New Instance" aria-label="New Instance" onclick="addDemoTab()">
+                <span aria-hidden="true">+</span><span class="new-label">New Instance</span>
+            </button>
+            <div id="tabs-container" aria-label="Instances"></div>
+            <div id="instance-actions" aria-label="Instance actions">
+                <button id="restart-btn" class="action-btn" title="Restart" aria-label="Restart" onclick="runInstanceAction('Restart')">
+                    <span class="action-icon" aria-hidden="true">↻</span><span class="action-label">Restart</span>
+                </button>
+                <button id="stop-btn" class="action-btn" title="Stop" aria-label="Stop" onclick="runInstanceAction('Stop')">
+                    <span class="action-icon" aria-hidden="true">□</span><span class="action-label">Stop</span>
+                </button>
+                <button id="delete-btn" class="action-btn danger" title="Delete" aria-label="Delete" onclick="runInstanceAction('Delete')">
+                    <span class="action-icon" aria-hidden="true">⌫</span><span class="action-label">Delete</span>
+                </button>
+                <span id="instance-state-text" hidden></span>
+            </div>
+        </div>
+        <div id="workspace">
+            <div id="terminal"></div>
+            <div id="terminal-controls">
+                <button class="icon-btn" title="Quick keys" aria-label="Quick keys" onclick="toggleQuickKeys()">⌘</button>
+            </div>
+            <div id="quick-keys-panel" hidden></div>
+        </div>
+        <div id="status-bar"><span>● connected</span><span>main +2/-0</span><span id="vp"></span></div>
+    </div>
+</div>
+
+<dialog id="demo-dialog">
+    <p><b>Delete · 演示 modal</b></p>
+    <p style="color:var(--text-secondary);margin:8px 0">Cancel 不取锁、不发请求；Delete 在执行前再次核对捕获 id 与最新状态。</p>
+    <p><select><option>main</option><option>develop</option></select></p>
+    <p style="margin-top:12px;display:flex;gap:8px;justify-content:flex-end">
+        <button id="cancel-delete">Cancel</button>
+        <button id="confirm-delete" class="danger">Delete</button>
+    </p>
+</dialog>
+
+<div id="hint">
+    <button id="hint-close" class="icon-btn" aria-label="Close preview help" onclick="document.getElementById('hint').remove()">✕</button>
+    <b>D0-1 交互预览 · 源稿 sidebar-states.pen</b>
+    <label>实例状态
+        <select id="instance-state" onchange="setDemoStatus(this.value)">
+            <option>running</option><option>unhealthy</option><option>starting</option>
+            <option>stopping</option><option>stopped</option><option>failed</option>
+            <option>exited</option><option>unknown</option>
+        </select>
+    </label>
+    <button class="demo" onclick="simulatePoll()">模拟 2s poll（保持 scrollLeft）</button>
+    <div>① &gt;1024 为 240px；769–1024 为 200px；≤768 为 drawer。Ctrl/Cmd+B 仍用同一 sidebarCollapsed。</div>
+    <div>② running/unhealthy/starting 仅 Stop；stopping 无按钮；stopped/failed/exited 仅 Restart + Delete。≤1024 图标仍有 aria-label/title。</div>
+    <div>③ 点 worktree 行切换 active；动作按钮单/双击不切行。remote inactive 无动作外层，主仓库无 Delete。</div>
+    <div>④ DevTools coarse：52px 顶栏、44px 命中区、独立动作行；320px stopped 的 tabs 预算为 112px。</div>
+    <div class="preview-note">此 preview 没有完整 visualViewport / iPadOS 系统 UI，不能作为 #116 高度证据，也不证明 per-id 锁、post-mutation refresh 或 selection revision 的实现完成。</div>
+</div>
+
+<script>
+    const STORAGE_KEY = "mw.ui.sidebarCollapsed";
+    const app = document.getElementById("app");
+    const toggleBtn = document.getElementById("sidebar-toggle-btn");
+    const tabsContainer = document.getElementById("tabs-container");
+    const inFlight = new Set();
+    let selectionRevision = 0;
+    let activeInstanceId = "issue116";
+    let activeWT = "feature/issue116";
+    let quickKeysOpen = false;
+    const sessions = { issue116: "$ myworktree\nready — final input line remains visible\n▊" };
+
+    function applySidebarCollapsed(collapsed, persist) {
+        app.classList.toggle("collapsed", collapsed);
+        toggleBtn.setAttribute("aria-expanded", String(!collapsed));
+        if (persist) { try { localStorage.setItem(STORAGE_KEY, JSON.stringify(collapsed)); } catch (e) {} }
+    }
+    function toggleSidebarCollapse() { applySidebarCollapsed(!app.classList.contains("collapsed"), true); }
+    function closeSidebarDrawer() { applySidebarCollapsed(true, true); }
+    function defaultSidebarCollapsedByViewport() {
+        return typeof window.matchMedia === "function" && window.matchMedia("(max-width: 768px)").matches;
+    }
+    (function initSidebarState() {
+        let stored = null;
+        try { stored = localStorage.getItem(STORAGE_KEY); } catch (e) {}
+        let collapsed;
+        if (stored === null) collapsed = defaultSidebarCollapsedByViewport();
+        else {
+            try { collapsed = JSON.parse(stored) === true; }
+            catch (e) { collapsed = defaultSidebarCollapsedByViewport(); }
+        }
+        applySidebarCollapsed(collapsed, false);
+    })();
+    document.addEventListener("keydown", event => {
+        if (event.repeat || event.altKey || !(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== "b") return;
+        if (event.target.closest("dialog, input, textarea, [contenteditable]")) return;
+        event.preventDefault(); toggleSidebarCollapse();
+    });
+
+    const worktrees = [
+        { id: "myworktree", name: "myworktree-with-a-very-long-main-repository-name", branch: "develop", main: true, remote: false, github: true },
+        { id: "feature/issue116", name: "feature/issue116", branch: "fix/fix-issue116", remote: false },
+        { id: "feature/auth", name: "feature/auth", branch: "feature/auth", remote: false },
+        { id: "remote/review", name: "remote/review", branch: "review", remote: true },
+        { id: "remote/upstream", name: "remote/upstream", branch: "upstream", main: true, remote: true },
+        { id: "remote/inactive", name: "remote/inactive", branch: "docs", remote: true },
+    ];
+    const actionNames = { terminal: "Open Terminal", finder: "Open Finder", delete: "Delete" };
+    const actionIcons = { terminal: ">_", finder: "↗", delete: "⌫" };
+    function el(tag, className, text) {
+        const node = document.createElement(tag);
+        if (className) node.className = className;
+        if (text !== undefined) node.textContent = text;
+        return node;
+    }
+    function actionButton(action) {
+        const btn = el("button", "wt-action-btn", actionIcons[action]);
+        btn.type = "button"; btn.title = actionNames[action]; btn.setAttribute("aria-label", actionNames[action]);
+        const stop = event => { event.stopPropagation(); };
+        btn.addEventListener("click", event => { stop(event); if (action !== "delete") alert("demo: " + actionNames[action]); });
+        btn.addEventListener("dblclick", stop);
+        return btn;
+    }
+    function renderSidebar() {
+        const list = document.getElementById("wt-list");
+        list.textContent = "";
+        for (const wt of worktrees) {
+            const active = wt.id === activeWT;
+            const row = el("div", "wt-item" + (active ? " active" : ""));
+            row.dataset.id = wt.id; row.tabIndex = 0;
+            const nameLine = el("div", "wt-name");
+            const name = el("span", "wt-name-text", wt.name);
+            nameLine.appendChild(name);
+            if (wt.github) {
+                const github = el("a", "wt-github icon-btn", "◎");
+                github.href = "https://github.com/"; github.target = "_blank";
+                github.title = "GitHub"; github.setAttribute("aria-label", "GitHub");
+                github.addEventListener("click", event => event.stopPropagation());
+                nameLine.appendChild(github);
+            }
+            const branch = el("div", "wt-branch");
+            branch.appendChild(el("span", "wt-branch-name", (wt.main ? "⌂ " : "⑂ ") + wt.branch));
+            const localActions = wt.remote ? [] : ["terminal", "finder"];
+            const actions = [...localActions];
+            if (active && !wt.main) actions.push("delete");
+            if (actions.length) {
+                const outer = el("span", "wt-row-actions");
+                if (localActions.length) {
+                    const nested = el("span", "wt-actions");
+                    localActions.forEach(action => nested.appendChild(actionButton(action)));
+                    outer.appendChild(nested);
+                }
+                if (active && !wt.main) outer.appendChild(actionButton("delete"));
+                branch.appendChild(outer);
+            }
+            row.append(nameLine, branch);
+            row.addEventListener("click", () => { activeWT = wt.id; selectionRevision++; renderSidebar(); });
+            row.addEventListener("keydown", event => { if (event.key === "Enter") row.click(); });
+            row.addEventListener("dblclick", event => {
+                if (event.target.closest(".wt-row-actions")) return;
+                event.preventDefault(); startWTRename(row, name, wt);
+            });
+            list.appendChild(row);
+        }
+    }
+    function startWTRename(row, nameNode, wt) {
+        const input = el("input", "wt-rename"); input.value = wt.name; input.setAttribute("aria-label", "Rename worktree");
+        nameNode.replaceWith(input); input.focus(); input.select();
+        const finish = () => { wt.name = input.value.trim() || wt.name; renderSidebar(); };
+        input.addEventListener("keydown", event => {
+            if (event.isComposing || event.keyCode === 229) return;
+            if (event.key === "Enter") finish(); if (event.key === "Escape") renderSidebar();
+        });
+        input.addEventListener("click", event => event.stopPropagation());
+        input.addEventListener("dblclick", event => event.stopPropagation());
+    }
+
+    const tabs = [
+        { id: "issue116", label: "issue116 · kimi" },
+        { id: "auth", label: "feature/auth · opencode" },
+        { id: "review", label: "bugfix/dirty-delete · reasonix" },
+    ];
+    function renderTabs(activeChanged = false) {
+        const oldLeft = tabsContainer.scrollLeft;
+        tabsContainer.textContent = "";
+        for (const inst of tabs) {
+            const tab = el("button", "tab" + (inst.id === activeInstanceId ? " active" : ""), inst.label);
+            tab.type = "button"; tab.dataset.id = inst.id;
+            tab.addEventListener("click", () => selectInstance(inst.id));
+            tabsContainer.appendChild(tab);
+        }
+        tabsContainer.scrollLeft = oldLeft;
+        if (activeChanged) tabsContainer.querySelector(".active")?.scrollIntoView({ block: "nearest", inline: "nearest" });
+    }
+    function selectInstance(id) {
+        if (!tabs.some(tab => tab.id === id)) return;
+        if (id !== activeInstanceId) selectionRevision++;
+        activeInstanceId = id; renderTabs(true); renderTerminal();
+    }
+    function addDemoTab() {
+        const id = "demo-" + (tabs.length + 1);
+        tabs.push({ id, label: id + " · new" }); sessions[id] = "$ new instance\n▊";
+        selectInstance(id);
+    }
+    function simulatePoll() { renderTabs(false); renderWorkspace(); }
+    function currentInstance() { return { id: activeInstanceId, status: document.getElementById("instance-state").value }; }
+
+    // 唯一可见性真源；in-flight 只负责 disabled/busy。
+    function getInstanceActionModel(inst, flight) {
+        const model = { Stop: false, Restart: false, Delete: false, disabled: flight.has(inst.id), stateText: "" };
+        if (["running", "unhealthy", "starting"].includes(inst.status)) model.Stop = true;
+        else if (["stopped", "failed", "exited"].includes(inst.status)) model.Restart = model.Delete = true;
+        else if (inst.status === "stopping") model.stateText = "Stopping…";
+        if (inst.status === "starting") model.stateText = "Starting…";
+        return model;
+    }
+    function renderWorkspace() {
+        const focusedAction = document.activeElement?.closest?.(".action-btn");
+        const inst = currentInstance();
+        const model = getInstanceActionModel(inst, inFlight);
+        for (const action of ["Stop", "Restart", "Delete"]) {
+            const btn = document.getElementById(action.toLowerCase() + "-btn");
+            btn.hidden = !model[action]; btn.disabled = model.disabled;
+            btn.setAttribute("aria-busy", String(model.disabled && !btn.hidden));
+        }
+        const stateText = document.getElementById("instance-state-text");
+        stateText.hidden = !model.stateText; stateText.textContent = model.stateText;
+        if (focusedAction?.hidden) {
+            const target = model.stateText ? stateText : tabsContainer.querySelector(".tab.active");
+            if (target === stateText) stateText.tabIndex = -1;
+            target?.focus({ preventScroll: true });
+        }
+    }
+    function setDemoStatus(status) {
+        document.getElementById("instance-state").value = status;
+        renderWorkspace(); renderTerminal();
+    }
+    async function runInstanceAction(action) {
+        const inst = currentInstance();
+        const model = getInstanceActionModel(inst, inFlight);
+        if (!model[action] || inFlight.has(inst.id)) return; // stale click / per-id 锁
+        if (action === "Delete") {
+            const dialog = document.getElementById("demo-dialog");
+            document.getElementById("cancel-delete").onclick = () => dialog.close();
+            document.getElementById("confirm-delete").onclick = () => {
+                dialog.close();
+                void performAction(inst.id, action);
+            };
+            dialog.showModal();
+            return; // confirm cancel 不取锁、不发请求
+        }
+        await performAction(inst.id, action);
+    }
+    async function performAction(id, action) {
+        const latest = currentInstance();
+        const latestModel = getInstanceActionModel(latest, inFlight);
+        if (latest.id !== id || !latestModel[action] || inFlight.has(id)) return;
+        const revision = selectionRevision;
+        inFlight.add(id); renderWorkspace();
+        try {
+            await new Promise(resolve => setTimeout(resolve, 650));
+            if (action === "Stop" && Object.prototype.hasOwnProperty.call(sessions, id)) {
+                sessions[id] += "\n[Process Stopped]"; // 只写捕获 id 的会话
+            }
+            if (selectionRevision === revision && activeInstanceId === id) renderTerminal();
+        } finally { inFlight.delete(id); renderWorkspace(); }
+    }
+    function renderTerminal() {
+        const inst = currentInstance();
+        document.getElementById("terminal").textContent = (sessions[inst.id] || "$ instance\n▊") + "\n\nstatus: " + inst.status;
+    }
+
+    const keys = ["Esc", "Tab", "⇧Tab", "←", "↓", "↑", "→", "^C", "^D", "Copy", "Paste"];
+    function toggleQuickKeys() {
+        quickKeysOpen = !quickKeysOpen;
+        const panel = document.getElementById("quick-keys-panel"); panel.hidden = !quickKeysOpen;
+        if (quickKeysOpen && !panel.childElementCount) keys.forEach(key => panel.appendChild(el("button", "", key)));
+    }
+
+    const handle = document.getElementById("sidebar-resize-handle");
+    const topPanel = document.getElementById("sidebar-top-panel");
+    let resizing = false, startY = 0, startHeight = 0;
+    function startSidebarResize(event) {
+        if (resizing) return;
+        resizing = true; startY = event.clientY; startHeight = topPanel.getBoundingClientRect().height;
+        handle.classList.add("dragging");
+        try { handle.setPointerCapture(event.pointerId); } catch (e) {}
+        document.addEventListener("pointermove", resizeSidebar);
+        document.addEventListener("pointerup", stopSidebarResize);
+        document.addEventListener("pointercancel", stopSidebarResize);
+        event.preventDefault();
+    }
+    function resizeSidebar(event) {
+        if (!resizing) return;
+        const sidebarHeight = document.getElementById("sidebar").clientHeight;
+        topPanel.style.height = Math.max(120, Math.min(sidebarHeight - 100, startHeight + event.clientY - startY)) + "px";
+    }
+    function stopSidebarResize(event) {
+        if (!resizing) return;
+        resizing = false; handle.classList.remove("dragging");
+        try { if (handle.hasPointerCapture(event.pointerId)) handle.releasePointerCapture(event.pointerId); } catch (e) {}
+        document.removeEventListener("pointermove", resizeSidebar);
+        document.removeEventListener("pointerup", stopSidebarResize);
+        document.removeEventListener("pointercancel", stopSidebarResize);
+    }
+    function updVp() {
+        const w = window.innerWidth;
+        document.getElementById("vp").textContent = w + "px · " + (w <= 768 ? "drawer" : w <= 1024 ? "200px" : "240px");
+    }
+    window.addEventListener("resize", updVp);
+    renderSidebar(); renderTabs(false); renderWorkspace(); renderTerminal(); updVp();
+</script>
+</body>
+</html>
