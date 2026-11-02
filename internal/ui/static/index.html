@@ -3462,10 +3462,14 @@
             // (measured seq14 open, seq29 close) and keeps its compensation.
             // Inclusive boundary: "covers AT LEAST 25%" is hard, so the
             // threshold reads the same in prose and in code.
-            if (vv.height <= layoutHeight * (1 - HARD_OCCLUSION_RATIO)) {
-                app.style.height = Math.max(vv.height, 0) + "px";
-            } else {
-                app.style.height = "";
+            const target = vv.height <= layoutHeight * (1 - HARD_OCCLUSION_RATIO)
+                ? Math.max(vv.height, 0) + "px"
+                : "";
+            // Write only on change. The reconcile tick below runs this on a timer,
+            // and an unconditional style write every tick would invalidate layout
+            // (and re-fire the terminal's ResizeObserver) for no gain.
+            if (app.style.height !== target) {
+                app.style.height = target;
             }
         }
 
@@ -3496,6 +3500,31 @@
             vv.addEventListener("resize", applyVisualViewportHeight);
             // scroll: visual-viewport pan — re-pin only what is pinned.
             vv.addEventListener("scroll", reapplyPinnedVisualViewportHeight);
+            // issue #116: keyboard-state TRANSITIONS do not reliably emit any
+            // visualViewport event. Measured on-device: the Magic Keyboard's
+            // floating bar both shrinks and recovers the visual viewport with no
+            // resize/scroll at all (seq47-54), and switching between the on-screen
+            // keyboard and a connected Magic Keyboard leaves a pin behind that
+            // nothing revises. A stale pin is exactly a white band: #app keeps the
+            // old, shorter inline height while the visible area has grown back, so
+            // the root canvas shows beneath the shell for the leftover height.
+            // Reported cases, all of this shape: connect the Magic Keyboard while
+            // the soft keyboard is up; expand the soft keyboard from the floating
+            // bar; disconnect either one. So re-run the (idempotent, cheap, now
+            // write-only-on-change) judgment on a timer and on every lifecycle
+            // edge that can accompany such a switch.
+            for (const type of ["pageshow", "orientationchange"]) {
+                window.addEventListener(type, applyVisualViewportHeight);
+            }
+            for (const type of ["visibilitychange", "focusin", "focusout"]) {
+                document.addEventListener(type, applyVisualViewportHeight);
+            }
+            // 500ms: fast enough that a stranded band is a blink rather than a
+            // state, slow enough that it costs nothing (the write above is a
+            // no-op unless the target actually changed).
+            setInterval(() => {
+                if (!document.hidden) applyVisualViewportHeight();
+            }, 500);
             applyVisualViewportHeight();
         }
 
@@ -3593,10 +3622,16 @@
         // point — a passive listener would be ignored.
         function initShellScrollLock() {
             const SCROLLABLE = /(auto|scroll)/;
+            // The terminal owns its own gestures: #terminal-container already
+            // preventDefaults and maps the drag onto xterm.scrollLines(), and
+            // xterm handles wheel itself. Exempting it here keeps that single
+            // implementation authoritative instead of double-handling.
             function ownsGesture(target) {
                 let el = target;
                 while (el && el !== document.body && el !== document.documentElement) {
                     if (el.tagName === "IFRAME") return true;
+                    if (el.id === "terminal-container") return true;
+                    if (el.classList && el.classList.contains("xterm")) return true;
                     const style = window.getComputedStyle(el);
                     if (style && SCROLLABLE.test(style.overflowY || "") && el.scrollHeight > el.clientHeight + 1) {
                         return true;
@@ -3607,6 +3642,19 @@
             }
             document.addEventListener("touchmove", (e) => {
                 if (e.touches && e.touches.length > 1) return;
+                if (ownsGesture(e.target)) return;
+                e.preventDefault();
+            }, { passive: false });
+            // Trackpad / mouse-wheel panning is a SECOND door onto the same room.
+            // A Magic Keyboard trackpad two-finger scroll emits `wheel`, not
+            // `touchmove`, so the guard above never sees it — measured on-device:
+            // touch drags on the shell could no longer pan the page, yet a
+            // two-finger trackpad scroll still walked the whole shell up and
+            // revealed the canvas band down to the floating bar's top edge.
+            // ctrlKey is the browser's pinch-zoom signal for wheel events and is
+            // left alone so zooming still works.
+            document.addEventListener("wheel", (e) => {
+                if (e.ctrlKey) return;
                 if (ownsGesture(e.target)) return;
                 e.preventDefault();
             }, { passive: false });

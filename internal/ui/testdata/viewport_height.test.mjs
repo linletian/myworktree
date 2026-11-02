@@ -67,7 +67,12 @@ const viewportFactory = new Function("deps", `
   const {
     window, document, requestAnimationFrame, console,
     getActiveTerminalSession, sendResize, syncTerminalToAppliedSize,
+    setInterval: injectInterval,
   } = deps;
+  // issue #116 added a timer-driven reconcile; route it through the injected
+  // dependency so the harness owns the cadence and node never keeps a real
+  // interval alive past the test.
+  const setInterval = (fn, ms) => injectInterval(fn, ms);
   // Mirrors the module-level declaration in index.html;
   // applySidebarCollapsed assigns it — the getter exposes it below.
   let sidebarCollapsed = false;
@@ -135,6 +140,9 @@ function makeDocument(app, layoutHeight) {
       if (id === "app") return app;
       return elements[id] ?? null;
     },
+    // issue #116: lifecycle reconcile hooks (visibilitychange / focusin /
+    // focusout) are registered through this stub.
+    addEventListener() {},
   };
 }
 
@@ -163,9 +171,18 @@ function viewportHarness({ withVisualViewport = true, layoutHeight = 600 } = {})
   const app = makeAppElement();
   const document = makeDocument(app, layoutHeight);
   const vv = makeVisualViewport({ height: layoutHeight, offsetTop: 0 });
-  const window = {};
+  const windowEvents = new Map();
+  const window = {
+    // issue #116: initVisualViewportHandling reconciles on lifecycle edges, so
+    // the stub must record listeners rather than throw.
+    addEventListener(type, handler) {
+      if (!windowEvents.has(type)) windowEvents.set(type, []);
+      windowEvents.get(type).push(handler);
+    },
+  };
   if (withVisualViewport) window.visualViewport = vv;
   const rafCallbacks = [];
+  const intervalCallbacks = [];
   const api = viewportFactory({
     window,
     document,
@@ -174,6 +191,7 @@ function viewportHarness({ withVisualViewport = true, layoutHeight = 600 } = {})
     getActiveTerminalSession: () => null,
     sendResize: () => {},
     syncTerminalToAppliedSize: () => {},
+    setInterval: (fn) => { intervalCallbacks.push(fn); return intervalCallbacks.length; },
   });
   return {
     api, app, vv, window,
@@ -182,6 +200,9 @@ function viewportHarness({ withVisualViewport = true, layoutHeight = 600 } = {})
     // Simulates the iOS keyboard opening: the layout viewport KEEPS its
     // height (that is the whole reason R6 exists), only the visual
     // viewport shrinks.
+    windowEvents,
+    // Drives the reconcile tick added for issue #116 without waiting real time.
+    tickReconcile: () => { for (const fn of intervalCallbacks) fn(); },
     openKeyboard: (visibleHeight) => { vv.height = visibleHeight; vv.offsetTop = 0; vv.dispatch("resize"); },
     closeKeyboard: () => { vv.height = layoutHeight; vv.offsetTop = 0; vv.dispatch("resize"); },
   };
@@ -383,4 +404,67 @@ test("issue #116 A: the pan is invisible to the judgment — the pin survives th
   }
   h.closeKeyboard();
   assert.equal(h.app.style.height || "", "", "only the keyboard leaving hands sizing back to the cascade");
+});
+
+// --- issue #116: keyboard-state TRANSITIONS that emit no event ---------------
+// Reported on-device, all three of this shape: connecting a Magic Keyboard while
+// the soft keyboard is up, expanding the soft keyboard from the floating bar,
+// and disconnecting either one — the shell kept an inline height from the
+// previous keyboard state, so #app stayed shorter than the visible area and the
+// root canvas showed through as a white band. The Magic floating bar is measured
+// to both shrink AND recover the visual viewport with no resize/scroll at all,
+// so an event-driven handler can never be the whole answer.
+
+test("issue #116: a stranded pin is cleared by the reconcile tick when the keyboard leaves silently", () => {
+  const h = viewportHarness({ layoutHeight: 702 });
+  h.api.initVisualViewportHandling();
+  h.openKeyboard(274);
+  assert.equal(h.app.style.height, "274px", "keyboard open pins first");
+
+  // The keyboard leaves with NO event whatsoever (the reported transitions).
+  h.vv.height = 702;
+  assert.equal(h.app.style.height, "274px", "without a tick the pin is stranded — this is the white band");
+
+  h.tickReconcile();
+  assert.equal(h.app.style.height, "", "the reconcile tick must hand sizing back to the cascade");
+});
+
+test("issue #116: an occlusion that appears silently is pinned by the reconcile tick", () => {
+  const h = viewportHarness({ layoutHeight: 702 });
+  h.api.initVisualViewportHandling();
+  assert.equal(h.app.style.height || "", "", "at rest the cascade owns the height");
+
+  // Keyboard appears without firing anything we listen to.
+  h.vv.height = 274;
+  h.tickReconcile();
+  assert.equal(h.app.style.height, "274px", "the tick must also apply a pin that arrived event-lessly");
+});
+
+test("issue #116: the reconcile tick is idempotent and does not churn the style", () => {
+  const h = viewportHarness({ layoutHeight: 702 });
+  h.api.initVisualViewportHandling();
+  h.openKeyboard(274);
+  // Sentinel: any write goes through this setter.
+  let writes = 0;
+  const real = h.app.style.height;
+  Object.defineProperty(h.app.style, "height", {
+    configurable: true,
+    get: () => real,
+    set: () => { writes += 1; },
+  });
+  h.tickReconcile();
+  h.tickReconcile();
+  assert.equal(writes, 0, "unchanged target must not write — the tick runs every 500ms and a write invalidates layout");
+});
+
+test("issue #116: transitions still respect the floating bar (no pin) and zoom (no pin)", () => {
+  const h = viewportHarness({ layoutHeight: 702 });
+  h.api.initVisualViewportHandling();
+  h.vv.height = 633.5; // magic floating bar, 9.8%
+  h.tickReconcile();
+  assert.equal(h.app.style.height || "", "", "the bar must never pin, tick or not");
+  h.vv.scale = 0.85;
+  h.vv.height = 274; // even a keyboard-sized shrink while zoomed
+  h.tickReconcile();
+  assert.equal(h.app.style.height || "", "", "zoom keeps its blanket exemption on every path");
 });

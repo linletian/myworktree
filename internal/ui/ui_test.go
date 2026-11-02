@@ -1104,7 +1104,11 @@ func TestViewportAndHeightAnchors(t *testing.T) {
 		"window.visualViewport",
 		"document.documentElement.clientHeight",
 		"vv.height <= layoutHeight * (1 - HARD_OCCLUSION_RATIO)",
-		`app.style.height = Math.max(vv.height, 0) + "px"`,
+		`Math.max(vv.height, 0) + "px"`,
+		// issue #116: the judgment now computes a target and writes only when it
+		// changed, so the 500ms reconcile tick cannot invalidate layout (and
+		// re-fire the terminal's ResizeObserver) on every pass.
+		"app.style.height !== target",
 		"vv.scale && Math.abs(vv.scale - 1) > 0.01",
 		`app.style.height = ""`,
 	} {

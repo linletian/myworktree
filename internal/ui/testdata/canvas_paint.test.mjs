@@ -273,3 +273,27 @@ test("the shell lock prevents the default unless a native scroller owns the gest
   );
   assert.match(body, /scrollHeight > el\.clientHeight/, "the exemption requires ACTUAL overflow, not just overflow-y");
 });
+
+test("the shell lock also covers wheel — the trackpad is a second door", () => {
+  const start = indexSource.indexOf("function initShellScrollLock()");
+  const body = indexSource.slice(start, indexSource.indexOf("\n        function initTerminalTouchScroll()", start));
+  assert.match(
+    body,
+    /addEventListener\("wheel"/,
+    "issue #116: a Magic Keyboard trackpad two-finger scroll emits `wheel`, not " +
+      "`touchmove`. Measured on-device: touch drags were locked but the trackpad still " +
+      "panned the whole shell up and revealed the canvas band to the bar's top edge.",
+  );
+  assert.match(body, /e\.ctrlKey/, "wheel pinch-zoom (ctrlKey) must stay exempt so zooming still works");
+});
+
+test("the shell lock exempts the terminal so xterm keeps its own gesture handling", () => {
+  const start = indexSource.indexOf("function initShellScrollLock()");
+  const body = indexSource.slice(start, indexSource.indexOf("\n        function initTerminalTouchScroll()", start));
+  assert.match(
+    body,
+    /terminal-container/,
+    "the terminal must be exempt: #terminal-container already preventDefaults and maps the " +
+      "drag onto xterm.scrollLines(), and xterm handles wheel itself",
+  );
+});
