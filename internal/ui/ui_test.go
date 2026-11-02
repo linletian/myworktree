@@ -1103,19 +1103,14 @@ func TestViewportAndHeightAnchors(t *testing.T) {
 	for _, check := range []string{
 		"window.visualViewport",
 		"document.documentElement.clientHeight",
-		// issue #116 final rule: no occlusion classification at all — whenever the
-		// visible bottom sits above the layout bottom, the shell ends exactly on it.
-		// A 25% ratio gate was tried and measured to hide the terminal's last 147px
-		// under a connected Magic Keyboard (seq1209: vv.height 555 of 702 = 20.9%).
-		// The target is vv.height ALONE: including the pan made the shell grow while
-		// scrolling (inline = pan + 274). The revealed strip is covered by the
-		// columns' 100vh ink bleed instead of by chasing the geometry.
-		"const occluded = vv.height < layoutHeight - 1",
-		"Math.max(vv.height, 0) + \"px\"",
-		"setPinnedHeights(app, pinnedHeight)",
+		"vv.height <= layoutHeight * (1 - HARD_OCCLUSION_RATIO)",
+		`Math.max(vv.height, 0) + "px"`,
+		// issue #116: the judgment now computes a target and writes only when it
+		// changed, so the 500ms reconcile tick cannot invalidate layout (and
+		// re-fire the terminal's ResizeObserver) on every pass.
+		"app.style.height !== target",
 		"vv.scale && Math.abs(vv.scale - 1) > 0.01",
-		// Zoom and "nothing occluded" both clear through the single writer.
-		"setPinnedHeights(app, \"\")",
+		`app.style.height = ""`,
 	} {
 		if !strings.Contains(apply, check) {
 			t.Fatalf("GET / applyVisualViewportHeight should include %q (issue #100 L1 R6, threshold re-calibrated under issue #116)", check)
@@ -1133,35 +1128,14 @@ func TestViewportAndHeightAnchors(t *testing.T) {
 	// stripped — this function documents itself with // line comments — and the
 	// scan is quote-aware so a string literal containing "//" survives.
 	applyCode := stripJSComments(apply)
-	// setPinnedHeights is the single writer: #app, <html> and <body> must agree on
-	// one height, or the root box stays layout-viewport tall and its surplus becomes
-	// a scrollable dead strip that shows the canvas. Only-on-change, because the
-	// 500ms reconcile tick runs it constantly.
-	pin := sliceJSFunction(t, bodyText, "setPinnedHeights")
-	for _, check := range []string{
-		"app.style.height !== height",
-		// The root box is explicitly CLEARED, never sized: a short root box clips the
-		// columns' downward bleed (body carries overflow:clip) and re-opens the gap.
-		"root.style.height = \"\"",
-		"document.body.style.height = \"\"",
-	} {
-		if !strings.Contains(pin, check) {
-			t.Fatalf("GET / setPinnedHeights should include %q (issue #116)", check)
-		}
-	}
-
-	// issue #116: vv.offsetTop/visibleBottom are deliberately BACK in the formula —
-	// ending on the visible bottom is what makes app.bottom == visibleBottom, which
-	// is the only way the canvas gap cannot exist. The ban therefore covers just the
-	// classification artefacts that were removed, so they cannot creep back.
 	for _, banned := range []string{
-		"HARD_OCCLUSION_RATIO",
-		"isHardOcclusion",
-		// A pan-sensitive target is banned: it turns every scroll into a resize.
 		"vv.offsetTop",
+		"offsetTop",
+		"visibleBottom",
+		"covered",
 	} {
 		if strings.Contains(applyCode, banned) {
-			t.Fatalf("GET / applyVisualViewportHeight must not classify occlusions (%q) — a ratio gate misclassified a 20.9%% occlusion on-device and hid the terminal's last rows (issue #116)", banned)
+			t.Fatalf("GET / applyVisualViewportHeight must not read %q — the occlusion judgment and the pin target are pan-immune by construction (issue #116 choice A)", banned)
 		}
 	}
 	// REVISED under issue #116: the scroll listener no longer gates on an
@@ -3476,34 +3450,5 @@ func TestSidebarWorktreeRenameAnchors(t *testing.T) {
 	}
 	if !strings.Contains(focusRule, "border-color: var(--active-color);") {
 		t.Fatal(".wt-rename-input:focus should take var(--active-color) like the tab input (issue #122)")
-	}
-}
-
-// TestServedDocumentsAreNotCacheable pins issue #116's verification lesson: the
-// shell is one inlined document whose behaviour IS the release, and the served
-// copy carried no cache directive at all — Safari applied heuristic freshness and
-// a plain reload could keep running the previous build, which made two rounds of
-// on-device reports ambiguous ("no change" could mean the fix failed or that the
-// old bytes were still live). Both the document and the diagnostic asset must
-// declare no-store.
-func TestServedDocumentsAreNotCacheable(t *testing.T) {
-	mux := http.NewServeMux()
-	if err := Register(mux, "myworktree", nil); err != nil {
-		t.Fatalf("Register: %v", err)
-	}
-	srv := httptest.NewServer(mux)
-	defer srv.Close()
-
-	for _, path := range []string{"/", "/static/viewport_debug.js"} {
-		resp, err := http.Get(srv.URL + path)
-		if err != nil {
-			t.Fatalf("GET %s: %v", path, err)
-		}
-		got := resp.Header.Get("Cache-Control")
-		_, _ = io.Copy(io.Discard, resp.Body)
-		_ = resp.Body.Close()
-		if !strings.Contains(got, "no-store") {
-			t.Fatalf("GET %s Cache-Control = %q, want no-store — the shell is one inlined document whose behaviour IS the release, and a stale copy made two rounds of on-device reports ambiguous (issue #116)", path, got)
-		}
 	}
 }

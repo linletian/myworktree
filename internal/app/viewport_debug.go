@@ -112,6 +112,11 @@ type viewportDebugDocument struct {
 type viewportDebugProbe struct {
 	VisualBottom *viewportDebugProbeHit `json:"visualBottom,omitempty"`
 	LayoutBottom *viewportDebugProbeHit `json:"layoutBottom,omitempty"`
+	// PageTop accompanies the two hits because elementFromPoint is a CLIENT-space
+	// API: without it a reader cannot tell whether a hit was taken in client or
+	// layout coordinates, and an earlier probe mixed the two (50 of 120 frames
+	// reported a phantom "BODY at the bottom" purely from that mistake).
+	PageTop *float64 `json:"pageTop,omitempty"`
 }
 
 type viewportDebugProbeHit struct {

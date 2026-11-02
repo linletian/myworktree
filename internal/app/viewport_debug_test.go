@@ -323,7 +323,8 @@ func TestViewportDebugAcceptsEveryClientField(t *testing.T) {
 	    },
 	    "probe": {
 	      "visualBottom": {"y":1162,"tag":"DIV","id":"workspace","className":"","background":"rgb(11, 16, 32)"},
-	      "layoutBottom": {"y":1178,"tag":"DIV","id":"workspace","className":"","background":"rgb(11, 16, 32)"}
+	      "layoutBottom": {"y":1178,"tag":"DIV","id":"workspace","className":"","background":"rgb(11, 16, 32)"},
+	      "pageTop": 69
 	    },
 	    "vv": {"width":820,"height":1111,"offsetTop":69,"offsetLeft":0,"scale":1},
 	    "app": {"top":0,"bottom":1164,"width":820,"height":1164,"computedHeight":"100dvh","inlineHeight":"","paddingTop":"0px","paddingRight":"0px","paddingBottom":"20px","paddingLeft":"0px","background":"rgba(0, 0, 0, 0)"},
