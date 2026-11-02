@@ -161,28 +161,28 @@
             /* issue #116 (iPad Safari white band, A0-calibrated): nothing in
                the paint chain covered the root canvas. Measured on-device
                (session 997d18dc…, 263/263 snapshots): html, body and #app all
-               compute to rgba(0,0,0,0) and the ONLY painted surface in that
-               column is #workspace (rgb(11,16,32) = var(--term-bg)), whose
-               bottom edge sits a CONSTANT 20.0px above the visible bottom in
-               every state — landscape, portrait, soft keyboard up, floating bar
-               pinned. Those 20px are #app's `padding-bottom:
-               env(safe-area-inset-bottom)`; with no background beneath them the
-               UA root canvas shows through, and `color-scheme` was never
-               declared anywhere in this document (only two
-               @media (prefers-color-scheme: dark) blocks), so the canvas was
-               WHITE. That constant band is the one reported in the issue — it
-               is a missing paint, not a missing height: #app.bottom already
-               equalled the visible bottom. Widens to 88.5px while the Magic
-               Keyboard floats its bar (that bar is the 68.5px visualViewport
-               shrink), which is why it appeared to "expand upward". Painting
-               var(--term-bg) here makes the safe-area inset read as the
-               terminal running edge to edge (design D0-1), covers the pinned
-               shortfall without touching the height algorithm, and is the
-               second line of defense against dvh over/under-reports. Token,
-               not a literal: --term-bg is defined once and is NOT overridden
-               inside @media (prefers-color-scheme: dark), so this matches
-               #workspace byte-identically in both themes. */
-            background: var(--term-bg);
+               compute to rgba(0,0,0,0), and `color-scheme` was never declared
+               anywhere in this document (only two
+               @media (prefers-color-scheme: dark) blocks), so the UA root
+               canvas rendered WHITE and every unpainted strip showed as a bright
+               band. Fixing that is where the root canvas earns a colour: it is
+               the app's CHROME tone (var(--bg-color), the same ink the sidebar
+               and the rail use), NOT the terminal ink.
+               Why not var(--term-bg): design truth ui/sidebar-states.pen names
+               the safe-area strip $bg-root (#F4F6FA) — a neutral chrome value
+               sitting beside $bg-sidebar (#F7F7F9), never $term-bg (#1B1A23).
+               Painting the terminal colour here turned the strip into a dark slab.
+               The strip must also never be treated as its own painted object: the
+               design rule is "background bleeds fully, content insets" (see below) (background bleeds past the
+               safe area, content insets) and
+               "drawer / main / workspace backgrounds bleed fully" — each column carries its OWN
+               background down to the physical edge, so under the sidebar the
+               strip reads as sidebar and under the terminal it reads as terminal.
+               Those two bleeds live on #sidebar and #workspace below; this rule
+               only guarantees that anything the columns do not cover (overscroll,
+               zoom-out, the URL-bar gap before dvh settles) is chrome-toned
+               instead of white. */
+            background: var(--bg-color);
             /* Declares that this document supports both themes off the same
                signal its @media blocks already use, so the UA canvas, form
                controls and scrollbars follow the system instead of defaulting
@@ -264,6 +264,20 @@
             border-right: 1px solid var(--border-color);
             display: flex;
             flex-direction: column;
+            /* issue #116 "background bleeds fully, content insets": #app's safe-area padding stops
+               every column 20px (env(safe-area-inset-bottom)) above the physical
+               edge, so the rail's own ink has to be carried across that strip or
+               the strip reads as an ownerless block under a light-inked sidebar.
+               box-shadow with zero blur/spread and a downward y-offset paints
+               exactly the strip using the element's OWN colour — no wrapper, no
+               magic constant (the offset IS the env() value, so it is 0 on every
+               desktop and collapses automatically on iPad), and no layout effect:
+               the sidebar's box is untouched, so flex sizing, the collapsed
+               width:0 state and the drawer transform all behave as before. A
+               ::after bleed would need position/height bookkeeping and would be
+               clipped by the collapsed state's overflow:hidden; the shadow cannot.
+               Design: ui/sidebar-states.pen "drawer / main / workspace backgrounds bleed fully". */
+            box-shadow: 0 env(safe-area-inset-bottom, 0px) 0 0 var(--bg-color);
         }
 
         /* Sidebar collapse (issue #99), scoped OFF the narrow tier with the
@@ -1335,6 +1349,19 @@
             overflow: hidden;
             display: flex;
             flex-direction: column;
+            /* issue #116 "background bleeds fully, content insets", terminal column: the terminal's
+               ink runs to the physical bottom edge while the ROWS stay inset,
+               which is what makes the safe-area strip disappear instead of
+               reading as a band. Same zero-blur/zero-spread shadow as #sidebar,
+               for the same reason — and here it is the only option that works:
+               #workspace is overflow:hidden (xterm needs the clip), so an
+               absolutely positioned ::after bleed sitting at top:100% would be
+               clipped away entirely, whereas box-shadow is painted outside the
+               element's own overflow context and survives.
+               Deliberately NOT folded into #main: #main carries var(--main-bg),
+               the panel ink, and bleeding THAT would put a panel-coloured band
+               under a terminal-coloured column — the very seam this removes. */
+            box-shadow: 0 env(safe-area-inset-bottom, 0px) 0 0 var(--term-bg);
         }
 
         #terminal-container {

@@ -85,14 +85,15 @@ test("the root canvas rule exists", () => {
   );
 });
 
-test("the root canvas is painted with a theme token, not left transparent", () => {
+test("the root canvas is painted with the CHROME token, not the terminal ink", () => {
   const body = bodiesFor(/^(?:body,\s*html|html,\s*body)$/)[0] || "";
   assert.equal(
     decl(body, "background"),
-    "var(--term-bg)",
-    "issue #116: `body, html` must paint var(--term-bg). Without it, #app's " +
-      "env(safe-area-inset-bottom) padding (measured a constant 20.0px on-device) " +
-      "exposes the UA root canvas, which renders white — that is the reported band.",
+    "var(--bg-color)",
+    "issue #116: the root canvas is the app's chrome tone. Design truth is " +
+      "ui/sidebar-states.pen, where the safe-area strip is $bg-root (#F4F6FA) and " +
+      "sits beside $bg-sidebar (#F7F7F9) — never $term-bg (#1B1A23). Painting the " +
+      "terminal ink here produced a dark slab across the bottom of every column.",
   );
 });
 
@@ -141,8 +142,8 @@ test("#workspace keeps painting the terminal background the band must join", () 
 
 test("#app still consumes the safe-area insets that create the band", () => {
   // Guards the premise of the whole diagnosis: the band is #app's safe-area
-  // padding. If that consumption ever goes away, the root-canvas paint becomes
-  // dead weight and this test should be revisited — not deleted.
+  // padding. If that consumption ever goes away, the per-column bleeds become
+  // dead weight and these tests should be revisited — not deleted.
   const bodies = bodiesFor(/^#app$/).join("\n");
   const pad = decl(bodies, "padding") || "";
   assert.match(
@@ -151,4 +152,58 @@ test("#app still consumes the safe-area insets that create the band", () => {
     "#app must keep consuming env(safe-area-inset-*) — the bottom inset IS the " +
       "band; the fix paints it rather than removing it (content stays inset, canvas fills)",
   );
+});
+
+// --- 「背景全出血，内容内缩」 (design: ui/sidebar-states.pen) ---------------
+// The design does not decorate the safe-area strip; it makes the strip vanish by
+// having each column carry its OWN background down to the physical edge while the
+// content stays inset. These cases pin that per-column contract.
+
+for (const [selector, ink] of [
+  ["#sidebar", "var(--bg-color)"],
+  ["#workspace", "var(--term-bg)"],
+]) {
+  // #sidebar has several variant rules (base, .collapsed width:0, the narrow-tier
+  // drawer); the bleed belongs to the BASE rule, so pick the one that carries it
+  // rather than assuming a rule count.
+  const bleedRule = () =>
+    bodiesFor(new RegExp(`^${selector}$`)).find((b) => (decl(b, "box-shadow") || "").includes("env(safe-area-inset-bottom"));
+
+  test(`${selector}: the column bleeds its own background past the safe area`, () => {
+    assert.ok(
+      bodiesFor(new RegExp(`^${selector}$`)).length >= 1,
+      `expected at least one ${selector} rule`,
+    );
+    const body = bleedRule();
+    assert.ok(body, `${selector} must carry a safe-area bleed box-shadow`);
+    assert.equal(
+      decl(body, "box-shadow"),
+      `0 env(safe-area-inset-bottom, 0px) 0 0 ${ink}`,
+      `${selector} must carry its own ink ${ink} across env(safe-area-inset-bottom). ` +
+        "Design 「drawer/main/workspace 背景全出血」: the strip reads as the column, " +
+        "not as a separate painted band. Zero blur and zero spread are load-bearing — " +
+        "they make the shadow a solid colour extension rather than a glow.",
+    );
+  });
+
+  test(`${selector}: the bleed carries no magic number`, () => {
+    const shadow = decl(bleedRule(), "box-shadow") || "";
+    // The offset must BE the env(): 20px is Apple's iPad value today and changes
+    // per device/orientation, so a literal would be wrong elsewhere. env()'s own
+    // 0px fallback is the declared default, not a magic number, so it is removed
+    // before the scan.
+    const withoutEnvFallbacks = shadow.replace(/env\([^)]*\)/g, "env()");
+    assert.ok(
+      !/\b\d+(\.\d+)?px\b/.test(withoutEnvFallbacks),
+      `${selector} bleed must derive its offset from env(), not a px constant (got "${shadow}")`,
+    );
+  });
+}
+
+test("#workspace keeps overflow:hidden — the bleed relies on box-shadow, not a child", () => {
+  // A ::after bleed at top:100% inside #workspace would be clipped (xterm needs
+  // overflow:hidden). box-shadow is painted outside the element's own overflow
+  // context, which is precisely why it is the mechanism used.
+  const bodies = bodiesFor(/^#workspace$/);
+  assert.equal(decl(bodies[0], "overflow"), "hidden", "#workspace must keep overflow:hidden for xterm");
 });

@@ -196,6 +196,40 @@
 
 Split View、dsh/reasonix iframe、iPhone/Chrome(iOS)、逐像素截图、键盘打开时整页刷新。
 
+## 5i. 安全区 UI 设计复盘：根画布是 chrome 色，每列背景各自全出血
+
+### 设计真源原文（`ui/sidebar-states.pen`，5 个视口稿重复标注，属刻意契约）
+
+- `横屏刘海 + Home Indicator：env(safe-area-inset-*) 四向内容内缩。html/body/#app 同主题铺底；drawer/main/workspace 背景全出血。`
+- `20px safe-area · html/body/#app 同主题；内容内缩，背景全出血`
+- 变量表：`bg-root = #F4F6FA`（根画布）、`bg-sidebar = #F7F7F9`、`bg-header = #FBFBFC`、`border = #D9DDE7`、`term-bg = #1B1A23`
+- 8 个 `safe-area 主题铺底（非透明白缝）` 图元：**整宽 20px 矩形，fill 全为 `$bg-root`，stroke 全为 None**（设计**没有**给这条带加描边或渐变）
+- 桌面稿纵向堆叠实测：`根画布 $bg-root(0..900)` → `#header $bg-header(0..40)` → `#workspace $bg-app(40..858)` → `状态栏 $bg-header(858..880)` → `safe-area $bg-root(880..900)`
+
+### 结论：安全区不是"一条要上色的带"
+
+设计让它**消失**的方式是「每列把自己的背景铺到物理底，只有内容内缩」，而不是给带子填一个颜色。带子本身无描边、无渐变——任何"给带子加线条/过渡"都是设计源没有的装饰。
+
+### 我此前两版实现都偏离了设计
+
+| 版本 | 做法 | 偏离点 |
+| --- | --- | --- |
+| 第一版 | `body/html` 涂 `var(--term-bg)` | 用了**终端墨色**当根画布；设计是 `$bg-root`（chrome 中性色）。在浅色侧栏下方形成一条深色板 |
+| 当前版 | `body/html` 改 `var(--bg-color)` + `#sidebar`/`#workspace` 各自 box-shadow 出血 | 符合「背景全出血，内容内缩」 |
+
+### 落地（第三版）
+
+- `body, html { background: var(--bg-color); color-scheme: light dark; }` —— 根画布为 chrome 色，仅兜住列未覆盖处（overscroll、zoom-out）。
+- `#sidebar { box-shadow: 0 env(safe-area-inset-bottom, 0px) 0 0 var(--bg-color); }`
+- `#workspace { box-shadow: 0 env(safe-area-inset-bottom, 0px) 0 0 var(--term-bg); }`
+- 选 `box-shadow`（0 blur / 0 spread / 向下偏移 env）而非 `::after` 出血层：`#workspace` 是 `overflow:hidden`（xterm 需要裁剪），绝对定位在 `top:100%` 的伪元素会被裁掉，而 box-shadow 画在自身溢出上下文之外不受影响；且影子零布局影响，`.collapsed` 的 `width:0` 与抽屉 transform 全部照旧。
+- 偏移量直接取 `env()`，无 px 常量（20px 只是当前 iPad 值，随设备/朝向变化）。
+- 门禁：`canvas_paint.test.mjs` 扩到 12 项，钉住"根画布必须是 chrome token 而非终端墨色""两列各自用自己的墨色出血""出血不得出现 px 常量""`#workspace` 必须保留 `overflow:hidden`"。另 `TestUICopyIsEnglishOnly` 抓到 CSS 注释里的中文设计原文，已改写为英文（该仓库 UI 资产禁 CJK）。
+
+### 若要做"可见的设计化处理"（待用户确认）
+
+设计源目前**没有**给安全区加线条/渐变。若要加（例如带顶部分隔线、或向终端色的渐变过渡），按 `ui/README.md` 维护纪律第 4 条，必须**先改 `.pen` 设计源并重出 PNG**，再改代码；`pen` CLI 0.3.11 本机可用，符合 README 指定版本。
+
 ## 6. 真机记录模板
 
 | 场景 | 操作 | 报告 session / seq | 关键几何与截图 | 初步判定 |
