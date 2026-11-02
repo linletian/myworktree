@@ -314,3 +314,63 @@ test("issue #100 L1 R12: collapse + keyboard coexist — the class and the inlin
   assert.equal(h.app.style.height, "");
   assert.deepEqual([...h.classes], []);
 });
+
+// --- issue #116: occlusion classification (soft keyboard vs floating bar) ---
+// Calibrated on iPad Pro 11 landscape, layout viewport 702px:
+//   soft keyboard     covered 428px = 60.9%  -> HARD  -> pin
+//   magic floating bar covered 68.5px =  9.8% -> soft -> never pin
+// The floating bar shrinks AND recovers the visual viewport without firing
+// resize/scroll (measured seq47-54), so any pin introduced for it goes stale
+// and leaves #app short by that amount forever. Not pinning removes the class.
+
+test("issue #116: a soft keyboard (60.9% covered) pins #app to the visible bottom", () => {
+  const h = viewportHarness({ layoutHeight: 702 });
+  h.api.initVisualViewportHandling();
+  h.openKeyboard(274); // measured seq14: vv.height 274, covered 428px
+  assert.equal(h.app.style.height, "274px", "the keyboard is a hard occlusion and must be compensated");
+  h.closeKeyboard();
+  assert.equal(h.app.style.height || "", "", "and the pin is handed back to the cascade when it closes");
+});
+
+test("issue #116: the magic floating bar (9.8% covered) never pins #app", () => {
+  const h = viewportHarness({ layoutHeight: 702 });
+  h.api.initVisualViewportHandling();
+  h.vv.height = 633.5; // measured seq47: covered 68.5px
+  h.vv.dispatch("resize");
+  assert.equal(h.app.style.height || "", "", "the floating bar is system-owned, user-movable chrome — the shell must not chase it");
+
+  // The decisive property: because nothing was pinned, the event-less recovery
+  // observed on-device (measured seq54: vv.height 633.5 -> 702 with NO
+  // resize/scroll event) cannot leave a stale inline height behind.
+  h.vv.height = 702;
+  assert.equal(h.app.style.height || "", "", "no pin was ever introduced, so a silent recovery leaves no residue");
+});
+
+test("issue #116: the hard-occlusion threshold is a ratio, not a pixel constant", () => {
+  // Threshold = 25% of the layout viewport, so the same judgment holds at any
+  // size. Exercised at 400px: covered 100 pins, covered 99 does not.
+  const hard = viewportHarness({ layoutHeight: 400 });
+  hard.api.initVisualViewportHandling();
+  hard.openKeyboard(300); // covered exactly 100 = 25%
+  assert.equal(hard.app.style.height, "300px", "covered == 25% of the layout viewport is hard");
+
+  const soft = viewportHarness({ layoutHeight: 400 });
+  soft.api.initVisualViewportHandling();
+  soft.openKeyboard(301); // covered 99 = 24.75%
+  assert.equal(soft.app.style.height || "", "", "just under the ratio is a soft occlusion — no pin");
+});
+
+test("issue #116: panning flush to the layout bottom clears the pin (covered becomes 0)", () => {
+  // Measured seq34/43/44: vv.height 634 with offsetTop 68 -> visible bottom
+  // 702 = layout height. Nothing is covered, so the cascade must own the
+  // height. This was CORRECT behavior all along and is pinned here so a
+  // future "fix" cannot regress it.
+  const h = viewportHarness({ layoutHeight: 702 });
+  h.vv.height = 274;
+  h.api.initVisualViewportHandling();
+  assert.equal(h.app.style.height, "274px", "keyboard open pins first");
+  h.vv.offsetTop = 68;
+  h.vv.height = 634; // covered = 702 - (68 + 634) = 0
+  h.vv.dispatch("scroll");
+  assert.equal(h.app.style.height || "", "", "flush to the layout bottom means nothing is covered");
+});

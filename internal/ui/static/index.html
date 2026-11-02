@@ -3347,6 +3347,22 @@
             const vv = window.visualViewport;
             const app = document.getElementById("app");
             if (!vv || !app) return;
+            // Hard-occlusion threshold, calibrated on-device (issue #116 A0,
+            // sessions 997d18dc… / f3ce260c…): the covered strip is expressed as
+            // a RATIO of the layout viewport, never in px, so it holds across
+            // devices and orientations. Measured anchors on iPad Pro 11 land
+            // (layout 702px):
+            //   soft keyboard      covered 428px = 60.9%  -> HARD, must pin
+            //   magic floating bar covered 68.5px =  9.8% -> soft, never pin
+            // 25% sits between the two anchors (an iPhone portrait keyboard
+            // covers ~40%+, so it stays on the hard side) and is fail-safe in
+            // the direction that matters: misclassifying a keyboard as a bar
+            // would leave text under the keyboard, while misclassifying a bar as
+            // a keyboard is what produced the stale-pin defect below. Declared
+            // inside the function because the test harness slices named
+            // functions out of this document and evaluates them standalone — a
+            // module-level const is outside that slice.
+            const HARD_OCCLUSION_RATIO = 0.25;
             // Pinch / double-tap zoom opt-out, spec fact #1: vv.height is
             // measured in layout-viewport pixels, so it SHRINKS as the scale
             // grows (and a resize event fires on the change) — without this
@@ -3359,18 +3375,31 @@
                 app.style.height = "";
                 return;
             }
-            // Visible bottom edge in layout-viewport coordinates. With the
-            // keyboard open this sits keyboardHeight above the layout
-            // bottom (offsetTop stays 0); at rest it equals the layout
-            // height. The sentinel is documentElement.clientHeight, spec
-            // fact #2: vv.height excludes scrollbars pinned to the visual
-            // viewport, while window.innerHeight INCLUDES the classic
-            // scrollbar gutter — comparing against innerHeight would pin
-            // spuriously by the gutter's size on desktops. The 1px slack
-            // absorbs sub-pixel rounding so a closed keyboard does not
-            // leave a 1px-short inline style behind.
+            // Covered strip in layout-viewport coordinates. Expressed this way
+            // the test is pan-immune: panning the visual viewport down grows
+            // visibleBottom and shrinks the covered strip, so pushing the page
+            // flush to the layout bottom yields covered = 0 and correctly hands
+            // sizing back to the CSS cascade (measured seq34/43/44: pan 68px,
+            // vv.height 634, visible bottom 702 = layout height — clearing
+            // there was CORRECT, not a defect, contrary to an earlier reading).
+            // The sentinel is documentElement.clientHeight, spec fact #2: it is
+            // scrollbar-gutter-free, while window.innerHeight includes the
+            // classic gutter and would pin spuriously on desktops.
+            const layoutHeight = document.documentElement.clientHeight;
             const visibleBottom = vv.offsetTop + vv.height;
-            if (visibleBottom < document.documentElement.clientHeight - 1) {
+            const covered = layoutHeight - visibleBottom;
+            // Only a HARD occlusion pins. The Magic Keyboard's floating bar
+            // shrinks the visual viewport by ~10% and iOS lets the user drag
+            // that bar anywhere on screen, so it is system-owned chrome that
+            // the shell must not chase: it also shrinks and recovers WITHOUT
+            // firing visualViewport resize/scroll (measured seq47–54: vv.height
+            // 633.5 -> 702 with no event at all, only our own diagnostic
+            // settle), which left an inline height of 633.5px behind and left
+            // #app permanently 68.5px short of the visible area. Not pinning
+            // for it removes that whole failure class at the source, while the
+            // keyboard — which does fire resize on both edges (measured seq14
+            // open, seq29 close) — keeps the compensation it needs.
+            if (covered > 1 && covered >= layoutHeight * HARD_OCCLUSION_RATIO) {
                 app.style.height = Math.max(visibleBottom, 0) + "px";
             } else {
                 app.style.height = "";
