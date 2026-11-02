@@ -3462,14 +3462,36 @@
             // (measured seq14 open, seq29 close) and keeps its compensation.
             // Inclusive boundary: "covers AT LEAST 25%" is hard, so the
             // threshold reads the same in prose and in code.
-            const target = vv.height <= layoutHeight * (1 - HARD_OCCLUSION_RATIO)
-                ? Math.max(vv.height, 0) + "px"
-                : "";
+            const isHardOcclusion = vv.height <= layoutHeight * (1 - HARD_OCCLUSION_RATIO);
+            const target = isHardOcclusion ? Math.max(vv.height, 0) + "px" : "";
             // Write only on change. The reconcile tick below runs this on a timer,
             // and an unconditional style write every tick would invalidate layout
             // (and re-fire the terminal's ResizeObserver) for no gain.
             if (app.style.height !== target) {
                 app.style.height = target;
+            }
+            // issue #116: keep the DOCUMENT box no taller than the visible
+            // viewport. This is the structural half of the band fix, and it is a
+            // different mechanism from the pin above: #app being short is fine,
+            // but html/body default to `height: 100%` of the LAYOUT viewport
+            // (702px) while the visible area can be 274px (keyboard) or 633.5px
+            // (floating bar). That surplus is a genuinely SCROLLABLE dead strip —
+            // measured: html/body stayed 702px, so 702-274 = 428px could be
+            // scrolled, pageTop/scrollTop climbed in lockstep (16.5 -> 138 -> 276)
+            // and probe.visualBottom hit BODY rgb(249,249,249) the whole way. The
+            // user-visible symptom is a band exactly one keyboard tall, and no
+            // gesture guard can stop it because the document really does scroll.
+            // Shrinking the root box removes the scroll range instead of fighting
+            // for it. #app keeps its own height: when it is taller than this box
+            // (the floating-bar case, where nothing is pinned) body's
+            // overflow:hidden clips the overflow that sits under the bar anyway.
+            const rootHeight = vv.height < layoutHeight - 1 ? Math.max(vv.height, 0) + "px" : "";
+            const root = document.documentElement;
+            if (root && root.style && root.style.height !== rootHeight) {
+                root.style.height = rootHeight;
+            }
+            if (document.body && document.body.style && document.body.style.height !== rootHeight) {
+                document.body.style.height = rootHeight;
             }
         }
 
@@ -3658,6 +3680,20 @@
                 if (ownsGesture(e.target)) return;
                 e.preventDefault();
             }, { passive: false });
+            // Backstop for scroll sources no listener can see (iPadOS drives some
+            // trackpad scrolling through the native web-view scroller). The shell
+            // never needs a non-zero document offset, so any residual bounce is
+            // returned to the origin immediately.
+            const pinRootScroll = () => {
+                const el = document.scrollingElement || document.documentElement;
+                if (el && (el.scrollTop !== 0 || el.scrollLeft !== 0)) {
+                    el.scrollTop = 0;
+                    el.scrollLeft = 0;
+                }
+                if (window.scrollX || window.scrollY) window.scrollTo(0, 0);
+            };
+            window.addEventListener("scroll", pinRootScroll, { passive: true });
+            document.addEventListener("scroll", pinRootScroll, { passive: true, capture: true });
         }
 
         function initTerminalTouchScroll() {

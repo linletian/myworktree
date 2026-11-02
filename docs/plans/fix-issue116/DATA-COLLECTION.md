@@ -256,6 +256,32 @@ Split View、dsh/reasonix iframe、iPhone/Chrome(iOS)、逐像素截图、键盘
 
 已撤销并写进测试。它没有阻止平移，且在软键盘态因 body 仍占满视口、`#app` 被钉到键盘顶边而多出一片键盘高度画布。
 
+## 5k. S5 失败的真因：文档比可视区高出"可滚动死区"（会话 `sop-7746830267fa01879804470f`）
+
+首份**探针字段齐全**的真机数据（`probeVersion=p4-reconcile-wheel`，120 帧窗口）。三不变量全部 FAIL，但失败形态与之前所有轮次不同，且指向一个结构性缺陷：
+
+```
+seq433  pageTop=16.5  scrollTop=17    probe.visualBottom → BODY  rgb(249,249,249)
+seq435  pageTop=56    scrollTop=56    band=112
+seq440  pageTop=138   scrollTop=138   band=276
+```
+
+- `scrollTop` 与 `pageTop` **同步增长** → 这是**文档真的在滚**，不是 iOS 平移可视视口（平移时 `scrollTop` 应为 0）。
+- 底部命中 **BODY**（`rgb(249,249,249)`）→ 露出的确实是根画布。
+- 72/120 帧 `vv.offsetTop>0`，42 帧底部命中 BODY。
+
+### 根因
+
+`#app` 已被正确钉到 274px（键盘态），但**`html/body` 仍是布局视口的 `height:100%` = 702px**。于是文档比可视区高出 `702 − 274 = 428px` —— **正好是一个软键盘高度**，且这段是**真实可滚动**的：滚过去就是 BODY 浅色画布。手势锁（`touchmove`/`wheel`）对此无效，因为它不是"手势被放行"，而是文档本来就有滚动范围。
+
+### 修法（结构性，非手势）
+
+让**文档盒永远不超过可视视口**：钉高时同步把 `documentElement.style.height` 与 `body.style.height` 设为 `vv.height`；恢复时清空。浮窗态（`vv.height=633.5`、不钉 `#app`）同样把根盒设为 633.5 —— 那 68.5px 也是富余量。`#app` 自身高度不变，超出根盒的部分由 `body` 的 `overflow:hidden` 裁掉（本来就被浮窗遮住）。
+
+另加兜底：`scroll` 事件里把任何残余根滚动立即归零（有些 iPadOS 触摸板滚动走原生 web-view 滚轮，页面监听看不到）。
+
+zoom 态整体豁免，与其余补偿一致。
+
 ## 6. 真机记录模板
 
 | 场景 | 操作 | 报告 session / seq | 关键几何与截图 | 初步判定 |

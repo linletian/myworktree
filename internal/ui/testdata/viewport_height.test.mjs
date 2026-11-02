@@ -88,6 +88,9 @@ const viewportFactory = new Function("deps", `
     reapplyPinnedVisualViewportHeight,
     initVisualViewportHandling,
     applySidebarCollapsed,
+    // issue #116: the root-box sizing is part of the contract, so tests need the
+    // document stub the handler writes to.
+    __document: document,
     isCollapsed: () => sidebarCollapsed,
   };
 `);
@@ -135,7 +138,12 @@ function makeDocument(app, layoutHeight) {
     // scrollbar-gutter-free layout height (vv.height excludes scrollbars
     // pinned to the visual viewport; window.innerHeight would include the
     // classic gutter and pin spuriously on desktops).
-    documentElement: { clientHeight: layoutHeight },
+    // issue #116: the handler now also sizes the root box (it must never be
+    // taller than the visible viewport, or that surplus becomes a scrollable
+    // dead strip showing the canvas). The stub needs writable styles.
+    documentElement: { clientHeight: layoutHeight, style: {} },
+    // issue #116: the root box that must never exceed the visible viewport.
+    body: { style: {} },
     getElementById(id) {
       if (id === "app") return app;
       return elements[id] ?? null;
@@ -143,6 +151,7 @@ function makeDocument(app, layoutHeight) {
     // issue #116: lifecycle reconcile hooks (visibilitychange / focusin /
     // focusout) are registered through this stub.
     addEventListener() {},
+    style: {},
   };
 }
 
@@ -467,4 +476,58 @@ test("issue #116: transitions still respect the floating bar (no pin) and zoom (
   h.vv.height = 274; // even a keyboard-sized shrink while zoomed
   h.tickReconcile();
   assert.equal(h.app.style.height || "", "", "zoom keeps its blanket exemption on every path");
+});
+
+// --- issue #116: the document box must never exceed the visible viewport -----
+// Measured failure (session sop-7746830…, S5): with the keyboard up, #app was
+// correctly pinned to 274px, but html/body stayed 100% of the LAYOUT viewport
+// (702px). The 702-274 = 428px surplus was genuinely SCROLLABLE: pageTop and
+// scrollTop climbed in lockstep (16.5 -> 138 -> 276) and probe.visualBottom hit
+// BODY rgb(249,249,249). The user sees a band exactly one keyboard tall, and no
+// gesture guard can stop it because the document really does scroll — the scroll
+// RANGE has to go.
+
+test("issue #116: the root box shrinks with the visible viewport, removing the scroll range", () => {
+  const h = viewportHarness({ layoutHeight: 702 });
+  const doc = h.api.__document;
+  h.api.initVisualViewportHandling();
+  assert.equal(doc.documentElement.style.height || "", "", "at rest the root box is left to CSS");
+
+  h.openKeyboard(274);
+  assert.equal(h.app.style.height, "274px", "the terminal column is pinned");
+  assert.equal(
+    doc.documentElement.style.height,
+    "274px",
+    "issue #116: html must be sized to the visible viewport too — otherwise the " +
+      "428px surplus becomes a scrollable dead strip that shows the canvas",
+  );
+  assert.equal(doc.body.style.height, "274px", "body must match, or it re-introduces the tall box");
+
+  h.closeKeyboard();
+  assert.equal(doc.documentElement.style.height || "", "", "restoring the keyboard restores the root box");
+  assert.equal(doc.body.style.height || "", "", "and body with it");
+});
+
+test("issue #116: the floating bar also shrinks the root box (it is still surplus)", () => {
+  // The bar is only 68.5px, but it is surplus all the same, and 68.5px of the
+  // root canvas is exactly the band reported before the pin existed.
+  const h = viewportHarness({ layoutHeight: 702 });
+  const doc = h.api.__document;
+  h.api.initVisualViewportHandling();
+  assert.equal(h.app.style.height || "", "", "the bar must not pin #app");
+  h.tickReconcile.call(null);
+  h.vv.height = 633.5;
+  h.tickReconcile();
+  assert.equal(h.app.style.height || "", "", "the bar still never pins #app");
+  assert.equal(doc.documentElement.style.height, "633.5px", "but the root box must not exceed the visible area");
+});
+
+test("issue #116: zoom leaves the root box alone, like every other compensation", () => {
+  const h = viewportHarness({ layoutHeight: 702 });
+  const doc = h.api.__document;
+  h.api.initVisualViewportHandling();
+  h.vv.scale = 0.85;
+  h.vv.height = 500;
+  h.tickReconcile();
+  assert.equal(doc.documentElement.style.height || "", "", "zoom keeps its blanket exemption");
 });
