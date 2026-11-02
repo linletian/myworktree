@@ -3452,3 +3452,32 @@ func TestSidebarWorktreeRenameAnchors(t *testing.T) {
 		t.Fatal(".wt-rename-input:focus should take var(--active-color) like the tab input (issue #122)")
 	}
 }
+
+// TestServedDocumentsAreNotCacheable pins issue #116's verification lesson: the
+// shell is one inlined document whose behaviour IS the release, and the served
+// copy carried no cache directive at all — Safari applied heuristic freshness and
+// a plain reload could keep running the previous build, which made two rounds of
+// on-device reports ambiguous ("no change" could mean the fix failed or that the
+// old bytes were still live). Both the document and the diagnostic asset must
+// declare no-store.
+func TestServedDocumentsAreNotCacheable(t *testing.T) {
+	mux := http.NewServeMux()
+	if err := Register(mux, "myworktree", nil); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	for _, path := range []string{"/", "/static/viewport_debug.js"} {
+		resp, err := http.Get(srv.URL + path)
+		if err != nil {
+			t.Fatalf("GET %s: %v", path, err)
+		}
+		got := resp.Header.Get("Cache-Control")
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+		if !strings.Contains(got, "no-store") {
+			t.Fatalf("GET %s Cache-Control = %q, want no-store — the shell is one inlined document whose behaviour IS the release, and a stale copy made two rounds of on-device reports ambiguous (issue #116)", path, got)
+		}
+	}
+}

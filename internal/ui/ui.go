@@ -39,6 +39,14 @@ func Register(mux *http.ServeMux, repoName string, isRemote func(r *http.Request
 			return
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		// issue #116: the shell is a single inlined document whose behaviour IS the
+		// release. Without a cache directive Safari applied heuristic freshness to
+		// this response, so a plain reload could keep running the previous build —
+		// which made on-device verification reports ambiguous ("nothing changed"
+		// could mean the fix failed, or that the old bytes were still live). Served
+		// documents must always reflect this process's embedded assets.
+		w.Header().Set("Cache-Control", "no-store, must-revalidate")
+		w.Header().Set("Pragma", "no-cache")
 		body := content
 		if isRemote != nil && isRemote(r) {
 			body = bytes.ReplaceAll(body, []byte("<body>"), []byte(`<body class="remote-access">`))
@@ -66,6 +74,11 @@ func Register(mux *http.ServeMux, repoName string, isRemote func(r *http.Request
 			return
 		}
 		w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
+		// Same reasoning as the document above: this asset is the measurement
+		// instrument, so a stale copy silently invalidates every capture taken with
+		// it. Embedding makes the bytes cheap to re-send.
+		w.Header().Set("Cache-Control", "no-store, must-revalidate")
+		w.Header().Set("Pragma", "no-cache")
 		_, _ = w.Write(viewportDebugAsset)
 	})
 	fs := http.FS(staticFS)

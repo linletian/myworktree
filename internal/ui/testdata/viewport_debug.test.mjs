@@ -379,3 +379,14 @@ test("viewport debug panel reserves the quick-keys control column when docked ri
   assert.equal(px(hidden.right), 8, "a hidden control column reserves nothing");
   assert.ok(px(right.right) + px(right.width) <= 1194, "reserved panel must stay inside the viewport");
 });
+
+test("every snapshot states which probe build produced it", () => {
+  // Two verification rounds were spent on reports that turned out to describe a
+  // page still running the previous build (the document carried no cache
+  // directive, so a plain reload could reuse it). The stamp makes a capture
+  // self-identifying; this pins that it is present and non-empty.
+  const { page } = makePage();
+  const snapshot = loadAPI().snapshotFromPage(page, "manual", "2026-10-27T12:00:00.000Z");
+  assert.equal(typeof snapshot.probeVersion, "string", "probeVersion must be a string");
+  assert.ok(snapshot.probeVersion.length >= 4, `probeVersion must be non-trivial, got ${JSON.stringify(snapshot.probeVersion)}`);
+});

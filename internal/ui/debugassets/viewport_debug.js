@@ -12,6 +12,14 @@
 
     const SESSION_PATTERN = /^[A-Za-z0-9_-]{16,64}$/;
 
+    // Stamped into EVERY snapshot. Two rounds of on-device verification were
+    // spent on reports that turned out to describe a page still running the
+    // previous build (the document carried no cache directive, so a plain reload
+    // could reuse it). A capture now states which instrument produced it, so a
+    // report can never be ambiguous again — bump this whenever the probe or the
+    // shell behaviour it measures changes.
+    const PROBE_VERSION = "p4-reconcile-wheel";
+
     function finite(value) {
         return Number.isFinite(value) ? value : 0;
     }
@@ -96,6 +104,7 @@
         const coarse = typeof win.matchMedia === "function" && win.matchMedia("(pointer: coarse)").matches;
 
         return {
+            probeVersion: PROBE_VERSION,
             capturedAt,
             reason,
             innerWidth: finite(win.innerWidth),
