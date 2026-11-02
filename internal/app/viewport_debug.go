@@ -91,9 +91,43 @@ type viewportDebugDevice struct {
 type viewportDebugDocument struct {
 	BodyBackground string `json:"bodyBackground"`
 	HTMLBackground string `json:"htmlBackground"`
+	// issue #116: scroll/pan discriminators. These exist so a report can say
+	// whether the page SCROLLED or whether iOS panned the VISUAL viewport — the
+	// two look identical on screen but have different fixes. Pointers, not
+	// float64, because the client sends null when the API is unavailable
+	// (elementFromPoint/visualViewport-less environments) and "absent" must stay
+	// distinguishable from "zero".
+	PageTop                      *float64 `json:"pageTop"`
+	ScrollTop                    *float64 `json:"scrollTop"`
+	ScrollingElementScrollTop    *float64 `json:"scrollingElementScrollTop"`
+	ScrollingElementScrollHeight *float64 `json:"scrollingElementScrollHeight"`
+	BodyScrollTop                *float64 `json:"bodyScrollTop"`
+}
+
+// viewportDebugProbe answers "what is painted at the bottom edge" as data rather
+// than inference: the hit-tested element at the last visible pixel of the VISUAL
+// viewport and of the LAYOUT viewport. They disagree exactly when the visual
+// viewport is panned, and a BODY/HTML hit means the root canvas is exposed
+// (a real band) whereas the terminal host means the pixels are the app's own ink.
+type viewportDebugProbe struct {
+	VisualBottom *viewportDebugProbeHit `json:"visualBottom,omitempty"`
+	LayoutBottom *viewportDebugProbeHit `json:"layoutBottom,omitempty"`
+}
+
+type viewportDebugProbeHit struct {
+	Y          float64 `json:"y"`
+	Tag        string  `json:"tag"`
+	ID         string  `json:"id"`
+	ClassName  string  `json:"className"`
+	Background string  `json:"background"`
 }
 
 type viewportDebugSnapshot struct {
+	// issue #116: which build of the instrument produced this snapshot. Two
+	// verification rounds were spent on reports that turned out to describe a
+	// page still running the previous build; a capture now identifies itself.
+	ProbeVersion string                   `json:"probeVersion,omitempty"`
+	Probe        *viewportDebugProbe      `json:"probe,omitempty"`
 	CapturedAt   string                   `json:"capturedAt"`
 	Reason       string                   `json:"reason"`
 	InnerWidth   float64                  `json:"innerWidth"`

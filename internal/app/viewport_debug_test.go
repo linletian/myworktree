@@ -289,3 +289,93 @@ func TestViewportDebugEndpointUsesExistingAuth(t *testing.T) {
 		t.Fatalf("authenticated response lacks no-store")
 	}
 }
+
+// TestViewportDebugAcceptsEveryClientField pins the CLIENT/SERVER schema together.
+//
+// The decoder uses DisallowUnknownFields, so any field the probe starts sending
+// and the struct does not declare turns EVERY upload into a 400 — which is
+// exactly what happened during issue #116: probeVersion, probe and the
+// document scroll/pan discriminators were added to the client only, so the panel
+// sat on "upload failed; retrying" while the server rejected the lot. A
+// permissive unmarshal swallow would have hidden it; this test fails loudly
+// instead. Keep this payload in step with snapshotFromPage in
+// internal/ui/debugassets/viewport_debug.js.
+func TestViewportDebugAcceptsEveryClientField(t *testing.T) {
+	srv := &Server{viewportDebug: newViewportDebugStore()}
+	payload := `{
+	  "session": "0123456789abcdef",
+	  "seq": 1,
+	  "snapshot": {
+	    "probeVersion": "p4-reconcile-wheel",
+	    "capturedAt": "2026-10-27T12:00:00.000Z",
+	    "reason": "manual",
+	    "innerWidth": 820, "innerHeight": 1180,
+	    "clientWidth": 820, "clientHeight": 1180, "dpr": 2,
+	    "device": {"userAgent":"iPad","platform":"iPad","touchPoints":5,"orientation":"portrait-primary","screenWidth":820,"screenHeight":1180,"coarse":true},
+	    "document": {
+	      "bodyBackground": "rgb(249, 249, 249)",
+	      "htmlBackground": "rgb(249, 249, 249)",
+	      "pageTop": 69,
+	      "scrollTop": 0,
+	      "scrollingElementScrollTop": 0,
+	      "scrollingElementScrollHeight": 1180,
+	      "bodyScrollTop": 0
+	    },
+	    "probe": {
+	      "visualBottom": {"y":1162,"tag":"DIV","id":"workspace","className":"","background":"rgb(11, 16, 32)"},
+	      "layoutBottom": {"y":1178,"tag":"DIV","id":"workspace","className":"","background":"rgb(11, 16, 32)"}
+	    },
+	    "vv": {"width":820,"height":1111,"offsetTop":69,"offsetLeft":0,"scale":1},
+	    "app": {"top":0,"bottom":1164,"width":820,"height":1164,"computedHeight":"100dvh","inlineHeight":"","paddingTop":"0px","paddingRight":"0px","paddingBottom":"20px","paddingLeft":"0px","background":"rgba(0, 0, 0, 0)"},
+	    "main": {"top":40,"bottom":1164,"width":820,"height":1124},
+	    "workspace": {"top":40,"bottom":1148,"width":820,"height":1108,"background":"rgb(11, 16, 32)"},
+	    "terminal": {"top":40,"bottom":1148,"width":820,"height":1108,"background":"rgba(0, 0, 0, 0)"},
+	    "xtermRows": {"top":50,"bottom":1138,"width":820,"height":1088},
+	    "ui": {"collapsed":false,"quickKeysOpen":false,"kind":"pty","status":"running","activeElementTag":"TEXTAREA"}
+	  }
+	}`
+	rec := doViewportDebugRequest(t, srv, http.MethodPost, "/api/viewport-debug/report", mustDecodeJSON(t, payload))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("the probe's own snapshot shape must be accepted, got status=%d body=%s — a client field missing from viewportDebugSnapshot turns every upload into a 400 and the panel just says \"upload failed; retrying\"", rec.Code, rec.Body.String())
+	}
+}
+
+// TestViewportDebugNullScrollFieldsAreAccepted covers the other half: the client
+// sends null for the scroll discriminators when the platform API is missing, so
+// "absent" must not be an error (pointers keep it distinguishable from zero).
+func TestViewportDebugNullScrollFieldsAreAccepted(t *testing.T) {
+	srv := &Server{viewportDebug: newViewportDebugStore()}
+	payload := `{
+	  "session": "0123456789abcdef",
+	  "seq": 1,
+	  "snapshot": {
+	    "capturedAt": "2026-10-27T12:00:00.000Z",
+	    "reason": "manual",
+	    "innerWidth": 820, "innerHeight": 1180,
+	    "clientWidth": 820, "clientHeight": 1180, "dpr": 2,
+	    "device": {"userAgent":"iPad","platform":"iPad","touchPoints":5,"orientation":"portrait-primary","screenWidth":820,"screenHeight":1180,"coarse":true},
+	    "document": {"bodyBackground":"","htmlBackground":"","pageTop":null,"scrollTop":null,"scrollingElementScrollTop":null,"scrollingElementScrollHeight":null,"bodyScrollTop":null},
+	    "probe": null,
+	    "vv": null,
+	    "app": {"top":0,"bottom":1164,"width":820,"height":1164,"computedHeight":"","inlineHeight":"","paddingTop":"0px","paddingRight":"0px","paddingBottom":"0px","paddingLeft":"0px","background":""},
+	    "main": {"top":40,"bottom":1164,"width":820,"height":1124},
+	    "workspace": {"top":40,"bottom":1148,"width":820,"height":1108,"background":""},
+	    "ui": {"collapsed":false,"quickKeysOpen":false,"kind":"pty","status":"running","activeElementTag":"BODY"}
+	  }
+	}`
+	if rec := doViewportDebugRequest(t, srv, http.MethodPost, "/api/viewport-debug/report", mustDecodeJSON(t, payload)); rec.Code != http.StatusOK {
+		t.Fatalf("null scroll/probe fields must decode, got status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// mustDecodeJSON turns a raw JSON literal into a value the request helper can
+// re-marshal (it takes `any` and marshals it), keeping the fixture readable as
+// literal JSON rather than a deeply nested Go composite.
+func mustDecodeJSON(t *testing.T, raw string) any {
+	t.Helper()
+	var v any
+	if err := json.Unmarshal([]byte(raw), &v); err != nil {
+		t.Fatalf("fixture is not valid JSON: %v", err)
+	}
+	return v
+}
