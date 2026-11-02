@@ -173,6 +173,29 @@
 
 `ui_test.go` 新增禁止锚点：`applyVisualViewportHeight` 的代码（剥掉 `//` 与 `/* */` 注释后）不得再出现 `offsetTop` / `visibleBottom` / `covered`；`reapplyPinnedVisualViewportHeight` 不得重新加回旧门禁。为此新增 `stripJSComments`（引号感知，URL/字符串里的 `//` 不误伤）。
 
+## 5h. A 方案真机复测通过（会话 `choiceA-5359054bbf8d96654ca6`，244 事件 / scale=1 241）
+
+| 验证项 | 结果 | 证据 |
+| --- | --- | --- |
+| 键盘打开钉高 | ✅ | seq14/25/38/532 `vv.height` 702→274，covered 428px=**61.0%**，`inline=274px` |
+| 键盘收起交还 CSS | ✅ | seq18/34/518/544 `inline` 清空，`vv.height` 回 702 |
+| **pan 免疫（本轮核心）** | ✅ | pan>0 帧中 `inline` **取值集合仅 {274px}**；seq350–514 共 142 个 scroll，pan 从 0→428→0 全程钉住 274px，一帧未丢 |
+| 缩放豁免 | ✅ | seq4–6 `scale=0.85` 时 `inline` 恒空 |
+| 键盘开/关沿均有事件 | ✅ | 10 个高度跳变沿 reason 全为 `resize`，无"静默恢复"（对比 §5g 浮窗的无事件恢复） |
+| 首次拿到 `visibilitychange` | ✅ | 补齐此前缺失的生命周期事件证据 |
+
+### A 方案完成不变量：终端末行不被遮
+
+钉高态且 `pan=0` 受检 32 帧中，**seq25 一帧 `xtermRows.bottom=669 > 274`**。这不是缺陷而是**同帧未 refit 的固有瞬态**：`resize` 帧里我们刚改 `#app` 高度，xterm 的 refit 由 `ResizeObserver` 在下一布局帧完成。seq26 起 `xtermRows.bottom=244 ≤ 274` 并稳定保持；用户按 `Soft keyboard` 的 seq538 亦为 244。**结论：除 resize 当帧的一帧外，终端末行始终在键盘顶（274）之上，一行都不被遮——A 方案的完成不变量成立。**
+
+### 线上产物级验证
+
+`verify-live-choiceA.mjs` 对 `:38234` **实际响应字节**（495325B）切出 `applyVisualViewportHeight` 跑几何回放：代码零 `offsetTop/visibleBottom/covered`；六种 pan 全应答 274px；浮窗 9.8% 不钉；`scale≠1` 豁免；25% 闭区间边界两侧正确。全部通过。
+
+### 仍未覆盖（不得宣布关闭）
+
+Split View、dsh/reasonix iframe、iPhone/Chrome(iOS)、逐像素截图、键盘打开时整页刷新。
+
 ## 6. 真机记录模板
 
 | 场景 | 操作 | 报告 session / seq | 关键几何与截图 | 初步判定 |
