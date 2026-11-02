@@ -66,8 +66,15 @@ for (const e of events) {
   const vv = s.vv;
   // Zoom is exempt end to end, exactly as the shipped guard is.
   if (vv && Math.abs((vv.scale || 1) - 1) > 0.01) continue;
+  // COORDINATE SYSTEMS — this bit two rounds. getBoundingClientRect() is relative
+  // to the VISUAL viewport, while vv.offsetTop + vv.height is LAYOUT absolute, so
+  // comparing them directly reports a phantom band equal to the scroll offset
+  // (measured: app.bottom 274 with pageTop 195 while the app really did reach the
+  // visible bottom). Add pageTop back to put the app rect in layout coordinates.
+  const pageTop = s.document?.pageTop || 0;
   const visibleBottom = vv ? (vv.offsetTop || 0) + vv.height : s.clientHeight;
-  const band = Math.round((visibleBottom - s.app.bottom) * 10) / 10;
+  const appLayoutBottom = s.app.bottom + pageTop;
+  const band = Math.round((visibleBottom - appLayoutBottom) * 10) / 10;
   if (band > 1) failures.band.push({ seq: e.seq, reason: s.reason, band });
 
   const hit = s.probe?.visualBottom;
@@ -75,7 +82,6 @@ for (const e of events) {
     failures.ink.push({ seq: e.seq, reason: s.reason, tag: hit.tag, id: hit.id, bg: hit.background });
   }
 
-  const pageTop = s.document?.pageTop;
   const scrollTop = s.document?.scrollTop;
   if ((pageTop ?? 0) > 0.5 || (scrollTop ?? 0) > 0.5) {
     failures.scroll.push({ seq: e.seq, reason: s.reason, pageTop, scrollTop });

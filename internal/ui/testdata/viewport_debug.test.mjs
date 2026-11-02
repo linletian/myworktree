@@ -170,6 +170,9 @@ test("snapshot captures geometry and UI state without content, token, names or p
   assert.deepEqual(snapshot.probe, {
     visualBottom: { y: 1162, tag: "DIV", id: "workspace", className: "", background: "rgb(11, 16, 32)" },
     layoutBottom: { y: 1178, tag: "DIV", id: "workspace", className: "", background: "rgb(11, 16, 32)" },
+    // elementFromPoint is a CLIENT-space API; pageTop is recorded alongside so the
+    // two coordinate systems in one snapshot are never confused again.
+    pageTop: 0,
   });
   assert.equal(snapshot.workspace.bottom, 1148);
   assert.equal(snapshot.terminal.bottom, 1148);

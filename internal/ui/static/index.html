@@ -145,7 +145,23 @@
             margin: 0;
             padding: 0;
             height: 100%;
+            /* issue #116: `clip`, not `hidden`. With `hidden` the root element is
+               still a SCROLL CONTAINER — it just has no visible scrollbar — and the
+               browser is free to scroll it. Measured on-device: with the soft
+               keyboard up, vv.height 274 against a 702px layout viewport, the root
+               scroller's scrollHeight is floored at clientHeight (702), so a
+               428px scroll RANGE exists no matter what we do to html/body heights
+               (verified: setting their height to the pinned value left
+               scrollHeight at 702). Two-finger trackpad scrolling walked that
+               range — pageTop/scrollTop climbed 195 -> 428 — which is why "glue the
+               app to the visible bottom" showed up as "the page grows while I
+               scroll" instead of "the page does not scroll". `overflow: clip`
+               removes the scroll container itself (spec: the viewport is not
+               scrollable, and there is no scrollport at all), so there is no range
+               for any input device to reach. Safari 16+; older engines still get
+               the `hidden` fallback declared first. */
             overflow: hidden;
+            overflow: clip;
             /* R17 (issue #100 padOS②/common①, PR #110 beta): overflow:hidden
                never chained Safari's document rubber-band — it has been on
                this rule since 2026-05 and the page still bounced on iOS

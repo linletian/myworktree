@@ -73,9 +73,22 @@
                 background: backgroundOf(win, el),
             };
         };
-        const visual = vv ? finite(vv.offsetTop + vv.height) - 2 : finite(win.innerHeight) - 2;
+        // COORDINATE SYSTEMS: elementFromPoint takes CLIENT coordinates (relative
+        // to the visual viewport), so the last visible pixel is always at
+        // vv.height - 2 — NOT at vv.offsetTop + vv.height - 2, which is a LAYOUT
+        // coordinate and produced phantom "the bottom is BODY" hits whenever the
+        // page was panned (50 of 120 frames in one capture). The layout-bottom
+        // probe keeps client coordinates too, which is what a client-space API
+        // expects; it simply lands outside the panned viewport and is clamped.
+        const visual = vv ? finite(vv.height) - 2 : finite(win.innerHeight) - 2;
         const layout = finite(doc.documentElement ? doc.documentElement.clientHeight : win.innerHeight) - 2;
-        return { visualBottom: describe(visual), layoutBottom: describe(layout) };
+        return {
+            visualBottom: describe(visual),
+            layoutBottom: describe(layout),
+            // Recorded so a reader can convert the app rect (client space) into
+            // layout space without guessing which system a number is in.
+            pageTop: vv ? finite(vv.pageTop) : 0,
+        };
     }
 
     function snapshotFromPage(page, reason, capturedAt) {

@@ -297,3 +297,20 @@ test("the shell lock exempts the terminal so xterm keeps its own gesture handlin
       "drag onto xterm.scrollLines(), and xterm handles wheel itself",
   );
 });
+
+test("the root element is not a scroll container at all: overflow:clip", () => {
+  // issue #116: `overflow: hidden` keeps the root a SCROLL CONTAINER (it merely
+  // hides the bar). Its scrollHeight is floored at clientHeight, so with the
+  // keyboard up a clientHeight - vv.height range always exists (measured 428px,
+  // walked 195 -> 428 by a trackpad two-finger scroll). `overflow: clip` removes
+  // the scrollport entirely — the only structural way to make "no scrolling" true.
+  // `hidden` stays first as the fallback for engines without clip support.
+  const start = indexSource.indexOf("body, html {");
+  assert.ok(start > 0, "the root rule must exist");
+  const block = indexSource.slice(start, indexSource.indexOf("}", start));
+  assert.match(
+    block,
+    /overflow:\s*hidden;[\s\S]*overflow:\s*clip;/,
+    "declaration order matters: hidden fallback first, clip second — clip is the contract",
+  );
+});
