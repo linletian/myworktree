@@ -211,32 +211,65 @@ test("#workspace keeps overflow:hidden — the bleed relies on box-shadow, not a
 // --- Gmail-style app shell: the page must never scroll or pan ----------------
 // Measured failure (issue #116, magic floating bar up): the shell was NOT
 // resized (#app computed 702px throughout, no inline height) yet
-// visualViewport.offsetTop walked 0 -> 69 and exposed 68.5px of root canvas at
-// the bottom. That is the visual viewport panning, and `overflow: hidden` alone
-// does not stop it.
+// visualViewport.offsetTop walked 0 -> 69. With #app exactly as tall as the
+// layout viewport, that pan shifts the whole shell up and exposes 69px of root
+// canvas BELOW its bottom edge — the reported band, whose height matching the
+// bar plus 1-2px is what identified the pan as the cause.
+//
+// A `body { position: fixed }` shell anchor was tried and REVERTED: it did not
+// stop the pan on-device, and with the soft keyboard up it produced a
+// keyboard-height slab of canvas (body stayed a full viewport tall while #app
+// was pinned to the keyboard's top edge). The lock is a gesture guard instead.
 
-test("body is the fixed app-shell anchor, so the page has nothing to pan into", () => {
+test("body is NOT pinned — the fixed-shell anchor is a measured dead end", () => {
   const bodies = bodiesFor(/^body$/);
-  assert.equal(bodies.length, 1, "expected exactly one `body` rule carrying the shell anchor");
+  const position = bodies.map((b) => decl(b, "position") || "").join("");
   assert.equal(
-    decl(bodies[0], "position"),
-    "fixed",
-    "issue #116: `body` must be position:fixed — with the scroller pinned to the " +
-      "viewport rectangle there is no document origin for iOS to slide, which is what " +
-      "produced the pan (0 -> 69) and the band it revealed.",
+    position,
+    "",
+    "issue #116: `body { position: fixed }` was tried and reverted — it did not stop " +
+      "the visual-viewport pan and it added a keyboard-height canvas slab in the " +
+      "keyboard state. Do not re-add it without on-device evidence.",
   );
-  assert.equal(decl(bodies[0], "inset"), "0", "the fixed shell must fill the viewport exactly");
 });
 
-test("html is deliberately NOT pinned — the anchor lives on body only", () => {
-  // Pinning the root element is not the standard recipe and changes how the
-  // canvas background propagates; the fix must stay on body.
-  const html = bodiesFor(/^html$/).map((b) => decl(b, "position") || "").join("");
-  assert.equal(html, "", "`html` must not be pinned; the shell anchor belongs on `body`");
+test("initShellScrollLock exists and is installed from the init path", () => {
+  assert.match(indexSource, /function initShellScrollLock\(\)/, "the gesture guard must exist");
+  const initAt = indexSource.indexOf("initTerminalTouchScroll();");
+  assert.ok(initAt > 0, "the existing terminal touch lock must still be installed");
+  const after = indexSource.slice(initAt, initAt + 400);
+  assert.match(
+    after,
+    /initShellScrollLock\(\);/,
+    "initShellScrollLock() must be installed right after the terminal touch lock — the " +
+      "terminal-only listener never saw drags that started outside #terminal-container, " +
+      "which is exactly how the shell was panned.",
+  );
 });
 
-test("the root scroller keeps overflow:hidden and the overscroll lock", () => {
-  const root = bodiesFor(/^(?:body,\s*html|html,\s*body)$/)[0] || "";
-  assert.equal(decl(root, "overflow"), "hidden", "root scroller must stay overflow:hidden");
-  assert.equal(decl(root, "overscroll-behavior"), "none", "root scroller keeps the overscroll-behavior lock");
+test("the shell lock prevents the default unless a native scroller owns the gesture", () => {
+  const start = indexSource.indexOf("function initShellScrollLock()");
+  assert.ok(start > 0, "initShellScrollLock must exist");
+  const body = indexSource.slice(start, indexSource.indexOf("\n        function initTerminalTouchScroll()", start));
+  assert.match(body, /touchmove/, "the lock must listen for touchmove");
+  assert.match(
+    body,
+    /\{ passive: false \}/,
+    "the lock MUST be { passive: false } — a passive listener cannot preventDefault, " +
+      "which is the entire mechanism",
+  );
+  assert.match(body, /preventDefault\(\)/, "the lock must call preventDefault");
+  assert.match(
+    body,
+    /IFRAME/,
+    "web-kind iframes must be exempt — blocking their drags would freeze the " +
+      "opencode / reasonix / dsh surfaces",
+  );
+  assert.match(
+    body,
+    /auto\|scroll/,
+    "native scrollers must be exempt by computed overflow-y, or the sidebar panels, " +
+      "monitor table, modal bodies and quick-keys panel stop scrolling",
+  );
+  assert.match(body, /scrollHeight > el\.clientHeight/, "the exemption requires ACTUAL overflow, not just overflow-y");
 });

@@ -155,22 +155,23 @@
                is disabled too — this UI is a software surface, not a
                document, and its own scrollers are listed below. */
             overscroll-behavior: none;
-            /* issue #116 (Gmail-style app shell): overflow:hidden alone did NOT
+            /* issue #116 (Gmail-style app shell): overflow:hidden alone does NOT
                stop iOS from moving the page. On-device capture (magic floating
                bar up, vv.height 633.5, clientHeight 702) shows the shell was
                NOT resized — #app computed 702px the whole time, inline height
                empty — yet visualViewport.offsetTop walked 0 -> 69 and
                #workspace's rect bottom tracked it (682 -> 613). That is the
-               VISUAL viewport panning inside the layout viewport, which is what
-               made the page appear to scroll and what exposed the 68.5px strip
-               of root canvas at the bottom (the reported white band: body is
-               rgb(249,249,249) in the light theme). Anchor instead: the root
-               scroller is a fixed, exactly-viewport-sized box, so there is no
-               scrollable overflow to pan into and no document origin to slide
-               away from. Inner surfaces are untouched by this — the terminal
-               (xterm) and the web-kind iframes scroll themselves, and
-               overscroll-behavior:contain on those keeps their momentum from
-               chaining back out here. */
+               VISUAL viewport panning inside the layout viewport. With #app
+               exactly as tall as the layout viewport, a 69px pan shifts the
+               whole shell up and exposes 69px of root canvas below its bottom
+               edge — the reported band, whose height matching the bar plus 1-2px
+               is what identified the pan as the cause.
+               `position: fixed` on the body was tried and REVERTED: it did not
+               stop the pan (verified on-device) and it introduced a worse
+               artifact — with the soft keyboard up, the body stayed a full
+               viewport tall while #app was pinned to the keyboard's top edge, so
+               a keyboard-height slab of canvas appeared. The lock that actually
+               owns this is a gesture guard; see initShellScrollLock(). */
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji";
             font-size: 13px;
             color: var(--text-primary);
@@ -205,20 +206,6 @@
                to light. Belt to the background braces above: it colors the
                canvas itself where no element paints (overscroll, zoom-out). */
             color-scheme: light dark;
-        }
-
-        /* issue #116 (Gmail-style shell, part 2): the ANCHOR that makes the pan
-           impossible, kept off `html` on purpose — pinning the root element is
-           not the standard recipe and changes how the canvas background is
-           propagated, while `body` is the documented app-shell anchor. With the
-           body fixed to the exact viewport rectangle there is no document origin
-           to slide and no scrollable overflow for iOS to pan into, so the
-           visual-viewport pan measured at 0 -> 69 (see above) has nothing to
-           move against. Inner scrollers are unaffected: xterm and the web-kind
-           iframes own their own scrolling surfaces. */
-        body {
-            position: fixed;
-            inset: 0;
         }
 
         * {
@@ -3583,6 +3570,48 @@
         // The signed remainder carries across events so sub-line drifts
         // never lose steps or jump; the line-height approximation only
         // affects scroll SPEED, never direction or destination.
+        // issue #116 (Gmail-style shell): the page must never pan and never
+        // scroll. initTerminalTouchScroll() already hard-locks the page, but ONLY
+        // through a touchmove listener bound to #terminal-container — so a drag
+        // that starts anywhere else (the header, the safe-area strip, the gap
+        // around the workspace) reached iOS untouched, which is exactly how the
+        // shell was panned 69px and how the canvas band appeared. This extends
+        // the same lock to the whole document, with two deliberate exemptions:
+        //
+        //   - native scrollers keep working: walking up from the touch target, if
+        //     any ancestor up to <body> actually overflows AND computes to
+        //     overflow-y auto/scroll, the drag belongs to that scroller (sidebar
+        //     panels, the monitor table, modal bodies, the quick-keys panel), so
+        //     the default is left alone;
+        //   - web-kind iframes are exempt outright. Their content lives in its own
+        //     document and must keep scrolling; blocking here would freeze the
+        //     opencode / reasonix / dsh UIs.
+        //
+        // Multi-finger touches are exempt so pinch-zoom is not swallowed (the
+        // zoom guard in applyVisualViewportHeight already handles scale != 1).
+        // The listener is { passive: false } because preventDefault is the whole
+        // point — a passive listener would be ignored.
+        function initShellScrollLock() {
+            const SCROLLABLE = /(auto|scroll)/;
+            function ownsGesture(target) {
+                let el = target;
+                while (el && el !== document.body && el !== document.documentElement) {
+                    if (el.tagName === "IFRAME") return true;
+                    const style = window.getComputedStyle(el);
+                    if (style && SCROLLABLE.test(style.overflowY || "") && el.scrollHeight > el.clientHeight + 1) {
+                        return true;
+                    }
+                    el = el.parentElement;
+                }
+                return false;
+            }
+            document.addEventListener("touchmove", (e) => {
+                if (e.touches && e.touches.length > 1) return;
+                if (ownsGesture(e.target)) return;
+                e.preventDefault();
+            }, { passive: false });
+        }
+
         function initTerminalTouchScroll() {
             const container = document.getElementById("terminal-container");
             if (!container) return;
@@ -4560,6 +4589,8 @@
             initVisualViewportHandling();
             // R17: terminal touch-scroll mapping + the touchmove page lock.
             initTerminalTouchScroll();
+            // issue #116: the same page lock, extended past #terminal-container.
+            initShellScrollLock();
             refresh();
             // Polling for status updates (2s)
             if (pollTimer) clearInterval(pollTimer);
