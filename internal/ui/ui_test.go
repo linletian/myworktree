@@ -1107,8 +1107,11 @@ func TestViewportAndHeightAnchors(t *testing.T) {
 		// visible bottom sits above the layout bottom, the shell ends exactly on it.
 		// A 25% ratio gate was tried and measured to hide the terminal's last 147px
 		// under a connected Magic Keyboard (seq1209: vv.height 555 of 702 = 20.9%).
-		"const visibleBottom = vv.offsetTop + vv.height",
-		"const occluded = visibleBottom < layoutHeight - 1",
+		// The target is vv.height ALONE: including the pan made the shell grow while
+		// scrolling (inline = pan + 274). The revealed strip is covered by the
+		// columns' 100vh ink bleed instead of by chasing the geometry.
+		"const occluded = vv.height < layoutHeight - 1",
+		"Math.max(vv.height, 0) + \"px\"",
 		"setPinnedHeights(app, pinnedHeight)",
 		"vv.scale && Math.abs(vv.scale - 1) > 0.01",
 		// Zoom and "nothing occluded" both clear through the single writer.
@@ -1137,9 +1140,10 @@ func TestViewportAndHeightAnchors(t *testing.T) {
 	pin := sliceJSFunction(t, bodyText, "setPinnedHeights")
 	for _, check := range []string{
 		"app.style.height !== height",
-		"document.documentElement",
-		"document.body",
-		"root.style.height !== height",
+		// The root box is explicitly CLEARED, never sized: a short root box clips the
+		// columns' downward bleed (body carries overflow:clip) and re-opens the gap.
+		"root.style.height = \"\"",
+		"document.body.style.height = \"\"",
 	} {
 		if !strings.Contains(pin, check) {
 			t.Fatalf("GET / setPinnedHeights should include %q (issue #116)", check)
@@ -1153,7 +1157,8 @@ func TestViewportAndHeightAnchors(t *testing.T) {
 	for _, banned := range []string{
 		"HARD_OCCLUSION_RATIO",
 		"isHardOcclusion",
-		"0.25",
+		// A pan-sensitive target is banned: it turns every scroll into a resize.
+		"vv.offsetTop",
 	} {
 		if strings.Contains(applyCode, banned) {
 			t.Fatalf("GET / applyVisualViewportHeight must not classify occlusions (%q) — a ratio gate misclassified a 20.9%% occlusion on-device and hid the terminal's last rows (issue #116)", banned)

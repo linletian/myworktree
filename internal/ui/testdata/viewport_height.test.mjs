@@ -256,13 +256,16 @@ test("issue #100 L1 R6: scroll only re-pins an existing pin — a pure pan never
   assert.equal(h.vv.listenerCount("scroll"), 1, "the shipped init registers exactly one scroll listener");
   assert.equal(h.vv.listenerCount("resize"), 1, "... and exactly one resize listener");
 
-  // Pure pan, nothing occluded (offsetTop grew and height shrank with it,
-  // the visible bottom still sits at the layout bottom): scroll must NOT
-  // introduce an inline height — the CSS cascade keeps ownership.
+  // REVISED under issue #116: the old rule cleared the pin whenever the VISIBLE
+  // BOTTOM reached the layout bottom, which required reading the pan. That made a
+  // pan resize the shell (and, when it went wrong, strand the pin). The judgment is
+  // now a single question — "is the visible area shorter than the layout viewport?"
+  // — so a panned-but-full-height state still pins to vv.height; whatever sits
+  // below it is covered by the columns' 100vh ink bleed, so nothing shows through.
   h.vv.offsetTop = 40;
   h.vv.height = 560;
   h.vv.dispatch("scroll");
-  assert.equal(h.app.style.height || "", "", "a pure pan leaves #app on the pure-CSS sizing path");
+  assert.equal(h.app.style.height, "560px", "a shortened visible area pins to vv.height, pan or not");
 
   // REVISED under issue #116 (product choice A): the pin target is
   // vv.height ALONE, so a pan moves nothing. Pinned while panned stays at
@@ -275,10 +278,10 @@ test("issue #100 L1 R6: scroll only re-pins an existing pin — a pure pan never
   h2.vv.offsetTop = 40;
   h2.vv.height = 260;
   h2.api.initVisualViewportHandling();
-  assert.equal(h2.app.style.height, "300px", "panned + keyboard pins to the visible bottom (40 + 260)");
+  assert.equal(h2.app.style.height, "260px", "panned + keyboard pins to vv.height, ignoring the pan");
   h2.vv.offsetTop = 0;
   h2.vv.dispatch("scroll");
-  assert.equal(h2.app.style.height, "260px", "panning back moves the visible bottom, so the pin follows it");
+  assert.equal(h2.app.style.height, "260px", "panning back changes nothing — the shell never chases the pan");
 });
 
 test("issue #100 L1 R6: pinch / double-tap zoom opts out of pinning — vv.height shrinks with the scale", () => {
@@ -383,37 +386,30 @@ test("issue #116: every occlusion pins — the floating bar included", () => {
 });
 
 
-test("issue #116: the pin target is the VISIBLE BOTTOM, so panning keeps app.bottom on it", () => {
-  // History: pan was first made invisible to the target (choice A) to stop the pin
-  // stranding, but that left app.bottom above the visible bottom whenever iOS
-  // panned, which IS the white band (pageTop/scrollTop walking 16.5 -> 276 with the
-  // bottom pixel hit-testing BODY). With reconcile in place, stranding is solved
-  // independently, so the target goes back to offsetTop + vv.height — the one value
-  // that makes app.bottom == visibleBottom by construction.
+test("issue #116: the pin target is vv.height ALONE — panning must not resize the shell", () => {
+  // History, in order: (1) the target included offsetTop and the pin chased the
+  // pan; (2) it was made pan-independent, which left a gap the canvas showed
+  // through; (3) it included offsetTop again to close that gap, which made the
+  // shell GROW while scrolling (inline = pan + 274, measured 274 -> 650) and shrink
+  // back — the user-visible "page gets taller as I scroll". The gap is now covered
+  // by the columns' 100vh ink bleed instead, so the target goes back to vv.height
+  // and the shell stays put.
   const h = viewportHarness({ layoutHeight: 702 });
   h.api.initVisualViewportHandling();
   h.openKeyboard(274);
-  assert.equal(h.app.style.height, "274px", "keyboard open pins to the visible bottom");
+  assert.equal(h.app.style.height, "274px", "keyboard open pins to the keyboard's top edge");
 
-  for (const pan of [12.5, 103, 237]) {
+  for (const pan of [12.5, 103, 237, 428]) {
     h.vv.offsetTop = pan;
     h.vv.dispatch("scroll");
-    const expected = `${pan + 274}px`;
     assert.equal(
       h.app.style.height,
-      expected,
-      `pan ${pan}: the app must end exactly on the visible bottom (${pan} + 274) — ` +
-        "anything less exposes canvas below it, anything more hides rows",
+      "274px",
+      `pan ${pan} must NOT resize the shell — the revealed strip is covered by the column bleed`,
     );
   }
 
-  // Panned flush to the layout bottom: nothing is hidden any more, so the pin goes.
-  h.vv.offsetTop = 428;
-  h.vv.height = 274;
-  assert.equal(428 + 274, 702, "fixture sanity: this pan fills the layout viewport exactly");
-  h.vv.dispatch("scroll");
-  assert.equal(h.app.style.height || "", "", "visibleBottom == layoutHeight means nothing is occluded");
-
+  h.vv.offsetTop = 0;
   h.closeKeyboard();
   assert.equal(h.app.style.height || "", "", "keyboard gone -> cascade owns sizing");
 });
@@ -490,49 +486,28 @@ test("issue #116: transitions pin through the reconcile tick, and zoom stays exe
 // gesture guard can stop it because the document really does scroll — the scroll
 // RANGE has to go.
 
-test("issue #116: the root box shrinks with the visible viewport, removing the scroll range", () => {
+test("issue #116: the root box is left at layout height so the bleed is not clipped", () => {
+  // Sizing html/body to the pin was tried and measurably cannot remove the scroll
+  // range (root scrollHeight is floored at clientHeight), and a short root box
+  // CLIPS the columns' downward paint because body carries overflow:clip — which
+  // would re-open the gap the bleeds exist to cover.
   const h = viewportHarness({ layoutHeight: 702 });
   const doc = h.api.__document;
   h.api.initVisualViewportHandling();
-  assert.equal(doc.documentElement.style.height || "", "", "at rest the root box is left to CSS");
-
   h.openKeyboard(274);
-  assert.equal(h.app.style.height, "274px", "the terminal column is pinned");
-
-  // Panned: the root box must cover the VISIBLE bottom, not just vv.height, or the
-  // pan itself re-opens a scroll range.
-  h.vv.offsetTop = 69;
-  h.vv.dispatch("scroll");
-  assert.equal(h.app.style.height, "343px", "app bottom == visible bottom under a pan");
-  assert.equal(doc.documentElement.style.height, "343px", "root box == visible bottom under a pan");
-  h.vv.offsetTop = 0;
-  h.vv.dispatch("scroll");
-  assert.equal(
-    doc.documentElement.style.height,
-    "274px",
-    "issue #116: html must be sized to the visible viewport too — otherwise the " +
-      "428px surplus becomes a scrollable dead strip that shows the canvas",
-  );
-  assert.equal(doc.body.style.height, "274px", "body must match, or it re-introduces the tall box");
-
-  h.closeKeyboard();
-  assert.equal(doc.documentElement.style.height || "", "", "restoring the keyboard restores the root box");
-  assert.equal(doc.body.style.height || "", "", "and body with it");
+  assert.equal(h.app.style.height, "274px", "the app is pinned");
+  assert.equal(doc.documentElement.style.height || "", "", "html keeps its layout height");
+  assert.equal(doc.body.style.height || "", "", "body keeps its layout height");
 });
 
-test("issue #116: the floating bar shrinks BOTH boxes — the band and its scroll range both go", () => {
-  // Measured history: with the bar up (vv.height 633.5 on 702) the app bottom sat
-  // above the visible bottom (a 68.5px band) and, worse, the root box stayed 702 so
-  // that surplus was scrollable. One rule now covers both: end at the visible
-  // bottom.
+test("issue #116: the floating bar pins the app but leaves the root box alone", () => {
   const h = viewportHarness({ layoutHeight: 702 });
   const doc = h.api.__document;
   h.api.initVisualViewportHandling();
   h.vv.height = 633.5;
   h.vv.dispatch("resize");
   assert.equal(h.app.style.height, "633.5px", "the bar pins the app to its top edge");
-  assert.equal(doc.documentElement.style.height, "633.5px", "and the root box follows, so no scroll range exists");
-  assert.equal(doc.body.style.height, "633.5px", "body with it, or it re-introduces the tall box");
+  assert.equal(doc.documentElement.style.height || "", "", "the root box stays at layout height");
 });
 
 test("issue #116: zoom leaves the root box alone, like every other compensation", () => {

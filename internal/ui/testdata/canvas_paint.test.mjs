@@ -159,46 +159,36 @@ test("#app still consumes the safe-area insets that create the band", () => {
 // having each column carry its OWN background down to the physical edge while the
 // content stays inset. These cases pin that per-column contract.
 
+// The bleeds are no longer "safe-area sized": they must cover the whole pannable
+// range, because iOS can pan the visual viewport down by clientHeight - vv.height
+// (428px with the keyboard up) and reveal everything below the shell's bottom edge.
 for (const [selector, ink] of [
   ["#sidebar", "var(--bg-color)"],
   ["#workspace", "var(--term-bg)"],
 ]) {
-  // #sidebar has several variant rules (base, .collapsed width:0, the narrow-tier
-  // drawer); the bleed belongs to the BASE rule, so pick the one that carries it
-  // rather than assuming a rule count.
   const bleedRule = () =>
-    bodiesFor(new RegExp(`^${selector}$`)).find((b) => (decl(b, "box-shadow") || "").includes("env(safe-area-inset-bottom"));
+    bodiesFor(new RegExp(`^${selector}$`)).find((b) => (decl(b, "box-shadow") || "").includes("100vh"));
 
-  test(`${selector}: the column bleeds its own background past the safe area`, () => {
-    assert.ok(
-      bodiesFor(new RegExp(`^${selector}$`)).length >= 1,
-      `expected at least one ${selector} rule`,
-    );
+  test(`${selector}: the column bleeds its ink across the whole pannable range`, () => {
     const body = bleedRule();
-    assert.ok(body, `${selector} must carry a safe-area bleed box-shadow`);
+    assert.ok(body, `${selector} must carry a full-height downward bleed`);
     assert.equal(
       decl(body, "box-shadow"),
-      `0 env(safe-area-inset-bottom, 0px) 0 0 ${ink}`,
-      `${selector} must carry its own ink ${ink} across env(safe-area-inset-bottom). ` +
-        "Design 「drawer/main/workspace 背景全出血」: the strip reads as the column, " +
-        "not as a separate painted band. Zero blur and zero spread are load-bearing — " +
-        "they make the shadow a solid colour extension rather than a glow.",
+      `0 100vh 0 0 ${ink}`,
+      `${selector} must continue its own ink ${ink} downward. A safe-area-sized bleed is ` +
+        "not enough: the panned range is clientHeight - vv.height, up to a full keyboard height.",
     );
   });
 
-  test(`${selector}: the bleed carries no magic number`, () => {
+  test(`${selector}: the bleed is expressed in viewport units, not a px constant`, () => {
     const shadow = decl(bleedRule(), "box-shadow") || "";
-    // The offset must BE the env(): 20px is Apple's iPad value today and changes
-    // per device/orientation, so a literal would be wrong elsewhere. env()'s own
-    // 0px fallback is the declared default, not a magic number, so it is removed
-    // before the scan.
-    const withoutEnvFallbacks = shadow.replace(/env\([^)]*\)/g, "env()");
     assert.ok(
-      !/\b\d+(\.\d+)?px\b/.test(withoutEnvFallbacks),
-      `${selector} bleed must derive its offset from env(), not a px constant (got "${shadow}")`,
+      !/\b\d+(\.\d+)?px\b/.test(shadow),
+      `${selector} bleed must not hard-code px (got "${shadow}") — the pannable range varies per device and keyboard`,
     );
   });
 }
+
 
 test("#workspace keeps overflow:hidden — the bleed relies on box-shadow, not a child", () => {
   // A ::after bleed at top:100% inside #workspace would be clipped (xterm needs
@@ -221,16 +211,26 @@ test("#workspace keeps overflow:hidden — the bleed relies on box-shadow, not a
 // keyboard-height slab of canvas (body stayed a full viewport tall while #app
 // was pinned to the keyboard's top edge). The lock is a gesture guard instead.
 
-test("body is NOT pinned — the fixed-shell anchor is a measured dead end", () => {
+test("body IS pinned again — but only alongside clip + the 100vh bleed", () => {
+  // History: `body { position: fixed }` alone was tried and reverted. It failed
+  // because (a) the root was still a scroll container (`overflow: hidden`), so the
+  // pan remained, and (b) nothing painted below the pinned-short app, so the area
+  // under the keyboard showed canvas. Both halves are now present: the root uses
+  // overflow:clip and the columns bleed 100vh of their own ink downward, so taking
+  // body out of flow only removes the pan's purchase. This test pins the
+  // COMBINATION, not the declaration on its own.
   const bodies = bodiesFor(/^body$/);
-  const position = bodies.map((b) => decl(b, "position") || "").join("");
-  assert.equal(
-    position,
-    "",
-    "issue #116: `body { position: fixed }` was tried and reverted — it did not stop " +
-      "the visual-viewport pan and it added a keyboard-height canvas slab in the " +
-      "keyboard state. Do not re-add it without on-device evidence.",
-  );
+  assert.equal(bodies.length, 1, "expected exactly one body rule");
+  assert.equal(decl(bodies[0], "position"), "fixed", "body must be out of flow for the shell to be immovable");
+  assert.equal(decl(bodies[0], "inset"), "0", "and fill the viewport exactly");
+
+  const rootStart = indexSource.indexOf("body, html {");
+  const rootBlock = indexSource.slice(rootStart, indexSource.indexOf("}", rootStart));
+  assert.match(rootBlock, /overflow:\s*clip;/, "the companion half: clip on the root");
+  for (const [selector, ink] of [["#sidebar", "var(--bg-color)"], ["#workspace", "var(--term-bg)"]]) {
+    const body = bodiesFor(new RegExp(`^${selector}$`)).find((b) => (decl(b, "box-shadow") || "").includes("100vh"));
+    assert.ok(body, `${selector} must bleed its ink downward, or the pinned-short app exposes canvas under the keyboard`);
+  }
 });
 
 test("initShellScrollLock exists and is installed from the init path", () => {
