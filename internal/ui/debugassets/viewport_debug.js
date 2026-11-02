@@ -548,7 +548,10 @@
         panel.style.cssText = "position:fixed;z-index:100000;padding:8px;border:1px solid #4b5563;border-radius:8px;background:rgba(13,17,23,0.96);color:#e6edf3;font:12px/1.4 -apple-system,BlinkMacSystemFont,sans-serif;box-shadow:0 4px 24px rgba(0,0,0,0.35);touch-action:manipulation;overflow:hidden auto;overscroll-behavior:contain;";
 
         const title = doc.createElement("div");
-        title.textContent = "Viewport diagnostics";
+        // The probe version rides in the title so a tester can confirm at a glance
+        // that the page is running the build they think it is. issue #116 lost two
+        // verification rounds to exactly that ambiguity.
+        title.textContent = "Viewport diagnostics" + " · " + PROBE_VERSION;
         title.style.cssText = "font-weight:700;margin-bottom:4px;cursor:grab;touch-action:none;user-select:none;";
         panel.appendChild(title);
         const session = doc.createElement("div");
