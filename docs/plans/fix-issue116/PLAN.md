@@ -2,7 +2,7 @@
 
 **日期**：2026-10-27
 
-**状态**：v1.7（D0-1/D0-2 已随 `346ed62` 提交签署通过，UI 编码门禁解除；A0 第二轮采集关闭妙控浮动栏分类、Split View 与 iframe 子层三项，A0 诊断浮层自身遮挡缺陷已修；PR1 三条修复线的输入已齐，见 §3.3 与 §8）；**本文件仅为修复计划，不代表高度问题已经修复**
+**状态**：v1.8（D0-1/D0-2 已随 `346ed62` 签署通过，UI 编码门禁解除。**两条修复线已落地并有真机实证**：PR1a 铺底根画布 `7c5ca6d`——白带真因确定为**铺底缺失而非高度缺失**（html/body/#app 全 transparent，#workspace 底边距可见底恒 20.0px＝#app 的 env(safe-area-inset-bottom)，且 color-scheme 从未声明），设备回报三背景已同为 rgb(11,16,32)、含缩放与平移态无白色；PR1b 钉高 pan 免疫 `a2b5d5f`+`0a8f584`——判据与目标只读 `vv.height`，妙控浮窗按产品决定出范围，existing-pin 门禁删除。§4.2 中依赖 `visibleBottom` 的旧条款已标注「已被实测推翻并重写」。**仍未关闭**：A0 尚缺 scale=1 下键盘开→关的钉高复测（会话 choiceA 轮询中）、键盘打开时刷新、Split View、dsh/reasonix iframe、iPhone/Chrome(iOS)、逐像素截图；故**本文件不代表高度问题已全部修复**）
 
 **基线**：`fix/fix-issue116` @ `225c5d7`（与当时 `origin/develop` 一致）
 
@@ -174,11 +174,11 @@
 
 必须遵守：
 
-- **基准与键盘补偿分离**：无硬键盘时维护正常窗口基准；确认软键盘后才施加补偿。妙控浮动栏属于非硬遮挡时，不得重复扣除其高度。
-- **不预写阈值**：如需要按遮挡高度、焦点、事件序列或稳定时长分类，阈值必须来自 A0 的软键盘最小值与浮动栏最大值，并留有余量。焦点存在本身不是充分条件。
+- **基准与键盘补偿分离**：无硬键盘时维护正常窗口基准；确认硬遮挡（软键盘）后才施加补偿。**妙控浮动栏已按产品决定出范围（不补偿、不分类）**：iOS 允许用户把该浮窗拖到屏幕任意边角，属系统级可移动浮层，壳不得追逐它。
+- **阈值已标定（原「不预写阈值」条款已满足）**：判据 `vv.height <= clientHeight × (1 − 25%)`，比例而非 px 常量。两实测锚点：软键盘 covered **428px = 60.9%**（iPad Pro 11 横屏 layout 702；iPadOS 27.2 重测逐位复现）＝硬遮挡；妙控浮窗 covered **68.5px = 9.8%**＝软遮挡。25% 落在两锚点之间并留有余量（iPhone 竖屏键盘 ≥40%，仍在硬侧）。焦点存在本身仍不是充分条件。
 - **区间重叠不能硬分类**：若浮动栏与软键盘在可用信号上不可可靠区分，采用“稳定全高壳 + 终端聚焦区域局部平移/滚动避让”的备选，而不是发布一个会在两种状态间来回猜测的阈值。
-- **滚动坐标与准入守卫必须一起看**：每次钉高用 `app.getBoundingClientRect()` 的当前 top 计算 `targetHeight = visibleBottom - app.top`，并 clamp 到非负值。补偿条件为 `visibleBottom < clientHeight - 1` **或** `abs(visibleBottom - app.bottom) > 1`；scroll 只有在“无 inline 且底边已对齐”时才保持纯平移不新建钉高，底边错位时允许新建。真机已实测 offsetTop 从 0→118 时旧公式底边误差同步从 0→118，另有 inline 为空但误差 340/428 的漏补偿场景。
-- **保留 zoom 豁免**：`vv.scale ≠ 1` 不把缩放后的可见矩形当作键盘；回 1 后重新采样。纯 pan 不得自行进入键盘补偿。
+- **【已被实测推翻并重写】pan 彻底退出判断与目标（产品选 A）**：旧条款要求用 `app.getBoundingClientRect().top` 算 `targetHeight = visibleBottom - app.top`、并以 `abs(visibleBottom - app.bottom) > 1` 作准入——`visibleBottom` 含 `offsetTop`，于是**同一个量同时驱动判据与目标**。真机实测（会话 `ios272recal…`，键盘全程打开、`vv.height` 恒 274、`clientHeight` 恒 702）：pan 12.5→237 时钉高被拉到 286.5→511px（seq297–310）；pan=265.5 时 covered 跌至 23.1% 穿透阈值，**键盘还开着就把钉高清掉**（seq311）；pan 回落时 covered 涨回 428px=61% 也不重新钉（seq362–396），因「scroll 不新建钉高」门禁拒绝复挂；整场仅靠 seq328 一次 `resize` 救回。净效果＝键盘无限期压住终端底部约 428px。**现行规则**：判据只读 `vv.height`，目标取 `vv.height`，`offsetTop` 不进入任何一侧；existing-pin 门禁删除；后果为产品选定——键盘打开时终端行数变少但**一行都不被遮**，竖向浏览由终端自身滚动条承担。锚点已禁止 `offsetTop`/`visibleBottom`/`covered` 再现于该函数代码（`stripJSComments` 剥注释后扫描）。新平台事实：27.2 拖拽期间 `window.innerHeight` 702→274 而 `documentElement.clientHeight` 恒 702，两源在手势中不一致，哨兵锁死后者。
+- **保留 zoom 豁免**：`vv.scale ≠ 1` 不把缩放后的可见矩形当作键盘；回 1 后重新采样。纯 pan 不得自行进入键盘补偿（本轮加强为 pan 完全不参与）。实测：27.2 下 `scale=0.75` 时页面永不压缩正是此守卫所致，非系统变更。
 - **基线失效明确**：方向、实际窗口尺寸、Split View 变化和 pageshow 必须重置旧基线；URL 栏变化不能被误冻结。
 - **事件合并**：resize/scroll/focus/orientation 变化用 rAF 合并，写高度后在下一布局帧复核；不得形成 `height → ResizeObserver → fit → height` 循环。
 - **无 visualViewport 降级**：保留 `100vh` fallback + `100dvh` 渐进增强；无 API 时不注册无效监听、不写 inline 高度。
