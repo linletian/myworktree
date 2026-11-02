@@ -524,6 +524,61 @@ func sliceJSFunction(t *testing.T, js, name string) string {
 	return rest[:end]
 }
 
+// stripJSComments removes // line comments and /* */ block comments so
+// forbidden-identifier scans see only executable code. It is quote-aware: a
+// "//" inside a string literal (a URL, a token) is NOT a comment. This exists
+// because the shipped viewport functions document themselves with // line
+// comments that name the very geometry they deliberately stopped reading — a
+// containment scan over raw text would report those mentions as code.
+func stripJSComments(js string) string {
+	var b strings.Builder
+	b.Grow(len(js))
+	for i := 0; i < len(js); {
+		c := js[i]
+		switch c {
+		case '"', '\'':
+			b.WriteByte(c)
+			i++
+			for i < len(js) && js[i] != c {
+				if js[i] == '\\' && i+1 < len(js) {
+					b.WriteByte(js[i])
+					i++
+				}
+				b.WriteByte(js[i])
+				i++
+			}
+			if i < len(js) {
+				b.WriteByte(js[i])
+				i++
+			}
+		case '/':
+			if i+1 < len(js) && js[i+1] == '/' {
+				for i < len(js) && js[i] != '\n' {
+					i++
+				}
+				continue
+			}
+			if i+1 < len(js) && js[i+1] == '*' {
+				i += 2
+				for i+1 < len(js) && !(js[i] == '*' && js[i+1] == '/') {
+					if js[i] == '\n' {
+						b.WriteByte('\n')
+					}
+					i++
+				}
+				i += 2
+				continue
+			}
+			b.WriteByte(c)
+			i++
+		default:
+			b.WriteByte(c)
+			i++
+		}
+	}
+	return b.String()
+}
+
 // stripCSSComments removes /* */ comments so selector scans see only real
 // rules. index.html's comments mention selectors like :hover verbatim (the
 // R11 notes do), and a containment scan must not mistake comment text for a
@@ -1048,20 +1103,49 @@ func TestViewportAndHeightAnchors(t *testing.T) {
 	for _, check := range []string{
 		"window.visualViewport",
 		"document.documentElement.clientHeight",
-		"vv.offsetTop + vv.height",
+		"vv.height <= layoutHeight * (1 - HARD_OCCLUSION_RATIO)",
+		`app.style.height = Math.max(vv.height, 0) + "px"`,
 		"vv.scale && Math.abs(vv.scale - 1) > 0.01",
 		`app.style.height = ""`,
 	} {
 		if !strings.Contains(apply, check) {
-			t.Fatalf("GET / applyVisualViewportHeight should include %q (issue #100 L1 R6)", check)
+			t.Fatalf("GET / applyVisualViewportHeight should include %q (issue #100 L1 R6, threshold re-calibrated under issue #116)", check)
 		}
 	}
-	// The scroll listener must gate on an existing pin: a pure pan never
-	// introduces one — that is what keeps an unpanned page on the pure-CSS
-	// sizing path.
+	// Choice A (issue #116, iPadOS 27.2 re-calibration): vv.offsetTop is NOT
+	// an input to either the occlusion test or the pin target, and neither is
+	// any derived visible-bottom value. Reading them is what let the pin chase
+	// a drag, clear itself mid-drag and then refuse to re-arm — leaving the
+	// keyboard over the terminal indefinitely (DATA-COLLECTION.md §5g). These
+	// forbidden anchors keep it out for good.
+	// The ban scans CODE, not prose: the function carries the calibration trace
+	// in comments (which name offsetTop to explain why it is gone), and a
+	// comment cannot make a judgment pan-sensitive. Both comment syntaxes are
+	// stripped — this function documents itself with // line comments — and the
+	// scan is quote-aware so a string literal containing "//" survives.
+	applyCode := stripJSComments(apply)
+	for _, banned := range []string{
+		"vv.offsetTop",
+		"offsetTop",
+		"visibleBottom",
+		"covered",
+	} {
+		if strings.Contains(applyCode, banned) {
+			t.Fatalf("GET / applyVisualViewportHeight must not read %q — the occlusion judgment and the pin target are pan-immune by construction (issue #116 choice A)", banned)
+		}
+	}
+	// REVISED under issue #116: the scroll listener no longer gates on an
+	// existing pin and runs the same full judgment as resize. The gate was
+	// removed deliberately — with vv.offsetTop gone it could only ever refuse
+	// to RE-ARM a pin, which is the failure that stranded the shell. The
+	// function keeps its name so this anchor and the shipped listener stay
+	// addressable.
 	reapply := sliceJSFunction(t, bodyText, "reapplyPinnedVisualViewportHeight")
-	if !strings.Contains(reapply, "if (!app || !app.style.height) return;") {
-		t.Fatal("GET / reapplyPinnedVisualViewportHeight must gate on an existing inline height — a pure pan must not introduce pinning (issue #100 L1 R6)")
+	if !strings.Contains(reapply, "applyVisualViewportHeight();") {
+		t.Fatal("GET / reapplyPinnedVisualViewportHeight must run the full judgment on scroll (issue #116 choice A)")
+	}
+	if strings.Contains(reapply, "if (!app || !app.style.height) return;") {
+		t.Fatal("GET / reapplyPinnedVisualViewportHeight must NOT re-add the existing-pin gate — it stranded the cleared pin across seq362-396 (issue #116)")
 	}
 	init := sliceJSFunction(t, bodyText, "initVisualViewportHandling")
 	for _, check := range []string{

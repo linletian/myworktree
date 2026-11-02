@@ -3375,50 +3375,69 @@
                 app.style.height = "";
                 return;
             }
-            // Covered strip in layout-viewport coordinates. Expressed this way
-            // the test is pan-immune: panning the visual viewport down grows
-            // visibleBottom and shrinks the covered strip, so pushing the page
-            // flush to the layout bottom yields covered = 0 and correctly hands
-            // sizing back to the CSS cascade (measured seq34/43/44: pan 68px,
-            // vv.height 634, visible bottom 702 = layout height — clearing
-            // there was CORRECT, not a defect, contrary to an earlier reading).
-            // The sentinel is documentElement.clientHeight, spec fact #2: it is
-            // scrollbar-gutter-free, while window.innerHeight includes the
-            // classic gutter and would pin spuriously on desktops.
+            // Occlusion is judged on vv.height ALONE, and the pin target is
+            // vv.height ALONE — vv.offsetTop never enters either. Product
+            // choice A (issue #116, iPadOS 27.2 re-calibration session
+            // ios272recal…): while the keyboard is up the terminal gets FEWER
+            // rows but NOTHING is ever hidden behind the keyboard; vertical
+            // browsing inside it is the terminal's own scroller, not a pan of
+            // the document.
+            // Why pan had to come out (measured, keyboard held open the whole
+            // time at vv.height 274 / clientHeight 702):
+            //   seq296 pan=0    → pinned 274px  (correct)
+            //   seq297–310 pan 12.5→237 → the OLD target (offsetTop+height)
+            //       grew the pin to 511px, chasing the pan
+            //   seq311 pan=265.5 → covered fell to 23.1%, UNDER the 25% gate,
+            //       so the OLD rule CLEARED the pin while the keyboard was
+            //       still up
+            //   seq362–396 pan 234→0→428 → covered climbed back to 428px
+            //       (61%) but the pin never returned: once cleared, the R6
+            //       "scroll never introduces a pin" gate refused to re-arm it,
+            //       so only a resize could save it (the single rescue in the
+            //       whole capture is seq328, reason=resize). Net effect: the
+            //       keyboard covered the bottom ~428px of the terminal
+            //       indefinitely — a regression introduced by making the test
+            //       depend on visibleBottom.
+            // A pan moves WHICH rows are in view; it changes neither whether
+            // the keyboard is up nor how much vertical room the shell has, so
+            // it must not be an input to either decision. Note also that on
+            // 27.2 window.innerHeight sinks 702→274 mid-drag while
+            // documentElement.clientHeight stays 702 — the two "layout height"
+            // sources disagree during a gesture, which is the second reason the
+            // sentinel stays documentElement.clientHeight and the gesture-derived
+            // values stay out.
             const layoutHeight = document.documentElement.clientHeight;
-            const visibleBottom = vv.offsetTop + vv.height;
-            const covered = layoutHeight - visibleBottom;
             // Only a HARD occlusion pins. The Magic Keyboard's floating bar
-            // shrinks the visual viewport by ~10% and iOS lets the user drag
-            // that bar anywhere on screen, so it is system-owned chrome that
-            // the shell must not chase: it also shrinks and recovers WITHOUT
-            // firing visualViewport resize/scroll (measured seq47–54: vv.height
-            // 633.5 -> 702 with no event at all, only our own diagnostic
-            // settle), which left an inline height of 633.5px behind and left
-            // #app permanently 68.5px short of the visible area. Not pinning
-            // for it removes that whole failure class at the source, while the
-            // keyboard — which does fire resize on both edges (measured seq14
-            // open, seq29 close) — keeps the compensation it needs.
-            if (covered > 1 && covered >= layoutHeight * HARD_OCCLUSION_RATIO) {
-                app.style.height = Math.max(visibleBottom, 0) + "px";
+            // shrinks the visual viewport by ~9.8% and iOS lets the user drag
+            // that bar anywhere on screen, so it is system-owned chrome the
+            // shell must not chase — and it shrinks AND recovers WITHOUT
+            // firing resize/scroll (measured seq47–54: vv.height 633.5→702
+            // with no event at all, only our own diagnostic settle), which is
+            // exactly how a pin introduced for it went stale and left #app
+            // permanently short. The keyboard fires resize on both edges
+            // (measured seq14 open, seq29 close) and keeps its compensation.
+            // Inclusive boundary: "covers AT LEAST 25%" is hard, so the
+            // threshold reads the same in prose and in code.
+            if (vv.height <= layoutHeight * (1 - HARD_OCCLUSION_RATIO)) {
+                app.style.height = Math.max(vv.height, 0) + "px";
             } else {
                 app.style.height = "";
             }
         }
 
-        // R6: the visual viewport also pans (pinch-zoom, or iOS revealing
-        // the focused field above the keyboard) and fires scroll there.
-        // Scroll must never INTRODUCE a pin: while nothing is occluded the
-        // CSS cascade owns the height (a pan alone never proves occlusion),
-        // so an unpinned app gets a no-op. An EXISTING pin, by contrast,
-        // follows the visible bottom edge in BOTH directions — it is a
-        // re-application of the full judgment, bounded above by
-        // documentElement.clientHeight (the visual viewport cannot pan out
-        // of the layout viewport, and a pinch-zoomed scale already
-        // short-circuited to no pin).
+        // R6 (revised under issue #116): the visual viewport also pans —
+        // pinch-zoom, iOS revealing a focused field above the keyboard — and
+        // fires scroll there. Scroll now runs the SAME full judgment as
+        // resize, with no gate. It is safe precisely because the judgment no
+        // longer reads vv.offsetTop: a pure pan cannot change vv.height, so a
+        // pan can neither introduce nor remove a pin. The old
+        // "if (!app.style.height) return" gate is REMOVED deliberately — it
+        // existed to stop a pan from chasing visibleBottom, and once
+        // visibleBottom was gone from the formula the gate's only remaining
+        // effect was to refuse to re-arm a pin that had been cleared, which is
+        // the seq362–396 failure above. The slice anchor keeps this function's
+        // name so the shipped listener and its tests stay addressable.
         function reapplyPinnedVisualViewportHeight() {
-            const app = document.getElementById("app");
-            if (!app || !app.style.height) return;
             applyVisualViewportHeight();
         }
 

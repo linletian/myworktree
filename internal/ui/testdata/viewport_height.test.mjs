@@ -233,20 +233,21 @@ test("issue #100 L1 R6: scroll only re-pins an existing pin — a pure pan never
   h.vv.dispatch("scroll");
   assert.equal(h.app.style.height || "", "", "a pure pan leaves #app on the pure-CSS sizing path");
 
-  // Already pinned (keyboard open while panned): panning back re-pins to
-  // the new visible bottom edge. This case exercises the shrinking
-  // direction only; growth is equally allowed — an existing pin follows
-  // the visible bottom edge both ways, bounded above by
-  // documentElement.clientHeight (the visual viewport cannot pan out of
-  // the layout viewport, and scale != 1 short-circuits to no pin).
+  // REVISED under issue #116 (product choice A): the pin target is
+  // vv.height ALONE, so a pan moves nothing. Pinned while panned stays at
+  // vv.height, and panning back to offsetTop 0 keeps it there — the whole
+  // point being that nothing may ever sit behind the keyboard. (The previous
+  // expectation, 300px = offsetTop + height, is exactly what let the pin
+  // chase the pan and then strand; see the seq297–396 trace in
+  // DATA-COLLECTION.md §5g.)
   const h2 = viewportHarness();
   h2.vv.offsetTop = 40;
   h2.vv.height = 260;
   h2.api.initVisualViewportHandling();
-  assert.equal(h2.app.style.height, "300px", "panned + keyboard at init pins the visible bottom edge");
+  assert.equal(h2.app.style.height, "260px", "panned + keyboard at init pins to vv.height, ignoring the pan");
   h2.vv.offsetTop = 0;
   h2.vv.dispatch("scroll");
-  assert.equal(h2.app.style.height, "260px", "scroll re-pins the already-pinned app to the new bottom edge");
+  assert.equal(h2.app.style.height, "260px", "panning back changes nothing — vv.height never moved");
 });
 
 test("issue #100 L1 R6: pinch / double-tap zoom opts out of pinning — vv.height shrinks with the scale", () => {
@@ -360,17 +361,26 @@ test("issue #116: the hard-occlusion threshold is a ratio, not a pixel constant"
   assert.equal(soft.app.style.height || "", "", "just under the ratio is a soft occlusion — no pin");
 });
 
-test("issue #116: panning flush to the layout bottom clears the pin (covered becomes 0)", () => {
-  // Measured seq34/43/44: vv.height 634 with offsetTop 68 -> visible bottom
-  // 702 = layout height. Nothing is covered, so the cascade must own the
-  // height. This was CORRECT behavior all along and is pinned here so a
-  // future "fix" cannot regress it.
+test("issue #116 A: the pan is invisible to the judgment — the pin survives the whole keyboard gesture", () => {
+  // Replay of the on-device sequence that stranded the shell (iPadOS 27.2,
+  // session ios272recal…, keyboard held open throughout at vv.height 274 /
+  // clientHeight 702): the OLD rule grew the pin as the page was dragged
+  // (seq297–310, offsetTop 12.5→237 → pin 286.5→511px), CLEARED it once the
+  // drag pushed covered under 25% (seq311), and then never re-armed it on the
+  // way back (seq362–396, covered climbing to 428px = 61%) because the R6
+  // "scroll never introduces a pin" gate refused. Net: the keyboard covered
+  // the bottom ~428px of the terminal indefinitely.
+  // Under choice A, vv.offsetTop is not an input to anything, so every one of
+  // those frames answers the same thing: 274px.
   const h = viewportHarness({ layoutHeight: 702 });
-  h.vv.height = 274;
   h.api.initVisualViewportHandling();
-  assert.equal(h.app.style.height, "274px", "keyboard open pins first");
-  h.vv.offsetTop = 68;
-  h.vv.height = 634; // covered = 702 - (68 + 634) = 0
-  h.vv.dispatch("scroll");
-  assert.equal(h.app.style.height || "", "", "flush to the layout bottom means nothing is covered");
+  h.openKeyboard(274); // measured seq296
+  assert.equal(h.app.style.height, "274px", "keyboard open pins to vv.height");
+  for (const pan of [12.5, 103, 237, 265.5, 428, 0]) {
+    h.vv.offsetTop = pan;
+    h.vv.dispatch("scroll");
+    assert.equal(h.app.style.height, "274px", `pan ${pan} must not change the pin — nothing may hide behind the keyboard`);
+  }
+  h.closeKeyboard();
+  assert.equal(h.app.style.height || "", "", "only the keyboard leaving hands sizing back to the cascade");
 });

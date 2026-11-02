@@ -144,6 +144,35 @@
 
 `covered = documentElement.clientHeight − (vv.offsetTop + vv.height)`，仅当 `covered ≥ 25% × clientHeight` 才钉高。比例而非 px 常量，跨设备/横竖屏成立。实测锚点（iPad Pro 11 横屏，layout 702px）：软键盘 covered **428px = 60.9%** → 硬遮挡钉高；浮窗 covered **68.5px = 9.8%** → 不钉高。失败方向安全：把键盘误判为浮窗才会让文字压在键盘下，而把浮窗误判为键盘正是上述残留缺陷的成因。
 
+## 5g. iPadOS 27.2 重标定：pan 必须从判断与目标中彻底摘除（产品选 A）
+
+会话 `ios272recalfd0c34958bbd3d5c`。升级 27.2 后重测，`scale=1` 下键盘**仍然压缩**（`vv.height` 274、`clientHeight` 702、covered 428px=**61.0%**，与升级前锚点逐位复现）；`scale=0.75` 下**永不压缩**——不是系统变了，而是 zoom 守卫（`vv.scale != 1` 直接清空 inline）按设计关闭了全部补偿。
+
+### 我上一轮改动引入的回归（键盘全程打开，`vv.height` 恒 274）
+
+| seq | pan | inline | 事实 |
+| --- | --- | --- | --- |
+| 296 | 0 | 274px | ✅ 钉高正确 |
+| 297–310 | 12.5→237 | 286.5→511px | 旧目标 `offsetTop+height` 追着平移增高 |
+| **311** | 265.5 | **—** | covered 跌到 23.1% < 25% → 键盘还开着就把钉高清掉 |
+| **362–396** | 234→0→428 | **—** | covered 涨回 428px(61%) 也不重新钉：R6「scroll 永不新引入钉高」门禁拒绝复挂 |
+
+整场捕获中唯一一次重新钉上是 `seq328 reason=resize`。**净效果：键盘无限期压住终端底部约 428px。** 根因是把 `visibleBottom`（含 pan）当成了遮挡判断的输入。
+
+### 产品决定 A（用户）与落地
+
+键盘打开时终端**变矮但一行都不被遮**，竖向浏览交给终端自身滚动条，而不是平移文档。因此：
+
+- 判断：`vv.height <= clientHeight × (1 − 25%)`，**只读 `vv.height`**。
+- 目标：`vv.height`，**不再用 `offsetTop + height`**。
+- R6 的 `if (!app.style.height) return;` 门禁**删除**：`offsetTop` 一旦退出公式，该门禁唯一残留作用就是"拒绝复挂已清除的钉高"，即上表缺陷。
+- 边界改为闭区间，让"至少 25% 即钉"在散文与代码中读法一致。
+- 新事实：**27.2 上手势期间 `window.innerHeight` 从 702 掉到 274，而 `documentElement.clientHeight` 恒为 702**——两个"布局高度"源在拖拽中不一致，故哨兵继续锁 `documentElement.clientHeight`，手势派生值一律不入判断。
+
+### 锚点加固
+
+`ui_test.go` 新增禁止锚点：`applyVisualViewportHeight` 的代码（剥掉 `//` 与 `/* */` 注释后）不得再出现 `offsetTop` / `visibleBottom` / `covered`；`reapplyPinnedVisualViewportHeight` 不得重新加回旧门禁。为此新增 `stripJSComments`（引号感知，URL/字符串里的 `//` 不误伤）。
+
 ## 6. 真机记录模板
 
 | 场景 | 操作 | 报告 session / seq | 关键几何与截图 | 初步判定 |
