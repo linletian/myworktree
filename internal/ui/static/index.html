@@ -3391,107 +3391,70 @@
             const vv = window.visualViewport;
             const app = document.getElementById("app");
             if (!vv || !app) return;
-            // Hard-occlusion threshold, calibrated on-device (issue #116 A0,
-            // sessions 997d18dc… / f3ce260c…): the covered strip is expressed as
-            // a RATIO of the layout viewport, never in px, so it holds across
-            // devices and orientations. Measured anchors on iPad Pro 11 land
-            // (layout 702px):
-            //   soft keyboard      covered 428px = 60.9%  -> HARD, must pin
-            //   magic floating bar covered 68.5px =  9.8% -> soft, never pin
-            // 25% sits between the two anchors (an iPhone portrait keyboard
-            // covers ~40%+, so it stays on the hard side) and is fail-safe in
-            // the direction that matters: misclassifying a keyboard as a bar
-            // would leave text under the keyboard, while misclassifying a bar as
-            // a keyboard is what produced the stale-pin defect below. Declared
-            // inside the function because the test harness slices named
-            // functions out of this document and evaluates them standalone — a
-            // module-level const is outside that slice.
-            const HARD_OCCLUSION_RATIO = 0.25;
-            // Pinch / double-tap zoom opt-out, spec fact #1: vv.height is
-            // measured in layout-viewport pixels, so it SHRINKS as the scale
-            // grows (and a resize event fires on the change) — without this
-            // guard a pinch would pin #app to the zoomed rectangle and
-            // collapse the whole UI toward half height. The zoomed state
-            // owns no inline height; zooming back to 1 re-runs the full
-            // judgment on the resize event and re-pins if the keyboard is
-            // still up.
+            // Pinch / double-tap zoom opt-out, spec fact #1: vv.height is measured
+            // in layout-viewport pixels, so it SHRINKS as the scale grows (and a
+            // resize event fires on the change) — without this guard a pinch would
+            // pin #app to the zoomed rectangle and collapse the whole UI toward
+            // half height. The zoomed state owns no inline height and no root-box
+            // height; zooming back to 1 re-runs the judgment.
             if (vv.scale && Math.abs(vv.scale - 1) > 0.01) {
-                app.style.height = "";
+                setPinnedHeights(app, "");
                 return;
             }
-            // Occlusion is judged on vv.height ALONE, and the pin target is
-            // vv.height ALONE — vv.offsetTop never enters either. Product
-            // choice A (issue #116, iPadOS 27.2 re-calibration session
-            // ios272recal…): while the keyboard is up the terminal gets FEWER
-            // rows but NOTHING is ever hidden behind the keyboard; vertical
-            // browsing inside it is the terminal's own scroller, not a pan of
-            // the document.
-            // Why pan had to come out (measured, keyboard held open the whole
-            // time at vv.height 274 / clientHeight 702):
-            //   seq296 pan=0    → pinned 274px  (correct)
-            //   seq297–310 pan 12.5→237 → the OLD target (offsetTop+height)
-            //       grew the pin to 511px, chasing the pan
-            //   seq311 pan=265.5 → covered fell to 23.1%, UNDER the 25% gate,
-            //       so the OLD rule CLEARED the pin while the keyboard was
-            //       still up
-            //   seq362–396 pan 234→0→428 → covered climbed back to 428px
-            //       (61%) but the pin never returned: once cleared, the R6
-            //       "scroll never introduces a pin" gate refused to re-arm it,
-            //       so only a resize could save it (the single rescue in the
-            //       whole capture is seq328, reason=resize). Net effect: the
-            //       keyboard covered the bottom ~428px of the terminal
-            //       indefinitely — a regression introduced by making the test
-            //       depend on visibleBottom.
-            // A pan moves WHICH rows are in view; it changes neither whether
-            // the keyboard is up nor how much vertical room the shell has, so
-            // it must not be an input to either decision. Note also that on
-            // 27.2 window.innerHeight sinks 702→274 mid-drag while
-            // documentElement.clientHeight stays 702 — the two "layout height"
-            // sources disagree during a gesture, which is the second reason the
-            // sentinel stays documentElement.clientHeight and the gesture-derived
-            // values stay out.
+            // ONE rule, no classification: whenever the VISIBLE area is shorter
+            // than the layout viewport, make both the app box and the document box
+            // end exactly at the visible bottom edge.
+            //
+            //   visibleBottom = vv.offsetTop + vv.height   (layout coordinates)
+            //
+            // Why there is no threshold any more (issue #116): a 25% ratio gate was
+            // tried to keep the Magic Keyboard's floating bar out of the pin, and it
+            // misclassified a real case on-device — connecting a Magic Keyboard
+            // while the soft keyboard was up leaves vv.height = 555 on a 702 layout
+            // viewport, i.e. 147px = 20.9% covered, under the gate, so the terminal
+            // kept its full height and the last 147px sat UNDER the keyboard
+            // (captured twice: seq1209 pinned nothing at 555, seq1234 at 702).
+            // The gate only ever existed to stop a pin from stranding when a
+            // keyboard state changed with no event; the reconcile tick below solves
+            // that directly, so the gate is now pure downside.
+            //
+            // Why the target includes vv.offsetTop (issue #116): pinning to
+            // vv.height alone leaves the app bottom above the visible bottom
+            // whenever iOS pans the visual viewport down, and that gap is the white
+            // band — measured as pageTop/scrollTop walking 16.5 -> 276 with the
+            // bottom pixel hit-testing BODY. Ending at visibleBottom makes the gap
+            // structurally impossible: app.bottom == visibleBottom in every state.
+            //
+            // Why the ROOT box moves too: html/body default to 100% of the LAYOUT
+            // viewport, so with the app pinned to 274px the document stayed 702px
+            // and that 428px surplus was a genuinely scrollable dead strip (one
+            // keyboard tall) showing the canvas. Sizing the root box to the same
+            // visible bottom removes the scroll RANGE, so no gesture guard has to
+            // fight for it. #app is never taller than this box, so nothing is
+            // clipped away.
             const layoutHeight = document.documentElement.clientHeight;
-            // Only a HARD occlusion pins. The Magic Keyboard's floating bar
-            // shrinks the visual viewport by ~9.8% and iOS lets the user drag
-            // that bar anywhere on screen, so it is system-owned chrome the
-            // shell must not chase — and it shrinks AND recovers WITHOUT
-            // firing resize/scroll (measured seq47–54: vv.height 633.5→702
-            // with no event at all, only our own diagnostic settle), which is
-            // exactly how a pin introduced for it went stale and left #app
-            // permanently short. The keyboard fires resize on both edges
-            // (measured seq14 open, seq29 close) and keeps its compensation.
-            // Inclusive boundary: "covers AT LEAST 25%" is hard, so the
-            // threshold reads the same in prose and in code.
-            const isHardOcclusion = vv.height <= layoutHeight * (1 - HARD_OCCLUSION_RATIO);
-            const target = isHardOcclusion ? Math.max(vv.height, 0) + "px" : "";
-            // Write only on change. The reconcile tick below runs this on a timer,
-            // and an unconditional style write every tick would invalidate layout
-            // (and re-fire the terminal's ResizeObserver) for no gain.
-            if (app.style.height !== target) {
-                app.style.height = target;
+            const visibleBottom = vv.offsetTop + vv.height;
+            const occluded = visibleBottom < layoutHeight - 1;
+            const pinnedHeight = occluded
+                ? Math.min(Math.max(visibleBottom, 0), layoutHeight) + "px"
+                : "";
+            setPinnedHeights(app, pinnedHeight);
+        }
+
+        // Writes the ONE height the whole shell agrees on: #app, <html> and <body>.
+        // Only-on-change, because the 500ms reconcile tick runs this constantly and
+        // an unconditional write would invalidate layout (and re-fire the terminal's
+        // ResizeObserver) for nothing.
+        function setPinnedHeights(app, height) {
+            if (app && app.style && app.style.height !== height) {
+                app.style.height = height;
             }
-            // issue #116: keep the DOCUMENT box no taller than the visible
-            // viewport. This is the structural half of the band fix, and it is a
-            // different mechanism from the pin above: #app being short is fine,
-            // but html/body default to `height: 100%` of the LAYOUT viewport
-            // (702px) while the visible area can be 274px (keyboard) or 633.5px
-            // (floating bar). That surplus is a genuinely SCROLLABLE dead strip —
-            // measured: html/body stayed 702px, so 702-274 = 428px could be
-            // scrolled, pageTop/scrollTop climbed in lockstep (16.5 -> 138 -> 276)
-            // and probe.visualBottom hit BODY rgb(249,249,249) the whole way. The
-            // user-visible symptom is a band exactly one keyboard tall, and no
-            // gesture guard can stop it because the document really does scroll.
-            // Shrinking the root box removes the scroll range instead of fighting
-            // for it. #app keeps its own height: when it is taller than this box
-            // (the floating-bar case, where nothing is pinned) body's
-            // overflow:hidden clips the overflow that sits under the bar anyway.
-            const rootHeight = vv.height < layoutHeight - 1 ? Math.max(vv.height, 0) + "px" : "";
             const root = document.documentElement;
-            if (root && root.style && root.style.height !== rootHeight) {
-                root.style.height = rootHeight;
+            if (root && root.style && root.style.height !== height) {
+                root.style.height = height;
             }
-            if (document.body && document.body.style && document.body.style.height !== rootHeight) {
-                document.body.style.height = rootHeight;
+            if (document.body && document.body.style && document.body.style.height !== height) {
+                document.body.style.height = height;
             }
         }
 
@@ -3680,20 +3643,6 @@
                 if (ownsGesture(e.target)) return;
                 e.preventDefault();
             }, { passive: false });
-            // Backstop for scroll sources no listener can see (iPadOS drives some
-            // trackpad scrolling through the native web-view scroller). The shell
-            // never needs a non-zero document offset, so any residual bounce is
-            // returned to the origin immediately.
-            const pinRootScroll = () => {
-                const el = document.scrollingElement || document.documentElement;
-                if (el && (el.scrollTop !== 0 || el.scrollLeft !== 0)) {
-                    el.scrollTop = 0;
-                    el.scrollLeft = 0;
-                }
-                if (window.scrollX || window.scrollY) window.scrollTo(0, 0);
-            };
-            window.addEventListener("scroll", pinRootScroll, { passive: true });
-            document.addEventListener("scroll", pinRootScroll, { passive: true, capture: true });
         }
 
         function initTerminalTouchScroll() {

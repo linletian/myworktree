@@ -1103,14 +1103,16 @@ func TestViewportAndHeightAnchors(t *testing.T) {
 	for _, check := range []string{
 		"window.visualViewport",
 		"document.documentElement.clientHeight",
-		"vv.height <= layoutHeight * (1 - HARD_OCCLUSION_RATIO)",
-		`Math.max(vv.height, 0) + "px"`,
-		// issue #116: the judgment now computes a target and writes only when it
-		// changed, so the 500ms reconcile tick cannot invalidate layout (and
-		// re-fire the terminal's ResizeObserver) on every pass.
-		"app.style.height !== target",
+		// issue #116 final rule: no occlusion classification at all — whenever the
+		// visible bottom sits above the layout bottom, the shell ends exactly on it.
+		// A 25% ratio gate was tried and measured to hide the terminal's last 147px
+		// under a connected Magic Keyboard (seq1209: vv.height 555 of 702 = 20.9%).
+		"const visibleBottom = vv.offsetTop + vv.height",
+		"const occluded = visibleBottom < layoutHeight - 1",
+		"setPinnedHeights(app, pinnedHeight)",
 		"vv.scale && Math.abs(vv.scale - 1) > 0.01",
-		`app.style.height = ""`,
+		// Zoom and "nothing occluded" both clear through the single writer.
+		"setPinnedHeights(app, \"\")",
 	} {
 		if !strings.Contains(apply, check) {
 			t.Fatalf("GET / applyVisualViewportHeight should include %q (issue #100 L1 R6, threshold re-calibrated under issue #116)", check)
@@ -1128,14 +1130,33 @@ func TestViewportAndHeightAnchors(t *testing.T) {
 	// stripped — this function documents itself with // line comments — and the
 	// scan is quote-aware so a string literal containing "//" survives.
 	applyCode := stripJSComments(apply)
+	// setPinnedHeights is the single writer: #app, <html> and <body> must agree on
+	// one height, or the root box stays layout-viewport tall and its surplus becomes
+	// a scrollable dead strip that shows the canvas. Only-on-change, because the
+	// 500ms reconcile tick runs it constantly.
+	pin := sliceJSFunction(t, bodyText, "setPinnedHeights")
+	for _, check := range []string{
+		"app.style.height !== height",
+		"document.documentElement",
+		"document.body",
+		"root.style.height !== height",
+	} {
+		if !strings.Contains(pin, check) {
+			t.Fatalf("GET / setPinnedHeights should include %q (issue #116)", check)
+		}
+	}
+
+	// issue #116: vv.offsetTop/visibleBottom are deliberately BACK in the formula —
+	// ending on the visible bottom is what makes app.bottom == visibleBottom, which
+	// is the only way the canvas gap cannot exist. The ban therefore covers just the
+	// classification artefacts that were removed, so they cannot creep back.
 	for _, banned := range []string{
-		"vv.offsetTop",
-		"offsetTop",
-		"visibleBottom",
-		"covered",
+		"HARD_OCCLUSION_RATIO",
+		"isHardOcclusion",
+		"0.25",
 	} {
 		if strings.Contains(applyCode, banned) {
-			t.Fatalf("GET / applyVisualViewportHeight must not read %q — the occlusion judgment and the pin target are pan-immune by construction (issue #116 choice A)", banned)
+			t.Fatalf("GET / applyVisualViewportHeight must not classify occlusions (%q) — a ratio gate misclassified a 20.9%% occlusion on-device and hid the terminal's last rows (issue #116)", banned)
 		}
 	}
 	// REVISED under issue #116: the scroll listener no longer gates on an

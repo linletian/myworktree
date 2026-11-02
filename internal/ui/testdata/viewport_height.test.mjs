@@ -78,6 +78,7 @@ const viewportFactory = new Function("deps", `
   let sidebarCollapsed = false;
   ${[
     "function applyVisualViewportHeight",
+    "function setPinnedHeights",
     "function reapplyPinnedVisualViewportHeight",
     "function initVisualViewportHandling",
     "function refitActiveTerminal",
@@ -274,10 +275,10 @@ test("issue #100 L1 R6: scroll only re-pins an existing pin — a pure pan never
   h2.vv.offsetTop = 40;
   h2.vv.height = 260;
   h2.api.initVisualViewportHandling();
-  assert.equal(h2.app.style.height, "260px", "panned + keyboard at init pins to vv.height, ignoring the pan");
+  assert.equal(h2.app.style.height, "300px", "panned + keyboard pins to the visible bottom (40 + 260)");
   h2.vv.offsetTop = 0;
   h2.vv.dispatch("scroll");
-  assert.equal(h2.app.style.height, "260px", "panning back changes nothing — vv.height never moved");
+  assert.equal(h2.app.style.height, "260px", "panning back moves the visible bottom, so the pin follows it");
 });
 
 test("issue #100 L1 R6: pinch / double-tap zoom opts out of pinning — vv.height shrinks with the scale", () => {
@@ -363,56 +364,58 @@ test("issue #116: a soft keyboard (60.9% covered) pins #app to the visible botto
   assert.equal(h.app.style.height || "", "", "and the pin is handed back to the cascade when it closes");
 });
 
-test("issue #116: the magic floating bar (9.8% covered) never pins #app", () => {
+test("issue #116: every occlusion pins — the floating bar included", () => {
+  // REVERSED twice, with reasons. It first "never pinned" (a 25% ratio gate kept
+  // it out), then the gate was measured to misclassify a 20.9% occlusion and hide
+  // the terminal's last 147px under the keyboard (seq1209: vv.height 555 on a 702
+  // layout viewport, nothing pinned). With the reconcile tick preventing stranded
+  // pins, the only rule that survives measurement is "end at the visible bottom".
   const h = viewportHarness({ layoutHeight: 702 });
   h.api.initVisualViewportHandling();
-  h.vv.height = 633.5; // measured seq47: covered 68.5px
+  h.vv.height = 633.5; // magic floating bar
   h.vv.dispatch("resize");
-  assert.equal(h.app.style.height || "", "", "the floating bar is system-owned, user-movable chrome — the shell must not chase it");
-
-  // The decisive property: because nothing was pinned, the event-less recovery
-  // observed on-device (measured seq54: vv.height 633.5 -> 702 with NO
-  // resize/scroll event) cannot leave a stale inline height behind.
-  h.vv.height = 702;
-  assert.equal(h.app.style.height || "", "", "no pin was ever introduced, so a silent recovery leaves no residue");
+  assert.equal(h.app.style.height, "633.5px", "the bar is an occlusion like any other — pin to it");
+  assert.equal(
+    h.app.style.height,
+    `${633.5}px`,
+    "pinning for the bar also removes the 68.5px band it used to expose",
+  );
 });
 
-test("issue #116: the hard-occlusion threshold is a ratio, not a pixel constant", () => {
-  // Threshold = 25% of the layout viewport, so the same judgment holds at any
-  // size. Exercised at 400px: covered 100 pins, covered 99 does not.
-  const hard = viewportHarness({ layoutHeight: 400 });
-  hard.api.initVisualViewportHandling();
-  hard.openKeyboard(300); // covered exactly 100 = 25%
-  assert.equal(hard.app.style.height, "300px", "covered == 25% of the layout viewport is hard");
 
-  const soft = viewportHarness({ layoutHeight: 400 });
-  soft.api.initVisualViewportHandling();
-  soft.openKeyboard(301); // covered 99 = 24.75%
-  assert.equal(soft.app.style.height || "", "", "just under the ratio is a soft occlusion — no pin");
-});
-
-test("issue #116 A: the pan is invisible to the judgment — the pin survives the whole keyboard gesture", () => {
-  // Replay of the on-device sequence that stranded the shell (iPadOS 27.2,
-  // session ios272recal…, keyboard held open throughout at vv.height 274 /
-  // clientHeight 702): the OLD rule grew the pin as the page was dragged
-  // (seq297–310, offsetTop 12.5→237 → pin 286.5→511px), CLEARED it once the
-  // drag pushed covered under 25% (seq311), and then never re-armed it on the
-  // way back (seq362–396, covered climbing to 428px = 61%) because the R6
-  // "scroll never introduces a pin" gate refused. Net: the keyboard covered
-  // the bottom ~428px of the terminal indefinitely.
-  // Under choice A, vv.offsetTop is not an input to anything, so every one of
-  // those frames answers the same thing: 274px.
+test("issue #116: the pin target is the VISIBLE BOTTOM, so panning keeps app.bottom on it", () => {
+  // History: pan was first made invisible to the target (choice A) to stop the pin
+  // stranding, but that left app.bottom above the visible bottom whenever iOS
+  // panned, which IS the white band (pageTop/scrollTop walking 16.5 -> 276 with the
+  // bottom pixel hit-testing BODY). With reconcile in place, stranding is solved
+  // independently, so the target goes back to offsetTop + vv.height — the one value
+  // that makes app.bottom == visibleBottom by construction.
   const h = viewportHarness({ layoutHeight: 702 });
   h.api.initVisualViewportHandling();
-  h.openKeyboard(274); // measured seq296
-  assert.equal(h.app.style.height, "274px", "keyboard open pins to vv.height");
-  for (const pan of [12.5, 103, 237, 265.5, 428, 0]) {
+  h.openKeyboard(274);
+  assert.equal(h.app.style.height, "274px", "keyboard open pins to the visible bottom");
+
+  for (const pan of [12.5, 103, 237]) {
     h.vv.offsetTop = pan;
     h.vv.dispatch("scroll");
-    assert.equal(h.app.style.height, "274px", `pan ${pan} must not change the pin — nothing may hide behind the keyboard`);
+    const expected = `${pan + 274}px`;
+    assert.equal(
+      h.app.style.height,
+      expected,
+      `pan ${pan}: the app must end exactly on the visible bottom (${pan} + 274) — ` +
+        "anything less exposes canvas below it, anything more hides rows",
+    );
   }
+
+  // Panned flush to the layout bottom: nothing is hidden any more, so the pin goes.
+  h.vv.offsetTop = 428;
+  h.vv.height = 274;
+  assert.equal(428 + 274, 702, "fixture sanity: this pan fills the layout viewport exactly");
+  h.vv.dispatch("scroll");
+  assert.equal(h.app.style.height || "", "", "visibleBottom == layoutHeight means nothing is occluded");
+
   h.closeKeyboard();
-  assert.equal(h.app.style.height || "", "", "only the keyboard leaving hands sizing back to the cascade");
+  assert.equal(h.app.style.height || "", "", "keyboard gone -> cascade owns sizing");
 });
 
 // --- issue #116: keyboard-state TRANSITIONS that emit no event ---------------
@@ -466,12 +469,12 @@ test("issue #116: the reconcile tick is idempotent and does not churn the style"
   assert.equal(writes, 0, "unchanged target must not write — the tick runs every 500ms and a write invalidates layout");
 });
 
-test("issue #116: transitions still respect the floating bar (no pin) and zoom (no pin)", () => {
+test("issue #116: transitions pin through the reconcile tick, and zoom stays exempt", () => {
   const h = viewportHarness({ layoutHeight: 702 });
   h.api.initVisualViewportHandling();
-  h.vv.height = 633.5; // magic floating bar, 9.8%
+  h.vv.height = 633.5; // magic floating bar
   h.tickReconcile();
-  assert.equal(h.app.style.height || "", "", "the bar must never pin, tick or not");
+  assert.equal(h.app.style.height, "633.5px", "the bar is pinned, tick or not — an occlusion like any other");
   h.vv.scale = 0.85;
   h.vv.height = 274; // even a keyboard-sized shrink while zoomed
   h.tickReconcile();
@@ -495,6 +498,15 @@ test("issue #116: the root box shrinks with the visible viewport, removing the s
 
   h.openKeyboard(274);
   assert.equal(h.app.style.height, "274px", "the terminal column is pinned");
+
+  // Panned: the root box must cover the VISIBLE bottom, not just vv.height, or the
+  // pan itself re-opens a scroll range.
+  h.vv.offsetTop = 69;
+  h.vv.dispatch("scroll");
+  assert.equal(h.app.style.height, "343px", "app bottom == visible bottom under a pan");
+  assert.equal(doc.documentElement.style.height, "343px", "root box == visible bottom under a pan");
+  h.vv.offsetTop = 0;
+  h.vv.dispatch("scroll");
   assert.equal(
     doc.documentElement.style.height,
     "274px",
@@ -508,18 +520,19 @@ test("issue #116: the root box shrinks with the visible viewport, removing the s
   assert.equal(doc.body.style.height || "", "", "and body with it");
 });
 
-test("issue #116: the floating bar also shrinks the root box (it is still surplus)", () => {
-  // The bar is only 68.5px, but it is surplus all the same, and 68.5px of the
-  // root canvas is exactly the band reported before the pin existed.
+test("issue #116: the floating bar shrinks BOTH boxes — the band and its scroll range both go", () => {
+  // Measured history: with the bar up (vv.height 633.5 on 702) the app bottom sat
+  // above the visible bottom (a 68.5px band) and, worse, the root box stayed 702 so
+  // that surplus was scrollable. One rule now covers both: end at the visible
+  // bottom.
   const h = viewportHarness({ layoutHeight: 702 });
   const doc = h.api.__document;
   h.api.initVisualViewportHandling();
-  assert.equal(h.app.style.height || "", "", "the bar must not pin #app");
-  h.tickReconcile.call(null);
   h.vv.height = 633.5;
-  h.tickReconcile();
-  assert.equal(h.app.style.height || "", "", "the bar still never pins #app");
-  assert.equal(doc.documentElement.style.height, "633.5px", "but the root box must not exceed the visible area");
+  h.vv.dispatch("resize");
+  assert.equal(h.app.style.height, "633.5px", "the bar pins the app to its top edge");
+  assert.equal(doc.documentElement.style.height, "633.5px", "and the root box follows, so no scroll range exists");
+  assert.equal(doc.body.style.height, "633.5px", "body with it, or it re-introduces the tall box");
 });
 
 test("issue #116: zoom leaves the root box alone, like every other compensation", () => {
