@@ -39,6 +39,37 @@
         return value;
     }
 
+    // issue #116: "what is painted at the bottom edge?" as data rather than
+    // inference. Reports the hit-tested element's identity and its own computed
+    // background at two y coordinates: the last visible pixel of the VISUAL
+    // viewport, and the last pixel of the LAYOUT viewport. They differ precisely
+    // when the visual viewport is panned, which is the state the Magic Keyboard
+    // bar produces. A BODY/HTML hit means the root canvas is exposed (a real
+    // band); a hit on the terminal host or #workspace means the pixels belong to
+    // the app's own ink.
+    function probeBottomEdge(doc, vv, win) {
+        if (!doc || typeof doc.elementFromPoint !== "function") return null;
+        const describe = (y) => {
+            let el = null;
+            try {
+                el = doc.elementFromPoint(finite(win.innerWidth) / 2, y);
+            } catch (err) {
+                return null;
+            }
+            if (!el) return null;
+            return {
+                y: finite(y),
+                tag: el.tagName || "",
+                id: el.id || "",
+                className: typeof el.className === "string" ? el.className : "",
+                background: backgroundOf(win, el),
+            };
+        };
+        const visual = vv ? finite(vv.offsetTop + vv.height) - 2 : finite(win.innerHeight) - 2;
+        const layout = finite(doc.documentElement ? doc.documentElement.clientHeight : win.innerHeight) - 2;
+        return { visualBottom: describe(visual), layoutBottom: describe(layout) };
+    }
+
     function snapshotFromPage(page, reason, capturedAt) {
         const win = page.window;
         const doc = page.document;
@@ -84,6 +115,21 @@
             document: {
                 bodyBackground: backgroundOf(win, doc.body),
                 htmlBackground: backgroundOf(win, doc.documentElement),
+                // issue #116: the white band under the Magic Keyboard bar was
+                // NOT a layout gap (#app computed 702 = clientHeight throughout)
+                // — it appeared while iOS panned the VISUAL viewport (measured
+                // pan 0 -> 69 with vv.height 633.5). These fields make the
+                // difference between "the document scrolls" and "the visual
+                // viewport pans" readable instead of inferred: pageTop is the
+                // pan in document coordinates, scrollTop* is the real scroll,
+                // and the two scrollHeight fields are what a scroll would need
+                // to exceed any of those. All three are absent from the
+                // pre-#116 capture, which is why this had to be guessed at.
+                pageTop: vv ? finite(vv.pageTop) : null,
+                scrollTop: finite(win.scrollY || win.pageYOffset || 0),
+                scrollingElementScrollTop: doc.scrollingElement ? finite(doc.scrollingElement.scrollTop) : null,
+                scrollingElementScrollHeight: doc.scrollingElement ? finite(doc.scrollingElement.scrollHeight) : null,
+                bodyScrollTop: doc.body ? finite(doc.body.scrollTop) : null,
             },
             vv: vv ? {
                 width: finite(vv.width),
@@ -114,6 +160,16 @@
                 status: active && active.status ? active.status : "",
                 activeElementTag: doc.activeElement && doc.activeElement.tagName ? doc.activeElement.tagName : "",
             },
+            // issue #116: THE decisive field for the Magic Keyboard white band.
+            // Grab what is actually painted at the last visible pixel (bottom
+            // edge of the visual viewport, horizontally centred) rather than
+            // inferring it from backgrounds. If it reports BODY/HTML the UA or
+            // root canvas is exposed — a band exists; if it reports the terminal
+            // host or #workspace the pixels are the app's own ink and any band
+            // is a child element's, which is a completely different fix. Also
+            // record the same probe at the layout bottom, because the two
+            // disagree exactly when the visual viewport is panned.
+            probe: probeBottomEdge(doc, vv, win),
         };
     }
 

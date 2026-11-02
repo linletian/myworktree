@@ -40,7 +40,7 @@ function makePage({ withVV = true } = {}) {
   host.querySelector = (selector) => selector === ".xterm-screen" ? xtermScreen : selector === ".xterm-rows" ? xtermRows : null;
   const listeners = new Map();
   const vv = withVV ? {
-    width: 820, height: 1164, offsetTop: 0, offsetLeft: 0, scale: 1,
+    width: 820, height: 1164, offsetTop: 0, offsetLeft: 0, scale: 1, pageTop: 0,
     addEventListener(type, handler) {
       if (!listeners.has(type)) listeners.set(type, []);
       listeners.get(type).push(handler);
@@ -72,10 +72,16 @@ function makePage({ withVV = true } = {}) {
       },
     },
     document: {
-      body: {},
+      body: { scrollTop: 0 },
+      scrollingElement: { scrollTop: 0, scrollHeight: 1164 },
       documentElement: { clientWidth: 820, clientHeight: 1180 },
       activeElement: { tagName: "TEXTAREA" },
       querySelector: () => null,
+      // issue #116: the bottom-edge probe hit-tests this. Returning the
+      // workspace stands in for "the pixels at the bottom edge are the app's own
+      // ink", the healthy state; a case that wants to simulate an exposed root
+      // canvas overrides this to return the documentElement.
+      elementFromPoint: () => ({ tagName: "DIV", id: "workspace", className: "" }),
       getElementById(id) {
         return id === "app" ? app : id === "main" ? main : id === "workspace" ? workspace : null;
       },
@@ -150,6 +156,20 @@ test("snapshot captures geometry and UI state without content, token, names or p
   assert.deepEqual(snapshot.document, {
     bodyBackground: "rgb(11, 16, 32)",
     htmlBackground: "rgb(11, 16, 32)",
+    pageTop: 0,
+    scrollTop: 0,
+    scrollingElementScrollTop: 0,
+    scrollingElementScrollHeight: 1164,
+    bodyScrollTop: 0,
+  });
+  // issue #116: the bottom-edge probe must report what is actually painted at
+  // the last visible pixel, at BOTH the visual and layout bottoms. The stubbed
+  // document reports app ink under both, which is the healthy answer; a case
+  // that returns the root canvas there is what an exposed-band capture looks
+  // like, and that is the distinction the field exists to make.
+  assert.deepEqual(snapshot.probe, {
+    visualBottom: { y: 1162, tag: "DIV", id: "workspace", className: "", background: "rgb(11, 16, 32)" },
+    layoutBottom: { y: 1178, tag: "DIV", id: "workspace", className: "", background: "rgb(11, 16, 32)" },
   });
   assert.equal(snapshot.workspace.bottom, 1148);
   assert.equal(snapshot.terminal.bottom, 1148);

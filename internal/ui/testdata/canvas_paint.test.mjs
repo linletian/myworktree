@@ -207,3 +207,36 @@ test("#workspace keeps overflow:hidden — the bleed relies on box-shadow, not a
   const bodies = bodiesFor(/^#workspace$/);
   assert.equal(decl(bodies[0], "overflow"), "hidden", "#workspace must keep overflow:hidden for xterm");
 });
+
+// --- Gmail-style app shell: the page must never scroll or pan ----------------
+// Measured failure (issue #116, magic floating bar up): the shell was NOT
+// resized (#app computed 702px throughout, no inline height) yet
+// visualViewport.offsetTop walked 0 -> 69 and exposed 68.5px of root canvas at
+// the bottom. That is the visual viewport panning, and `overflow: hidden` alone
+// does not stop it.
+
+test("body is the fixed app-shell anchor, so the page has nothing to pan into", () => {
+  const bodies = bodiesFor(/^body$/);
+  assert.equal(bodies.length, 1, "expected exactly one `body` rule carrying the shell anchor");
+  assert.equal(
+    decl(bodies[0], "position"),
+    "fixed",
+    "issue #116: `body` must be position:fixed — with the scroller pinned to the " +
+      "viewport rectangle there is no document origin for iOS to slide, which is what " +
+      "produced the pan (0 -> 69) and the band it revealed.",
+  );
+  assert.equal(decl(bodies[0], "inset"), "0", "the fixed shell must fill the viewport exactly");
+});
+
+test("html is deliberately NOT pinned — the anchor lives on body only", () => {
+  // Pinning the root element is not the standard recipe and changes how the
+  // canvas background propagates; the fix must stay on body.
+  const html = bodiesFor(/^html$/).map((b) => decl(b, "position") || "").join("");
+  assert.equal(html, "", "`html` must not be pinned; the shell anchor belongs on `body`");
+});
+
+test("the root scroller keeps overflow:hidden and the overscroll lock", () => {
+  const root = bodiesFor(/^(?:body,\s*html|html,\s*body)$/)[0] || "";
+  assert.equal(decl(root, "overflow"), "hidden", "root scroller must stay overflow:hidden");
+  assert.equal(decl(root, "overscroll-behavior"), "none", "root scroller keeps the overscroll-behavior lock");
+});

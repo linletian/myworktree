@@ -155,6 +155,22 @@
                is disabled too — this UI is a software surface, not a
                document, and its own scrollers are listed below. */
             overscroll-behavior: none;
+            /* issue #116 (Gmail-style app shell): overflow:hidden alone did NOT
+               stop iOS from moving the page. On-device capture (magic floating
+               bar up, vv.height 633.5, clientHeight 702) shows the shell was
+               NOT resized — #app computed 702px the whole time, inline height
+               empty — yet visualViewport.offsetTop walked 0 -> 69 and
+               #workspace's rect bottom tracked it (682 -> 613). That is the
+               VISUAL viewport panning inside the layout viewport, which is what
+               made the page appear to scroll and what exposed the 68.5px strip
+               of root canvas at the bottom (the reported white band: body is
+               rgb(249,249,249) in the light theme). Anchor instead: the root
+               scroller is a fixed, exactly-viewport-sized box, so there is no
+               scrollable overflow to pan into and no document origin to slide
+               away from. Inner surfaces are untouched by this — the terminal
+               (xterm) and the web-kind iframes scroll themselves, and
+               overscroll-behavior:contain on those keeps their momentum from
+               chaining back out here. */
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji";
             font-size: 13px;
             color: var(--text-primary);
@@ -189,6 +205,20 @@
                to light. Belt to the background braces above: it colors the
                canvas itself where no element paints (overscroll, zoom-out). */
             color-scheme: light dark;
+        }
+
+        /* issue #116 (Gmail-style shell, part 2): the ANCHOR that makes the pan
+           impossible, kept off `html` on purpose — pinning the root element is
+           not the standard recipe and changes how the canvas background is
+           propagated, while `body` is the documented app-shell anchor. With the
+           body fixed to the exact viewport rectangle there is no document origin
+           to slide and no scrollable overflow for iOS to pan into, so the
+           visual-viewport pan measured at 0 -> 69 (see above) has nothing to
+           move against. Inner scrollers are unaffected: xterm and the web-kind
+           iframes own their own scrolling surfaces. */
+        body {
+            position: fixed;
+            inset: 0;
         }
 
         * {
