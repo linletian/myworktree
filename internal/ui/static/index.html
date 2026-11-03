@@ -745,17 +745,50 @@
             }
         }
 
+        /* Sidebar title row (issue #116). The middle tier caps #sidebar at
+           200px, a remote session adds the "Remote" badge and on a coarse
+           pointer each action button is 44px, so this row had to fit title +
+           badge + 96px of buttons into a 175px content box. The markup is
+           `Worktrees<span id="remote-badge">Remote</span>` with NO whitespace
+           between them, so the two words fuse into ONE unbreakable line and
+           the text cell could not shrink below it — the second button landed
+           outside the rail. Three constraints fix it, and none of them hides
+           anything: the text cell may break (min-width:0 +
+           overflow-wrap:anywhere), the action group is never squeezed
+           (flex:0 0 auto + nowrap, so the 44px hit targets stay 44px), and
+           the row wraps as a floor — where the two cells truly cannot share a
+           line the buttons drop below the title instead of escaping. */
         .sidebar-title {
             padding: 12px;
             font-weight: 600;
             border-bottom: 1px solid var(--border-color);
             display: flex;
+            flex-wrap: wrap;
+            column-gap: 8px;
             justify-content: space-between;
             align-items: center;
+            min-width: 0;
+        }
+
+        /* Basis 0 and not auto: `auto` seeds the flex line with this cell's
+           max-content width, and flex wraps before it shrinks, so the buttons
+           would drop to a second line even at the default 240px rail. */
+        .sidebar-title > span {
+            flex: 1 1 0;
+            min-width: 0;
+            overflow-wrap: anywhere;
+        }
+
+        /* The badge is a single unit: it may move to its own line, never
+           break into "Rem / ote". */
+        .sidebar-title > span > .remote-badge {
+            white-space: nowrap;
         }
 
         .sidebar-actions {
             display: flex;
+            flex-wrap: nowrap;
+            flex: 0 0 auto;
             gap: 8px;
         }
 
