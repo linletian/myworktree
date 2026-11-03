@@ -1124,23 +1124,31 @@ func TestViewportAndHeightAnchors(t *testing.T) {
 		"document.documentElement.clientHeight",
 		`document.getElementById("terminal-container")`,
 		":scope > [data-instance-id]",
-		// The occlusion is a SHORTFALL against the stable layout height, then
-		// FLOORED by the v3.1 small-overlay ratio. This is the anchor that
-		// replaces the retired `vv.height < layoutHeight - 1` pin and the retired
-		// `vv.height <= layoutHeight * (1 - HARD_OCCLUSION_RATIO)` gate: a raw
-		// shortfall at or above 0.25 * layoutHeight is paid whole, a shallower
-		// overlay floors to 0. On the measured 702 layout that floor is 175.5px, so
-		// the 428px soft keyboard (vv.height 274) avoids while the 147px
-		// Magic-keyboard retract frames (vv.height 555) and the 68.5px thin strip
-		// (vv.height 633.5) are exempt — the 0.15 this build carried put the floor at
-		// 105.3px, BELOW the 147px frame, and the device reported the terminal
-		// bouncing ~8.6 rows (147 over the ~17px row) with the Transport climbing.
-		// The floor is a ratio of layout height, not
-		// the retired "never lift below 0.75" gate.
+		// v3.2: the SHORTFALL against the stable layout height is one INPUT to a
+		// KEYBOARD-SESSION STATE MACHINE, not the verdict itself. The retired v3.1
+		// stateless floor (SMALL_OCCLUSION_RATIO 0.25) is GONE, not renamed: the
+		// measured 206.1/340px retransition intermediates sat ABOVE its 175.5px
+		// line and re-lifted the terminal and Transport mid-transition, and no
+		// fraction can separate one live keyboard mid-session from a strip that
+		// never opened a session. The machine instead: raw =
+		// max(0, clientHeight − vv.height); EDITABLE focus (TEXTAREA / INPUT /
+		// contenteditable) + raw ≥ 0.50 * layoutHeight ENTERS (428 ≥ 351 on the
+		// measured 702 layout); the session HOLDS at RAW every pass (340 / 206.1
+		// / 147 are the same keyboard, paid as it moves); zoom, raw ≤ 1 or focus
+		// loss ENDS it (0); and a shallow shortfall can never re-open a closed
+		// session — only a fresh keyboard across the entry line can. The 0.50
+		// compares at ENTRY ONLY.
 		"Math.max(0, layoutHeight - vv.height)",
-		"const SMALL_OCCLUSION_RATIO = 0.25;",
-		"occlusion < layoutHeight * SMALL_OCCLUSION_RATIO",
-		"if (occlusion < layoutHeight * SMALL_OCCLUSION_RATIO) occlusion = 0;",
+		"document.activeElement",
+		`focus.tagName === "TEXTAREA" || focus.tagName === "INPUT" || focus.isContentEditable`,
+		"const KEYBOARD_ENTRY_RATIO = 0.50;",
+		"terminalAvoidanceActive = raw >= layoutHeight * KEYBOARD_ENTRY_RATIO;",
+		"if (zoomed || raw <= 1 || !focusEditable) {",
+		"terminalAvoidanceActive = false;",
+		"const occlusion = terminalAvoidanceActive ? raw : 0;",
+		// The diagnostic mirror: the probe reports THIS number, never a copy of
+		// the arithmetic (viewport_debug.js occlusionOf reads it off the window).
+		"window.__mwTerminalOcclusion = occlusion;",
 		`const target = occlusion + "px"`,
 		// The judgment writes per host and only when it changed, so the 500ms
 		// backstop cannot invalidate layout (and re-fire the terminal's
@@ -1187,32 +1195,33 @@ func TestViewportAndHeightAnchors(t *testing.T) {
 			t.Fatalf("GET / applyVisualViewportOcclusion must not contain %q — the root is never written, the shell is never resized, and neither is re-settled on a frame (issue #116 contract v3.0)", banned)
 		}
 	}
-	// The retired HARD gate is GONE, not merely unused. That gate (the retired
-	// `vv.height <= layoutHeight * (1 - HARD_OCCLUSION_RATIO)` / 0.75 rule) REFUSED
-	// to lift for anything SHORTER than a tall keyboard — the exact opposite of the
-	// v3.1 SMALL_OCCLUSION_RATIO floor, which pays every shortfall at or above 0.25
-	// * layoutHeight and exempts only the shallower overlay under it. So the ban is
-	// on the gate's SHAPE — the constant's name, the `(1 -` cliff spelling and the
-	// inlined `layoutHeight *0.75` cliff literal — and NOT on the numeral 0.25, which
-	// is legitimate here as SMALL_OCCLUSION_RATIO applied to the SHORTFALL (the floor
-	// the device feedback settled on: exempting the 147px Magic-keyboard retract
-	// frames that 0.15 made pay, and 0.15 is the numeral that is retired). A ban on
-	// the bare numeral would only prove the test cannot tell a cliff from a floor. The
-	// magic-hint
-	// frame (b90643be…, seq388) still shows a true overlay lands on occlusion 0
-	// because clientHeight - vv.height is 0 — but v3.1 no longer needs a 0.75 cliff
-	// to get there: the 633.5 thin strip now floors to 0 on its own ratio, and so
-	// does the 555 frame at 147px = 20.9% under the 175.5px floor, while the 428px
-	// soft keyboard still avoids.
+	// The retired gates are GONE, not merely unused. The v2 HARD gate
+	// (`vv.height <= layoutHeight * (1 - HARD_OCCLUSION_RATIO)` / 0.75) REFUSED to
+	// lift for anything SHORTER than a tall keyboard. The v3.1 floor
+	// (SMALL_OCCLUSION_RATIO, 0.15 then 0.25 of the layout height applied to the
+	// running shortfall) is now retired the same way: applied STATELESSLY to every
+	// frame, it re-lifted the terminal and the Transport on the measured 206.1px
+	// and 340px retransition intermediates — every one of them sits ABOVE the 0.25
+	// line (175.5px on the 702 layout), and no fraction can tell one live
+	// keyboard mid-session from a strip that never opened a session. v3.2 keeps
+	// ONE fraction, 0.50, and applies it ONLY at the session ENTRY edge, never
+	// against a running occlusion. So the bans are on the retired gates' SHAPES —
+	// the HARD gate's name, `(1 -` cliff spelling and inlined `layoutHeight *0.75`
+	// literal; the small-overlay floor's name and its `occlusion < layoutHeight *`
+	// running-comparison spelling — not on bare numerals, which only prove a test
+	// cannot tell a cliff from a floor from an entry line. A true overlay still
+	// lands on occlusion 0: raw is 0 by arithmetic and the session never enters.
 	// Scan CODE, not prose (the comments narrate the retirement by name).
 	codeText := stripJSComments(bodyText)
 	for _, banned := range []string{
 		"HARD_OCCLUSION_RATIO",
+		"SMALL_OCCLUSION_RATIO",
 		"layoutHeight * (1 -",
 		"layoutHeight *0.75",
+		"occlusion < layoutHeight *",
 	} {
 		if strings.Contains(codeText, banned) {
-			t.Fatalf("GET / must not carry the retired HARD occlusion gate %q — v3.1 pays every shortfall at or above the 0.25 floor and exempts only the shallower overlay under it, it never refuses to lift below a 0.75 cliff (issue #116)", banned)
+			t.Fatalf("GET / must not carry the retired occlusion gate %q — v3.2 pays the RAW of an entered keyboard session and exempts every shortfall OUTSIDE one; it neither refuses to lift below a 0.75 cliff nor floors the running occlusion at a 0.25 line (issue #116)", banned)
 		}
 	}
 	// CONTRACT v3.1 (issue #116), the transport strip reaches the PHYSICAL bottom.

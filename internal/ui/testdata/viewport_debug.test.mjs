@@ -26,13 +26,15 @@ function fakeElement(rect, style = {}, classes = []) {
   };
 }
 
-// The v3.0 stand-in, laid out like the measured iPad-landscape shell: a
+// The v3.2 stand-in, laid out like the measured iPad-landscape shell: a
 // FULL-HEIGHT shell (app 0 → 1180 against clientHeight 1180), #workspace inside
-// the 16px safe-area padding (bottom 1164), and the keyboard UP at vv.height 860
-// — so the occlusion is 320, which clears the v3.1 floor of 1180*0.25 = 295, and
-// every PTY host's own bottom is 320px, landing its
-// real bottom at 844, above the covered strip. Nothing in this page is
-// scrollable, and #app carries NO inline height.
+// the 16px safe-area padding (bottom 1164), and an OPEN keyboard-session frame at
+// vv.height 860 — the EDITABLE field was focused and the keyboard entered across
+// the 50% line, so inside the session every PTY host's own bottom carries the raw
+// 320px, landing its real bottom at 844, above the covered strip. The probe reads
+// that 320 off window.__mwTerminalOcclusion — the applier's mirror — it does not
+// re-derive it. Nothing in this page is scrollable, and #app carries NO inline
+// height.
 const LAYOUT_HEIGHT = 1180;
 const VV_HEIGHT = 860;
 const WORKSPACE_BOTTOM = 1164;
@@ -108,6 +110,13 @@ function makePage({ withVV = true, hosts = [true, false] } = {}) {
       innerWidth: 820,
       innerHeight: 1180,
       devicePixelRatio: 2,
+      // v3.2: the probe's occlusion is READ from this mirror the applier writes
+      // (window.__mwTerminalOcclusion in index.html), never re-derived here.
+      // This fixture is a LIVE keyboard session mid-state — every host already
+      // carries bottom 320px, so the applier's mirror is 320 too. A page where
+      // no pass has run (or the session is closed) leaves it 0/absent, and the
+      // cases below spell that out.
+      __mwTerminalOcclusion: withVV ? OCCLUSION : 0,
       navigator: {
         userAgent: "Mozilla/5.0 (iPad; CPU OS 18_0 like Mac OS X) Safari/605.1.15",
         platform: "iPad",
@@ -288,30 +297,42 @@ test("snapshot captures geometry and UI state without content, token, names or p
 
 // --- p7 / contract v3.0: the fields the new verdict reads ---------------------
 
-test("p8 stamps every snapshot with the version that measures v3.1", () => {
+test("p9 stamps every snapshot with the version that measures v3.2", () => {
   const { page } = makePage();
   const snapshot = loadAPI().snapshotFromPage(page, "manual", "2026-10-27T12:00:00.000Z");
-  assert.equal(snapshot.probeVersion, "p8-full-shell-overlay-wheel-v1", "the stamp is what stops a capture from certifying the wrong build");
+  assert.equal(snapshot.probeVersion, "p9-full-shell-session-avoidance-v1", "the stamp is what stops a capture from certifying the wrong build");
 });
 
-test("p8 floors occlusion at the small-overlay ratio — a thin strip owes nothing", () => {
+test("p9 reports the applier's mirrored occlusion, never a re-derived ratio", () => {
   const api = loadAPI();
-  // Under the floor: a shortfall below 0.25 of the layout height (1180*0.25 = 295)
-  // is a shallow overlay — the thin floating strip, or the Magic Keyboard's retract
-  // frames — that the terminal does NOT avoid, so the probe reports
-  // occlusion 0 (matching what the applier wrote) instead of the raw shortfall it
-  // would have owed pre-v3.1.
+  // v3.2 moved the occlusion JUDGMENT into the applier's keyboard-session state
+  // machine (index.html) and the probe now READS window.__mwTerminalOcclusion.
+  // It must not re-run the retired v3.1 floor (raw < clientHeight*0.25 ? 0 :
+  // raw) here — that arithmetic would call a MID-SESSION 147px retract frame
+  // "exempt" and a post-session shallow strip "owed", which is exactly backwards
+  // and is what re-lifted the terminal on the device. What the applier wrote IS
+  // the truth the probe carries.
   const thin = makePage();
-  thin.vv.height = LAYOUT_HEIGHT - Math.floor(LAYOUT_HEIGHT * 0.25) + 40; // raw < ratio
+  thin.vv.height = LAYOUT_HEIGHT - Math.floor(LAYOUT_HEIGHT * 0.25) + 40; // a shortfall under the retired 0.25 line
+  thin.page.window.__mwTerminalOcclusion = 0; // the applier closed/left the session → wrote 0
   const thinSnapshot = api.snapshotFromPage(thin.page, "resize", "2026-10-27T12:00:00.000Z");
   assert.ok(thinSnapshot.vv.height > 0, "the viewport really did shrink");
-  assert.equal(thinSnapshot.occlusion, 0, "a shortfall under the ratio is exempt — the probe reports what THIS build owes, not the raw shortfall");
+  assert.equal(thinSnapshot.occlusion, 0, "the probe mirrors the applier's 0, not a re-derived raw shortfall");
 
-  // Over the floor: a real keyboard's shortfall is still owed in full.
-  const kb = makePage();
-  kb.vv.height = LAYOUT_HEIGHT - Math.ceil(LAYOUT_HEIGHT * 0.25) - 40; // raw > ratio
-  const kbSnapshot = api.snapshotFromPage(kb.page, "resize", "2026-10-27T12:00:00.000Z");
-  assert.equal(kbSnapshot.occlusion, LAYOUT_HEIGHT - kb.vv.height, "a shortfall at or over the ratio is owed in full");
+  // Mid-session under the retired floor: the session is LIVE, so the applier
+  // paid raw and the probe must carry that raw — the retired floor would have
+  // reported 0 here and certified the bounce as correct.
+  const mid = makePage();
+  mid.vv.height = LAYOUT_HEIGHT - 147; // raw 147, under the retired 295 line
+  mid.page.window.__mwTerminalOcclusion = 147; // session live, hosts pay raw
+  const midSnapshot = api.snapshotFromPage(mid.page, "resize", "2026-10-27T12:00:00.000Z");
+  assert.equal(midSnapshot.occlusion, 147, "a live session's raw shortfall is reported RAW — geometry alone cannot re-classify it");
+
+  // An unset mirror (no pass ran yet) reads 0 — exactly what the applier owes
+  // before the first keyboard enters.
+  const fresh = makePage();
+  delete fresh.page.window.__mwTerminalOcclusion;
+  assert.equal(api.snapshotFromPage(fresh.page, "resize", "2026-10-27T12:00:00.000Z").occlusion, 0, "an unset mirror reads 0");
 });
 
 test("p7 lists EVERY PTY host, hidden included, with its own bottom", () => {
@@ -378,6 +399,9 @@ test("p7 reports the quick-keys panel's computed max-height against its own scro
 });
 
 test("p7 occlusion: no visualViewport or zoom both mean nothing is owed", () => {
+  // v3.2 spelling: the applier's session machine writes 0 on all three edges —
+  // no visualViewport, zoom, keyboard closed — and the probe mirrors the 0. The
+  // probe itself judges nothing; it reads window.__mwTerminalOcclusion.
   const withoutVV = makePage({ withVV: false });
   const snapshot = loadAPI().snapshotFromPage(withoutVV.page, "init", "2026-10-27T12:00:00.000Z");
   assert.equal(snapshot.vv, null);
@@ -387,11 +411,13 @@ test("p7 occlusion: no visualViewport or zoom both mean nothing is owed", () => 
   const zoomed = makePage();
   zoomed.vv.scale = 2;
   zoomed.vv.height = 450;
+  zoomed.page.window.__mwTerminalOcclusion = 0; // zoom ENDED the session; the applier wrote 0
   const zoomedSnapshot = loadAPI().snapshotFromPage(zoomed.page, "resize", "2026-10-27T12:00:00.000Z");
   assert.equal(zoomedSnapshot.occlusion, 0, "zoom owns nothing — a pinch must not lift the terminal off a page the user is panning");
 
   const open = makePage();
   open.vv.height = LAYOUT_HEIGHT;
+  open.page.window.__mwTerminalOcclusion = 0; // raw 0 closed the session
   assert.equal(loadAPI().snapshotFromPage(open.page, "resize", "2026-10-27T12:00:00.000Z").occlusion, 0, "the real floating overlay never enters visualViewport: occlusion 0 by arithmetic");
 });
 

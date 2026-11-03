@@ -19,10 +19,10 @@
     // report can never be ambiguous again — bump this whenever the probe or the
     // shell behaviour it measures changes.
     //
-    // p8-full-shell-overlay-wheel-v1 measures the issue #116 contract v3.1:
+    // p9-full-shell-session-avoidance-v1 measures the issue #116 contract v3.2:
     // "out-of-flow FULL-HEIGHT fixed shell + non-scrollable root + PTY-local
-    // avoidance with a small-overlay floor + a wheel door that blocks the root".
-    // Same schema as p7 (no new fields); what changed is the arithmetic one verdict
+    // avoidance scoped to soft-keyboard sessions + a wheel door that blocks the root".
+    // Same schema as p7/p8 (no new fields); what changed is the arithmetic one verdict
     // checks against and one gesture surface the probe's parent now hardens:
     //
     //   * THE SHELL NEVER MOVES. appComputedPosition reads "fixed",
@@ -35,26 +35,27 @@
     //     control the user ran on the same iPad is what settled it — with the
     //     keyboard up, what shows through the keyboard is the same unchanged
     //     full-height layout.
-    //   * THE TERMINAL AVOIDS LOCALLY, ABOVE A FLOOR. The boxes that move are the
-    //     TERMINAL'S OWN: every PTY host inside #terminal-container, the overlay
-    //     #terminal-controls column, and #status-bar — which v3.1 makes
+    //   * THE TERMINAL AVOIDS LOCALLY, INSIDE A KEYBOARD SESSION. The boxes that
+    //     move are the TERMINAL'S OWN: every PTY host inside #terminal-container,
+    //     the overlay #terminal-controls column, and #status-bar — which v3.1 made
     //     `position:fixed` so the Transport sits at the PHYSICAL viewport bottom
     //     with no keyboard, not the safe-area-inset bottom #workspace would give
-    //     it. Occlusion is now floored at SMALL_OCCLUSION_RATIO (0.25 of the
-    //     layout height): a shortfall under that fraction (the measured thin
-    //     floating strip at ≈68.5 ≈ 9.8% AND the Magic Keyboard's retract frames at
-    //     ≈147 ≈ 20.9%) is owed NOTHING — host bottom 0,
-    //     controls 20, status 0 — so the terminal keeps its full height and the
-    //     strip simply overlaps it; a shortfall at or over the fraction avoids as
-    //     before, which on the measured 702 layout (floor 175.5px) covers the full
-    //     soft keyboard
-    //     (428 ≈ 61.0%). So `occlusion` now reports the FLOORED height the applier
-    //     actually owes, not the raw clientHeight − vv.height; `ptyHosts` reports
-    //     EVERY host (hidden and inactive included) with its rect bottom, its own
-    //     inline `bottom` and visibility; `controls` / `statusBar` report the same
-    //     three numbers for the two overlays at the offsets they are AUTHORED at
-    //     plus the floored occlusion; `quickKeys` reports the panel's computed
-    //     max-height against its clientHeight / scrollHeight. Anything that
+    //     it. Occlusion is v3.2 keyboard-session state read straight from the
+    //     applier (window.__mwTerminalOcclusion, written every pass): the session
+    //     enters at raw >= 50% of the layout height with editable focus, holds at
+    //     raw while that focus is kept and raw > 1, and leaves at raw <= 1, zoom
+    //     or focus loss — so a shallow 147 / 206.1 / 68.5 strip AFTER a closed
+    //     session is owed NOTHING (host bottom 0, controls 20, status 0, terminal
+    //     full height, strip simply overlaps it) while the SAME 147 mid-session
+    //     belongs to one live keyboard and moves exactly what the keyboard moved.
+    //     The probe reports the FLOORED-history-free EFFECTIVE number the applier
+    //     actually owes, not a raw reconstruction; the retired 0.25 small-overlay
+    //     floor that used to be re-derived here is gone, not renamed. `ptyHosts`
+    //     reports EVERY host (hidden and inactive included) with its rect bottom,
+    //     its own inline `bottom` and visibility; `controls` / `statusBar` report
+    //     the same three numbers for the two overlays at the offsets they are
+    //     AUTHORED at plus the effective occlusion; `quickKeys` reports the panel's
+    //     computed max-height against its clientHeight / scrollHeight. Anything that
     //     disagrees with its authored offset is the miss. A shell whose layoutGap
     //     is not ~0 is a shell that was still resized.
     //   * THE WHEEL DOOR IS BLOCKED, NOT DOUBLED. A trackpad two-finger scroll
@@ -76,19 +77,7 @@
     // p6-structural-no-scroll-v1 the pinned-shell build and p5-root-origin-v1 the
     // build that PARKED the root at 0; none of those stamps can certify this one,
     // which is exactly what a stamp is for.)
-    const PROBE_VERSION = "p8-full-shell-overlay-wheel-v1";
-
-    // The SMALL-OVERLAY floor the applier applies (see applyVisualViewportOcclusion
-    // in index.html): a shortfall under this fraction of the layout height is a thin
-    // floating strip the terminal does NOT avoid, so the probe reports occlusion 0
-    // for it. The two MUST stay in lockstep or the probe judges the build against a
-    // number it never owed. 0.25: on the measured 702 layout the floor is 175.5px,
-    // which keeps the thin 68.5px strip AND the Magic Keyboard's measured 147px
-    // retract frames exempt (lifting them is the ~9-row bounce + raised Transport the
-    // device feedback reported) and makes the measured 428px (274) keyboard avoid.
-    // Not an identifier of any particular overlay —
-    // a pure terminal-local avoidance floor, nothing more.
-    const SMALL_OCCLUSION_RATIO = 0.25;
+    const PROBE_VERSION = "p9-full-shell-session-avoidance-v1";
 
     function finite(value) {
         return Number.isFinite(value) ? value : 0;
@@ -207,22 +196,20 @@
         return out;
     }
 
-    // v3.1's occlusion, measured the way the applier computes it — including the
-    // SMALL-OVERLAY floor the applier applies. The raw shortfall is the height the
-    // keyboard would owe, but the applier owes NOTHING for a shortfall under
-    // SMALL_OCCLUSION_RATIO of the layout height (the thin floating strips, the
-    // "浮窗不压缩任何终端区域" case), so the probe reports the FLOORED number: a
-    // verdict then checks each host / overlay bottom against what THIS build actually
-    // wrote, not against a raw reconstruction that would call an intentionally-full
-    // terminal a miss. The ratio must match the applier's SMALL_OCCLUSION_RATIO.
-    // Zero under zoom and without visualViewport, exactly as the applier.
-    function occlusionOf(vv, clientHeight) {
-        if (!vv) return 0;
-        const scale = finite(vv.scale || 1);
-        if (Math.abs(scale - 1) > 0.01) return 0;
-        const raw = Math.max(0, finite(clientHeight) - finite(vv.height));
-        if (raw < finite(clientHeight) * SMALL_OCCLUSION_RATIO) return 0;
-        return raw;
+    // v3.2's occlusion: READ, not re-derived. The applier keeps the keyboard-session
+    // state machine (enter at raw >= 50% of the layout height with editable focus,
+    // hold at raw inside the session, leave at raw <= 1 / zoom / focus loss) and
+    // mirrors the EFFECTIVE number it owed on the last pass to
+    // window.__mwTerminalOcclusion (see applyVisualViewportOcclusion in index.html).
+    // The probe reports exactly that number, because a probe that re-ran its own
+    // stateless rule (the retired 0.25 floor, or the raw shortfall pre-v3.1) would
+    // judge this build against arithmetic it does not perform — a mid-session 147px
+    // retract frame is a keyboard that still owes its lift, and a post-session 147
+    // is a strip that owes nothing, and geometry alone cannot tell them apart.
+    // Unset (no pass has run yet) reads 0, exactly as the applier owes nothing.
+    function occlusionOf(win) {
+        const value = win ? win.__mwTerminalOcclusion : undefined;
+        return Number.isFinite(value) ? value : 0;
     }
 
     // issue #116 contract v3.0, the second half of the LOCAL avoidance: the two
@@ -408,8 +395,10 @@
             workspace: styledRect(win, workspace),
             terminal: styledRect(win, host),
             // v3.0: occlusion + every PTY host, so a verdict can check the LOCAL
-            // avoidance instead of a resized shell. See ptyHostsOf / occlusionOf.
-            occlusion: occlusionOf(vv, doc.documentElement ? doc.documentElement.clientHeight : win.innerHeight),
+            // avoidance instead of a resized shell. v3.2: occlusion is the applier's
+            // own session value read off the window, never re-derived here.
+            // See ptyHostsOf / occlusionOf.
+            occlusion: occlusionOf(win),
             ptyHosts: ptyHostsOf(win, doc),
             // v3.0, same pass, same occlusion: the two overlay children of
             // #workspace the applier now lifts as well — the quick-keys control

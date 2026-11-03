@@ -1,9 +1,9 @@
 #!/usr/bin/env node
-// Verify the DEPLOYED bundle's PTY-local avoidance against contract v3.1
-// ("full-height shell + PTY-LOCAL avoidance above a ratio floor, non-scrollable
-// root", issue #116). v3.1 = the v3.0 base (full-height shell, host-local lift,
-// overlay half) PLUS the 0.25 small-overlay floor, the fixed #status-bar and the
-// wheel isolation.
+// Verify the DEPLOYED bundle's PTY-local avoidance against contract v3.2
+// ("full-height shell + PTY-LOCAL avoidance SCOPED TO SOFT-KEYBOARD SESSIONS,
+// non-scrollable root", issue #116). v3.2 = the v3.0 base (full-height shell,
+// host-local lift, overlay half) with the avoidance gated by the keyboard-session
+// state machine — plus the fixed #status-bar and the wheel isolation from v3.1.
 //
 // Why this exists: the node suite in internal/ui/testdata/ slices the repo
 // source, and the Go anchors assert served-asset *text*. Neither proves the
@@ -22,24 +22,27 @@
 //     pinned the whole page to vv.height here and asserted app.style.height;
 //     those assertions are DELIBERATELY GONE — the same four heights now have to
 //     leave #app untouched and pay the shortfall into the hosts instead.
-//   - A shortfall is paid ONLY ABOVE A RATIO FLOOR (contract v3.1). The raw
-//     shortfall is clientHeight - vv.height; at or above 0.25 * clientHeight it is
-//     a real keyboard and its RAW value is paid into every host (274 →
-//     428px). UNDER that floor (702*0.25=175.5, so BOTH the
-//     633.5 → raw 68.5 = 9.8% strip AND the 555 → raw 147 = 20.9% Magic-keyboard
-//     retract frames sit under it) it is the shallow overlay the
-//     user said must NOT compress the terminal, so
-//     it is exempt and owes 0 — the hosts stay flush and the strip overlaps a page
-//     that never moved. The 0.15 this script asserted before (floor 105.3) is NOT
-//     kept: it sat BELOW the measured 147px frame, made that transient a paying
-//     occupant, and the device reported the terminal bouncing ~8.6 rows (147 over
-//     the ~17px row) with the Transport climbing as the soft keyboard left. The floor is a RATIO of the layout height, so it holds at
-//     every viewport size; it REPLACES v3.0's "any shortfall, no classification" and
-//     the retired v2.x HARD_OCCLUSION_RATIO gate alike. A genuine magic-hint overlay
-//     (vv.height = clientHeight) still lands on occlusion 0 by arithmetic.
+//   - A shortfall is paid only INSIDE A KEYBOARD SESSION (contract v3.2). The raw
+//     shortfall is clientHeight - vv.height. A session ENTERS at raw >= 0.50 *
+//     clientHeight with editable focus (document.activeElement TEXTAREA/INPUT or
+//     contenteditable) — the explicit soft keyboard (274 → raw 428) — and while it
+//     HOLDS there is NO ratio line: every retract frame pays its RAW (555 → 147,
+//     495.9 → 206.1, 362 → 340). The session LEAVES at raw <= 1, at zoom, or when
+//     focus stops being editable, and after leaving, a shortfall UNDER the 0.50
+//     line can never re-open it — the thin floating strip (633.5 → raw 68.5) and
+//     any shallow state simply overlap a terminal that stays flush. The retired
+//     v3.1 0.25 STATELESS floor is NOT replayed: its 175.5px line sat BELOW the
+//     measured 206.1px and 147px retransition intermediates, and paying them was the
+//     ~8.6-row bounce plus the climbing Transport the device reported back — no
+//     fraction can tell those live-session frames from a fresh shallow overlay, so
+//     the gate is STATE, and the one surviving fraction (0.50) only opens sessions.
+//     A genuine magic-hint overlay (vv.height = clientHeight) still lands on
+//     occlusion 0 by arithmetic.
 //   - EVERY host is lifted, hidden and inactive included, and a host born under a
-//     covered bottom is lifted at creation.
-//   - pinch zoom (scale != 1) opts out entirely (ratio included) and restores bottom: 0px.
+//     covered bottom is lifted at creation — inside a live session only; born
+//     outside one it is born flush.
+//   - pinch zoom (scale != 1) opts out entirely AND CLOSES the session (its raw is
+//     a zoom artifact); restore bottom: 0px.
 //   - nothing in this layer may write the root: scrollTo / scrollTop THROW below.
 //
 // Gotchas hit while writing this — do not reintroduce:
@@ -122,14 +125,16 @@ console.log("✓ live code reads neither offsetTop nor visibleBottom, and writes
 // therefore every host at inset:0 inside it — with its floor at 682.
 const LAYOUT = 702;
 const HOST_FLOOR = 682;
-// Contract v3.1: a shortfall under this fraction of the layout height is a shallow
-// overlay and owes nothing; at or over it an explicit larger keyboard owes
-// its raw shortfall. 702 * 0.25 = 175.5px is the boundary: it
-// sits ABOVE the thin floating strip (68.5, exempt) and ABOVE the measured 147px
-// Magic-keyboard retract frames (exempt too — lifting the terminal on that transient
-// was the ~8.6-row bounce plus the raised Transport the device reported back), and
-// BELOW the full soft keyboard's 428px shortfall, which still avoids.
-const SMALL_OCCLUSION_RATIO = 0.25;
+// Contract v3.2: this fraction of the layout height is the session ENTRY line and
+// NOTHING ELSE. At or over it, with editable focus and no session open, the keyboard
+// is explicit and opens avoidance; once open, the session pays RAW at every height
+// until raw closes (<= 1), zoom, or focus loss. 702 * 0.50 = 351px is the entry
+// line: the full soft keyboard (274 → raw 428) opens it; the thin floating strip
+// (68.5) and a never-opened 555 frame (147) never do. The retired v3.1 floor
+// (SMALL_OCCLUSION_RATIO 0.25 → 175.5) is NOT here: it applied its line to the
+// RUNNING occlusion and re-lifted the terminal mid-retract — see the HOLD block
+// below, where the same 147 is paid BECAUSE a session entered.
+const KEYBOARD_ENTRY_RATIO = 0.50;
 
 // Full-height, out-of-flow #app. Its inline height setter THROWS: v2.2 pinned
 // this box to vv.height and v3.0 never may, so the retired pin fails HERE rather
@@ -217,19 +222,30 @@ const liveDocument = {
   body: rootBox,
   scrollingElement: rootBox,
   createElement: (tagName) => ({ tagName: String(tagName).toUpperCase(), dataset: {}, style: {} }),
+  // The focus half of the v3.2 session gate. The terminal's editable helper is a
+  // TEXTAREA (xterm's input helper), so keyboard frames legitimately carry it;
+  // setFocus below swaps it for BODY / contenteditable to drive the edge cases.
+  activeElement: { tagName: "TEXTAREA", isContentEditable: false },
   getElementById: (id) => (id === "app" ? app
     : id === "terminal-container" ? container
       : id === "terminal-controls" ? controls
         : id === "status-bar" ? statusBar
           : null),
 };
+const setFocus = (el) => { liveDocument.activeElement = el; };
 const liveWindow = {
   visualViewport: vv,
   scrollTo: () => ban("window.scrollTo(...)"),
   scrollBy: () => ban("window.scrollBy(...)"),
   get scrollY() { return 0; },
 };
-const factory = new Function("document", "window", `${apply}\n\nreturn applyVisualViewportOcclusion;`);
+// The v3.2 applier keeps ONE module-level boolean (`terminalAvoidanceActive`) that
+// lives ABOVE the function slice, exactly like `sidebarCollapsed` does in the node
+// harness. The slice ships only the function, so the factory must declare that
+// variable in the same closure the sliced function references — otherwise the live
+// bytes would throw on the first `terminalAvoidanceActive =` and never prove the
+// session machine. It starts CLOSED, matching the shipped page load.
+const factory = new Function("document", "window", `let terminalAvoidanceActive = false;\n${apply}\n\nreturn applyVisualViewportOcclusion;`);
 const avoid = factory(liveDocument, liveWindow);
 
 const bottoms = () => hosts.map((host) => host.style.bottom);
@@ -245,43 +261,54 @@ avoid();
 assert.deepEqual(bottoms(), ["0px", "0px"], "at rest every host owns bottom 0px");
 assert.deepEqual(hostBottoms(), [HOST_FLOOR, HOST_FLOOR]);
 
-// The measured table: the shortfall is paid into the HOST above the v3.1 ratio
-// floor, and the same terminal geometry the old full-page pin produced comes out of
-// it. Only 274 (raw 428) clears the 175.5 floor and pays 428 → host bottom 254;
-// 555 (raw 147 = 20.9%) and 633.5 (raw 68.5 = 9.8%) both sit under it and pay 0 —
-// the Magic-keyboard retract frames stay flush instead of bouncing the terminal.
-// `owed` below is the floored shortfall — the single number every box is judged on,
-// so no fixture can quietly restate the retired no-floor arithmetic.
-const table = [274, 555, 633.5];
-for (const visible of table) {
-  const raw = LAYOUT - visible;
-  const owed = raw >= LAYOUT * SMALL_OCCLUSION_RATIO ? raw : 0;
+// The v3.2 gate must be visible IN THE LIVE BYTES themselves, not just inferred
+// from the bottoms: one boolean, the focus read, the entry-only line. (The Go
+// anchors check the served text; this ties the FETCHED bytes to the same shape.)
+assert.ok(code.includes("terminalAvoidanceActive"), "live code carries the keyboard-session boolean");
+assert.ok(code.includes("document.activeElement"), "live code reads the focus before paying anything");
+assert.ok(code.includes("KEYBOARD_ENTRY_RATIO"), "live code declares the entry-only fraction");
+console.log("✓ live bytes carry the v3.2 session gate (terminalAvoidanceActive + document.activeElement + KEYBOARD_ENTRY_RATIO)");
+
+// The measured session, replayed in capture order. ONE helper runs the full box
+// check per frame; `owed` is passed in from the SESSION rule, never re-derived
+// inside the helper, so a helper that floored or lifted on its own would disagree
+// with the caller and fail. The sequence is the contract:
+//   ENTER at 274 (raw 428 >= 351)  → every box pays 428, hosts land at 254;
+//   HOLD 362 → raw 340 pays 340     (mid-session, NO line — the old 0.25 floor
+//   HOLD 495.9 → raw 206.1 pays it   would have snapped these to 0 mid retract);
+//   HOLD 555 → raw 147 pays 147;
+//   the column pays owed + 20, the strip owed alone, literal numbers each frame.
+const sessionFrame = (visible, owed, label) => {
   const bottom = owed + "px";
   const hostBottom = HOST_FLOOR - owed;
   vv.height = visible;
   avoid();
-  assert.deepEqual(bottoms(), [bottom, bottom], `vv.height ${visible} must set EVERY host bottom to ${bottom} (raw ${raw}, owed ${owed})`);
-  assert.deepEqual(hostBottoms(), [hostBottom, hostBottom], `vv.height ${visible} must land the host at ${hostBottom}`);
+  assert.deepEqual(bottoms(), [bottom, bottom], `${label}: vv.height ${visible} must set EVERY host bottom to ${bottom}`);
+  assert.deepEqual(hostBottoms(), [hostBottom, hostBottom], `${label}: vv.height ${visible} must land the host at ${hostBottom}`);
   assert.equal(app.getBoundingClientRect().bottom, LAYOUT, "the shell stays full height while the keyboard covers the rest");
   // The overlay half, LITERAL numbers — 20 + owed for the column, the owed value
   // alone for the strip. A copy of the host target onto the column would leave the
   // quick-keys panel buried in the transport strip's band, and nothing else in this
   // file would notice. At owed 0 each returns to its OWN authored value.
-  assert.equal(controlsBottom(), (20 + owed) + "px", `vv.height ${visible}: #terminal-controls owes bottom ${20 + owed}px (authored 20px + owed)`);
-  assert.equal(statusBarBottom(), owed + "px", `vv.height ${visible}: #status-bar owes bottom ${owed}px (authored 0)`);
+  assert.equal(controlsBottom(), (20 + owed) + "px", `${label}: #terminal-controls owes bottom ${20 + owed}px (authored 20px + owed)`);
+  assert.equal(statusBarBottom(), owed + "px", `${label}: #status-bar owes bottom ${owed}px (authored 0)`);
   assert.equal(controls.getBoundingClientRect().bottom, HOST_FLOOR - 20 - owed, "the column's real bottom lifts by the owed shortfall, keeping its 20px clearance");
   assert.equal(statusBar.getBoundingClientRect().bottom, HOST_FLOOR - owed, "the strip's real bottom lifts by the owed shortfall itself");
-  // The strip/column must clear the keyboard ONLY in an avoiding frame. In an
-  // exempt thin strip they legitimately stay full height and are overlapped on
-  // purpose (the user's own request), so demanding clearance there would fail the
-  // very case v3.1 protects.
+  // The strip/column must clear the keyboard ONLY inside a live avoiding session.
+  // Outside one they legitimately stay full height and are overlapped on purpose
+  // (the user's own request), so demanding clearance there would fail the very
+  // case v3.2 protects.
   if (owed > 1) {
     assert.ok(controls.getBoundingClientRect().bottom <= visible + 1, `the column must sit above the keyboard at ${visible} (avoiding)`);
   }
   assert.ok(controls.getBoundingClientRect().top === CONTROLS_TOP, "top:20px is never written — the quick-keys ENTRY button does not jump");
   assert.equal(controlsHeight(), HOST_FLOOR - CONTROLS_TOP - CONTROLS_AUTHORED_BOTTOM - owed, `the column's usable height shrinks by exactly ${owed}px (what the panel's max-height:100% resolves against)`);
-}
-console.log("✓ 274 paid 428px into every host, the column (+20) and the strip; 555 (147=20.9%) and 633.5 (68.5=9.8%) are exempt under the 0.25 floor and pay 0, with the shell untouched");
+};
+sessionFrame(274, 428, "ENTER 274 (raw 428 crosses the 351px entry line)");
+sessionFrame(362, 340, "HOLD mid-retract 362 pays raw 340");
+sessionFrame(495.9, LAYOUT - 495.9, "HOLD mid-retract 495.9 pays raw 206.1 (a third of the layout — the retired floor snapped THIS to 0 and bounced)");
+sessionFrame(555, 147, "HOLD retract 555 pays raw 147 (147 below 351 but the session is LIVE)");
+console.log("✓ ENTER 274 paid 428px into every host, the column (+20) and the strip; the SAME session then HELD raw 340 / 206.1 / 147 with NO floor — the intermediates the retired 0.25 ratio could not tell apart");
 
 // Pan immunity: the occlusion is client-space vv.height against the stable layout
 // height, so the target does not move — and because writes are guarded, nothing is
@@ -306,41 +333,52 @@ for (const offsetTop of [12.5, 237, 428, 0]) {
 assert.equal(overlayWrites(), overlaySettled, "a pan must not rewrite the column or the strip either");
 console.log("✓ every pan offset left both the lift and the write count untouched (hosts, column and strip)");
 
-// 633.5 — the thin floating strip. raw shortfall 68.5 < 702*0.25=175.5, so under
-// contract v3.1 it is EXEMPT: owed 0. Coming off the avoiding 274 frame above, the
-// applier must actively RESTORE the hosts to flush rather than keep the last lift —
-// this is the exemption doing real work, not merely a frame that happens to be flat.
-// (555 → raw 147 is exempt by the SAME arithmetic and is covered by the table above;
-// before this round it paid 147, and that lift was the bounce the device reported.)
+// 633.5 INSIDE the live session: the keyboard retracting through 633.5 still pays
+// raw 68.5 — the terminal FOLLOWS the keyboard; the session decides, not the size.
+// (This is the frame the retired 0.25 exemption answered with "0" — paying 0 while
+// the keyboard covered the last lift is exactly the bounce the device reported.)
 vv.height = 633.5;
 avoid();
-assert.deepEqual(bottoms(), ["0px", "0px"], "a thin strip under the ratio is exempt: hosts restored to bottom 0px, terminal never compressed");
-assert.deepEqual(hostBottoms(), [HOST_FLOOR, HOST_FLOOR], "and every host lands back flush at the host floor");
-console.log("✓ a 633.5 strip (raw 68.5 < 175.5) is exempt at owed 0 — hosts restored flush, not lifted");
-
-// The REAL floating overlay (b90643be…, seq388): vv.height == clientHeight, so
-// occlusion is 0 by arithmetic and the hosts go back to flush.
+assert.deepEqual(bottoms(), ["68.5px", "68.5px"], "a live session HOLDS the retract: hosts at raw 68.5, not snapped flush");
+assert.equal(controlsBottom(), "88.5px", "…and the column follows at 20 + 68.5");
+assert.equal(statusBarBottom(), "68.5px", "…and the strip at 68.5");
+// The REAL floating overlay / keyboard close (b90643be…, seq388): vv.height ==
+// clientHeight → raw 0 ≤ 1 → the session LEAVES, hosts RESTORE to flush rather
+// than keep the last lift — this restore is the exit doing real work, and occlusion
+// 0 restores each overlay to its OWN authored value: the column back to 20px (NOT
+// 0px — that would drop it into the transport strip) and the strip back to 0px.
 vv.height = LAYOUT;
 avoid();
-assert.deepEqual(bottoms(), ["0px", "0px"], "a pure overlay covers nothing in client space: bottom back to 0px");
-// occlusion 0 restores each overlay to its OWN authored value: the column back to
-// 20px (NOT 0px — that would drop it into the transport strip) and the strip back
-// to 0px.
+assert.deepEqual(bottoms(), ["0px", "0px"], "raw <= 1 closes the session: bottom back to 0px");
 assert.equal(controlsBottom(), "20px", "occlusion 0 restores the column's authored 20px, not the host value 0px");
 assert.equal(statusBarBottom(), "0px", "and the strip's authored 0px");
 const afterRestore = overlayWrites();
 avoid();
 avoid();
 assert.equal(overlayWrites(), afterRestore, "the restore is one write per box, then silence");
+// A CLOSED session does not reopen on shallow heights, editable focus included —
+// 555 (raw 147) and 633.5 (raw 68.5) sit under the 351px entry line and pay 0.
+// THE SAME two heights the HOLD block above paid raw: the state, not the size,
+// answers.
+vv.height = 555;
+avoid();
+assert.deepEqual(bottoms(), ["0px", "0px"], "closed session + editable focus at 555: the closed session holds, hosts stay flush");
+vv.height = 633.5;
+avoid();
+assert.deepEqual(bottoms(), ["0px", "0px"], "…and at 633.5: the thin strip overlaps a terminal that never moved");
+// A NEW soft keyboard crosses the entry line and opens a NEW session.
+sessionFrame(274, 428, "a NEW keyboard at 274 RE-ENTERS the session");
+console.log("✓ live session followed the retract through 633.5 (raw 68.5), CLOSED at full height with the authored restore, stayed flush at shallow 555/633.5 after leaving, and a new 274 re-opened it");
 
-// Zoom exemption: vv.height shrinks with the scale, and the short-circuit must
-// stop that from lifting a page the user is panning around.
+// Zoom: vv.height shrinks with the scale, and the short-circuit must stop that from
+// lifting a page the user is panning around — AND it CLOSES the live session, so a
+// post-pinch shallow frame cannot masquerade as mid-session raw.
 vv.height = 274;
 avoid();
 vv.scale = 0.75;
 vv.height = 365; // measured at 0.75 zoom: 570.7px short of the layout height
 avoid();
-assert.deepEqual(bottoms(), ["0px", "0px"], "zoom must opt out (this is why 0.75 never compresses)");
+assert.deepEqual(bottoms(), ["0px", "0px"], "zoom must opt out AND close the session (this is why 0.75 never compresses)");
 // "Opt out entirely" has to mean every box the avoidance writes: a pinch that
 // left the column at 448px would float the quick-keys entry off the bottom of a
 // page the user is panning around.
@@ -352,10 +390,33 @@ assert.equal(controlsBottom(), "20px", "while zoomed, a shortfall owes nothing t
 vv.scale = 1;
 vv.height = 274; // the keyboard is still up at the same visible height
 avoid();
-assert.deepEqual(bottoms(), ["428px", "428px"], "back at scale 1 the shortfall is paid again");
+assert.deepEqual(bottoms(), ["428px", "428px"], "back at scale 1 the raw 428 crosses the entry line again and a NEW session opens");
 assert.equal(controlsBottom(), "448px", "…and the column lifts again at scale 1");
 assert.equal(statusBarBottom(), "428px", "…and so does the strip");
-console.log("✓ zoom exemption intact, and the judgment re-arms at scale 1");
+console.log("✓ zoom opted out and CLOSED the session; at scale 1 the entry line re-armed the judgment");
+
+// FOCUS edges, on the live bytes: the session is LIVE at 274 (raw 428, TEXTAREA
+// helper focused). A NON-editable focus (BODY) must END it — hosts restore flush
+// even with the same covering geometry — and a contenteditable focus (the gate the
+// product reads `isContentEditable` for) must open a session at the same raw. The
+// soft keyboard here is whatever iOS shows; the session follows the FOCUS, which is
+// why the probe reports activeElementTag and this stub can swap it.
+sessionFrame(274, 428, "TEXTAREA focus keeps the session live");
+vv.height = 555; // raw 147, still LIVE while the TEXTAREA holds focus
+avoid();
+assert.deepEqual(bottoms(), ["147px", "147px"], "TEXTAREA focus: session live at 555 pays raw 147");
+setFocus({ tagName: "BODY", isContentEditable: false });
+avoid();
+assert.deepEqual(bottoms(), ["0px", "0px"], "non-editable focus ENDS the session: hosts flush at the same raw 147");
+assert.equal(controlsBottom(), "20px", "…and the column drops back to its authored 20px");
+vv.height = 274; // the keyboard is gone with the focus; even a tall raw stays 0
+avoid();
+assert.deepEqual(bottoms(), ["0px", "0px"], "even raw 428 pays NOTHING without editable focus");
+setFocus({ tagName: "DIV", isContentEditable: true });
+avoid();
+assert.deepEqual(bottoms(), ["428px", "428px"], "contenteditable focus ENTERS at raw 428 — the isContentEditable half of the gate");
+setFocus({ tagName: "TEXTAREA", isContentEditable: false });
+console.log("✓ focus edges executed: BODY ended the session (raw 428 paid nothing), contenteditable re-entered it");
 
 // A host born under a covered bottom must not wait for the next event: the
 // shipped createTerminalHost runs the same call.
@@ -368,30 +429,42 @@ assert.equal(born.style.bottom, "428px", "a host created while the keyboard is u
 assert.equal(liveDocument.getElementById("terminal-container").querySelectorAll(":scope > [data-instance-id]").length, 3);
 console.log("✓ a host created under a covered bottom is lifted at creation");
 
-// A second viewport size (400), where the floor itself moves: 400 * 0.25 = 100px.
-// The point of the block is now the FLOOR, not its absence. ABOVE the floor the
-// shortfall is paid EXACTLY — half a pixel is half a pixel, no 1px rounding (v2.2
-// put a 1px tolerance on the retired PIN decision; the A0 SOP's 1px figure is a
-// tolerance on the VERDICT's comparisons, never a floor on the write). BELOW the
-// floor it is exempt and collapses to 0. Stepping across 100px flips the write.
+// A second viewport size (400), where the ENTRY LINE itself moves: 400 * 0.50 =
+// 200px. The point is the session line, fractional and stateful. FIRST the session
+// must be CLOSED (the previous block left it live at scale 1 / 274), so the first
+// frame here rests full height (raw 0 → LEAVES). Then a shallow NEVER-entered frame
+// (raw 198.5 < 200) collapses to 0; the frame that touches the line (raw exactly
+// 200) ENTERS and pays its RAW; while live it HOLDS shallower raw EXACTLY (half a
+// pixel is half a pixel — no 1px rounding, v2.2's 1px tolerance was on the retired
+// PIN decision, never a floor on the write); raw <= 1 closes it; and a NEW tall
+// frame re-enters. Stepping across 200px flips the write because STATE flips.
 vv.scale = 1;
-documentElement.clientHeight = 400;
-vv.height = 299.5; // raw 100.5 >= 100: fractional, paid exactly
+vv.height = LAYOUT; // close the still-live session first: raw 0
 avoid();
-assert.deepEqual(bottoms(), ["100.5px", "100.5px", "100.5px"], "above the floor a half-pixel shortfall is paid as half a pixel");
-vv.height = 300; // raw exactly 100 = the floor: boundary is inclusive
+assert.deepEqual(bottoms(), ["0px", "0px", "0px"], "the second viewport opens only after the session is closed flush");
+documentElement.clientHeight = 400; // entry line moves to 200px
+vv.height = 201.5; // raw 198.5 < 200: shallow, never enters — collapsed to 0
 avoid();
-assert.deepEqual(bottoms(), ["100px", "100px", "100px"], "the floor is inclusive — a shortfall of exactly 0.25*layout is paid");
-vv.height = 301; // raw 99 < 100: just under the floor, exempt
+assert.deepEqual(bottoms(), ["0px", "0px", "0px"], "a never-opened shallow shortfall under the 0.50*layout line is exempt (198.5 < 200)");
+vv.height = 200; // raw exactly 200 = the entry line: ENTERS, inclusive boundary
 avoid();
-assert.deepEqual(bottoms(), ["0px", "0px", "0px"], "under the floor the shortfall is exempt and collapses to 0 — the shallow overlay must not compress");
-vv.height = 298.5; // raw 101.5 >= 100: back above the floor, exact again
+assert.deepEqual(bottoms(), ["200px", "200px", "200px"], "raw exactly 0.50*layout ENTERS the session and pays its raw (boundary inclusive)");
+vv.height = 299.5; // raw 100.5: LIVE session HOLDS a shallower fractional shortfall
 avoid();
-assert.deepEqual(bottoms(), ["101.5px", "101.5px", "101.5px"], "stepping back above the floor pays the raw shortfall exactly");
+assert.deepEqual(bottoms(), ["100.5px", "100.5px", "100.5px"], "a live session HOLDS a fractional shallower shortfall exactly (100.5)");
+vv.height = 400; // raw 0: LEAVE
+avoid();
+assert.deepEqual(bottoms(), ["0px", "0px", "0px"], "raw <= 1 leaves the session at the second viewport too");
+vv.height = 300.5; // raw 99.5 < 200: closed, shallow, must NOT re-open
+avoid();
+assert.deepEqual(bottoms(), ["0px", "0px", "0px"], "a closed session does not re-open on a shallow raw (99.5 < 200)");
+vv.height = 198.5; // raw 201.5 >= 200: a NEW tall frame re-enters, fractional
+avoid();
+assert.deepEqual(bottoms(), ["201.5px", "201.5px", "201.5px"], "stepping across the 0.50*layout line re-enters and pays the raw fractional exactly (201.5)");
 vv.height = 400;
 avoid();
 assert.deepEqual(bottoms(), ["0px", "0px", "0px"], "exactly full: nothing owed");
-console.log("✓ at a second viewport the ratio floor is exact: fractional paid above 0.25*layout, exempt to 0 below it");
+console.log("✓ at a second viewport the SESSION line is exact: ENTER at raw>=0.50*layout, HOLD shallower raw live, LEAVE at raw<=1, never re-open shallow");
 
 // The structural half: driving every path must leave the root untouched, and the
 // stub throws, so reaching the end of this block IS the assertion.
@@ -404,4 +477,4 @@ for (const height of [274, 555, 633.5, 702]) {
 }
 console.log("✓ every geometry moved ONLY the terminal's own three bottoms — the root never received a scroll write, #app and #workspace never received a size");
 
-console.log(`\nPASS — verified against the ${offline ? "repo" : "served"} bytes: full-height shell, ${hosts.length} PTY hosts + the quick-keys column + the status bar avoiding locally.`);
+console.log(`\nPASS — verified against the ${offline ? "repo" : "served"} bytes: full-height shell, a soft-keyboard SESSION gate (enter/hold/leave) lifting ${hosts.length} PTY hosts + the quick-keys column + the status bar locally, flush outside every session.`);

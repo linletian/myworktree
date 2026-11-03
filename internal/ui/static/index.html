@@ -1603,7 +1603,7 @@
                keyboard avoidance below still writes this box's OWN bottom =
                occlusion (its authored bottom is 0), so a raised soft keyboard hands
                the strip back at its physical-top edge, and occlusion 0 — or the
-               small-overlay exemption — hands exactly 0 back at the physical bottom.
+               closed avoidance session — hands exactly 0 back at the physical bottom.
                Never a second layout truth: the authored 0 is the baseline. */
             position: fixed;
             /* issue #116 v3.0: 0 is the AUTHORED bottom. While the keyboard is up
@@ -3597,53 +3597,43 @@
         // move the covered content itself, and window.visualViewport is the
         // only API that reports the rectangle the covering UI leaves visible.
         //
-        // CONTRACT v3.1 — "full-height shell, PTY-local avoidance with a
-        // small-overlay floor". Occlusion is the ONLY thing this layer writes, and
+        // CONTRACT v3.2 — "full-height shell, PTY-local avoidance SCOPED TO
+        // SOFT-KEYBOARD SESSIONS". Occlusion is the ONLY thing this layer writes, and
         // the boxes it writes it to are the TERMINAL'S OWN boxes: the PTY hosts,
         // the terminal control column that carries the quick-keys entry and panel,
         // and the transport status strip. Nothing above them — #app, #main,
         // #workspace, the sidebar, the header — is written at all.
         //
-        //   1. OCCLUSION, gated by one product boundary. At scale = 1:
-        //        raw       = max(0, documentElement.clientHeight - vv.height)
-        //        occlusion = raw < clientHeight * SMALL_OCCLUSION_RATIO ? 0 : raw
-        //        -> every PTY host's style.bottom  = occlusion + "px"
-        //        -> #terminal-controls style.bottom = (20 + occlusion) + "px"
-        //        -> #status-bar's style.bottom      = occlusion + "px"
-        //      Hosts are `position:absolute; inset:0` inside #terminal-container, so
-        //      writing the `bottom` LONGHAND moves the host's own bottom edge UP by
-        //      that amount; #status-bar is `position:fixed` so its bottom resolves
-        //      against the viewport directly. In the measured clientHeight=702
-        //      layout the boundary is 702*0.25 = 175.5px:
-        //        vv.height 274   -> occlusion 428 (61.0%) -> avoids (host 428, controls 448, status 428)
-        //        vv.height 555   -> occlusion 147 (20.9%) -> EXEMPT (host 0, controls 20, status 0)
-        //        vv.height 633.5 -> occlusion 68.5 ( 9.8%) -> EXEMPT (host 0, controls 20, status 0)
-        //      The 633.5 frames are the thin floating strip the user says must NOT
-        //      compress the terminal ("the floating panel must not compress any
-        //      terminal area"): under the boundary
-        //      they owe NOTHING and the terminal keeps its full height, exactly the
-        //      "OVERLAPS a page that never moved" behaviour. The 555 frames are the
-        //      shortfall the device feedback came back on: with the Magic Keyboard
-        //      attached, a 147px lift is the defect the user reported — 147px over
-        //      the ~17px row is the ~8.6-row bounce the terminal makes as the soft
-        //      keyboard leaves, plus a Transport strip that climbs off the bottom for
-        //      the length of the animation. So the 555 frames owe NOTHING too: the
-        //      hosts stay flush at 682, the controls at 20 and the strip at 0, and
-        //      no row of ink moves. The boundary therefore sits ABOVE the 147px
-        //      anchor, at 175.5px, with 28.5px of margin below the 274 keyboard's
-        //      428px shortfall (the one measured state that still avoids) and 107px
-        //      above 68.5, while an iPhone portrait keyboard (>= 40%) stays on the
-        //      avoiding side. That is why the boundary sits at 0.25: the 0.15 this
-        //      build carried was calibrated on the assumption that a 147px shortfall
-        //      is a keyboard that must avoid, and the on-device feedback overturned
-        //      that assumption. It is
-        //      NOT the retired v2 HARD_OCCLUSION_RATIO gate (vv.height <=
-        //      layoutHeight*0.75, gone not renamed), and this build no longer claims
-        //      a 633.5 shrink "must be" or "must not be" the Magic Keyboard — it is
-        //      a terminal-local avoidance floor measured in fraction of layout
-        //      height, nothing more. occlusion = 0 (a true overlay never entering
-        //      visualViewport, keyboard closed) — and zoom, which is exempt —
-        //      restores bottom:0px.
+        //   1. OCCLUSION, gated by a KEYBOARD-SESSION STATE MACHINE instead of a
+        //      stateless ratio floor. With raw = max(0, clientHeight - vv.height):
+        //        ENTERS   at scale = 1, editable focus (TEXTAREA / INPUT /
+        //                 contenteditable) and raw >= clientHeight * 0.50 — an
+        //                 explicit soft keyboard starting up (measured 702 layout:
+        //                 vv.height 274 -> raw 428 = 61.0% -> host 428, controls
+        //                 448, status 428);
+        //        HOLDS    while scale = 1, editable focus and raw > 1, and the
+        //                 EFFECTIVE occlusion then tracks RAW every pass — 340 /
+        //                 206.1 / 147 retract frames inside one live session are
+        //                 the SAME keyboard leaving, not new overlays to re-judge;
+        //        LEAVES   at raw <= 1 (keyboard closed), at zoom (scale != 1), or
+        //                 the moment focus is no longer editable — effective
+        //                 occlusion 0, every box back at its authored bottom;
+        //        AFTER leaving, a shortfall that does not reach the 50% ENTRY line
+        //                 can never re-open avoidance on its own: the thin floating
+        //                 strip (68.5) and the shallow 147 / 206.1 / 340 states
+        //                 overlap a full-height terminal that no longer moves. A
+        //                 NEW explicit keyboard (editable focus, raw >= 50%) starts
+        //                 a NEW session and avoids again.
+        //      The 0.50 compares ONLY at the entry edge — it NEVER filters a
+        //      session that is already active. The retired v3.1 0.25 small-overlay
+        //      floor is gone, not renamed: 206.1px intermediates measured on the
+        //      device sat ABOVE its 175.5px line and re-lifted the terminal and
+        //      Transport mid-transition — the bounce this round closes. Hosts are
+        //      `position:absolute; inset:0` inside #terminal-container, so writing
+        //      the `bottom` LONGHAND moves the host's own bottom edge UP by that
+        //      amount; #status-bar is `position:fixed` so its bottom resolves
+        //      against the viewport directly. No visualViewport => raw 0 =>
+        //      occlusion 0; zoom restores bottom:0px.
         //   2. NOTHING ELSE IS WRITTEN. No #app / html / body height, no root
         //      scroll, no scrollTo / scrollTop, no transform compensation, no
         //      re-top: the shell is full height in EVERY state and the page is
@@ -3713,6 +3703,13 @@
         // hostRect.bottom == 682 - occlusion in the measured layout, the controls
         // column sits at 20 + occlusion and the status strip at occlusion, and
         // xtermRows.bottom <= vv.height + 1.
+        // issue #116 v3.2: the ONLY persistent state of this layer — one boolean
+        // (is a soft-keyboard session in flight?) plus the effective occlusion
+        // actually written, mirrored on window.__mwTerminalOcclusion so the
+        // diagnostic probe reports the number the product owes instead of keeping
+        // a second copy of the arithmetic. No timers, no history arrays, no modes.
+        let terminalAvoidanceActive = false;
+
         function applyVisualViewportOcclusion() {
             const container = document.getElementById("terminal-container");
             if (!container) return false;
@@ -3726,61 +3723,57 @@
             // adds the occlusion ON TOP of it, occlusion 0 hands exactly 20px
             // back, and no ratio or threshold is computed from it.
             const CONTROLS_BOTTOM_OFFSET = 20;
-            // CONTRACT v3.1 (issue #116) — the SMALL-OVERLAY exemption. This is a
-            // product boundary on terminal-local avoidance, NOTHING more: it is not
-            // a Magic-Keyboard identifier and not a whole-page classification. When
-            // the shortfall is under this fraction of the LAYOUT height it is a
-            // shallow overlay the user expects to OVERLAP a terminal that never
-            // moves, so all three terminal boxes stay put (host bottom 0,
-            // controls 20, status 0); at or over it the shortfall is a real keyboard
-            // and every box avoids. In the measured clientHeight=702 layout the
-            // boundary sits at 702*0.25 = 175.5px: the thin floating bar at
-            // 68 / 68.5 ≈ 9.8% and the Magic Keyboard's 147 ≈ 20.9% retract frames
-            // both fall under it and move NOTHING, which is exactly the
-            // "the floating panel must not compress any terminal area" the user asked
-            // for, while the full soft keyboard (vv 274 → occlusion 428 ≈ 61.0%)
-            // clears it and keeps avoiding.
-            // 0.25 is calibrated on what THIS device showed after 0.15 shipped: with
-            // the Magic Keyboard attached, the 147px intermediate frame lifted the
-            // hosts to 535 and raised the Transport, and what the user reported back
-            // was the terminal bouncing ~9 rows (147px over the ~17px row is 8.6
-            // rows) as the soft keyboard left. The 68.5px strip (9.8%) stays below
-            // the floor and the 428px soft keyboard (61.0%) stays above it, so the
-            // single line keeps 107px of clearance over the thin strip and 28.5px
-            // under the only shortfall that has to avoid, and an iPhone portrait
-            // keyboard (>= 40%) stays on the avoiding side. The 0.15 this build
-            // carried is NOT kept: it sat at 105.3px, BELOW the measured 147px
-            // frame, which made that retract transition a paying occupant and is the
-            // bounce the device feedback overturned. This is NOT the retired v2
-            // HARD_OCCLUSION_RATIO gate either (that was
-            // vv.height <= layoutHeight*0.75, computed off the VISIBLE height, and
-            // it is gone, not renamed). scale != 1 still restores every box above, so
-            // a pinch never avoids at all.
-            const SMALL_OCCLUSION_RATIO = 0.25;
+            // CONTRACT v3.2 (issue #116) — the ENTRY edge of the keyboard-session
+            // state machine. 0.50 of the LAYOUT height is compared ONLY while the
+            // session is INACTIVE: a shortfall at or over it with editable focus is
+            // an explicit soft keyboard starting up (measured 702 layout: 428 =
+            // 61.0%) and enters avoidance. It is NEVER applied to a session that is
+            // already active — inside one, occlusion tracks raw every pass, so the
+            // 340 / 206.1 / 147 retract frames of one live keyboard move the
+            // terminal exactly as far as the keyboard moves, and after the session
+            // ends (raw <= 1, zoom, or focus leaving the editable field) those
+            // shallow numbers can no longer OPEN avoidance on their own. The 0.25
+            // small-overlay floor this constant replaces did exactly that on the
+            // device — 206.1px intermediates sat above its 175.5px line and
+            // re-lifted the terminal and Transport mid-transition — and it is gone,
+            // not renamed. NOT the retired v2 HARD_OCCLUSION_RATIO gate either
+            // (vv.height <= layoutHeight*0.75, computed off the VISIBLE height;
+            // gone, not renamed).
+            const KEYBOARD_ENTRY_RATIO = 0.50;
             const layoutHeight = document.documentElement.clientHeight;
             const vv = window.visualViewport;
             // Pinch / double-tap zoom opt-out, spec fact #1: vv.height is
             // already scaled, so compensating for it would lift the terminal off
             // the bottom of a page the user is zoomed into. Zoom owns NOTHING
             // else — it does not touch the root position either, because the
-            // root is NEVER written.
+            // root is NEVER written. Zoom also ENDS any session in flight.
             const zoomed = !!(vv && vv.scale && Math.abs(vv.scale - 1) > 0.01);
-            let occlusion = 0;
-            if (vv && !zoomed) {
-                // Client space on BOTH sides of the subtraction (the p5
-                // incident: height = clientHeight - offsetTop mixed client and
-                // layout space and pinned to 0 when the keyboard was covered by
-                // panning). vv.offsetTop is NOT an input and cannot reappear
-                // here — the shell is out of flow, cannot be panned, and the
-                // covered/uncovered boundary lives at vv.height in client
-                // coordinates. A gap of exactly 0 is a real floating overlay
-                // (the Gmail-shape case): nothing is covered, nothing moves.
-                occlusion = Math.max(0, layoutHeight - vv.height);
-                // The small-overlay exemption above: a shortfall under the ratio is
-                // a thin floating strip that overlaps a full-height terminal, so it
-                // is owed NOTHING and the three boxes keep their authored bottoms.
-                if (occlusion < layoutHeight * SMALL_OCCLUSION_RATIO) occlusion = 0;
+            // Client space on BOTH sides of the subtraction (the p5
+            // incident: height = clientHeight - offsetTop mixed client and
+            // layout space and pinned to 0 when the keyboard was covered by
+            // panning). vv.offsetTop is NOT an input and cannot reappear
+            // here — the shell is out of flow, cannot be panned, and the
+            // covered/uncovered boundary lives at vv.height in client
+            // coordinates. A gap of exactly 0 (and no visualViewport at all)
+            // is a real floating overlay / closed keyboard: raw 0 ends the
+            // session, nothing moves.
+            const raw = vv ? Math.max(0, layoutHeight - vv.height) : 0;
+            // The focus half of the session: the keyboard is up only while an
+            // editable owns focus (xterm's helper is a TEXTAREA; the guard also
+            // accepts INPUT and contenteditable hosts).
+            const focus = document.activeElement;
+            const focusEditable = !!(focus && (focus.tagName === "TEXTAREA" || focus.tagName === "INPUT" || focus.isContentEditable));
+            // The state machine itself — the whole judgment, four edges, no
+            // ratios on the held path (see the CONTRACT v3.2 header above).
+            if (zoomed || raw <= 1 || !focusEditable) {
+                terminalAvoidanceActive = false;
+            } else if (!terminalAvoidanceActive) {
+                terminalAvoidanceActive = raw >= layoutHeight * KEYBOARD_ENTRY_RATIO;
             }
+            const occlusion = terminalAvoidanceActive ? raw : 0;
+            // Mirror of what was OWED this pass, for the diagnostic probe
+            // (viewport_debug.js reads this value; it never re-derives it).
+            window.__mwTerminalOcclusion = occlusion;
             const target = occlusion + "px";
             // EVERY host in #terminal-container, hidden and inactive included
             // (createTerminalHost here, PtyRenderer._createSession in
@@ -3860,9 +3853,9 @@
             if (!vv) return;
             vv.addEventListener("resize", applyVisualViewportOcclusion);
             vv.addEventListener("scroll", reapplyVisualViewportOcclusion);
-            // THE SILENT-CHANGE BACKSTOP. The contract's own rule — soft keyboard up
-            // 274 ⇒ occlusion 428, exempt strip 633.5 / Magic-keyboard retract 555 ⇒
-            // occlusion 0 — is a
+            // THE SILENT-CHANGE BACKSTOP. The contract's own rule — an OPEN
+            // keyboard session pays raw (274 ⇒ 428 on the measured layout) and a
+            // CLOSED session pays 0 — is a
             // RECOMPUTATION against a live measurement, and Safari is free to
             // change the height without ever firing an event: the manual
             // magic-hint frame (b90643be…, seq388) shows the REAL overlay up

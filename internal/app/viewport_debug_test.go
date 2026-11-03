@@ -47,10 +47,11 @@ func validViewportDebugReport(seq int) viewportDebugReport {
 			// incident lost a whole capture round), and a payload that only
 			// carries the fields it happens to remember cannot catch that.
 			Document: viewportDebugDocument{BodyBackground: "rgba(0, 0, 0, 0)", HTMLBackground: "rgba(0, 0, 0, 0)", HTMLOverflow: "clip", BodyOverflow: "clip", RootScrollHeight: &rootScrollHeight},
-			// v3.0 shape: the keyboard is UP (vv.height 900 of a 1180 layout) and
-			// the shell did not move — app.bottom answers to clientHeight, so
-			// layoutGap is 0 and inlineHeight is empty — while occlusion 280 is
-			// owed to, and paid by, every PTY host.
+			// v3.0 shape, read the v3.2 way: a keyboard-session frame UP (vv.height
+			// 900 of a 1180 layout) and the shell did not move — app.bottom answers
+			// to clientHeight, so layoutGap is 0 and inlineHeight empty — while the
+			// applier's occlusion mirror (this is a MID-session frame: a tall keyboard
+			// entered earlier, the session still live) reads 280, paid by every host.
 			VV: &viewportDebugVV{Width: 820, Height: 900, OffsetTop: 0, OffsetLeft: 0, Scale: 1},
 			App: viewportDebugApp{
 				viewportDebugRect: viewportDebugRect{Top: 0, Bottom: 1180, Width: 820, Height: 1180},
@@ -397,21 +398,22 @@ func TestViewportDebugEndpointUsesExistingAuth(t *testing.T) {
 // which is precisely the drift that turned every upload into a 400 during issue
 // #116. `ptyHosts` is NOT omitempty — the probe sends it in every frame and an
 // empty list is a measurement, see TestViewportDebugEmptyPtyHostListIsNeverOmitted.
-// The fixture is the p8 / contract v3.1 shape: a FULL-HEIGHT shell (app.bottom at
+// The fixture is the p9 / contract v3.2 shape: a FULL-HEIGHT shell (app.bottom at
 // clientHeight, layoutGap 0, inlineHeight empty) with a THIN floating strip up
-// (vv.height 1100, a shortfall of 80 < clientHeight*0.25=295) that v3.1 FLOORS to
-// occlusion 0 — so every host keeps its authored bottom ("0px") and the strip simply
-// overlaps a terminal that never moved. #status-bar is now `position:fixed`, so its
-// rest rect sits at the physical viewport bottom (1180), not the inset workspace
-// bottom (1160). This is the shape that must round-trip through the server without a
-// 400; the geometry is illustrative of the exemption, the acceptance is the point.
+// (vv.height 1100, a shortfall of 80) and NO keyboard session open — the shallow
+// shortfall never reached the 50% entry line, so the applier's occlusion mirror is
+// 0, every host keeps its authored bottom ("0px") and the strip simply overlaps a
+// terminal that never moved. #status-bar is `position:fixed`, so its rest rect sits
+// at the physical viewport bottom (1180), not the inset workspace bottom (1160).
+// This is the shape that must round-trip through the server without a 400; the
+// geometry is illustrative of the closed-session overlap, the acceptance is the point.
 func TestViewportDebugAcceptsEveryClientField(t *testing.T) {
 	srv := &Server{viewportDebug: newViewportDebugStore()}
 	payload := `{
 	  "session": "0123456789abcdef",
 	  "seq": 1,
 	  "snapshot": {
-	    "probeVersion": "p8-full-shell-overlay-wheel-v1",
+	    "probeVersion": "p9-full-shell-session-avoidance-v1",
 	    "capturedAt": "2026-10-27T12:00:00.000Z",
 	    "reason": "manual",
 	    "innerWidth": 820, "innerHeight": 1180,
@@ -511,17 +513,18 @@ func TestViewportDebugNullScrollFieldsAreAccepted(t *testing.T) {
 // nothing, and both failures are invisible to a test that only marshals Go values.
 func TestViewportDebugEmptyPtyHostListIsNeverOmitted(t *testing.T) {
 	srv := &Server{viewportDebug: newViewportDebugStore()}
-	// An init frame spelled the way the p8 probe spells it: keyboard down (occlusion
-	// 0, vv == layout), no host yet (`terminal`/`xterm*` null), and the overlays
-	// still reported. #terminal-controls is a child of #workspace (authored bottom
-	// 20px, rest bottom 1140), but #status-bar is `position:fixed` under v3.1, so
+	// An init frame spelled the way the p9 probe spells it: keyboard down (no
+	// session: occlusion mirror 0, vv == layout), no host yet (`terminal`/`xterm*`
+	// null), and the overlays still reported. #terminal-controls is a child of
+	// #workspace (authored bottom 20px, rest bottom 1140), but #status-bar is
+	// `position:fixed` since v3.1, so
 	// at rest its bottom is the PHYSICAL viewport bottom (1180), not the inset
 	// workspace bottom (1160) — the safe-area it no longer inherits.
 	initFrame := `{
 	  "session": "0123456789abcdef",
 	  "seq": 1,
 	  "snapshot": {
-	    "probeVersion": "p8-full-shell-overlay-wheel-v1",
+	    "probeVersion": "p9-full-shell-session-avoidance-v1",
 	    "capturedAt": "2026-10-27T12:00:00.000Z",
 	    "reason": "init",
 	    "innerWidth": 820, "innerHeight": 1180,
