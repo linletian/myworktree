@@ -3760,14 +3760,16 @@
             const focusEditable = !!(focus && (focus.tagName === "TEXTAREA" || focus.tagName === "INPUT" || focus.isContentEditable));
             const sameGeometry = layoutHeight === previousTerminalLayoutHeight
                 && !!vv && vv.width === previousTerminalVVWidth;
-            const geometryChanged = terminalAvoidanceActive && !sameGeometry;
+            const geometryChanged = !sameGeometry;
+            const activeGeometryChanged = terminalAvoidanceActive && geometryChanged;
+            if (geometryChanged) terminalAvoidanceRecovering = false;
             const consumeGeometryGrace = terminalAvoidanceGeometryGrace && !geometryChanged;
             if (zoomed || raw <= 1 || !focusEditable) {
                 // Only a real session creates a recovery latch. A fresh page sitting
                 // at its baseline must still be allowed to open its first keyboard.
                 if (terminalAvoidanceActive) terminalAvoidanceRecovering = true;
                 terminalAvoidanceActive = false;
-            } else if (terminalAvoidanceActive && !geometryChanged
+            } else if (terminalAvoidanceActive && !activeGeometryChanged
                 && !consumeGeometryGrace && raw < previousTerminalRaw - 1) {
                 // Recovery is an EXIT, not a request to hold a partially occluded
                 // terminal forever. This is the landscape Magic-Keyboard case.
@@ -3782,7 +3784,7 @@
                     terminalAvoidanceRecovering = false;
                 }
             }
-            terminalAvoidanceGeometryGrace = terminalAvoidanceActive && geometryChanged;
+            terminalAvoidanceGeometryGrace = terminalAvoidanceActive && activeGeometryChanged;
             const occlusion = terminalAvoidanceActive ? raw : 0;
             // Mirror of what was OWED this pass, for the diagnostic probe
             // (viewport_debug.js reads this value; it never re-derives it).

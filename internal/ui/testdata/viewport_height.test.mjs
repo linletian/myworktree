@@ -737,6 +737,24 @@ test("v3.3: orientation resize gets one settle pass before recovery detection", 
   assert.deepEqual(h.bottoms(), ["0px"]);
 });
 
+test("v3.3: a NEW portrait session after landscape recovery clears the stale re-entry latch", () => {
+  const h = viewportHarness({ hosts: ["a"] });
+  h.api.initVisualViewportHandling();
+  h.openKeyboard(274); // landscape keyboard, then close
+  h.closeKeyboard();
+
+  h.root.box.clientHeight = 1062;
+  h.vv.width = 834;
+  h.vv.height = 1062;
+  h.vv.dispatch("resize"); // rotation while closed must retire the old recovery
+
+  h.vv.height = 722; // direct portrait keyboard: raw 340 = 32%
+  h.vv.dispatch("resize");
+  assert.equal(h.api.isAvoidanceActive(), true, "340/1062 uses the normal 25% entry, not the old 50% recovery gate");
+  assert.deepEqual(h.bottoms(), ["340px"]);
+  assert.equal(h.statusBarBottom(), "340px");
+});
+
 test("v3.2(c): raw back to 0 closes the session — shallow 206.1 / 147 / 68.5 then stay 0 even with editable focus", () => {
   // The no-rebound half: after the keyboard really closed (raw 0), every shallow
   // shortfall is OVERLAP, not avoidance — the thin strip and the Magic-keyboard

@@ -441,24 +441,24 @@ vv.height = LAYOUT; // close the still-live session first: raw 0
 avoid();
 assert.deepEqual(bottoms(), ["0px", "0px", "0px"], "the second viewport opens only after the session is closed flush");
 documentElement.clientHeight = 400; // entry line moves to 200px
-vv.height = 201.5; // raw 198.5 < 200: shallow, never enters — collapsed to 0
+vv.height = 300.5; // raw 99.5 < the 100px normal entry line
 avoid();
-assert.deepEqual(bottoms(), ["0px", "0px", "0px"], "a never-opened shallow shortfall under the 0.50*layout line is exempt (198.5 < 200)");
-vv.height = 200; // raw exactly 200 = the entry line: ENTERS, inclusive boundary
+assert.deepEqual(bottoms(), ["0px", "0px", "0px"], "a shallow shortfall under 25% stays exempt (99.5 < 100)");
+vv.height = 300; // raw exactly 100 = 25%: ENTER, inclusive
 avoid();
-assert.deepEqual(bottoms(), ["200px", "200px", "200px"], "raw exactly 0.50*layout ENTERS the session and pays its raw (boundary inclusive)");
-vv.height = 299.5; // raw 100.5: same-geometry decrease exits
+assert.deepEqual(bottoms(), ["100px", "100px", "100px"], "raw exactly 25% enters and pays its raw");
+vv.height = 299.5; // raw 100.5: stable/increasing live session follows exactly
 avoid();
-assert.deepEqual(bottoms(), ["0px", "0px", "0px"], "the fractional decrease is recovery, so the session exits");
+assert.deepEqual(bottoms(), ["100.5px", "100.5px", "100.5px"], "a live session follows the exact fractional shortfall");
 vv.height = 400; // raw 0: LEAVE
 avoid();
 assert.deepEqual(bottoms(), ["0px", "0px", "0px"], "raw <= 1 leaves the session at the second viewport too");
-vv.height = 300.5; // raw 99.5 < 200: closed, shallow, must NOT re-open
+vv.height = 300.5; // raw 99.5: closed, shallow, must NOT re-open
 avoid();
-assert.deepEqual(bottoms(), ["0px", "0px", "0px"], "a closed session does not re-open on a shallow raw (99.5 < 200)");
-vv.height = 198.5; // raw 201.5 >= 200: a NEW tall frame re-enters, fractional
+assert.deepEqual(bottoms(), ["0px", "0px", "0px"], "a closed session does not re-open on a shallow raw");
+vv.height = 200; // raw 200 = the 50% post-recovery re-entry line
 avoid();
-assert.deepEqual(bottoms(), ["201.5px", "201.5px", "201.5px"], "stepping across the 0.50*layout line re-enters and pays the raw fractional exactly (201.5)");
+assert.deepEqual(bottoms(), ["200px", "200px", "200px"], "a fresh 50% keyboard re-enters after recovery");
 vv.height = 400;
 avoid();
 assert.deepEqual(bottoms(), ["0px", "0px", "0px"], "exactly full: nothing owed");

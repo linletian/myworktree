@@ -176,12 +176,14 @@ function makeKeyboardSessionJudge() {
       if (tag === "") return { owed: null, gap: "ui.activeElementTag" };
       const editable = tag === "TEXTAREA" || tag === "INPUT";
       const sameGeometry = clientHeight === previousClientHeight && vvWidth === previousVVWidth;
-      const geometryChanged = active && !sameGeometry;
+      const geometryChanged = !sameGeometry;
+      const activeGeometryChanged = active && geometryChanged;
+      if (geometryChanged) recovering = false;
       const consumeGrace = geometryGrace && !geometryChanged;
       if (raw <= 1 || !editable) {
         if (active) recovering = true;
         active = false;
-      } else if (active && !geometryChanged && !consumeGrace && raw < previousRaw - 1) {
+      } else if (active && !activeGeometryChanged && !consumeGrace && raw < previousRaw - 1) {
         active = false;
         recovering = true;
       }
@@ -192,7 +194,7 @@ function makeKeyboardSessionJudge() {
           recovering = false;
         }
       }
-      geometryGrace = active && geometryChanged;
+      geometryGrace = active && activeGeometryChanged;
       previousRaw = raw;
       previousClientHeight = clientHeight;
       previousVVWidth = vvWidth;
