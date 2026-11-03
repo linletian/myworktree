@@ -175,6 +175,7 @@ function makeKeyboardSessionJudge() {
       const tag = snapshot.ui && typeof snapshot.ui.activeElementTag === "string" ? snapshot.ui.activeElementTag : "";
       if (tag === "") return { owed: null, gap: "ui.activeElementTag" };
       const editable = tag === "TEXTAREA" || tag === "INPUT";
+      if (snapshot.reason === "focusin") recovering = false;
       const sameGeometry = clientHeight === previousClientHeight && vvWidth === previousVVWidth;
       const geometryChanged = !sameGeometry;
       const activeGeometryChanged = active && geometryChanged;

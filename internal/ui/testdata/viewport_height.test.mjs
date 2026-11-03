@@ -308,8 +308,17 @@ function makeTerminalContainer({ top = 0, bottom = HOST_BOTTOM, width = 1194 } =
     bottom,
     width,
     hosts: [],
+    listeners: new Map(),
     stats: { hostWrites: 0, perHost: {} },
     selectorAttempts: [],
+    addEventListener(type, cb) {
+      const callbacks = container.listeners.get(type) || [];
+      callbacks.push(cb);
+      container.listeners.set(type, callbacks);
+    },
+    dispatch(type) {
+      for (const cb of container.listeners.get(type) || []) cb({ type, target: container });
+    },
     querySelectorAll(selector) {
       container.selectorAttempts.push(selector);
       // The harness answers ONLY the shipped selector. If index.html changes the
@@ -751,6 +760,18 @@ test("v3.3: a NEW portrait session after landscape recovery clears the stale re-
   h.vv.height = 722; // direct portrait keyboard: raw 340 = 32%
   h.vv.dispatch("resize");
   assert.equal(h.api.isAvoidanceActive(), true, "340/1062 uses the normal 25% entry, not the old 50% recovery gate");
+  assert.deepEqual(h.bottoms(), ["340px"]);
+  assert.equal(h.statusBarBottom(), "340px");
+
+  // The SECOND opening is a NEW user input session, not a floating-overlay
+  // transition. A fresh terminal click clears the old recovery latch.
+  h.vv.height = 1062;
+  h.vv.dispatch("resize");
+  assert.deepEqual(h.bottoms(), ["0px"]);
+  h.container.dispatch("click");
+  h.vv.height = 722;
+  h.vv.dispatch("resize");
+  assert.equal(h.api.isAvoidanceActive(), true, "the second direct portrait keyboard opens after a new terminal click");
   assert.deepEqual(h.bottoms(), ["340px"]);
   assert.equal(h.statusBarBottom(), "340px");
 });

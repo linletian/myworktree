@@ -3871,6 +3871,16 @@
             if (!vv) return;
             vv.addEventListener("resize", applyVisualViewportOcclusion);
             vv.addEventListener("scroll", reapplyVisualViewportOcclusion);
+            // A NEW tap/focus is user intent to start another input session. Clear
+            // the previous recovery latch here, rather than making a second keyboard
+            // opening satisfy a larger ratio. Click (not touchstart) means a scroll
+            // gesture cannot accidentally re-arm the terminal.
+            const intentContainer = document.getElementById("terminal-container");
+            if (intentContainer) {
+                intentContainer.addEventListener("click", () => {
+                    terminalAvoidanceRecovering = false;
+                }, { passive: true });
+            }
             // THE SILENT-CHANGE BACKSTOP. The contract's own rule — an OPEN
             // keyboard session pays raw (274 ⇒ 428 on the measured layout) and a
             // CLOSED session pays 0 — is a
@@ -3891,9 +3901,13 @@
             for (const type of ["pageshow", "orientationchange"]) {
                 window.addEventListener(type, applyVisualViewportOcclusion);
             }
-            for (const type of ["visibilitychange", "focusin", "focusout"]) {
+            for (const type of ["visibilitychange", "focusout"]) {
                 document.addEventListener(type, applyVisualViewportOcclusion);
             }
+            document.addEventListener("focusin", () => {
+                terminalAvoidanceRecovering = false;
+                applyVisualViewportOcclusion();
+            });
             // 500ms: fast enough that a stale host bottom is a blink rather than
             // a state, slow enough that it costs nothing (every write is a no-op
             // unless the occlusion actually moved). This is a backstop for the
