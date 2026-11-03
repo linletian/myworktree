@@ -237,6 +237,24 @@ func TestViewportDebugHandling(t *testing.T) {
 	t.Logf("%s", out)
 }
 
+// TestTtyResizeRefit runs the issue #116 PTY resize-timing client tests
+// (testdata/tty_resize_refit.test.mjs): a local fit stays on screen and is never
+// repainted at the previous applied ack, the throttle's trailing edge delivers the
+// newest size, a refusal is not remembered as sent, and every teardown disarms the
+// pending send. The Go wrapper makes `go test` enforce the same shipped static
+// asset; Node absence skips here.
+func TestTtyResizeRefit(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not on PATH; skipping PTY resize refit JS tests")
+	}
+	out, err := exec.Command(node, "--test", "testdata/tty_resize_refit.test.mjs").CombinedOutput()
+	if err != nil {
+		t.Fatalf("node --test testdata/tty_resize_refit.test.mjs: %v\n%s", err, out)
+	}
+	t.Logf("%s", out)
+}
+
 // TestNarrowDrawerHandling runs the Node unit tests for the issue #100 L2
 // breakpoint / drawer layer (testdata/narrow_drawer.test.mjs): the R14
 // viewport-dispatched default for a missing / unparseable persisted value

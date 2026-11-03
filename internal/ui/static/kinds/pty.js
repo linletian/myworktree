@@ -291,6 +291,12 @@ class PtyRenderer {
             ttyLivenessTimer: null,
             appliedTTYSize: null,
             lastResizeTime: 0,
+            // Resize-throttle state (issue #116) — the same three fields, same
+            // meaning, as the legacy factory in index.html. The two session
+            // factories have drifted before; these stay together.
+            pendingTTYResize: null,
+            ttyResizeTrailingTimer: null,
+            lastSentTTYResize: null,
         };
 
         session.term = new window.Terminal({
@@ -323,11 +329,20 @@ class PtyRenderer {
                 const h = entry ? entry.contentRect.height : host.clientHeight;
                 session.term.resize(Math.floor(w / 9), Math.floor(h / 17));
             }
-            const now = Date.now();
-            if (now - session.lastResizeTime > 100 && session.term.cols > 0 && session.term.rows > 0) {
-                session.lastResizeTime = now;
-                if (window.sendResize) window.sendResize(session, session.term.cols, session.term.rows);
-                if (window.syncTerminalToAppliedSize) window.syncTerminalToAppliedSize(session);
+            // issue #116: fit, then ASK for that size through the throttle shared
+            // with index.html (leading edge + ONE trailing edge, so the newest size
+            // inside the window is delivered instead of dropped). This path used to
+            // pair sendResize with syncTerminalToAppliedSize, which repainted the
+            // PREVIOUS ack over the box fit() had just measured — permanently on any
+            // path where sendResize refused because the socket was not OPEN. The ack
+            // is adopted on the `resize` control frame that carries it, in
+            // index.html, nowhere else.
+            //
+            // Guarded like every other index.html helper here: this file stays
+            // unit-testable in isolation, where the shell's function is not loaded.
+            if (session.term.cols > 0 && session.term.rows > 0
+                && typeof window.queueTTYResize === 'function') {
+                window.queueTTYResize(session, session.term.cols, session.term.rows);
             }
         });
         session.resizeObserver.observe(host);
@@ -417,6 +432,16 @@ class PtyRenderer {
         if (s.resizeObserver) {
             try { s.resizeObserver.disconnect(); } catch (_) {}
         }
+        // issue #116: the trailing resize is disarmed here too, and cannot depend
+        // on the disconnectTTY call above — that one is guarded by try/catch and
+        // absent when this file is loaded in isolation. A timer outliving its
+        // session would fire a resize for a terminal that no longer exists.
+        if (s.ttyResizeTrailingTimer) {
+            clearTimeout(s.ttyResizeTrailingTimer);
+            s.ttyResizeTrailingTimer = null;
+        }
+        s.pendingTTYResize = null;
+        s.lastSentTTYResize = null;
         if (s.term) {
             try { s.term.dispose(); } catch (_) {}
         }

@@ -1,9 +1,10 @@
 #!/usr/bin/env node
-// Checks a capture against docs/plans/fix-issue116/A0-SOP.md (contract v3.1,
-// "FULL-HEIGHT shell + PTY-LOCAL avoidance above a 0.15 ratio floor — a thinner
-// floating strip simply overlaps — non-scrollable root") and prints a
-// PASS/FAIL table per invariant. v3.1 is the v3.0 base plus the small-occupant
-// floor, the fixed #status-bar and the wheel isolation; the shell/clip/overlay
+// Checks a capture against docs/plans/fix-issue116/A0-SOP.md (contract v3.2,
+// "FULL-HEIGHT shell + PTY-LOCAL avoidance SCOPED TO SOFT-KEYBOARD SESSIONS — a
+// shortfall outside a live session simply overlaps — non-scrollable root") and
+// prints a PASS/FAIL table per invariant. v3.2 replaces the v3.1 0.25 stateless
+// ratio floor with the keyboard-session state machine the applier now runs; the
+// fixed #status-bar and the wheel isolation carry over, and the shell/clip/overlay
 // invariants below carry their original v3.0 numbers unchanged.
 //
 // The SOP is written for a human on the iPad; this is the machine half of the
@@ -26,27 +27,41 @@
 //   "crossing" bucket is deleted, and a fixture proves the old failure shape now
 //   passes for the right reason.
 //
-//   THE TERMINAL AVOIDS LOCALLY, ABOVE A FLOOR. The raw shortfall is
-//   max(0, clientHeight - vv.height); at scale = 1 a shortfall of at least
-//   0.15 * clientHeight is a REAL keyboard and its raw value is
-//   written into the `bottom` of EVERY PTY host inside #terminal-container, so the
-//   covered strip stops being terminal and becomes #workspace's own ink. On the
-//   measured 702 layout the floor is 105.3px, so BOTH measured keyboards avoid —
-//   555 pays 147 (host bottom 535) and 274 pays 428 (host bottom 254). A shortfall
-//   UNDER that floor is a THIN floating strip the user said must NOT compress the
-//   terminal, so it owes NOTHING: the owed occlusion floors to 0, the hosts stay
-//   flush and the strip simply overlaps a page that never moved (633.5 → 68.5). The hosts are the
-//   only boxes this build moves, so they are what the verdict reads:
+//   THE TERMINAL AVOIDS LOCALLY, INSIDE A KEYBOARD SESSION. The judge replays
+//   the capture's frames IN ORDER through the same state machine the applier
+//   runs: at scale = 1, with editable focus (ui.activeElementTag TEXTAREA /
+//   INPUT — contenteditable focus is not visible to the probe, see NOTE below)
+//   and raw = max(0, clientHeight - vv.height):
+//
+//     ENTER   at raw >= 0.50 * clientHeight — an explicit keyboard starting up
+//             (measured 274 pays raw 428 on the 702 layout, host bottom 254);
+//     HOLD    at raw every pass while that focus and raw > 1 survive — 340 /
+//             206.1 / 147 retract frames of ONE keyboard move exactly that far;
+//     LEAVE   at raw <= 1, zoom, or focus loss; after leaving, a shortfall
+//             under the 0.50 line can never re-enter — the thin floating strip
+//             (633.5 → 68.5) and any shallow state simply overlap a terminal
+//             that stays flush.
+//
+//   The retired v3.1 0.25 floor is NOT replayed: 206.1px intermediates sat
+//   ABOVE its 175.5px line and re-lifted the terminal and Transport mid-session
+//   — that bounce was the device feedback, and geometry without session state
+//   cannot tell those frames from a fresh shallow overlay. NOTE: the probe
+//   reports only tagName, so a contenteditable focus reads "not editable" to
+//   this judge; the product app has no contenteditable hosts (xterm's helper is
+//   a TEXTAREA), and if that ever changes the judge must learn the field. The
+//   hosts are the only boxes this build moves, so they are what the verdict
+//   reads:
 //
 //     app.inlineHeight !== ""                 -> FAIL "pinned"   (the retired pin)
-//     occlusion != floored shortfall         -> FAIL "occlusion" (wrong arithmetic)
+//     occlusion != session shortfall         -> FAIL "occlusion" (wrong arithmetic)
 //     a host inline bottom != occlusion      -> FAIL "host"      (a host missed)
 //     hosts disagree with each other         -> FAIL "residue"   (the next band)
 //     a host bottom > vv.height + 1 (avoiding frames only) -> FAIL "underKeyboard"
 //
-//   the under-* checks bind only on AVOIDING frames (owed > 1px). In an exempt thin
-//   strip the terminal keeps its full height and is overlapped on purpose, so a box
-//   dipping under the visible bottom there is the required behaviour, not a fault.
+//   the under-* checks bind only on AVOIDING frames (session live, owed > 1px).
+//   Outside a session the terminal keeps its full height and is overlapped on
+//   purpose, so a box dipping under the visible bottom there is the required
+//   behaviour, not a fault.
 //
 //   root scroll: document.scrollTop / scrollingElementScrollTop are judged AND the
 //   root scroll RANGE is judged (rootScrollHeight / scrollingElementScrollHeight
@@ -93,7 +108,7 @@
 import { readFileSync } from "node:fs";
 
 // The build under test. A capture stamped with anything else cannot certify it.
-const EXPECTED_PROBE_VERSION = "p8-full-shell-overlay-wheel-v1";
+const EXPECTED_PROBE_VERSION = "p9-full-shell-session-avoidance-v1";
 // Reasons whose geometry has settled. `resize` and `scroll` are transients: the
 // host bottom was just written and the flex column / xterm refit has not landed
 // yet, so they are reported but never asserted.
@@ -109,21 +124,11 @@ const SCROLL_TOLERANCE_PX = 0.5;
 // other check in this file and still bury the quick-keys panel.
 const CONTROLS_AUTHORED_BOTTOM = 20;
 
-// CONTRACT v3.1 (issue #116): the SMALL-OCCUPANT exemption, mirrored from the
-// applier. A shortfall under SMALL_OCCLUSION_RATIO of clientHeight is a THIN
-// floating strip the user said must NOT compress the terminal ("the floating panel
-// must not compress any terminal area"); at a height >= the ratio the frame is an
-// keyboard that still owes local avoidance. The floor is a RATIO,
-// not a pixel count, so it holds at every viewport height. 0.15 is calibrated
-// between the two real cases the user gave: on a 702 layout the floor is 105.3, so
-// the 633.5 strip (68.5 = 9.8%) is exempt while the 555 frames (147 = 20.9%) and
-// the full soft keyboard (274 → 428 = 61.0%) both avoid. The 0.25 this round first
-// shipped is NOT kept: its 175.5px floor sat ABOVE the measured 147px keyboard and
-// exempted a keyboard that has to avoid — margin on both sides is what 0.15
-// restores (36.8px over 68.5, 41.7px before 147).
-// The judge RECOMPUTES this so the exemption is proven from raw geometry, not
-// taken on trust from the probe's own occlusion field.
-const SMALL_OCCLUSION_RATIO = 0.15;
+// Contract v3.3: entry at 25% (portrait 340/1062 is valid). A same-geometry
+// decrease exits; after recovery only a fresh 50% keyboard may re-enter.
+// Geometry changes receive one settle pass before recovery detection.
+const KEYBOARD_ENTRY_RATIO = 0.25;
+const KEYBOARD_REENTRY_RATIO = 0.50;
 
 function num(value) {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
@@ -138,19 +143,65 @@ function isZoomed(snapshot) {
   return scale !== null && Math.abs(scale - 1) > 0.01;
 }
 
-// What the shell owes the PTY hosts, computed independently of the probe's own
-// `occlusion` field so the two can disagree and the disagreement is the finding.
-function owedOcclusion(snapshot) {
-  const clientHeight = num(snapshot.clientHeight);
-  const vvHeight = num(snapshot.vv ? snapshot.vv.height : null);
-  if (clientHeight === null || vvHeight === null) return null;
-  if (isZoomed(snapshot)) return 0;
-  const raw = Math.max(0, clientHeight - vvHeight);
-  // v3.1 exemption (0.15): a thin floating strip (raw shortfall < ratio*clientHeight)
-  // owes NOTHING — the terminal keeps its full height and the strip simply
-  // overlaps it. An explicit larger keyboard (raw >= ratio*clientHeight) still
-  // owes the full shortfall. Same rule the applier ships, recomputed here.
-  return raw >= clientHeight * SMALL_OCCLUSION_RATIO ? raw : 0;
+// What the build owes the PTY hosts: the applier's state machine REPLAYED in
+// capture order, independently of the probe's own `occlusion` mirror, so the two
+// can disagree and the disagreement is the finding. State is ONE boolean — no
+// timers, no history — and the judge advances it on every frame, zoom included.
+// Returns { owed, gap }: owed null with a gap name when the frame cannot place the
+// session (no geometry, or no ui.activeElementTag to prove the focus half). The
+// probe reports tagName only, so contenteditable focus reads non-editable to the
+// judge — the product has no contenteditable hosts (xterm's helper is a TEXTAREA),
+// and if that ever changes, the probe and this judge must learn the field together.
+function makeKeyboardSessionJudge() {
+  let active = false;
+  let recovering = false;
+  let geometryGrace = false;
+  let previousRaw = 0;
+  let previousClientHeight = 0;
+  let previousVVWidth = 0;
+  return {
+    owedOcclusion: function (snapshot) {
+      const clientHeight = num(snapshot.clientHeight);
+      const vvHeight = num(snapshot.vv ? snapshot.vv.height : null);
+      const vvWidth = num(snapshot.vv ? snapshot.vv.width : null);
+      if (isZoomed(snapshot)) {
+        if (active) recovering = true;
+        active = false;
+        geometryGrace = false;
+        return { owed: 0, gap: null };
+      }
+      if (clientHeight === null || vvHeight === null || vvWidth === null) return { owed: null, gap: "clientHeight or vv geometry" };
+      const raw = Math.max(0, clientHeight - vvHeight);
+      const tag = snapshot.ui && typeof snapshot.ui.activeElementTag === "string" ? snapshot.ui.activeElementTag : "";
+      if (tag === "") return { owed: null, gap: "ui.activeElementTag" };
+      const editable = tag === "TEXTAREA" || tag === "INPUT";
+      if (snapshot.reason === "focusin") recovering = false;
+      const sameGeometry = clientHeight === previousClientHeight && vvWidth === previousVVWidth;
+      const geometryChanged = !sameGeometry;
+      const activeGeometryChanged = active && geometryChanged;
+      if (geometryChanged) recovering = false;
+      const consumeGrace = geometryGrace && !geometryChanged;
+      if (raw <= 1 || !editable) {
+        if (active) recovering = true;
+        active = false;
+      } else if (active && !activeGeometryChanged && !consumeGrace && raw < previousRaw - 1) {
+        active = false;
+        recovering = true;
+      }
+      if (!active && editable && raw > 1) {
+        const ratio = recovering ? KEYBOARD_REENTRY_RATIO : KEYBOARD_ENTRY_RATIO;
+        if (raw >= clientHeight * ratio) {
+          active = true;
+          recovering = false;
+        }
+      }
+      geometryGrace = active && activeGeometryChanged;
+      previousRaw = raw;
+      previousClientHeight = clientHeight;
+      previousVVWidth = vvWidth;
+      return { owed: active ? raw : 0, gap: null };
+    },
+  };
 }
 
 function parsePx(value) {
@@ -161,11 +212,22 @@ function parsePx(value) {
   return Number.isFinite(n) ? n : null;
 }
 
-// One frame -> { fail[], info } . Pure: no I/O, so --self-test can drive it with
-// hand-built snapshots and prove the READING, not just the plumbing.
-function judgeFrame(event) {
+// One frame -> { fail[], info }. No I/O, so --self-test can drive it with
+// hand-built snapshots and prove the READING, not just the plumbing. It is NOT
+// stateless: v3.2's occlusion is a KEYBOARD SESSION, so the session judge advances
+// on EVERY frame — zoom included, because zoom ENDS a session in flight — and a
+// caller that skipped a frame could not tell a mid-session raw from a never-opened
+// shallow strip. A fresh judge runs one capture; the frame loop must feed it every
+// event in seq order, exactly like the live applier is fed every visualViewport
+// pass, focus edge and 500ms tick.
+function judgeFrame(event, session) {
   const s = event.snapshot || {};
   const out = { fail: [], info: "" };
+  // The session advances BEFORE any early return: the zoom early-return below must
+  // still leave the state machine closed, so a shallow post-pinch frame cannot read
+  // as mid-session raw.
+  const owed = session.owedOcclusion(s);
+  out.sessionActive = owed.owed > TOLERANCE_PX;
   if (isZoomed(s)) {
     out.zoom = true;
     return out;
@@ -207,30 +269,32 @@ function judgeFrame(event) {
   }
   if (out.inline !== "") out.fail.push("pinned");
 
-  // PTY-LOCAL AVOIDANCE. occlusion is recomputed here, not trusted from the
-  // probe, and then held against every host — visible and hidden alike.
-  const owed = owedOcclusion(s);
+  // PTY-LOCAL AVOIDANCE. The session owed-value was computed above from the
+  // replayed state machine — geometry plus the focus evidence — not trusted from
+  // the probe, and it is held against every host, visible and hidden alike.
   const reported = num(s.occlusion);
-  if (owed === null) {
-    missing.push("clientHeight or vv.height");
+  if (owed.owed === null) {
+    missing.push(owed.gap || "clientHeight or vv.height");
     out.missing = missing;
     return out;
   }
-  out.occlusion = owed;
+  out.occlusion = owed.owed;
+  const owedPx = owed.owed;
   // Are we in an AVOIDING frame at all? Only then may we demand that no box dips
-  // below the visible bottom. In an EXEMPT frame (owed floored to 0 by the v3.1
-  // small-occupant rule) the terminal legitimately stays full height and the thin
-  // strip simply overlaps it — "OVERLAPS a page that never moved" is the required
-  // behaviour there, so an under-bottom is not a failure. Gating every *Under check
-  // on this keeps the exemption honest instead of failing the very case it certifies.
-  const avoiding = owed > TOLERANCE_PX;
+  // below the visible bottom. OUTSIDE a live session (owed 0 — no editable focus,
+  // keyboard closed, or a shallow shortfall that never opened a session) the
+  // terminal legitimately stays full height and the strip simply overlaps it —
+  // "OVERLAPS a page that never moved" is the required behaviour there, so an
+  // under-bottom is not a failure. Gating every *Under check on this keeps the
+  // session machine honest instead of failing the very case it certifies.
+  const avoiding = owed.owed > TOLERANCE_PX;
   out.avoiding = avoiding;
   if (reported === null) {
     missing.push("occlusion");
     out.missing = missing;
     return out;
   }
-  if (Math.abs(reported - owed) > TOLERANCE_PX) out.fail.push("occlusion");
+  if (Math.abs(reported - owedPx) > TOLERANCE_PX) out.fail.push("occlusion");
   if (!Array.isArray(s.ptyHosts)) {
     // ptyHosts is p7's own field. A frame without it comes from an older
     // instrument and cannot speak about the local avoidance at all.
@@ -251,7 +315,7 @@ function judgeFrame(event) {
         return out;
       }
       bottoms.add(host.inlineBottom || "");
-      if (Math.abs(inline - owed) > TOLERANCE_PX) out.fail.push("host");
+      if (Math.abs(inline - owedPx) > TOLERANCE_PX) out.fail.push("host");
       if (avoiding && bottom > vvHeight + TOLERANCE_PX) out.fail.push("underKeyboard");
       // The host DEEPEST into the page is the one that decides the verdict, so
       // track the largest bottom rather than the first one seen.
@@ -296,13 +360,13 @@ function judgeFrame(event) {
     out.statusInline = round1(statusInline);
     if (s.controls.visible) {
       out.overlayObserved = true;
-      if (Math.abs(controlsInline - (CONTROLS_AUTHORED_BOTTOM + owed)) > TOLERANCE_PX) out.fail.push("controls");
+      if (Math.abs(controlsInline - (CONTROLS_AUTHORED_BOTTOM + owedPx)) > TOLERANCE_PX) out.fail.push("controls");
       const controlsBottom = num(s.controls.bottom);
       if (avoiding && controlsBottom !== null && controlsBottom > vvHeight + TOLERANCE_PX) out.fail.push("controlsUnder");
     }
     if (s.statusBar.visible) {
       out.overlayObserved = true;
-      if (Math.abs(statusInline - owed) > TOLERANCE_PX) out.fail.push("statusBar");
+      if (Math.abs(statusInline - owedPx) > TOLERANCE_PX) out.fail.push("statusBar");
       const statusBottom = num(s.statusBar.bottom);
       if (avoiding && statusBottom !== null && statusBottom > vvHeight + TOLERANCE_PX) out.fail.push("statusBarUnder");
     }
@@ -371,7 +435,7 @@ function judgeFrame(event) {
   const rowsBottom = num(s.xtermRows ? s.xtermRows.bottom : null);
   out.hasRows = rowsBottom !== null;
   // xterm's rendered rows must not sit under the keyboard EITHER — but only in an
-  // AVOIDING frame. In an exempt (thin-strip) frame the rows keep full height and
+  // AVOIDING frame (live session). OUTSIDE a session the rows keep full height and
   // the strip overlaps them by design, exactly like the host under-check above.
   if (avoiding && STABLE_REASONS.has(s.reason) && rowsBottom !== null && rowsBottom > vvHeight + TOLERANCE_PX) {
     out.fail.push("rows");
@@ -416,9 +480,13 @@ function evaluateFrames(events) {
     r.inconclusive.push(`seq holes: ${holes.length} frame(s) never delivered (first: ${holes[0]}) — the capture is not complete`);
   }
 
+  // ONE session judge for the WHOLE run: the frames are replayed in seq order and
+  // the state machine carries across them, exactly like the applier's single
+  // terminalAvoidanceActive carries across the device's passes.
+  const keyboardSession = makeKeyboardSessionJudge();
   for (const e of events) {
     const s = e.snapshot || {};
-    const j = judgeFrame(e);
+    const j = judgeFrame(e, keyboardSession);
     if (j.zoom) { r.zoomExempt++; continue; }
     if (j.missing) {
       r.inconclusive.push(`seq ${e.seq} (${s.reason}) missing ${j.missing.join(", ")}`);
@@ -518,7 +586,7 @@ function report(events) {
   const mark = (list) => (list.length ? "FAIL" : "ok  ");
   console.log(`1. shell full height (|clientHeight - app.bottom| <= 1)   ${mark(r.failures.shellShort)}  (${r.failures.shellShort.length} frames)`);
   console.log(`2. #app inline height never written (retired pin)          ${mark(r.failures.pinned)}  (${r.failures.pinned.length} frames)`);
-  console.log(`3. occlusion == floored shortfall (>=0.15*h else 0)         ${mark(r.failures.occlusion)}  (${r.failures.occlusion.length} frames)`);
+  console.log(`3. occlusion == live-session shortfall (held raw, else 0)    ${mark(r.failures.occlusion)}  (${r.failures.occlusion.length} frames)`);
   console.log(`4. every PTY host bottom == occlusion                      ${mark(r.failures.host)}  (${r.failures.host.length} frames)`);
   console.log(`5. no residue across hosts (one value everywhere)          ${mark(r.failures.residue)}  (${r.failures.residue.length} frames)`);
   console.log(`6. host never under keyboard (avoiding frames only)       ${mark(r.failures.underKeyboard)}  (${r.failures.underKeyboard.length} frames)`);
@@ -578,7 +646,11 @@ function selfTest() {
     probeVersion: EXPECTED_PROBE_VERSION,
     reason: "manual",
     clientHeight: LAYOUT,
-    vv: { height: LAYOUT, offsetTop: 0, scale: 1 },
+    vv: { height: LAYOUT, width: 1194, offsetTop: 0, scale: 1 },
+    // The focus half of the v3.2 session gate: the terminal's editable helper is
+    // a TEXTAREA, so keyboard fixtures really do carry the evidence the session
+    // machine needs (a frame WITHOUT ui is inconclusive by design, see judge).
+    ui: { activeElementTag: "TEXTAREA" },
     app: { top: 0, bottom: LAYOUT, height: LAYOUT, inlineHeight: "", computedPosition: "fixed" },
     occlusion: 0,
     ptyHosts: hostsAt(0),
@@ -586,21 +658,38 @@ function selfTest() {
     probe: { visualBottom: { tag: "DIV", id: "workspace", background: "rgb(11, 16, 32)" } },
     xtermRows: { top: 40, bottom: 669 },
   };
-  // A keyboard-up fixture is written as ONE thing — the visible height — and the
-  // shell, the occlusion and the host bottom are derived, so no fixture can
-  // accidentally describe the retired shape (a shorter shell AND a lifted host).
-  // v3.1: the derived occlusion is FLOORED by the same ratio the judge recomputes,
-  // so a thin floating strip (633.5 → raw 68.5 < 105.3) builds hosts at 0 and
-  // a real keyboard (555 → raw 147, 274 → raw 428, both >= 105.3) builds hosts
-  // lifted.
+  // A keyboard ENTERING is a keyboard fixture: one thing — the visible height —
+  // and the shell, the session occlusion, the host bottom and the overlays derive
+  // from it, so no fixture can accidentally describe the retired shape (a shorter
+  // shell AND a lifted host). v3.2: keyboard() is the ENTRY frame — editable focus
+  // (base.ui) with raw >= 50% of the layout height, the session opens, hosts pay
+  // RAW. It THROWS on a shallow height on purpose: inside a live session (pay raw)
+  // and outside one (pay 0) the SAME shallow height means different things, and a
+  // helper may not invent session history — those frames are spelled out.
   const keyboard = (visible) => {
     const raw = Math.max(0, LAYOUT - visible);
-    const occlusion = raw >= LAYOUT * SMALL_OCCLUSION_RATIO ? raw : 0;
+    if (raw < LAYOUT * KEYBOARD_ENTRY_RATIO) {
+      throw new Error(`keyboard(${visible}) never ENTERS a v3.2 session (raw ${raw} < ${LAYOUT * KEYBOARD_ENTRY_RATIO}) — spell this frame's occlusion explicitly`);
+    }
     return {
       vv: { height: visible, offsetTop: 0, scale: 1 },
-      occlusion,
-      ptyHosts: hostsAt(occlusion),
-      xtermRows: { top: 40, bottom: HOST_FLOOR - occlusion - 13 },
+      occlusion: raw,
+      ptyHosts: hostsAt(raw),
+      xtermRows: { top: 40, bottom: HOST_FLOOR - raw - 13 },
+    };
+  };
+  // The never-entered shallow frame: editable focus is there but raw stays under
+  // the 50% entry line, so the session machine owes NOTHING to any box.
+  const shallow = (visible) => {
+    const raw = Math.max(0, LAYOUT - visible);
+    if (raw >= LAYOUT * KEYBOARD_ENTRY_RATIO) {
+      throw new Error(`shallow(${visible}) clears the entry line — that is a keyboard(), use keyboard(${visible})`);
+    }
+    return {
+      vv: { height: visible, offsetTop: 0, scale: 1 },
+      occlusion: 0,
+      ptyHosts: hostsAt(0),
+      xtermRows: { top: 40, bottom: HOST_FLOOR - 13 },
     };
   };
   const snap = (over = {}) => {
@@ -628,22 +717,54 @@ function selfTest() {
       { seq: 1, snapshot: snap() }, { seq: 2, snapshot: snap({ reason: "periodic" }) }], want: "PASS" },
     { name: "soft keyboard 274: shell STILL full height, hosts lifted 428px", events: [
       { seq: 1, snapshot: snap({ reason: "keyboard-hint", ...keyboard(274) }) }], want: "PASS" },
-    { name: "the ratio makes 274 (428px) and 555 (147 = 20.9%) avoid and exempts only 633.5", events: [
+    // Same-geometry decrease is recovery: after entering at 274, the 555 frame
+    // must restore flush; later 633.5 and other shallow overlays cannot re-open it.
+    { name: "same-geometry recovery: 274 then 555 then 633.5 all restore flush", events: [
       { seq: 1, snapshot: snap({ reason: "keyboard-hint", ...keyboard(274) }) },
-      { seq: 2, snapshot: snap({ reason: "settle", ...keyboard(555) }) },
-      { seq: 3, snapshot: snap({ reason: "settle", ...keyboard(633.5) }) }], want: "PASS" },
-    // v3.1 ENFORCEMENT of the exemption: a thin strip that STILL lifts its hosts is
-    // the retired no-floor arithmetic returning. The judge recomputes owed=0 for
-    // 633.5, so a host sitting at inline 68.5px disagrees and FAILS — the exact
-    // inverse of the old file, which demanded hosts == 68.5 here.
-    { name: "thin strip 633.5 that WRONGLY lifts hosts to 68.5px -> FAIL host", events: [
+      { seq: 2, snapshot: snap({ reason: "settle", ...shallow(555) }) },
+      { seq: 3, snapshot: snap({ reason: "settle", ...shallow(633.5) }) }], want: "PASS" },
+    // v3.2 EXIT and the closed-session exemption: the keyboard closes (raw <= 1 at
+    // seq2), the session LEAVES, and the shallow frames after it (555 → 147,
+    // 633.5 → 68.5) with editable focus still owe NOTHING — a closed session
+    // cannot be re-opened under the 50% entry line. This is the same geometry the
+    // HOLD fixture above pays raw; here the state, not the ratio, says 0.
+    { name: "closed session: full-height exit then shallow 555 / 633.5 stay flush with editable focus", events: [
+      { seq: 1, snapshot: snap({ reason: "keyboard-hint", ...keyboard(274) }) },
+      { seq: 2, snapshot: snap({ reason: "settle" }) },
+      { seq: 3, snapshot: snap({ reason: "settle", ...shallow(555) }) },
+      { seq: 4, snapshot: snap({ reason: "settle", ...shallow(633.5) }) }], want: "PASS" },
+    // v3.2 RE-ENTRY: a shallow never-opened strip does not block the next REAL
+    // keyboard — a new 274 frame crosses the entry line and the session opens.
+    { name: "shallow strip first, then a NEW soft keyboard 274 ENTERS and lifts 428px", events: [
+      { seq: 1, snapshot: snap({ reason: "settle", ...shallow(633.5) }) },
+      { seq: 2, snapshot: snap({ reason: "keyboard-hint", ...keyboard(274) }) }], want: "PASS" },
+    // v3.2 FOCUS edges: a non-editable focus ENDS the session (seq2 owes 0 even
+    // at raw 428), and an INPUT focus enters it (seq4). contenteditable is
+    // invisible to the probe (tagName only) — the NOTE in the header owns that gap.
+    { name: "BODY focus exits the session (hosts flush again); INPUT focus enters it", events: [
+      { seq: 1, snapshot: snap({ reason: "keyboard-hint", ...keyboard(274) }) },
+      { seq: 2, snapshot: snap({ reason: "settle", ui: { activeElementTag: "BODY" }, ...shallow(555) }) },
+      { seq: 3, snapshot: snap({ reason: "settle", ui: { activeElementTag: "BODY" } }) },
+      { seq: 4, snapshot: snap({ reason: "keyboard-hint", ui: { activeElementTag: "INPUT" }, ...keyboard(274) }) }], want: "PASS" },
+    // v3.2 ENFORCEMENT: outside a session, lifting is a fault. A thin strip that
+    // STILL lifts its hosts is the retired no-floor arithmetic returning — owed 0
+    // because no session ever entered at 68.5, so a host at inline 68.5px
+    // disagrees and FAILS.
+    { name: "thin strip 633.5 (no session) that WRONGLY lifts hosts to 68.5px -> FAIL host", events: [
       { seq: 1, snapshot: snap({ reason: "settle", vv: { height: 633.5, offsetTop: 0, scale: 1 }, occlusion: 0, ptyHosts: hostsAt(68.5), controls: columnAt(0), statusBar: stripAt(0), quickKeys: panelAt(0) }) }], want: "FAIL" },
-    // THE OTHER DIRECTION OF THE SAME ENFORCEMENT: at the 0.15 floor the 555 frame
-    // owes its RAW shortfall (147). A build that leaves its hosts flush at 0 is the
-    // 0.25 arithmetic coming back — a real keyboard exempted because 147 < 175.5 —
-    // and that is exactly the conflict this round removed, so it must FAIL here.
-    { name: "keyboard 555 that WRONGLY stays flush at 0px (the 0.25 floor) -> FAIL host", events: [
-      { seq: 1, snapshot: snap({ reason: "settle", vv: { height: 555, offsetTop: 0, scale: 1 }, occlusion: 147, ptyHosts: hostsAt(0), controls: columnAt(147), statusBar: stripAt(147), quickKeys: panelAt(147) }) }], want: "FAIL" },
+    // THE OTHER DIRECTION: 555 outside a session owes NOTHING (raw 147 < 351 and
+    // no session entered). A build that lifts its hosts to 147px is the stateless
+    // arithmetic coming back — the transient that made the terminal bounce ~8.6
+    // rows and climb the Transport off the bottom on the device — so it must FAIL.
+    { name: "shallow frame 555 outside a session that WRONGLY lifts hosts to 147px -> FAIL host", events: [
+      { seq: 1, snapshot: snap({ reason: "settle", vv: { height: 555, offsetTop: 0, scale: 1 }, occlusion: 147, ptyHosts: hostsAt(147), controls: columnAt(147), statusBar: stripAt(147), quickKeys: panelAt(147) }) }], want: "FAIL" },
+    // THE THIRD DIRECTION: lifting DURING the session that should hold raw. The
+    // judge threads 555 AFTER a 274 entry — owed 147 — so this fixture is spelled
+    // with the entry first and a WRONG full-lift after: hosts at 428 mid-retract
+    // disagree with the held raw 147 and FAIL host (residue of the entry value).
+    { name: "mid-session 555 frozen at the entry lift 428 (no follow of raw) -> FAIL host", events: [
+      { seq: 1, snapshot: snap({ reason: "keyboard-hint", ...keyboard(274) }) },
+      { seq: 2, snapshot: snap({ reason: "settle", vv: { height: 555, offsetTop: 0, scale: 1 }, occlusion: 428, ptyHosts: hostsAt(428), controls: columnAt(428), statusBar: stripAt(428), quickKeys: panelAt(428) }) }], want: "FAIL" },
     { name: "REAL floating overlay: vv.height == clientHeight -> occlusion 0", events: [
       { seq: 1, snapshot: snap({ reason: "magic-hint" }) }], want: "PASS" },
     // THE RETIRED READING: app.bottom at the layout height while the keyboard
@@ -652,7 +773,7 @@ function selfTest() {
     { name: "shell under the keyboard (vv.height 274 < app.bottom 702) is EXPECTED now", events: [
       { seq: 1, snapshot: snap({ reason: "keyboard-hint", vv: { height: 274, offsetTop: 0, scale: 1 }, app: { bottom: LAYOUT, inlineHeight: "" }, occlusion: 428, ptyHosts: hostsAt(428), xtermRows: { top: 40, bottom: 241 } }) }], want: "PASS" },
     { name: "the retired pin came back: #app inline height 633.5px -> FAIL", events: [
-      { seq: 1, snapshot: snap({ reason: "keyboard-hint", ...keyboard(633.5), app: { bottom: 633.5, inlineHeight: "633.5px" } }) }], want: "FAIL" },
+      { seq: 1, snapshot: snap({ reason: "keyboard-hint", ...shallow(633.5), app: { bottom: 633.5, inlineHeight: "633.5px" } }) }], want: "FAIL" },
     { name: "shell resized but inline cleared (shorter than the layout) -> FAIL shellShort", events: [
       { seq: 1, snapshot: snap({ reason: "settle", app: { bottom: 690, inlineHeight: "" } }) }], want: "FAIL" },
     { name: "raw layoutGap 1.04px FAILS even though it prints 1.0", events: [
@@ -664,12 +785,14 @@ function selfTest() {
     { name: "host bottom below the visible bottom -> FAIL underKeyboard", events: [
       { seq: 1, snapshot: snap({ reason: "keyboard-hint", ...keyboard(274), ptyHosts: [{ index: 0, top: 0, bottom: 300, height: 300, inlineBottom: "428px", computedBottom: "428px", visible: true }] }) }], want: "FAIL" },
     { name: "STALE HIDDEN HOST keeps the old bottom -> FAIL residue", events: [
-      // Anchored on 274 (owed 428 >= the 105.3 floor) so this fixture fails on the
-      // RESIDUE — two hosts disagreeing — and not, by accident, on the ratio.
+      // Anchored on 274 (a LIVE session entered at raw 428) so this fixture fails
+      // on the RESIDUE — two hosts disagreeing — and not, by accident, on whether
+      // a shallow frame is exempt.
       { seq: 1, snapshot: snap({ reason: "settle", ...keyboard(274), ptyHosts: [...hostsAt(428), { index: 1, top: 0, bottom: HOST_FLOOR, height: HOST_FLOOR, inlineBottom: "0px", computedBottom: "0px", visible: false }] }) }], want: "FAIL" },
     { name: "probe's occlusion disagrees with clientHeight - vv.height -> FAIL occlusion", events: [
-      // 274 owes its RAW shortfall (428): a probe reporting 0 disagrees. The frame
-      // now has a second valid anchor — 555 owes 147 at the 0.15 floor — so this
+      // 274 owes its RAW shortfall (428): a probe reporting 0 disagrees. The 555
+      // frame is NOT a second anchor any more — OUTSIDE a session it owes 0, so a
+      // probe reporting 0 there is CORRECT — which is why this
       // stays anchored on 274, the biggest shortfall in the table.
       { seq: 1, snapshot: snap({ reason: "keyboard-hint", ...keyboard(274), occlusion: 0 }) }], want: "FAIL" },
     { name: "rows below the visible bottom on a stable frame -> FAIL rows", events: [
@@ -697,6 +820,15 @@ function selfTest() {
     { name: "zoom frame without probe stays exempt (zoom asserts no ink)", events: [
       { seq: 1, snapshot: snap({ vv: { height: 400, offsetTop: 120, scale: 1.5 }, probe: undefined }) },
       { seq: 2, snapshot: snap({ reason: "settle" }) }], want: "PASS" },
+    // v3.2 ZOOM CLOSES A LIVE SESSION: the zoomed frame itself is exempt from the
+    // geometry verdict, but the machine still LEAVES the session — so the first
+    // un-zoomed frame after the pinch sits at raw-under-entry and owes 0. A judge
+    // that skipped zoom frames without advancing state would call seq3 mid-session
+    // and pay 147 — this fixture is the difference between the two machines.
+    { name: "zoom during a live session closes it: post-pinch 555 owes 0, hosts flush -> PASS", events: [
+      { seq: 1, snapshot: snap({ reason: "keyboard-hint", ...keyboard(274) }) },
+      { seq: 2, snapshot: snap({ reason: "resize", vv: { height: 400, offsetTop: 120, scale: 1.5 }, occlusion: 0, ptyHosts: hostsAt(0) }) },
+      { seq: 3, snapshot: snap({ reason: "settle", ...shallow(555) }) }], want: "PASS" },
     // Geometry complete, ink evidence absent — which must never read as a PASS of
     // invariant 10.
     { name: "valid geometry, NO PROBE AT ALL -> INCONCLUSIVE", events: [
@@ -740,15 +872,20 @@ function selfTest() {
         controls: { top: 20, bottom: 234, width: 44, height: 214, inlineBottom: "448px", computedBottom: "448px", visible: true },
         statusBar: { top: 237, bottom: 254, width: 120, height: 17, inlineBottom: "428px", computedBottom: "428px", visible: true },
         quickKeys: { top: 20, bottom: 234, width: 200, height: 214, maxHeight: "214px", clientHeight: 214, scrollHeight: 310, open: true } }) }], want: "PASS" },
-    // THE 555 TRIPLE IN LITERAL NUMBERS — the same three-box arithmetic as the 274
-    // fixture above, at the other measured keyboard: host 147, column 20 + 147 =
-    // 167, strip 147. Typed, not derived, for the same reason: a helper that
-    // computed 147 + 20 as 147 would agree with a broken implementation.
-    { name: "keyboard 555: hosts 147px, column 167px, strip 147px -> PASS", events: [
-      { seq: 1, snapshot: snap({ reason: "keyboard-hint", ...keyboard(555),
-        controls: { top: 20, bottom: 515, width: 44, height: 495, inlineBottom: "167px", computedBottom: "167px", visible: true },
-        statusBar: { top: 518, bottom: 535, width: 120, height: 17, inlineBottom: "147px", computedBottom: "147px", visible: true },
-        quickKeys: { top: 20, bottom: 515, width: 200, height: 495, maxHeight: "495px", clientHeight: 495, scrollHeight: 591, open: true } }) }], want: "PASS" },
+    // THE 555 TRIPLE IN LITERAL NUMBERS — a shallow frame OUTSIDE any session,
+    // typed and not derived: raw 147 never crossed the 351px entry line, so
+    // NOTHING is owed and each box sits at its OWN authored value (hosts flush at
+    // 682, column 20 + 0 = 20, strip 0). Typed, for the same reason the 274 triple
+    // above is: a helper that computed a lift where none is owed would agree with
+    // the stateless 0.15/0.25 arithmetic coming back — inside a live session the
+    // SAME 555 frame owes raw 147 (the HOLD fixture says so); what makes this frame
+    // flush is the CLOSED session, and a fixture helper may not invent which one
+    // this seq belongs to.
+    { name: "shallow frame 555 outside a session: hosts 0px, column 20px, strip 0px -> PASS (nothing moves)", events: [
+      { seq: 1, snapshot: snap({ reason: "keyboard-hint", ...shallow(555),
+        controls: { top: 20, bottom: 662, width: 44, height: 642, inlineBottom: "20px", computedBottom: "20px", visible: true },
+        statusBar: { top: 665, bottom: 682, width: 120, height: 17, inlineBottom: "0px", computedBottom: "0px", visible: true },
+        quickKeys: { top: 20, bottom: 662, width: 200, height: 642, maxHeight: "642px", clientHeight: 642, scrollHeight: 738, open: true } }) }], want: "PASS" },
     { name: "quick-keys column left at its authored 20px while the keyboard covers it -> FAIL controls", events: [
       { seq: 1, snapshot: snap({ reason: "keyboard-hint", ...keyboard(274),
         controls: { top: 20, bottom: 662, width: 44, height: 642, inlineBottom: "20px", computedBottom: "20px", visible: true } }) }], want: "FAIL" },
@@ -771,8 +908,9 @@ function selfTest() {
     { name: "column shrank by the wrong amount (top moved) -> FAIL quickKeys", events: [
       { seq: 1, snapshot: snap({ reason: "settle" }) },
       // Anchored on 274 (owed 428, controls 448): the column must shorten by the
-      // occlusion with its top held at 20. 555 avoids at the 0.15 floor (owed 147,
-      // controls 167), so either keyboard could carry this verdict now.
+      // occlusion with its top held at 20. A 555 frame OUTSIDE a session owes 0
+      // (controls back at 20) and inside one pays raw — so 274, the session opener,
+      // is the keyboard that carries this verdict cleanly.
       { seq: 2, snapshot: snap({ reason: "settle", ...keyboard(274),
         controls: { top: 20, bottom: 320, width: 44, height: 300, inlineBottom: "448px", computedBottom: "448px", visible: true } }) }], want: "FAIL" },
     // A web-kind workspace hides the column with the .oc-hidden CLASS, which
