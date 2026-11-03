@@ -29,7 +29,7 @@ function fakeElement(rect, style = {}, classes = []) {
 // The v3.0 stand-in, laid out like the measured iPad-landscape shell: a
 // FULL-HEIGHT shell (app 0 → 1180 against clientHeight 1180), #workspace inside
 // the 16px safe-area padding (bottom 1164), and the keyboard UP at vv.height 860
-// — so the occlusion is 320, which clears the v3.1 floor of 1180*0.15 = 177, and
+// — so the occlusion is 320, which clears the v3.1 floor of 1180*0.25 = 295, and
 // every PTY host's own bottom is 320px, landing its
 // real bottom at 844, above the covered strip. Nothing in this page is
 // scrollable, and #app carries NO inline height.
@@ -296,19 +296,20 @@ test("p8 stamps every snapshot with the version that measures v3.1", () => {
 
 test("p8 floors occlusion at the small-overlay ratio — a thin strip owes nothing", () => {
   const api = loadAPI();
-  // Under the floor: a shortfall below 0.15 of the layout height (1180*0.15 = 177)
-  // is a thin floating strip the terminal does NOT avoid, so the probe reports
+  // Under the floor: a shortfall below 0.25 of the layout height (1180*0.25 = 295)
+  // is a shallow overlay — the thin floating strip, or the Magic Keyboard's retract
+  // frames — that the terminal does NOT avoid, so the probe reports
   // occlusion 0 (matching what the applier wrote) instead of the raw shortfall it
   // would have owed pre-v3.1.
   const thin = makePage();
-  thin.vv.height = LAYOUT_HEIGHT - Math.floor(LAYOUT_HEIGHT * 0.15) + 40; // raw < ratio
+  thin.vv.height = LAYOUT_HEIGHT - Math.floor(LAYOUT_HEIGHT * 0.25) + 40; // raw < ratio
   const thinSnapshot = api.snapshotFromPage(thin.page, "resize", "2026-10-27T12:00:00.000Z");
   assert.ok(thinSnapshot.vv.height > 0, "the viewport really did shrink");
   assert.equal(thinSnapshot.occlusion, 0, "a shortfall under the ratio is exempt — the probe reports what THIS build owes, not the raw shortfall");
 
   // Over the floor: a real keyboard's shortfall is still owed in full.
   const kb = makePage();
-  kb.vv.height = LAYOUT_HEIGHT - Math.ceil(LAYOUT_HEIGHT * 0.15) - 40; // raw > ratio
+  kb.vv.height = LAYOUT_HEIGHT - Math.ceil(LAYOUT_HEIGHT * 0.25) - 40; // raw > ratio
   const kbSnapshot = api.snapshotFromPage(kb.page, "resize", "2026-10-27T12:00:00.000Z");
   assert.equal(kbSnapshot.occlusion, LAYOUT_HEIGHT - kb.vv.height, "a shortfall at or over the ratio is owed in full");
 });

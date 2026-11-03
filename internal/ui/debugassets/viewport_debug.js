@@ -40,13 +40,14 @@
     //     #terminal-controls column, and #status-bar — which v3.1 makes
     //     `position:fixed` so the Transport sits at the PHYSICAL viewport bottom
     //     with no keyboard, not the safe-area-inset bottom #workspace would give
-    //     it. Occlusion is now floored at SMALL_OCCLUSION_RATIO (0.15 of the
+    //     it. Occlusion is now floored at SMALL_OCCLUSION_RATIO (0.25 of the
     //     layout height): a shortfall under that fraction (the measured thin
-    //     floating strip at ≈68.5 ≈ 9.8%) is owed NOTHING — host bottom 0,
+    //     floating strip at ≈68.5 ≈ 9.8% AND the Magic Keyboard's retract frames at
+    //     ≈147 ≈ 20.9%) is owed NOTHING — host bottom 0,
     //     controls 20, status 0 — so the terminal keeps its full height and the
     //     strip simply overlaps it; a shortfall at or over the fraction avoids as
-    //     before, which on the measured 702 layout (floor 105.3px) covers BOTH the
-    //     555 keyboard (147 ≈ 20.9% → host bottom 535) and the full soft keyboard
+    //     before, which on the measured 702 layout (floor 175.5px) covers the full
+    //     soft keyboard
     //     (428 ≈ 61.0%). So `occlusion` now reports the FLOORED height the applier
     //     actually owes, not the raw clientHeight − vv.height; `ptyHosts` reports
     //     EVERY host (hidden and inactive included) with its rect bottom, its own
@@ -81,11 +82,13 @@
     // in index.html): a shortfall under this fraction of the layout height is a thin
     // floating strip the terminal does NOT avoid, so the probe reports occlusion 0
     // for it. The two MUST stay in lockstep or the probe judges the build against a
-    // number it never owed. 0.15: on the measured 702 layout the floor is 105.3px,
-    // which keeps the thin 68.5px strip exempt and makes the measured 147px (555)
-    // and 428px (274) keyboards avoid. Not an identifier of any particular overlay —
+    // number it never owed. 0.25: on the measured 702 layout the floor is 175.5px,
+    // which keeps the thin 68.5px strip AND the Magic Keyboard's measured 147px
+    // retract frames exempt (lifting them is the ~9-row bounce + raised Transport the
+    // device feedback reported) and makes the measured 428px (274) keyboard avoid.
+    // Not an identifier of any particular overlay —
     // a pure terminal-local avoidance floor, nothing more.
-    const SMALL_OCCLUSION_RATIO = 0.15;
+    const SMALL_OCCLUSION_RATIO = 0.25;
 
     function finite(value) {
         return Number.isFinite(value) ? value : 0;

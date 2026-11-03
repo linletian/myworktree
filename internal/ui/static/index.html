@@ -3614,25 +3614,29 @@
         //      writing the `bottom` LONGHAND moves the host's own bottom edge UP by
         //      that amount; #status-bar is `position:fixed` so its bottom resolves
         //      against the viewport directly. In the measured clientHeight=702
-        //      layout the boundary is 702*0.15 = 105.3px:
+        //      layout the boundary is 702*0.25 = 175.5px:
         //        vv.height 274   -> occlusion 428 (61.0%) -> avoids (host 428, controls 448, status 428)
-        //        vv.height 555   -> occlusion 147 (20.9%) -> avoids (host 147, controls 167, status 147)
+        //        vv.height 555   -> occlusion 147 (20.9%) -> EXEMPT (host 0, controls 20, status 0)
         //        vv.height 633.5 -> occlusion 68.5 ( 9.8%) -> EXEMPT (host 0, controls 20, status 0)
         //      The 633.5 frames are the thin floating strip the user says must NOT
         //      compress the terminal ("the floating panel must not compress any
         //      terminal area"): under the boundary
         //      they owe NOTHING and the terminal keeps its full height, exactly the
-        //      "OVERLAPS a page that never moved" behaviour. The 555 frames are NOT
-        //      that strip: a 147px = 20.9% shortfall is a keyboard that DID enter
-        //      visualViewport, so it pays its raw shortfall and the host's own
-        //      bottom lands at 535. A boundary ABOVE 147 would have exempted a real
-        //      keyboard and left its rows under the keys, which is exactly why this
-        //      round moved it from 0.25 (702 → 175.5px, above the 147 anchor) to
-        //      0.15 (702 → 105.3px, below it). The anchors it splits are the thin
-        //      floating strip (68.5px = 9.8%, exempt) and the real keyboards (147px
-        //      = 20.9% and 428px = 61.0%, both avoiding), and 0.15 leaves margin on
-        //      BOTH sides (36.8px above 68.5, 41.7px below 147) while an iPhone
-        //      portrait keyboard (>= 40%) stays clear on the avoiding side. It is
+        //      "OVERLAPS a page that never moved" behaviour. The 555 frames are the
+        //      shortfall the device feedback came back on: with the Magic Keyboard
+        //      attached, a 147px lift is the defect the user reported — 147px over
+        //      the ~17px row is the ~8.6-row bounce the terminal makes as the soft
+        //      keyboard leaves, plus a Transport strip that climbs off the bottom for
+        //      the length of the animation. So the 555 frames owe NOTHING too: the
+        //      hosts stay flush at 682, the controls at 20 and the strip at 0, and
+        //      no row of ink moves. The boundary therefore sits ABOVE the 147px
+        //      anchor, at 175.5px, with 28.5px of margin below the 274 keyboard's
+        //      428px shortfall (the one measured state that still avoids) and 107px
+        //      above 68.5, while an iPhone portrait keyboard (>= 40%) stays on the
+        //      avoiding side. That is why the boundary sits at 0.25: the 0.15 this
+        //      build carried was calibrated on the assumption that a 147px shortfall
+        //      is a keyboard that must avoid, and the on-device feedback overturned
+        //      that assumption. It is
         //      NOT the retired v2 HARD_OCCLUSION_RATIO gate (vv.height <=
         //      layoutHeight*0.75, gone not renamed), and this build no longer claims
         //      a 633.5 shrink "must be" or "must not be" the Magic Keyboard — it is
@@ -3726,29 +3730,33 @@
             // product boundary on terminal-local avoidance, NOTHING more: it is not
             // a Magic-Keyboard identifier and not a whole-page classification. When
             // the shortfall is under this fraction of the LAYOUT height it is a
-            // thin floating strip that the user expects to OVERLAP a terminal that
-            // never moves, so all three terminal boxes stay put (host bottom 0,
+            // shallow overlay the user expects to OVERLAP a terminal that never
+            // moves, so all three terminal boxes stay put (host bottom 0,
             // controls 20, status 0); at or over it the shortfall is a real keyboard
             // and every box avoids. In the measured clientHeight=702 layout the
-            // boundary sits at 702*0.15 = 105.3px: the thin floating bar at
-            // 68 / 68.5 ≈ 9.8% falls under it and does NOT move, which is exactly the
+            // boundary sits at 702*0.25 = 175.5px: the thin floating bar at
+            // 68 / 68.5 ≈ 9.8% and the Magic Keyboard's 147 ≈ 20.9% retract frames
+            // both fall under it and move NOTHING, which is exactly the
             // "the floating panel must not compress any terminal area" the user asked
-            // for, while the 555 keyboard's 147 ≈ 20.9% and the full soft keyboard
-            // (vv 274 → occlusion 428 ≈ 61.0%) both clear it and keep avoiding.
-            // 0.15 is calibrated on the measured anchors this build has: 68.5px
-            // (9.8%, the thin strip that must NOT compress the terminal) sits BELOW
-            // the floor and 147px (20.9%) / 428px (61.0%) ABOVE it, so there is
-            // margin on both sides of the single line — 36.8px of clearance over
-            // 68.5 and 41.7px before 147 — and an iPhone portrait keyboard (>= 40%)
-            // stays on the avoiding side. The 0.25 this round first shipped is NOT
-            // kept: on this layout it put the floor at 175.5px, ABOVE the measured
-            // 147px keyboard, which exempted a real keyboard and left its rows under
-            // the keys — the arithmetic that the review caught. This is NOT the
-            // retired v2 HARD_OCCLUSION_RATIO gate either (that was
+            // for, while the full soft keyboard (vv 274 → occlusion 428 ≈ 61.0%)
+            // clears it and keeps avoiding.
+            // 0.25 is calibrated on what THIS device showed after 0.15 shipped: with
+            // the Magic Keyboard attached, the 147px intermediate frame lifted the
+            // hosts to 535 and raised the Transport, and what the user reported back
+            // was the terminal bouncing ~9 rows (147px over the ~17px row is 8.6
+            // rows) as the soft keyboard left. The 68.5px strip (9.8%) stays below
+            // the floor and the 428px soft keyboard (61.0%) stays above it, so the
+            // single line keeps 107px of clearance over the thin strip and 28.5px
+            // under the only shortfall that has to avoid, and an iPhone portrait
+            // keyboard (>= 40%) stays on the avoiding side. The 0.15 this build
+            // carried is NOT kept: it sat at 105.3px, BELOW the measured 147px
+            // frame, which made that retract transition a paying occupant and is the
+            // bounce the device feedback overturned. This is NOT the retired v2
+            // HARD_OCCLUSION_RATIO gate either (that was
             // vv.height <= layoutHeight*0.75, computed off the VISIBLE height, and
             // it is gone, not renamed). scale != 1 still restores every box above, so
             // a pinch never avoids at all.
-            const SMALL_OCCLUSION_RATIO = 0.15;
+            const SMALL_OCCLUSION_RATIO = 0.25;
             const layoutHeight = document.documentElement.clientHeight;
             const vv = window.visualViewport;
             // Pinch / double-tap zoom opt-out, spec fact #1: vv.height is
@@ -3852,8 +3860,9 @@
             if (!vv) return;
             vv.addEventListener("resize", applyVisualViewportOcclusion);
             vv.addEventListener("scroll", reapplyVisualViewportOcclusion);
-            // THE SILENT-CHANGE BACKSTOP. The contract's own rule — keyboard up
-            // 633.5 ⇒ occlusion 68.5, real overlay 702 ⇒ occlusion 0 — is a
+            // THE SILENT-CHANGE BACKSTOP. The contract's own rule — soft keyboard up
+            // 274 ⇒ occlusion 428, exempt strip 633.5 / Magic-keyboard retract 555 ⇒
+            // occlusion 0 — is a
             // RECOMPUTATION against a live measurement, and Safari is free to
             // change the height without ever firing an event: the manual
             // magic-hint frame (b90643be…, seq388) shows the REAL overlay up

@@ -399,7 +399,7 @@ func TestViewportDebugEndpointUsesExistingAuth(t *testing.T) {
 // empty list is a measurement, see TestViewportDebugEmptyPtyHostListIsNeverOmitted.
 // The fixture is the p8 / contract v3.1 shape: a FULL-HEIGHT shell (app.bottom at
 // clientHeight, layoutGap 0, inlineHeight empty) with a THIN floating strip up
-// (vv.height 1100, a shortfall of 80 < clientHeight*0.15=177) that v3.1 FLOORS to
+// (vv.height 1100, a shortfall of 80 < clientHeight*0.25=295) that v3.1 FLOORS to
 // occlusion 0 — so every host keeps its authored bottom ("0px") and the strip simply
 // overlaps a terminal that never moved. #status-bar is now `position:fixed`, so its
 // rest rect sits at the physical viewport bottom (1180), not the inset workspace

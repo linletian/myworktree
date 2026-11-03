@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 // Checks a capture against docs/plans/fix-issue116/A0-SOP.md (contract v3.1,
-// "FULL-HEIGHT shell + PTY-LOCAL avoidance above a 0.15 ratio floor — a thinner
-// floating strip simply overlaps — non-scrollable root") and prints a
-// PASS/FAIL table per invariant. v3.1 is the v3.0 base plus the small-occupant
+// "FULL-HEIGHT shell + PTY-LOCAL avoidance above a 0.25 ratio floor — a shallower
+// overlay simply overlaps — non-scrollable root") and prints a
+// PASS/FAIL table per invariant. v3.1 is the v3.0 base plus the small-overlay
 // floor, the fixed #status-bar and the wheel isolation; the shell/clip/overlay
 // invariants below carry their original v3.0 numbers unchanged.
 //
@@ -28,14 +28,18 @@
 //
 //   THE TERMINAL AVOIDS LOCALLY, ABOVE A FLOOR. The raw shortfall is
 //   max(0, clientHeight - vv.height); at scale = 1 a shortfall of at least
-//   0.15 * clientHeight is a REAL keyboard and its raw value is
+//   0.25 * clientHeight is a REAL keyboard and its raw value is
 //   written into the `bottom` of EVERY PTY host inside #terminal-container, so the
 //   covered strip stops being terminal and becomes #workspace's own ink. On the
-//   measured 702 layout the floor is 105.3px, so BOTH measured keyboards avoid —
-//   555 pays 147 (host bottom 535) and 274 pays 428 (host bottom 254). A shortfall
-//   UNDER that floor is a THIN floating strip the user said must NOT compress the
+//   measured 702 layout the floor is 175.5px, so the full soft keyboard avoids —
+//   274 pays 428 (host bottom 254). A shortfall
+//   UNDER that floor is a shallow overlay the user said must NOT compress the
 //   terminal, so it owes NOTHING: the owed occlusion floors to 0, the hosts stay
-//   flush and the strip simply overlaps a page that never moved (633.5 → 68.5). The hosts are the
+//   flush and the strip simply overlaps a page that never moved (633.5 → 68.5, and
+//   555 → 147). That second one is the point of the 0.25: with the Magic Keyboard
+//   attached, 0.15 (floor 105.3px) made the 147px retract transient a paying
+//   occupant, and what the device reported back was the terminal bouncing ~8.6 rows
+//   (147 over the ~17px row) with the Transport climbing off the bottom. The hosts are the
 //   only boxes this build moves, so they are what the verdict reads:
 //
 //     app.inlineHeight !== ""                 -> FAIL "pinned"   (the retired pin)
@@ -109,21 +113,23 @@ const SCROLL_TOLERANCE_PX = 0.5;
 // other check in this file and still bury the quick-keys panel.
 const CONTROLS_AUTHORED_BOTTOM = 20;
 
-// CONTRACT v3.1 (issue #116): the SMALL-OCCUPANT exemption, mirrored from the
-// applier. A shortfall under SMALL_OCCLUSION_RATIO of clientHeight is a THIN
-// floating strip the user said must NOT compress the terminal ("the floating panel
+// CONTRACT v3.1 (issue #116): the SMALL-OVERLAY exemption, mirrored from the
+// applier. A shortfall under SMALL_OCCLUSION_RATIO of clientHeight is a shallow
+// overlay the user said must NOT compress the terminal ("the floating panel
 // must not compress any terminal area"); at a height >= the ratio the frame is an
 // keyboard that still owes local avoidance. The floor is a RATIO,
-// not a pixel count, so it holds at every viewport height. 0.15 is calibrated
-// between the two real cases the user gave: on a 702 layout the floor is 105.3, so
-// the 633.5 strip (68.5 = 9.8%) is exempt while the 555 frames (147 = 20.9%) and
-// the full soft keyboard (274 → 428 = 61.0%) both avoid. The 0.25 this round first
-// shipped is NOT kept: its 175.5px floor sat ABOVE the measured 147px keyboard and
-// exempted a keyboard that has to avoid — margin on both sides is what 0.15
-// restores (36.8px over 68.5, 41.7px before 147).
+// not a pixel count, so it holds at every viewport height. 0.25 is calibrated
+// on what the device showed after 0.15 shipped: on a 702 layout the floor is 175.5,
+// so the 633.5 strip (68.5 = 9.8%) AND the 555 Magic-keyboard retract frames
+// (147 = 20.9%) are exempt while
+// the full soft keyboard (274 → 428 = 61.0%) avoids. The 0.15 this build carried is
+// NOT kept: its 105.3px floor sat BELOW the measured 147px frame, so the transient
+// made the terminal lift 147px — the ~8.6-row bounce (147 over the ~17px row) plus
+// the climbing Transport the user reported back — and 0.25 puts the whole transient
+// under the floor (107px of clearance over 68.5, 28.5px under 428).
 // The judge RECOMPUTES this so the exemption is proven from raw geometry, not
 // taken on trust from the probe's own occlusion field.
-const SMALL_OCCLUSION_RATIO = 0.15;
+const SMALL_OCCLUSION_RATIO = 0.25;
 
 function num(value) {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
@@ -146,7 +152,7 @@ function owedOcclusion(snapshot) {
   if (clientHeight === null || vvHeight === null) return null;
   if (isZoomed(snapshot)) return 0;
   const raw = Math.max(0, clientHeight - vvHeight);
-  // v3.1 exemption (0.15): a thin floating strip (raw shortfall < ratio*clientHeight)
+  // v3.1 exemption (0.25): a shallow overlay (raw shortfall < ratio*clientHeight)
   // owes NOTHING — the terminal keeps its full height and the strip simply
   // overlaps it. An explicit larger keyboard (raw >= ratio*clientHeight) still
   // owes the full shortfall. Same rule the applier ships, recomputed here.
@@ -518,7 +524,7 @@ function report(events) {
   const mark = (list) => (list.length ? "FAIL" : "ok  ");
   console.log(`1. shell full height (|clientHeight - app.bottom| <= 1)   ${mark(r.failures.shellShort)}  (${r.failures.shellShort.length} frames)`);
   console.log(`2. #app inline height never written (retired pin)          ${mark(r.failures.pinned)}  (${r.failures.pinned.length} frames)`);
-  console.log(`3. occlusion == floored shortfall (>=0.15*h else 0)         ${mark(r.failures.occlusion)}  (${r.failures.occlusion.length} frames)`);
+  console.log(`3. occlusion == floored shortfall (>=0.25*h else 0)         ${mark(r.failures.occlusion)}  (${r.failures.occlusion.length} frames)`);
   console.log(`4. every PTY host bottom == occlusion                      ${mark(r.failures.host)}  (${r.failures.host.length} frames)`);
   console.log(`5. no residue across hosts (one value everywhere)          ${mark(r.failures.residue)}  (${r.failures.residue.length} frames)`);
   console.log(`6. host never under keyboard (avoiding frames only)       ${mark(r.failures.underKeyboard)}  (${r.failures.underKeyboard.length} frames)`);
@@ -590,9 +596,9 @@ function selfTest() {
   // shell, the occlusion and the host bottom are derived, so no fixture can
   // accidentally describe the retired shape (a shorter shell AND a lifted host).
   // v3.1: the derived occlusion is FLOORED by the same ratio the judge recomputes,
-  // so a thin floating strip (633.5 → raw 68.5 < 105.3) builds hosts at 0 and
-  // a real keyboard (555 → raw 147, 274 → raw 428, both >= 105.3) builds hosts
-  // lifted.
+  // so BOTH shallow states (633.5 → raw 68.5 and 555 → raw 147, both under the
+  // 175.5 floor) build hosts at 0 and only the full soft keyboard (274 → raw 428
+  // >= 175.5) builds hosts lifted.
   const keyboard = (visible) => {
     const raw = Math.max(0, LAYOUT - visible);
     const occlusion = raw >= LAYOUT * SMALL_OCCLUSION_RATIO ? raw : 0;
@@ -628,7 +634,7 @@ function selfTest() {
       { seq: 1, snapshot: snap() }, { seq: 2, snapshot: snap({ reason: "periodic" }) }], want: "PASS" },
     { name: "soft keyboard 274: shell STILL full height, hosts lifted 428px", events: [
       { seq: 1, snapshot: snap({ reason: "keyboard-hint", ...keyboard(274) }) }], want: "PASS" },
-    { name: "the ratio makes 274 (428px) and 555 (147 = 20.9%) avoid and exempts only 633.5", events: [
+    { name: "the ratio makes 274 (428px) avoid and exempts 555 (147 = 20.9%) and 633.5 (68.5 = 9.8%)", events: [
       { seq: 1, snapshot: snap({ reason: "keyboard-hint", ...keyboard(274) }) },
       { seq: 2, snapshot: snap({ reason: "settle", ...keyboard(555) }) },
       { seq: 3, snapshot: snap({ reason: "settle", ...keyboard(633.5) }) }], want: "PASS" },
@@ -638,12 +644,12 @@ function selfTest() {
     // inverse of the old file, which demanded hosts == 68.5 here.
     { name: "thin strip 633.5 that WRONGLY lifts hosts to 68.5px -> FAIL host", events: [
       { seq: 1, snapshot: snap({ reason: "settle", vv: { height: 633.5, offsetTop: 0, scale: 1 }, occlusion: 0, ptyHosts: hostsAt(68.5), controls: columnAt(0), statusBar: stripAt(0), quickKeys: panelAt(0) }) }], want: "FAIL" },
-    // THE OTHER DIRECTION OF THE SAME ENFORCEMENT: at the 0.15 floor the 555 frame
-    // owes its RAW shortfall (147). A build that leaves its hosts flush at 0 is the
-    // 0.25 arithmetic coming back — a real keyboard exempted because 147 < 175.5 —
-    // and that is exactly the conflict this round removed, so it must FAIL here.
-    { name: "keyboard 555 that WRONGLY stays flush at 0px (the 0.25 floor) -> FAIL host", events: [
-      { seq: 1, snapshot: snap({ reason: "settle", vv: { height: 555, offsetTop: 0, scale: 1 }, occlusion: 147, ptyHosts: hostsAt(0), controls: columnAt(147), statusBar: stripAt(147), quickKeys: panelAt(147) }) }], want: "FAIL" },
+    // THE OTHER DIRECTION OF THE SAME ENFORCEMENT: at the 0.25 floor the 555 frame
+    // owes NOTHING (147 < 175.5). A build that lifts its hosts to 147px is the
+    // 0.15 arithmetic coming back — the transient that made the terminal bounce ~8.6
+    // rows and climb the Transport off the bottom on the device — so it must FAIL.
+    { name: "Magic-keyboard frame 555 that WRONGLY lifts hosts to 147px (the 0.15 floor) -> FAIL host", events: [
+      { seq: 1, snapshot: snap({ reason: "settle", vv: { height: 555, offsetTop: 0, scale: 1 }, occlusion: 147, ptyHosts: hostsAt(147), controls: columnAt(147), statusBar: stripAt(147), quickKeys: panelAt(147) }) }], want: "FAIL" },
     { name: "REAL floating overlay: vv.height == clientHeight -> occlusion 0", events: [
       { seq: 1, snapshot: snap({ reason: "magic-hint" }) }], want: "PASS" },
     // THE RETIRED READING: app.bottom at the layout height while the keyboard
@@ -664,12 +670,13 @@ function selfTest() {
     { name: "host bottom below the visible bottom -> FAIL underKeyboard", events: [
       { seq: 1, snapshot: snap({ reason: "keyboard-hint", ...keyboard(274), ptyHosts: [{ index: 0, top: 0, bottom: 300, height: 300, inlineBottom: "428px", computedBottom: "428px", visible: true }] }) }], want: "FAIL" },
     { name: "STALE HIDDEN HOST keeps the old bottom -> FAIL residue", events: [
-      // Anchored on 274 (owed 428 >= the 105.3 floor) so this fixture fails on the
+      // Anchored on 274 (owed 428 >= the 175.5 floor) so this fixture fails on the
       // RESIDUE — two hosts disagreeing — and not, by accident, on the ratio.
       { seq: 1, snapshot: snap({ reason: "settle", ...keyboard(274), ptyHosts: [...hostsAt(428), { index: 1, top: 0, bottom: HOST_FLOOR, height: HOST_FLOOR, inlineBottom: "0px", computedBottom: "0px", visible: false }] }) }], want: "FAIL" },
     { name: "probe's occlusion disagrees with clientHeight - vv.height -> FAIL occlusion", events: [
-      // 274 owes its RAW shortfall (428): a probe reporting 0 disagrees. The frame
-      // now has a second valid anchor — 555 owes 147 at the 0.15 floor — so this
+      // 274 owes its RAW shortfall (428): a probe reporting 0 disagrees. The 555
+      // frame is NOT a second anchor any more — at the 0.25 floor it owes 0, so a
+      // probe reporting 0 there is CORRECT — which is why this
       // stays anchored on 274, the biggest shortfall in the table.
       { seq: 1, snapshot: snap({ reason: "keyboard-hint", ...keyboard(274), occlusion: 0 }) }], want: "FAIL" },
     { name: "rows below the visible bottom on a stable frame -> FAIL rows", events: [
@@ -740,15 +747,16 @@ function selfTest() {
         controls: { top: 20, bottom: 234, width: 44, height: 214, inlineBottom: "448px", computedBottom: "448px", visible: true },
         statusBar: { top: 237, bottom: 254, width: 120, height: 17, inlineBottom: "428px", computedBottom: "428px", visible: true },
         quickKeys: { top: 20, bottom: 234, width: 200, height: 214, maxHeight: "214px", clientHeight: 214, scrollHeight: 310, open: true } }) }], want: "PASS" },
-    // THE 555 TRIPLE IN LITERAL NUMBERS — the same three-box arithmetic as the 274
-    // fixture above, at the other measured keyboard: host 147, column 20 + 147 =
-    // 167, strip 147. Typed, not derived, for the same reason: a helper that
-    // computed 147 + 20 as 147 would agree with a broken implementation.
-    { name: "keyboard 555: hosts 147px, column 167px, strip 147px -> PASS", events: [
+    // THE 555 TRIPLE IN LITERAL NUMBERS — the Magic-keyboard transient, typed and
+    // not derived: 147 < the 175.5 floor, so NOTHING is owed and each box sits at
+    // its OWN authored value (hosts flush at 682, column 20 + 0 = 20, strip 0).
+    // Typed, for the same reason the 274 triple above is: a helper that computed a
+    // lift where none is owed would agree with the 0.15 arithmetic coming back.
+    { name: "Magic-keyboard frame 555: hosts 0px, column 20px, strip 0px -> PASS (exempt, nothing moves)", events: [
       { seq: 1, snapshot: snap({ reason: "keyboard-hint", ...keyboard(555),
-        controls: { top: 20, bottom: 515, width: 44, height: 495, inlineBottom: "167px", computedBottom: "167px", visible: true },
-        statusBar: { top: 518, bottom: 535, width: 120, height: 17, inlineBottom: "147px", computedBottom: "147px", visible: true },
-        quickKeys: { top: 20, bottom: 515, width: 200, height: 495, maxHeight: "495px", clientHeight: 495, scrollHeight: 591, open: true } }) }], want: "PASS" },
+        controls: { top: 20, bottom: 662, width: 44, height: 642, inlineBottom: "20px", computedBottom: "20px", visible: true },
+        statusBar: { top: 665, bottom: 682, width: 120, height: 17, inlineBottom: "0px", computedBottom: "0px", visible: true },
+        quickKeys: { top: 20, bottom: 662, width: 200, height: 642, maxHeight: "642px", clientHeight: 642, scrollHeight: 738, open: true } }) }], want: "PASS" },
     { name: "quick-keys column left at its authored 20px while the keyboard covers it -> FAIL controls", events: [
       { seq: 1, snapshot: snap({ reason: "keyboard-hint", ...keyboard(274),
         controls: { top: 20, bottom: 662, width: 44, height: 642, inlineBottom: "20px", computedBottom: "20px", visible: true } }) }], want: "FAIL" },
@@ -771,8 +779,8 @@ function selfTest() {
     { name: "column shrank by the wrong amount (top moved) -> FAIL quickKeys", events: [
       { seq: 1, snapshot: snap({ reason: "settle" }) },
       // Anchored on 274 (owed 428, controls 448): the column must shorten by the
-      // occlusion with its top held at 20. 555 avoids at the 0.15 floor (owed 147,
-      // controls 167), so either keyboard could carry this verdict now.
+      // occlusion with its top held at 20. 555 is EXEMPT at the 0.25 floor (owed 0,
+      // controls back at 20), so 274 is the only keyboard that can carry this verdict.
       { seq: 2, snapshot: snap({ reason: "settle", ...keyboard(274),
         controls: { top: 20, bottom: 320, width: 44, height: 300, inlineBottom: "448px", computedBottom: "448px", visible: true } }) }], want: "FAIL" },
     // A web-kind workspace hides the column with the .oc-hidden CLASS, which

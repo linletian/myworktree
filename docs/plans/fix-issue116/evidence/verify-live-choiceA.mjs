@@ -2,7 +2,7 @@
 // Verify the DEPLOYED bundle's PTY-local avoidance against contract v3.1
 // ("full-height shell + PTY-LOCAL avoidance above a ratio floor, non-scrollable
 // root", issue #116). v3.1 = the v3.0 base (full-height shell, host-local lift,
-// overlay half) PLUS the 0.15 small-occupant floor, the fixed #status-bar and the
+// overlay half) PLUS the 0.25 small-overlay floor, the fixed #status-bar and the
 // wheel isolation.
 //
 // Why this exists: the node suite in internal/ui/testdata/ slices the repo
@@ -23,14 +23,17 @@
 //     those assertions are DELIBERATELY GONE — the same four heights now have to
 //     leave #app untouched and pay the shortfall into the hosts instead.
 //   - A shortfall is paid ONLY ABOVE A RATIO FLOOR (contract v3.1). The raw
-//     shortfall is clientHeight - vv.height; at or above 0.15 * clientHeight it is
+//     shortfall is clientHeight - vv.height; at or above 0.25 * clientHeight it is
 //     a real keyboard and its RAW value is paid into every host (274 →
-//     428px, 555 → 147px). UNDER that floor (702*0.15=105.3, so only the
-//     633.5 → raw 68.5 = 9.8% strip sits under it) it is the shallow overlay the
+//     428px). UNDER that floor (702*0.25=175.5, so BOTH the
+//     633.5 → raw 68.5 = 9.8% strip AND the 555 → raw 147 = 20.9% Magic-keyboard
+//     retract frames sit under it) it is the shallow overlay the
 //     user said must NOT compress the terminal, so
 //     it is exempt and owes 0 — the hosts stay flush and the strip overlaps a page
-//     that never moved. 0.25 (floor 175.5) was tried first and is NOT kept: it sits
-//     ABOVE the measured 147px keyboard, so it exempted a keyboard that has to avoid. The floor is a RATIO of the layout height, so it holds at
+//     that never moved. The 0.15 this script asserted before (floor 105.3) is NOT
+//     kept: it sat BELOW the measured 147px frame, made that transient a paying
+//     occupant, and the device reported the terminal bouncing ~8.6 rows (147 over
+//     the ~17px row) with the Transport climbing as the soft keyboard left. The floor is a RATIO of the layout height, so it holds at
 //     every viewport size; it REPLACES v3.0's "any shortfall, no classification" and
 //     the retired v2.x HARD_OCCLUSION_RATIO gate alike. A genuine magic-hint overlay
 //     (vv.height = clientHeight) still lands on occlusion 0 by arithmetic.
@@ -119,12 +122,14 @@ console.log("✓ live code reads neither offsetTop nor visibleBottom, and writes
 // therefore every host at inset:0 inside it — with its floor at 682.
 const LAYOUT = 702;
 const HOST_FLOOR = 682;
-// Contract v3.1: a shortfall under this fraction of the layout height is a thin
-// floating strip and owes nothing; at or over it an explicit larger keyboard owes
-// its raw shortfall. 702 * 0.15 = 105.3px is the boundary this round settled on: it
-// sits ABOVE the thin floating strip (68.5, exempt) and BELOW both measured keyboards
-// (147 and 428, both avoiding), with 36.8px / 41.7px of margin on the two sides.
-const SMALL_OCCLUSION_RATIO = 0.15;
+// Contract v3.1: a shortfall under this fraction of the layout height is a shallow
+// overlay and owes nothing; at or over it an explicit larger keyboard owes
+// its raw shortfall. 702 * 0.25 = 175.5px is the boundary: it
+// sits ABOVE the thin floating strip (68.5, exempt) and ABOVE the measured 147px
+// Magic-keyboard retract frames (exempt too — lifting the terminal on that transient
+// was the ~8.6-row bounce plus the raised Transport the device reported back), and
+// BELOW the full soft keyboard's 428px shortfall, which still avoids.
+const SMALL_OCCLUSION_RATIO = 0.25;
 
 // Full-height, out-of-flow #app. Its inline height setter THROWS: v2.2 pinned
 // this box to vv.height and v3.0 never may, so the retired pin fails HERE rather
@@ -242,8 +247,9 @@ assert.deepEqual(hostBottoms(), [HOST_FLOOR, HOST_FLOOR]);
 
 // The measured table: the shortfall is paid into the HOST above the v3.1 ratio
 // floor, and the same terminal geometry the old full-page pin produced comes out of
-// it. 555 (raw 147) clears the 105.3 floor and pays 147 → host bottom 535; only
-// 633.5 (raw 68.5) sits under it and pays 0.
+// it. Only 274 (raw 428) clears the 175.5 floor and pays 428 → host bottom 254;
+// 555 (raw 147 = 20.9%) and 633.5 (raw 68.5 = 9.8%) both sit under it and pay 0 —
+// the Magic-keyboard retract frames stay flush instead of bouncing the terminal.
 // `owed` below is the floored shortfall — the single number every box is judged on,
 // so no fixture can quietly restate the retired no-floor arithmetic.
 const table = [274, 555, 633.5];
@@ -275,7 +281,7 @@ for (const visible of table) {
   assert.ok(controls.getBoundingClientRect().top === CONTROLS_TOP, "top:20px is never written — the quick-keys ENTRY button does not jump");
   assert.equal(controlsHeight(), HOST_FLOOR - CONTROLS_TOP - CONTROLS_AUTHORED_BOTTOM - owed, `the column's usable height shrinks by exactly ${owed}px (what the panel's max-height:100% resolves against)`);
 }
-console.log("✓ 274 paid 428px and 555 paid 147px into every host, the column (+20) and the strip; only 633.5 (68.5=9.8%) is exempt under the 0.15 floor and pays 0, with the shell untouched");
+console.log("✓ 274 paid 428px into every host, the column (+20) and the strip; 555 (147=20.9%) and 633.5 (68.5=9.8%) are exempt under the 0.25 floor and pay 0, with the shell untouched");
 
 // Pan immunity: the occlusion is client-space vv.height against the stable layout
 // height, so the target does not move — and because writes are guarded, nothing is
@@ -300,15 +306,17 @@ for (const offsetTop of [12.5, 237, 428, 0]) {
 assert.equal(overlayWrites(), overlaySettled, "a pan must not rewrite the column or the strip either");
 console.log("✓ every pan offset left both the lift and the write count untouched (hosts, column and strip)");
 
-// 633.5 — the thin floating strip. raw shortfall 68.5 < 702*0.15=105.3, so under
+// 633.5 — the thin floating strip. raw shortfall 68.5 < 702*0.25=175.5, so under
 // contract v3.1 it is EXEMPT: owed 0. Coming off the avoiding 274 frame above, the
 // applier must actively RESTORE the hosts to flush rather than keep the last lift —
 // this is the exemption doing real work, not merely a frame that happens to be flat.
+// (555 → raw 147 is exempt by the SAME arithmetic and is covered by the table above;
+// before this round it paid 147, and that lift was the bounce the device reported.)
 vv.height = 633.5;
 avoid();
 assert.deepEqual(bottoms(), ["0px", "0px"], "a thin strip under the ratio is exempt: hosts restored to bottom 0px, terminal never compressed");
 assert.deepEqual(hostBottoms(), [HOST_FLOOR, HOST_FLOOR], "and every host lands back flush at the host floor");
-console.log("✓ a 633.5 strip (raw 68.5 < 105.3) is exempt at owed 0 — hosts restored flush, not lifted");
+console.log("✓ a 633.5 strip (raw 68.5 < 175.5) is exempt at owed 0 — hosts restored flush, not lifted");
 
 // The REAL floating overlay (b90643be…, seq388): vv.height == clientHeight, so
 // occlusion is 0 by arithmetic and the hosts go back to flush.
@@ -360,30 +368,30 @@ assert.equal(born.style.bottom, "428px", "a host created while the keyboard is u
 assert.equal(liveDocument.getElementById("terminal-container").querySelectorAll(":scope > [data-instance-id]").length, 3);
 console.log("✓ a host created under a covered bottom is lifted at creation");
 
-// A second viewport size (400), where the floor itself moves: 400 * 0.15 = 60px.
+// A second viewport size (400), where the floor itself moves: 400 * 0.25 = 100px.
 // The point of the block is now the FLOOR, not its absence. ABOVE the floor the
 // shortfall is paid EXACTLY — half a pixel is half a pixel, no 1px rounding (v2.2
 // put a 1px tolerance on the retired PIN decision; the A0 SOP's 1px figure is a
 // tolerance on the VERDICT's comparisons, never a floor on the write). BELOW the
-// floor it is exempt and collapses to 0. Stepping across 60px flips the write.
+// floor it is exempt and collapses to 0. Stepping across 100px flips the write.
 vv.scale = 1;
 documentElement.clientHeight = 400;
-vv.height = 339.5; // raw 60.5 >= 60: fractional, paid exactly
+vv.height = 299.5; // raw 100.5 >= 100: fractional, paid exactly
 avoid();
-assert.deepEqual(bottoms(), ["60.5px", "60.5px", "60.5px"], "above the floor a half-pixel shortfall is paid as half a pixel");
-vv.height = 340; // raw exactly 60 = the floor: boundary is inclusive
+assert.deepEqual(bottoms(), ["100.5px", "100.5px", "100.5px"], "above the floor a half-pixel shortfall is paid as half a pixel");
+vv.height = 300; // raw exactly 100 = the floor: boundary is inclusive
 avoid();
-assert.deepEqual(bottoms(), ["60px", "60px", "60px"], "the floor is inclusive — a shortfall of exactly 0.15*layout is paid");
-vv.height = 341; // raw 59 < 60: just under the floor, exempt
+assert.deepEqual(bottoms(), ["100px", "100px", "100px"], "the floor is inclusive — a shortfall of exactly 0.25*layout is paid");
+vv.height = 301; // raw 99 < 100: just under the floor, exempt
 avoid();
-assert.deepEqual(bottoms(), ["0px", "0px", "0px"], "under the floor the shortfall is exempt and collapses to 0 — the thin strip must not compress");
-vv.height = 338.5; // raw 61.5 >= 60: back above the floor, exact again
+assert.deepEqual(bottoms(), ["0px", "0px", "0px"], "under the floor the shortfall is exempt and collapses to 0 — the shallow overlay must not compress");
+vv.height = 298.5; // raw 101.5 >= 100: back above the floor, exact again
 avoid();
-assert.deepEqual(bottoms(), ["61.5px", "61.5px", "61.5px"], "stepping back above the floor pays the raw shortfall exactly");
+assert.deepEqual(bottoms(), ["101.5px", "101.5px", "101.5px"], "stepping back above the floor pays the raw shortfall exactly");
 vv.height = 400;
 avoid();
 assert.deepEqual(bottoms(), ["0px", "0px", "0px"], "exactly full: nothing owed");
-console.log("✓ at a second viewport the ratio floor is exact: fractional paid above 0.15*layout, exempt to 0 below it");
+console.log("✓ at a second viewport the ratio floor is exact: fractional paid above 0.25*layout, exempt to 0 below it");
 
 // The structural half: driving every path must leave the root untouched, and the
 // stub throws, so reaching the end of this block IS the assertion.

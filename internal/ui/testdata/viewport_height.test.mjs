@@ -36,11 +36,14 @@
 //   * The ONE write is each PTY host's OWN `bottom`, inside
 //     #terminal-container (`position:absolute; inset:0` in both host factories):
 //     raw = max(0, clientHeight − vv.height) at scale = 1, 0 under zoom, then
-//     FLOORED — under SMALL_OCCLUSION_RATIO (0.15) of clientHeight it owes 0.
+//     FLOORED — under SMALL_OCCLUSION_RATIO (0.25) of clientHeight it owes 0.
 //     In the measured 702-tall layout whose hosts bottom out at 682 the floor is
-//     702*0.15 = 105.3px, so it pays BOTH real keyboards — 274 → 428px (host bottom
-//     254) and 555 → 147px (host bottom 535) — and exempts only the thin floating
-//     strip (633.5 → raw 68.5 < 105.3 → host bottom stays 682), without moving a
+//     702*0.25 = 175.5px, so it pays the full soft keyboard — 274 → 428px (host
+//     bottom 254) — and exempts BOTH shallow states: the thin floating
+//     strip (633.5 → raw 68.5) and the Magic Keyboard's 555 → raw 147 retract
+//     frames, whose lift was the ~8.6-row bounce + raised Transport the device
+//     feedback reported — hosts staying flush at 682 in either case, without
+//     moving a
 //     single ancestor box. EVERY host gets it, hidden and
 //     inactive included, because a stale bottom on the host the user switches TO is
 //     the next band.
@@ -604,10 +607,11 @@ function viewportHarness({
 // The occlusion this layout owes at a given visible height — the formula under
 // test, spelled out once so every case states the EXPECTATION independently. v3.1
 // floors it: a shortfall under SMALL_OCCLUSION_RATIO of the layout height (the thin
-// floating strip) is owed NOTHING, so the host / controls / status keep their
-// authored bottoms; at or over the ratio (every measured keyboard, 147 and 428 on a
-// 702 layout against a 105.3px floor) the shortfall is paid in full.
-const SMALL_OCCLUSION_RATIO = 0.15;
+// floating strip AND the Magic Keyboard's retract frames) is owed NOTHING, so the
+// host / controls / status keep their
+// authored bottoms; at or over the ratio (the measured soft keyboard, 428 on a
+// 702 layout against a 175.5px floor) the shortfall is paid in full.
+const SMALL_OCCLUSION_RATIO = 0.25;
 const owedPx = (visibleHeight) => {
   const raw = Math.max(0, LAYOUT_HEIGHT - visibleHeight);
   return raw < LAYOUT_HEIGHT * SMALL_OCCLUSION_RATIO ? 0 : raw;
@@ -631,22 +635,24 @@ test("issue #100 L1 R6: without visualViewport the init is a no-op — no listen
 
 // --- v3.1 §1: the occlusion rule, floored at the small-overlay boundary -------
 
-test("v3.1: every keyboard lifts every PTY host's own bottom (274 / 555); only the thin strip is exempt (633.5)", () => {
+test("v3.1: the soft keyboard lifts every PTY host's own bottom (274); the Magic-keyboard frames (555) and the thin strip (633.5) are exempt", () => {
   const h = viewportHarness({ hosts: ["a"] });
   h.api.initVisualViewportHandling();
   assert.equal(h.appBottom(), LAYOUT_HEIGHT, "full height before the keyboard");
 
-  // The measured table. The floor is 702*0.15 = 105.3px, and BOTH measured keyboards
-  // clear it and lift by their raw shortfall — the full soft keyboard (274 → 428) and
-  // the 555 keyboard (147 → host bottom 535). Only the 633.5 thin floating strip
-  // (68.5 = 9.8%) falls under the floor and is owed NOTHING — the terminal keeps its
-  // full height and the strip just overlaps it ("浮窗不压缩任何终端区域"). 555 is
-  // stated HERE as an avoiding frame on purpose: at the 0.25 this round first shipped
-  // (floor 175.5px) the arithmetic wrongly exempted it, which is the conflict the
-  // review caught and the reason the boundary is 0.15.
+  // The measured table. The floor is 702*0.25 = 175.5px, and only the full soft
+  // keyboard clears it: 274 → 428 → host bottom 254. The 555 frames (147 = 20.9%)
+  // and the 633.5 thin floating strip (68.5 = 9.8%) both fall UNDER the floor and
+  // are owed NOTHING — the terminal keeps its full height and the overlay just
+  // overlaps it ("浮窗不压缩任何终端区域"). 555 is
+  // stated HERE as an exempt frame on purpose: at the 0.15 this build carried before
+  // (floor 105.3px) the arithmetic made that 147px shortfall a paying occupant, and
+  // the device feedback came back with the terminal bouncing ~8.6 rows (147 over the
+  // ~17px row) and the Transport climbing as the soft keyboard left. That feedback is
+  // why the boundary is 0.25 — the earlier "147 must avoid" reading is overturned.
   const table = [
     [274, "428px", 254],
-    [555, "147px", HOST_BOTTOM - 147],
+    [555, "0px", HOST_BOTTOM],
     [633.5, "0px", HOST_BOTTOM],
   ];
   for (const [visible, bottom, hostBottom] of table) {
@@ -666,9 +672,10 @@ test("v3.1: avoiding states lift controls (20 + occlusion) and the fixed strip (
   // the same one pass. The two numbers are NOT the same: the column keeps its
   // authored 20px clearance over the transport strip and adds the occlusion ON TOP
   // of it, while the strip lifts by the occlusion alone. The floor is v3.1's: a
-  // shortfall under the ratio (633.5 → raw 68.5 ≈ 9.8%, under the 105.3px floor)
+  // shortfall under the ratio (633.5 → raw 68.5 ≈ 9.8%, and the Magic Keyboard's
+  // 555 → raw 147 ≈ 20.9%, both under the 175.5px floor)
   // owes NOTHING, so the strip stays authored at the PHYSICAL bottom (702) and simply
-  // overlaps the terminal; 555 (raw 147 ≈ 20.9%) clears the floor and lifts.
+  // overlaps the terminal; only 274 (raw 428 ≈ 61.0%) clears the floor and lifts.
   //   controls bottom = 20 + owed
   //   status   bottom = owed        (fixed, anchored to layoutHeight)
   const h = viewportHarness({ hosts: ["a"] });
@@ -679,12 +686,12 @@ test("v3.1: avoiding states lift controls (20 + occlusion) and the fixed strip (
   const table = [
     // [vv.height, owedOcclusion] — owed = floored occlusion (0 when exempt).
     [274, owedPx(274)],   // 428
-    [555, owedPx(555)],   // 147 — above the 105.3 floor, it avoids
+    [555, owedPx(555)],   // 0 — under the 175.5 floor, exempt: no lift, no bounce
     [633.5, owedPx(633.5)], // 0 — under the floor, exempt
   ];
-  assert.equal(table[0][1], 428, "274 clears the 702*0.15 = 105.3 floor and owes its full shortfall");
-  assert.equal(table[1][1], 147, "555 is 147 = 20.9% > 15% — above the floor, it owes the whole shortfall");
-  assert.equal(table[2][1], 0, "633.5 is 68.5 = 9.8% < 15% — under the floor and owes nothing");
+  assert.equal(table[0][1], 428, "274 clears the 702*0.25 = 175.5 floor and owes its full shortfall");
+  assert.equal(table[1][1], 0, "555 is 147 = 20.9% < 25% — under the floor, it owes nothing and nothing moves");
+  assert.equal(table[2][1], 0, "633.5 is 68.5 = 9.8% < 25% — under the floor and owes nothing");
 
   for (const [visible, occlusion] of table) {
     h.openKeyboard(visible);
@@ -919,7 +926,7 @@ test("v3.0: zoom never lifts even at keyboard-sized visible heights", () => {
 test("v3.1: a stranded lift is cleared by the 500ms tick when the keyboard leaves silently", () => {
   const h = viewportHarness({ hosts: ["a"] });
   h.api.initVisualViewportHandling();
-  // A REAL keyboard (274 clears the 105.3 floor), so there IS a lift that could strand.
+  // A REAL keyboard (274 clears the 175.5 floor), so there IS a lift that could strand.
   h.openKeyboard(274);
   assert.deepEqual(h.bottoms(), ["428px"]);
 
@@ -1164,12 +1171,14 @@ test("v3.0 structure: the retired pin and the retired root-origin machinery are 
   // The retired v2 gate is banned by its STRUCTURE, not by a numeral. It compared the
   // VISUAL HEIGHT against a fraction of the layout height ("a short keyboard does not
   // get to lift anything") — that is the cliff that left a real keyboard sitting on
-  // the terminal, and it must never come back in any spelling. The numeral 0.15 is
+  // the terminal, and it must never come back in any spelling. The numeral 0.25 is
   // legitimate on this build: it is SMALL_OCCLUSION_RATIO, a floor applied to the
   // SHORTFALL in the opposite direction (a shallow shortfall moves nothing). A test
   // that banned the literal would only prove it cannot tell the two apart. The floor
-  // is 0.15 and not the 0.25 this round first shipped: 0.25 put the 702-layout floor
-  // at 175.5px, ABOVE the measured 147px keyboard, and exempted a real keyboard.
+  // is 0.25 (702 → 175.5px, ABOVE the measured 147px Magic-keyboard frame) because
+  // the device feedback overturned the earlier 0.15 reading: lifting the terminal on
+  // that 147px transient was the ~8.6-row bounce plus the raised Transport that was
+  // reported back, so the transient is exempt and the 428px soft keyboard still avoids.
   assert.equal(/layoutHeight\s*\*\s*\(\s*1\s*-/.test(src), false, "the retired (1 − ratio) cliff must not survive — it refused to lift SHORT keyboards");
   assert.equal(/vv\.height\s*<=?[^;{]*\*/.test(src), false, "vv.height may never be compared against a fraction of the layout height — that is the retired occlusion classification");
   assert.equal(/isHardOcclusion|covered\s*>=/.test(src), false, "the retired hard/soft occlusion classification must not return under its old names");
