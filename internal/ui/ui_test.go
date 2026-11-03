@@ -1124,25 +1124,16 @@ func TestViewportAndHeightAnchors(t *testing.T) {
 		"document.documentElement.clientHeight",
 		`document.getElementById("terminal-container")`,
 		":scope > [data-instance-id]",
-		// v3.2: the SHORTFALL against the stable layout height is one INPUT to a
-		// KEYBOARD-SESSION STATE MACHINE, not the verdict itself. The retired v3.1
-		// stateless floor (SMALL_OCCLUSION_RATIO 0.25) is GONE, not renamed: the
-		// measured 206.1/340px retransition intermediates sat ABOVE its 175.5px
-		// line and re-lifted the terminal and Transport mid-transition, and no
-		// fraction can separate one live keyboard mid-session from a strip that
-		// never opened a session. The machine instead: raw =
-		// max(0, clientHeight − vv.height); EDITABLE focus (TEXTAREA / INPUT /
-		// contenteditable) + raw ≥ 0.50 * layoutHeight ENTERS (428 ≥ 351 on the
-		// measured 702 layout); the session HOLDS at RAW every pass (340 / 206.1
-		// / 147 are the same keyboard, paid as it moves); zoom, raw ≤ 1 or focus
-		// loss ENDS it (0); and a shallow shortfall can never re-open a closed
-		// session — only a fresh keyboard across the entry line can. The 0.50
-		// compares at ENTRY ONLY.
+		// v3.3: entry uses 25% so portrait's measured 340/1062 keyboard can
+		// enter. A same-geometry decrease exits; after recovery only a fresh 50%
+		// keyboard may re-enter. Orientation/Split View changes get one settle pass.
+		// No ratio filters the running occlusion.
 		"Math.max(0, layoutHeight - vv.height)",
 		"document.activeElement",
 		`focus.tagName === "TEXTAREA" || focus.tagName === "INPUT" || focus.isContentEditable`,
-		"const KEYBOARD_ENTRY_RATIO = 0.50;",
-		"terminalAvoidanceActive = raw >= layoutHeight * KEYBOARD_ENTRY_RATIO;",
+		"const KEYBOARD_ENTRY_RATIO = 0.25;",
+		"const KEYBOARD_REENTRY_RATIO = 0.50;",
+		"raw >= layoutHeight * entryRatio",
 		"if (zoomed || raw <= 1 || !focusEditable) {",
 		"terminalAvoidanceActive = false;",
 		"const occlusion = terminalAvoidanceActive ? raw : 0;",
@@ -1195,23 +1186,9 @@ func TestViewportAndHeightAnchors(t *testing.T) {
 			t.Fatalf("GET / applyVisualViewportOcclusion must not contain %q — the root is never written, the shell is never resized, and neither is re-settled on a frame (issue #116 contract v3.0)", banned)
 		}
 	}
-	// The retired gates are GONE, not merely unused. The v2 HARD gate
-	// (`vv.height <= layoutHeight * (1 - HARD_OCCLUSION_RATIO)` / 0.75) REFUSED to
-	// lift for anything SHORTER than a tall keyboard. The v3.1 floor
-	// (SMALL_OCCLUSION_RATIO, 0.15 then 0.25 of the layout height applied to the
-	// running shortfall) is now retired the same way: applied STATELESSLY to every
-	// frame, it re-lifted the terminal and the Transport on the measured 206.1px
-	// and 340px retransition intermediates — every one of them sits ABOVE the 0.25
-	// line (175.5px on the 702 layout), and no fraction can tell one live
-	// keyboard mid-session from a strip that never opened a session. v3.2 keeps
-	// ONE fraction, 0.50, and applies it ONLY at the session ENTRY edge, never
-	// against a running occlusion. So the bans are on the retired gates' SHAPES —
-	// the HARD gate's name, `(1 -` cliff spelling and inlined `layoutHeight *0.75`
-	// literal; the small-overlay floor's name and its `occlusion < layoutHeight *`
-	// running-comparison spelling — not on bare numerals, which only prove a test
-	// cannot tell a cliff from a floor from an entry line. A true overlay still
-	// lands on occlusion 0: raw is 0 by arithmetic and the session never enters.
-	// Scan CODE, not prose (the comments narrate the retirement by name).
+	// Retired stateless gates stay banned. v3.3 uses entry 25%, recovery
+	// re-entry 50%, and a same-geometry decrease to exit; orientation changes
+	// receive one settle pass before recovery detection. Scan code, not prose.
 	codeText := stripJSComments(bodyText)
 	for _, banned := range []string{
 		"HARD_OCCLUSION_RATIO",
@@ -1221,7 +1198,7 @@ func TestViewportAndHeightAnchors(t *testing.T) {
 		"occlusion < layoutHeight *",
 	} {
 		if strings.Contains(codeText, banned) {
-			t.Fatalf("GET / must not carry the retired occlusion gate %q — v3.2 pays the RAW of an entered keyboard session and exempts every shortfall OUTSIDE one; it neither refuses to lift below a 0.75 cliff nor floors the running occlusion at a 0.25 line (issue #116)", banned)
+			t.Fatalf("GET / must not carry the retired occlusion gate %q — v3.3 exits on recovery and never floors the running occlusion (issue #116)", banned)
 		}
 	}
 	// CONTRACT v3.1 (issue #116), the transport strip reaches the PHYSICAL bottom.

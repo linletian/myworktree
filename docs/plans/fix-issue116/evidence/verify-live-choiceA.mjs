@@ -134,7 +134,8 @@ const HOST_FLOOR = 682;
 // (SMALL_OCCLUSION_RATIO 0.25 → 175.5) is NOT here: it applied its line to the
 // RUNNING occlusion and re-lifted the terminal mid-retract — see the HOLD block
 // below, where the same 147 is paid BECAUSE a session entered.
-const KEYBOARD_ENTRY_RATIO = 0.50;
+const KEYBOARD_ENTRY_RATIO = 0.25;
+const KEYBOARD_REENTRY_RATIO = 0.50;
 
 // Full-height, out-of-flow #app. Its inline height setter THROWS: v2.2 pinned
 // this box to vv.height and v3.0 never may, so the retired pin fails HERE rather
@@ -245,7 +246,7 @@ const liveWindow = {
 // variable in the same closure the sliced function references — otherwise the live
 // bytes would throw on the first `terminalAvoidanceActive =` and never prove the
 // session machine. It starts CLOSED, matching the shipped page load.
-const factory = new Function("document", "window", `let terminalAvoidanceActive = false;\n${apply}\n\nreturn applyVisualViewportOcclusion;`);
+const factory = new Function("document", "window", `let terminalAvoidanceActive = false;\nlet terminalAvoidanceRecovering = false;\nlet terminalAvoidanceGeometryGrace = false;\nlet previousTerminalRaw = 0;\nlet previousTerminalLayoutHeight = 0;\nlet previousTerminalVVWidth = 0;\n${apply}\n\nreturn applyVisualViewportOcclusion;`);
 const avoid = factory(liveDocument, liveWindow);
 
 const bottoms = () => hosts.map((host) => host.style.bottom);
@@ -304,11 +305,10 @@ const sessionFrame = (visible, owed, label) => {
   assert.ok(controls.getBoundingClientRect().top === CONTROLS_TOP, "top:20px is never written — the quick-keys ENTRY button does not jump");
   assert.equal(controlsHeight(), HOST_FLOOR - CONTROLS_TOP - CONTROLS_AUTHORED_BOTTOM - owed, `the column's usable height shrinks by exactly ${owed}px (what the panel's max-height:100% resolves against)`);
 };
-sessionFrame(274, 428, "ENTER 274 (raw 428 crosses the 351px entry line)");
-sessionFrame(362, 340, "HOLD mid-retract 362 pays raw 340");
-sessionFrame(495.9, LAYOUT - 495.9, "HOLD mid-retract 495.9 pays raw 206.1 (a third of the layout — the retired floor snapped THIS to 0 and bounced)");
-sessionFrame(555, 147, "HOLD retract 555 pays raw 147 (147 below 351 but the session is LIVE)");
-console.log("✓ ENTER 274 paid 428px into every host, the column (+20) and the strip; the SAME session then HELD raw 340 / 206.1 / 147 with NO floor — the intermediates the retired 0.25 ratio could not tell apart");
+sessionFrame(274, 428, "ENTER 274: the explicit soft keyboard lifts the terminal");
+sessionFrame(495.9, 0, "RECOVER 495.9: a same-geometry decrease exits instead of holding 206.1px");
+sessionFrame(555, 0, "Magic overlay 555 stays closed after recovery");
+console.log("✓ the keyboard entered at 428, recovery restored all three boxes, and the floating intermediate did not re-open it");
 
 // Pan immunity: the occlusion is client-space vv.height against the stable layout
 // height, so the target does not move — and because writes are guarded, nothing is
@@ -333,15 +333,13 @@ for (const offsetTop of [12.5, 237, 428, 0]) {
 assert.equal(overlayWrites(), overlaySettled, "a pan must not rewrite the column or the strip either");
 console.log("✓ every pan offset left both the lift and the write count untouched (hosts, column and strip)");
 
-// 633.5 INSIDE the live session: the keyboard retracting through 633.5 still pays
-// raw 68.5 — the terminal FOLLOWS the keyboard; the session decides, not the size.
-// (This is the frame the retired 0.25 exemption answered with "0" — paying 0 while
-// the keyboard covered the last lift is exactly the bounce the device reported.)
+// A further decrease in the same geometry exits immediately; it is not held as
+// a partial 68.5px avoidance.
 vv.height = 633.5;
 avoid();
-assert.deepEqual(bottoms(), ["68.5px", "68.5px"], "a live session HOLDS the retract: hosts at raw 68.5, not snapped flush");
-assert.equal(controlsBottom(), "88.5px", "…and the column follows at 20 + 68.5");
-assert.equal(statusBarBottom(), "68.5px", "…and the strip at 68.5");
+assert.deepEqual(bottoms(), ["0px", "0px"], "recovery at 633.5 restores the hosts instead of holding 68.5px");
+assert.equal(controlsBottom(), "20px", "the column returns to its authored 20px");
+assert.equal(statusBarBottom(), "0px", "and Transport returns to 0px");
 // The REAL floating overlay / keyboard close (b90643be…, seq388): vv.height ==
 // clientHeight → raw 0 ≤ 1 → the session LEAVES, hosts RESTORE to flush rather
 // than keep the last lift — this restore is the exit doing real work, and occlusion
@@ -402,9 +400,9 @@ console.log("✓ zoom opted out and CLOSED the session; at scale 1 the entry lin
 // soft keyboard here is whatever iOS shows; the session follows the FOCUS, which is
 // why the probe reports activeElementTag and this stub can swap it.
 sessionFrame(274, 428, "TEXTAREA focus keeps the session live");
-vv.height = 555; // raw 147, still LIVE while the TEXTAREA holds focus
+vv.height = 555; // same-geometry decrease is already recovery
 avoid();
-assert.deepEqual(bottoms(), ["147px", "147px"], "TEXTAREA focus: session live at 555 pays raw 147");
+assert.deepEqual(bottoms(), ["0px", "0px"], "recovery exits at 555 instead of holding 147px");
 setFocus({ tagName: "BODY", isContentEditable: false });
 avoid();
 assert.deepEqual(bottoms(), ["0px", "0px"], "non-editable focus ENDS the session: hosts flush at the same raw 147");
@@ -449,9 +447,9 @@ assert.deepEqual(bottoms(), ["0px", "0px", "0px"], "a never-opened shallow short
 vv.height = 200; // raw exactly 200 = the entry line: ENTERS, inclusive boundary
 avoid();
 assert.deepEqual(bottoms(), ["200px", "200px", "200px"], "raw exactly 0.50*layout ENTERS the session and pays its raw (boundary inclusive)");
-vv.height = 299.5; // raw 100.5: LIVE session HOLDS a shallower fractional shortfall
+vv.height = 299.5; // raw 100.5: same-geometry decrease exits
 avoid();
-assert.deepEqual(bottoms(), ["100.5px", "100.5px", "100.5px"], "a live session HOLDS a fractional shallower shortfall exactly (100.5)");
+assert.deepEqual(bottoms(), ["0px", "0px", "0px"], "the fractional decrease is recovery, so the session exits");
 vv.height = 400; // raw 0: LEAVE
 avoid();
 assert.deepEqual(bottoms(), ["0px", "0px", "0px"], "raw <= 1 leaves the session at the second viewport too");

@@ -428,10 +428,11 @@ function makeOverlayChild({ id, top, workspaceBottom, authoredBottom, resolveBot
 // A stand-in for window.visualViewport: geometry is mutable so a case can
 // open/close the keyboard, pan the viewport, or pinch-zoom, and dispatch()
 // fires the listeners the shipped init registered.
-function makeVisualViewport({ height = LAYOUT_HEIGHT, offsetTop = 0, scale = 1 } = {}) {
+function makeVisualViewport({ height = LAYOUT_HEIGHT, width = 1194, offsetTop = 0, scale = 1 } = {}) {
   const listeners = new Map();
   return {
     height,
+    width,
     offsetTop,
     scale,
     listeners,
@@ -470,6 +471,11 @@ function buildViewportFactory(src) {
   // applier assigns terminalAvoidanceActive — the getters expose them below.
   let sidebarCollapsed = false;
   let terminalAvoidanceActive = false;
+  let terminalAvoidanceRecovering = false;
+  let terminalAvoidanceGeometryGrace = false;
+  let previousTerminalRaw = 0;
+  let previousTerminalLayoutHeight = 0;
+  let previousTerminalVVWidth = 0;
 
   ${slices}
   return {
@@ -627,29 +633,10 @@ function viewportHarness({
   };
 }
 
-// The session rule under test, spelled out ONCE for the expectation side so each
-// case states what it expects independently of the implementation. v3.2 replaced the
-// retired stateless floor (`raw < clientHeight * 0.25 ? 0 : raw` — gone, not
-// renamed): with editable focus and scale = 1 the session ENTERS at raw >= 50% of
-// the layout height, HOLDS at raw every pass while editable focus is kept and
-// raw > 1, and LEAVES at raw <= 1, zoom, or focus loss. The 0.50 compares ONLY at
-// the entry edge — never against a session already in flight. The oracle is the
-// expectation's bookkeeping; the cases below still spell the literal numbers.
-const KEYBOARD_ENTRY_RATIO = 0.50;
-function makeSessionOracle() {
-  let active = false;
-  const owedPx = (visibleHeight, { editable = true, scale = 1 } = {}) => {
-    const raw = Math.max(0, LAYOUT_HEIGHT - visibleHeight);
-    if (Math.abs(scale - 1) > 0.01 || raw <= 1 || !editable) {
-      active = false;
-    } else if (!active) {
-      active = raw >= LAYOUT_HEIGHT * KEYBOARD_ENTRY_RATIO;
-    }
-    return active ? raw : 0;
-  };
-  owedPx.isActive = () => active;
-  return owedPx;
-}
+// Contract v3.3: a 25% shortfall can enter a keyboard session. A same-geometry
+// decrease exits instead of holding a partial overlay; after that only a fresh
+// 50% keyboard may re-enter. Geometry changes get one settle pass so rotation is
+// not mistaken for recovery.
 
 // --- R6: graceful degradation -----------------------------------------------
 
@@ -690,37 +677,64 @@ test("v3.2(a): an editable-focused keyboard entering 428 activates the session a
   assert.equal(h.layoutGap(), 0, "layoutGap = clientHeight − app.bottom, and it stays 0");
 });
 
-test("v3.2(b): mid-session retract frames pay RAW — 340, 206.1, 147 — never re-filtered by 50%", () => {
-  // The defect this round closes: those intermediates are ONE live keyboard
-  // leaving, and every previous stateless rule (0.15, then 0.25) re-judged each
-  // frame and RE-LIFTED the terminal and Transport when a frame crossed back over
-  // its line. Inside a session there is no line at all — the boxes track raw.
+test("v3.3: a portrait keyboard at 340/1062 enters — the 50% entry gate was the regression", () => {
+  const h = viewportHarness({ layoutHeight: 1062, hosts: ["a"] });
+  h.api.initVisualViewportHandling();
+  h.vv.width = 834;
+  h.vv.height = 722; // measured portrait soft keyboard: raw 340 = 32.0%
+  h.vv.dispatch("resize");
+  assert.equal(h.api.isAvoidanceActive(), true, "340/1062 clears the 25% entry line");
+  assert.deepEqual(h.bottoms(), ["340px"]);
+  assert.deepEqual(h.hostBottoms(), [1042 - 340]);
+});
+
+test("v3.3: a same-geometry decrease exits — Magic overlays cannot re-lift the terminal", () => {
   const h = viewportHarness({ hosts: ["a"] });
   h.api.initVisualViewportHandling();
-  h.openKeyboard(274); // enter: raw 428
-  const oracle = makeSessionOracle();
-  assert.equal(oracle(274), 428, "the oracle enters at 428");
+  h.openKeyboard(274);
+  assert.deepEqual(h.bottoms(), ["428px"]);
 
-  const table = [
-    // [vv.height, raw owed] — raw spelled as the SAME double the layout
-    // subtraction produces (≈340 / 206.1 / 147 on the device); the exact
-    // integers are pinned by the other cases, the point here is RAW-vs-0.
-    [362, 340],
-    [495.9, LAYOUT_HEIGHT - 495.9],
-    [555, 147],
-  ];
-  for (const [visible, raw] of table) {
-    assert.ok(raw < LAYOUT_HEIGHT * KEYBOARD_ENTRY_RATIO, `raw ${raw} sits UNDER the 50% entry line — inside a live session it must STILL be paid`);
-    assert.equal(oracle(visible), raw, `the oracle holds the session at raw ${raw}`);
+  // No full-height event is required: the recovery direction itself ends the lift.
+  h.openKeyboard(495.9); // raw 206.1, decreasing from 428
+  assert.equal(h.api.isAvoidanceActive(), false);
+  assert.deepEqual(h.bottoms(), ["0px"]);
+  assert.deepEqual(h.hostBottoms(), [HOST_BOTTOM]);
+  assert.equal(h.statusBarBottom(), "0px", "Transport returns in the same pass");
+
+  for (const visible of [555, 633.5, 495.9]) {
     h.openKeyboard(visible);
-    assert.equal(h.api.isAvoidanceActive(), true, `the session stays active at vv.height ${visible}`);
-    assert.deepEqual(h.bottoms(), [raw + "px"], `vv.height ${visible} pays the RAW ${raw}px, not a re-floored 0`);
-    assert.deepEqual(h.hostBottoms(), [HOST_BOTTOM - raw], `the host's real bottom tracks ${raw}`);
-    assert.equal(h.controlsBottom(), (20 + raw) + "px", `the column tracks 20 + ${raw}`);
-    assert.equal(h.statusBarBottom(), raw + "px", `the strip tracks ${raw}`);
-    assert.equal(h.effectiveOcclusion(), raw, `the diagnostic mirror tracks ${raw}`);
-    assert.equal(h.appBottom(), LAYOUT_HEIGHT, "the shell stays FULL HEIGHT throughout");
+    assert.equal(h.api.isAvoidanceActive(), false, `raw ${LAYOUT_HEIGHT - visible} cannot re-open a recovered session`);
+    assert.deepEqual(h.bottoms(), ["0px"]);
   }
+  h.tick();
+  assert.deepEqual(h.bottoms(), ["0px"], "the 500ms backstop cannot bring the lift back");
+
+  h.openKeyboard(274); // a NEW explicit keyboard clears the recovery latch
+  assert.equal(h.api.isAvoidanceActive(), true);
+  assert.deepEqual(h.bottoms(), ["428px"]);
+});
+
+test("v3.3: orientation resize gets one settle pass before recovery detection", () => {
+  const h = viewportHarness({ hosts: ["a"] });
+  h.api.initVisualViewportHandling();
+  h.openKeyboard(274); // landscape raw 428
+  h.root.box.clientHeight = 1062;
+  h.vv.width = 834;
+  h.vv.height = 274;
+  h.vv.dispatch("resize"); // geometry changed: raw 788, still avoiding
+  assert.deepEqual(h.bottoms(), ["788px"]);
+
+  // This is the observed orientation sequence: the next resize decreases raw
+  // while the keyboard is still alive. It is not the Magic-keyboard close path.
+  h.vv.height = 722;
+  h.vv.dispatch("resize");
+  assert.equal(h.api.isAvoidanceActive(), true, "the first same-geometry settle pass is not a recovery");
+  assert.deepEqual(h.bottoms(), ["340px"]);
+
+  h.vv.height = 1062;
+  h.vv.dispatch("resize");
+  assert.equal(h.api.isAvoidanceActive(), false, "subsequent full height closes normally");
+  assert.deepEqual(h.bottoms(), ["0px"]);
 });
 
 test("v3.2(c): raw back to 0 closes the session — shallow 206.1 / 147 / 68.5 then stay 0 even with editable focus", () => {
@@ -851,12 +865,9 @@ test("v3.0: the quick-keys column's usable height shrinks by exactly the occlusi
   const fullHeight = h.controlsHeight();
   assert.equal(fullHeight, HOST_BOTTOM - 20 - CONTROLS_AUTHORED_BOTTOM, "at rest: workspace bottom − top 20 − authored bottom 20");
 
-  // Session order, spelled with literals: ENTER at 274 (raw 428), then the
-  // 555 / 633.5 frames are the SAME keyboard retracting mid-session, so they
-  // pay their raw (147 / 68.5) and the column shortens by exactly that; only
-  // close hands the full usable height back. Under the retired 0.25 floor the
-  // second and third frames owed nothing and the column snapped back mid-lift.
-  for (const [visible, occlusion] of [[274, 428], [555, 147], [633.5, 68.5]]) {
+  // Entry at 274 shrinks the column by 428. A same-geometry recovery at 555
+  // exits and restores the full column; subsequent floating overlays stay closed.
+  for (const [visible, occlusion] of [[274, 428], [555, 0], [633.5, 0]]) {
     h.openKeyboard(visible);
     assert.equal(h.controlsHeight(), fullHeight - occlusion, `vv.height ${visible}: the column is ${occlusion}px shorter mid-session, so the panel's max-height tracks the occlusion the live session owes`);
     assert.equal(h.controlsRect().top, CONTROLS_TOP, "top:20px is never written — the quick-keys ENTRY BUTTON does not move, and never jumps");
@@ -1275,8 +1286,9 @@ test("v3.0 structure: the viewport layer writes the TERMINAL'S OWN bottoms and N
   assert.match(apply, /document\.activeElement/, "the session reads the focused element");
   assert.match(apply, /tagName === "TEXTAREA" \|\| focus\.tagName === "INPUT" \|\| focus\.isContentEditable/, "editable means TEXTAREA, INPUT or contenteditable — the xterm helper is a TEXTAREA");
   assert.match(apply, /zoomed \|\| raw <= 1 \|\| !focusEditable/, "the exit edges: zoom, raw <= 1, or focus loss, spelled exactly like this");
-  assert.match(apply, /const KEYBOARD_ENTRY_RATIO = 0\.50;/, "the entry line is a named 0.50 constant and NOTHING else");
-  assert.match(apply, /terminalAvoidanceActive = raw >= layoutHeight \* KEYBOARD_ENTRY_RATIO;/, "the 0.50 compares ONLY at the entry edge, spelled exactly like this");
+  assert.match(apply, /const KEYBOARD_ENTRY_RATIO = 0\.25;/, "portrait's 340/1062 keyboard enters at 25%");
+  assert.match(apply, /const KEYBOARD_REENTRY_RATIO = 0\.50;/, "only a fresh 50% keyboard may re-enter after recovery");
+  assert.match(apply, /raw >= layoutHeight \* entryRatio/, "the active entry edge uses the selected ratio");
   assert.match(apply, /const occlusion = terminalAvoidanceActive \? raw : 0;/, "an active session pays RAW — no ratio refilters the held path");
   assert.match(apply, /window\.__mwTerminalOcclusion = occlusion;/, "the effective number is mirrored for the diagnostic probe to read");
   const targets = new Set((apply.match(/[\w.[\]]+\.style\.\w+\s*=/g) || []));
@@ -1317,8 +1329,9 @@ test("v3.0 structure: the retired pin and the retired root-origin machinery are 
   assert.equal(/vv\.height\s*<=?[^;{]*\*/.test(src), false, "vv.height may never be compared against a fraction of the layout height — that is the retired occlusion classification");
   assert.equal(/isHardOcclusion|covered\s*>=/.test(src), false, "the retired hard/soft occlusion classification must not return under its old names");
   assert.equal(/occlusion\s*<\s*layoutHeight\s*\*/.test(src), false, "the stateless shortfall floor is retired — no fraction may be compared against the running occlusion");
-  assert.equal((src.match(/layoutHeight \* KEYBOARD_ENTRY_RATIO/g) || []).length, 1, "the entry fraction appears EXACTLY once, on the entry edge");
-  assert.match(src, /terminalAvoidanceActive = raw >= layoutHeight \* KEYBOARD_ENTRY_RATIO;/, "the surviving boundary is the SESSION ENTRY line, spelled exactly like this");
+  assert.equal((src.match(/layoutHeight \* KEYBOARD_ENTRY_RATIO/g) || []).length, 0, "the ratio is selected once, then used by the entry guard");
+  assert.equal((src.match(/layoutHeight \* KEYBOARD_REENTRY_RATIO/g) || []).length, 0, "the re-entry fraction is selected once, not used as a running floor");
+  assert.match(src, /raw >= layoutHeight \* entryRatio/, "the entry guard uses the selected ratio");
   assert.equal(src.includes("visibleBottom"), false, "the retired pan-based occlusion arithmetic must not come back under its old name");
 });
 

@@ -124,19 +124,11 @@ const SCROLL_TOLERANCE_PX = 0.5;
 // other check in this file and still bury the quick-keys panel.
 const CONTROLS_AUTHORED_BOTTOM = 20;
 
-// CONTRACT v3.2 (issue #116): the KEYBOARD-SESSION entry line, mirrored from the
-// applier. 0.50 of clientHeight is compared ONLY while no session is open — a
-// shortfall at or over it, with editable focus, is an explicit soft keyboard
-// starting up and ENTERS avoidance. Inside a live session there is NO line: the
-// effective occlusion tracks raw every pass (the 340 / 206.1 / 147 retract frames
-// of one keyboard move exactly that far), and at raw <= 1, zoom, or focus loss the
-// session ENDS — after which any shortfall under 0.50 can never re-open it. The
-// retired v3.1 0.25 stateless floor is NOT replayed here: 206.1px intermediates sat
-// ABOVE its 175.5px line and re-lifted the terminal and Transport mid-session, the
-// exact bounce the device feedback reported; a ratio without session state cannot
-// tell those frames from a fresh shallow overlay, which is why the shape changed.
-// The ratio is a RATIO, not a pixel count, so it holds at every viewport height.
-const KEYBOARD_ENTRY_RATIO = 0.50;
+// Contract v3.3: entry at 25% (portrait 340/1062 is valid). A same-geometry
+// decrease exits; after recovery only a fresh 50% keyboard may re-enter.
+// Geometry changes receive one settle pass before recovery detection.
+const KEYBOARD_ENTRY_RATIO = 0.25;
+const KEYBOARD_REENTRY_RATIO = 0.50;
 
 function num(value) {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
@@ -162,19 +154,48 @@ function isZoomed(snapshot) {
 // and if that ever changes, the probe and this judge must learn the field together.
 function makeKeyboardSessionJudge() {
   let active = false;
+  let recovering = false;
+  let geometryGrace = false;
+  let previousRaw = 0;
+  let previousClientHeight = 0;
+  let previousVVWidth = 0;
   return {
     owedOcclusion: function (snapshot) {
-      if (isZoomed(snapshot)) { active = false; return { owed: 0, gap: null }; }
       const clientHeight = num(snapshot.clientHeight);
       const vvHeight = num(snapshot.vv ? snapshot.vv.height : null);
-      if (clientHeight === null || vvHeight === null) return { owed: null, gap: "clientHeight or vv.height" };
+      const vvWidth = num(snapshot.vv ? snapshot.vv.width : null);
+      if (isZoomed(snapshot)) {
+        if (active) recovering = true;
+        active = false;
+        geometryGrace = false;
+        return { owed: 0, gap: null };
+      }
+      if (clientHeight === null || vvHeight === null || vvWidth === null) return { owed: null, gap: "clientHeight or vv geometry" };
       const raw = Math.max(0, clientHeight - vvHeight);
-      if (raw <= 1) { active = false; return { owed: 0, gap: null }; }
       const tag = snapshot.ui && typeof snapshot.ui.activeElementTag === "string" ? snapshot.ui.activeElementTag : "";
       if (tag === "") return { owed: null, gap: "ui.activeElementTag" };
       const editable = tag === "TEXTAREA" || tag === "INPUT";
-      if (!editable) { active = false; return { owed: 0, gap: null }; }
-      if (!active) active = raw >= clientHeight * KEYBOARD_ENTRY_RATIO;
+      const sameGeometry = clientHeight === previousClientHeight && vvWidth === previousVVWidth;
+      const geometryChanged = active && !sameGeometry;
+      const consumeGrace = geometryGrace && !geometryChanged;
+      if (raw <= 1 || !editable) {
+        if (active) recovering = true;
+        active = false;
+      } else if (active && !geometryChanged && !consumeGrace && raw < previousRaw - 1) {
+        active = false;
+        recovering = true;
+      }
+      if (!active && editable && raw > 1) {
+        const ratio = recovering ? KEYBOARD_REENTRY_RATIO : KEYBOARD_ENTRY_RATIO;
+        if (raw >= clientHeight * ratio) {
+          active = true;
+          recovering = false;
+        }
+      }
+      geometryGrace = active && geometryChanged;
+      previousRaw = raw;
+      previousClientHeight = clientHeight;
+      previousVVWidth = vvWidth;
       return { owed: active ? raw : 0, gap: null };
     },
   };
@@ -622,7 +643,7 @@ function selfTest() {
     probeVersion: EXPECTED_PROBE_VERSION,
     reason: "manual",
     clientHeight: LAYOUT,
-    vv: { height: LAYOUT, offsetTop: 0, scale: 1 },
+    vv: { height: LAYOUT, width: 1194, offsetTop: 0, scale: 1 },
     // The focus half of the v3.2 session gate: the terminal's editable helper is
     // a TEXTAREA, so keyboard fixtures really do carry the evidence the session
     // machine needs (a frame WITHOUT ui is inconclusive by design, see judge).
@@ -668,25 +689,6 @@ function selfTest() {
       xtermRows: { top: 40, bottom: HOST_FLOOR - 13 },
     };
   };
-  // A HOLD frame of a live session: a PRIOR keyboard() opened the session at a
-  // tall raw shortfall, and the keyboard is now retracting to a SHORTER visible
-  // height. Because the session is already active, the machine pays the RAW here
-  // with NO floor — 340 / 206.1 / 147 / 68.5 exactly — which is the whole point of
-  // v3.2: the same shallow height that a never-entered frame pays 0, a live session
-  // pays in full. Valid ONLY inside a session; the fixture's seq order is what makes
-  // it true (the judge threads the state, not this helper).
-  const holdSession = (visible) => {
-    const raw = Math.max(0, LAYOUT - visible);
-    if (raw <= 1) {
-      throw new Error(`holdSession(${visible}) is a CLOSED session (raw ${raw} <= 1) — that frame owes 0, spell it with shallow()/rest`);
-    }
-    return {
-      vv: { height: visible, offsetTop: 0, scale: 1 },
-      occlusion: raw,
-      ptyHosts: hostsAt(raw),
-      xtermRows: { top: 40, bottom: HOST_FLOOR - raw - 13 },
-    };
-  };
   const snap = (over = {}) => {
     const merged = {
       ...base,
@@ -712,16 +714,12 @@ function selfTest() {
       { seq: 1, snapshot: snap() }, { seq: 2, snapshot: snap({ reason: "periodic" }) }], want: "PASS" },
     { name: "soft keyboard 274: shell STILL full height, hosts lifted 428px", events: [
       { seq: 1, snapshot: snap({ reason: "keyboard-hint", ...keyboard(274) }) }], want: "PASS" },
-    // v3.2 HOLD — the half the retired 0.25 floor got BACKWARDS: once the session
-    // has ENTERED at 274 (seq1), the SAME keyboard retracting through 555 (raw
-    // 147) and 633.5 (raw 68.5) pays RAW at every pass with NO line on it — the
-    // hosts follow raw, they do NOT snap back to flush mid-transition. The judge
-    // proves this is a session, not a ratio: the same 555/633.5 frames with no
-    // entered session (below) owe 0.
-    { name: "live session HOLDS at raw: 274 (428) then 555 (147) then 633.5 (68.5) — no floor snaps it back", events: [
+    // Same-geometry decrease is recovery: after entering at 274, the 555 frame
+    // must restore flush; later 633.5 and other shallow overlays cannot re-open it.
+    { name: "same-geometry recovery: 274 then 555 then 633.5 all restore flush", events: [
       { seq: 1, snapshot: snap({ reason: "keyboard-hint", ...keyboard(274) }) },
-      { seq: 2, snapshot: snap({ reason: "settle", ...holdSession(555) }) },
-      { seq: 3, snapshot: snap({ reason: "settle", ...holdSession(633.5) }) }], want: "PASS" },
+      { seq: 2, snapshot: snap({ reason: "settle", ...shallow(555) }) },
+      { seq: 3, snapshot: snap({ reason: "settle", ...shallow(633.5) }) }], want: "PASS" },
     // v3.2 EXIT and the closed-session exemption: the keyboard closes (raw <= 1 at
     // seq2), the session LEAVES, and the shallow frames after it (555 → 147,
     // 633.5 → 68.5) with editable focus still owe NOTHING — a closed session

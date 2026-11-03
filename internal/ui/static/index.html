@@ -3703,12 +3703,19 @@
         // hostRect.bottom == 682 - occlusion in the measured layout, the controls
         // column sits at 20 + occlusion and the status strip at occlusion, and
         // xtermRows.bottom <= vv.height + 1.
-        // issue #116 v3.2: the ONLY persistent state of this layer — one boolean
-        // (is a soft-keyboard session in flight?) plus the effective occlusion
-        // actually written, mirrored on window.__mwTerminalOcclusion so the
-        // diagnostic probe reports the number the product owes instead of keeping
-        // a second copy of the arithmetic. No timers, no history arrays, no modes.
+        // issue #116 v3.3: keyboard avoidance is scoped to an actual input session.
+        // A 25% shortfall may ENTER; after recovery starts, only a fresh 50% keyboard
+        // may re-enter while the same editable remains focused. This prevents a
+        // floating overlay from re-opening avoidance after the keyboard closes.
+        // A same-geometry decrease exits immediately instead of holding the terminal
+        // at 147/206px. Orientation/Split View geometry changes get one settle pass,
+        // because their first resize can otherwise look exactly like a recovery.
         let terminalAvoidanceActive = false;
+        let terminalAvoidanceRecovering = false;
+        let terminalAvoidanceGeometryGrace = false;
+        let previousTerminalRaw = 0;
+        let previousTerminalLayoutHeight = 0;
+        let previousTerminalVVWidth = 0;
 
         function applyVisualViewportOcclusion() {
             const container = document.getElementById("terminal-container");
@@ -3723,23 +3730,11 @@
             // adds the occlusion ON TOP of it, occlusion 0 hands exactly 20px
             // back, and no ratio or threshold is computed from it.
             const CONTROLS_BOTTOM_OFFSET = 20;
-            // CONTRACT v3.2 (issue #116) — the ENTRY edge of the keyboard-session
-            // state machine. 0.50 of the LAYOUT height is compared ONLY while the
-            // session is INACTIVE: a shortfall at or over it with editable focus is
-            // an explicit soft keyboard starting up (measured 702 layout: 428 =
-            // 61.0%) and enters avoidance. It is NEVER applied to a session that is
-            // already active — inside one, occlusion tracks raw every pass, so the
-            // 340 / 206.1 / 147 retract frames of one live keyboard move the
-            // terminal exactly as far as the keyboard moves, and after the session
-            // ends (raw <= 1, zoom, or focus leaving the editable field) those
-            // shallow numbers can no longer OPEN avoidance on their own. The 0.25
-            // small-overlay floor this constant replaces did exactly that on the
-            // device — 206.1px intermediates sat above its 175.5px line and
-            // re-lifted the terminal and Transport mid-transition — and it is gone,
-            // not renamed. NOT the retired v2 HARD_OCCLUSION_RATIO gate either
-            // (vv.height <= layoutHeight*0.75, computed off the VISIBLE height;
-            // gone, not renamed).
-            const KEYBOARD_ENTRY_RATIO = 0.50;
+            // CONTRACT v3.3: the entry ratio is 25% (portrait's measured 340/1062
+            // keyboard must enter). Once recovery starts, re-entry requires a new
+            // 50% keyboard. Neither ratio filters an already-running session.
+            const KEYBOARD_ENTRY_RATIO = 0.25;
+            const KEYBOARD_REENTRY_RATIO = 0.50;
             const layoutHeight = document.documentElement.clientHeight;
             const vv = window.visualViewport;
             // Pinch / double-tap zoom opt-out, spec fact #1: vv.height is
@@ -3763,17 +3758,38 @@
             // accepts INPUT and contenteditable hosts).
             const focus = document.activeElement;
             const focusEditable = !!(focus && (focus.tagName === "TEXTAREA" || focus.tagName === "INPUT" || focus.isContentEditable));
-            // The state machine itself — the whole judgment, four edges, no
-            // ratios on the held path (see the CONTRACT v3.2 header above).
+            const sameGeometry = layoutHeight === previousTerminalLayoutHeight
+                && !!vv && vv.width === previousTerminalVVWidth;
+            const geometryChanged = terminalAvoidanceActive && !sameGeometry;
+            const consumeGeometryGrace = terminalAvoidanceGeometryGrace && !geometryChanged;
             if (zoomed || raw <= 1 || !focusEditable) {
+                // Only a real session creates a recovery latch. A fresh page sitting
+                // at its baseline must still be allowed to open its first keyboard.
+                if (terminalAvoidanceActive) terminalAvoidanceRecovering = true;
                 terminalAvoidanceActive = false;
-            } else if (!terminalAvoidanceActive) {
-                terminalAvoidanceActive = raw >= layoutHeight * KEYBOARD_ENTRY_RATIO;
+            } else if (terminalAvoidanceActive && !geometryChanged
+                && !consumeGeometryGrace && raw < previousTerminalRaw - 1) {
+                // Recovery is an EXIT, not a request to hold a partially occluded
+                // terminal forever. This is the landscape Magic-Keyboard case.
+                terminalAvoidanceActive = false;
+                terminalAvoidanceRecovering = true;
             }
+            if (!terminalAvoidanceActive && focusEditable && !zoomed && raw > 1) {
+                const entryRatio = terminalAvoidanceRecovering
+                    ? KEYBOARD_REENTRY_RATIO : KEYBOARD_ENTRY_RATIO;
+                if (raw >= layoutHeight * entryRatio) {
+                    terminalAvoidanceActive = true;
+                    terminalAvoidanceRecovering = false;
+                }
+            }
+            terminalAvoidanceGeometryGrace = terminalAvoidanceActive && geometryChanged;
             const occlusion = terminalAvoidanceActive ? raw : 0;
             // Mirror of what was OWED this pass, for the diagnostic probe
             // (viewport_debug.js reads this value; it never re-derives it).
             window.__mwTerminalOcclusion = occlusion;
+            previousTerminalRaw = raw;
+            previousTerminalLayoutHeight = layoutHeight;
+            previousTerminalVVWidth = vv ? vv.width : 0;
             const target = occlusion + "px";
             // EVERY host in #terminal-container, hidden and inactive included
             // (createTerminalHost here, PtyRenderer._createSession in
