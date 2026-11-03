@@ -3483,8 +3483,10 @@
                 try { session.fitAddon.fit(); } catch (e) { console.error("xterm fit error:", e); }
             }
             if (session.term.cols > 0 && session.term.rows > 0) {
-                sendResize(session, session.term.cols, session.term.rows);
-                syncTerminalToAppliedSize(session);
+                // issue #116: ask, do not revert. The sendResize +
+                // syncTerminalToAppliedSize pair here repainted the previous ack on
+                // top of the size fit() had just measured in the same tick.
+                queueTTYResize(session, session.term.cols, session.term.rows);
             }
         }
 
@@ -6956,6 +6958,13 @@
                 resizeObserver: null,
                 lastResizeTime: 0,
                 appliedTTYSize: null,
+                // Resize-throttle state (issue #116), identical in the factory in
+                // kinds/pty.js: the newest size collected inside the window, the
+                // ONE timer that delivers it, and the last size that actually
+                // reached the socket — the dedupe key.
+                pendingTTYResize: null,
+                ttyResizeTrailingTimer: null,
+                lastSentTTYResize: null,
             };
 
             session.term = new Terminal({
@@ -6986,11 +6995,14 @@
                     session.term.resize(Math.floor(w / 9), Math.floor(h / 17));
                 }
 
-                const now = Date.now();
-                if (now - session.lastResizeTime > 100 && session.term.cols > 0 && session.term.rows > 0) {
-                    session.lastResizeTime = now;
-                    sendResize(session, session.term.cols, session.term.rows);
-                    syncTerminalToAppliedSize(session);
+                if (session.term.cols > 0 && session.term.rows > 0) {
+                    // issue #116: fit, then ASK for that size through the shared
+                    // throttle. This path used to pair sendResize with
+                    // syncTerminalToAppliedSize, painting the PREVIOUS ack over the
+                    // size fit() had just measured — permanently wherever sendResize
+                    // refused because the socket was not OPEN. The ack is adopted on
+                    // the `resize` control frame that carries it, not here.
+                    queueTTYResize(session, session.term.cols, session.term.rows);
                 }
             });
             session.resizeObserver.observe(host);
@@ -7107,6 +7119,15 @@
                 session.resizeObserver.disconnect();
                 session.resizeObserver = null;
             }
+            // issue #116: disarmed here as well as in disconnectTTY above, so this
+            // pre-renderer teardown cannot leave a trailing timer behind for a
+            // session that no longer exists.
+            if (session.ttyResizeTrailingTimer) {
+                clearTimeout(session.ttyResizeTrailingTimer);
+                session.ttyResizeTrailingTimer = null;
+            }
+            session.pendingTTYResize = null;
+            session.lastSentTTYResize = null;
             if (session.term && typeof session.term.dispose === "function") {
                 session.term.dispose();
                 session.term = null;
@@ -7367,8 +7388,9 @@
                     try { activeSession.fitAddon.fit(); } catch (e) { console.error("xterm fit error:", e); }
                 }
                 if (activeSession.term.cols > 0 && activeSession.term.rows > 0) {
-                    sendResize(activeSession, activeSession.term.cols, activeSession.term.rows);
-                    syncTerminalToAppliedSize(activeSession);
+                    // issue #116: same rule as every other fit path — ask via the
+                    // throttle, adopt an ack only when the server sends one.
+                    queueTTYResize(activeSession, activeSession.term.cols, activeSession.term.rows);
                 }
             }, 0);
         }
@@ -7903,6 +7925,58 @@
             applyTTYSize(session, session.appliedTTYSize.cols, session.appliedTTYSize.rows);
         }
 
+        // issue #116: the fit → resize throttle, shared by every fit path in both
+        // session factories. Leading edge + ONE trailing edge: a size seen inside
+        // the window is remembered (payload replaced, never re-armed, so a stream
+        // of fits cannot postpone the send) and goes out when the window closes —
+        // the retired leading-only gate silently dropped the newest fit, and a
+        // settled host box never re-fired the observer to deliver it. The ack is
+        // never adopted here; applyTTYSize on the `resize` frame does that.
+        //
+        // The window constant lives inside the function because the unit tests
+        // slice named functions out of this document and evaluate them standalone,
+        // and a module-level const sits outside that slice.
+        function queueTTYResize(session, cols, rows) {
+            if (!session || !session.term) return;
+            if (cols <= 0 || rows <= 0) return;
+            const MIN_RESIZE_MS = 100;
+            const now = Date.now();
+            if (session.pendingTTYResize) {
+                session.pendingTTYResize.cols = cols;
+                session.pendingTTYResize.rows = rows;
+                return;
+            }
+            const elapsed = now - (session.lastResizeTime || 0);
+            if (elapsed >= MIN_RESIZE_MS) {
+                session.lastResizeTime = now;
+                dispatchTTYResize(session, cols, rows);
+                return;
+            }
+            session.pendingTTYResize = { cols, rows };
+            session.ttyResizeTrailingTimer = setTimeout(() => {
+                session.ttyResizeTrailingTimer = null;
+                const pending = session.pendingTTYResize;
+                session.pendingTTYResize = null;
+                if (!pending) return;
+                session.lastResizeTime = Date.now();
+                dispatchTTYResize(session, pending.cols, pending.rows);
+            }, MIN_RESIZE_MS - elapsed);
+        }
+
+        // Sends one size unless it is the size already on the wire, and reports
+        // whether anything went out. sendResize's answer decides what is remembered:
+        // a refusal (no OPEN socket) must NOT occupy the dedupe slot, or a
+        // reopened socket would skip the resize it still owes the PTY.
+        function dispatchTTYResize(session, cols, rows) {
+            if (!session || !session.term) return false;
+            if (cols <= 0 || rows <= 0) return false;
+            const last = session.lastSentTTYResize;
+            if (last && last.cols === cols && last.rows === rows) return false;
+            if (!sendResize(session, cols, rows)) return false;
+            session.lastSentTTYResize = { cols, rows };
+            return true;
+        }
+
         function parseTTYControlMessage(data) {
             if (typeof data !== "string" || data.length === 0 || data[0] !== "{") return null;
             try {
@@ -7950,11 +8024,16 @@
             resetTTYStreamAndReconnect(session, "overflow notice");
         }
 
+        // Reports whether the frame ACTUALLY went out (issue #116): the throttle
+        // remembers a size as sent, and a refusal — the common case on an SSE-only
+        // session and during every reconnect — must not occupy that record, or the
+        // reopened socket would skip the resize it still owes.
         function sendResize(session, cols, rows) {
-            if (!session || !session.ttySocket || session.ttySocket.readyState !== WebSocket.OPEN) return;
-            if (cols <= 0 || rows <= 0) return;
+            if (!session || !session.ttySocket || session.ttySocket.readyState !== WebSocket.OPEN) return false;
+            if (cols <= 0 || rows <= 0) return false;
             const msg = JSON.stringify({ type: "resize", cols, rows });
             session.ttySocket.send(msg);
+            return true;
         }
 
         // Fetches logs from the server and writes them to the terminal.
@@ -8125,6 +8204,18 @@
                 clearTimeout(session.ttyReconnectTimer);
                 session.ttyReconnectTimer = null;
             }
+            // issue #116: the resize throttle's trailing send dies here too. This
+            // is the teardown every path goes through — disconnect, reconnect,
+            // overflow reset, session destroy — so no pending size can fire against
+            // a socket that is already gone. The dedupe key resets with it: a
+            // reopened socket starts with an empty per-connection size table
+            // server-side, so repeating the old cols/rows is a NEW request there.
+            if (session.ttyResizeTrailingTimer) {
+                clearTimeout(session.ttyResizeTrailingTimer);
+                session.ttyResizeTrailingTimer = null;
+            }
+            session.pendingTTYResize = null;
+            session.lastSentTTYResize = null;
             if (session.logStream) {
                 session.logStream.onmessage = null;
                 session.logStream.onerror = null;
@@ -8640,6 +8731,15 @@
                         if (state.activeInst === id) {
                             updateStatus("websocket live");
                         }
+                        // Socket establishment path, one of two (the other is the
+                        // first-data tick below) — the only places
+                        // syncTerminalToAppliedSize still runs (issue #116): a PTY
+                        // that has just reached READY genuinely still has the size it
+                        // last applied, so the screen matching it for one round trip
+                        // is the truthful picture. Not routed through
+                        // queueTTYResize — the handshake waits for this client's
+                        // first resize frame, so it must go now even if it repeats a
+                        // size an earlier socket carried.
                         if (session.term && session.term.cols > 0 && session.term.rows > 0) {
                             sendResize(session, session.term.cols, session.term.rows);
                             syncTerminalToAppliedSize(session);
@@ -8652,6 +8752,14 @@
                         return;
                     }
                     if (controlMsg && controlMsg.type === 'resize') {
+                        // issue #116: this is where an applied size is adopted — on
+                        // the frame that carries it, and nowhere else. Every fit path
+                        // now only ASKS (queueTTYResize), so a screen fitted to a
+                        // bigger box is never pulled back to the previous ack before
+                        // this answer lands; and when the server answers with
+                        // something else than it was asked for — the applied size is
+                        // the minimum across the viewers of one instance — that answer
+                        // wins, the authority it has always had.
                         applyTTYSize(session, controlMsg.cols, controlMsg.rows);
                         return;
                     }
@@ -8777,6 +8885,10 @@
                             if (session.term && ws === session.ttySocket && ws.readyState === WebSocket.OPEN) {
                                 const cols = session.term.cols;
                                 const rows = session.term.rows;
+                                // The second socket-establishment site (issue #116):
+                                // a TUI that just produced its first byte produced it at
+                                // the size the PTY actually has. No fit path reaches
+                                // here — queueTTYResize asks, it does not answer.
                                 if (cols > 0 && rows > 0) {
                                     sendResize(session, cols, rows);
                                     syncTerminalToAppliedSize(session);
@@ -9783,6 +9895,10 @@
         window.reportSessionError = reportSessionError;
         window.sendResize = sendResize;
         window.syncTerminalToAppliedSize = syncTerminalToAppliedSize;
+        // issue #116: the fit paths in kinds/pty.js share THIS throttle, so it is
+        // exported — a second copy of the timing there would be a second thing to
+        // forget to fix.
+        window.queueTTYResize = queueTTYResize;
         window.applyTTYSize = applyTTYSize;
         window.parseTTYControlMessage = parseTTYControlMessage;
         window.renderTerminalSessions = renderTerminalSessions;
