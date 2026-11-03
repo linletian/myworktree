@@ -18,7 +18,74 @@
     // could reuse it). A capture now states which instrument produced it, so a
     // report can never be ambiguous again — bump this whenever the probe or the
     // shell behaviour it measures changes.
-    const PROBE_VERSION = "p4-reconcile-wheel";
+    //
+    // p8-full-shell-overlay-wheel-v1 measures the issue #116 contract v3.1:
+    // "out-of-flow FULL-HEIGHT fixed shell + non-scrollable root + PTY-local
+    // avoidance with a small-overlay floor + a wheel door that blocks the root".
+    // Same schema as p7 (no new fields); what changed is the arithmetic one verdict
+    // checks against and one gesture surface the probe's parent now hardens:
+    //
+    //   * THE SHELL NEVER MOVES. appComputedPosition reads "fixed",
+    //     htmlOverflow / bodyOverflow read "clip", rootScrollHeight does not
+    //     exceed clientHeight — the document has no scroll mechanism and no
+    //     scroll range — and the shell's own box is FULL HEIGHT in every
+    //     keyboard state: app.bottom answers to documentElement.clientHeight
+    //     (layoutGap = clientHeight − app.bottom), NOT to vv.height. v2.2
+    //     pinned #app to vv.height and that pairing is retired. The real-Gmail
+    //     control the user ran on the same iPad is what settled it — with the
+    //     keyboard up, what shows through the keyboard is the same unchanged
+    //     full-height layout.
+    //   * THE TERMINAL AVOIDS LOCALLY, ABOVE A FLOOR. The boxes that move are the
+    //     TERMINAL'S OWN: every PTY host inside #terminal-container, the overlay
+    //     #terminal-controls column, and #status-bar — which v3.1 makes
+    //     `position:fixed` so the Transport sits at the PHYSICAL viewport bottom
+    //     with no keyboard, not the safe-area-inset bottom #workspace would give
+    //     it. Occlusion is now floored at SMALL_OCCLUSION_RATIO (0.15 of the
+    //     layout height): a shortfall under that fraction (the measured thin
+    //     floating strip at ≈68.5 ≈ 9.8%) is owed NOTHING — host bottom 0,
+    //     controls 20, status 0 — so the terminal keeps its full height and the
+    //     strip simply overlaps it; a shortfall at or over the fraction avoids as
+    //     before, which on the measured 702 layout (floor 105.3px) covers BOTH the
+    //     555 keyboard (147 ≈ 20.9% → host bottom 535) and the full soft keyboard
+    //     (428 ≈ 61.0%). So `occlusion` now reports the FLOORED height the applier
+    //     actually owes, not the raw clientHeight − vv.height; `ptyHosts` reports
+    //     EVERY host (hidden and inactive included) with its rect bottom, its own
+    //     inline `bottom` and visibility; `controls` / `statusBar` report the same
+    //     three numbers for the two overlays at the offsets they are AUTHORED at
+    //     plus the floored occlusion; `quickKeys` reports the panel's computed
+    //     max-height against its clientHeight / scrollHeight. Anything that
+    //     disagrees with its authored offset is the miss. A shell whose layoutGap
+    //     is not ~0 is a shell that was still resized.
+    //   * THE WHEEL DOOR IS BLOCKED, NOT DOUBLED. A trackpad two-finger scroll
+    //     emits `wheel`; the p7 capture showed document.scrollTop walking non-zero
+    //     under overflow:clip, so the root clip alone does not hold it. The shell
+    //     lock now preventDefaults a wheel even over the terminal — xterm's own
+    //     wheel handler is closer to the target and has already scrolled the
+    //     buffer, so the lock never calls scrollLines itself; it owes the page a
+    //     preventDefault only. This is not directly a captured number; it is why
+    //     scrollTop stays 0 in a p8 capture and why the p7 trackpad frames that
+    //     showed non-zero scrollTop must not recur.
+    //
+    // scrollTop / scrollingElementScrollTop stay EVIDENCE and never an input: a
+    // non-zero scroll is a product failure that no code here may correct, and no
+    // hidden scroll area under the keyboard is allowed (the reference app grows
+    // one; this contract forbids it). vv.offsetTop and pageTop stay
+    // informational — they describe iOS' own panning and must never be added back
+    // onto a rect. (p7-full-shell-local-avoidance-v1 measured the no-floor build,
+    // p6-structural-no-scroll-v1 the pinned-shell build and p5-root-origin-v1 the
+    // build that PARKED the root at 0; none of those stamps can certify this one,
+    // which is exactly what a stamp is for.)
+    const PROBE_VERSION = "p8-full-shell-overlay-wheel-v1";
+
+    // The SMALL-OVERLAY floor the applier applies (see applyVisualViewportOcclusion
+    // in index.html): a shortfall under this fraction of the layout height is a thin
+    // floating strip the terminal does NOT avoid, so the probe reports occlusion 0
+    // for it. The two MUST stay in lockstep or the probe judges the build against a
+    // number it never owed. 0.15: on the measured 702 layout the floor is 105.3px,
+    // which keeps the thin 68.5px strip exempt and makes the measured 147px (555)
+    // and 428px (274) keyboards avoid. Not an identifier of any particular overlay —
+    // a pure terminal-local avoidance floor, nothing more.
+    const SMALL_OCCLUSION_RATIO = 0.15;
 
     function finite(value) {
         return Number.isFinite(value) ? value : 0;
@@ -38,6 +105,16 @@
     function backgroundOf(win, element) {
         if (!element || typeof win.getComputedStyle !== "function") return "";
         return win.getComputedStyle(element).backgroundColor || "";
+    }
+
+    // issue #116 contract v2.2: `overflow` as a FACT captured from the live
+    // engine, not as a claim in a stylesheet. An engine that never learned
+    // `clip` answers "hidden" here, and that answer is the honest signal that
+    // this browser is running the fallback floor — which is exactly why the
+    // value is reported instead of being assumed from the CSS text.
+    function overflowOf(win, element) {
+        if (!element || typeof win.getComputedStyle !== "function") return "";
+        return win.getComputedStyle(element).overflow || "";
     }
 
     function styledRect(win, element) {
@@ -91,6 +168,130 @@
         };
     }
 
+    // issue #116 contract v3.0: the PTY hosts are the ONLY boxes the shell
+    // writes, so they are reported individually — every host inside
+    // #terminal-container, hidden and inactive included. `bottom` is the rect in
+    // CLIENT space (the same space vv.height lives in), `inlineBottom` is the
+    // host's OWN written value, and `visible` says whether the host is the one
+    // on screen right now. A hidden host with a stale inline bottom is the band
+    // the user meets on the NEXT switch, so it has to be in the capture even
+    // though nothing is visibly wrong at this instant.
+    function ptyHostsOf(win, doc) {
+        const container = doc && typeof doc.getElementById === "function"
+            ? doc.getElementById("terminal-container")
+            : null;
+        if (!container || typeof container.querySelectorAll !== "function") return [];
+        const hosts = container.querySelectorAll(":scope > [data-instance-id]");
+        const out = [];
+        for (let i = 0; i < hosts.length; i++) {
+            const host = hosts[i];
+            const value = rect(host);
+            if (!value) continue;
+            const style = host.style || {};
+            const computed = typeof win.getComputedStyle === "function"
+                ? win.getComputedStyle(host)
+                : null;
+            out.push({
+                index: out.length,
+                top: value.top,
+                bottom: value.bottom,
+                height: value.height,
+                inlineBottom: style.bottom || "",
+                computedBottom: computed ? (computed.bottom || "") : "",
+                visible: style.display !== "none",
+            });
+        }
+        return out;
+    }
+
+    // v3.1's occlusion, measured the way the applier computes it — including the
+    // SMALL-OVERLAY floor the applier applies. The raw shortfall is the height the
+    // keyboard would owe, but the applier owes NOTHING for a shortfall under
+    // SMALL_OCCLUSION_RATIO of the layout height (the thin floating strips, the
+    // "浮窗不压缩任何终端区域" case), so the probe reports the FLOORED number: a
+    // verdict then checks each host / overlay bottom against what THIS build actually
+    // wrote, not against a raw reconstruction that would call an intentionally-full
+    // terminal a miss. The ratio must match the applier's SMALL_OCCLUSION_RATIO.
+    // Zero under zoom and without visualViewport, exactly as the applier.
+    function occlusionOf(vv, clientHeight) {
+        if (!vv) return 0;
+        const scale = finite(vv.scale || 1);
+        if (Math.abs(scale - 1) > 0.01) return 0;
+        const raw = Math.max(0, finite(clientHeight) - finite(vv.height));
+        if (raw < finite(clientHeight) * SMALL_OCCLUSION_RATIO) return 0;
+        return raw;
+    }
+
+    // issue #116 contract v3.0, the second half of the LOCAL avoidance: the two
+    // absolutely positioned overlay children of #workspace — #terminal-controls
+    // (the quick-keys entry / panel column) and #status-bar (the transport strip).
+    // #workspace keeps its full height in every keyboard state, so these two are
+    // covered by the keyboard unless THEY move, and the whole point of the fix is
+    // that the quick-keys entry and the input stay reachable. Each is reported
+    // with the same three numbers a host is reported with — the rect it resolved
+    // to, the value the applier wrote, and whether it is on screen — so a verdict
+    // can check the authored offset plus the occlusion instead of guessing:
+    //     #terminal-controls bottom = 20 + occlusion   (authored bottom 20px)
+    //     #status-bar          bottom = occlusion       (authored bottom 0)
+    // The COLUMN's height is the number that matters twice over: it is what
+    // shortens as the bottom rises, and it is the definite containing block the
+    // panel's `max-height: 100%` resolves against, so a column that did NOT
+    // shorten means a panel that still runs under the keyboard.
+    // Element missing => null, and a null is answered as "not observed" by the
+    // verifier, never as a pass.
+    function overlayOf(win, doc, id) {
+        const el = doc && typeof doc.getElementById === "function"
+            ? doc.getElementById(id)
+            : null;
+        if (!el) return null;
+        const value = rect(el);
+        if (!value) return null;
+        const style = el.style || {};
+        const computed = typeof win.getComputedStyle === "function"
+            ? win.getComputedStyle(el)
+            : null;
+        return {
+            top: value.top,
+            bottom: value.bottom,
+            width: value.width,
+            height: value.height,
+            inlineBottom: style.bottom || "",
+            computedBottom: computed ? (computed.bottom || "") : "",
+            // COMPUTED display, not the inline one: #terminal-controls is hidden
+            // by a CLASS (.oc-hidden on web kinds), so an inline-only read would
+            // call a hidden column visible and the verifier would judge geometry a
+            // zeroed rect never had.
+            visible: computed ? computed.display !== "none" : style.display !== "none",
+        };
+    }
+
+    // The quick-keys panel itself. `maxHeight` is the COMPUTED value, so the
+    // capture says what the percentage resolved to rather than what the stylesheet
+    // wished; scrollHeight against clientHeight is the internal-scroll claim
+    // (content taller than the box, box still reachable). Only reported when the
+    // panel exists, and it stays absent (`null`) when it does not.
+    function quickKeysOf(win, doc) {
+        const el = doc && typeof doc.getElementById === "function"
+            ? doc.getElementById("quick-keys-panel")
+            : null;
+        if (!el) return null;
+        const value = rect(el);
+        if (!value) return null;
+        const computed = typeof win.getComputedStyle === "function"
+            ? win.getComputedStyle(el)
+            : null;
+        return {
+            top: value.top,
+            bottom: value.bottom,
+            width: value.width,
+            height: value.height,
+            maxHeight: computed ? (computed.maxHeight || "") : "",
+            clientHeight: finite(el.clientHeight),
+            scrollHeight: finite(el.scrollHeight),
+            open: !!(el.classList && el.classList.contains("open")),
+        };
+    }
+
     function snapshotFromPage(page, reason, capturedAt) {
         const win = page.window;
         const doc = page.document;
@@ -137,16 +338,33 @@
             document: {
                 bodyBackground: backgroundOf(win, doc.body),
                 htmlBackground: backgroundOf(win, doc.documentElement),
-                // issue #116: the white band under the Magic Keyboard bar was
-                // NOT a layout gap (#app computed 702 = clientHeight throughout)
-                // — it appeared while iOS panned the VISUAL viewport (measured
-                // pan 0 -> 69 with vv.height 633.5). These fields make the
-                // difference between "the document scrolls" and "the visual
-                // viewport pans" readable instead of inferred: pageTop is the
-                // pan in document coordinates, scrollTop* is the real scroll,
-                // and the two scrollHeight fields are what a scroll would need
-                // to exceed any of those. All three are absent from the
-                // pre-#116 capture, which is why this had to be guessed at.
+                // issue #116 contract v3.0: the STRUCTURE is the claim, so the
+                // structure is reported. htmlOverflow / bodyOverflow are the
+                // computed `overflow` of the two root boxes — under v3.0 both read
+                // "clip" (a clipped box has no scroll mechanism), and the pair
+                // arriving together with appComputedPosition = "fixed" and a
+                // rootScrollHeight that never exceeds clientHeight is what makes a
+                // capture say "this document cannot scroll" instead of "this
+                // capture happens to show scroll 0 right now". The v3.0 addition is
+                // that this stays true WITH the keyboard up: the reference app grows
+                // a hidden, user-scrollable strip below the shell when the keyboard
+                // arrives, and this contract forbids copying that — a capture that
+                // shows a root scroll range appearing under the keyboard is a
+                // regression, not a feature.
+                // scrollTop / scrollingElementScrollTop therefore changed meaning:
+                // they are EVIDENCE, never an input. There is no code in this build
+                // that writes them. A non-zero value here is the product failure the
+                // SOP is looking for, and it must stay in the capture exactly as
+                // found — v2.1 parked them at 0, and a probe that only ever reads
+                // back 0 cannot tell a fixed structure from a symptom that is being
+                // repeatedly repaired.
+                // pageTop and vv.offsetTop stay INFORMATIONAL context (they say how
+                // far iOS panned, which is how a pan is told apart from a scroll);
+                // they are never added onto an app rect by the verifier. The two
+                // backgrounds say whose ink a band is painted in.
+                htmlOverflow: overflowOf(win, doc.documentElement),
+                bodyOverflow: overflowOf(win, doc.body),
+                rootScrollHeight: doc.documentElement ? finite(doc.documentElement.scrollHeight) : null,
                 pageTop: vv ? finite(vv.pageTop) : null,
                 scrollTop: finite(win.scrollY || win.pageYOffset || 0),
                 scrollingElementScrollTop: doc.scrollingElement ? finite(doc.scrollingElement.scrollTop) : null,
@@ -162,7 +380,21 @@
             } : null,
             app: Object.assign(appRect, {
                 computedHeight: appStyle.height || "",
+                // issue #116 contract v3.0: the shell's computed position is part
+                // of the claim — "fixed" here plus the two clipped root boxes is
+                // the pair that says the document has neither scroll content nor
+                // scroll mechanism. Read it together with document.htmlOverflow.
+                computedPosition: appStyle.position || "",
+                // v3.0: `inlineHeight` is the NEGATIVE proof — it must stay "" in
+                // every state, because v2.2's full-page pin to vv.height is gone
+                // and the shell is sized by CSS alone (100vh → 100dvh).
+                // `layoutGap` is the POSITIVE proof: clientHeight − app.bottom,
+                // ~0 in every state including keyboard-up. The retired v2.2 number
+                // was vv.height − app.bottom, whose negative branch ("crossing")
+                // is exactly what v3.0 WANTS — the shell deliberately extends under
+                // the keyboard — so it is not computed here any more.
                 inlineHeight: app && app.style ? (app.style.height || "") : "",
+                layoutGap: finite(doc.documentElement ? doc.documentElement.clientHeight : win.innerHeight) - finite(appRect.bottom),
                 paddingTop: appStyle.paddingTop || "0px",
                 paddingRight: appStyle.paddingRight || "0px",
                 paddingBottom: appStyle.paddingBottom || "0px",
@@ -172,6 +404,17 @@
             main: rect(main) || { top: 0, bottom: 0, width: 0, height: 0 },
             workspace: styledRect(win, workspace),
             terminal: styledRect(win, host),
+            // v3.0: occlusion + every PTY host, so a verdict can check the LOCAL
+            // avoidance instead of a resized shell. See ptyHostsOf / occlusionOf.
+            occlusion: occlusionOf(vv, doc.documentElement ? doc.documentElement.clientHeight : win.innerHeight),
+            ptyHosts: ptyHostsOf(win, doc),
+            // v3.0, same pass, same occlusion: the two overlay children of
+            // #workspace the applier now lifts as well — the quick-keys control
+            // column and the transport status strip — plus the panel whose
+            // max-height resolves against that column. See overlayOf/quickKeysOf.
+            controls: overlayOf(win, doc, "terminal-controls"),
+            statusBar: overlayOf(win, doc, "status-bar"),
+            quickKeys: quickKeysOf(win, doc),
             webPanel: styledRect(win, webPanel),
             xtermScreen: host ? rect(host.querySelector(".xterm-screen")) : null,
             xtermRows: host ? rect(host.querySelector(".xterm-rows")) : null,

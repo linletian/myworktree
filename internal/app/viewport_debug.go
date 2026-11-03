@@ -25,6 +25,11 @@ const (
 	viewportDebugSessionTTL      = 30 * time.Minute
 	viewportDebugMaxSessions     = 8
 	viewportDebugMaxEventsPerSes = 120
+	// issue #116 contract v3.0: every PTY host is listed in a snapshot because a
+	// stale bottom on a hidden host is the band the next switch produces. One
+	// host per session, and sessions are bounded by the instance cap, so 64 is
+	// generous — the limit exists to bound the body, not to hide a leak.
+	viewportDebugMaxPtyHosts = 64
 )
 
 var (
@@ -62,12 +67,23 @@ type viewportDebugVV struct {
 type viewportDebugApp struct {
 	viewportDebugRect
 	ComputedHeight string `json:"computedHeight"`
-	InlineHeight   string `json:"inlineHeight"`
-	PaddingTop     string `json:"paddingTop"`
-	PaddingRight   string `json:"paddingRight"`
-	PaddingBottom  string `json:"paddingBottom"`
-	PaddingLeft    string `json:"paddingLeft"`
-	Background     string `json:"background"`
+	// issue #116 contract v2.2: the shell's computed position is part of the
+	// structural claim ("fixed", paired with two clipped root boxes). Adding a
+	// client field without its server twin makes every upload 400 — see the
+	// pageTop incident; the schema test's payload is the guard.
+	ComputedPosition string `json:"computedPosition,omitempty"`
+	InlineHeight     string `json:"inlineHeight"`
+	// issue #116 contract v3.0: the shell is FULL HEIGHT in every state, so the
+	// number that describes it is clientHeight − app.bottom (~0 always), NOT
+	// vv.height − app.bottom. v2.2 pinned the shell to vv.height and let that
+	// gap go negative — the "crossing" reading is retired, because a shell that
+	// extends under the keyboard is exactly what v3.0 wants.
+	LayoutGap     float64 `json:"layoutGap"`
+	PaddingTop    string  `json:"paddingTop"`
+	PaddingRight  string  `json:"paddingRight"`
+	PaddingBottom string  `json:"paddingBottom"`
+	PaddingLeft   string  `json:"paddingLeft"`
+	Background    string  `json:"background"`
 }
 
 type viewportDebugUI struct {
@@ -102,6 +118,16 @@ type viewportDebugDocument struct {
 	ScrollingElementScrollTop    *float64 `json:"scrollingElementScrollTop"`
 	ScrollingElementScrollHeight *float64 `json:"scrollingElementScrollHeight"`
 	BodyScrollTop                *float64 `json:"bodyScrollTop"`
+	// issue #116 contract v2.2: the structural half of the claim, reported by
+	// the engine instead of inferred from the stylesheet. HTMLOverflow /
+	// BodyOverflow are the computed `overflow` of the two root boxes ("clip"
+	// under this contract, "hidden" on an engine that never learned it), and
+	// RootScrollHeight against the snapshot's clientHeight is the scroll RANGE:
+	// no range means nothing to scroll. ScrollTop stays a POINTER to evidence,
+	// never an input — this build never writes it.
+	HTMLOverflow     string   `json:"htmlOverflow,omitempty"`
+	BodyOverflow     string   `json:"bodyOverflow,omitempty"`
+	RootScrollHeight *float64 `json:"rootScrollHeight"`
 }
 
 // viewportDebugProbe answers "what is painted at the bottom edge" as data rather
@@ -127,6 +153,55 @@ type viewportDebugProbeHit struct {
 	Background string  `json:"background"`
 }
 
+// viewportDebugPtyHost is one PTY host inside #terminal-container, reported by
+// the p7 probe. Contract v3.0 moves NOTHING but these boxes: the shell, the
+// sidebar, the header and #workspace keep their full height in every keyboard
+// state and each host lifts its OWN bottom by the occlusion. So every host is
+// listed — hidden and inactive ones included, because a stale inline bottom on a
+// host the user switches TO is the band the next switch produces — and each
+// carries the rect it resolved to (client space), the value the applier wrote
+// (inlineBottom) and whether it is on screen right now (visible).
+type viewportDebugPtyHost struct {
+	Index          int     `json:"index"`
+	Top            float64 `json:"top"`
+	Bottom         float64 `json:"bottom"`
+	Height         float64 `json:"height"`
+	InlineBottom   string  `json:"inlineBottom,omitempty"`
+	ComputedBottom string  `json:"computedBottom,omitempty"`
+	Visible        bool    `json:"visible"`
+}
+
+// viewportDebugOverlay is one of the two absolutely positioned overlay children
+// of #workspace that the p7 probe reports: #terminal-controls (the quick-keys
+// entry / panel column) and #status-bar (the transport strip). #workspace keeps
+// its full height in every keyboard state, so these two are covered by the
+// keyboard unless THEY move too — and the requirement is that quick-keys stays
+// reachable, so they are written by the same avoidance pass as the hosts, each
+// from its OWN authored bottom (20px for the column, 0 for the strip). Reported
+// with the same three numbers a host is reported with: the rect it resolved to,
+// the value the applier wrote, and whether it is on screen. Missing element
+// means the client sent null, and a null is "not observed", never a pass.
+type viewportDebugOverlay struct {
+	viewportDebugRect
+	InlineBottom   string `json:"inlineBottom,omitempty"`
+	ComputedBottom string `json:"computedBottom,omitempty"`
+	Visible        bool   `json:"visible"`
+}
+
+// viewportDebugQuickKeys is the quick-keys panel. maxHeight is the COMPUTED
+// value, so the capture states what the percentage resolved to instead of what
+// the stylesheet hoped for: the percentage resolves against #terminal-controls'
+// height, so when the column lifts by 20 + occlusion this is the number that has
+// to shrink, and scrollHeight against clientHeight is the internal scroll that
+// keeps the rest of the key set reachable inside the shortened box.
+type viewportDebugQuickKeys struct {
+	viewportDebugRect
+	MaxHeight    string  `json:"maxHeight,omitempty"`
+	ClientHeight float64 `json:"clientHeight"`
+	ScrollHeight float64 `json:"scrollHeight"`
+	Open         bool    `json:"open"`
+}
+
 type viewportDebugSnapshot struct {
 	// issue #116: which build of the instrument produced this snapshot. Two
 	// verification rounds were spent on reports that turned out to describe a
@@ -147,10 +222,33 @@ type viewportDebugSnapshot struct {
 	Main         viewportDebugRect        `json:"main"`
 	Workspace    viewportDebugStyledRect  `json:"workspace"`
 	Terminal     *viewportDebugStyledRect `json:"terminal,omitempty"`
-	WebPanel     *viewportDebugStyledRect `json:"webPanel,omitempty"`
-	XtermScreen  *viewportDebugRect       `json:"xtermScreen,omitempty"`
-	XtermRows    *viewportDebugRect       `json:"xtermRows,omitempty"`
-	UI           viewportDebugUI          `json:"ui"`
+	// issue #116 contract v3.0: the occlusion the shell owes the boxes it moves,
+	// and those boxes' own geometry. The hosts plus the two overlay children of
+	// #workspace are exactly the set v3.0 moves, so they are the numbers a verdict
+	// is taken from now that the shell no longer resizes; `ptyHosts` is capped by
+	// viewportDebugMaxPtyHosts.
+	// NO `omitempty` ON `ptyHosts`: THE EMPTY LIST IS A MEASUREMENT, NOT AN ABSENCE.
+	// The probe sends `ptyHosts` in EVERY frame — `ptyHostsOf` answers `[]` when
+	// `#terminal-container` has no host yet (the `init` frame of a fresh session,
+	// and every web-kind page) — and it is the DOWNLOADED capture the SOP is read
+	// from. With `omitempty` Go dropped that observed empty list from the response,
+	// so the frame came back with the field ABSENT, and the verifier's
+	// `!Array.isArray(s.ptyHosts)` read it as "an older instrument that cannot speak
+	// about the local avoidance": real evidence of a hostless page was thrown away
+	// as evidence of an outdated build. A nil list still encodes `null`, which is
+	// the honest encoding of a frame that never carried the field at all, so
+	// "not observed" stays distinguishable from "observed, zero hosts" — the
+	// verifier fails or answers INCONCLUSIVE on both, never PASS. Every other
+	// nullable field keeps its pointer/`omitempty` semantics untouched.
+	Occlusion   float64                  `json:"occlusion"`
+	PtyHosts    []viewportDebugPtyHost   `json:"ptyHosts"`
+	Controls    *viewportDebugOverlay    `json:"controls,omitempty"`
+	StatusBar   *viewportDebugOverlay    `json:"statusBar,omitempty"`
+	QuickKeys   *viewportDebugQuickKeys  `json:"quickKeys,omitempty"`
+	WebPanel    *viewportDebugStyledRect `json:"webPanel,omitempty"`
+	XtermScreen *viewportDebugRect       `json:"xtermScreen,omitempty"`
+	XtermRows   *viewportDebugRect       `json:"xtermRows,omitempty"`
+	UI          viewportDebugUI          `json:"ui"`
 }
 
 type viewportDebugReport struct {
@@ -388,8 +486,42 @@ func validateViewportDebugReport(report viewportDebugReport) error {
 	if err := validateViewportDebugRect(s.Workspace.viewportDebugRect); err != nil {
 		return err
 	}
-	for _, value := range []string{s.App.ComputedHeight, s.App.InlineHeight, s.App.PaddingTop, s.App.PaddingRight, s.App.PaddingBottom, s.App.PaddingLeft, s.App.Background, s.Workspace.Background, s.Document.BodyBackground, s.Document.HTMLBackground} {
+	for _, value := range []string{s.App.ComputedHeight, s.App.ComputedPosition, s.App.InlineHeight, s.App.PaddingTop, s.App.PaddingRight, s.App.PaddingBottom, s.App.PaddingLeft, s.App.Background, s.Workspace.Background, s.Document.BodyBackground, s.Document.HTMLBackground, s.Document.HTMLOverflow, s.Document.BodyOverflow} {
 		if len(value) > 160 {
+			return errors.New("CSS diagnostic value is too long")
+		}
+	}
+	// issue #116 contract v3.0: the occlusion is the height v3.0 owes every PTY
+	// host, and each host reports the value it was given. Both are bounded and
+	// finite for the same reason every other diagnostic is: this channel carries
+	// numbers a verdict is taken from, so a NaN or a 1e12 must be rejected at the
+	// door instead of being averaged into a report.
+	if err := viewportDebugNumber(s.Occlusion); err != nil {
+		return err
+	}
+	if s.Occlusion < 0 {
+		return errors.New("occlusion must be non-negative")
+	}
+	if len(s.PtyHosts) > viewportDebugMaxPtyHosts {
+		return errors.New("too many PTY hosts in snapshot")
+	}
+	for i, host := range s.PtyHosts {
+		if host.Index != i {
+			return errors.New("PTY host index must be sequential")
+		}
+		if err := viewportDebugNumber(host.Top); err != nil {
+			return err
+		}
+		if err := viewportDebugNumber(host.Bottom); err != nil {
+			return err
+		}
+		if err := viewportDebugNumber(host.Height); err != nil {
+			return err
+		}
+		if host.Height < 0 {
+			return errors.New("PTY host height must be non-negative")
+		}
+		if len(host.InlineBottom) > 160 || len(host.ComputedBottom) > 160 {
 			return errors.New("CSS diagnostic value is too long")
 		}
 	}
@@ -401,6 +533,40 @@ func validateViewportDebugReport(report viewportDebugReport) error {
 			if len(rect.Background) > 160 {
 				return errors.New("CSS diagnostic value is too long")
 			}
+		}
+	}
+	// issue #116 contract v3.0, the overlay half: #terminal-controls and
+	// #status-bar are moved by the same occlusion, and #quick-keys-panel's
+	// computed max-height is the number that proves the column really got
+	// shorter. All three are OPTIONAL pointers — a login gate has none of them,
+	// and "absent" must stay distinguishable from "at zero", so a nil is accepted
+	// here and answered INCONCLUSIVE by the verifier, never silently passed.
+	for _, overlay := range []*viewportDebugOverlay{s.Controls, s.StatusBar} {
+		if overlay == nil {
+			continue
+		}
+		if err := validateViewportDebugRect(overlay.viewportDebugRect); err != nil {
+			return err
+		}
+		if len(overlay.InlineBottom) > 160 || len(overlay.ComputedBottom) > 160 {
+			return errors.New("CSS diagnostic value is too long")
+		}
+	}
+	if qk := s.QuickKeys; qk != nil {
+		if err := validateViewportDebugRect(qk.viewportDebugRect); err != nil {
+			return err
+		}
+		if len(qk.MaxHeight) > 160 {
+			return errors.New("CSS diagnostic value is too long")
+		}
+		if err := viewportDebugNumber(qk.ClientHeight); err != nil {
+			return err
+		}
+		if err := viewportDebugNumber(qk.ScrollHeight); err != nil {
+			return err
+		}
+		if qk.ClientHeight < 0 || qk.ScrollHeight < 0 {
+			return errors.New("quick-keys heights must be non-negative")
 		}
 	}
 	for _, rect := range []*viewportDebugRect{s.XtermScreen, s.XtermRows} {

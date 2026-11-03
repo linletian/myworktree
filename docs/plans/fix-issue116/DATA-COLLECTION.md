@@ -276,11 +276,38 @@ seq440  pageTop=138   scrollTop=138   band=276
 
 ### 修法（结构性，非手势）
 
+> **⚠️ 本节的两条手段已被否决，保留为分析记录，不是当前契约。** "用 JS 写 `documentElement.style.height` / `body.style.height`"与"在 `scroll` 事件里把根滚动归零"正是后来被判定为掩盖症状的做法：一个每帧被拖回顶部的页面仍然**能滑**，用户看得见带出现再被拽走。本节的**诊断成立**（文档确实有一段比可视区高、真实可滚的死区），手段已换：根两盒的 `height` / `position` 永不被 JS 改写，改为 `html` / `body` 声明 `overflow: hidden` 后接 `overflow: clip`（clip 的框没有滚动机制，死区无从产生），`#app` 以 `position: fixed; top/left: 0` 脱离普通流。见 `A0-SOP.md` 第 3 / 4 条与 `evidence/structural-check.mjs`。
+
 让**文档盒永远不超过可视视口**：钉高时同步把 `documentElement.style.height` 与 `body.style.height` 设为 `vv.height`；恢复时清空。浮窗态（`vv.height=633.5`、不钉 `#app`）同样把根盒设为 633.5 —— 那 68.5px 也是富余量。`#app` 自身高度不变，超出根盒的部分由 `body` 的 `overflow:hidden` 裁掉（本来就被浮窗遮住）。
 
 另加兜底：`scroll` 事件里把任何残余根滚动立即归零（有些 iPadOS 触摸板滚动走原生 web-view 滚轮，页面监听看不到）。
 
 zoom 态整体豁免，与其余补偿一致。
+
+## 5l. 契约 v3.1：让位加比值地板 + 状态条触底 + 滚轮隔离（PROBE `p8-full-shell-overlay-wheel-v1`）
+
+**这一节是当前生效的判读口径，覆盖 §5f/§5g/§9 里所有"任意 shortfall 全额让位 / 没有阈值 / 633.5 走同一条算式"的老写法。** v3.1 = v3.0 底座（满高壳、根不可滚、overlay 两块让位）不变，只加三件事：
+
+**① 遮挡的比值地板（headline）。** `applyVisualViewportOcclusion` 里 `occlusion = max(0, clientHeight − vv.height)` 之后再加一行 `if (occlusion < clientHeight * SMALL_OCCLUSION_RATIO) occlusion = 0;`，**`SMALL_OCCLUSION_RATIO = 0.15`（本轮已定，不是待判）**——线画在 68.5px=9.8% 与 147px=20.9% 这两个实测 shortfall 之间。
+
+* **为什么加**：v3.0 把**每一个** shortfall 都全额写进宿主，结果薄薄一条妙控浮动栏（实测 `vv.height` 633.5，shortfall 仅 68.5px）也把终端顶上抬了一截——用户明确说这条薄浮窗**不许压缩终端**（"浮窗不压缩任何终端区域"）。
+* **达到地板**（shortfall ≥ `clientHeight × 0.15`）是真实键盘，全额让位（"明确较大键盘遮挡仍要局部避让"那半）；**低于地板**是薄浮窗，**豁免**（欠 0，终端铺满，浮窗直接盖在一个没动过的页面上）。这个比例把三个真实例子摆在正确的两侧：
+  | 视口 | shortfall | `clientHeight×0.15` | 判定 | occlusion | 宿主真实底 |
+  | --- | --- | --- | --- | --- | --- |
+  | 702 布局, vv 274 | 428 (61.0%) | 105.3 | 让位 | 428 | 254 |
+  | 702 布局, vv 555 | 147 (20.9%) | 105.3 | **让位** | **147** | **535** |
+  | 702 布局, vv 633.5 | 68.5 (9.8%) | 105.3 | **豁免** | **0**（终端满高被盖） | 682 |
+  | 400 布局, vv 340 | 60 | 60 | 让位（边界含） | 60 | — |
+  | 400 布局, vv 341 | 59 | 60 | **豁免** | **0** | — |
+* **这是比值不是像素**：地板随 `clientHeight` 走，横竖屏/跨设备都成立。它和被 Ban 掉的 `HARD_OCCLUSION_RATIO`（0.75 悬崖，方向相反——那个是"矮键盘不让位"）是两回事；0.15 只对**低于 15% 的浅遮挡**豁免，方向和被否决的老门禁相反。
+* **0.15 是怎么定下来的（本轮已定，不再是标定缺口）**：本轮先写的是 0.25，`702 × 0.25 = 175.5px` 这条地板**高于**实测 147px 那把键盘（20.9%），算术上把它判成豁免——真有一把真实键盘会因此埋进键下，这个冲突经复核成立，0.25 已撤回。地板现在画在**必须动的**与**不许动的**两个实测 shortfall 之间：不许动的下界是 68.5px（9.8%，薄浮窗），必须动的上界是 147px（20.9%，vv 555 的真实键盘），`0.15 × 702 = 105.3px` 落在中间且**两侧都有余量**（比 68.5 高 36.8px，比 147 低 41.7px）；428px（61.0%）的满键盘离地板更远，iPhone 竖屏键盘（≥ 40%）同样稳在让位一侧。再往下压到 68.5 之下会让薄浮窗重新压缩终端，正是用户明令禁止的方向；再抬到 147 之上就回到本轮撤回的那个错误。§5f 那条 25% 是**旧 `HARD_OCCLUSION_RATIO` 门禁**的阈值（`vv.height ≤ clientHeight × (1 − 25%)`，算的是可视高），与这条作用在 shortfall 上的地板不是同一个量，本节不复用它。
+* **验收含义**：`≤ vv.height + 1` 这类"不许越可视底"只在**让位帧**（occlusion>0）成立；**豁免帧**里宿主/控制列/状态栏满高、真实底越界是**预期覆盖**，不是 FAIL（`verify-sop.mjs` 的 underKeyboard / controlsUnder / statusBarUnder / rows 判定都按 `owed>1` 门控）。
+
+**② `#status-bar` 改 `position: fixed`。** 原创 `bottom:0`、让位仍写 `= occlusion`，但包含块从 `#workspace`（其 padding 底被 `env(safe-area-inset-bottom)`≈20px 内缩）换到**视口**——静止态真实底 = 视口物理底 `clientHeight`，让位态 = `clientHeight − occlusion`。`#terminal-controls` 仍 `absolute` 在 `#workspace` 内，只有状态条移动，二者原创 20px 间距与面板 `max-height:100%`（对列解析）不受影响。`structural-check.mjs` 相应改判状态条计算样式为 `fixed`。
+
+**③ 滚轮隔离。** `initShellScrollLock` 的 document `wheel`（`{passive:false}`）只 `preventDefault` **根默认滚动**、**绝不** `term.scrollLines`；终端缓冲区滚动只归终端自己的 `initTerminalTouchScroll`。滚轮停在终端上只锁根、不双滚。
+
+**④ 探针 `p8`。** `PROBE_VERSION = p8-full-shell-overlay-wheel-v1`（浮层标题、`viewport_debug.js`、`internal/app/viewport_debug_test.go` 两份固定 payload 同步；其中"接受任意字段"那份已改写成**豁免薄浮窗**的自洽几何：vv.height 1100、shortfall 80 < `1180 × 0.15 = 177`、occlusion 0、宿主铺满、状态条静止真实底 = 视口物理底 1180）。§5f 的 25% 分类（旧 HARD 门禁，已作废的口径）与 §5g 的 pan 摘除结论保留其历史记录地位；本节只在其上补这条 0.15 地板与那两处触底/隔离。
 
 ## 6. 真机记录模板
 
@@ -296,13 +323,16 @@ zoom 态整体豁免，与其余补偿一致。
 | 子层 | pty、opencode/reasonix/dsh iframe、quick-keys | ✅ pty + opencode-web；**quick-keys seq126–140（`quickKeysOpen=true`）** | xtermRows 与 workspace 余量分开；钉高态下 webPanel 同步 | quick-keys 同场闭合；仍缺 dsh/reasonix |
 | 生命周期 | 前后台切换、键盘已打开时刷新 | ❌ 第二轮 `pageshow`/`visibilitychange` 为 0 | 本轮未触发该两项 | 未采就是未采，不记为通过 |
 
-## 7. 快检判读
+## 7. 快检判读（v3.1 轴；旧的"壳缺高 = 钉高没生效"读法已作废）
 
-- `app.bottom - (vv.offsetTop + vv.height)` 明显为负且接近一行：外壳缺高，继续区分 dvh 与 inline 钉高路径。
-- 上述差值约为 0，但白带高度接近 `app.paddingBottom`：优先 safe-area/透明画布，不能据此改高度算法。
-- app 正确、`workspace.bottom < app.bottom`：检查 flex 与子层传导。
-- app/workspace 正确、仅终端缺行：检查 xterm fit/行取整，不能拉高 app 补偿。
-- 妙控浮动栏出现时 vv/dvh 变小且 app 再短一段：浮层被误当硬遮挡；需单独分类，不与静止白带混为一谈。
+> 本节按契约 v3.1 判读（v3.0 底座 + `SMALL_OCCLUSION_RATIO=0.15` 地板，702 布局 = 105.3px，见 §5l）。v2.1 / v2.2 时代"`vv.height − app.bottom` 为负 → 外壳缺高 → 该钉没钉"这条判读**整体作废**：满高壳本来就要伸到键盘底下，负值是契约生效的样子。判读轴换成两问：**壳动不动**（`app.bottom` 对 `clientHeight`）与**终端让没让**（每个宿主的 `bottom` 对**地板后的** `occlusion`）。
+
+- `layoutGap = clientHeight − app.bottom` 明显不为 0（尤其等于一个键盘高度）：**壳被动了**——v2.2 的整页钉高复活，或有人又给 `#app` 写了 inline height（`app.inlineHeight` 必须恒为空）。这是 FAIL，不要再去"补钉"。
+- `vv.height − app.bottom` 为负：**不是缺陷，是预期**（键盘浮在满高页面之上）。旧文档里凡是把它写成"外壳缺高"的，都按本条重新理解。
+- `occlusion`（**地板后** = shortfall ≥ `clientHeight×0.15` 取 shortfall、否则 0）与宿主的 `inlineBottom` 不一致，或 `ptyHosts[]` 里出现两个不同的 inline 值：局部避让漏了宿主 / 隐藏宿主留了旧值 —— 后者就是切过去那一瞬的白带。
+- 差值约为 0，但白带高度接近 `app.paddingBottom`：优先 safe-area/透明画布，不能据此改高度算法。
+- **让位帧**（occlusion > 0）里宿主 `bottom` 已抬起、`xtermRows.bottom` 仍 > `vv.height + 1`：检查 xterm fit/行取整，不要靠继续加大宿主 `bottom` 或缩短 `#workspace` 补偿。（**豁免帧**——薄浮窗 shortfall < 地板——里 occlusion 归 0、终端满高被盖，真实底越界是预期，不判此项。）
+- 妙控浮动栏在场而 `vv.height == clientHeight`（seq388）：shortfall 0 ⇒ `occlusion` 天然 0。v3.1 起**薄浮窗**（633.5 → 68.5 = 9.8% < 105.3 地板）也落到 `occlusion 0`——不过是走比值地板，同样不需要为它找"硬/软"分类；分类门禁（旧 25% / 0.75）继续作废。注意 555 → 147 = 20.9% **不属这一条**：它在 105.3 地板之上，必须让位到 147px。
 - vv 与 dvh 相对截图同时短报：先找独立几何基准；不以常量偏移冒充精确修复。
 
 ## 8. 真机环境与剩余未覆盖项
@@ -319,3 +349,48 @@ zoom 态整体豁免，与其余补偿一致。
 - **剩余未覆盖**：`keyboard-hint` 与 68.5/157/206.1/428 缩减量的命名；quick-keys 同场（此前被诊断浮层遮挡，浮层已修待重采）；键盘打开时刷新（第二轮 `pageshow`/`visibilitychange` 为 0）；Stage Manager；dsh/reasonix iframe；竖屏静止基线（仅 8 事件）；iPhone、Chrome(iOS) 及其他 iPadOS 版本；实体截图逐像素比对。这些项目在矩阵补齐前不得标为通过。
 - **待产品拍板**：scale≠1 时 `#app` 按 `100vh` 铺到 936 而可见底为 844.7，**溢出 91.3 layout px**（终端最后几行落在可见区外）。这是 zoom 豁免的固有代价而非回归；是否给缩放态建基准需单独决定，不得顺手用常量偏移掩盖。
 - **诊断浮层缺陷（A0 工具侧，已修）**：见 §5b 与 `evidence/panel-check.mjs`、`evidence/panel-occlusion.mjs`。修前 `tr` 角下 `#quick-keys-toggle` 的 `elementFromPoint` 命中者为 `viewport-debug-panel`；修后四角均可命中。
+
+## 9. v3.1 的重新判读（参考应用对照 + 新验收轴；地板见 §5l）
+
+用户在**同一台 iPad**上跑了一次真参考应用（Gmail）作为对照，事实按用户提供记录为真：
+
+1. 无活动输入时布局铺满视口，没有白带，整页滑动**永远露不出**白带。
+2. 有活动输入时，妙控键盘的浮动面板 / 软键盘在视觉上是**浮在上面**的，透过它们看到的页面与键盘弹起之前**一模一样**。
+3. Gmail 随后会长出一段**默认隐藏、高度约等于键盘高度**的底部区域，**只有手动整页滑动才能看到**，失焦后消失。
+
+据此本契约只抄前两条：
+
+| 参考应用的做法 | v3.0 采纳？ | 落点 |
+| --- | --- | --- |
+| 布局恒满高，键盘作为覆盖层浮在页面之上 | ✅ 采纳 | `#app` `position: fixed` + `top/left: 0` + `100vh` → `@supports 100dvh`；`app.bottom` 恒对 `clientHeight`；`inlineHeight` 恒空 |
+| 透过键盘看到的仍是同一份布局 | ✅ 采纳 | 键盘/浮窗不改壳、侧栏、页面布局；只允许 PTY 宿主 `bottom` 变化 |
+| 键盘下方多长出一段隐藏、可整页滑出的区域 | ❌ **明确拒绝** | `html` / `body` `overflow: hidden` → `clip` + 壳脱流 ⇒ 根**没有可滚范围**（`rootScrollHeight ≤ clientHeight`），滑不出、也拉不回；比参考应用更严 |
+
+新的验收轴（`evidence/verify-sop.mjs` p8 的不变量就是这个表的机器版）：
+
+| 观测量 | v3.1 期望 | 旧的错误判读 |
+| --- | --- | --- |
+| `layoutGap = clientHeight − app.bottom` | ≈ 0（每个键盘态） | — |
+| `vv.height − app.bottom` | **可为负，不判失败** | 旧版把负值记作"越底/crossing"FAIL —— 已作废 |
+| `app.inlineHeight` | 恒为空 | 旧版要求它等于 `vv.height` —— 已作废 |
+| `occlusion` | **地板后** shortfall：shortfall ≥ `clientHeight×0.15` 取 shortfall、否则 0；zoom 为 0 | 旧版有 25% / 0.75 阈值与硬/软遮挡分类 —— 已作废（v3.1 的地板只对薄浮窗豁免，方向相反） |
+| `ptyHosts[i].inlineBottom` | 每个宿主都等于 `occlusion + "px"`，且彼此相同 | 旧版只看壳，看不见隐藏宿主的残留值 |
+| 宿主真实 `bottom` | **仅让位帧**（occlusion>0）≤ `vv.height + 1`（实测 682 − occlusion）；豁免帧满高越界是预期 | — |
+| `controls.inlineBottom` | `20 + occlusion`（原创 `bottom:20px` + 让位），稳定帧；缺失 → INCONCLUSIVE | 旧版只核对宿主，看不见快捷键是否压在键盘底下 |
+| `controls` 真实 `bottom` / `height` | 让位帧 ≤ `vv.height + 1`；列高按 occlusion 缩短，`top:20px` 恒定（入口不跳） | 把宿主值 `occlusion` 抄给控制列会少抬 20px，快捷键埋进状态栏带 |
+| `statusBar` | **`position: fixed`**（v3.1，钉视口物理底）；`inlineBottom` = `occlusion`（原创 `bottom:0`），稳定帧；让位帧真实底 ≤ `vv.height + 1` | 旧版是 `absolute` 包在 `#workspace` 里，真实底被 safe-area 内缩一截 |
+| `quickKeys`（`maxHeight` / `clientHeight` / `scrollHeight`） | 面板高度 ≤ 列高且随列高缩短；`scrollHeight > clientHeight` 说明内部滚动仍在 | 面板钉在原高度 ⇒ 键位伸到键盘底下 |
+| 根 `scrollTop` / `rootScrollHeight` | 0 / ≤ `clientHeight`（既不能滚，也没有可滚范围） | 旧 v2.1 允许滚然后 `scrollTo(0,0)` 拉回 —— 已永久撤回 |
+| `wheel`（滚轮） | document `wheel` 只 `preventDefault` 根默认、**绝不** `term.scrollLines`；终端滚动只归 `initTerminalTouchScroll` | 滚轮在终端上触发 `term.scrollLines` → 双滚 |
+
+实测回放（702 布局 / 宿主原底 682 / 地板 = `702×0.15 = 105.3px`）：`vv.height` 274 → shortfall 428 ≥ 地板 → 宿主 `bottom: 428px` → 254；**555 → shortfall 147 = 20.9% ≥ 地板 → 让位 → `147px` → 宿主真实底 535**；**633.5 → shortfall 68.5 = 9.8% < 地板 → 豁免 → `0px` → 宿主铺满 682**（浮窗盖在一个没动的满高终端上）；702（真浮窗纯覆盖，seq388）→ `0px` → 682。让位那两档终端可见几何与 v2.2 逐像素相同，**区别只在于被移动的是宿主而不是壳**；只有 633.5 这一档 v3.1 起不让位。
+
+本轮已定（不再是待判事项）：局部避让的范围是 **PTY 宿主 + 终端控制列 + 状态栏**，三者各自写自己的 `bottom`（状态栏 v3.1 起 `fixed` 钉视口底）。`#workspace` 恒为满高，两块贴底 overlay 若不跟着抬，快捷键与传输状态条就压在键盘底下——而输入框与快捷键始终可达是原始需求本身，不是可选项。算式与实测（702 布局 / 宿主原底 682 / 控制列原创 `top:20px` `bottom:20px` / 地板 105.3）：
+
+| 目标 | 算式 | 274 | 555 | 633.5（< 地板→豁免） | 702（occlusion 0）与缩放态 |
+| --- | --- | --- | --- | --- | --- |
+| PTY 宿主 `bottom` | `occlusion`（地板后） | `428px` → 254 | `147px` → 535 | `0px` → 682 | `0px` → 682 |
+| `#terminal-controls` `bottom` | `20 + occlusion` | `448px` | `167px` | `20px`（原创值） | `20px`（原创值） |
+| `#status-bar` `bottom`（`fixed`） | `occlusion` | `428px` | `147px` | `0px` | `0px`（原创值） |
+
+`#terminal-controls` 的 `top:20px` **永不写**，所以快捷键入口按钮不动，缩短的只有列高；`#quick-keys-panel` 的 `max-height:100%` 随列高一起缩短，其余键位在盒内滚动。**448 与 428 必须不同**：把宿主值复制到控制列上会让快捷键埋进状态栏那条 20px 带里，这正是 `verify-sop.mjs` 第 12 项专门核对的点。

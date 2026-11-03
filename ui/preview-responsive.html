@@ -21,7 +21,7 @@
     }
     * { box-sizing: border-box; margin: 0; padding: 0; }
     [hidden] { display: none !important; }
-    html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; background: var(--bg-color); }
+    html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; overflow: clip; background: var(--bg-color); }
     body {
         font: 13px/1.45 -apple-system, "Segoe UI", "Helvetica Neue", sans-serif;
         color: var(--text-primary);
@@ -29,12 +29,16 @@
     button, input, select { font: inherit; }
     button { touch-action: manipulation; }
 
-    /* D0-1：根画布同主题铺底；几何修复仍属 PR1，不在 preview 伪造 VV 证据。 */
+    /* D0-1：根画布同主题铺底；契约 v3.1 的壳脱离普通流（fixed + top/left）并且**恒满高**，根 clip。
+       preview 仍不伪造 VV 证据：不模拟 visualViewport，不写任何根 scroll，也不写 #app 高度——
+       键盘避让在这份契约里只发生在终端宿主自己的 bottom 上。 */
     #app {
         display: flex;
         height: 100vh;
         width: 100%;
-        position: relative;
+        position: fixed;
+        top: 0;
+        left: 0;
         background: var(--bg-color);
         padding: env(safe-area-inset-top, 0px) env(safe-area-inset-right, 0px)
                  env(safe-area-inset-bottom, 0px) env(safe-area-inset-left, 0px);
@@ -307,7 +311,7 @@
 
 <div id="hint">
     <button id="hint-close" class="icon-btn" aria-label="Close preview help" onclick="document.getElementById('hint').remove()">✕</button>
-    <b>D0-1 交互预览 · 源稿 sidebar-states.pen</b>
+    <b>D0-1 交互预览 · 源稿 sidebar-states.pen v3.1</b>
     <label>实例状态
         <select id="instance-state" onchange="setDemoStatus(this.value)">
             <option>running</option><option>unhealthy</option><option>starting</option>
@@ -320,7 +324,8 @@
     <div>② running/unhealthy/starting 仅 Stop；stopping 无按钮；stopped/failed/exited 仅 Restart + Delete。≤1024 图标仍有 aria-label/title。</div>
     <div>③ 点 worktree 行切换 active；动作按钮单/双击不切行。remote inactive 无动作外层，主仓库无 Delete。</div>
     <div>④ DevTools coarse：52px 顶栏、44px 命中区、独立动作行；320px stopped 的 tabs 预算为 112px。</div>
-    <div class="preview-note">此 preview 没有完整 visualViewport / iPadOS 系统 UI，不能作为 #116 高度证据，也不证明 per-id 锁、post-mutation refresh 或 selection revision 的实现完成。</div>
+    <div>⑤ 高度契约（源稿 v3.1）：满高壳 + 带比值地板的 PTY 局部避让 + 根不可滚。#app 恒满高（bottom = clientHeight，inline height 恒为空）；整页钉 vv.height 已删除。键盘到来时让位的是终端自己的三个盒子，且先过一道比值地板：raw = max(0, clientHeight − vv.height)，raw &lt; clientHeight × 0.15 → occlusion = 0（豁免），达到才 occlusion = raw（0.15 标定在本轮实测锚点之间：68.5px=9.8% 在地板下、147px=20.9% 与 428px=61.0% 在地板上，两侧均有余量）。写进 #terminal-container 内每个宿主自己的 bottom：702 布局地板 = 105.3px，274 → 428px 让位；555（raw 147 = 20.9%）在地板上 → 让位 147px（宿主真实底 535）；只有 633.5（raw 68.5 = 9.8%）低于地板 → 豁免为 0，浮窗直接盖在一个没动过的满高终端上。同一次避让还写这两个贴底 overlay——#terminal-controls（快捷键入口/面板列）bottom = 20 + occlusion（让位档 448px，555 档 167px，保留原创 20px 间距，top 永不写所以入口不跳），#status-bar bottom = occlusion（让位档 428px，555 档 147px；v3.1 起 #status-bar 是 position: fixed + bottom: 0，静止真实底 = 物理视口底，不再继承 #workspace 的 env(safe-area-inset-bottom)）；面板 max-height:100% 随缩短的列收缩并在盒内滚动。侧栏/实例分隔线 1px 延伸穿过 safe-area 到物理底（实现是 #sidebar::after，height = 100% + env(safe-area-inset-bottom)）。滚轮隔离：document 的 wheel 只 preventDefault 根默认滚动、绝不 term.scrollLines，终端缓冲区滚动只归终端自己的触摸拖拽，滚轮盖在终端上不双滚、不自动回顶。未覆盖的条带是 #workspace 的 --term-bg 墨色而不是白带。scale ≠ 1 豁免并回 0px。“滑不动”来自结构：html/body 先 overflow: hidden 兜旧引擎、再 overflow: clip 取消滚动机制，#app position: fixed + top/left 脱离普通流；脚本不写根 scroll，也不改 html/body / #app 的 height。参考应用会在键盘下多长出一段默认隐藏、整页可滑出来的区域，本契约明确不复制它。验收读 app.bottom / 宿主 bottom / 控制列 bottom / 状态栏 bottom / xtermRows.bottom / scrollTop，加 computed overflow 与 position，不读 #app inline。本 preview 无 JS 高度、无真 PTY 宿主，不模拟 visualViewport，不作为 #116 高度证据。</div>
+    <div class="preview-note">此 preview 没有完整 visualViewport / iPadOS 系统 UI，不能作为 #116 高度证据，也不证明 per-id 锁、post-mutation refresh 或 selection revision 的实现完成。上面⑤只是源稿契约的口头复述：本 preview 不模拟 visualViewport，也没有真实的 PTY 宿主可以被抬起；v2.1 那种把根滚动拉回 0 的机制早已删除，v3.0 连整页钉高也删了，v3.1 只在此之上给局部避让加了 15% 比值地板（702 地板 105.3px：633.5 豁免、555 让位 147、274 让位 428）、把状态栏改成 fixed 触物理底、并把滚轮与终端滚动隔离——根一旦滑动即为失败，而壳矮于 clientHeight 同样是失败；本 preview 不模拟 visualViewport，也没有真实 PTY 宿主可以被抬起，比值地板在这里无从演示。</div>
 </div>
 
 <script>

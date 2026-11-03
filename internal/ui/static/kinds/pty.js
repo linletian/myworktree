@@ -236,6 +236,17 @@ class PtyRenderer {
         host.dataset.instanceId = id;
         host.style.cssText = 'position:absolute; inset:0; display:none;';
         termContainer.appendChild(host);
+        // issue #116 contract v3.0: the host is born `inset:0`, so a host
+        // created while the keyboard or the floating panel covers the bottom
+        // would sit under it — and stay there, fitted to a height nobody can
+        // see, until the next visualViewport event or the 500ms backstop in
+        // index.html. Lifting it here, at the one moment the box exists, is
+        // the same idempotent, write-only-on-change call the shell uses;
+        // guarded because this file is unit-testable in isolation, where the
+        // shell's function is not loaded.
+        if (typeof window.applyVisualViewportOcclusion === 'function') {
+            window.applyVisualViewportOcclusion();
+        }
 
         const session = {
             id,

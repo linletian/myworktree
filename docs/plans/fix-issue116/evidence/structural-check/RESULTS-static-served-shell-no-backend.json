@@ -1,0 +1,39 @@
+{
+  "url": "http://127.0.0.1:43924/?token=<redacted>",
+  "label": "static-served-shell-no-backend",
+  "viewport": {
+    "WIDTH": 1194,
+    "HEIGHT": 702
+  },
+  "measured": {
+    "htmlOverflow": "clip",
+    "bodyOverflow": "clip",
+    "htmlPosition": "static",
+    "bodyPosition": "static",
+    "appPosition": "fixed",
+    "appTop": "0px",
+    "appLeft": "0px",
+    "rootScrollHeight": 702,
+    "clientHeight": 702,
+    "vvHeight": 702,
+    "scrollBefore": 0,
+    "scrollAfterScrollTo": 0,
+    "scrollTopAfterWrite": 0,
+    "inner": {
+      "candidate": null,
+      "scrolled": null,
+      "rootScrollYDuringInner": null
+    },
+    "appRect": {
+      "top": 0,
+      "bottom": 702,
+      "height": 702
+    }
+  },
+  "fail": [],
+  "note": [
+    "no overflowing inner scroller was present in this DOM state (S8 unproven, not passed)"
+  ],
+  "inconclusive": [],
+  "verdict": "PASS"
+}

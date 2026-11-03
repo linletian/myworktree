@@ -1096,69 +1096,287 @@ func TestViewportAndHeightAnchors(t *testing.T) {
 	// occlusion sentinel is documentElement.clientHeight (not
 	// window.innerHeight — vv.height excludes scrollbars pinned to the
 	// visual viewport while innerHeight includes the classic gutter), and
-	// pinch/double-tap zoom opts out of pinning entirely: vv.height shrinks
-	// with the scale and fires resize, so without the short-circuit a pinch
-	// would collapse the whole UI toward half height.
-	apply := sliceJSFunction(t, bodyText, "applyVisualViewportHeight")
+	// pinch/double-tap zoom opts out entirely: vv.height shrinks with the
+	// scale and fires resize, so without the short-circuit a pinch would lift
+	// the terminal off a page the user is panning around.
+	// CONTRACT v3.0 (issue #116, "full-height shell + PTY-local avoidance").
+	// v2.2 pinned the SHELL to vv.height; the user's own control run of real
+	// Gmail on the same iPad showed the reference never moves its layout — the
+	// keyboard floats over an unchanged full-height page. So the shell is now
+	// FULL HEIGHT in every state and what this layer writes is the TERMINAL'S OWN
+	// bottom, in three places:
+	//     occlusion = max(0, documentElement.clientHeight - vv.height)
+	//     every PTY host's bottom  = occlusion
+	//     #terminal-controls'       = 20 + occlusion   (authored bottom 20px)
+	//     #status-bar's             = occlusion        (authored bottom 0)
+	// which reproduces the old terminal geometry (702/682 layout: vv.height 274
+	// -> host bottom 428px -> host rect 254; controls 448px; status 428px)
+	// without resizing an ancestor. The quick-keys entry stays put because the
+	// column's `top: 20px` is never written — only its height shortens, and that
+	// is what the panel's max-height:100% resolves against. Leaving the column and
+	// the strip under the keyboard would have kept the original defect (input and
+	// quick-keys reachable) open, so they are part of the contract, not a question
+	// left for review. The pin is DELETED, not renamed, so what this anchor asserts
+	// is BOTH the presence of these writes and the absence of the shell write.
+	apply := sliceJSFunction(t, bodyText, "applyVisualViewportOcclusion")
 	for _, check := range []string{
 		"window.visualViewport",
 		"document.documentElement.clientHeight",
-		"vv.height <= layoutHeight * (1 - HARD_OCCLUSION_RATIO)",
-		`Math.max(vv.height, 0) + "px"`,
-		// issue #116: the judgment now computes a target and writes only when it
-		// changed, so the 500ms reconcile tick cannot invalidate layout (and
-		// re-fire the terminal's ResizeObserver) on every pass.
-		"app.style.height !== target",
+		`document.getElementById("terminal-container")`,
+		":scope > [data-instance-id]",
+		// The occlusion is a SHORTFALL against the stable layout height, then
+		// FLOORED by the v3.1 small-occupant ratio. This is the anchor that
+		// replaces the retired `vv.height < layoutHeight - 1` pin and the retired
+		// `vv.height <= layoutHeight * (1 - HARD_OCCLUSION_RATIO)` gate: a raw
+		// shortfall at or above 0.15 * layoutHeight is paid whole, a thinner strip
+		// floors to 0. On the measured 702 layout that floor is 105.3px, so the
+		// 147px keyboard (vv.height 555) and the 428px one (vv.height 274) both
+		// avoid and only the 68.5px thin strip (vv.height 633.5) is exempt — the
+		// 0.25 this round first shipped put the floor at 175.5px and wrongly
+		// exempted the 147px keyboard. The floor is a ratio of layout height, not
+		// the retired "never lift below 0.75" gate.
+		"Math.max(0, layoutHeight - vv.height)",
+		"const SMALL_OCCLUSION_RATIO = 0.15;",
+		"occlusion < layoutHeight * SMALL_OCCLUSION_RATIO",
+		"if (occlusion < layoutHeight * SMALL_OCCLUSION_RATIO) occlusion = 0;",
+		`const target = occlusion + "px"`,
+		// The judgment writes per host and only when it changed, so the 500ms
+		// backstop cannot invalidate layout (and re-fire the terminal's
+		// ResizeObserver) on every pass.
+		"hosts[i].style.bottom !== target",
+		`hosts[i].style.bottom = target`,
 		"vv.scale && Math.abs(vv.scale - 1) > 0.01",
-		`app.style.height = ""`,
+		// The two overlay children of #workspace, same pass, same guard, each from
+		// its OWN authored bottom. Without these the quick-keys entry, its panel
+		// and the transport strip sit under the keyboard.
+		`document.getElementById("terminal-controls")`,
+		`document.getElementById("status-bar")`,
+		"const CONTROLS_BOTTOM_OFFSET = 20;",
+		`const controlsTarget = (CONTROLS_BOTTOM_OFFSET + occlusion) + "px"`,
+		"controls.style.bottom !== controlsTarget",
+		`controls.style.bottom = controlsTarget`,
+		"statusBar.style.bottom !== target",
+		`statusBar.style.bottom = target`,
 	} {
 		if !strings.Contains(apply, check) {
-			t.Fatalf("GET / applyVisualViewportHeight should include %q (issue #100 L1 R6, threshold re-calibrated under issue #116)", check)
+			t.Fatalf("GET / applyVisualViewportOcclusion should include %q (issue #100 L1 R6, contract v3.0 under issue #116)", check)
 		}
 	}
-	// Choice A (issue #116, iPadOS 27.2 re-calibration): vv.offsetTop is NOT
-	// an input to either the occlusion test or the pin target, and neither is
-	// any derived visible-bottom value. Reading them is what let the pin chase
-	// a drag, clear itself mid-drag and then refuse to re-arm — leaving the
-	// keyboard over the terminal indefinitely (DATA-COLLECTION.md §5g). These
-	// forbidden anchors keep it out for good.
-	// The ban scans CODE, not prose: the function carries the calibration trace
-	// in comments (which name offsetTop to explain why it is gone), and a
-	// comment cannot make a judgment pan-sensitive. Both comment syntaxes are
-	// stripped — this function documents itself with // line comments — and the
-	// scan is quote-aware so a string literal containing "//" survives.
+	// The ban list is the veto, executed against CODE (comments name the calls
+	// to explain why they are gone, and a comment cannot scroll a page or resize
+	// a shell). The PTY host's own bottom is the only thing this layer writes.
 	applyCode := stripJSComments(apply)
+	for _, banned := range []string{
+		"scrollTo",
+		"scrollBy",
+		"scrollTop",
+		"scrollingElement",
+		"documentElement.style",
+		"document.body.style",
+		"requestAnimationFrame",
+		"resetRootScrollOrigin",
+		// v3.0: the shell and the columns it contains are NEVER resized. These
+		// three bans are what "full height" means in code rather than in prose.
+		"app.style.height",
+		"app.style.position",
+		"workspace.style",
+	} {
+		if strings.Contains(applyCode, banned) {
+			t.Fatalf("GET / applyVisualViewportOcclusion must not contain %q — the root is never written, the shell is never resized, and neither is re-settled on a frame (issue #116 contract v3.0)", banned)
+		}
+	}
+	// The retired HARD gate is GONE, not merely unused. That gate (the retired
+	// `vv.height <= layoutHeight * (1 - HARD_OCCLUSION_RATIO)` / 0.75 rule) REFUSED
+	// to lift for anything SHORTER than a tall keyboard — the exact opposite of the
+	// v3.1 SMALL_OCCLUSION_RATIO floor, which pays every shortfall at or above 0.15
+	// * layoutHeight and exempts only the shallower strip under it. So the ban is on
+	// the gate's SHAPE — the constant's name, the `(1 -` cliff spelling and the
+	// inlined `layoutHeight *0.25` literal — and NOT on the numeral 0.15, which is
+	// legitimate here as SMALL_OCCLUSION_RATIO applied to the SHORTFALL. A ban on the
+	// bare numeral would only prove the test cannot tell a cliff from a floor. The
+	// magic-hint
+	// frame (b90643be…, seq388) still shows a true overlay lands on occlusion 0
+	// because clientHeight - vv.height is 0 — but v3.1 no longer needs a 0.75 cliff
+	// to get there: the 633.5 thin strip now floors to 0 on its own ratio, while the
+	// 555 frame at 147px = 20.9% clears the 105.3px floor and avoids.
+	// Scan CODE, not prose (the comments narrate the retirement by name).
+	codeText := stripJSComments(bodyText)
+	for _, banned := range []string{
+		"HARD_OCCLUSION_RATIO",
+		"layoutHeight * (1 -",
+		"layoutHeight *0.25",
+	} {
+		if strings.Contains(codeText, banned) {
+			t.Fatalf("GET / must not carry the retired HARD occlusion gate %q — v3.1 pays every shortfall at or above the 0.15 floor and exempts only the shallower strip under it, it never refuses to lift below a 0.75 cliff (issue #116)", banned)
+		}
+	}
+	// CONTRACT v3.1 (issue #116), the transport strip reaches the PHYSICAL bottom.
+	// #status-bar is `position: fixed`, not `absolute`: as an absolute child of
+	// #workspace its bottom resolved against #workspace's padding box, which sits
+	// env(safe-area-inset-bottom) (~20px on this iPad) above the physical edge, so
+	// the Transport stopped short while the terminal ink bled past it. `fixed`
+	// re-anchors it to the viewport (its authored bottom is still 0 → its own bottom
+	// IS the physical bottom), and the occlusion avoidance still writes this box's
+	// own bottom = occlusion. This is the CSS half of the strip-bottom invariant; the
+	// JS half (writing bottom) is anchored above, and the live engine half lives in
+	// evidence/structural-check.mjs. #terminal-controls stays absolute inside
+	// #workspace — only the strip moves, so the two boxes keep their authored 20px
+	// gap and the quick-keys panel's max-height still resolves against the column.
+	sbRuleStart := strings.Index(bodyText, "\n        #status-bar {\n")
+	if sbRuleStart < 0 {
+		t.Fatal(`GET / lost the 8-space-indented base #status-bar rule (issue #116 contract v3.1)`)
+	}
+	sbRuleEnd := strings.Index(bodyText[sbRuleStart:], "\n        }")
+	if sbRuleEnd < 0 {
+		t.Fatal("GET / #status-bar rule has no closing brace")
+	}
+	sbRule := bodyText[sbRuleStart : sbRuleStart+sbRuleEnd]
+	for _, decl := range []string{"position: fixed;", "bottom: 0;"} {
+		if !strings.Contains(sbRule, decl) {
+			t.Fatalf("GET / #status-bar rule must declare %q — v3.1 pins the transport strip to the viewport's physical bottom so the safe-area inset that shortens #workspace no longer stops it short (issue #116 contract v3.1)", decl)
+		}
+	}
+	if strings.Contains(sbRule, "position: absolute;") {
+		t.Fatal("GET / #status-bar must NOT be position:absolute — that resolves its bottom against #workspace's inset padding box and reintroduces the short-of-bottom defect (issue #116 contract v3.1)")
+	}
+	// Choice A (issue #116, iPadOS 27.2 re-calibration): vv.offsetTop is NOT
+	// an input to the occlusion arithmetic, and neither is any derived
+	// visible-bottom value. Reading them is what let the pin chase a drag, clear
+	// itself mid-drag and then refuse to re-arm — leaving the keyboard over the
+	// terminal indefinitely (DATA-COLLECTION.md §5g). These forbidden anchors
+	// keep it out for good: the shell is out of flow and cannot be panned, and
+	// the covered/uncovered boundary lives at vv.height in client coordinates.
+	applyForBan := stripJSComments(apply)
 	for _, banned := range []string{
 		"vv.offsetTop",
 		"offsetTop",
 		"visibleBottom",
 		"covered",
 	} {
-		if strings.Contains(applyCode, banned) {
-			t.Fatalf("GET / applyVisualViewportHeight must not read %q — the occlusion judgment and the pin target are pan-immune by construction (issue #116 choice A)", banned)
+		if strings.Contains(applyForBan, banned) {
+			t.Fatalf("GET / applyVisualViewportOcclusion must not read %q — the occlusion is pan-immune by construction (issue #116 choice A)", banned)
 		}
 	}
-	// REVISED under issue #116: the scroll listener no longer gates on an
-	// existing pin and runs the same full judgment as resize. The gate was
-	// removed deliberately — with vv.offsetTop gone it could only ever refuse
-	// to RE-ARM a pin, which is the failure that stranded the shell. The
-	// function keeps its name so this anchor and the shipped listener stay
-	// addressable.
-	reapply := sliceJSFunction(t, bodyText, "reapplyPinnedVisualViewportHeight")
-	if !strings.Contains(reapply, "applyVisualViewportHeight();") {
-		t.Fatal("GET / reapplyPinnedVisualViewportHeight must run the full judgment on scroll (issue #116 choice A)")
+	// The retired machinery is deleted, not renamed and not parked behind a
+	// flag. Every name the previous rounds shipped must be gone from CODE, the
+	// v2.2 pin function with them, and so must the listener that drove the
+	// origin: the root is not chased, it does not exist as a scroller (html/body
+	// are clipped below, #app is out of flow).
+	for _, gone := range []string{
+		"applyVisualViewportHeight",
+		"reapplyPinnedVisualViewportHeight",
+		"resetRootScrollOrigin",
+		"reconcileViewportShell",
+		"SHELL_RECONCILE_MAX_FRAMES",
+		"pendingShellReconcileFrame",
+		"shellReconcileFramesLeft",
+	} {
+		if strings.Contains(codeText, gone) {
+			t.Fatalf("GET / must not still define or call %q — v2.1's origin parking and v2.2's full-page pin are both withdrawn, not disabled (issue #116)", gone)
+		}
+	}
+	if strings.Contains(codeText, `window.addEventListener("scroll"`) {
+		t.Fatal("GET / must not register a window scroll listener — that listener existed to pull the page back (issue #116 contract v2.2)")
+	}
+	// reapplyVisualViewportOcclusion keeps the scroll-anchor role v2.2 called
+	// reapplyPinnedVisualViewportHeight, and does exactly one thing: re-run the
+	// avoidance. It must NOT gain any root- or shell-write back under a new
+	// label, and the name itself says what changed — re-AVOID, never re-PIN.
+	reapply := sliceJSFunction(t, bodyText, "reapplyVisualViewportOcclusion")
+	if !strings.Contains(reapply, "applyVisualViewportOcclusion();") {
+		t.Fatal("GET / reapplyVisualViewportOcclusion must re-run the avoidance on visualViewport scroll (issue #116 contract v3.0)")
+	}
+	if strings.Contains(stripJSComments(reapply), "scroll") && strings.Contains(stripJSComments(reapply), "=") {
+		t.Fatal("GET / reapplyVisualViewportOcclusion must not write any scroll (issue #116 contract v3.0)")
 	}
 	if strings.Contains(reapply, "if (!app || !app.style.height) return;") {
-		t.Fatal("GET / reapplyPinnedVisualViewportHeight must NOT re-add the existing-pin gate — it stranded the cleared pin across seq362-396 (issue #116)")
+		t.Fatal("GET / reapplyVisualViewportOcclusion must NOT re-add the existing-pin gate — it stranded the cleared pin across seq362-396 (issue #116)")
 	}
 	init := sliceJSFunction(t, bodyText, "initVisualViewportHandling")
 	for _, check := range []string{
 		"if (!vv) return;",
-		`vv.addEventListener("resize", applyVisualViewportHeight)`,
-		`vv.addEventListener("scroll", reapplyPinnedVisualViewportHeight)`,
+		`vv.addEventListener("resize", applyVisualViewportOcclusion)`,
+		`vv.addEventListener("scroll", reapplyVisualViewportOcclusion)`,
+		`applyVisualViewportOcclusion()`,
+		// The 500ms backstop stays, but it owns the HOST BOTTOM only: every
+		// state change that fires no event (seq72 / seq114 / seq493, and the
+		// silent overlay recovery at seq54) was first caught by this tick, and a
+		// stranded lift is exactly as wrong as a stranded pin was.
+		"setInterval",
 	} {
 		if !strings.Contains(init, check) {
-			t.Fatalf("GET / initVisualViewportHandling should include %q (issue #100 L1 R6)", check)
+			t.Fatalf("GET / initVisualViewportHandling should include %q (issue #100 L1 R6, contract v3.0 under issue #116)", check)
+		}
+	}
+	initCode := stripJSComments(init)
+	for _, banned := range []string{"scrollTo", "scrollTop", "scrollingElement", "documentElement.style", "app.style.height", "requestAnimationFrame"} {
+		if strings.Contains(initCode, banned) {
+			t.Fatalf("GET / initVisualViewportHandling must not contain %q — the backstop owns the host bottom, never the root or the shell (issue #116 contract v3.0)", banned)
+		}
+	}
+	// A PTY host is born `position:absolute; inset:0`, and the avoidance writes
+	// the `bottom` LONGHAND afterwards. If a factory stopped declaring inset:0 —
+	// or #terminal-container stopped being the containing block — the written
+	// value would stop being the last word on that box and the terminal would
+	// silently sink back under the keyboard.
+	for _, factory := range []string{"function createTerminalHost(id) {", "#terminal-container {"} {
+		if !strings.Contains(bodyText, factory) {
+			t.Fatalf("GET / must still carry %q — the host/inset contract the PTY-local avoidance resolves against (issue #116 contract v3.0)", factory)
+		}
+	}
+	if !strings.Contains(bodyText, "position:absolute; inset:0") {
+		t.Fatal("GET / must keep `position:absolute; inset:0` on the PTY host — the host's own bottom is the only box v3.0 moves (issue #116 contract v3.0)")
+	}
+
+	// REVISED under issue #116 contract v2.2: the root boxes are where the
+	// guarantee now lives. `overflow: hidden` stays as the legacy floor and
+	// `overflow: clip` comes AFTER it — source order is the mechanism, and
+	// reordered, every engine that knows clip silently gets a scrollable root
+	// back, which is the band returning. Height and position stay exactly as
+	// they were: body is deliberately NOT fixed (2ac6c83, reverted in 5fdbd84)
+	// and no JS touches either box.
+	bodyRuleStart := strings.Index(bodyText, "\n        body, html {\n")
+	if bodyRuleStart < 0 {
+		t.Fatal("GET / lost the body,html rule (issue #116)")
+	}
+	bodyRuleEnd := strings.Index(bodyText[bodyRuleStart:], "\n        }")
+	bodyRule := stripCSSComments(bodyText[bodyRuleStart : bodyRuleStart+bodyRuleEnd])
+	if !strings.Contains(bodyRule, "height: 100%;") {
+		t.Fatal("GET / body,html must keep height:100% — the contract does not resize the document (issue #116)")
+	}
+	hiddenAt := strings.Index(bodyRule, "overflow: hidden;")
+	clipAt := strings.Index(bodyRule, "overflow: clip;")
+	if hiddenAt < 0 {
+		t.Fatal("GET / body,html must keep overflow: hidden as the legacy floor for engines that never learned clip (issue #116 contract v2.2)")
+	}
+	if clipAt < 0 {
+		t.Fatal("GET / body,html must declare overflow: clip — hidden alone still lets the root be scrolled; measured sop6-3357d50e…, seq23-34 walked scrollTop 0 -> 428 with hidden in place (issue #116 contract v2.2)")
+	}
+	if hiddenAt > clipAt {
+		t.Fatal("GET / body,html must declare overflow: hidden BEFORE overflow: clip — last-declaration-wins, swapped the modern engines get their scrollable root back (issue #116 contract v2.2)")
+	}
+	if strings.Contains(bodyRule, "position:") {
+		t.Fatal("GET / body,html must not declare position — the body-fixed shell was tried and reverted; the out-of-flow anchor lives on #app (issue #116, 2ac6c83)")
+	}
+	if strings.Contains(codeText, "document.documentElement.style.height") || strings.Contains(codeText, "document.body.style.height") {
+		t.Fatal("GET / JS must not set the root box height — §5k's root-resize was reverted and v2.2 never reintroduces it (issue #116)")
+	}
+	// The out-of-flow anchor: #app leaves the normal flow, so the root boxes
+	// carry no content to overflow. This is the structural difference from every
+	// reverted round: the SHELL is fixed, the document is clipped, and neither is
+	// ever written from JS.
+	appFixed := strings.Index(bodyText, "#app {\n")
+	if appFixed < 0 {
+		t.Fatal("GET / lost the #app rule (issue #116 contract v2.2)")
+	}
+	appRuleEnd := strings.Index(bodyText[appFixed:], "\n        }")
+	if appRuleEnd < 0 {
+		t.Fatal("GET / #app rule has no closing brace")
+	}
+	appRule := stripCSSComments(bodyText[appFixed : appFixed+appRuleEnd])
+	for _, check := range []string{"position: fixed;", "top: 0;", "left: 0;", "width: 100%;"} {
+		if !strings.Contains(appRule, check) {
+			t.Fatalf("GET / #app must declare %q — an out-of-flow shell needs its viewport anchor, and this is what stops the document from carrying scrollable content (issue #116 contract v2.2)", check)
 		}
 	}
 	// The wiring must actually run at startup, or the whole R6 path is dead
@@ -1183,6 +1401,16 @@ func TestNarrowDrawerAnchors(t *testing.T) {
 	// mask. In-rule assertion, same style as TestViewportAndHeightAnchors —
 	// other rules in the file also set position and a bare Contains would
 	// anchor nothing.
+	//
+	// REVISED under issue #116 contract v2.2: the value is now `fixed`, not
+	// `relative`. The requirement R7 actually encodes is "there IS a positioned
+	// ancestor for the absolutely positioned drawer", and a fixed box is one —
+	// the anchor stays satisfied. What the change DOES cost, and what this
+	// anchor therefore also pins, is that the containing block is the
+	// LAYOUT VIEWPORT rather than the in-flow box, so the drawer's insets are
+	// resolved against the viewport. That is the same consequence the shell
+	// itself already lives with (it cannot be panned any more), so the drawer
+	// inherits a behaviour the page now guarantees everywhere, not a new one.
 	appStart := strings.Index(bodyText, "#app {\n")
 	if appStart < 0 {
 		t.Fatal("GET / lost the #app rule (issue #100 L2 R7)")
@@ -1191,9 +1419,13 @@ func TestNarrowDrawerAnchors(t *testing.T) {
 	if appEnd < 0 {
 		t.Fatal("GET / #app rule has no closing brace")
 	}
-	if !strings.Contains(bodyText[appStart:appStart+appEnd], "position: relative;") {
-		t.Fatal("GET / #app rule should declare position: relative — the drawer's positioning containing block (issue #100 L2 R7)")
+	appRule := bodyText[appStart : appStart+appEnd]
+	if !strings.Contains(appRule, "position: fixed;") {
+		t.Fatal("GET / #app rule should declare position: fixed — it must stay the drawer's positioned containing block (issue #100 L2 R7) while taking the shell out of the document's flow (issue #116 contract v2.2)")
 	}
+	// The drawer's own positioning is asserted below, against the narrow-tier
+	// rule that actually restyles it: it stays ABSOLUTE, so it resolves against
+	// this now-fixed containing block instead of escaping it.
 
 	// R7 + §3.1: PR1's zero-width collapse rule is scoped off the narrow
 	// tier by the SEAMLESS complement of the drawer's max-width: 768px

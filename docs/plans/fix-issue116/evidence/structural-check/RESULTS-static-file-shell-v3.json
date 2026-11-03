@@ -1,0 +1,55 @@
+{
+  "url": "file:///home/linletian/SoftwareWorkspace/myworktree-myworktree/fix-fix-issue116/internal/ui/static/index.html",
+  "label": "static-file-shell-v3",
+  "viewport": {
+    "WIDTH": 1194,
+    "HEIGHT": 702
+  },
+  "measured": {
+    "htmlOverflow": "clip",
+    "bodyOverflow": "clip",
+    "htmlPosition": "static",
+    "bodyPosition": "static",
+    "appPosition": "fixed",
+    "appTop": "0px",
+    "appLeft": "0px",
+    "rootScrollHeight": 702,
+    "clientHeight": 702,
+    "vvHeight": 702,
+    "scrollBefore": 0,
+    "scrollAfterScrollTo": 0,
+    "scrollTopAfterWrite": 0,
+    "inner": {
+      "candidate": null,
+      "scrolled": null,
+      "rootScrollYDuringInner": null
+    },
+    "appRect": {
+      "top": 0,
+      "bottom": 702,
+      "height": 702
+    },
+    "layoutClientHeight": 702,
+    "appInlineHeight": "",
+    "host": {
+      "containerFound": true,
+      "containerBottom": 702,
+      "inlineBottoms": [],
+      "rectBottoms": [],
+      "probe": {
+        "insetBottom": 702,
+        "writtenBottom": "428px",
+        "liftedBottom": 274,
+        "movedBy": 428,
+        "computedBottom": "428px"
+      }
+    }
+  },
+  "fail": [],
+  "note": [
+    "no overflowing inner scroller was present in this DOM state (S8 unproven, not passed)",
+    "no live PTY host in this DOM state (web kind / no session): the host list is empty, the cascade probe below still runs"
+  ],
+  "inconclusive": [],
+  "verdict": "PASS"
+}

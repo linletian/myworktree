@@ -1,0 +1,57 @@
+{
+  "url": "file:///tmp/v3-fixture.html",
+  "label": "fixture-v3-host-cascade",
+  "viewport": {
+    "WIDTH": 1194,
+    "HEIGHT": 702
+  },
+  "measured": {
+    "htmlOverflow": "clip",
+    "bodyOverflow": "clip",
+    "htmlPosition": "static",
+    "bodyPosition": "static",
+    "appPosition": "fixed",
+    "appTop": "0px",
+    "appLeft": "0px",
+    "rootScrollHeight": 702,
+    "clientHeight": 702,
+    "vvHeight": 702,
+    "scrollBefore": 0,
+    "scrollAfterScrollTo": 0,
+    "scrollTopAfterWrite": 0,
+    "inner": {
+      "candidate": "#sidebar",
+      "before": 0,
+      "scrolled": 40,
+      "rootScrollYDuringInner": 0
+    },
+    "appRect": {
+      "top": 0,
+      "bottom": 702,
+      "height": 702
+    },
+    "layoutClientHeight": 702,
+    "appInlineHeight": "",
+    "host": {
+      "containerFound": true,
+      "containerBottom": 702,
+      "inlineBottoms": [
+        "0px"
+      ],
+      "rectBottoms": [
+        702
+      ],
+      "probe": {
+        "insetBottom": 702,
+        "writtenBottom": "428px",
+        "liftedBottom": 274,
+        "movedBy": 428,
+        "computedBottom": "428px"
+      }
+    }
+  },
+  "fail": [],
+  "note": [],
+  "inconclusive": [],
+  "verdict": "PASS"
+}

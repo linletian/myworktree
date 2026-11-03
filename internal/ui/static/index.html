@@ -145,33 +145,60 @@
             margin: 0;
             padding: 0;
             height: 100%;
+            /* CONTRACT v3.0 (issue #116) — "out-of-flow FULL-HEIGHT fixed shell +
+               non-scrollable root", declared as a STRUCTURE and not as a repair
+               loop. The structure is carried over from v2.2 unchanged; what v3.0
+               adds is that the shell — and every column inside it — keeps its full
+               height in EVERY keyboard state, and only the PTY hosts inside
+               #terminal-container move (applyVisualViewportOcclusion below):
+                 overflow: hidden  -> the legacy floor (old Safari never learned
+                 clip; hidden still let the root be scrolled programmatically, and
+                 that is precisely the hole this round closes);
+                 overflow: clip    -> the value an engine that knows `clip` settles
+                 on, and it is a different kind of answer: a clipped box has NO
+                 scroll mechanism at all, so there is no scroll range to walk, no
+                 scrollTop to write and no scroll event to chase.
+               Source order is the mechanism (same-origin, equal specificity,
+               last-wins), so `hidden` first and `clip` after — swapping them would
+               silently hand every modern browser back a scrollable root.
+               Why the change: `overflow: hidden` alone did NOT stop iOS from
+               moving this page. Measured (session sop6-3357d50e…, seq23-34), the
+               ROOT scrollTop walked 0 -> 428 (288 by seq30) in step with
+               visualViewport.offsetTop under a focused field even with hidden here,
+               and because getBoundingClientRect is visual-viewport relative, a
+               scrolled root lifts every rect: with scrollY = s the shell's VISIBLE
+               bottom is vv.height - s. The exposed band IS that scroll.
+               v2.1 answered it by PARKING the origin — scrollTo / scrollTop = 0 in
+               a shared pass, re-checked on rAF follow-ups and a 500ms tick. That
+               was the wrong shape of fix and is REMOVED, not renamed: a page that
+               has to be dragged back to the top every frame is still a page the
+               user can scroll, and the recovery was visible as the band appearing
+               and being yanked away. From here the root cannot scroll in the first
+               place, so there is nothing to recover; the user gets a surface that
+               does not move, not one that is pulled back. This is STRICTER than the
+               reference app the user measured (real Gmail on the same iPad): Gmail
+               answers the keyboard by growing a hidden strip below the shell, about
+               a keyboard tall, that the user has to swipe the whole page into and
+               that collapses again when focus leaves. That strip is a root scroll
+               area by another name, and this contract forbids it — `clip` here is
+               exactly what makes such a strip unreachable, and no JS may create one.
+               Height and position of html/body stay EXACTLY as they were: height:
+               100%, no position (body is deliberately NOT fixed — the 2ac6c83
+               combination of body-fixed + clip + a 100vh column bleed was tried
+               and reverted, and this round re-adds ONLY clip, in a different
+               structure), and no JS ever touches either box. What changed is where
+               the application lives: #app below leaves the normal flow entirely, so
+               these two boxes carry no content to overflow — they carry the root
+               background and nothing else.
+               R17 (issue #100 padOS②/common①, PR #110 beta): overscroll-behavior:
+               none is the iOS 16+ rubber-band lock, kept for the same reason it was
+               added (hidden alone never chained Safari's bounce). Accepted
+               consequence: Android pull-to-refresh is disabled too — this UI is a
+               software surface, not a document, and its own scrollers are inside
+               #app. */
             overflow: hidden;
-            /* R17 (issue #100 padOS②/common①, PR #110 beta): overflow:hidden
-               never chained Safari's document rubber-band — it has been on
-               this rule since 2026-05 and the page still bounced on iOS
-               (Chrome honors it, which is why headless Chrome showed
-               nothing). overscroll-behavior:none is the iOS 16+ root-
-               scroller lock. Accepted consequence: Android pull-to-refresh
-               is disabled too — this UI is a software surface, not a
-               document, and its own scrollers are listed below. */
+            overflow: clip;
             overscroll-behavior: none;
-            /* issue #116 (Gmail-style app shell): overflow:hidden alone does NOT
-               stop iOS from moving the page. On-device capture (magic floating
-               bar up, vv.height 633.5, clientHeight 702) shows the shell was
-               NOT resized — #app computed 702px the whole time, inline height
-               empty — yet visualViewport.offsetTop walked 0 -> 69 and
-               #workspace's rect bottom tracked it (682 -> 613). That is the
-               VISUAL viewport panning inside the layout viewport. With #app
-               exactly as tall as the layout viewport, a 69px pan shifts the
-               whole shell up and exposes 69px of root canvas below its bottom
-               edge — the reported band, whose height matching the bar plus 1-2px
-               is what identified the pan as the cause.
-               `position: fixed` on the body was tried and REVERTED: it did not
-               stop the pan (verified on-device) and it introduced a worse
-               artifact — with the soft keyboard up, the body stayed a full
-               viewport tall while #app was pinned to the keyboard's top edge, so
-               a keyboard-height slab of canvas appeared. The lock that actually
-               owns this is a gesture guard; see initShellScrollLock(). */
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji";
             font-size: 13px;
             color: var(--text-primary);
@@ -190,8 +217,8 @@
                sitting beside $bg-sidebar (#F7F7F9), never $term-bg (#1B1A23).
                Painting the terminal colour here turned the strip into a dark slab.
                The strip must also never be treated as its own painted object: the
-               design rule is "background bleeds fully, content insets" (see below) (background bleeds past the
-               safe area, content insets) and
+               design rules are "background bleeds fully, content insets" (the
+               background bleeds past the safe area while the content insets) and
                "drawer / main / workspace backgrounds bleed fully" — each column carries its OWN
                background down to the physical edge, so under the sidebar the
                strip reads as sidebar and under the terminal it reads as terminal.
@@ -214,41 +241,107 @@
 
         #app {
             display: flex;
-            /* R7 (issue #100 L2): the positioning containing block for the
-               narrow-tier drawer and its mask below — both are absolutely
-               positioned children of #app (the padding box, safe areas
-               included). Verified no-op against every pre-existing
-               ABSOLUTELY or FIXED positioned element, markup OR JS-created
-               — only those can have their containing block re-homed by an
-               ancestor gaining position:relative; a position:relative
-               element like .remote-badge offsets from its own normal-flow
-               position and is unaffected by definition, so it needs no
-               audit. Each audited element's ACTUAL containing block is
-               listed so this stays checkable: #connection-overlay is
-               position:fixed (its containing block is the viewport,
-               ancestors irrelevant); #status-bar, #terminal-controls and
-               #empty-state are direct children of #workspace
-               (position:relative — already their containing block; note
-               #empty-state is #terminal-container's SIBLING, not its
-               child); the JS-created #dsh-remote-mask (created in
-               kinds/dsh_web.js, styled by the rule a few hundred lines
-               below) sits inside #dsh-frames (position:relative); the
-               JS-created measurement span in truncatePath (a body-appended
-               span with position:fixed in its style.cssText) is
-               viewport-positioned like any fixed element, ancestors
-               irrelevant; and the two JS-created per-instance xterm host
-               divs — createTerminalHost in this file and
-               PtyRenderer._createSession in kinds/pty.js — (position:
-               absolute in their style.cssText) are appended to
-               #terminal-container (position:relative), already their
-               containing block. */
-            position: relative;
+            /* CONTRACT v3.0 (issue #116): the shell leaves the normal flow AND
+               stays FULL HEIGHT. `fixed` here is not decoration, it is the
+               structural half of "the root cannot scroll": an out-of-flow #app
+               contributes NOTHING to the document's scrollable overflow, so html/body
+               — clipped above — have no content to scroll and no range to walk. R5's
+               height basis is untouched by the change: the same 100vh / 100dvh pair,
+               the same width:100%, plus a top/left anchor (fixed needs one; the
+               anchor is 0/0, so the box lands exactly where normal flow put it).
+               Why this is NOT the reverted 2ac6c83 combination: that round put
+               `fixed` on BODY, kept the root at overflow:hidden semantics and bled
+               the columns 100vh; the body then stayed a full viewport tall while
+               #app was pinned to the keyboard's top edge, so a keyboard-height slab
+               of canvas showed through. Here the body keeps its normal static box and
+               carries NO application content, the columns keep the env()-sized bleed
+               they had before, and nothing is ever pinned shorter than the viewport.
+               WHAT v3.0 CHANGED AGAINST v2.2: v2.2 pinned the shell ITSELF to
+               `vv.height` whenever the visual viewport came up short. The real-Gmail
+               control the user ran on the iPad says the reference behaves
+               differently: with the soft keyboard or the Magic Keyboard's floating
+               panel up, what is visible THROUGH the keyboard is identical to what
+               was there before it — the keyboard OVERLAPS a page that never moved,
+               it does not resize it. So here the shell, the sidebar, the header and
+               #workspace stay full height in EVERY keyboard state, and the covered
+               strip is lifted by the TERMINAL'S OWN boxes only: each PTY host
+               inside #terminal-container moves its OWN `bottom` up by the occlusion,
+               and so do the two absolutely positioned overlay children of
+               #workspace — #terminal-controls, the quick-keys entry / panel column,
+               which keeps its authored 20px clearance ON TOP of the occlusion, and
+               #status-bar (applyVisualViewportOcclusion below). Gmail also grows a
+               hidden strip under the keyboard that the user can scroll the whole page
+               into; that half is deliberately NOT copied — the user's standing
+               requirement is that this page is never scrollable and never
+               auto-returns to the top, so the root stays clipped and no scroll range
+               is created at all.
+               R7 (issue #100 L2), the containing-block audit, survives the swap
+               UNCHANGED in substance: a fixed element is a positioned element, so
+               #app remains the positioning containing block for the narrow-tier
+               drawer and its mask (both absolutely positioned children; the box
+               they resolve against is still #app's PADDING box, safe areas
+               included). Re-audited against every pre-existing positioned element,
+               markup OR JS-created, because fixed — unlike relative — also takes
+               its OWN containing block away from the flow: #connection-overlay is
+               position:fixed (containing block = viewport, ancestors irrelevant);
+               the narrow-tier #sidebar-toggle-btn lift is position:fixed and
+               resolves against the viewport as before — #app carries no
+               transform / filter / perspective, and a fixed ANCESTOR does not
+               capture fixed DESCENDANTS, so the anchor left:
+               calc(var(--sidebar-width) - 1px) still measures from x=0 of the
+               viewport; #status-bar, #terminal-controls and #empty-state are
+               direct children of #workspace (position:relative — already their
+               containing block; #empty-state is #terminal-container's SIBLING,
+               not its child) — and #status-bar / #terminal-controls are the two
+               OVERLAY children the keyboard avoidance therefore lifts by their OWN
+               `bottom` (occlusion, and 20 + occlusion), precisely BECAUSE their
+               containing block stays full height and they would otherwise sit under
+               the keyboard, while the quick-keys panel inherits the shorter column
+               through its `max-height: 100%`; the JS-created
+               #dsh-remote-mask (kinds/dsh_web.js)
+               sits inside #dsh-frames (position:relative); the JS-created
+               measurement span in truncatePath (body-appended, position:fixed in
+               its style.cssText) is viewport-positioned like any fixed element;
+               and the two JS-created per-instance xterm host divs —
+               createTerminalHost in this file and PtyRenderer._createSession in
+               kinds/pty.js — (position:absolute; inset:0 in their style.cssText)
+               are appended to #terminal-container (position:relative), already
+               their containing block — and hosts, together with the two overlay
+               children named above, are exactly the set of boxes this build moves:
+               the PTY-local avoidance writes each box's OWN `bottom`, which
+               resolves against that same #terminal-container / #workspace, so the
+               terminal's content AND its furniture lift off the covered strip while
+               every ancestor keeps the size
+               it had before the keyboard arrived. The one real consequence of
+               leaving the flow is the one this contract wants, and it is auditable:
+               the DIRECT CHILDREN
+               OF <body> are now `#app` (fixed, out of flow), eight closed <dialog>
+               elements (UA `display:none` until `showModal()` moves them to the
+               top layer, which no ancestor overflow clips), and <link> / <script
+               > elements that render nothing — so body has NO in-flow content, its
+               content height is 0, and the root has nothing to scroll. The three
+               body-APPENDED JS children were audited against the same question and
+               none of them adds flow content: the copy fallback's <textarea>
+               (position:fixed, left:-9999em, removed synchronously), truncatePath's
+               measurement <span> (position:fixed;visibility:hidden) and the
+               viewport-debug panel (position:fixed). The known STRUCTURAL cost,
+               recorded rather than hidden: a fixed shell is anchored to the LAYOUT
+               viewport, so if iOS ever pans the visual viewport anyway, the shell
+               does not pan with it — the A0 SOP is what settles that on the device,
+               and no JS here is allowed to paper over it. And because the shell is
+               FULL HEIGHT by contract, the strip iOS covers with the keyboard is
+               covered by the keyboard itself, exactly like the Gmail control; it is
+               never re-painted as a band and never scrolled into view. */
+            position: fixed;
+            top: 0;
+            left: 0;
             /* R5 (issue #100 L1): height basis. 100vh is the legacy
                fallback (old Safari); the @supports block below upgrades it
                to the dynamic viewport height, which tracks the mobile URL
-               bar show/hide without any JS. Width is 100% of body, NOT
-               100vw: vw counts the scrollbar gutter, so a vertical
-               scrollbar would push this flex row into horizontal overflow. */
+               bar show/hide without any JS. Width stays 100% — now resolved
+               against the viewport it is fixed to, NOT 100vw: vw counts the
+               scrollbar gutter, so a vertical scrollbar would push this flex
+               row into horizontal overflow. */
             height: 100vh;
             width: 100%;
             /* R5: keep the row inside the display notch / Home Indicator
@@ -295,6 +388,15 @@
                clipped by the collapsed state's overflow:hidden; the shadow cannot.
                Design: ui/sidebar-states.pen "drawer / main / workspace backgrounds bleed fully". */
             box-shadow: 0 env(safe-area-inset-bottom, 0px) 0 0 var(--bg-color);
+            /* CONTRACT v3.1 (issue #116): the containing block for the divider
+               ::after below. `relative` with no offsets keeps the box exactly where
+               the flex row already put it and creates no stacking context (no
+               z-index here); it only makes #sidebar — not #app — the box the
+               divider resolves against, so the divider tracks the rail's real right
+               edge and follows its width. None of #sidebar's descendants is
+               absolutely positioned against #app (the drawer mask is a SIBLING of
+               #sidebar, the toggle lives in #header), so nothing re-anchors. */
+            position: relative;
         }
 
         /* Sidebar collapse (issue #99), scoped OFF the narrow tier with the
@@ -328,6 +430,43 @@
                    invisible. visibility lifts them out of focus/hit-testing
                    while collapsed and restores on expand, zero JS. */
                 visibility: hidden;
+            }
+        }
+
+        /* CONTRACT v3.1 (issue #116), the divider reaching the PHYSICAL bottom.
+           The rail's `border-right` is the visual divider, but a border is painted on
+           the border box and #sidebar is a flex child inside #app's SAFE-AREA padding
+           (~env(safe-area-inset-bottom) = 20px on this iPad), so the border stopped
+           ~20px above the physical edge: the box-shadow bleeds the FILL across the
+           strip, but a box-shadow cannot carry a 1px HAIRLINE, and the instance divider
+           visibly stopped short. This ::after IS that hairline. It sits exactly on the
+           border column: left:100% is #sidebar's padding-box right edge (= border-box
+           right − 1px), width:1px covers [W-1, W] — the border's own column. Its
+           height:100% + env(safe-area-inset-bottom) runs from the top THROUGH the
+           safe-area strip to the physical bottom, overlaying the existing border for
+           the rail's height (same token, same column — invisible doubling) and NEW
+           only across the strip the border never reached. pointer-events:none; out of
+           flow, so it never widens #sidebar. Kept in its OWN wide-tier complement
+           block (a SEPARATE `not all and max-width:768px`, NOT inside the collapse
+           block) so that block stays the collapse rule alone and this hairline never
+           leaks into a scoped rule it does not belong to; the complement matches only
+           while width > 768px, i.e. only while #sidebar is a flex sibling — on the
+           narrow tier #sidebar is an absolute drawer at bottom:0 and the divider
+           already reaches the physical bottom. Collapsed: the collapse block sets
+           #sidebar visibility:hidden, inherited by this pseudo, so no orphan divider
+           survives. NOT a 100vh bleed — its length is the env() inset (0 on desktop),
+           collapsing to a no-op there. Design: ui/sidebar-states.pen "the
+           sidebar/instance divider runs to the physical bottom". */
+        @media not all and (max-width: 768px) {
+            #sidebar::after {
+                content: "";
+                position: absolute;
+                left: 100%;
+                top: 0;
+                width: 1px;
+                height: calc(100% + env(safe-area-inset-bottom, 0px));
+                background: var(--border-color);
+                pointer-events: none;
             }
         }
 
@@ -1416,7 +1555,31 @@
 
         /* Transport Status */
         #status-bar {
-            position: absolute;
+            /* CONTRACT v3.1 (issue #116): `fixed`, not `absolute`. As an absolute
+               child of #workspace the strip's bottom resolved against #workspace's
+               padding box, which sits env(safe-area-inset-bottom) (~20px) above the
+               physical edge — so the Transport stopped short of the true bottom
+               while the terminal ink bled past it. `fixed` re-anchors it to the
+               VIEWPORT: with no keyboard its own bottom is the physical bottom
+               (bottom:0), Gmail-style, and it no longer inherits the safe-area
+               inset that #workspace carries. #app carries no transform / filter /
+               perspective, and a fixed ANCESTOR does not capture a fixed DESCENDANT,
+               so this resolves against the viewport even though #status-bar stays a
+               DOM child of #workspace; #workspace's overflow:hidden never clips it
+               (a fixed box is painted outside an untransformed ancestor's clip). The
+               keyboard avoidance below still writes this box's OWN bottom =
+               occlusion (its authored bottom is 0), so a raised soft keyboard hands
+               the strip back at its physical-top edge, and occlusion 0 — or the
+               small-overlay exemption — hands exactly 0 back at the physical bottom.
+               Never a second layout truth: the authored 0 is the baseline. */
+            position: fixed;
+            /* issue #116 v3.0: 0 is the AUTHORED bottom. While the keyboard is up
+               applyVisualViewportOcclusion writes this box's OWN bottom =
+               occlusion, so the transport strip stays above the keyboard instead of
+               under it, and occlusion 0 hands exactly 0 back — the same geometry the
+               old full-page pin produced, reached by moving the child instead of the
+               shell. Never a second layout truth: the authored value below is the
+               baseline the avoidance offsets from. */
             bottom: 0;
             right: 0;
             background: var(--status-bar-bg);
@@ -1987,7 +2150,18 @@
                    pointer-events:none keeps the empty stretches of the
                    now-taller column from swallowing terminal clicks /
                    drags / selections on the right edge; the buttons and
-                   the panel re-enable their own below. */
+                   the panel re-enable their own below.
+                   issue #116 v3.0: this 20px is the AUTHORED bottom, and it is
+                   the value the keyboard avoidance adds the occlusion TO
+                   (applyVisualViewportOcclusion writes bottom = 20 + occlusion and
+                   hands exactly 20px back at occlusion 0). top:20px is NEVER
+                   written, so the quick-keys entry button stays put and only the
+                   column's height shortens — which is exactly what the panel's
+                   max-height above resolves against, so the panel shrinks with the
+                   keyboard instead of sitting under it, and its own
+                   overflow-y:auto keeps the key set reachable. Changing this
+                   offset means changing the constant inside that function: the two
+                   are one contract, stated twice. */
                 bottom: 20px;
                 pointer-events: none;
                 display: flex;
@@ -2063,6 +2237,13 @@
                 position: absolute;
                 top: 0;
                 right: calc(100% + 8px);
+                /* issue #116 v3.0: the percentage resolves against #terminal-controls,
+                   and while the keyboard is up the applier writes THAT box's own
+                   bottom = 20 + occlusion, so its height — the definite containing
+                   block this max-height needs — shortens by exactly the occlusion.
+                   The panel therefore shrinks with the keyboard and its
+                   overflow-y:auto below becomes the reachable scroll instead of a
+                   clipped key row; no JS touches this rule. */
                 max-height: 100%;
                 overflow-y: auto;
                 max-width: calc(100vw - 88px);
@@ -3367,165 +3548,306 @@
 
         document.addEventListener("keydown", handleSidebarToggleKeydown);
 
-        // --- Viewport height & the iOS soft keyboard (issue #100 L1) ---
+        // --- PTY-local occlusion & the non-scrollable root (issue #100 L1; rewritten under issue #116) ---
 
-        // R6: iOS Safari does not resize the layout viewport when the soft
-        // keyboard opens, and we deliberately do NOT use the
+        // R6: iOS Safari does not resize the layout viewport when the keyboard
+        // opens, and we deliberately do NOT use the
         // interactive-widget=resizes-content viewport directive (it is
         // Chromium-only; see plan §3.5/§8) — so the keyboard parks over the
-        // bottom of the page. body/html are overflow:hidden: the page itself
-        // never scrolls, which means the covered strip cannot be scrolled
-        // back into view. The only remedy is to shrink the app to what is
-        // actually visible, and window.visualViewport is the one API that
-        // reports that rectangle. The RESIZE listener runs the full
-        // judgment (keyboard open AND close); the SCROLL listener only
-        // re-pins an existing pin — a pure pan must never introduce one.
-        // While anything is covered, #app's inline height is pinned to the
-        // visual viewport's bottom edge in layout coordinates; the narrowing
-        // walks down the flex column (#workspace is flex:1), the terminal
-        // host's ResizeObserver fires and xterm re-fits, so the input area
-        // stays above the keyboard. When nothing is covered the inline
-        // height is CLEARED, handing sizing back to the CSS cascade
-        // (100dvh, with the 100vh fallback).
-        function applyVisualViewportHeight() {
-            const vv = window.visualViewport;
-            const app = document.getElementById("app");
-            if (!vv || !app) return;
-            // Hard-occlusion threshold, calibrated on-device (issue #116 A0,
-            // sessions 997d18dc… / f3ce260c…): the covered strip is expressed as
-            // a RATIO of the layout viewport, never in px, so it holds across
-            // devices and orientations. Measured anchors on iPad Pro 11 land
-            // (layout 702px):
-            //   soft keyboard      covered 428px = 60.9%  -> HARD, must pin
-            //   magic floating bar covered 68.5px =  9.8% -> soft, never pin
-            // 25% sits between the two anchors (an iPhone portrait keyboard
-            // covers ~40%+, so it stays on the hard side) and is fail-safe in
-            // the direction that matters: misclassifying a keyboard as a bar
-            // would leave text under the keyboard, while misclassifying a bar as
-            // a keyboard is what produced the stale-pin defect below. Declared
-            // inside the function because the test harness slices named
-            // functions out of this document and evaluates them standalone — a
-            // module-level const is outside that slice.
-            const HARD_OCCLUSION_RATIO = 0.25;
-            // Pinch / double-tap zoom opt-out, spec fact #1: vv.height is
-            // measured in layout-viewport pixels, so it SHRINKS as the scale
-            // grows (and a resize event fires on the change) — without this
-            // guard a pinch would pin #app to the zoomed rectangle and
-            // collapse the whole UI toward half height. The zoomed state
-            // owns no inline height; zooming back to 1 re-runs the full
-            // judgment on the resize event and re-pins if the keyboard is
-            // still up.
-            if (vv.scale && Math.abs(vv.scale - 1) > 0.01) {
-                app.style.height = "";
-                return;
-            }
-            // Occlusion is judged on vv.height ALONE, and the pin target is
-            // vv.height ALONE — vv.offsetTop never enters either. Product
-            // choice A (issue #116, iPadOS 27.2 re-calibration session
-            // ios272recal…): while the keyboard is up the terminal gets FEWER
-            // rows but NOTHING is ever hidden behind the keyboard; vertical
-            // browsing inside it is the terminal's own scroller, not a pan of
-            // the document.
-            // Why pan had to come out (measured, keyboard held open the whole
-            // time at vv.height 274 / clientHeight 702):
-            //   seq296 pan=0    → pinned 274px  (correct)
-            //   seq297–310 pan 12.5→237 → the OLD target (offsetTop+height)
-            //       grew the pin to 511px, chasing the pan
-            //   seq311 pan=265.5 → covered fell to 23.1%, UNDER the 25% gate,
-            //       so the OLD rule CLEARED the pin while the keyboard was
-            //       still up
-            //   seq362–396 pan 234→0→428 → covered climbed back to 428px
-            //       (61%) but the pin never returned: once cleared, the R6
-            //       "scroll never introduces a pin" gate refused to re-arm it,
-            //       so only a resize could save it (the single rescue in the
-            //       whole capture is seq328, reason=resize). Net effect: the
-            //       keyboard covered the bottom ~428px of the terminal
-            //       indefinitely — a regression introduced by making the test
-            //       depend on visibleBottom.
-            // A pan moves WHICH rows are in view; it changes neither whether
-            // the keyboard is up nor how much vertical room the shell has, so
-            // it must not be an input to either decision. Note also that on
-            // 27.2 window.innerHeight sinks 702→274 mid-drag while
-            // documentElement.clientHeight stays 702 — the two "layout height"
-            // sources disagree during a gesture, which is the second reason the
-            // sentinel stays documentElement.clientHeight and the gesture-derived
-            // values stay out.
+        // bottom of the page. The page CANNOT scroll at all under this contract
+        // (html/body are `overflow: clip` above, #app is `position: fixed` and
+        // FULL HEIGHT, so the document owns neither a scroll mechanism nor
+        // scrollable content), which means a covered strip can neither be
+        // scrolled into view nor be scrolled away. The one remedy left is to
+        // move the covered content itself, and window.visualViewport is the
+        // only API that reports the rectangle the covering UI leaves visible.
+        //
+        // CONTRACT v3.1 — "full-height shell, PTY-local avoidance with a
+        // small-overlay floor". Occlusion is the ONLY thing this layer writes, and
+        // the boxes it writes it to are the TERMINAL'S OWN boxes: the PTY hosts,
+        // the terminal control column that carries the quick-keys entry and panel,
+        // and the transport status strip. Nothing above them — #app, #main,
+        // #workspace, the sidebar, the header — is written at all.
+        //
+        //   1. OCCLUSION, gated by one product boundary. At scale = 1:
+        //        raw       = max(0, documentElement.clientHeight - vv.height)
+        //        occlusion = raw < clientHeight * SMALL_OCCLUSION_RATIO ? 0 : raw
+        //        -> every PTY host's style.bottom  = occlusion + "px"
+        //        -> #terminal-controls style.bottom = (20 + occlusion) + "px"
+        //        -> #status-bar's style.bottom      = occlusion + "px"
+        //      Hosts are `position:absolute; inset:0` inside #terminal-container, so
+        //      writing the `bottom` LONGHAND moves the host's own bottom edge UP by
+        //      that amount; #status-bar is `position:fixed` so its bottom resolves
+        //      against the viewport directly. In the measured clientHeight=702
+        //      layout the boundary is 702*0.15 = 105.3px:
+        //        vv.height 274   -> occlusion 428 (61.0%) -> avoids (host 428, controls 448, status 428)
+        //        vv.height 555   -> occlusion 147 (20.9%) -> avoids (host 147, controls 167, status 147)
+        //        vv.height 633.5 -> occlusion 68.5 ( 9.8%) -> EXEMPT (host 0, controls 20, status 0)
+        //      The 633.5 frames are the thin floating strip the user says must NOT
+        //      compress the terminal ("the floating panel must not compress any
+        //      terminal area"): under the boundary
+        //      they owe NOTHING and the terminal keeps its full height, exactly the
+        //      "OVERLAPS a page that never moved" behaviour. The 555 frames are NOT
+        //      that strip: a 147px = 20.9% shortfall is a keyboard that DID enter
+        //      visualViewport, so it pays its raw shortfall and the host's own
+        //      bottom lands at 535. A boundary ABOVE 147 would have exempted a real
+        //      keyboard and left its rows under the keys, which is exactly why this
+        //      round moved it from 0.25 (702 → 175.5px, above the 147 anchor) to
+        //      0.15 (702 → 105.3px, below it). The anchors it splits are the thin
+        //      floating strip (68.5px = 9.8%, exempt) and the real keyboards (147px
+        //      = 20.9% and 428px = 61.0%, both avoiding), and 0.15 leaves margin on
+        //      BOTH sides (36.8px above 68.5, 41.7px below 147) while an iPhone
+        //      portrait keyboard (>= 40%) stays clear on the avoiding side. It is
+        //      NOT the retired v2 HARD_OCCLUSION_RATIO gate (vv.height <=
+        //      layoutHeight*0.75, gone not renamed), and this build no longer claims
+        //      a 633.5 shrink "must be" or "must not be" the Magic Keyboard — it is
+        //      a terminal-local avoidance floor measured in fraction of layout
+        //      height, nothing more. occlusion = 0 (a true overlay never entering
+        //      visualViewport, keyboard closed) — and zoom, which is exempt —
+        //      restores bottom:0px.
+        //   2. NOTHING ELSE IS WRITTEN. No #app / html / body height, no root
+        //      scroll, no scrollTo / scrollTop, no transform compensation, no
+        //      re-top: the shell is full height in EVERY state and the page is
+        //      never scrollable, so there is nothing to recover and nothing to
+        //      pull back. The reference app grows a HIDDEN strip under the
+        //      keyboard that a full-page swipe reveals and that disappears when
+        //      focus leaves; copying that half is FORBIDDEN here by the user's
+        //      standing requirement — this page never gets a root scroll area —
+        //      so the root stays `overflow: clip`, the shell stays out of flow,
+        //      and the scroll range stays empty. v2.1 parked the origin
+        //      (scrollTo / scrollTop = 0 on every pass, re-checked on rAF
+        //      follow-ups) and was vetoed on-device; v2.2 pinned the whole shell
+        //      to vv.height and is superseded by this round. Neither name
+        //      survives as a code path here: the calls are gone, not renamed.
+        //      What DOES move is the terminal's own furniture, because the
+        //      original requirement is that the INPUT and the quick-keys stay
+        //      reachable while the keyboard is up — leaving the control column
+        //      and the status strip under the keyboard would have kept exactly
+        //      the half of the defect the fix exists to close. So
+        //      #terminal-controls (absolutely positioned in #workspace, whose
+        //      containing block the keyboard does NOT shorten) and #status-bar
+        //      (position:fixed, resolving against the viewport) each get their OWN
+        //      `bottom` written: the strip by the
+        //      occlusion (its authored bottom is 0), the column by 20 + occlusion
+        //      (its authored bottom is 20px, the clearance that keeps it above
+        //      the transport strip). `top: 20px` on the column is untouched, so
+        //      the quick-keys ENTRY BUTTON never moves and never jumps; only the
+        //      column's height shortens, which is what the panel's
+        //      `max-height: 100%` resolves against (PRD-CHANGE §3.1: a percentage
+        //      against a definite containing block), so the quick-keys panel
+        //      shrinks with the keyboard and keeps its own internal scroll
+        //      instead of sitting under it. The geometry matches what those child
+        //      layers had when the whole page was pinned: same bottoms, reached by
+        //      moving the children instead of the shell.
+        //   3. EVERY HOST, INCLUDING THE HIDDEN AND INACTIVE ONES. The applier
+        //      iterates ALL #terminal-container hosts, not just the active one,
+        //      so a host cannot keep a stale `bottom` and show a band the moment
+        //      the user switches to it. Writes stay per-host and ONLY on
+        //      change, so the 500ms backstop cannot invalidate layout (and
+        //      re-fire every host's ResizeObserver) on a stable page; a hidden
+        //      host costs one string compare until the switch that reads it. The
+        //      two overlay boxes are guarded the same way, and a missing element
+        //      (a login gate, a page before boot) is skipped, never fatal.
+        //   4. ZOOM opts out entirely (scale != 1 -> bottom:0px): vv.height
+        //      shrinks with the pinch and fires resize, so without the
+        //      short-circuit a pinch would lift the terminal off the bottom of a
+        //      page the user is panning around, and give it back at scale = 1 on
+        //      the next resize. It restores THESE BOTTOMS ONLY — host 0px, status
+        //      0px, controls back to its authored 20px — and a zoom never touches
+        //      the root position, because the root is never written.
+        //   5. NO visualViewport (desktop, old browsers) => occlusion 0, no
+        //      listeners, no writes at all. Full height with nothing covered is
+        //      the CORRECT answer, not a degradation: innerHeight is no
+        //      substitute (it does not report the floating bar either) and no
+        //      fallback would see the keyboard anyway; the terminal's own
+        //      ResizeObserver → fit → sendResize chain stays the single owner of
+        //      the TTY geometry, exactly as before.
+        //   6. Sub-pixel agreement is agreement: the arithmetic is exact and the
+        //      acceptance tolerance is 1 CSS px. It guards layout churn, never
+        //      coverage — a host bottom inside vv.height + 1 is covered-free.
+        //
+        // What a passing capture looks like on THIS build: scrollTop stays 0,
+        // document.scrollingElement.scrollHeight <= clientHeight (no range),
+        // window.scrollTo(0,100) leaves scrollY at 0 (no mechanism),
+        // appRect.bottom == documentElement.clientHeight (the shell is full
+        // height in every state), host style.bottom == occlusion + "px",
+        // hostRect.bottom == 682 - occlusion in the measured layout, the controls
+        // column sits at 20 + occlusion and the status strip at occlusion, and
+        // xtermRows.bottom <= vv.height + 1.
+        function applyVisualViewportOcclusion() {
+            const container = document.getElementById("terminal-container");
+            if (!container) return false;
+            // #terminal-controls' authored `bottom` (the clearance that keeps the
+            // control column above the ~17px transport strip). Declared INSIDE the
+            // function because the test harness slices named functions out of this
+            // document and evaluates them standalone — a module-level const is
+            // outside that slice. It is a CSS constant, read once from the rule this
+            // code must agree with (#terminal-controls { bottom: 20px }), not a
+            // measurement and never a second source of layout truth: the keyboard
+            // adds the occlusion ON TOP of it, occlusion 0 hands exactly 20px
+            // back, and no ratio or threshold is computed from it.
+            const CONTROLS_BOTTOM_OFFSET = 20;
+            // CONTRACT v3.1 (issue #116) — the SMALL-OVERLAY exemption. This is a
+            // product boundary on terminal-local avoidance, NOTHING more: it is not
+            // a Magic-Keyboard identifier and not a whole-page classification. When
+            // the shortfall is under this fraction of the LAYOUT height it is a
+            // thin floating strip that the user expects to OVERLAP a terminal that
+            // never moves, so all three terminal boxes stay put (host bottom 0,
+            // controls 20, status 0); at or over it the shortfall is a real keyboard
+            // and every box avoids. In the measured clientHeight=702 layout the
+            // boundary sits at 702*0.15 = 105.3px: the thin floating bar at
+            // 68 / 68.5 ≈ 9.8% falls under it and does NOT move, which is exactly the
+            // "the floating panel must not compress any terminal area" the user asked
+            // for, while the 555 keyboard's 147 ≈ 20.9% and the full soft keyboard
+            // (vv 274 → occlusion 428 ≈ 61.0%) both clear it and keep avoiding.
+            // 0.15 is calibrated on the measured anchors this build has: 68.5px
+            // (9.8%, the thin strip that must NOT compress the terminal) sits BELOW
+            // the floor and 147px (20.9%) / 428px (61.0%) ABOVE it, so there is
+            // margin on both sides of the single line — 36.8px of clearance over
+            // 68.5 and 41.7px before 147 — and an iPhone portrait keyboard (>= 40%)
+            // stays on the avoiding side. The 0.25 this round first shipped is NOT
+            // kept: on this layout it put the floor at 175.5px, ABOVE the measured
+            // 147px keyboard, which exempted a real keyboard and left its rows under
+            // the keys — the arithmetic that the review caught. This is NOT the
+            // retired v2 HARD_OCCLUSION_RATIO gate either (that was
+            // vv.height <= layoutHeight*0.75, computed off the VISIBLE height, and
+            // it is gone, not renamed). scale != 1 still restores every box above, so
+            // a pinch never avoids at all.
+            const SMALL_OCCLUSION_RATIO = 0.15;
             const layoutHeight = document.documentElement.clientHeight;
-            // Only a HARD occlusion pins. The Magic Keyboard's floating bar
-            // shrinks the visual viewport by ~9.8% and iOS lets the user drag
-            // that bar anywhere on screen, so it is system-owned chrome the
-            // shell must not chase — and it shrinks AND recovers WITHOUT
-            // firing resize/scroll (measured seq47–54: vv.height 633.5→702
-            // with no event at all, only our own diagnostic settle), which is
-            // exactly how a pin introduced for it went stale and left #app
-            // permanently short. The keyboard fires resize on both edges
-            // (measured seq14 open, seq29 close) and keeps its compensation.
-            // Inclusive boundary: "covers AT LEAST 25%" is hard, so the
-            // threshold reads the same in prose and in code.
-            const target = vv.height <= layoutHeight * (1 - HARD_OCCLUSION_RATIO)
-                ? Math.max(vv.height, 0) + "px"
-                : "";
-            // Write only on change. The reconcile tick below runs this on a timer,
-            // and an unconditional style write every tick would invalidate layout
-            // (and re-fire the terminal's ResizeObserver) for no gain.
-            if (app.style.height !== target) {
-                app.style.height = target;
+            const vv = window.visualViewport;
+            // Pinch / double-tap zoom opt-out, spec fact #1: vv.height is
+            // already scaled, so compensating for it would lift the terminal off
+            // the bottom of a page the user is zoomed into. Zoom owns NOTHING
+            // else — it does not touch the root position either, because the
+            // root is NEVER written.
+            const zoomed = !!(vv && vv.scale && Math.abs(vv.scale - 1) > 0.01);
+            let occlusion = 0;
+            if (vv && !zoomed) {
+                // Client space on BOTH sides of the subtraction (the p5
+                // incident: height = clientHeight - offsetTop mixed client and
+                // layout space and pinned to 0 when the keyboard was covered by
+                // panning). vv.offsetTop is NOT an input and cannot reappear
+                // here — the shell is out of flow, cannot be panned, and the
+                // covered/uncovered boundary lives at vv.height in client
+                // coordinates. A gap of exactly 0 is a real floating overlay
+                // (the Gmail-shape case): nothing is covered, nothing moves.
+                occlusion = Math.max(0, layoutHeight - vv.height);
+                // The small-overlay exemption above: a shortfall under the ratio is
+                // a thin floating strip that overlaps a full-height terminal, so it
+                // is owed NOTHING and the three boxes keep their authored bottoms.
+                if (occlusion < layoutHeight * SMALL_OCCLUSION_RATIO) occlusion = 0;
             }
+            const target = occlusion + "px";
+            // EVERY host in #terminal-container, hidden and inactive included
+            // (createTerminalHost here, PtyRenderer._createSession in
+            // kinds/pty.js — both stamp data-instance-id and write
+            // position:absolute; inset:0 into the host's own style.cssText, so
+            // this longhand is the LAST word on that box: no other rule in the
+            // document restyles these hosts, and structural-check.mjs
+            // re-measures the resolved bottom in a real engine). The two overlay
+            // boxes written below are in that same set of "terminal's own boxes"
+            // and are guarded the same way; the shell and the root are not in it.
+            const hosts = container.querySelectorAll(":scope > [data-instance-id]");
+            let written = 0;
+            for (let i = 0; i < hosts.length; i++) {
+                // Write ONLY when the value actually changes. `layoutHeight` and
+                // `vv.height` are LIVE here, so a single-frame glitch could
+                // otherwise rewrite an identical value on every pass and re-fire
+                // the host's ResizeObserver — and through it the terminal's fit
+                // and sendResize — for no gain.
+                if (hosts[i].style.bottom !== target) {
+                    hosts[i].style.bottom = target;
+                    written++;
+                }
+            }
+            // THE TERMINAL'S OWN OVERLAY CHILDREN, same occlusion, two authored
+            // offsets. #terminal-controls and #status-bar are absolutely positioned
+            // children of #workspace, and v3.0 does NOT shorten that containing
+            // block, so left alone they stay exactly where the keyboard arrives:
+            // the quick-keys entry, its panel and the transport strip would sit
+            // UNDER the keyboard, and the original requirement — the input and the
+            // quick-keys stay reachable — would still be broken. Writing each box's
+            // OWN `bottom` is the same local avoidance, in the same one pass, with
+            // the same guard: each keeps its authored offset (20px for the column,
+            // the clearance over the transport strip; 0 for the strip) and adds the
+            // occlusion on top of it. #terminal-controls keeps its `top: 20px`, so
+            // the quick-keys ENTRY BUTTON never moves; the column's HEIGHT is what
+            // shortens, and that height is exactly what the panel's
+            // `max-height: 100%` resolves against, so the panel shrinks with the
+            // keyboard and keeps its own internal scroll instead of parking rows
+            // beneath it. Element missing => skip: a login gate or a page that has
+            // not booted must not make the hosts' avoidance fatal.
+            const controls = document.getElementById("terminal-controls");
+            if (controls) {
+                const controlsTarget = (CONTROLS_BOTTOM_OFFSET + occlusion) + "px";
+                if (controls.style.bottom !== controlsTarget) {
+                    controls.style.bottom = controlsTarget;
+                    written++;
+                }
+            }
+            const statusBar = document.getElementById("status-bar");
+            if (statusBar) {
+                if (statusBar.style.bottom !== target) {
+                    statusBar.style.bottom = target;
+                    written++;
+                }
+            }
+            return written > 0;
         }
 
-        // R6 (revised under issue #116): the visual viewport also pans —
-        // pinch-zoom, iOS revealing a focused field above the keyboard — and
-        // fires scroll there. Scroll now runs the SAME full judgment as
-        // resize, with no gate. It is safe precisely because the judgment no
-        // longer reads vv.offsetTop: a pure pan cannot change vv.height, so a
-        // pan can neither introduce nor remove a pin. The old
-        // "if (!app.style.height) return" gate is REMOVED deliberately — it
-        // existed to stop a pan from chasing visibleBottom, and once
-        // visibleBottom was gone from the formula the gate's only remaining
-        // effect was to refuse to re-arm a pin that had been cleared, which is
-        // the seq362–396 failure above. The slice anchor keeps this function's
-        // name so the shipped listener and its tests stay addressable.
-        function reapplyPinnedVisualViewportHeight() {
-            applyVisualViewportHeight();
+        // The visualViewport SCROLL listener's anchor. A pan cannot introduce or
+        // remove occlusion here (occlusion is client-space vv.height against the
+        // stable layout height, and the shell is out of flow), so the call stays
+        // a no-op that writes nothing; the anchor is where the structural
+        // guarantee lives, and the name says what this build does — re-AVOID,
+        // never re-TOP. It is NOT the reason the page cannot scroll any more
+        // (that is the root's `overflow: clip`), and no root scroll is written
+        // here.
+        function reapplyVisualViewportOcclusion() {
+            applyVisualViewportOcclusion();
         }
 
-        // Desktop and legacy browsers may have no window.visualViewport at
-        // all: degrade to a no-op — no listeners are registered and the CSS
-        // dvh/fallback pair remains the whole story.
         function initVisualViewportHandling() {
+            // Desktop and legacy browsers may have no window.visualViewport at
+            // all: the static 100dvh / 100vh basis owns the height, nothing is
+            // covered, and nothing is installed. Staying FULL HEIGHT with nothing
+            // covered is the correct answer, not a degradation.
             const vv = window.visualViewport;
             if (!vv) return;
-            // resize: keyboard open/close, URL-bar show/hide, zoom change —
-            // the full judgment, in both directions.
-            vv.addEventListener("resize", applyVisualViewportHeight);
-            // scroll: visual-viewport pan — re-pin only what is pinned.
-            vv.addEventListener("scroll", reapplyPinnedVisualViewportHeight);
-            // issue #116: keyboard-state TRANSITIONS do not reliably emit any
-            // visualViewport event. Measured on-device: the Magic Keyboard's
-            // floating bar both shrinks and recovers the visual viewport with no
-            // resize/scroll at all (seq47-54), and switching between the on-screen
-            // keyboard and a connected Magic Keyboard leaves a pin behind that
-            // nothing revises. A stale pin is exactly a white band: #app keeps the
-            // old, shorter inline height while the visible area has grown back, so
-            // the root canvas shows beneath the shell for the leftover height.
-            // Reported cases, all of this shape: connect the Magic Keyboard while
-            // the soft keyboard is up; expand the soft keyboard from the floating
-            // bar; disconnect either one. So re-run the (idempotent, cheap, now
-            // write-only-on-change) judgment on a timer and on every lifecycle
-            // edge that can accompany such a switch.
+            vv.addEventListener("resize", applyVisualViewportOcclusion);
+            vv.addEventListener("scroll", reapplyVisualViewportOcclusion);
+            // THE SILENT-CHANGE BACKSTOP. The contract's own rule — keyboard up
+            // 633.5 ⇒ occlusion 68.5, real overlay 702 ⇒ occlusion 0 — is a
+            // RECOMPUTATION against a live measurement, and Safari is free to
+            // change the height without ever firing an event: the manual
+            // magic-hint frame (b90643be…, seq388) shows the REAL overlay up
+            // while vv.height = 702 with the bar pinned, and the same session's
+            // seq54 shows a recovery with the overlay gone, vv back at 702 and
+            // not ONE resize / scroll event in between. A stale occlusion is a
+            // stale host bottom: either rows sit under the keyboard, or the
+            // terminal stays lifted off a bottom that is visible again. So the
+            // avoidance judgment runs on focus, orientation, resize, pageshow,
+            // visibilitychange and a 500ms tick, and each of those paths runs the
+            // judgment ITSELF (applyVisualViewportOcclusion) rather than a
+            // scroll-shaped wrapper: an occlusion change must be caught without
+            // any scroll semantics being dragged along, and there is no follow-up
+            // rAF because there is no scroll to follow.
             for (const type of ["pageshow", "orientationchange"]) {
-                window.addEventListener(type, applyVisualViewportHeight);
+                window.addEventListener(type, applyVisualViewportOcclusion);
             }
             for (const type of ["visibilitychange", "focusin", "focusout"]) {
-                document.addEventListener(type, applyVisualViewportHeight);
+                document.addEventListener(type, applyVisualViewportOcclusion);
             }
-            // 500ms: fast enough that a stranded band is a blink rather than a
-            // state, slow enough that it costs nothing (the write above is a
-            // no-op unless the target actually changed).
+            // 500ms: fast enough that a stale host bottom is a blink rather than
+            // a state, slow enough that it costs nothing (every write is a no-op
+            // unless the occlusion actually moved). This is a backstop for the
+            // HOST BOTTOM only; it is not, and must not become, a loop that
+            // drags the root back to the top or sizes the shell.
             setInterval(() => {
-                if (!document.hidden) applyVisualViewportHeight();
+                if (!document.hidden) applyVisualViewportOcclusion();
             }, 500);
-            applyVisualViewportHeight();
+            applyVisualViewportOcclusion();
         }
 
         // R17 touch-scroll state (issue #100 padOS②, PR #110 beta). Module
@@ -3599,13 +3921,18 @@
         // The signed remainder carries across events so sub-line drifts
         // never lose steps or jump; the line-height approximation only
         // affects scroll SPEED, never direction or destination.
-        // issue #116 (Gmail-style shell): the page must never pan and never
-        // scroll. initTerminalTouchScroll() already hard-locks the page, but ONLY
-        // through a touchmove listener bound to #terminal-container — so a drag
-        // that starts anywhere else (the header, the safe-area strip, the gap
-        // around the workspace) reached iOS untouched, which is exactly how the
-        // shell was panned 69px and how the canvas band appeared. This extends
-        // the same lock to the whole document, with two deliberate exemptions:
+        // issue #116 (contract v2.2): this is a GESTURE BOUNDARY, not the reason
+        // the page cannot scroll — that is structural (html/body `overflow: clip`,
+        // #app out of flow). What this lock still owns is the gesture ARBITRATION
+        // iOS performs before it ever gets there: a drag that starts on the
+        // header, the safe-area strip or the gap around the workspace must not
+        // reach the compositor's page-panning at all, and initTerminalTouchScroll()
+        // only ever hard-locked the document through a touchmove listener bound to
+        // #terminal-container — so every other pixel of the shell was left
+        // unguarded, which is exactly how the shell was panned 69px and how the
+        // canvas band appeared. Deleting this would NOT re-open the scroll range;
+        // it would only let a gesture get as far as asking for one. Two deliberate
+        // exemptions:
         //
         //   - native scrollers keep working: walking up from the touch target, if
         //     any ancestor up to <body> actually overflows AND computes to
@@ -3617,16 +3944,37 @@
         //     opencode / reasonix / dsh UIs.
         //
         // Multi-finger touches are exempt so pinch-zoom is not swallowed (the
-        // zoom guard in applyVisualViewportHeight already handles scale != 1).
+        // zoom guard in applyVisualViewportOcclusion already handles scale != 1).
         // The listener is { passive: false } because preventDefault is the whole
         // point — a passive listener would be ignored.
         function initShellScrollLock() {
             const SCROLLABLE = /(auto|scroll)/;
-            // The terminal owns its own gestures: #terminal-container already
-            // preventDefaults and maps the drag onto xterm.scrollLines(), and
-            // xterm handles wheel itself. Exempting it here keeps that single
-            // implementation authoritative instead of double-handling.
-            function ownsGesture(target) {
+            // A box that scrolls ITSELF natively — a real scroller (computed
+            // overflow-y auto/scroll AND actual overflow present) or an iframe.
+            // Both keep their own scrolling: swallowing their drag would freeze the
+            // sidebar panels / monitor table / modal bodies / quick-keys panel and
+            // the opencode / reasonix / dsh surfaces. The TERMINAL is deliberately
+            // NOT in this set — see the wheel listener, where a wheel over the
+            // terminal must block the root's default pan.
+            function nativeScrollOwner(target) {
+                let el = target;
+                while (el && el !== document.body && el !== document.documentElement) {
+                    if (el.tagName === "IFRAME") return true;
+                    const style = window.getComputedStyle(el);
+                    if (style && SCROLLABLE.test(style.overflowY || "") && el.scrollHeight > el.clientHeight + 1) {
+                        return true;
+                    }
+                    el = el.parentElement;
+                }
+                return false;
+            }
+            // The TERMINAL's TOUCH gesture owner, the touchmove path only.
+            // #terminal-container already preventDefaults and maps the drag onto
+            // xterm.scrollLines() (initTerminalTouchScroll), so a touch that starts
+            // in the terminal is exempt HERE — that single implementation stays
+            // authoritative instead of double-handling. Native scrollers and iframes
+            // are exempt for the reasons above.
+            function ownsTouchGesture(target) {
                 let el = target;
                 while (el && el !== document.body && el !== document.documentElement) {
                     if (el.tagName === "IFRAME") return true;
@@ -3642,20 +3990,29 @@
             }
             document.addEventListener("touchmove", (e) => {
                 if (e.touches && e.touches.length > 1) return;
-                if (ownsGesture(e.target)) return;
+                if (ownsTouchGesture(e.target)) return;
                 e.preventDefault();
             }, { passive: false });
             // Trackpad / mouse-wheel panning is a SECOND door onto the same room.
             // A Magic Keyboard trackpad two-finger scroll emits `wheel`, not
-            // `touchmove`, so the guard above never sees it — measured on-device:
-            // touch drags on the shell could no longer pan the page, yet a
-            // two-finger trackpad scroll still walked the whole shell up and
-            // revealed the canvas band down to the floating bar's top edge.
-            // ctrlKey is the browser's pinch-zoom signal for wheel events and is
-            // left alone so zooming still works.
+            // `touchmove`. Measured (p7, session 854069ba…): on 333 frames with
+            // offsetTop > 0 the document.scrollTop / scrollingElementScrollTop walked
+            // non-zero IN STEP even though rootScrollHeight == clientHeight == 702
+            // and html/body compute to overflow:clip — iPadOS does not honour the
+            // root clip against a trackpad wheel, so the clip alone cannot hold this
+            // door. The terminal can no longer be exempt from it: a two-finger scroll
+            // that lands on the terminal scrolled xterm AND panned the whole shell.
+            // So the wheel path blocks the root default even over the terminal.
+            // This does NOT double-scroll: xterm's own wheel handler is bound closer
+            // to the target than this document listener, so it has already consumed
+            // the terminal scroll by the time the event bubbles here; this listener
+            // owes the page a preventDefault and NOTHING more — it never calls
+            // term.scrollLines. Native scrollers and iframes keep scrolling (they are
+            // in nativeScrollOwner, exempted above); ctrlKey is the browser's
+            // pinch-zoom signal for wheel and stays exempt so zooming still works.
             document.addEventListener("wheel", (e) => {
                 if (e.ctrlKey) return;
-                if (ownsGesture(e.target)) return;
+                if (nativeScrollOwner(e.target)) return;
                 e.preventDefault();
             }, { passive: false });
         }
@@ -6449,6 +6806,16 @@
             host.dataset.instanceId = id;
             host.style.cssText = "position:absolute; inset:0; display:none;";
             document.getElementById("terminal-container").appendChild(host);
+            // issue #116 contract v3.0: a host born while something already
+            // covers the bottom must not start at inset:0 and wait for the next
+            // visualViewport event or the 500ms backstop to lift off it — the
+            // applier is idempotent and writes ONLY hosts whose bottom differs
+            // from the current occlusion, so this costs one compare per existing
+            // host and nothing at all when nothing is covered. Guarded because
+            // this factory is also sliced out and run in isolation by the
+            // terminal-status harness, where the viewport layer is not loaded —
+            // the same guard kinds/pty.js uses for the same reason.
+            if (typeof applyVisualViewportOcclusion === "function") applyVisualViewportOcclusion();
             return host;
         }
 
@@ -9386,6 +9753,12 @@
         window.applyTTYSize = applyTTYSize;
         window.parseTTYControlMessage = parseTTYControlMessage;
         window.renderTerminalSessions = renderTerminalSessions;
+        // issue #116 contract v3.0: kinds/pty.js creates the live PTY hosts and
+        // must be able to lift a host born under a covered bottom immediately
+        // instead of waiting for the next visualViewport event; the callee is
+        // guarded at the call site because that file is unit-tested in
+        // isolation, where this one is not loaded.
+        window.applyVisualViewportOcclusion = applyVisualViewportOcclusion;
 
         // Boot
         init();

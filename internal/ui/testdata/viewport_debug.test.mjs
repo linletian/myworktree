@@ -26,21 +26,71 @@ function fakeElement(rect, style = {}, classes = []) {
   };
 }
 
-function makePage({ withVV = true } = {}) {
+// The v3.0 stand-in, laid out like the measured iPad-landscape shell: a
+// FULL-HEIGHT shell (app 0 → 1180 against clientHeight 1180), #workspace inside
+// the 16px safe-area padding (bottom 1164), and the keyboard UP at vv.height 860
+// — so the occlusion is 320, which clears the v3.1 floor of 1180*0.15 = 177, and
+// every PTY host's own bottom is 320px, landing its
+// real bottom at 844, above the covered strip. Nothing in this page is
+// scrollable, and #app carries NO inline height.
+const LAYOUT_HEIGHT = 1180;
+const VV_HEIGHT = 860;
+const WORKSPACE_BOTTOM = 1164;
+const OCCLUSION = LAYOUT_HEIGHT - VV_HEIGHT; // 320
+const HOST_BOTTOM = WORKSPACE_BOTTOM - OCCLUSION; // 844
+// #terminal-controls' authored bottom, straight from the shipped CSS. The
+// avoidance adds the occlusion ON TOP of it, so the column lifts while keeping
+// its clearance over the transport strip — the two numbers a verdict compares.
+const CONTROLS_AUTHORED_BOTTOM = 20;
+
+function makePage({ withVV = true, hosts = [true, false] } = {}) {
   const app = fakeElement(
-    fakeRect(0, 1164, 820, 1164),
-    { height: "1164px", paddingTop: "0px", paddingRight: "0px", paddingBottom: "16px", paddingLeft: "0px", backgroundColor: "rgba(0, 0, 0, 0)" },
+    fakeRect(0, LAYOUT_HEIGHT, 820, LAYOUT_HEIGHT),
+    { height: "", position: "fixed", paddingTop: "0px", paddingRight: "0px", paddingBottom: "16px", paddingLeft: "0px", backgroundColor: "rgba(0, 0, 0, 0)" },
     ["collapsed"],
   );
-  const main = fakeElement(fakeRect(0, 1164, 620, 1164));
-  const workspace = fakeElement(fakeRect(40, 1148, 620, 1108));
-  const xtermScreen = fakeElement(fakeRect(40, 1147, 620, 1107));
-  const xtermRows = fakeElement(fakeRect(40, 1138, 620, 1098));
-  const host = fakeElement(fakeRect(40, 1148, 620, 1108));
+  const main = fakeElement(fakeRect(0, LAYOUT_HEIGHT, 620, LAYOUT_HEIGHT));
+  const workspace = fakeElement(fakeRect(40, WORKSPACE_BOTTOM, 620, WORKSPACE_BOTTOM - 40));
+  const xtermScreen = fakeElement(fakeRect(40, HOST_BOTTOM - 1, 620, HOST_BOTTOM - 41));
+  const xtermRows = fakeElement(fakeRect(40, HOST_BOTTOM - 10, 620, HOST_BOTTOM - 50));
+  const host = fakeElement(fakeRect(40, HOST_BOTTOM, 620, HOST_BOTTOM - 40), { bottom: OCCLUSION + "px", display: "block" });
   host.querySelector = (selector) => selector === ".xterm-screen" ? xtermScreen : selector === ".xterm-rows" ? xtermRows : null;
+  // Every PTY host inside #terminal-container, the visible one and the hidden
+  // one alike — that is what the p7 host list is for.
+  const terminalContainer = fakeElement(fakeRect(40, WORKSPACE_BOTTOM, 620, WORKSPACE_BOTTOM - 40));
+  terminalContainer.hosts = hosts.map((visible, index) => fakeElement(
+    fakeRect(40, HOST_BOTTOM, 620, HOST_BOTTOM - 40),
+    { bottom: OCCLUSION + "px", display: visible ? "block" : "none" },
+  ));
+  terminalContainer.querySelectorAll = (selector) => {
+    if (selector !== ":scope > [data-instance-id]") throw new Error("unexpected host selector: " + selector);
+    return terminalContainer.hosts;
+  };
+  // The two overlay children of #workspace and the quick-keys panel inside the
+  // column. v3.0 lifts these too — #workspace stays full height, so they would
+  // sit under the keyboard otherwise — and the probe reports each one's rect,
+  // the bottom the applier wrote, and (for the panel) the COMPUTED max-height,
+  // which is the number that proves the column really shortened.
+  const controlsBottom = CONTROLS_AUTHORED_BOTTOM + OCCLUSION; // 480
+  const controls = fakeElement(
+    fakeRect(60, WORKSPACE_BOTTOM - controlsBottom, 44, WORKSPACE_BOTTOM - controlsBottom - 60),
+    { bottom: controlsBottom + "px", display: "block" },
+  );
+  const statusBar = fakeElement(
+    fakeRect(WORKSPACE_BOTTOM - OCCLUSION - 17, WORKSPACE_BOTTOM - OCCLUSION, 120, 17),
+    { bottom: OCCLUSION + "px", display: "block" },
+  );
+  const quickKeys = fakeElement(
+    fakeRect(60, 60 + (WORKSPACE_BOTTOM - controlsBottom - 60), 200, WORKSPACE_BOTTOM - controlsBottom - 60),
+    { display: "block" },
+  );
+  quickKeys.clientHeight = WORKSPACE_BOTTOM - controlsBottom - 60;
+  // Two rows of keys taller than the shortened box: the internal scroll is the
+  // only thing that keeps them reachable, so the fixture has to be overflowable.
+  quickKeys.scrollHeight = quickKeys.clientHeight + 96;
   const listeners = new Map();
   const vv = withVV ? {
-    width: 820, height: 1164, offsetTop: 0, offsetLeft: 0, scale: 1, pageTop: 0,
+    width: 820, height: VV_HEIGHT, offsetTop: 0, offsetLeft: 0, scale: 1, pageTop: 0,
     addEventListener(type, handler) {
       if (!listeners.has(type)) listeners.set(type, []);
       listeners.get(type).push(handler);
@@ -68,13 +118,29 @@ function makePage({ withVV = true } = {}) {
       visualViewport: vv,
       getComputedStyle(element) {
         if (element === app) return app.style;
+        // issue #116 contract v2.2 / v3.0: the two ROOT boxes answer the
+        // overflow question, so the stand-in has to answer it too — a stub with
+        // no `overflow` would make snapshot.document.htmlOverflow "" and the
+        // structural field would never be exercised by any test.
+        if (element === page.document.documentElement || element === page.document.body) {
+          return { backgroundColor: "rgb(11, 16, 32)", overflow: "clip" };
+        }
+        // A PTY host also answers `bottom`, because v3.0's whole claim lives in
+        // that one longhand and the probe reports the computed value next to the
+        // inline one the applier wrote.
+        if (element && element.style && element.style.bottom) {
+          return { backgroundColor: "rgb(11, 16, 32)", bottom: element.style.bottom };
+        }
+        if (element === quickKeys) {
+          return { backgroundColor: "rgb(13, 17, 23)", maxHeight: quickKeys.clientHeight + "px" };
+        }
         return { backgroundColor: "rgb(11, 16, 32)" };
       },
     },
     document: {
       body: { scrollTop: 0 },
       scrollingElement: { scrollTop: 0, scrollHeight: 1164 },
-      documentElement: { clientWidth: 820, clientHeight: 1180 },
+      documentElement: { clientWidth: 820, clientHeight: LAYOUT_HEIGHT, scrollHeight: LAYOUT_HEIGHT },
       activeElement: { tagName: "TEXTAREA" },
       querySelector: () => null,
       // issue #116: the bottom-edge probe hit-tests this. Returning the
@@ -83,13 +149,20 @@ function makePage({ withVV = true } = {}) {
       // canvas overrides this to return the documentElement.
       elementFromPoint: () => ({ tagName: "DIV", id: "workspace", className: "" }),
       getElementById(id) {
-        return id === "app" ? app : id === "main" ? main : id === "workspace" ? workspace : null;
+        if (id === "app") return app;
+        if (id === "main") return main;
+        if (id === "workspace") return workspace;
+        if (id === "terminal-container") return terminalContainer;
+        if (id === "terminal-controls") return controls;
+        if (id === "status-bar") return statusBar;
+        if (id === "quick-keys-panel") return quickKeys;
+        return null;
       },
     },
     state,
     getActiveTerminalSession: () => ({ container: host, quickKeysOpen: true }),
   };
-  return { page, app, main, workspace, host, vv, listeners };
+  return { page, app, main, workspace, host, terminalContainer, controls, statusBar, quickKeys, vv, listeners };
 }
 
 function makeHarness(options = {}) {
@@ -140,10 +213,22 @@ test("snapshot captures geometry and UI state without content, token, names or p
   const { page } = makePage();
   const snapshot = loadAPI().snapshotFromPage(page, "manual", "2026-10-27T12:00:00.000Z");
   assert.equal(snapshot.reason, "manual");
-  assert.equal(snapshot.vv.height, 1164);
-  assert.equal(snapshot.app.bottom, 1164);
+  assert.equal(snapshot.vv.height, VV_HEIGHT);
+  // issue #116 contract v3.0: the shell is FULL HEIGHT. app.bottom answers to
+  // documentElement.clientHeight, never to vv.height, so layoutGap is 0 even
+  // with the keyboard up at vv.height 860 — and inlineHeight, the channel v2.2
+  // pinned, is empty.
+  assert.equal(snapshot.app.bottom, LAYOUT_HEIGHT);
   assert.equal(snapshot.app.paddingBottom, "16px");
-  assert.equal(snapshot.app.inlineHeight, "1164px");
+  assert.equal(snapshot.app.inlineHeight, "");
+  assert.equal(snapshot.app.layoutGap, 0);
+  assert.equal(snapshot.app.computedPosition, "fixed");
+  // …while the occlusion is owed to, and paid by, every PTY host.
+  assert.equal(snapshot.occlusion, OCCLUSION);
+  assert.deepEqual(snapshot.ptyHosts, [
+    { index: 0, top: 40, bottom: HOST_BOTTOM, height: HOST_BOTTOM - 40, inlineBottom: "320px", computedBottom: "320px", visible: true },
+    { index: 1, top: 40, bottom: HOST_BOTTOM, height: HOST_BOTTOM - 40, inlineBottom: "320px", computedBottom: "320px", visible: false },
+  ]);
   assert.deepEqual(snapshot.device, {
     userAgent: "Mozilla/5.0 (iPad; CPU OS 18_0 like Mac OS X) Safari/605.1.15",
     platform: "iPad",
@@ -156,6 +241,12 @@ test("snapshot captures geometry and UI state without content, token, names or p
   assert.deepEqual(snapshot.document, {
     bodyBackground: "rgb(11, 16, 32)",
     htmlBackground: "rgb(11, 16, 32)",
+    // issue #116 contract v2.2: the structural trio. deepEqual is the point —
+    // an absent field is as loud as a wrong one, which is the same guard that
+    // caught the pageTop drift between client and server.
+    htmlOverflow: "clip",
+    bodyOverflow: "clip",
+    rootScrollHeight: 1180,
     pageTop: 0,
     scrollTop: 0,
     scrollingElementScrollTop: 0,
@@ -168,17 +259,20 @@ test("snapshot captures geometry and UI state without content, token, names or p
   // that returns the root canvas there is what an exposed-band capture looks
   // like, and that is the distinction the field exists to make.
   assert.deepEqual(snapshot.probe, {
-    visualBottom: { y: 1162, tag: "DIV", id: "workspace", className: "", background: "rgb(11, 16, 32)" },
+    visualBottom: { y: VV_HEIGHT - 2, tag: "DIV", id: "workspace", className: "", background: "rgb(11, 16, 32)" },
     layoutBottom: { y: 1178, tag: "DIV", id: "workspace", className: "", background: "rgb(11, 16, 32)" },
     // elementFromPoint is a CLIENT-space API; pageTop is recorded alongside so the
     // two coordinate systems in one snapshot are never confused again.
     pageTop: 0,
   });
-  assert.equal(snapshot.workspace.bottom, 1148);
-  assert.equal(snapshot.terminal.bottom, 1148);
+  assert.equal(snapshot.workspace.bottom, WORKSPACE_BOTTOM);
+  // The terminal is the box that moves: its bottom sits OCCLUSION above the
+  // workspace floor, and the rows it paints stay above the covered strip.
+  assert.equal(snapshot.terminal.bottom, HOST_BOTTOM);
+  assert.equal(snapshot.terminal.bottom <= VV_HEIGHT + 1, true, "no terminal row may sit under the keyboard");
   assert.equal(snapshot.webPanel, null);
-  assert.equal(snapshot.xtermScreen.bottom, 1147);
-  assert.equal(snapshot.xtermRows.bottom, 1138);
+  assert.equal(snapshot.xtermScreen.bottom, HOST_BOTTOM - 1);
+  assert.equal(snapshot.xtermRows.bottom, HOST_BOTTOM - 10);
   assert.deepEqual(snapshot.ui, {
     collapsed: true,
     quickKeysOpen: true,
@@ -190,6 +284,123 @@ test("snapshot captures geometry and UI state without content, token, names or p
   for (const forbidden of ["instance-private-id", "must-not-leak", "token", "worktree", "terminalText", "/home/"]) {
     assert.equal(serialized.includes(forbidden), false, `snapshot leaked ${forbidden}`);
   }
+});
+
+// --- p7 / contract v3.0: the fields the new verdict reads ---------------------
+
+test("p8 stamps every snapshot with the version that measures v3.1", () => {
+  const { page } = makePage();
+  const snapshot = loadAPI().snapshotFromPage(page, "manual", "2026-10-27T12:00:00.000Z");
+  assert.equal(snapshot.probeVersion, "p8-full-shell-overlay-wheel-v1", "the stamp is what stops a capture from certifying the wrong build");
+});
+
+test("p8 floors occlusion at the small-overlay ratio — a thin strip owes nothing", () => {
+  const api = loadAPI();
+  // Under the floor: a shortfall below 0.15 of the layout height (1180*0.15 = 177)
+  // is a thin floating strip the terminal does NOT avoid, so the probe reports
+  // occlusion 0 (matching what the applier wrote) instead of the raw shortfall it
+  // would have owed pre-v3.1.
+  const thin = makePage();
+  thin.vv.height = LAYOUT_HEIGHT - Math.floor(LAYOUT_HEIGHT * 0.15) + 40; // raw < ratio
+  const thinSnapshot = api.snapshotFromPage(thin.page, "resize", "2026-10-27T12:00:00.000Z");
+  assert.ok(thinSnapshot.vv.height > 0, "the viewport really did shrink");
+  assert.equal(thinSnapshot.occlusion, 0, "a shortfall under the ratio is exempt — the probe reports what THIS build owes, not the raw shortfall");
+
+  // Over the floor: a real keyboard's shortfall is still owed in full.
+  const kb = makePage();
+  kb.vv.height = LAYOUT_HEIGHT - Math.ceil(LAYOUT_HEIGHT * 0.15) - 40; // raw > ratio
+  const kbSnapshot = api.snapshotFromPage(kb.page, "resize", "2026-10-27T12:00:00.000Z");
+  assert.equal(kbSnapshot.occlusion, LAYOUT_HEIGHT - kb.vv.height, "a shortfall at or over the ratio is owed in full");
+});
+
+test("p7 lists EVERY PTY host, hidden included, with its own bottom", () => {
+  const { page, terminalContainer } = makePage({ hosts: [true, false, false] });
+  const snapshot = loadAPI().snapshotFromPage(page, "manual", "2026-10-27T12:00:00.000Z");
+  assert.equal(snapshot.ptyHosts.length, 3, "a host the user has not switched to yet still has to appear — a stale bottom there is the next band");
+  assert.deepEqual(snapshot.ptyHosts.map((host) => host.visible), [true, false, false]);
+  assert.deepEqual([...new Set(snapshot.ptyHosts.map((host) => host.inlineBottom))], ["320px"], "no host may carry a different bottom");
+  assert.deepEqual(snapshot.ptyHosts.map((host) => host.index), [0, 1, 2], "index is sequential: the verifier reads hosts in order");
+  // A stale host is exactly what the list exists to catch: lift one host and
+  // its own value has to show up, not the average.
+  terminalContainer.hosts[2].style.bottom = "0px";
+  terminalContainer.hosts[2].getBoundingClientRect = () => ({ top: 40, bottom: WORKSPACE_BOTTOM, height: WORKSPACE_BOTTOM - 40, width: 620 });
+  const second = loadAPI().snapshotFromPage(page, "manual", "2026-10-27T12:00:00.000Z");
+  assert.deepEqual(second.ptyHosts.map((host) => host.inlineBottom), ["320px", "320px", "0px"], "a stale host must be visible in the data, not smoothed over");
+  assert.deepEqual(second.ptyHosts.map((host) => host.bottom), [HOST_BOTTOM, HOST_BOTTOM, WORKSPACE_BOTTOM]);
+});
+
+test("p7 reports the controls column and the status strip with their own bottoms", () => {
+  // The second half of the LOCAL avoidance: #terminal-controls and #status-bar
+  // are lifted by the SAME occlusion, each from its OWN authored bottom (20 +
+  // occlusion for the column, occlusion for the strip). The probe has to report
+  // what each box was written, because a verdict that only reads the hosts cannot
+  // see quick-keys sitting under the keyboard.
+  const { page, controls, statusBar } = makePage();
+  const snapshot = loadAPI().snapshotFromPage(page, "manual", "2026-10-27T12:00:00.000Z");
+  assert.equal(snapshot.controls.inlineBottom, (CONTROLS_AUTHORED_BOTTOM + OCCLUSION) + "px", "the column's inline bottom is the authored 20px plus the occlusion");
+  assert.equal(snapshot.controls.computedBottom, snapshot.controls.inlineBottom, "computed agrees with inline — the longhand won, in the engine's own words");
+  assert.equal(snapshot.controls.bottom, WORKSPACE_BOTTOM - CONTROLS_AUTHORED_BOTTOM - OCCLUSION, "the column's rect bottom lifted by the occlusion");
+  assert.ok(snapshot.controls.visible, "the column is on screen in this fixture");
+  assert.equal(snapshot.statusBar.inlineBottom, OCCLUSION + "px", "the strip lifts by the occlusion itself, its authored bottom being 0");
+  assert.equal(snapshot.statusBar.bottom, WORKSPACE_BOTTOM - OCCLUSION, "and its rect bottom says so");
+  // The one number a reviewer is likely to get wrong: the two bottoms are NOT
+  // equal, and they must not be — the column keeps its clearance.
+  assert.notEqual(snapshot.controls.inlineBottom, snapshot.statusBar.inlineBottom, "the column keeps its 20px clearance, it does not copy the host target");
+
+  // A missing overlay is null, never a zero — "absent" and "at zero" are
+  // different claims and the verifier answers them differently.
+  const original = page.document.getElementById;
+  page.document.getElementById = (id) => (id === "terminal-controls" || id === "status-bar" ? null : original(id));
+  const bare = loadAPI().snapshotFromPage(page, "manual", "2026-10-27T12:00:00.000Z");
+  assert.equal(bare.controls, null, "no column, no numbers invented");
+  assert.equal(bare.statusBar, null, "…and the same for the strip");
+  assert.equal(bare.ptyHosts.length, 2, "…while the hosts are still reported — one missing overlay never blinds the capture");
+  void controls; void statusBar;
+});
+
+test("p7 reports the quick-keys panel's computed max-height against its own scroll", () => {
+  // `max-height: 100%` is a percentage, and a percentage is only a promise until
+  // an engine resolves it. The probe reports the COMPUTED max-height next to
+  // clientHeight / scrollHeight, so a capture states that the column actually got
+  // shorter and the key set is still scrollable inside it.
+  const { page, quickKeys } = makePage();
+  const snapshot = loadAPI().snapshotFromPage(page, "manual", "2026-11-03T12:00:00.000Z");
+  assert.equal(snapshot.quickKeys.maxHeight, quickKeys.clientHeight + "px", "the computed max-height is the resolved number, not the authored percentage");
+  assert.equal(snapshot.quickKeys.maxHeight, snapshot.controls.height + "px", "…and it equals the shortened column's height, which is the containing block it resolves against");
+  assert.ok(snapshot.quickKeys.scrollHeight > snapshot.quickKeys.clientHeight, "content taller than the box: the internal scroll is live, not a clipped row");
+  assert.equal(snapshot.quickKeys.open, false, "the fixture panel is closed; `open` reflects the class, and a closed panel is still measured");
+
+  // No panel on the page => null, and the rest of the capture survives.
+  const original = page.document.getElementById;
+  page.document.getElementById = (id) => (id === "quick-keys-panel" ? null : original(id));
+  assert.equal(loadAPI().snapshotFromPage(page, "manual", "2026-11-03T12:00:00.000Z").quickKeys, null, "absent panel is reported absent");
+});
+
+test("p7 occlusion: no visualViewport or zoom both mean nothing is owed", () => {
+  const withoutVV = makePage({ withVV: false });
+  const snapshot = loadAPI().snapshotFromPage(withoutVV.page, "init", "2026-10-27T12:00:00.000Z");
+  assert.equal(snapshot.vv, null);
+  assert.equal(snapshot.occlusion, 0, "no visualViewport, nothing covered: the shell and the hosts stay put");
+  assert.equal(snapshot.app.layoutGap, 0);
+
+  const zoomed = makePage();
+  zoomed.vv.scale = 2;
+  zoomed.vv.height = 450;
+  const zoomedSnapshot = loadAPI().snapshotFromPage(zoomed.page, "resize", "2026-10-27T12:00:00.000Z");
+  assert.equal(zoomedSnapshot.occlusion, 0, "zoom owns nothing — a pinch must not lift the terminal off a page the user is panning");
+
+  const open = makePage();
+  open.vv.height = LAYOUT_HEIGHT;
+  assert.equal(loadAPI().snapshotFromPage(open.page, "resize", "2026-10-27T12:00:00.000Z").occlusion, 0, "the real floating overlay never enters visualViewport: occlusion 0 by arithmetic");
+});
+
+test("p7 survives a page with no #terminal-container", () => {
+  const { page } = makePage();
+  const original = page.document.getElementById;
+  page.document.getElementById = (id) => (id === "terminal-container" ? null : original(id));
+  const snapshot = loadAPI().snapshotFromPage(page, "manual", "2026-10-27T12:00:00.000Z");
+  assert.deepEqual(snapshot.ptyHosts, [], "a web-kind page owns no PTY host; the snapshot reports that instead of throwing");
+  assert.equal(snapshot.occlusion, OCCLUSION, "the occlusion is a fact about the viewport, independent of which kind is showing");
 });
 
 test("snapshot degrades to vv=null when visualViewport is unavailable", () => {
@@ -392,4 +603,29 @@ test("every snapshot states which probe build produced it", () => {
   const snapshot = loadAPI().snapshotFromPage(page, "manual", "2026-10-27T12:00:00.000Z");
   assert.equal(typeof snapshot.probeVersion, "string", "probeVersion must be a string");
   assert.ok(snapshot.probeVersion.length >= 4, `probeVersion must be non-trivial, got ${JSON.stringify(snapshot.probeVersion)}`);
+});
+
+test("the probe reports the STRUCTURE the v3.0 contract rests on, and never writes it", () => {
+  // p6 moved the guarantee from behaviour to structure: the capture has to say
+  // WHY the page cannot scroll (a fixed shell inside two clipped root boxes and a
+  // root scroll range of zero), not merely that scroll happened to be 0. Without
+  // these three fields a capture taken on a build that still repairs the page
+  // looks identical to a capture taken on one that cannot scroll at all.
+  const { page } = makePage();
+  const snapshot = loadAPI().snapshotFromPage(page, "manual", "2026-10-27T12:00:00.000Z");
+  assert.equal(snapshot.app.computedPosition, "fixed", "#app's computed position is the out-of-flow half of the claim");
+  assert.equal(snapshot.document.htmlOverflow, "clip", "html must report the computed overflow it actually resolves to");
+  assert.equal(snapshot.document.bodyOverflow, "clip", "and body the same — the floor is on both root boxes");
+  assert.ok(
+    snapshot.document.rootScrollHeight <= snapshot.clientHeight,
+    "no scroll range: rootScrollHeight must not exceed clientHeight",
+  );
+  // The instrument measures and never repairs. The ban is on WRITES — reading
+  // scrollTop IS the probe's job, so a regex over the bare word would fail on
+  // the capture itself and teach nothing. Comments are stripped first because
+  // the probe documents the very calls it must not make.
+  const code = source.replace(/\/\/[^\n]*/g, "").replace(/\/\*[\s\S]*?\*\//g, "");
+  for (const banned of [/\.scrollTop\s*=[^=]/, /\.scrollLeft\s*=[^=]/, /\bscrollTo\s*\(/, /\bscrollBy\s*\(/]) {
+    assert.equal(banned.test(code), false, `the probe must never write scroll, matched ${banned}`);
+  }
 });
