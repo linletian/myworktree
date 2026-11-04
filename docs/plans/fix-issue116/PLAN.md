@@ -143,8 +143,8 @@ opencode、reasonix、dsh 等 iframe 内输入由 iframe / Safari 处理。父�
 **任务**
 
 1. 在不采集正文、token、worktree 名称/路径的前提下，补足：输入归属类别、活动输入宿主类型及可见 rect（或明确的不可得标记）、`vv.height/offsetTop/scale`、诊断面板自身 rect/corner。
-2. 修正诊断面板底部居位和非零 `vv.offsetTop` 的可达性，补四角 × 键盘 × pan 测试；诊断修正与产品几何修改分开提交。
-3. 对比普通 input 与 xterm helper 的聚焦目标及 Safari pan 时序，决定 D1。
+2. 修正诊断面板底部居位和非零 `vv.offsetTop` 的可达性，并按已实现口径补面板矩阵测试：四角 `tl/tr/bl/br` 覆盖三档键盘 × 四档 pan（0、纵向 403、横向 44、横向 overscroll −120），`free` 覆盖三档键盘 × 三档拖拽 × pan 0/纵向 403，另有横向与负 overscroll 边界用例；诊断修正与产品几何修改分开提交。
+3. 对比普通 input 与 xterm helper 的聚焦目标及 Safari pan 时序，决定 D1；探针 tick 顺序和同瞬间几何只是顺序证据，`vv.offsetTop` 采样变化只证明 pan 事实，不得冒充 Safari 侧归因。
 4. 更新设计源，至少表现 PTY 模式、Web 输入模式、焦点交接、键盘/pan/zoom 边界和异常回退；设计稿不是实现证据。
 5. 保留现有 PTY refit / sidebar 几何工具，按新契约更新其判据，旧 p9 结果只作历史对照。
 
@@ -197,7 +197,7 @@ opencode、reasonix、dsh 等 iframe 内输入由 iframe / Safari 处理。父�
 
 **任务**
 
-1. 在最终提交上执行针对性 Node/Go、带 `viewportdebug` 的包测试、全仓 Go 和直接 Node 门禁。
+1. 在最终提交上执行针对性 Node/Go、带 `viewportdebug` 的包测试、全仓 Go 和直接 Node 门禁。诊断专项至少执行 `go test -tags viewportdebug -run ViewportDebug ./internal/ui ./internal/app`；无 tag 的同名 `-run` 只覆盖 `!viewportdebug` OFF 变体与不限标签的 JS 包装测试，不能替代 ON 变体及服务端诊断门禁。
 2. 按真机矩阵保存截图、几何、会话和派生差值，特别复核 A 的 zoom 场景与 C 的持续 pan 场景。
 3. 更新 PRD、CHANGELOG、当前兼容性说明和设计稿状态；历史候选文档标记为历史，不改写原始证据。
 4. 评审最终 diff、保留回退点、合并后再关闭 #116。
@@ -248,3 +248,18 @@ iPhone Safari 按旧 PLAN 至少补一轮；不同 iPadOS 版本和 Chrome(iOS) 
 | `RESULTS-authenticated-shell-p9.json`、侧栏 baseline/working 结果 | 仅作历史结构/失败证明，不宣称最终真机验收 | Phase 2 |
 | CHANGELOG 两处测试总数 27 → 34 | 独立计数修正提交 | Phase 0 门禁 |
 | 无活动终端的 smoke、旧 p9 暂存实验 | 清理，不提交 | 已完成，若再出现同类内容继续排除 |
+
+## 10. Phase 2 诊断基座仲裁后续台账（非实现授权）
+
+本台账只登记评审后续，不改变 R1–R6、§3 或“诊断测量 ≠ 补偿”，也不授权产品代码、诊断代码或 evidence 工具改动。
+
+| 项目 | 仲裁处置 | 后续边界 |
+| --- | --- | --- |
+| E 系列余项：N-1、N-2、N-3、N-4、N-5 | 维持原状，仅记录 | 不改契约、不授权代码；须按原评审描述另立任务 |
+| E 系列余项：NP-1、NP-2 | 维持原状，仅记录 | 同上 |
+| E 系列余项：F-2、F-3、F-4、F-7、F-8 | 维持原状，仅记录 | 同上 |
+| E 系列余项：m-8、m-9 | 维持原状，仅记录 | 同上 |
+| C6 / N-6 / m-6 | **需用户确认**；建议形状错误仍 400，语义冗余改为留存 + verifier INCONCLUSIVE | 用户拍板前维持 937d91f 的 400 行为；若采纳变更，转编码 Sub-agent 另授权 |
+| C-2 / F-1 的注释不符与可选指针化 | 本轮只把降级帧排他规则写入契约 | 修注释或改指针均须另授权；本轮不批准 schema / 产品代码改动 |
+| C-1 / F-6 的 unlockTrace 读者 | 当前仅为可采证 groundwork，GI-2 集群维持 INCONCLUSIVE | 新增读者或判读流程须另授权 evidence 工具与对应测试 |
+| NP-3 / F-5 的可选服务端收窄 | 当前传输层宽容声明为有意 | 若要求服务端强制“环成员 = 决策集”，转编码 Sub-agent 另授权 |
