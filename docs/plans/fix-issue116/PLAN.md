@@ -61,11 +61,11 @@ opencode、reasonix、dsh 等 iframe 内输入由 iframe / Safari 处理。父�
 
 只有前台 PTY 的真实输入宿主可以取得终端输入所有权。PTY ↔ Web 输入、PTY ↔ iframe、PTY A ↔ PTY B、quick-keys 粘贴、旋转、窗口变化、缩放及前后台切换都必须重新确认归属，旧状态不得滞留。
 
-### R5：zoom 独立决策与 scale<1 候选兼容
+### R5：zoom 独立决策与 scale<1 已签署兼容
 
 双指缩放与“已处于缩放状态时打开软键盘”必须分开讨论。不得以删除全部 zoom guard、全局锁 pan 或把 `vv.offsetTop` 加入 raw 的方式顺带解决。
 
-针对真机补充观察“iPadOS/iOS 双指可能只能放大（`scale>=1`），菜单或妙控键盘才能缩小（`scale<1`）”，本计划把**兼容 scale<1 的软键盘避让**列为候选目标：如果设备矩阵证实缩小不可能来自双指手势，则当前对 scale<1 的一刀切豁免过宽。平台行为未确认前不得按该假设直接改代码。
+2026-11-04 产品 owner 的真机操作观察与明确指令已将**兼容 scale<1 的软键盘避让**签署为确定目标，采用 D2 的非对称策略：`scale>1` 继续保守豁免，`scale<1` 只在前台 PTY editable focus、真实遮挡和 settle 后稳定几何等条件同时成立时，按冻结 §5 的其余会话规则避让。该签署不删除全部 zoom guard，不把 owner 的文字口径写成测试 PASS；正式来源冲突或行为不成立时按 D2 的失败 / 回退路径处理。
 
 ### R6：可采证、可回退
 
@@ -93,14 +93,38 @@ opencode、reasonix、dsh 等 iframe 内输入由 iframe / Safari 处理。父�
 
 ### D2：缩放状态的终端行为与 scale<1 兼容
 
-先在真机上分别确认双指、Safari 菜单和妙控键盘对 `visualViewport.scale` 的影响，再选择实现：
+**签署状态：已签署目标（2026-11-04，产品 owner 指令，本轮仲裁签署）**。`scale<1` 场景的终端软键盘避让由候选 / 待签升格为确定目标，采用下述非对称策略。签署依据是产品 owner 的真机操作观察、文字口径和明确产品指令；该证据按 **INCONCLUSIVE** 级登记，但在 D2 产品决策域内是缩放来源判断的**直接产品证据**，不是行为验收 PASS。逐字原文与证据缺口见 VALIDATION“当前有效证据”。
 
-- 候选非对称策略：`scale>1` 继续保守豁免，避免放大手势被误认为键盘；`scale<1` 在 editable focus、真实遮挡和稳定几何同时成立时允许软键盘避让。
-- **任何 scale 变化都先视为新几何**：缩放切换当帧不得直接触发避让，不复用旧 layout/raw/恢复状态，必须等 settle 后按当前值重新判定。这样防止菜单/键盘缩小本身被误认为软键盘。
-- 菜单或妙控键盘执行“缩小页面”但没有软键盘时，不得仅因 scale<1 就抬高终端。
-- 如果设备证据表明 scale<1 也可由双指产生，或缩放与键盘信号仍不可分，则保留当前全部豁免并回到产品讨论，不能静默放开。
+**签署前冲突核查**：A 原始会话早段 153 帧全为 `scale=0.75`、`occlusion=0`，符合冻结 zoom guard 的历史事实，但没有唯一缩放来源标注，既不证明双指来源，也不与新目标冲突；C 原始会话 583 帧全为 `scale=1`，不存在 zoom 帧反例。历史 `DATA-COLLECTION.md` 的“双指/双击缩放”与“75% 与 100%”写在同一组合操作行，未建立“双指从 `scale=1` 持续缩小至 `vv.scale<1`”的唯一来源链，不能当作 owner 口径的直接反例，也不得反过来充当来源证明。基于当前有效证据未发现阻止签署的直接冲突。
 
-选择兼容 scale<1 后，A 会话的 0.75 场景成为必测项；选择保留全部豁免时，必须明确记录这是对终端体验的限制。
+**已签署的非对称行为目标**：
+
+1. **`scale>1`：维持保守豁免**。双指放大 / 缩小过程不得被误认为软键盘，终端避让必须 opt-out。owner 实测双手释放后回到 `scale=1`；这是 Safari 来源行为及验收观察项，不授权应用写入 scale、强制回 1 或阻止系统手势。释放并 settle 后，才按当前焦点与几何重判，避免把释放瞬间误判为键盘。
+2. **`scale<1`：允许符合契约的软键盘避让**。按 owner 实测口径，持续 `vv.scale<1` 只来自妙控键盘 / 外接键盘 `cmd+'-'` 或浏览器菜单缩放指令，不来自从 `scale=1` 开始的双指缩小。只有前台 PTY 真实终端输入宿主持有 editable focus、存在真实遮挡（`raw>1`）且 scale / layout / VV 已 settle 时，才允许进入软键盘避让；这三项是必要条件，具体进入 / 重入仍服从冻结 §5 的 25% / 50% 门槛及既有解锁规则，不得用 `raw>1` 绕过门线。无前台 PTY editable focus、无键盘 / 无真实遮挡或几何尚未 settle 时，不得仅因 `scale<1` 抬高终端。
+3. **任何 scale 变化先视为新几何**。变档当帧及未 settle 的过渡帧不得触发避让，不复用变档前的 layout、raw、恢复锁或让位结果；以 settle 后的当前几何重建判定基线，再按当前 scale、焦点和遮挡重判。该规则不新增第二套会话状态机。
+4. **zoom 与键盘信号按 owner 实测认定可分，但仍须双确认**。双指 `scale>1` 豁免、释放回 1 后 settle 重判，与“前台 PTY editable focus + `raw>1`”共同防止把缩放或释放瞬间当成键盘。除本次签署的 scale 准入非对称和“scale 变档 = 新几何”规则外，raw 算式、活动会话 `occlusion=raw`、恢复退出、click / focusin / 几何解锁、25% / 50% 门线及一次 settle 宽容均以冻结 §5 为唯一真源，不改写、不替换。
+5. **失败与回退方向**。签署后的 MUST 在真机不成立即记该场景 FAIL，不得以 Node 结果或 `zoomExempt` 记 PASS，也不得追加阈值掩盖。若正式 Z-PINCH 证明双指能从 1 持续产生 `vv.scale<1`、释放行为与签署前提冲突，或 zoom / 键盘信号实际上不可分，则停止该行为交付、重开 D2 回产品讨论，并单独回退本 D2 实现；冻结基线 `5268869` 与历史提交不改写。
+
+**A0 历史素材激活（签署后必测，不是追溯 PASS）**：A 会话 0.75 / 153 帧正式转为新实现的**必测场景锚点**。Z-MENU 与 Z-MAGIC 均须尝试达到精确 `scale=0.75`；达到后必须记录该 scale 下的无键盘、软键盘开 / 关、恢复及回 1。两条独立连续会话合计至少一条必须完整覆盖 0.75 场景，不能达到该 scale 或缺任一场景即对未覆盖项记 INCONCLUSIVE。历史 153 帧只证明旧 guard 曾退出避让，原始文件不改写，不得冒充新行为已验证。
+
+**D2 签署后真机验收矩阵（实现后执行，不改工具）**：每行使用独立、连续、无缺口的会话，从 `scale=1`、软键盘关闭开始，并且只用该行来源改变 scale。每阶段保留人工时间线、连续 raw、手动 Capture 和同场截图；验证目标是**已实现行为是否符合签署契约**，不再是“是否解锁 / 是否签署 D2”。来源无法产生目标 scale 或软键盘无法出现时，如实记录实际范围，对应子项未覆盖 / INCONCLUSIVE，不伪造场景。
+
+| 会话 | 单一来源与最小操作顺序 | 签署后的验收目标 |
+| --- | --- | --- |
+| Z-PINCH | 双指：`1 / 无键盘` 基线 → 放大至 `scale>1` 并 settle → 保持该 scale 打开 / 关闭软键盘 → 双指缩小并释放，记录是否回 `1` → settle 后在当前几何继续键盘开 / 关 → 在 `1` 继续尝试双指缩小；若实际持续产生 `vv.scale<1`，保留完整会话并补做键盘开 / 关 | `scale>1` 全程保守 opt-out；释放回 1 的变档当帧不误避让，settle 后才按前台 PTY focus + raw + 冻结 §5 重判；从 1 双指缩小若进入平铺标签页 / Tab Overview，必须明确它不是 `vv.scale<1`，不得冒充 scale<1 验收。若双指实际持续产生 `vv.scale<1`，记录为签署来源前提冲突并走失败 / 回退路径 |
+| Z-MENU | 仅浏览器菜单缩放指令：`1 / 无键盘` → 缩小至 `scale<1`（必须尝试达到 0.75）并 settle、Capture → 先验证无键盘 → 保持该 scale 打开 / 关闭 / 重开软键盘 → 菜单回到 `1` 并 settle | 非前台 PTY editable focus 或无真实遮挡时仅缩放、不误让位；`scale<1 + 前台 PTY focus + raw>1 + settle` 按冻结 §5 其余规则实现避让、恢复与重入；输入行 / 最后一行、quick-keys、Transport 和 rows/cols 按现行契约验收；回 1 后无旧 layout / raw / 恢复状态 |
+| Z-MAGIC | 仅妙控键盘 / 外接键盘 `cmd+'-'` 改变 scale：按 Z-MENU 同样的阶段顺序执行并尝试达到 0.75，不混用双指或菜单缩放；软键盘开 / 关单独标注，不能以 `magic-hint` 代替真实软键盘 | 验证命令缩小本身不误避让，以及 `scale<1 + 软键盘` 开 / 关 / 重开、恢复和回 1 的签署行为；无法打开真实软键盘时对应子项 INCONCLUSIVE，不用 Node / Headless 结果补 PASS |
+
+**每会话最小字段**：①会话元数据：设备 / iPadOS / Safari、方向与窗口形态、被测构建、`probeVersion` / `schemaRev`、session；②人工标注：唯一 `zoomSource`、每步起止 seq、实际操作、软键盘开 / 关状态、手动 Capture 与截图对应关系；③逐帧事实：连续 `seq` / `reason` / `capturedAt`，`vv.scale/height/width/offsetTop/offsetLeft`，布局 `clientHeight/clientWidth` 与派生 raw，输入归属 / 活动宿主类别及 client rect（或不可得原因），reported `occlusion`，前台 PTY 宿主 rect 与 inline / computed bottom，输入行 / 最后一行及 `xtermRows` rect，面板 rect / corner / support；④保留所有过渡帧、zoom 帧和 settle 后回到 `scale=1` 的稳定帧，不得只筛非 zoom 或稳定帧。
+
+**与 C-3 及现行重放器的衔接**：冻结 p9 judge 的 `zoomExempt`、探针 `derivedState=none` 或混合会话其他帧的 PASS 均不得认证 D2。对旧基线，zoom 帧只证明 scale 与退出记账；对已签署的新目标，旧 judge 在 `scale<1` 给出的 owed=0 也只描述旧基线，既不能直接判新实现 FAIL，也不能因豁免而判 PASS。签署后的验收须由经授权的真机验收判读者按 D2 的 scale 准入规则 + 冻结 §5 其余状态机，结合唯一来源人工标注、连续会话、同场截图及 settle 后稳定帧逐项 verdict；现行工具不自动产生新行为 PASS。
+
+**后续编码 Sub-agent 的授权范围（仅 D2，调度者另行分派后生效）**：
+
+- **允许**：仅修改 `internal/ui/static/index.html` 的 zoom guard 段，以及该行为的直接测试——`internal/ui/testdata/` 下相关用例；如现有 Go 门禁直接锚定该 guard，可在 `internal/ui` 内同步对应的直接门禁测试 / 断言。若需要改动其他产品逻辑、诊断资产 / 探针、evidence 工具、服务端协议或 `internal/ui` 的非直接关联实现，即超出授权，停止并回报。
+- **禁止**：把 `vv.offsetTop` 加进 raw 算式；全局锁 pan；把 `#app` 钉高；恢复、重写或新增已经属于合同的 click / focusin / 几何解锁；改变 25% / 50% 门线；修改 trailing resize、最终尺寸去重或断开清理机制；删除全部 zoom guard；借本任务修改 §3 其他禁令或 R1–R6 其他语义。
+- **状态机与提交边界**：新行为除上述两项 D2 显式例外外，仍以冻结 §5 为唯一会话状态机真源。产品实现与直接测试组成一个可独立解释、验证和回退的原子变更；不得混入诊断、历史证据或无关重构，必须能单独回退而不改写 `5268869`。
+- **真机义务**：实现后必须完成 scale<1 避让、Z-MENU、Z-MAGIC 以及 zoom 状态下键盘开 / 关 / 重开的真机验证，并按矩阵补 Z-PINCH 和 A0 0.75 必测项。Node / Go / Headless 只证明其覆盖的代码路径，不得据此宣称真机 PASS；未执行或缺证据逐项记 INCONCLUSIVE（PLAN §7、PHASE1-CONTRACT F 节）。
 
 ### D3：非活动 PTY 宿主的几何策略
 
@@ -186,7 +210,7 @@ opencode、reasonix、dsh 等 iframe 内输入由 iframe / Safari 处理。父�
 **任务**
 
 - 横竖屏、Split View、Stage Manager、窗口尺寸变化；
-- 按 D2 实施或明确保留 zoom 豁免；
+- 按已签署的 D2 实现非对称 zoom guard，并执行 Z-PINCH / Z-MENU / Z-MAGIC 与 A0 0.75 必测场景；若正式证据冲突，按 D2 重开决策并单独回退，不静默保留全量豁免；
 - 前后台恢复、键盘打开时刷新、实例切换、隐藏宿主；
 - quick-keys 粘贴、IME、触摸滚动、内部滚动器、safe-area、暗色/浅色；
 - opencode、reasonix、dsh iframe 的父页面无干预验证。
@@ -216,7 +240,7 @@ opencode、reasonix、dsh 等 iframe 内输入由 iframe / Safari 处理。父�
 | opencode / reasonix / dsh iframe | 父页面是否保持无干预，系统输入可见性是否成立 |
 | 妙控键盘与浮动提示栏 | 是否避免误压缩终端，同时保持所需控件可达 |
 | 横竖屏、Split View、Stage Manager | 输入归属和几何是否按新窗口重算，无旧恢复状态 |
-| `scale=0.75`、scale 往返、zoom + 键盘 | 按 D2 的签署口径验收，不以 0.75 数据冒充 scale=1；另验菜单/妙控缩小但无键盘时不得误避让 |
+| `scale=0.75`、scale 往返、zoom + 键盘 | 按已签署 D2 的非对称口径验收，不以 0.75 历史数据冒充新实现或 scale=1；另验菜单 / 妙控缩小但无键盘时不得误避让，以及 `scale>1` opt-out、变档 settle 后重判和 zoom 状态下键盘开 / 关 / 重开 |
 | 前后台、键盘打开时刷新 | 是否重新识别输入归属和当前几何 |
 | 暗色/浅色、safe-area | 截图是否无默认白画布缝，几何与视觉证据是否一致 |
 
@@ -263,3 +287,4 @@ iPhone Safari 按旧 PLAN 至少补一轮；不同 iPadOS 版本和 Chrome(iOS) 
 | C-2 / F-1 的注释不符与可选指针化 | 本轮只把降级帧排他规则写入契约 | 修注释或改指针均须另授权；本轮不批准 schema / 产品代码改动 |
 | C-1 / F-6 的 unlockTrace 读者 | 当前仅为可采证 groundwork，GI-2 集群维持 INCONCLUSIVE | 新增读者或判读流程须另授权 evidence 工具与对应测试 |
 | NP-3 / F-5 的可选服务端收窄 | 当前传输层宽容声明为有意 | 若要求服务端强制“环成员 = 决策集”，转编码 Sub-agent 另授权 |
+| PO-2026-11-04：debug 面板默认未展开 | **独立 follow-up，可改进项**；产品 owner 口头观察，无截图 / raw，INCONCLUSIVE。源码显示 More 次要控件默认隐藏、可手动展开（`viewport_debug.js` 1779–1782、1995–1999）；不据此判定 R6 / 冻结行为失败，也不产生 PASS | 先确认“未展开”指 More 次要控件还是主面板状态；另立默认态需求、影响范围与真机验收后再授权。当前不改产品代码、诊断代码或 evidence 工具，也不改冻结文档 |
