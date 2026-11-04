@@ -206,6 +206,94 @@ func TestViewportDebugRejectsInvalidReports(t *testing.T) {
 			r.Snapshot.Controls.ComputedBottom = string(bytes.Repeat([]byte("x"), 161))
 		}},
 		{"over-long computed max-height", func(r *viewportDebugReport) { r.Snapshot.QuickKeys.MaxHeight = string(bytes.Repeat([]byte("x"), 161)) }},
+		// issue #116 Phase 2 task 1 / task 2, the additive blocks: the contract's
+		// enums (HO-1..HO-4, the frozen §5 session states, R6's supported /
+		// unsupported) and the journal's bounds go through the same 400 door, so a
+		// client cannot invent a fifth ownership category, quietly drop a rect, or
+		// ship an unreachable corner without saying why.
+		{"invalid ownership category", func(r *viewportDebugReport) {
+			r.Snapshot.Ownership = &viewportDebugOwnership{Category: "HO-5", Basis: "editable-focus-on-page-web-input"}
+		}},
+		{"unknown ownership without a reason", func(r *viewportDebugReport) {
+			r.Snapshot.Ownership = &viewportDebugOwnership{Category: "unknown", Basis: "not-evaluated"}
+		}},
+		{"decided ownership with a smuggled reason", func(r *viewportDebugReport) {
+			r.Snapshot.Ownership = &viewportDebugOwnership{Category: "HO-2", Basis: "editable-focus-inside-foreground-terminal-host", UnavailableReason: "guessed"}
+		}},
+		{"invalid active input tag", func(r *viewportDebugReport) {
+			r.Snapshot.ActiveInput = &viewportDebugActiveInput{Observed: true, Tag: "<script>", Role: "web-textarea", RectUnavailableReason: "focus-client-rect-unavailable"}
+		}},
+		{"active input without a rect or a reason", func(r *viewportDebugReport) {
+			r.Snapshot.ActiveInput = &viewportDebugActiveInput{Observed: true, Tag: "TEXTAREA", Role: "web-textarea"}
+		}},
+		{"invalid keyboard session state", func(r *viewportDebugReport) {
+			r.Snapshot.KeyboardSession = &viewportDebugKeyboardSession{Derived: true, DerivedState: "pinned", Basis: "applier-mirror-positive", Evidence: "applier-mirror", Scale: 1}
+		}},
+		// B-3: a derived label that does not say it is derived is the second source of
+		// truth the frozen judge must not have to argue with, so the door rejects it.
+		{"derived keyboard session label that hides that it is derived", func(r *viewportDebugReport) {
+			r.Snapshot.KeyboardSession = &viewportDebugKeyboardSession{Derived: false, DerivedState: "active", Basis: "applier-mirror-positive", Evidence: "applier-mirror", Scale: 1}
+		}},
+		{"unknown derived state without a reason", func(r *viewportDebugReport) {
+			r.Snapshot.KeyboardSession = &viewportDebugKeyboardSession{Derived: true, DerivedState: "unknown", Basis: "not-evaluated", Evidence: "unavailable", Scale: 1}
+		}},
+		{"non-positive keyboard session scale", func(r *viewportDebugReport) {
+			r.Snapshot.KeyboardSession = &viewportDebugKeyboardSession{Derived: true, DerivedState: "active", Basis: "applier-mirror-positive", Evidence: "applier-mirror", Scale: 0}
+		}},
+		{"unlock trace that judges", func(r *viewportDebugReport) {
+			r.Snapshot.UnlockTrace = &viewportDebugUnlockTrace{AdvisoryOnly: false, GeometryCountedOnly: true}
+		}},
+		// M-6: a journal that does not state that geometry is count-only cannot be
+		// trusted to have kept the click §5.5 asks for.
+		{"unlock trace that does not state geometry is count-only", func(r *viewportDebugReport) {
+			r.Snapshot.UnlockTrace = &viewportDebugUnlockTrace{AdvisoryOnly: true, GeometryCountedOnly: false, Counts: &viewportDebugTraceCounts{Click: 1}}
+		}},
+		// N-4: the entry type goes through the same character discipline as the tag.
+		{"invalid unlock trace entry type", func(r *viewportDebugReport) {
+			r.Snapshot.UnlockTrace = &viewportDebugUnlockTrace{
+				AdvisoryOnly: true, GeometryCountedOnly: true,
+				Entries: []viewportDebugTraceEntry{{Tick: 1, Type: "terminalText", Tag: "TEXTAREA"}},
+			}
+		}},
+		{"uppercase unlock trace entry type", func(r *viewportDebugReport) {
+			r.Snapshot.UnlockTrace = &viewportDebugUnlockTrace{
+				AdvisoryOnly: true, GeometryCountedOnly: true,
+				Entries: []viewportDebugTraceEntry{{Tick: 1, Type: "CLICK", Tag: "TEXTAREA"}},
+			}
+		}},
+		// m-5: a schemaRev the server has no declarations for means fields it would
+		// silently drop, so it is schema drift caught at the door.
+		{"unknown schemaRev", func(r *viewportDebugReport) { r.Snapshot.SchemaRev = "p10-invented-revision" }},
+		// m-2: the degraded frame must carry its fixed marker, and never the marker
+		// without the flag (a "failed read" claim attached to a measured frame).
+		{"probe read failure without the marker", func(r *viewportDebugReport) { r.Snapshot.ProbeReadFailed = true }},
+		{"probe read failure marker on a measured frame", func(r *viewportDebugReport) {
+			r.Snapshot.ProbeReadFailedReason = "probe-read-failed"
+		}},
+		{"too many unlock trace entries", func(r *viewportDebugReport) {
+			entries := make([]viewportDebugTraceEntry, 0, viewportDebugMaxTraceEntries+1)
+			for i := 0; i <= viewportDebugMaxTraceEntries; i++ {
+				entries = append(entries, viewportDebugTraceEntry{Tick: i, Type: "click"})
+			}
+			r.Snapshot.UnlockTrace = &viewportDebugUnlockTrace{
+				AdvisoryOnly: true, GeometryCountedOnly: true, Entries: entries,
+				Counts: &viewportDebugTraceCounts{Click: len(entries)},
+			}
+		}},
+		{"unsupported panel corner without a reason", func(r *viewportDebugReport) {
+			r.Snapshot.Panel = &viewportDebugPanel{Exists: true, Corner: "br", Support: "unsupported"}
+		}},
+		// B-2: ONE vocabulary. `unavailable` is legal, but it still has to state why;
+		// a fourth word (the client's old "unknown") never gets past the pattern.
+		{"unavailable panel corner without a reason", func(r *viewportDebugReport) {
+			r.Snapshot.Panel = &viewportDebugPanel{Exists: true, Corner: "unknown", Support: "unavailable"}
+		}},
+		{"invented panel support vocabulary", func(r *viewportDebugReport) {
+			r.Snapshot.Panel = &viewportDebugPanel{Exists: true, Corner: "tr", Support: "unknown", UnsupportedReason: "panel-layout-not-authored", RectUnavailableReason: "panel-client-rect-unavailable"}
+		}},
+		{"invalid diagnostic panel corner", func(r *viewportDebugReport) {
+			r.Snapshot.Panel = &viewportDebugPanel{Exists: true, Corner: "center", Support: "supported", RectUnavailableReason: "panel-client-rect-unavailable"}
+		}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -452,7 +540,13 @@ func TestViewportDebugAcceptsEveryClientField(t *testing.T) {
 	    "webPanel": {"top":40,"bottom":1160,"width":820,"height":1120,"background":"rgb(11, 16, 32)"},
 	    "xtermScreen": {"top":50,"bottom":1151,"width":820,"height":1101},
 	    "xtermRows": {"top":50,"bottom":1151,"width":820,"height":1101},
-	    "ui": {"collapsed":false,"quickKeysOpen":false,"kind":"pty","status":"running","activeElementTag":"TEXTAREA"}
+	    "ui": {"collapsed":false,"quickKeysOpen":false,"kind":"pty","status":"running","activeElementTag":"TEXTAREA"},
+	    "schemaRev": "p9-additive-ownership-panel-v1",
+	    "ownership": {"category":"HO-2","basis":"editable-focus-inside-foreground-terminal-host","unavailableReason":""},
+	    "activeInput": {"observed":true,"tag":"TEXTAREA","editable":true,"role":"xterm-helper-textarea","xtermMarker":true,"helperMarker":true,"insideTerminalContainer":true,"insideTerminalHost":true,"insideQuickKeysPanel":false,"hostIsForeground":true,"hostVisible":true,"ancestryReachedRoot":true,"rect":{"top":836,"bottom":864,"left":120,"right":420,"width":300,"height":28},"rectUnavailableReason":"","insideVisibleViewport":true,"unavailableReason":""},
+	    "keyboardSession": {"mirrorExposed":true,"mirrorOcclusion":280,"rawShortfall":280,"layoutHeight":1180,"vvHeight":900,"vvWidth":820,"vvOffsetTop":0,"scale":1,"zoomed":false,"vvObserved":true,"focusEditable":true,"derived":true,"derivedState":"active","basis":"applier-mirror-positive","evidence":"applier-mirror","unavailableReason":"","geometryChangedSincePrevious":false,"previousMirrorOcclusion":320,"unlockTick":6,"previousUnlockTick":4},
+	    "unlockTrace": {"advisoryOnly":true,"captureTick":7,"geometryCountedOnly":true,"counts":{"click":2,"clickOnTerminalHost":1,"touchstart":1,"focusin":1,"focusout":0,"vvResize":3,"vvScroll":40,"windowResize":2,"other":0},"entries":[{"tick":6,"type":"click","tag":"TEXTAREA","editable":true,"onTerminalHost":true,"xtermMarker":true,"vvHeight":900,"vvWidth":820,"vvOffsetTop":0,"layoutHeight":1180,"scale":1,"mirrorOcclusion":280}]},
+	    "panel": {"exists":true,"corner":"tr","support":"supported","unsupportedReason":"","lifted":false,"panCorrected":false,"nominalHeight":520,"rect":{"top":32,"bottom":552,"left":466,"right":826,"width":360,"height":520},"rectUnavailableReason":"","keyboardOverlap":0,"insideVisibleViewport":true}
 	  }
 	}`
 	rec := doViewportDebugRequest(t, srv, http.MethodPost, "/api/viewport-debug/report", mustDecodeJSON(t, payload))
@@ -645,6 +739,208 @@ func TestViewportDebugEmptyPtyHostListIsNeverOmitted(t *testing.T) {
 	}
 	if len(got.Events) != 1 || len(got.Events[0].Snapshot["ptyHosts"].([]any)) != 2 {
 		t.Fatalf("want 2 hosts back, got %+v", got.Events)
+	}
+}
+
+// TestViewportDebugAcceptsPanelFormsAndDegradedFrame pins the shapes the client
+// actually produces for the panel block and for a failed read (B-2 / m-2). Every one
+// of these is a POSITIVE case: an accepted upload, because each is a state the tool
+// genuinely reaches and the report must be able to carry.
+//
+//	B-2 vocabulary — the panel block answers `support` from exactly one set
+//	(supported / unsupported / unavailable) and every non-supported corner states why.
+//	The previous client invented "unknown" for a panel whose dataset had never been
+//	written, and the pattern answered every upload with a 400 — the whole capture
+//	round lost to a word.
+//	m-2 — a frame whose read of the live page threw goes out with the marker set and
+//	every measurement ABSENT (null), never zero-filled into a number a verifier could
+//	measure. `vv: null` is what keeps it INCONCLUSIVE in the frozen verifier.
+func TestViewportDebugAcceptsPanelFormsAndDegradedFrame(t *testing.T) {
+	srv := &Server{viewportDebug: newViewportDebugStore()}
+	cases := []struct {
+		name    string
+		payload string
+	}{
+		{"panel absent", `{
+		  "session": "0123456789abcdef", "seq": 1,
+		  "snapshot": {
+		    "capturedAt": "2026-11-04T12:00:00.000Z", "reason": "manual",
+		    "clientWidth": 834, "clientHeight": 1108, "dpr": 2,
+		    "vv": {"width":834,"height":702,"offsetTop":0,"offsetLeft":0,"scale":1},
+		    "schemaRev": "p9-additive-ownership-panel-v1",
+		    "panel": {"exists":false,"corner":"unavailable","support":"unavailable","unsupportedReason":"panel-absent","lifted":null,"panCorrected":null,"nominalHeight":null,"rect":null,"rectUnavailableReason":"panel-absent","keyboardOverlap":null,"insideVisibleViewport":null}
+		  }
+		}`},
+		{"panel exists but its dataset was never authored (B-2)", `{
+		  "session": "0123456789abcdef", "seq": 2,
+		  "snapshot": {
+		    "capturedAt": "2026-11-04T12:00:01.000Z", "reason": "manual",
+		    "clientWidth": 834, "clientHeight": 1108, "dpr": 2,
+		    "vv": {"width":834,"height":702,"offsetTop":0,"offsetLeft":0,"scale":1},
+		    "schemaRev": "p9-additive-ownership-panel-v1",
+		    "panel": {"exists":true,"corner":"unknown","support":"unavailable","unsupportedReason":"panel-layout-not-authored","lifted":null,"panCorrected":null,"nominalHeight":null,"rect":{"top":32,"bottom":552,"left":466,"right":826,"width":360,"height":520},"rectUnavailableReason":"","keyboardOverlap":0,"insideVisibleViewport":true}
+		  }
+		}`},
+		{"corner is physically unsupported and says why", `{
+		  "session": "0123456789abcdef", "seq": 3,
+		  "snapshot": {
+		    "capturedAt": "2026-11-04T12:00:02.000Z", "reason": "manual",
+		    "clientWidth": 834, "clientHeight": 1108, "dpr": 2,
+		    "vv": {"width":834,"height":70,"offsetTop":0,"offsetLeft":0,"scale":1},
+		    "schemaRev": "p9-additive-ownership-panel-v1",
+		    "panel": {"exists":true,"corner":"br","support":"unsupported","unsupportedReason":"visible-window-too-short-for-panel","lifted":true,"panCorrected":false,"nominalHeight":38,"rect":{"top":32,"bottom":70,"left":466,"right":826,"width":360,"height":38},"rectUnavailableReason":"","keyboardOverlap":0,"insideVisibleViewport":true}
+		  }
+		}`},
+		{"free corner with a real pan on both axes", `{
+		  "session": "0123456789abcdef", "seq": 4,
+		  "snapshot": {
+		    "capturedAt": "2026-11-04T12:00:03.000Z", "reason": "manual",
+		    "clientWidth": 834, "clientHeight": 1108, "dpr": 2,
+		    "vv": {"width":834,"height":1108,"offsetTop":403,"offsetLeft":44,"scale":1},
+		    "schemaRev": "p9-additive-ownership-panel-v1",
+		    "panel": {"exists":true,"corner":"free","support":"supported","unsupportedReason":"","lifted":false,"panCorrected":true,"nominalHeight":520,"rect":{"top":32,"bottom":552,"left":466,"right":826,"width":360,"height":520},"rectUnavailableReason":"","keyboardOverlap":0,"insideVisibleViewport":true}
+		  }
+		}`},
+		// m-2: the degraded frame. Nothing measured, everything marked.
+		{"probe read failed frame carries the marker and no geometry", `{
+		  "session": "0123456789abcdef", "seq": 5,
+		  "snapshot": {
+		    "probeVersion": "p9-full-shell-session-avoidance-v1",
+		    "schemaRev": "p9-additive-ownership-panel-v1",
+		    "capturedAt": "2026-11-04T12:00:04.000Z", "reason": "periodic",
+		    "probeReadFailed": true, "probeReadFailedReason": "probe-read-failed",
+		    "innerWidth": 0, "innerHeight": 0, "clientWidth": 0, "clientHeight": 0, "dpr": 1,
+		    "vv": null, "occlusion": null, "ptyHosts": null,
+		    "terminal": null, "controls": null, "statusBar": null, "quickKeys": null,
+		    "webPanel": null, "xtermScreen": null,
+		    "ownership": null, "activeInput": null, "keyboardSession": null,
+		    "unlockTrace": null, "panel": null
+		  }
+		}`},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			if rec := doViewportDebugRequest(t, srv, http.MethodPost, "/api/viewport-debug/report", mustDecodeJSON(t, tt.payload)); rec.Code != http.StatusOK {
+				t.Fatalf("%s must be accepted, status=%d body=%s", tt.name, rec.Code, rec.Body.String())
+			}
+		})
+	}
+	// The degraded frame must survive the round trip as ABSENCE, not as zeros: a
+	// verifier reads `vv: null` as INCONCLUSIVE, and that is the whole point.
+	rec := doViewportDebugRequest(t, srv, http.MethodGet, "/api/viewport-debug/report?session=0123456789abcdef&after=4", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("download: status=%d", rec.Code)
+	}
+	var got struct {
+		Events []struct {
+			Seq      int `json:"seq"`
+			Snapshot struct {
+				ProbeReadFailed       bool   `json:"probeReadFailed"`
+				ProbeReadFailedReason string `json:"probeReadFailedReason"`
+				VV                    *struct {
+					Height float64 `json:"height"`
+				} `json:"vv"`
+				PtyHosts []map[string]any `json:"ptyHosts"`
+			} `json:"snapshot"`
+		} `json:"events"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode download: %v", err)
+	}
+	if len(got.Events) != 1 || got.Events[0].Seq != 5 {
+		t.Fatalf("want only the degraded frame back, got %+v", got.Events)
+	}
+	frame := got.Events[0].Snapshot
+	if !frame.ProbeReadFailed || frame.ProbeReadFailedReason != "probe-read-failed" {
+		t.Fatalf("the degraded frame lost its marker: %+v", frame)
+	}
+	if frame.VV != nil {
+		t.Fatalf("a frame that never read the viewport must come back vv:null, got %+v", frame.VV)
+	}
+	if frame.PtyHosts != nil {
+		t.Fatalf("a frame that never walked the hosts must come back ptyHosts:null, got %+v", frame.PtyHosts)
+	}
+}
+
+// TestViewportDebugUnlockTraceRingsDecisionEvents pins the M-6 / N-1 / N-3 wire
+// shape: the ring holds the events a verdict reads, the counts keep the flood, and
+// the two are checked at the door instead of assumed.
+func TestViewportDebugUnlockTraceRingsDecisionEvents(t *testing.T) {
+	srv := &Server{viewportDebug: newViewportDebugStore()}
+	payload := `{
+	  "session": "0123456789abcdef", "seq": 1,
+	  "snapshot": {
+	    "capturedAt": "2026-11-04T12:00:00.000Z", "reason": "scroll",
+	    "clientWidth": 834, "clientHeight": 1108, "dpr": 2,
+	    "vv": {"width":834,"height":702,"offsetTop":403,"offsetLeft":0,"scale":1},
+	    "schemaRev": "p9-additive-ownership-panel-v1",
+	    "keyboardSession": {"mirrorExposed":true,"mirrorOcclusion":0,"rawShortfall":406,"layoutHeight":1108,"vvHeight":702,"vvWidth":834,"vvOffsetTop":403,"scale":1,"zoomed":false,"vvObserved":true,"focusEditable":true,"derived":true,"derivedState":"unknown","basis":"applier-mirror-zero-after-unlock-was-journalled","evidence":"applier-mirror+frame-history","unavailableReason":"unlocked-after-previous-frame-latch-state-unpublished","geometryChangedSincePrevious":false,"previousMirrorOcclusion":406,"unlockTick":9,"previousUnlockTick":4},
+	    "unlockTrace": {"advisoryOnly":true,"captureTick":81,"geometryCountedOnly":true,
+	      "counts":{"click":1,"clickOnTerminalHost":1,"touchstart":0,"focusin":1,"focusout":0,"vvResize":40,"vvScroll":40,"windowResize":2,"other":0},
+	      "entries":[
+	        {"tick":4,"type":"click","tag":"TEXTAREA","editable":true,"onTerminalHost":true,"xtermMarker":true,"vvHeight":702,"vvWidth":834,"vvOffsetTop":403,"layoutHeight":1108,"scale":1,"mirrorOcclusion":406},
+	        {"tick":8,"type":"focusin","tag":"INPUT","editable":true,"onTerminalHost":false,"xtermMarker":false,"vvHeight":702,"vvWidth":834,"vvOffsetTop":403,"layoutHeight":1108,"scale":1,"mirrorOcclusion":406}
+	      ]}
+	  }
+	}`
+	if rec := doViewportDebugRequest(t, srv, http.MethodPost, "/api/viewport-debug/report", mustDecodeJSON(t, payload)); rec.Code != http.StatusOK {
+		t.Fatalf("the continuous-pan frame must be accepted, status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	rec := doViewportDebugRequest(t, srv, http.MethodGet, "/api/viewport-debug/report?session=0123456789abcdef", nil)
+	var got struct {
+		Events []struct {
+			Snapshot struct {
+				KeyboardSession struct {
+					Derived            bool   `json:"derived"`
+					DerivedState       string `json:"derivedState"`
+					UnavailableReason  string `json:"unavailableReason"`
+					UnlockTick         *int   `json:"unlockTick"`
+					PreviousUnlockTick *int   `json:"previousUnlockTick"`
+				} `json:"keyboardSession"`
+				UnlockTrace struct {
+					GeometryCountedOnly bool `json:"geometryCountedOnly"`
+					Counts              struct {
+						VVResize     int `json:"vvResize"`
+						VVScroll     int `json:"vvScroll"`
+						WindowResize int `json:"windowResize"`
+					} `json:"counts"`
+					Entries []struct {
+						Type         string   `json:"type"`
+						VVHeight     *float64 `json:"vvHeight"`
+						VVWidth      *float64 `json:"vvWidth"`
+						LayoutHeight *float64 `json:"layoutHeight"`
+						Scale        *float64 `json:"scale"`
+					} `json:"entries"`
+				} `json:"unlockTrace"`
+			} `json:"snapshot"`
+		} `json:"events"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("download: %v", err)
+	}
+	s := got.Events[0].Snapshot
+	if !s.KeyboardSession.Derived || s.KeyboardSession.DerivedState != "unknown" {
+		t.Fatalf("the derived label must round-trip as derived: %+v", s.KeyboardSession)
+	}
+	if s.KeyboardSession.UnlockTick == nil || s.KeyboardSession.PreviousUnlockTick == nil {
+		t.Fatalf("the tick span the label was inferred across must travel with it: %+v", s.KeyboardSession)
+	}
+	if !s.UnlockTrace.GeometryCountedOnly {
+		t.Fatal("geometryCountedOnly was lost")
+	}
+	// N-1: the window's resize is NOT folded into the visualViewport's count.
+	if s.UnlockTrace.Counts.VVResize != 40 || s.UnlockTrace.Counts.WindowResize != 2 {
+		t.Fatalf("vvResize / windowResize were conflated on the wire: %+v", s.UnlockTrace.Counts)
+	}
+	// M-6: the ring still holds the two decision events across an 80-event flood.
+	if len(s.UnlockTrace.Entries) != 2 || s.UnlockTrace.Entries[0].Type != "click" {
+		t.Fatalf("the decision events must survive the geometry flood: %+v", s.UnlockTrace.Entries)
+	}
+	// N-3: each entry carries the layout / horizontal sides of its own instant.
+	for _, e := range s.UnlockTrace.Entries {
+		if e.VVWidth == nil || e.LayoutHeight == nil || e.Scale == nil {
+			t.Fatalf("journal entry lost the geometry that closes §5.7's comparison: %+v", e)
+		}
 	}
 }
 

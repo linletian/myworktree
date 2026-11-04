@@ -30,13 +30,36 @@ const (
 	// host per session, and sessions are bounded by the instance cap, so 64 is
 	// generous — the limit exists to bound the body, not to hide a leak.
 	viewportDebugMaxPtyHosts = 64
+	// The unlock journal is a ring: enough frames to order a keyboard opening
+	// against the geometry that followed it, small enough that a 1s capture never
+	// crowds the 64KiB body limit.
+	viewportDebugMaxTraceEntries = 16
 )
 
 var (
 	viewportDebugSessionPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{16,64}$`)
 	viewportDebugKindPattern    = regexp.MustCompile(`^[a-z0-9_-]{0,32}$`)
 	viewportDebugTagPattern     = regexp.MustCompile(`^[A-Za-z0-9]{0,32}$`)
-	viewportDebugReasons        = map[string]bool{
+	// The contract's own enums (PHASE1-CONTRACT B章 / frozen §5 / R6). A client
+	// that invents a fifth ownership category or a fourth placement verdict is a
+	// schema drift, caught at the door rather than averaged into a report.
+	viewportDebugOwnershipPattern    = regexp.MustCompile(`^(HO-1|HO-2|HO-3|HO-4|unknown)$`)
+	viewportDebugRolePattern         = regexp.MustCompile(`^[a-z][a-z-]{0,63}$`)
+	viewportDebugSessionStatePattern = regexp.MustCompile(`^(active|recovering|geometryGrace|none|unknown)$`)
+	viewportDebugPanelCornerPattern  = regexp.MustCompile(`^(tl|tr|bl|br|free|unknown|unavailable)$`)
+	viewportDebugPanelSupportPattern = regexp.MustCompile(`^(supported|unsupported|unavailable)$`)
+	// N-4: the entry types the client's eventTrace.note() actually journals
+	// (click / touchstart / focusin / focusout), plus every name it may still COUNT
+	// — so the whitelist is the client's vocabulary, not a guess at it. A type
+	// outside this set means the channel is being used for something other than the
+	// §5.5 unlock journal, and the door is where that gets caught.
+	viewportDebugTraceTypePattern = regexp.MustCompile(`^(click|touchstart|focusin|focusout|resize|scroll|window-resize|orientationchange|pageshow|visibilitychange)$`)
+	// m-5: the additive schema revisions this door accepts, spelled out. `schemaRev`
+	// is optional so a pre-additive capture still uploads; when present it must be
+	// a revision the server has declarations for, because a client that invents one
+	// has added fields this struct would silently drop.
+	viewportDebugSchemaRevPattern = regexp.MustCompile(`^p9-additive-ownership-panel-v1$`)
+	viewportDebugReasons          = map[string]bool{
 		"init": true, "resize": true, "scroll": true, "focusin": true,
 		"focusout": true, "orientationchange": true, "window-resize": true,
 		"visibilitychange": true, "pageshow": true, "settle": true,
@@ -202,6 +225,179 @@ type viewportDebugQuickKeys struct {
 	Open         bool    `json:"open"`
 }
 
+// ── issue #116 Phase 2 task 1/2: the ADDITIVE field groups ────────────────────
+// PHASE1-CONTRACT「验收前置条件（工具依赖，不得绕过）」 makes the ownership
+// category, the focused host's identity + visible client rect and the keyboard
+// session marker pre-conditions for whole classes of verdicts, and D1 names the
+// third: the sub-frame order of events against the geometry change. The decoder
+// uses DisallowUnknownFields, so every one of those client fields needs a twin
+// here — a twin missing is not a dropped field, it is every upload answered 400
+// and a panel that only ever says "upload failed; retrying" (the pageTop incident).
+//
+// Nothing here can carry content: identity fields are TAGS and BOOLEAN role
+// markers, rects are numbers, and the trace is explicitly `advisoryOnly`.
+
+// viewportDebugClientRect is a rect in CLIENT space with the two horizontal edges
+// too: reachability is "does this box fall inside [0, vv.height] / [0, vv.width]",
+// which top/bottom/width/height alone cannot answer.
+type viewportDebugClientRect struct {
+	viewportDebugRect
+	Left  float64 `json:"left"`
+	Right float64 `json:"right"`
+}
+
+// viewportDebugOwnership is the contract's B章 answer: the category, the branch
+// that decided it, and — when nothing could be decided — the reason. `unknown` is
+// a legal category and an empty unavailableReason is the only proof it was decided.
+type viewportDebugOwnership struct {
+	Category          string `json:"category"`
+	Basis             string `json:"basis"`
+	UnavailableReason string `json:"unavailableReason"`
+}
+
+type viewportDebugActiveInput struct {
+	Observed                bool   `json:"observed"`
+	Tag                     string `json:"tag"`
+	Editable                bool   `json:"editable"`
+	Role                    string `json:"role"`
+	XtermMarker             bool   `json:"xtermMarker"`
+	HelperMarker            bool   `json:"helperMarker"`
+	InsideTerminalContainer bool   `json:"insideTerminalContainer"`
+	// POINTERS on the three-state reads: "not determinable" is a different claim
+	// from "determinable and false", and the verifier answers them differently.
+	InsideTerminalHost    *bool                    `json:"insideTerminalHost"`
+	InsideQuickKeysPanel  bool                     `json:"insideQuickKeysPanel"`
+	HostIsForeground      *bool                    `json:"hostIsForeground"`
+	HostVisible           *bool                    `json:"hostVisible"`
+	AncestryReachedRoot   bool                     `json:"ancestryReachedRoot"`
+	Rect                  *viewportDebugClientRect `json:"rect,omitempty"`
+	RectUnavailableReason string                   `json:"rectUnavailableReason"`
+	InsideVisibleViewport *bool                    `json:"insideVisibleViewport"`
+	UnavailableReason     string                   `json:"unavailableReason"`
+}
+
+// viewportDebugKeyboardSession is the applier's mirrored occlusion plus the
+// probe's DERIVED label over it. `rawShortfall` is a MEASUREMENT (clientHeight −
+// vv.height) and never an input: the occlusion the shell owes stays in
+// `snapshot.occlusion`, read off window.__mwTerminalOcclusion.
+//
+// B-3: the label is named `derivedState` and carries `derived:true`, because it is
+// NOT an acceptance state. The applier keeps `terminalAvoidanceActive` /
+// `...Recovering` / `...GeometryGrace` module-local, so every word here is an
+// inference across the frames the probe happened to sample. The AUTHORITY for a
+// session stays the frozen judge (evidence/verify-sop.mjs makeKeyboardSessionJudge,
+// which replays §5 from measurements) next to this block's measurement fields
+// (`occlusion` on the snapshot, `mirrorOcclusion`, `rawShortfall`). A label that
+// cannot be derived is `unknown` PLUS a non-empty `unavailableReason`, and the two
+// numbers the inference was made across (`previousMirrorOcclusion`,
+// `unlockTick`/`previousUnlockTick`) travel with it so a reader can re-check the
+// inference instead of trusting the word.
+type viewportDebugKeyboardSession struct {
+	Derived                      bool     `json:"derived"`
+	DerivedState                 string   `json:"derivedState"`
+	Basis                        string   `json:"basis"`
+	Evidence                     string   `json:"evidence"`
+	UnavailableReason            string   `json:"unavailableReason"`
+	MirrorExposed                bool     `json:"mirrorExposed"`
+	MirrorOcclusion              float64  `json:"mirrorOcclusion"`
+	RawShortfall                 float64  `json:"rawShortfall"`
+	LayoutHeight                 float64  `json:"layoutHeight"`
+	VVHeight                     float64  `json:"vvHeight"`
+	VVWidth                      float64  `json:"vvWidth"`
+	VVOffsetTop                  float64  `json:"vvOffsetTop"`
+	Scale                        float64  `json:"scale"`
+	Zoomed                       bool     `json:"zoomed"`
+	VVObserved                   bool     `json:"vvObserved"`
+	FocusEditable                bool     `json:"focusEditable"`
+	GeometryChangedSincePrevious *bool    `json:"geometryChangedSincePrevious,omitempty"`
+	PreviousMirrorOcclusion      *float64 `json:"previousMirrorOcclusion,omitempty"`
+	// The tick span the derived label was inferred across (B-3). An unlock landing
+	// inside it means `recovering` was NOT derivable — the frame says so in
+	// `unavailableReason`, and these two numbers are the proof it says so on.
+	UnlockTick         *int `json:"unlockTick,omitempty"`
+	PreviousUnlockTick *int `json:"previousUnlockTick,omitempty"`
+}
+
+// viewportDebugTraceCounts is the COUNTER half of the journal. M-6 / N-1 are why
+// the set is split the way it is: `vvResize` counts ONLY the visualViewport's
+// `resize` (the keyboard-shaped signal) and `windowResize` counts the window's, so
+// one can never be read as the other; both keep counting after the entry ring rolls
+// (or, for the geometry events, instead of entering it).
+type viewportDebugTraceCounts struct {
+	Click               int `json:"click"`
+	ClickOnTerminalHost int `json:"clickOnTerminalHost"`
+	Touchstart          int `json:"touchstart"`
+	Focusin             int `json:"focusin"`
+	Focusout            int `json:"focusout"`
+	VVResize            int `json:"vvResize"`
+	VVScroll            int `json:"vvScroll"`
+	WindowResize        int `json:"windowResize"`
+	Other               int `json:"other"`
+}
+
+// viewportDebugUnlockTrace is §5.5 evidence, RECORD ONLY: `click` and `touchstart`
+// are kept apart because only click unlocks the recovery latch, and the frozen
+// verifier could never see a click frame at all (GI-2 seq 373–377). Each entry
+// carries the geometry visible at the instant the handler ran, which is what makes
+// the sub-frame order (D1 ③) derivable next to the frame's captureTick.
+// viewportDebugUnlockTrace is §5.5 evidence, RECORD ONLY: `click` and `touchstart`
+// are kept apart because only click unlocks the recovery latch, and the frozen
+// verifier could never see a click frame at all (GI-2 seq 373–377). Each entry
+// carries the geometry visible at the instant the handler ran, which is what makes
+// the sub-frame order (D1 ③) derivable next to the frame's captureTick.
+//
+// M-6: `entries` is the DECISION ring — click / touchstart / focusin / focusout —
+// and `geometryCountedOnly:true` states on the frame that the high-frequency
+// geometry events (`resize` / `scroll` / `window-resize`) live in `counts` and never
+// enter the ring. A continuous pan emits dozens of geometry events per second; with
+// one shared ring that flood evicted the single click §5.5 asks for, and the
+// journal reported its own blindness as "no click happened".
+type viewportDebugUnlockTrace struct {
+	AdvisoryOnly        bool                      `json:"advisoryOnly"`
+	CaptureTick         int                       `json:"captureTick"`
+	GeometryCountedOnly bool                      `json:"geometryCountedOnly"`
+	Counts              *viewportDebugTraceCounts `json:"counts"`
+	Entries             []viewportDebugTraceEntry `json:"entries"`
+	UnavailableReason   string                    `json:"unavailableReason,omitempty"`
+}
+
+type viewportDebugTraceEntry struct {
+	Tick           int      `json:"tick"`
+	Type           string   `json:"type"`
+	Tag            string   `json:"tag"`
+	Editable       bool     `json:"editable"`
+	OnTerminalHost *bool    `json:"onTerminalHost"`
+	XtermMarker    bool     `json:"xtermMarker"`
+	VVHeight       *float64 `json:"vvHeight"`
+	VVOffsetTop    *float64 `json:"vvOffsetTop"`
+	// N-3: the horizontal and layout sides of the same instant, so §5.7's
+	// `layoutHeight` / `vvWidth` geometry-change comparison closes INSIDE the
+	// journal — a reader no longer needs a second frame next to it to check the
+	// claim that geometry changed when the handler ran.
+	VVWidth         *float64 `json:"vvWidth"`
+	LayoutHeight    *float64 `json:"layoutHeight"`
+	Scale           *float64 `json:"scale"`
+	MirrorOcclusion *float64 `json:"mirrorOcclusion"`
+}
+
+// viewportDebugPanel is R6 / GI-9: the instrument reporting its own box. A panel
+// the user cannot reach makes every verdict built on it INCONCLUSIVE, so the
+// capture states the corner it authored, whether that corner is supported in this
+// keyboard/pan state, and how much of it the keyboard covers.
+type viewportDebugPanel struct {
+	Exists                bool                     `json:"exists"`
+	Corner                string                   `json:"corner"`
+	Support               string                   `json:"support"`
+	UnsupportedReason     string                   `json:"unsupportedReason"`
+	Lifted                *bool                    `json:"lifted"`
+	PanCorrected          *bool                    `json:"panCorrected"`
+	NominalHeight         *float64                 `json:"nominalHeight"`
+	Rect                  *viewportDebugClientRect `json:"rect,omitempty"`
+	RectUnavailableReason string                   `json:"rectUnavailableReason"`
+	KeyboardOverlap       *float64                 `json:"keyboardOverlap"`
+	InsideVisibleViewport *bool                    `json:"insideVisibleViewport"`
+}
+
 type viewportDebugSnapshot struct {
 	// issue #116: which build of the instrument produced this snapshot. Two
 	// verification rounds were spent on reports that turned out to describe a
@@ -249,6 +445,25 @@ type viewportDebugSnapshot struct {
 	XtermScreen *viewportDebugRect       `json:"xtermScreen,omitempty"`
 	XtermRows   *viewportDebugRect       `json:"xtermRows,omitempty"`
 	UI          viewportDebugUI          `json:"ui"`
+	// issue #116 Phase 2 task 1 / task 2, ADDITIVE: the p9 fields above are
+	// untouched, these are the ones PHASE1-CONTRACT lists as pre-conditions
+	// (ownership category, focused host + its client rect in the same frame, the
+	// keyboard session marker, the §5.5 unlock evidence) plus the instrument's own
+	// box (R6 / GI-9). `schemaRev` marks the additive field set without bumping
+	// the frozen PROBE_VERSION, which the verifier's stamp check depends on.
+	SchemaRev string `json:"schemaRev,omitempty"`
+	// m-2: the degraded frame. When the probe's own read of the live page throws,
+	// the frame still goes out marked — every measurement field absent (null), the
+	// marker stating it — instead of an uncaught exception surfacing on the iPad
+	// that is being measured. Absence stays absence; nothing here is zero-filled
+	// into a number a verifier could measure.
+	ProbeReadFailed       bool                          `json:"probeReadFailed,omitempty"`
+	ProbeReadFailedReason string                        `json:"probeReadFailedReason,omitempty"`
+	Ownership             *viewportDebugOwnership       `json:"ownership,omitempty"`
+	ActiveInput           *viewportDebugActiveInput     `json:"activeInput,omitempty"`
+	KeyboardSession       *viewportDebugKeyboardSession `json:"keyboardSession,omitempty"`
+	UnlockTrace           *viewportDebugUnlockTrace     `json:"unlockTrace,omitempty"`
+	Panel                 *viewportDebugPanel           `json:"panel,omitempty"`
 }
 
 type viewportDebugReport struct {
@@ -581,6 +796,217 @@ func validateViewportDebugReport(report viewportDebugReport) error {
 	}
 	if !viewportDebugTagPattern.MatchString(s.UI.ActiveElementTag) {
 		return errors.New("invalid active element tag")
+	}
+	if err := validateViewportDebugAdditive(s); err != nil {
+		return err
+	}
+	return nil
+}
+
+// viewportDebugAdditive guards the Phase 2 field groups through the same door as
+// everything else a verdict is read from: an enum outside its set, a NaN, a tag
+// carrying markup or an unbounded journal is a broken capture, not a measurement.
+// The enums are the contract's own words (PHASE1-CONTRACT B章 HO-1..HO-4, the
+// frozen §5 session states, R6's supported/unsupported), so a client cannot quietly
+// invent a fifth ownership category or a fourth placement verdict.
+func validateViewportDebugAdditive(s viewportDebugSnapshot) error {
+	if o := s.Ownership; o != nil {
+		if !viewportDebugOwnershipPattern.MatchString(o.Category) {
+			return errors.New("invalid ownership category")
+		}
+		if len(o.Basis) > 64 || len(o.UnavailableReason) > 64 {
+			return errors.New("ownership diagnostic text is too long")
+		}
+		// "缺字段一律 INCONCLUSIVE": a decided category must not smuggle an
+		// unavailable reason, and an undecided one must state which.
+		if o.Category != "unknown" && o.UnavailableReason != "" {
+			return errors.New("a decided ownership must not carry an unavailable reason")
+		}
+		if o.Category == "unknown" && o.UnavailableReason == "" {
+			return errors.New("an unknown ownership must state why it is unobtainable")
+		}
+	}
+	if a := s.ActiveInput; a != nil {
+		if !viewportDebugTagPattern.MatchString(a.Tag) {
+			return errors.New("invalid active input tag")
+		}
+		if !viewportDebugRolePattern.MatchString(a.Role) {
+			return errors.New("invalid active input role")
+		}
+		if len(a.UnavailableReason) > 64 || len(a.RectUnavailableReason) > 64 {
+			return errors.New("active input diagnostic text is too long")
+		}
+		if a.Rect != nil {
+			if err := validateViewportDebugRect(a.Rect.viewportDebugRect); err != nil {
+				return err
+			}
+			if err := viewportDebugNumber(a.Rect.Left); err != nil {
+				return err
+			}
+			if err := viewportDebugNumber(a.Rect.Right); err != nil {
+				return err
+			}
+		} else if a.RectUnavailableReason == "" {
+			return errors.New("a missing client rect must state why it is unobtainable")
+		}
+	}
+	if k := s.KeyboardSession; k != nil {
+		// B-3: the label is DERIVED and the door enforces that it says so. A client
+		// that drops `derived:true` is publishing a hint as a verdict, which is the
+		// second source of truth the frozen §5 judge must not have to argue with.
+		if !k.Derived {
+			return errors.New("keyboardSession.derivedState is derived by contract and must say so")
+		}
+		if !viewportDebugSessionStatePattern.MatchString(k.DerivedState) {
+			return errors.New("invalid derived keyboard session state")
+		}
+		// An asymmetry, on purpose (B-3): `unknown` must always explain itself, while
+		// a label that WAS derivable may still carry the limit of what it covers —
+		// `recovering` legitimately ships "recovery-latch-not-published-by-applier".
+		if k.DerivedState == "unknown" && k.UnavailableReason == "" {
+			return errors.New("an unknown derived state must state why it is undecidable")
+		}
+		if len(k.Basis) > 64 || len(k.Evidence) > 64 || len(k.UnavailableReason) > 64 {
+			return errors.New("keyboard session diagnostic text is too long")
+		}
+		for _, n := range []float64{k.MirrorOcclusion, k.RawShortfall, k.LayoutHeight, k.VVHeight, k.VVWidth, k.VVOffsetTop, k.Scale} {
+			if err := viewportDebugNumber(n); err != nil {
+				return err
+			}
+		}
+		if k.MirrorOcclusion < 0 || k.RawShortfall < 0 || k.LayoutHeight < 0 || k.VVHeight < 0 || k.VVWidth < 0 {
+			return errors.New("keyboard session heights must be non-negative")
+		}
+		if k.Scale <= 0 {
+			return errors.New("invalid keyboard session scale")
+		}
+		if k.PreviousMirrorOcclusion != nil {
+			if err := viewportDebugNumber(*k.PreviousMirrorOcclusion); err != nil {
+				return err
+			}
+		}
+		if k.UnlockTick != nil && *k.UnlockTick < 0 {
+			return errors.New("unlock tick must be non-negative")
+		}
+		if k.PreviousUnlockTick != nil && *k.PreviousUnlockTick < 0 {
+			return errors.New("previous unlock tick must be non-negative")
+		}
+	}
+	// m-2 / m-5: the two self-describing markers of the additive block. A frame
+	// that says it could not read must carry the marker's fixed text and must not
+	// smuggle a measurement next to it; a `schemaRev` outside the accepted set is
+	// schema drift caught at the door, not averaged into a report.
+	if s.ProbeReadFailed {
+		if s.ProbeReadFailedReason != "probe-read-failed" {
+			return errors.New("a failed probe read must carry the fixed probe-read-failed marker")
+		}
+	} else if s.ProbeReadFailedReason != "" {
+		return errors.New("probe-read-failed marker without probeReadFailed")
+	}
+	if s.SchemaRev != "" && !viewportDebugSchemaRevPattern.MatchString(s.SchemaRev) {
+		return errors.New("unknown diagnostic schemaRev")
+	}
+	if t := s.UnlockTrace; t != nil {
+		if !t.AdvisoryOnly {
+			return errors.New("the unlock trace is advisory by contract and must stay recorded-only")
+		}
+		if t.CaptureTick < 0 {
+			return errors.New("captureTick must be non-negative")
+		}
+		if len(t.Entries) > viewportDebugMaxTraceEntries {
+			return errors.New("too many unlock trace entries in snapshot")
+		}
+		// M-6: the ring is bounded, the counts are not, and `geometryCountedOnly` is
+		// the frame's own word for "the geometry flood lives in counts, so no click
+		// was ever evicted by it" — checked, not assumed.
+		if !t.GeometryCountedOnly {
+			return errors.New("the unlock trace rings decision events by contract; geometry events must be count-only")
+		}
+		if t.Counts != nil {
+			for _, n := range []int{t.Counts.Click, t.Counts.ClickOnTerminalHost, t.Counts.Touchstart,
+				t.Counts.Focusin, t.Counts.Focusout, t.Counts.VVResize, t.Counts.VVScroll,
+				t.Counts.WindowResize, t.Counts.Other} {
+				if n < 0 {
+					return errors.New("unlock trace counts must be non-negative")
+				}
+			}
+		}
+		for _, entry := range t.Entries {
+			if entry.Tick < 0 {
+				return errors.New("unlock trace tick must be non-negative")
+			}
+			// N-4: `type` gets the same character-set discipline `tag` always had. The
+			// enum is the set the client's note() actually journals; an entry typed
+			// with anything else is either a client drift or a channel being used as a
+			// general text transport, and both belong at the door, not in a report.
+			if !viewportDebugTraceTypePattern.MatchString(entry.Type) {
+				return errors.New("invalid unlock trace entry type")
+			}
+			if !viewportDebugTagPattern.MatchString(entry.Tag) {
+				return errors.New("invalid unlock trace entry tag")
+			}
+			for _, n := range []*float64{entry.VVHeight, entry.VVOffsetTop, entry.VVWidth,
+				entry.LayoutHeight, entry.Scale, entry.MirrorOcclusion} {
+				if n == nil {
+					continue
+				}
+				if err := viewportDebugNumber(*n); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	if p := s.Panel; p != nil {
+		if !viewportDebugPanelCornerPattern.MatchString(p.Corner) {
+			return errors.New("invalid diagnostic panel corner")
+		}
+		if !viewportDebugPanelSupportPattern.MatchString(p.Support) {
+			return errors.New("invalid diagnostic panel support")
+		}
+		if len(p.UnsupportedReason) > 64 || len(p.RectUnavailableReason) > 64 {
+			return errors.New("diagnostic panel diagnostic text is too long")
+		}
+		// B-2: ONE vocabulary on both sides — supported / unsupported / unavailable —
+		// and every corner that is NOT reachable states why, whichever word it uses.
+		// A panel that exists but whose dataset was never written reports
+		// `support:"unavailable"` + a reason; inventing a fourth word there (the
+		// previous client's "unknown") was a 400 on EVERY upload, which is how a
+		// diagnostic loses a whole capture round.
+		if p.Support != "supported" && p.UnsupportedReason == "" {
+			return errors.New("a corner that is not supported must state why (R6: never silently unreachable)")
+		}
+		if p.Support == "supported" && p.UnsupportedReason != "" {
+			return errors.New("a supported corner must not carry an unsupported reason")
+		}
+		if p.Rect != nil {
+			if err := validateViewportDebugRect(p.Rect.viewportDebugRect); err != nil {
+				return err
+			}
+			if err := viewportDebugNumber(p.Rect.Left); err != nil {
+				return err
+			}
+			if err := viewportDebugNumber(p.Rect.Right); err != nil {
+				return err
+			}
+		} else if p.Exists && p.RectUnavailableReason == "" {
+			return errors.New("a panel without a rect must state why it is unobtainable")
+		}
+		if p.KeyboardOverlap != nil {
+			if err := viewportDebugNumber(*p.KeyboardOverlap); err != nil {
+				return err
+			}
+			if *p.KeyboardOverlap < 0 {
+				return errors.New("keyboard overlap must be non-negative")
+			}
+		}
+		if p.NominalHeight != nil {
+			if err := viewportDebugNumber(*p.NominalHeight); err != nil {
+				return err
+			}
+			if *p.NominalHeight < 0 {
+				return errors.New("panel nominal height must be non-negative")
+			}
+		}
 	}
 	return nil
 }
