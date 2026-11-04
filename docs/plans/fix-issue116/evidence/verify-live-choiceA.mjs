@@ -246,7 +246,14 @@ const liveWindow = {
 // variable in the same closure the sliced function references — otherwise the live
 // bytes would throw on the first `terminalAvoidanceActive =` and never prove the
 // session machine. It starts CLOSED, matching the shipped page load.
-const factory = new Function("document", "window", `let terminalAvoidanceActive = false;\nlet terminalAvoidanceRecovering = false;\nlet terminalAvoidanceGeometryGrace = false;\nlet previousTerminalRaw = 0;\nlet previousTerminalLayoutHeight = 0;\nlet previousTerminalVVWidth = 0;\n${apply}\n\nreturn applyVisualViewportOcclusion;`);
+// N1 mirror exception (PLAN §4 D2 / VALIDATION-2026-11-04 复评登记): the slice now
+// also reads the D2 scale history + the D-C counted-scale-settle memory, so the
+// factory declares those NINE bindings with the initial values from
+// internal/ui/static/index.html (previousTerminalScale = 0, SCALE_SETTLE_TICKS = 2,
+// SCALE_SETTLE_EPSILON = 0.001, six scaleSettle* = 0). The sliced body writes them
+// once per pass exactly like previousTerminalRaw above, so mirroring the DECLARATIONS
+// is all this needs; NO assertion, replay step, geometry or verdict below is touched.
+const factory = new Function("document", "window", `let terminalAvoidanceActive = false;\nlet terminalAvoidanceRecovering = false;\nlet terminalAvoidanceGeometryGrace = false;\nlet previousTerminalRaw = 0;\nlet previousTerminalLayoutHeight = 0;\nlet previousTerminalVVWidth = 0;\nlet previousTerminalScale = 0;\nconst SCALE_SETTLE_TICKS = 2;\nconst SCALE_SETTLE_EPSILON = 0.001;\nlet scaleSettleCandidate = 0;\nlet scaleSettleBaseline = 0;\nlet scaleSettleTicked = 0;\nlet scaleSettleLayoutHeight = 0;\nlet scaleSettleVVWidth = 0;\nlet scaleSettleRaw = 0;\n${apply}\n\nreturn applyVisualViewportOcclusion;`);
 const avoid = factory(liveDocument, liveWindow);
 
 const bottoms = () => hosts.map((host) => host.style.bottom);
@@ -388,10 +395,14 @@ assert.equal(controlsBottom(), "20px", "while zoomed, a shortfall owes nothing t
 vv.scale = 1;
 vv.height = 274; // the keyboard is still up at the same visible height
 avoid();
-assert.deepEqual(bottoms(), ["428px", "428px"], "back at scale 1 the raw 428 crosses the entry line again and a NEW session opens");
-assert.equal(controlsBottom(), "448px", "…and the column lifts again at scale 1");
+assert.deepEqual(bottoms(), ["0px", "0px"], "D-D: the 0.75 → 1 return frame pays 0; raw 428 cannot open a session before settle");
+avoid("scaleSettleTick");
+assert.deepEqual(bottoms(), ["0px", "0px"], "D-C: one tick leaves the return candidate pending");
+avoid("scaleSettleTick");
+assert.deepEqual(bottoms(), ["428px", "428px"], "after two settle ticks raw 428 crosses the entry line again and a NEW session opens");
+assert.equal(controlsBottom(), "448px", "…and the column lifts again after the scale-1 settle");
 assert.equal(statusBarBottom(), "428px", "…and so does the strip");
-console.log("✓ zoom opted out and CLOSED the session; at scale 1 the entry line re-armed the judgment");
+console.log("✓ the 0.75 → 1 return paid 0 through the first tick; the second tick settled scale 1 and re-armed the session judgment");
 
 // FOCUS edges, on the live bytes: the session is LIVE at 274 (raw 428, TEXTAREA
 // helper focused). A NON-editable focus (BODY) must END it — hosts restore flush
