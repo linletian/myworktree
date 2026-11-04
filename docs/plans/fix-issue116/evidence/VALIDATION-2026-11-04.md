@@ -20,13 +20,28 @@
 ## D2 Phase 2 实施双评审终审登记（非真机验收）
 
 - 本节只登记对 `32fab22` 签署口径的实施裁决，不把当前未提交实现或 Node / Go 结果记为真机 PASS。D-A 选过渡方案 B：Phase 3 前沿用冻结通用 editable 谓词，scale<1 下 Web 输入导致的终端避让列为 **R2 已知偏离 / Phase 3 依赖**；PTY 宿主帧与 Web 输入帧分列，后者不用于 D2 verdict。本项不新增产品归属判定，故无需 owner 追加拍板。
-- D-B 批准 scale<1 带外变档帧“退出付 0、清旧锁但不新置锁”，settle 后统一按未锁 25% 重判；这是 PLAN / PHASE1-CONTRACT 记录的对冻结 §5.6 源码置锁顺序的窄例外，不回写冻结文档，其余退出路径不变。D-D 接受带外限定，并要求 0.75→1 / scale>1→1 回程帧付 0、清旧状态、重新 settle；当前实现的回程一帧新 raw 让位不获追认。
-- D-C 的 settle 定义固定为连续两次既有 500ms tick 合格：相邻 scale 与相对首个候选 tick / 当前已 settle 基线的差均 `<=0.001`，候选期间 layoutHeight / vv.width / raw 不变；基线只在重建时更新，累计超 ε 的慢速漂移同样重置。普通事件 pass 不计数，计数达 2 后饱和，已 settled 后单纯键盘 raw 开合不重置 scale settle。不新增 timer 或墙钟 / 单调时钟，hidden 不累计。完整重置、回程和测试口径见 PLAN §4 D2 与 PHASE1-CONTRACT 术语章 / F13-F14。
+- D-B 的免置新锁在复评中收窄为“纯 scale<1 带外变档退出”（当帧仍 `raw>1 && focusEditable`），settle 后按未锁 25% 重判；同帧 raw<=1 / 失焦及 scale>1 仍按冻结规则置 / 保留恢复锁，settle 不自动清锁。这是 PLAN / PHASE1-CONTRACT 记录的对冻结 §5.6 源码置锁顺序的窄例外，不回写冻结文档。D-D 要求 0.75→1 / scale>1→1 回程帧付 0 并重新 settle；其中 scale>1→1 不抹除在先 scale>1 退出形成的旧锁，未被独立解锁时 settle 后按 50%，D2-6 的保守结果据此成立。
+- D-C 的 settle 定义固定为连续两次既有 500ms tick 合格：相邻 scale 与相对首个候选 tick / 当前已 settle 基线的差均 `<=0.001`，候选期间 layoutHeight / vv.width / raw 不变；基线只在重建时更新，累计超 ε 的慢速漂移同样重置，已 settled 的累计亚 ε 漂移保持。普通事件 pass 不计数，计数达 2 后饱和，已 settled 后单纯键盘 raw 开合不重置 scale settle。scale>1 域不得开启 / 累计候选，进入该域须清空旧候选。不新增 timer 或墙钟 / 单调时钟，hidden 不累计。ε 边界按 JavaScript binary64 的实际差判定，十进制“恰好 0.001”不保证等值，1 ULP 用例须按位构造。完整重置、回程和测试口径见 PLAN §4 D2 与 PHASE1-CONTRACT 术语章 / F13-F14。
 - **参数证据边界**：对 `raw/final116-20261104-a.jsonl` 只读复算，按文件顺序的早段 153 帧 scale 唯一值为精确 `0.75`，相邻 scale 差唯一值为 `0`；其中 raw 范围为 `0–571.34375`，100 帧 `raw>1`。它既没有变档过程，也没有 1 ULP 或亚 ε 抖动样本，不能据此估计噪声上限，也不能把这 153 帧概括成“全部 raw=0 / 无键盘”。因此 N=2 / ε=0.001 是保守暂定实现参数，不是实测结论；Z-MENU / Z-MAGIC 必须记录实际 scale、raw 和 tick 节奏复核，未达到精确 0.75 时该锚点 INCONCLUSIVE，其余实际 scale<1 场景按实记录。
 - 诊断层继续只读：`viewport_debug.js:675–680` 先对 zoom 帧返回 `derivedState:none / zoomed-session-exempt`，再检查 mirror `occlusion>1`，所以 D2 下同帧标签与正 occlusion 可并存。验收以 reported `occlusion` + computed bottom 为准并记录该矛盾，不授权修改诊断资产、探针或重放器。
 - 当前实现仍须按上述 D-B / D-C / D-D 及 PLAN 所列测试锚点修订后再评审；本节不是 APPROVE，不替代 Z-PINCH / Z-MENU / Z-MAGIC，也不关闭 R2 的 Phase 3 门禁。
 
-## 已通过的自动化门禁
+## D2 实施修订版复评登记（非真机验收）
+
+- **复评结论：NOT-APPROVE，N1 为阻断项。** 核对对象是 `6e8a006` 之后未提交的 D2 工作区（`internal/ui/static/index.html`、两个直接 JS 测试、两个 Go 包装 / 锚点测试及新增 `zoom_scale.test.mjs`）；本轮仲裁只改 PLAN / PHASE1-CONTRACT / 本记录，不改产品或测试，不 commit。N2 / N4 / N6 与注释、边界用例按 PLAN 的编码待修项执行；所有 Z 系列真机项仍未验证。
+- **N1 实测（离线，不冒充 live / 真机）**：`node docs/plans/fix-issue116/evidence/verify-live-choiceA.mjs --html internal/ui/static/index.html` 对当前工作区 **exit 1**，首个异常为 `ReferenceError: previousTerminalScale is not defined`；同一工具对 `6e8a006` 的 `index.html` **exit 0**。原因是工具只切 `applyVisualViewportOcclusion`，工厂镜像未声明 D2 的九项函数外绑定。终审判定采用最小扰动的镜像例外：编码只准在该工厂闭包补 `previousTerminalScale`、两个 `SCALE_SETTLE_*` 常量和六个 `scaleSettle*` 变量，不得改其他任何工具语句；未来切片外部依赖按 PLAN 的“自包含优先 / 全镜像同步”规则处理。
+- **N1 授权边界与新增实测**：用 `/tmp` 临时副本仅补上述九绑定后，当前源码不再抛该 ReferenceError，但仍在旧断言“back at scale 1 … a NEW session opens”处 **exit 1**（实际 `0px`，旧期望 `428px`；对应原工具 388–394 行）。这是旧 v3.2 即时回程断言与已签署 D-D 两 tick 语义的后续冲突；本仲裁**没有授权改该断言、回放或判定口径**，所以九绑定修复不得被登记为该门禁 PASS，须由调度者另行取得证据工具回放修订授权后处理。
+- **针对性 Node 实况**：`node --test internal/ui/testdata/zoom_scale.test.mjs internal/ui/testdata/viewport_height.test.mjs` 为 **60/60 PASS**。它只证明当前切片 harness 的已覆盖断言，不抵消 evidence 门禁失败，不证明 N2 / N4 / N6 / N7 等缺失用例，也不构成 iPadOS Safari 真机 PASS。
+- **N2 / N3 / N4 / N6 / 带内优先级**：容器早退须同步 scale 并清 D2 候选，禁止恢复首帧伪回程；细则 2 的 scale>1 冻结置锁优先，F14 不再写“一律清恢复状态”；纯变档免置锁收窄到 `raw>1 && focusEditable`，其他退出原因保留锁；scale>1 域禁止候选开启 / 累计；回程及 pending 期间 D-C 两 tick 优先于普通带内准入，普通带内 jitter 无候选时仍全归冻结机。完整可执行文字以 PLAN §4 D2 与 PHASE1-CONTRACT 细则 2–6 / F13-F14 为准。
+- **源码锚点规则**：PLAN 对未提交 D2 实现不再使用易漂移的 `index.html:NNNN`，一律按 `scaleStepNoLatchExit` / `zoomReturnFrame` / `scaleSettlePending` / `SCALE_SETTLE_TICKS` 等符号引用；历史提交行号只在明确绑定该提交的基线事实中保留。
+
+## D2 回程旧断言处置仲裁（非真机验收）
+
+- **定性与授权链**：旧 v3.2 即时回程断言由 `4def4d6` 写入、由冻结基线 `5268869` 原样继承；D2 目标后来由 `32fab22` 签署，D-C 两 tick / D-D 回程付 0 由 `6e8a006` 仲裁，本轮又取得 owner 对该断言处置的显式授权。故当前 D2 工作区在 0.75→1 回程普通 pass 付 0 是已签署语义，旧断言的 exit 1 属于历史基线期望过时，不是 D2 实现违约。上方复评节的 NOT-APPROVE、N1 失败及其会话描述均作为当时历史原样保留，本节是后续派生裁决，不覆写它们。
+- **最小处置与正确期望**：只改 `verify-live-choiceA.mjs` 的 0.75→1 回程断言块：回程普通 pass 为 hosts `["0px", "0px"]`；第一次 `avoid("scaleSettleTick")` 后仍为 `["0px", "0px"]`；第二次既有 tick 后为 `["428px", "428px"]`，控制列 / Transport 分别为 `448px` / `428px`，即“重新打开新会话”仍成立，但从当帧立即改为第二个 settle tick。除该块两次 tick 推进外，未改工具其他内容。该场景 raw 428 同时大于 702 的 25%（175.5）与 50%（351），所以本门禁不单独区分恢复锁是否清除；纯 0.75→1 的未锁 25% 与 scale>1→1 的保留旧锁 50% 仍由 PLAN / PHASE1-CONTRACT 的 D-D 及各自直接用例判定。
+- **run-the-gate 实况**：本仲裁亲自执行 `node docs/plans/fix-issue116/evidence/verify-live-choiceA.mjs --html internal/ui/static/index.html`，处置后在同一未提交 D2 工作区 **exit 0**，末尾输出 `PASS — verified against the repo bytes`；处置前同一命令在旧回程断言 **exit 1**，actual 为 `["0px", "0px"]`、expected 为 `["428px", "428px"]`。这是离线切片门禁结果，不是 live 服务或 iPadOS Safari 真机 PASS，也不把此前整体复评自动改判为 APPROVE。
+
+## 已通过的自动化门禁（历史冻结基线；D2 工作区复评见上节）
 
 | 验证 | 结果 |
 | --- | --- |
@@ -41,8 +56,8 @@
 | `structural-check.mjs --self-test` | PASS，71 个 fixture/guard 均按预期判定 |
 | `pty-refit-check.mjs --self-test` | PASS，18 个判定均按预期 |
 | `sidebar-title-check.mjs --self-test` | PASS，12 个判定均按预期 |
-| `verify-live-choiceA.mjs --html internal/ui/static/index.html` | PASS，冻结仓库源码离线回放通过 |
-| `MW_LIVE_URL=http://127.0.0.1:38235/ verify-live-choiceA.mjs` | PASS，现有 issue116 服务实际提供的源码回放通过 |
+| `verify-live-choiceA.mjs --html internal/ui/static/index.html` | **历史 PASS / D2 基线过时→已按签署语义更新 / 本轮回放 exit 0**：`6e8a006` 基线离线回放为历史 exit 0；当前未提交 D2 工作区处置前在旧回程断言 exit 1，本轮按 `32fab22` / `6e8a006` 与 owner 另行授权仅更新该断言块后，上述 run-the-gate 命令实测 exit 0。历史失败描述仍在复评节保留；本行只登记离线门禁，不认证 live / 真机行为 |
+| `MW_LIVE_URL=http://127.0.0.1:38235/ verify-live-choiceA.mjs` | **历史 PASS**：仅指当时现有 issue116 冻结服务实际提供的源码；本轮未复跑，不认证当前 D2 工作区或真机行为 |
 
 ## 本轮未完成：真实浏览器运行检查（INCONCLUSIVE，不是产品 FAIL）
 
