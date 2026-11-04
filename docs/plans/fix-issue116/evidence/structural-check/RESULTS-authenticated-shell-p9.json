@@ -1,0 +1,292 @@
+{
+  "url": "http://127.0.0.1:38235/?token=<redacted>&viewport-debug=1&debug-session=p9smoke0123456789ab",
+  "label": "authenticated-shell-p9",
+  "viewport": {
+    "WIDTH": 1194,
+    "HEIGHT": 702
+  },
+  "measured": {
+    "htmlOverflow": "clip",
+    "bodyOverflow": "clip",
+    "htmlPosition": "static",
+    "bodyPosition": "static",
+    "appPosition": "fixed",
+    "appTop": "0px",
+    "appLeft": "0px",
+    "rootScrollHeight": 702,
+    "clientHeight": 702,
+    "clientWidth": 1194,
+    "vvHeight": 702,
+    "scrollBefore": 0,
+    "scrollAfterScrollTo": 0,
+    "scrollTopAfterWrite": 0,
+    "inner": {
+      "candidate": null,
+      "scrolled": null,
+      "rootScrollYDuringInner": null
+    },
+    "divider": {
+      "sidebarFound": true,
+      "appCollapsed": false,
+      "sidebarRect": {
+        "top": 0,
+        "bottom": 702,
+        "left": 0,
+        "right": 240,
+        "width": 240,
+        "height": 702
+      },
+      "sidebarClientHeight": 702,
+      "sidebarClientWidth": 239,
+      "sidebarPosition": "relative",
+      "sidebarBorderRightWidth": "1px",
+      "content": "\"\"",
+      "generated": true,
+      "position": "absolute",
+      "top": "0px",
+      "left": "239px",
+      "width": "1px",
+      "height": "702px",
+      "pointerEvents": "none",
+      "visibility": "visible",
+      "background": "rgb(225, 228, 232) none repeat scroll 0% 0% / auto padding-box border-box",
+      "backgroundColor": "rgb(225, 228, 232)",
+      "backgroundImage": "none",
+      "heightPx": 702,
+      "widthPx": 1,
+      "leftPx": 239,
+      "derivedInsetPx": 0,
+      "pseudoTopPx": 0,
+      "pseudoBottomPx": 702,
+      "pseudoRightEdgePx": 240,
+      "authoredRules": [
+        {
+          "selectorText": "#sidebar::after",
+          "mediaText": "not all and (max-width: 768px)",
+          "mediaMatches": true,
+          "content": "\"\"",
+          "position": "absolute",
+          "top": "0px",
+          "width": "1px",
+          "height": "calc(100% + env(safe-area-inset-bottom, 0px))",
+          "pointerEvents": "none"
+        }
+      ],
+      "unreadableSheets": 0
+    },
+    "appRect": {
+      "top": 0,
+      "bottom": 702,
+      "height": 702
+    },
+    "layoutClientHeight": 702,
+    "appInlineHeight": "",
+    "host": {
+      "containerFound": true,
+      "containerBottom": 702,
+      "inlineBottoms": [
+        "0px"
+      ],
+      "rectBottoms": [
+        702
+      ],
+      "probe": {
+        "insetBottom": 702,
+        "writtenBottom": "428px",
+        "liftedBottom": 274,
+        "movedBy": 428,
+        "computedBottom": "428px"
+      }
+    },
+    "overlay": {
+      "workspaceFound": true,
+      "controls": {
+        "id": "terminal-controls",
+        "computedPosition": "absolute",
+        "computedTop": "20px",
+        "computedBottom": "20px",
+        "inlineBottom": "20px",
+        "display": "flex",
+        "rect": {
+          "top": 60,
+          "bottom": 682,
+          "height": 622
+        }
+      },
+      "statusBar": {
+        "id": "status-bar",
+        "computedPosition": "fixed",
+        "computedTop": "682px",
+        "computedBottom": "0px",
+        "inlineBottom": "0px",
+        "display": "block",
+        "rect": {
+          "top": 682,
+          "bottom": 702,
+          "height": 20
+        }
+      },
+      "quickKeys": {
+        "id": "quick-keys-panel",
+        "computedPosition": "absolute",
+        "computedTop": "0px",
+        "computedBottom": "auto",
+        "inlineBottom": "",
+        "display": "none",
+        "rect": {
+          "top": 0,
+          "bottom": 0,
+          "height": 0
+        }
+      },
+      "probe": {
+        "writtenBottom": "448px",
+        "restBottom": 682,
+        "restHeight": 622,
+        "liftedBottom": 254,
+        "liftedHeight": 194,
+        "topStaysAt": 60,
+        "restTop": 60,
+        "backBottom": 682,
+        "computedBottom": "448px",
+        "computedTop": "20px",
+        "panelMaxHeight": "100%",
+        "panelScrollable": false,
+        "inlineBottomWhileLifted": "448px",
+        "restoredComputedBottom": "20px",
+        "restoredComputedTop": "20px",
+        "restoredPanelMaxHeight": "100%",
+        "inlineBottomWhileRestored": "20px",
+        "restoredHeight": 622,
+        "panelRestHeight": 622,
+        "panelLiftedHeight": 194,
+        "panelBackHeight": 622
+      }
+    },
+    "wheel": {
+      "ready": true,
+      "reason": null,
+      "boxKind": "pty-host",
+      "point": {
+        "x": 717,
+        "y": 371
+      },
+      "hit": "div.xterm-screen",
+      "boxRect": {
+        "top": 40,
+        "bottom": 702,
+        "left": 240,
+        "right": 1194,
+        "width": 954,
+        "height": 662
+      },
+      "centerPoint": {
+        "x": 717,
+        "y": 371
+      },
+      "centerHit": "div.xterm-screen",
+      "centerHitInsideBox": true,
+      "relocated": false,
+      "candidatesTried": 1,
+      "instrumentWalkSaysNativeScroller": false,
+      "termFound": true,
+      "termViewportYBefore": 0,
+      "termBufferLength": 44,
+      "scrollYBefore": 0,
+      "scrollTopBefore": 0,
+      "installed": true,
+      "instrumentRan": true,
+      "events": [
+        {
+          "type": "wheel",
+          "eventPhase": 3,
+          "atDocument": true,
+          "target": "div.xterm-screen",
+          "clientX": 717,
+          "clientY": 371,
+          "deltaX": 0,
+          "deltaY": 80,
+          "deltaMode": 0,
+          "ctrlKey": false,
+          "isTrusted": true,
+          "defaultPrevented": true,
+          "scrollYAtEvent": 0
+        }
+      ],
+      "eventCount": 1,
+      "scrollYAfter": 0,
+      "scrollTopAfter": 0,
+      "termFoundAfter": true,
+      "termViewportYAfter": 0,
+      "termBufferLengthAfter": 44,
+      "removedViaHandle": true,
+      "listenerDismantled": true,
+      "globalsRemoved": true,
+      "dispatched": true,
+      "dispatchError": null,
+      "deltaY": 80,
+      "wheelWaitMs": 100,
+      "termFoundBefore": true,
+      "termBufferLengthBefore": 44,
+      "listenersBefore": {
+        "available": true,
+        "count": 1,
+        "bubbleNonPassive": 1,
+        "listeners": [
+          {
+            "useCapture": false,
+            "passive": false,
+            "scriptId": "12",
+            "line": 4068,
+            "column": 47
+          }
+        ]
+      },
+      "listenersInstalled": {
+        "available": true,
+        "count": 2,
+        "bubbleNonPassive": 2,
+        "listeners": [
+          {
+            "useCapture": false,
+            "passive": false,
+            "scriptId": "12",
+            "line": 4068,
+            "column": 47
+          },
+          {
+            "useCapture": false,
+            "passive": false,
+            "scriptId": "15",
+            "line": 119,
+            "column": 64
+          }
+        ]
+      },
+      "listenersAfterCleanup": {
+        "available": true,
+        "count": 1,
+        "bubbleNonPassive": 1,
+        "listeners": [
+          {
+            "useCapture": false,
+            "passive": false,
+            "scriptId": "12",
+            "line": 4068,
+            "column": 47
+          }
+        ]
+      }
+    }
+  },
+  "fail": [],
+  "note": [
+    "no overflowing inner scroller was present in this DOM state (S8 unproven, not passed)",
+    "the probe panel was not overflowable in this state (internal scroll unproven, not failed)",
+    "divider adopted by the engine: content \"\\\"\\\"\" absolute top 0px width 1px height 702px (= rail clientHeight 702 + derived inset 0) pointer-events none; winning declaration height \"calc(100% + env(safe-area-inset-bottom, 0px))\" under @media \"not all and (max-width: 768px)\" (matches)",
+    "headless Chrome reports env(safe-area-inset-bottom) as 0 (derivedInsetPx 0): this certifies that the browser adopted the pseudo-element and the size formula, NOT the iPad safe-area behaviour",
+    "auxiliary xterm buffer viewportY 0 -> 0 (buffer length 44; a wheel DOWN at the bottom of the buffer cannot move it — never a verdict, and this instrument never called scrollLines)"
+  ],
+  "inconclusive": [],
+  "verdict": "PASS"
+}
