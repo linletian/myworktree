@@ -1,9 +1,65 @@
 # Issue #116 D0-1 / D0-2 设计导出与评审清单
 
-**日期**：2026-10-28（首版）／ 2026-11-02 修订 v2.1 ／ 2026-11-02 修订 v2.2 ／ 2026-11-03 修订 v3.0 ／ 2026-11-03 修订 v3.0a（局部避让范围补齐：控制列 + 状态栏）／ 2026-11-03 修订 v3.1（比值地板 + 状态条触底 + 滚轮隔离）／ **2026-11-03 修订 v3.1 终值：地板定 `SMALL_OCCLUSION_RATIO = 0.15`（0.25 已撤回）+ 状态条触底 + 滚轮隔离 · **`.pen` 已改稿、PNG 已用 pen 0.3.11 原生重出，无待拍板 / 待导出项**）**
+**日期**：2026-10-28（首版）／ 2026-11-02 修订 v2.1 ／ 2026-11-02 修订 v2.2 ／ 2026-11-03 修订 v3.0 / v3.0a / v3.1（均为历史）／ **2026-11-04 修订 v4（PLAN v2.0 输入所有权契约，当前口径）**
 
 **工具**：`pen version` = **0.3.11**  
-**状态**：源稿、PNG 与主 UI preview 已生成并校验；**D0-1 / D0-2 设计评审待签，PR1 / PR2 / PR3 尚未获得编码门禁放行**。
+**状态**：v4 设计源与受影响 PNG 已生成并校验；**设计评审与 Phase 2 门禁仍待签，本清单不含任何实现完成或真机 PASS 声明**。`preview-responsive.html` 不在本轮授权范围内，未同步其 v3.1 说明；它仍只是旧交互预览，不是 v4 契约来源或高度证据。
+
+## 0aaaa. 修订记录 v4（2026-11-04 · PLAN v2.0 输入所有权契约，当前）
+
+本版以 `PLAN.md` v2.0 的 R1–R6、§3 与 `PHASE1-CONTRACT.md`（含提交 `323fa91` 的修订）为现行口径。下方 v3.1 / v3.0a / v3.0 及更早段落**全部是历史记录**，其中 0.15 地板、555→147 让位、整壳钉高或根原点等旧叙事不得再作为设计或验收依据。当前进入线为布局高 ×25%，恢复后重入线为 ×50%，活动会话内 `occlusion = raw`；不存在 0.15 持续过滤地板。
+
+**证据边界**：本轮只改设计源、文本/标注与原生导出 PNG，不授权实现。设计稿、PNG、pen 结构检查和图片回读都不是 iPadOS 真机证据；未执行真机验收，不宣称任何真机 PASS。本轮开始时两份 `.pen` 已含未提交的 v4 草稿；下表记录其相对 HEAD v3.1 的最终差异，以及本轮实际完成的结构复核、保存和导出。
+
+### v4 改动节点与契约映射
+
+| 源稿 / 帧 | 改动节点 | 旧文 → 新文要点与理由 | 契约条款 |
+| --- | --- | --- | --- |
+| `sidebar-states.pen` / `d1_notes` | `d1_text_0002`、`d1_text_0003`、`d1_text_0004` | v3.1「0.15 地板 + 555 让位」→ v4 版本戳、HO-1..4 焦点归属、25% 进入 / 50% 重入、会话内全额 raw、Web 输入归 Safari；消除旧地板与输入所有权并存 | PLAN R1/R2/R4；PHASE1 B、术语「软键盘避让会话」 |
+| 同上 | `d1_text_0014` | 旧评审清单 → 证据边界、147@748 新结论、五类标注索引；D1 正向机制未选、D2 待真机采证 | PLAN §5 Phase 2 任务 4；PHASE1 E、F |
+| 同上 | 新增标注帧 `i0LM2t`；文本 `z4X55l`、`bx9BO`、`Lt220`、`Jk8zS`、`dn7Xi`、`sSCCt`、`UANCw`、`P2vsjr`、`Qx6HO`、`X66O6e` | 新增 Web 输入模式、PTY↔Web/粘贴/iframe/失焦/隐藏实例交接、键盘/pan/zoom 边界与异常回退；含探针降级、`derivedState` 非权威、`stop()` 零残留、D1 禁止手段及诊断 fixed inset 窄例外 | PLAN R1–R6、§3；PHASE1 B/C、GI-9、E D1/D2、F 通用规则 |
+| 同上 | `d1_notes` 高 1040→1700；`i0LM2t` 为新标注容器 | 仅为容纳新增文本标注；未新增/删除既有产品 UI 结构节点，未改既有节点坐标或色板 | PLAN §5 Phase 2 任务 4 的文本/标注交付 |
+| `sidebar-states.pen` / `d1_viewport_geometry` | `d1_text_1201`、`d1_text_1202` | 旧 0.15 标题/公式 → 输入所有权几何、活动/非活动会话、client `[0,vv.height]` 与 D2 未决边界 | PHASE1 术语、GI-1/GI-2、E D2 |
+| 同上 · PTY 非会话 | `d1_rect_1203`（仅 name）、`d1_text_1204`、`d1_text_1209`、`d1_text_1210`、`d1_text_1211` | 静止/旧地板叙事 → HO-2 持焦但会话非 active：`occlusion=0`、满高被浮窗覆盖为预期、键盘收起不释放归属；748/601 示例及三条解锁 | PHASE1 HO-2、GI-2、F18 |
+| 同上 · PTY 活动会话 | `d1_rect_1212`（仅 name）、`d1_text_1213`、`d1_text_1219`、`d1_text_1221`、`d1_text_1222` | 旧 15% 才让位 → 前台 PTY 持焦且会话 active 时 `occlusion=raw`，可用视口/输入行/最后一行/quick-keys/Transport 位于屏显区域；748/320 示例 | PLAN R1；PHASE1 GI-2..GI-5、GI-7 |
+| 同上 · 历史数值 | `d1_rect_1223`（仅 name）、`d1_text_1224`、`d1_text_1230`、`d1_text_1231`、`d1_text_1232`、`d1_text_1233` | 「555 必须让位 / 633.5 仅按地板豁免」→ 702 布局进入线 175.5、重入线 351；147 与 68.5 均须结合前置会话状态，不再存在「147 必须让位」 | PHASE1 GI-2、F 表四档场景锚点、G |
+| 同上 · 边界 | `d1_rect_1234`（仅 name）、`d1_text_1235`、`d1_text_1241`、`d1_text_1242`、`d1_text_1243` | Home Indicator 说明块改作边界标注：scale 变化=新几何；菜单/妙控缩小无键盘不得误避让；pan=403 是未修复事实；持续出屏停止并回 D1；offsetTop 不入 raw | PLAN R5、§3；PHASE1 F13/F17、E D1/D2 |
+| `sidebar-states.pen` / `d1_quick_short` | `d1_text_1295` | 旧泛化局部避让 → 活动会话控制列 `20+occlusion`、非会话回 20；粘贴 textarea 为 HO-3，不触发 PTY 避让 | PHASE1 HO-3、GI-4、F4/F5 |
+| `quick-keys-panel.pen` / `qk0001` | `qk0010b` | v3.1 地板/旧数值 → v4 所有权、会话区间、25%/50%、147@748 恢复锁结论、HO-3 粘贴、交接、zoom/pan 边界与禁止手段 | PLAN R1/R2/R4/R5、§3；PHASE1 B/C、GI-2/GI-4/GI-5 |
+| 同上 / `qk0053` | `qk0062` | 「终端失焦=预期」→ 粘贴 textarea 持焦=HO-3，Safari 最小 pan、无 PTY 避让/双重补偿；点回终端后按当帧会话重判 | PHASE1 HO-3、F4/F5 |
+| 同上 / `qk0124` | `qk0125`、`qk0156` | 「≥15% 才让位」→ 明确 PTY 持焦且活动会话前提、`occlusion=raw`、三盒让位与非会话覆盖预期；粘贴输入不套用 PTY 避让 | PHASE1 HO-2/HO-3、GI-2/GI-4/GI-5 |
+
+### v4 数值复算与事实边界
+
+- `raw = max(0, clientHeight − vv.height)`；`vv.offsetTop` 只记录 pan 事实，不进入 raw。
+- 748 布局、`vv.height=601`：`raw=147`；进入线 `748×25%=187`，恢复后重入线 `748×50%=374`。恢复锁且无 click / focusin / 窗口几何变化解锁时，预期 `occlusion=0`，不是 v3.1 的让位 147。
+- 748 布局、`vv.height=320`：`raw=428`，进入线 187、重入线 374；在 HO-2、非缩放、无恢复锁或已解锁且达线的前提下，活动会话 `occlusion=428`，宿主/控制列/Transport 分别为 428/448/428。
+- 702 布局：`vv.height=555` → `raw=147 < 175.5`；`vv.height=633.5` → `raw=68.5 < 175.5`；恢复后重入线 351。所有结论都需前置会话状态，数值本身不证明场景来源。
+- `vv.offsetTop=403`、`app.top=-403`、宿主底边 `-103`、120 个稳定帧仅重述 C 会话历史事实；**不是已修复**。D1 仅部分签署禁止手段，D2 的 scale 来源与 scale<1 兼容仍待真机采证。
+
+### v4 原生导出与实际像素
+
+使用 `pen version` = **0.3.11**；每个 frame 通过 `get_app_state()` / `Get` 复核后 `save()`，再以 `Export(ids,"png",dir)` 按节点 id 原生导出并改为既定文件名。未传 scale、未 resize、未裁剪；每张 PNG 均只导出 **1 次**。
+
+| Frame id | 既定 PNG | v4 实际像素 | v3.1 像素 / 变化 |
+| --- | --- | ---: | --- |
+| `d1_notes` | `ui/notes-decisions.png` | **2362×3402** | 2362×2082；**高 +1320**（新增标注帧，源高 +660 CSS px） |
+| `d1_viewport_geometry` | `ui/viewport-geometry.png` | **2882×2482** | 2882×2482；未变 |
+| `d1_quick_short` | `ui/quick-keys-short-viewport.png` | **1642×1202** | 1642×1202；未变 |
+| `qk0001` | `ui/quick-keys/notes-decisions.png` | **1002×1728** | 1002×1694；**高 +34**（自动文本排版） |
+| `qk0053` | `ui/quick-keys/component-panel-paste-fallback.png` | **562×724** | 562×664；**高 +60**（HO-3 粘贴交接说明增长） |
+| `qk0124` | `ui/quick-keys/scene-iphone-keyboard-panel.png` | **802×1772** | 802×1772；未变 |
+
+实际导出命令序列（临时目录仅承载节点 id 原图，随后按上表改名）：
+
+```
+pen interactive --in ui/sidebar-states.pen --out ui/sidebar-states.pen
+  save() → execute(Export(["d1_notes","d1_viewport_geometry","d1_quick_short"],"png","/tmp/issue116-v4-export.OAlq8l/sidebar"))
+pen interactive --in ui/quick-keys/quick-keys-panel.pen --out ui/quick-keys/quick-keys-panel.pen
+  save() → execute(Export(["qk0001","qk0053","qk0124"],"png","/tmp/issue116-v4-export.OAlq8l/quick-keys"))
+```
+
+`Get` 的 `ctx.problems` 未报告上述改动帧存在 `partially clipped` / `fully clipped`；6 张 PNG 均已回读检查，未见新增文本截断或重叠。该检查只针对设计产物，不是产品实现或真机验收。其余源内容未变的 PNG 不重出。
 
 ## 0aaa. v3.1 设计同步（2026-11-03 · **本 pass 已真实改稿并重出 PNG**）
 
@@ -157,7 +213,7 @@ pen interactive --in ui/quick-keys/quick-keys-panel.pen --out ui/quick-keys/quic
 - 三份源稿均通过 `pen interactive` 的 `get_app_state()` 文档/schema 校验，并由 `save()` 保存。
 - frame id 通过 `Get((n,c)=>{c.skipChildren();Print(n.id,n.name,n.width,n.height)})` 查询确认；未使用占位 id。
 - 所有 PNG 均通过 interactive `Export(ids, "png", dir)` 原生导出，**未传入 scale，也未做任何后期 resize、裁剪或截图缩放**。下表记录实际 PNG 像素尺寸；其大于 CSS 场景尺寸是 CLI 当前导出行为。
-- 本轮未升级 CLI，未混用不同 CLI/Export 路径。quick-keys 仅说明帧与 iPhone 软键盘帧的源内容发生变化，因此只重出这两帧；其余五帧源内容与既有 PNG 保持不变。
+- 本轮未升级 CLI，未混用不同 CLI/Export 路径。v4 仅重出主 UI 的 `d1_notes` / `d1_viewport_geometry` / `d1_quick_short` 与 quick-keys 的 `qk0001` / `qk0053` / `qk0124`；其余源内容与既有 PNG 保持不变。
 - 已逐项目检主 UI 与 Portal 必需画面。初次主 UI 导出中发现的终端坐标遮挡、密度说明重叠及 Portal 空态表头换行问题均已回改 `.pen` 并重新导出，不以修图代替源稿修正。
 
 ## 2. D0-1 主 UI
@@ -167,7 +223,7 @@ pen interactive --in ui/quick-keys/quick-keys-panel.pen --out ui/quick-keys/quic
 
 | Frame id | PNG（`ui/`） | 实际像素 | 覆盖内容 |
 | --- | --- | ---: | --- |
-| `d1_notes` | `notes-decisions.png` | 2362×2082 | 状态矩阵、断点不变、全宽内联、**满高壳 + 键盘覆盖 + PTY 局部避让（并拒绝参考应用的隐藏可滑区）**、证据边界 |
+| `d1_notes` | `notes-decisions.png` | 2362×3402 | 状态矩阵、断点不变、全宽内联；v4 输入所有权、Web 输入、焦点交接、键盘/pan/zoom 与异常回退标注；设计/证据边界 |
 | `d1_desktop_expanded` | `desktop-expanded.png` | 2882×1802 | 1440×900、240px 展开侧栏、running 仅 Stop |
 | `d1_desktop_collapsed` | `desktop-collapsed.png` | 2882×1802 | 折叠零宽、stopped 的 Restart + Delete 内联 |
 | `d1_action_states` | `desktop-action-states.png` | 2882×1962 | running / starting / stopping / stopped 四态及完整矩阵 |
@@ -181,16 +237,17 @@ pen interactive --in ui/quick-keys/quick-keys-panel.pen --out ui/quick-keys/quic
 | `d1_density390` | `worktree-density-390.png` | 782×1690 | 390×844、240px drawer、无动作无空行 |
 | `d1_density820` | `worktree-density-820.png` | 1642×2362 | 820×1180、200px 并排侧栏与滚动后果 |
 | `d1_density_matrix` | `worktree-density-matrix.png` | 3362×2602 | 320/390/820 × 0/1/multi 设计矩阵；真实滚动数据待回填 |
-| `d1_viewport_geometry` | `viewport-geometry.png` | 2882×2482 | v3.0 四格：壳恒满高 + 宿主贴底 682、软键盘下只有宿主被 `occlusion` 抬起（条带是 `--term-bg` 墨色）、妙控真浮窗不改 VV → 避让 0、横屏/Home Indicator 铺底与内缩 |
-| `d1_quick_short` | `quick-keys-short-viewport.png` | 1642×1202 | 820×600 矮视口、quick-keys 与新顶栏互不遮挡 |
+| `d1_viewport_geometry` | `viewport-geometry.png` | 2882×2482 | v4 四格：PTY 活动/非活动会话两态、25%/50% 门线与历史数值重述、键盘/pan/zoom 边界；不含 0.15 地板 |
+| `d1_quick_short` | `quick-keys-short-viewport.png` | 1642×1202 | 820×600 矮视口；活动会话控制列随 `20+occlusion` 收缩，粘贴 textarea 为 HO-3；quick-keys 与新顶栏互不遮挡 |
 
 ### quick-keys 既有稿件复核
 
 设计源：[quick-keys-panel.pen](../../../../ui/quick-keys/quick-keys-panel.pen)
 
-- 形态、键集、入口、左展与内部滚动不变；说明帧（`qk0010b`）已按 v2.1 改写为固定壳 + 根原点契约，不再引用 `visibleBottom − app.top`，也不再留"妙控浮动栏分类待复核"的悬置表述。
-- iPhone 软键盘帧（`qk0125` 帧名 + `qk0156` 标注）的旧"经硬遮挡分类后 `visibleBottom − app.top`"描述已改为 `scale = 1 且 vv.height < clientHeight → #app = vv.height`，并写明同一次判定把根 scroll 归零；容器的 `max-height:100%` 内部滚动仍来自可见区收缩。
-- `qk0001` → `notes-decisions.png`（**1002×1388**，v3.0 因 `qk0010b` 说明文本变长再增长 34px）；`qk0124` → `scene-iphone-keyboard-panel.png`（802×1772，未变）。
+- 形态、键集、入口、左展与内部滚动不变；说明帧（`qk0010b`）已按 v4 改写为焦点归属 + 冻结会话几何口径，不再使用 0.15 地板，也不再把 Web 粘贴输入当作 PTY 避让触发器。
+- 粘贴兜底组件（`qk0053` / `qk0062`）明确 textarea 持焦为 HO-3、Safari 最小 pan、无 PTY 避让/双重补偿，点回终端后按当帧会话重判；对应 `component-panel-paste-fallback.png` 为 **562×724**。
+- iPhone 软键盘帧（`qk0125` + `qk0156`）明确前台 PTY 持焦且活动会话前提，会话内 `occlusion=raw`；非会话 `occlusion=0`、满高被覆盖为预期，粘贴 textarea 则归 HO-3。
+- `qk0001` → `notes-decisions.png`（**1002×1728**）；`qk0053` → `component-panel-paste-fallback.png`（**562×724**）；`qk0124` → `scene-iphone-keyboard-panel.png`（**802×1772**，尺寸未变）。
 
 ### preview 验证（只验证 preview，不是 PR1/真机证据）
 
