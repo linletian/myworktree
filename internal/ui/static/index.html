@@ -3716,10 +3716,84 @@
         let previousTerminalRaw = 0;
         let previousTerminalLayoutHeight = 0;
         let previousTerminalVVWidth = 0;
+        // issue #116 D2 (PLAN §4 D2, arbitration commit 6e8a006): the previous
+        // pass's vv.scale, input to "ANY scale change = NEW GEOMETRY" in
+        // applyVisualViewportOcclusion. Like the raw / layout / VV-width history
+        // above it is written once per pass — it is NOT a second ownership or
+        // session state machine (D2 rule 3: the frozen §5 machine stays the only
+        // session truth).
+        let previousTerminalScale = 0;
+        // issue #116 D-C (arbitration commit 6e8a006): the EXECUTABLE definition of
+        // a SETTLED scale. The first draft's single-frame equality
+        // (`scale === previousTerminalScale`) let ONE transition frame through the
+        // gate, which is not a settle; the arbitration counts a settle instead, and
+        // these six variables + two constants are its whole memory. They are the
+        // scale term's settle memory and NOTHING ELSE: no new timer (the counting
+        // rides the EXISTING 500ms self-check tick at
+        // initVisualViewportHandling — see the "scaleSettleTick" token), no new
+        // event source, no second ownership / session machine (the frozen §5
+        // machine stays the only session truth).
+        //   * scaleSettleCandidate — the scale being watched, 0 = no candidate.
+        //     A candidate opens on a scale step (including the trip BACK to 1)
+        //     and re-opens whenever it breaks.
+        //   * scaleSettleBaseline — the candidate's vv.scale at open time: the
+        //     reference a SLOW DRIFT is measured against. A step of < ε between
+        //     two passes is tolerated; the same drift ACCUMULATED past ε against
+        //     this baseline breaks the candidate and it re-enters.
+        //   * scaleSettleTicked — consecutive counting ticks at the candidate.
+        //     Only the 500ms self-check tick increments it; a resize / scroll /
+        //     focus / pageshow / orientationchange / visibilitychange pass or a
+        //     direct call may BREAK a candidate but never counts toward one.
+        //     document.hidden counts nothing at all — the interval itself refuses
+        //     to run the judgment there. Counting SATURATES at
+        //     SCALE_SETTLE_TICKS and is announced once, so an identical settled
+        //     tick is idempotent and does not re-trigger the settle edge.
+        //   * scaleSettleLayoutHeight / scaleSettleVVWidth / scaleSettleRaw —
+        //     the candidate's own geometry. While a candidate is CANDIDATING, a
+        //     change of any of the three voids it and it re-enters. Once the
+        //     scale is SETTLED, the keyboard opening or closing (raw) does NOT
+        //     reset the scale settle — only drift past ε does.
+        // The machine runs only where a scale question exists: scale < 1, the trip
+        // back into the band, or a candidate already in flight. A long scale = 1
+        // steady state therefore never touches these. scale > 1 runs NO scale
+        // question either — it opts out wholesale, and entering that domain DROPS
+        // an in-flight candidate instead of banking it (D-C re-review), so the trip
+        // home counts a full two ticks. The container-missing early return syncs the
+        // same memory too (D-E), so a step taken with no container is not misread
+        // as a return trip on the first frame back.
+        const SCALE_SETTLE_TICKS = 2;
+        const SCALE_SETTLE_EPSILON = 0.001;
+        let scaleSettleCandidate = 0;
+        let scaleSettleBaseline = 0;
+        let scaleSettleTicked = 0;
+        let scaleSettleLayoutHeight = 0;
+        let scaleSettleVVWidth = 0;
+        let scaleSettleRaw = 0;
 
-        function applyVisualViewportOcclusion() {
+        function applyVisualViewportOcclusion(scaleSettleTickToken) {
             const container = document.getElementById("terminal-container");
-            if (!container) return false;
+            if (!container) {
+                // D-E (arbitration 6e8a006 re-review, PLAN §4 D2 / contract rule 6):
+                // the early return is still a PASS that happened. Whatever scale the
+                // visual viewport reports NOW has to reach the D2 scale history, and
+                // the D-C candidate has to be dropped, or a step taken while the
+                // container was gone would meet the stale previousTerminalScale on
+                // the first frame back and be MISREAD as a zoomReturnFrame — a fake
+                // return trip that pays 0 and banks two more suppressed ticks. The
+                // sync is the SAME two writes the bottom of the function does for
+                // its own scale term and NOTHING more: the frozen active / recovering
+                // flags, the raw / layout / VV-width history and every other
+                // lifecycle meaning of this early return stay exactly as they were.
+                const vvNow = window.visualViewport;
+                previousTerminalScale = vvNow && vvNow.scale ? vvNow.scale : 1;
+                scaleSettleCandidate = 0;
+                scaleSettleBaseline = 0;
+                scaleSettleTicked = 0;
+                scaleSettleLayoutHeight = 0;
+                scaleSettleVVWidth = 0;
+                scaleSettleRaw = 0;
+                return false;
+            }
             // #terminal-controls' authored `bottom` (the clearance that keeps the
             // control column above the ~17px transport strip). Declared INSIDE the
             // function because the test harness slices named functions out of this
@@ -3741,8 +3815,58 @@
             // already scaled, so compensating for it would lift the terminal off
             // the bottom of a page the user is zoomed into. Zoom owns NOTHING
             // else — it does not touch the root position either, because the
-            // root is NEVER written. Zoom also ENDS any session in flight.
+            // root is NEVER written. Zoom also ENDS any session in flight — with
+            // the one-sided D2 amendment below (arbitration commit 6e8a006), which
+            // keeps that rule for scale > 1 and every scale step, and hands only a
+            // SETTLED scale < 1 to the frozen §5 machine.
             const zoomed = !!(vv && vv.scale && Math.abs(vv.scale - 1) > 0.01);
+            // issue #116 D2 (PLAN §4 D2, arbitration commit 6e8a006):
+            // the all-zoom opt-out above is now ONE-SIDED. The frozen baseline
+            // (5268869) opted out of EVERY |scale − 1| > 0.01 frame; this block
+            // changes ONLY the scale < 1 half, atomically and revertably:
+            //   * scale > 1 (zoomed && scale > 1): the frozen conservative opt-out
+            //     is KEPT UNCHANGED — every zoomed-in pass still exits any session
+            //     in flight (recovery latch included) and can never enter. The
+            //     release back to 1 is Safari's own behavior; this app never writes
+            //     scale.
+            //   * scale ≈ 1 (inside the existing ±0.01 zoomed tolerance, the
+            //     number unchanged): the whole frozen machine, untouched. Jitter
+            //     inside that band is OWNED BY THE FROZEN THRESHOLD — it is not
+            //     zoomed, it is judged by §5 as always, and the scale settle below
+            //     has nothing to say about it (D-D: in-band jitter stays under the
+            //     frozen tolerance).
+            //   * scale < 1 (zoomed && scale < 1): NO blanket opt-out. A SETTLED
+            //     scale (D-C below: SCALE_SETTLE_TICKS self-check ticks at an
+            //     unchanged scale / layout / VV-width / raw, inside ε of the
+            //     candidate baseline) is handed to the frozen §5 session machine
+            //     below, whose existing gates still all have to be met: editable
+            //     focus through the existing document.activeElement path (no new
+            //     ownership machine), raw > 1 real occlusion, the 25% entry / 50%
+            //     re-entry lines, the click / focusin / geometry unlocks and the
+            //     same-geometry-decrease exit. Nothing is bypassed: raw > 1 alone
+            //     owes nothing.
+            //   * ANY scale change = NEW GEOMETRY (D2 rule 3): a zoomed pass whose
+            //     scale differs from the previous pass is an UNSETTLED transition
+            //     frame — zoomOptOut stays true, so it exits the session through
+            //     the same existing edge as the frozen zoom exit and never enters;
+            //     the scale step also routes through the existing window-geometry-
+            //     change unlock above, so the pre-change layout / raw / recovery
+            //     latch are not reused. What it does NOT get is the frozen zoom
+            //     exit's latch: D-B (and D-D for the trip back to 1) exempts a
+            //     scale-step exit from setting a NEW recovery latch — see
+            //     scaleStepNoLatchExit. Without that guard a single-step scale
+            //     change carried the fresh latch into the settle frame and made
+            //     the re-entry line path-dependent (50% after one step, 25% after
+            //     several). A step now means: old latch cleared by the geometry
+            //     unlock, session exited, occlusion 0, NO new latch; the settle
+            //     then rebuilds the baseline on the unlocked 25% line.
+            // A keyboard-free zoom-out (menu / cmd+'-') still lifts NOTHING: the
+            // layout grows while vv.height == layoutHeight, raw is 0 by arithmetic
+            // (device evidence: A0 0.75 segment, 153 frames, raw 0 closed and
+            // occlusion 0 under the old guard), and raw <= 1 ends / blocks the
+            // session exactly as before.
+            const scale = vv && vv.scale ? vv.scale : 1;
+            const scaleBelowOne = zoomed && vv.scale < 1;
             // Client space on BOTH sides of the subtraction (the p5
             // incident: height = clientHeight - offsetTop mixed client and
             // layout space and pinned to 0 when the keyboard was covered by
@@ -3758,16 +3882,145 @@
             // accepts INPUT and contenteditable hosts).
             const focus = document.activeElement;
             const focusEditable = !!(focus && (focus.tagName === "TEXTAREA" || focus.tagName === "INPUT" || focus.isContentEditable));
+            // D-B / D-D (arbitration commit 6e8a006): the trip BACK into the band
+            // (0.75 → 1, scale > 1 → 1). Like a scale step it exits the session
+            // through the frozen edge below and pays occlusion 0, and it leaves no
+            // NEW recovery latch behind either — the narrow D2 exception to the
+            // frozen §5.6 host exit, noted in the PLAN and the contract (the guard
+            // is scaleStepNoLatchExit, below the counted settle). A frozen scale > 1
+            // pass still sets the latch exactly as before, so `scale > 1` staying
+            // zoomed is deliberately NOT part of that exemption, and an exit owed to
+            // raw <= 1 / focus loss / a same-geometry decrease keeps its latch too:
+            // the exemption covers ONLY the exit the scale step itself causes. The
+            // frame then re-enters the counted scale settle below. Read the 25% line
+            // narrowly: it is the PURE scale<1 / 0.75 → 1 re-judgement. A latch an
+            // earlier scale > 1 exit already booked is NOT erased by the trip home or
+            // by the settle, so after a scale > 1 → 1 the settled frame re-enters on
+            // the latched 50% recovering line unless a click / focusin / geometry
+            // change unlocked it first (D-D; executed by D2-6).
+            const zoomReturnFrame = !zoomed && previousTerminalScale > 0
+                && Math.abs(previousTerminalScale - 1) > 0.01;
+            // D-C (arbitration commit 6e8a006): the counted settle. The gate keeps
+            // the frozen footprint: the machine runs ONLY where a scale question
+            // exists — scale < 1, the trip back into the band, or a candidate
+            // already in flight. A scale = 1 steady state never reads this state,
+            // and in-band jitter is owned by the frozen ±0.01 threshold above, not
+            // by the settle (D-D). Only the 500ms self-check tick counts (see the
+            // "scaleSettleTick" token at initVisualViewportHandling); document.hidden
+            // never reaches this code at all, because the interval itself skips the
+            // judgment there.
+            const selfCheckPass = scaleSettleTickToken === "scaleSettleTick";
+            let scaleBelowOneSettled = false;
+            if (zoomed && !scaleBelowOne) {
+                // D-C (arbitration 6e8a006 re-review): scale > 1 is the CONSERVATIVE
+                // opt-out domain and it runs no scale question — every frame there
+                // already opts out through zoomOptOut. So the domain neither OPENS
+                // nor BANKS a candidate: an in-flight candidate inherited from
+                // scale < 1 is dropped here, which is what makes the trip back to 1
+                // count a FULL two ticks instead of resuming a count earned while the
+                // zoom owed nothing. Six clears, the machine's whole footprint.
+                scaleSettleCandidate = 0;
+                scaleSettleBaseline = 0;
+                scaleSettleTicked = 0;
+                scaleSettleLayoutHeight = 0;
+                scaleSettleVVWidth = 0;
+                scaleSettleRaw = 0;
+            } else if (scaleBelowOne || zoomReturnFrame || scaleSettleCandidate !== 0) {
+                const hasCandidate = scaleSettleCandidate !== 0;
+                const vvWidth = vv ? vv.width : 0;
+                // Drift is measured against the CANDIDATE BASELINE, so a slow crawl
+                // of steps each smaller than ε still breaks once the accumulated
+                // difference exceeds ε.
+                const driftBeyondEpsilon = hasCandidate
+                    && Math.abs(scale - scaleSettleBaseline) > SCALE_SETTLE_EPSILON;
+                const settled = hasCandidate
+                    && scaleSettleTicked >= SCALE_SETTLE_TICKS && !driftBeyondEpsilon;
+                if (!hasCandidate || driftBeyondEpsilon
+                    || (!settled && (Math.abs(scale - previousTerminalScale) > SCALE_SETTLE_EPSILON
+                        || layoutHeight !== scaleSettleLayoutHeight
+                        || vvWidth !== scaleSettleVVWidth
+                        || raw !== scaleSettleRaw))) {
+                    // Open / re-open the candidate on THIS pass: this frame's scale,
+                    // layout, VV width and raw become the new baseline and the count
+                    // restarts. An event-driven pass may land here and break a
+                    // candidate, but it never advances one.
+                    scaleSettleCandidate = scale;
+                    scaleSettleBaseline = scale;
+                    scaleSettleTicked = 0;
+                    scaleSettleLayoutHeight = layoutHeight;
+                    scaleSettleVVWidth = vvWidth;
+                    scaleSettleRaw = raw;
+                } else if (selfCheckPass && scaleSettleTicked < SCALE_SETTLE_TICKS) {
+                    // The ONLY counting site, and it SATURATES: once the two ticks
+                    // are in, further identical ticks are idempotent and the settle
+                    // is announced once instead of re-firing every 500ms.
+                    scaleSettleTicked++;
+                }
+                scaleBelowOneSettled = scaleBelowOne
+                    && scaleSettleTicked >= SCALE_SETTLE_TICKS
+                    && Math.abs(scale - scaleSettleBaseline) <= SCALE_SETTLE_EPSILON;
+                if (!zoomed && scaleSettleTicked >= SCALE_SETTLE_TICKS
+                    && Math.abs(scale - scaleSettleBaseline) <= SCALE_SETTLE_EPSILON) {
+                    // Back inside the band and counted out: the scale question is
+                    // closed, so the candidate is dropped and the scale = 1 steady
+                    // state stops consulting this state entirely.
+                    scaleSettleCandidate = 0;
+                    scaleSettleTicked = 0;
+                }
+            }
+            const zoomOptOut = zoomed && !scaleBelowOneSettled;
+            // D-B / D-D (arbitration commit 6e8a006): this pass exits BECAUSE the
+            // scale stepped — an unsettled scale < 1 step, or the trip back into the
+            // band. Such an exit clears the OLD latch (the geometry unlock below)
+            // and pays 0, but does NOT book a NEW one; every other exit edge
+            // (scale > 1, raw <= 1, focus loss, the same-geometry decrease) keeps
+            // the frozen §5.6 latch behaviour character for character.
+            const scaleStepNoLatchExit = ((scaleBelowOne && !scaleBelowOneSettled
+                && scale !== previousTerminalScale) || zoomReturnFrame)
+                && raw > 1 && focusEditable;
+            // A candidate that has not counted its ticks yet is still PENDING: while
+            // it is pending nothing may enter. Above scale < 1 the unsettled verdict
+            // (zoomOptOut) already blocks the entry; this term is what makes the
+            // D-C settle real for the trip BACK into the band (D-D), where
+            // zoomOptOut is by definition false — without it the pass right after a
+            // zoom return would re-enter on a transient raw the candidate exists to
+            // rule out. In-band and saturated, or no zoom question at all, the
+            // candidate is closed and this term is false: the frozen entry machine.
+            const scaleSettlePending = scaleSettleCandidate !== 0
+                && scaleSettleTicked < SCALE_SETTLE_TICKS;
+            // D2 (arbitration commit 6e8a006): "ANY scale change = NEW GEOMETRY"
+            // rides the EXISTING window-geometry-change path below — the scale term
+            // only exists inside the settled-§5 half of D2 (scale < 1): a scale step
+            // there counts as a geometry change, so the STALE recovery latch is
+            // retired through the same existing unlock. What the step does NOT get
+            // is a settle grace: the step frame exits at the zoom edge above, so
+            // `terminalAvoidanceGeometryGrace` (booked from the ACTIVE session at
+            // the bottom of this function) is never set for it — the earlier claim
+            // that a scale step "keeps one settle grace" was false, and the counted
+            // D-C settle replaced it. Outside scale < 1 the term collapses to true
+            // and the expression is the frozen one, character for character.
             const sameGeometry = layoutHeight === previousTerminalLayoutHeight
-                && !!vv && vv.width === previousTerminalVVWidth;
+                && !!vv && vv.width === previousTerminalVVWidth
+                && !(scaleBelowOne && scale !== previousTerminalScale);
             const geometryChanged = !sameGeometry;
             const activeGeometryChanged = terminalAvoidanceActive && geometryChanged;
             if (geometryChanged) terminalAvoidanceRecovering = false;
             const consumeGeometryGrace = terminalAvoidanceGeometryGrace && !geometryChanged;
-            if (zoomed || raw <= 1 || !focusEditable) {
+            // D2: the zoom term of this frozen exit edge is now zoomOptOut —
+            // scale > 1 every pass, and any UNSETTLED scale step (D2 rule 3),
+            // still exit through THIS existing edge with the recovery latch;
+            // a settled scale < 1 no longer exits here and falls into §5.
+            // D-D adds the trip BACK into the band (zoomReturnFrame) to the same
+            // existing edge, so a 0.75 → 1 / scale > 1 → 1 frame exits and pays 0
+            // instead of carrying the pre-zoom session over; scaleStepNoLatchExit
+            // (D-B / D-D) is the guard that keeps that exit from leaving a NEW
+            // latch, so the re-entry after the D-C settle is judged on the unlocked
+            // 25% line and not on 50% — no path dependence on how many zoom steps
+            // it took to get here.
+            if (zoomOptOut || zoomReturnFrame || raw <= 1 || !focusEditable) {
                 // Only a real session creates a recovery latch. A fresh page sitting
                 // at its baseline must still be allowed to open its first keyboard.
-                if (terminalAvoidanceActive) terminalAvoidanceRecovering = true;
+                if (terminalAvoidanceActive && !scaleStepNoLatchExit) terminalAvoidanceRecovering = true;
                 terminalAvoidanceActive = false;
             } else if (terminalAvoidanceActive && !activeGeometryChanged
                 && !consumeGeometryGrace && raw < previousTerminalRaw - 1) {
@@ -3776,7 +4029,18 @@
                 terminalAvoidanceActive = false;
                 terminalAvoidanceRecovering = true;
             }
-            if (!terminalAvoidanceActive && focusEditable && !zoomed && raw > 1) {
+            // D2: entry keeps every frozen gate (fresh, focusEditable, raw > 1,
+            // then the 25% / 50% lines below decide inside) and swaps the frozen
+            // `!zoomed` for `!zoomOptOut`: scale > 1 can still never enter, an
+            // UNSETTLED scale step can never enter, and a SETTLED scale < 1 is
+            // judged by the untouched entry machinery. `!zoomReturnFrame` is D-D:
+            // the frame that carries the scale back into the band is the exit frame,
+            // it does not re-enter on the same pass — the counted D-C settle decides
+            // the next one, on the unlocked 25% line (no latch was booked above).
+            // `!scaleSettlePending` is the same rule seen from the other side: an
+            // unsettled candidate holds the entry closed until it counts out.
+            if (!terminalAvoidanceActive && focusEditable && !zoomOptOut
+                && !zoomReturnFrame && !scaleSettlePending && raw > 1) {
                 const entryRatio = terminalAvoidanceRecovering
                     ? KEYBOARD_REENTRY_RATIO : KEYBOARD_ENTRY_RATIO;
                 if (raw >= layoutHeight * entryRatio) {
@@ -3792,6 +4056,11 @@
             previousTerminalRaw = raw;
             previousTerminalLayoutHeight = layoutHeight;
             previousTerminalVVWidth = vv ? vv.width : 0;
+            // D2 (arbitration commit 6e8a006): recorded once per pass, like the
+            // raw / layout / width history — this is the ADJACENT reading the D-C
+            // settle compares against (the candidate baseline above is the other
+            // half), nothing else.
+            previousTerminalScale = scale;
             const target = occlusion + "px";
             // EVERY host in #terminal-container, hidden and inactive included
             // (createTerminalHost here, PtyRenderer._createSession in
@@ -3913,8 +4182,18 @@
             // unless the occlusion actually moved). This is a backstop for the
             // HOST BOTTOM only; it is not, and must not become, a loop that
             // drags the root back to the top or sizes the shell.
+            // The "scaleSettleTick" token is the ONE thing that makes this pass
+            // special: it is the only pass allowed to COUNT toward the D-C scale
+            // settle (arbitration commit 6e8a006). No new timer and no new event
+            // source — the same interval, the same judgment, one extra argument.
+            // Every other path (the vv resize / scroll listeners above, which hand
+            // in an Event, pageshow / orientationchange / visibilitychange /
+            // focusout, focusin, and the direct calls) gets an undefined argument
+            // and therefore only ever breaks a candidate, never advances one; and
+            // while document.hidden the judgment does not run at all, so a
+            // background tab accumulates nothing.
             setInterval(() => {
-                if (!document.hidden) applyVisualViewportOcclusion();
+                if (!document.hidden) applyVisualViewportOcclusion("scaleSettleTick");
             }, 500);
             applyVisualViewportOcclusion();
         }

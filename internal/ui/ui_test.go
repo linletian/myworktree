@@ -1134,7 +1134,33 @@ func TestViewportAndHeightAnchors(t *testing.T) {
 		"const KEYBOARD_ENTRY_RATIO = 0.25;",
 		"const KEYBOARD_REENTRY_RATIO = 0.50;",
 		"raw >= layoutHeight * entryRatio",
-		"if (zoomed || raw <= 1 || !focusEditable) {",
+		// D2 (PLAN §4 D2, Phase 2 arbitration verdict 6e8a006): the zoom term of
+		// the frozen exit edge is now zoomOptOut — scale > 1 keeps the frozen
+		// conservative opt-out UNCHANGED; D-D adds zoomReturnFrame, so the trip
+		// BACK into the band (0.75 → 1, scale>1 → 1) exits through THIS same
+		// existing edge and pays 0; a scale<1 step still exits as NEW GEOMETRY,
+		// and scaleStepNoLatchExit is the narrow D-B guard that keeps exactly
+		// THOSE exits (unsettled scale<1 step, return into the band) from
+		// booking a NEW recovery latch — every other exit (scale>1, raw<=1,
+		// focus loss, same-geometry decrease) keeps the frozen §5.6 latching
+		// verbatim. A scale<1 frame reaches the untouched §5 entry gates only
+		// through the D-C COUNTED settle — two consecutive 500ms self-check
+		// ticks inside ε of the candidate baseline with layout / vv.width / raw
+		// unchanged — and entry keeps the raw > 1 floor with the return frame
+		// and the pending candidate held shut. These anchors protect this exact
+		// spelling; the executing cases live in testdata/zoom_scale.test.mjs.
+		"if (zoomOptOut || zoomReturnFrame || raw <= 1 || !focusEditable) {",
+		"const scaleBelowOne = zoomed && vv.scale < 1;",
+		"const zoomOptOut = zoomed && !scaleBelowOneSettled;",
+		"const zoomReturnFrame = !zoomed && previousTerminalScale > 0",
+		"const scaleStepNoLatchExit = ((scaleBelowOne && !scaleBelowOneSettled",
+		"if (terminalAvoidanceActive && !scaleStepNoLatchExit) terminalAvoidanceRecovering = true;",
+		"scaleBelowOneSettled = scaleBelowOne",
+		"scaleSettleTicked >= SCALE_SETTLE_TICKS",
+		"Math.abs(scale - scaleSettleBaseline) > SCALE_SETTLE_EPSILON",
+		"&& !(scaleBelowOne && scale !== previousTerminalScale);",
+		"&& !zoomReturnFrame && !scaleSettlePending && raw > 1) {",
+		`const selfCheckPass = scaleSettleTickToken === "scaleSettleTick";`,
 		"terminalAvoidanceActive = false;",
 		"const occlusion = terminalAvoidanceActive ? raw : 0;",
 		// The diagnostic mirror: the probe reports THIS number, never a copy of
@@ -1162,6 +1188,24 @@ func TestViewportAndHeightAnchors(t *testing.T) {
 		if !strings.Contains(apply, check) {
 			t.Fatalf("GET / applyVisualViewportOcclusion should include %q (issue #100 L1 R6, contract v3.0 under issue #116)", check)
 		}
+	}
+	// D-C (arbitration 6e8a006): the settle parameters are NAMED module
+	// constants — N=2 ticks and ε=0.001 are conservative provisional values to
+	// be re-checked on device (Z-MENU / Z-MAGIC), and sprinkling them as
+	// literals inside the guard is how they would silently stop being the
+	// documented parameters. Module level, spelled exactly once each.
+	for _, settled := range []string{
+		"const SCALE_SETTLE_TICKS = 2;",
+		"const SCALE_SETTLE_EPSILON = 0.001;",
+	} {
+		if !strings.Contains(bodyText, settled) {
+			t.Fatalf("GET / should declare %q — the D-C settle parameters are module constants, not literals scattered in the guard (arbitration 6e8a006)", settled)
+		}
+	}
+	// The single-frame equality settle of the first draft is DEAD, not renamed:
+	// the counted settle replaced it and the equality must never come back.
+	if strings.Contains(stripJSComments(apply), "scaleBelowOneSettled = scaleBelowOne && scale === previousTerminalScale") {
+		t.Fatal("GET / applyVisualViewportOcclusion must not revive the single-frame equality settle — D-C counts two ticks (arbitration 6e8a006)")
 	}
 	// The ban list is the veto, executed against CODE (comments name the calls
 	// to explain why they are gone, and a comment cannot scroll a page or resize
@@ -1294,6 +1338,13 @@ func TestViewportAndHeightAnchors(t *testing.T) {
 		// silent overlay recovery at seq54) was first caught by this tick, and a
 		// stranded lift is exactly as wrong as a stranded pin was.
 		"setInterval",
+		// D-C (arbitration 6e8a006): the interval body is the ONE caller that
+		// carries the "scaleSettleTick" token — the only pass allowed to COUNT
+		// toward the scale settle. No new timer, no new event source: the same
+		// interval, the same judgment, one extra argument. Every registration
+		// above takes the bare function and can therefore only break a
+		// candidate, never advance one.
+		`applyVisualViewportOcclusion("scaleSettleTick")`,
 	} {
 		if !strings.Contains(init, check) {
 			t.Fatalf("GET / initVisualViewportHandling should include %q (issue #100 L1 R6, contract v3.0 under issue #116)", check)

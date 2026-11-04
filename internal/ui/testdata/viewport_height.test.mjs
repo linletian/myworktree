@@ -485,6 +485,23 @@ function buildViewportFactory(src) {
   let previousTerminalRaw = 0;
   let previousTerminalLayoutHeight = 0;
   let previousTerminalVVWidth = 0;
+  // D2 (PLAN §4 D2, 32fab22): mirrors the shipped previous-SCALE history; the
+  // guard's settled / new-geometry rule reads it, so the sliced harness must
+  // own it like the other previous* fields above.
+  let previousTerminalScale = 0;
+  // D-C (arbitration commit 6e8a006): mirrors index.html:3759–3766 — the counted
+  // settle memory of the scale term. The slice reads these wherever a scale
+  // question exists (scale < 1, the trip back into the band, or a candidate in
+  // flight), so the harness owns them exactly like the session fields above; the
+  // frozen scale = 1 machine never consults them.
+  const SCALE_SETTLE_TICKS = 2;
+  const SCALE_SETTLE_EPSILON = 0.001;
+  let scaleSettleCandidate = 0;
+  let scaleSettleBaseline = 0;
+  let scaleSettleTicked = 0;
+  let scaleSettleLayoutHeight = 0;
+  let scaleSettleVVWidth = 0;
+  let scaleSettleRaw = 0;
 
   ${slices}
   return {
@@ -875,16 +892,26 @@ test("v3.2(f): zoom ENDS the session — the mid-session raw cannot survive a pi
 
   // Release the pinch at a SHALLOW height: the retired rule would have paid it
   // straight back (the terminal jumps); the session machine re-enters only at
-  // the 50% line.
+  // the 50% line. D-D (arbitration commit 6e8a006): the trip BACK into the
+  // band is itself an exit frame — it pays 0 whatever the new raw reads, opens
+  // the D-C settle candidate, and books NO new latch behind it.
   h.vv.scale = 1;
   h.vv.height = 555; // raw 147 < 351
   h.vv.dispatch("resize");
   assert.equal(h.api.isAvoidanceActive(), false, "a shallow un-zoom cannot re-open a dead session");
   assert.deepEqual(h.bottoms(), ["0px"], "no jump");
 
-  // Deepen to a real keyboard at scale 1: a fresh session, paid in full.
+  // Deepen to a real keyboard at scale 1. The return frame opened the D-C
+  // settle candidate and this pass RE-OPENS it (the raw moved while the
+  // candidate was pending), so entry waits for two consecutive counting
+  // 500ms ticks — one tick is not a settle (D-C).
   h.openKeyboard(274);
-  assert.equal(h.api.isAvoidanceActive(), true, "back at scale 1 a raw ≥ 50% keyboard enters fresh");
+  assert.equal(h.api.isAvoidanceActive(), false, "D-C: the pass that moves the raw mid-candidate re-opens the candidate — nothing enters unsettled");
+  assert.deepEqual(h.bottoms(), ["0px"], "no jump on the unsettled pass");
+  h.tick();
+  assert.equal(h.api.isAvoidanceActive(), false, "D-C: ONE counting tick — the candidate has not settled");
+  h.tick();
+  assert.equal(h.api.isAvoidanceActive(), true, "back at scale 1, settled by two consecutive ticks, a raw ≥ 50% keyboard enters fresh — the frozen scale>1 exit kept its latch, so the recovering 50% line governs");
   assert.deepEqual(h.bottoms(), ["428px"]);
   assert.equal(h.controlsBottom(), "448px");
   assert.equal(h.statusBarBottom(), "428px");
@@ -969,9 +996,21 @@ test("v3.0: zoom restores controls 20px and status 0px — the opt-out covers al
   assert.equal(h.controlsBottom(), "20px", "…and the column stays authored");
   assert.equal(h.statusBarBottom(), "0px", "…and so does the strip");
 
+  // D-D (arbitration commit 6e8a006): the return to scale 1 is the EXIT frame
+  // — it pays 0 and does not carry the pre-zoom shortfall straight back.
   h.zoom(1);
-  assert.equal(h.api.isAvoidanceActive(), true, "back at scale 1 the keyboard still clears the 50% entry line — a fresh session");
-  assert.deepEqual(h.bottoms(), ["428px"], "back at scale 1 the shortfall is owed again");
+  assert.equal(h.api.isAvoidanceActive(), false, "the return frame exits; it does not re-enter on the same pass");
+  assert.deepEqual(h.bottoms(), ["0px"], "the return frame pays 0 — not one frame of new raw rides the step home");
+  assert.equal(h.controlsBottom(), "20px", "the authored bottoms stay authored on the return frame");
+  assert.equal(h.statusBarBottom(), "0px", "…and so does the strip's");
+  // D-C: two consecutive counting ticks settle the return, and the frozen
+  // machine re-judges on current geometry — the raw still clears the line the
+  // frozen scale>1 exit latched (the recovering 50% re-entry, unchanged).
+  h.tick();
+  assert.equal(h.api.isAvoidanceActive(), false, "D-C: one tick is not a settle");
+  h.tick();
+  assert.equal(h.api.isAvoidanceActive(), true, "settled back at scale 1 the keyboard clears the recovering 50% entry line");
+  assert.deepEqual(h.bottoms(), ["428px"], "back at scale 1 the shortfall is owed again — after the settle");
   assert.equal(h.controlsBottom(), "448px", "…and the column lifts again");
   assert.equal(h.statusBarBottom(), "428px", "…and the strip lifts again");
 });
@@ -1076,11 +1115,17 @@ test("v3.0: zoom restores bottom 0px and touches nothing else", () => {
   assert.deepEqual(h.bottoms(), ["0px"], "zoom owns nothing: the terminal returns to its own bottom");
   assert.equal(h.stats.rootAttempts.length, 0, "zoom does not touch the root either");
 
-  // Zoom released with the keyboard STILL up: the judgment is live again at
-  // scale 1 and the same shortfall is owed again — zoom suppresses, it does not
-  // cancel, the avoidance.
+  // Zoom released with the keyboard STILL up: D-D (arbitration commit
+  // 6e8a006) makes the frame that carries the scale home the EXIT frame — it
+  // pays 0 and re-settles; zoom suppresses, it does not cancel, the
+  // avoidance, but the shortfall is owed again only after the two counting
+  // ticks re-judge the frozen machine on current geometry.
   h.zoom(1);
-  assert.deepEqual(h.bottoms(), ["428px"], "back at scale 1 the shortfall is owed again");
+  assert.deepEqual(h.bottoms(), ["0px"], "the return frame pays 0 — the step home is judged fresh");
+  h.tick();
+  assert.deepEqual(h.bottoms(), ["0px"], "D-C: one tick is not a settle");
+  h.tick();
+  assert.deepEqual(h.bottoms(), ["428px"], "settled back at scale 1 the shortfall is owed again");
   h.closeKeyboard();
   assert.deepEqual(h.bottoms(), ["0px"]);
 });
@@ -1324,7 +1369,26 @@ test("v3.0 structure: the viewport layer writes the TERMINAL'S OWN bottoms and N
   // the whole machine; four edges, no timers, no history arrays.
   assert.match(apply, /document\.activeElement/, "the session reads the focused element");
   assert.match(apply, /tagName === "TEXTAREA" \|\| focus\.tagName === "INPUT" \|\| focus\.isContentEditable/, "editable means TEXTAREA, INPUT or contenteditable — the xterm helper is a TEXTAREA");
-  assert.match(apply, /zoomed \|\| raw <= 1 \|\| !focusEditable/, "the exit edges: zoom, raw <= 1, or focus loss, spelled exactly like this");
+  // D2 (PLAN §4 D2, arbitration commit 6e8a006): the zoom term of this edge is
+  // zoomOptOut — scale > 1 keeps the frozen opt-out UNCHANGED; scale < 1 exits
+  // only on an UNSETTLED scale step (any scale change = new geometry), a
+  // SETTLED scale < 1 falls into the untouched §5 gates. D-D adds
+  // zoomReturnFrame: the trip BACK into the band (0.75 → 1, scale>1 → 1) is
+  // judged through THIS same existing edge — it exits and pays 0, it does not
+  // carry the pre-zoom session over. See testdata/zoom_scale.test.mjs for the
+  // executing cases.
+  assert.match(apply, /zoomOptOut \|\| zoomReturnFrame \|\| raw <= 1 \|\| !focusEditable/, "the exit edges: zoom opt-out, the trip back into the band (D-D), raw <= 1, or focus loss, spelled exactly like this");
+  assert.match(apply, /const zoomOptOut = zoomed && !scaleBelowOneSettled;/, "the D2 zoom opt-out is ONE-SIDED: zoomed minus the settled scale < 1 half, spelled exactly like this");
+  // D-C (arbitration 6e8a006) replaced the first draft's single-frame equality
+  // (`scale === previousTerminalScale`) with the COUNTED settle: two
+  // consecutive 500ms self-check ticks at an unchanged scale / layout /
+  // VV-width / raw, inside ε of the candidate baseline. The equality must
+  // never come back.
+  assert.equal(/scaleBelowOneSettled = scaleBelowOne && scale === previousTerminalScale/.test(apply), false, "the single-frame equality settle is superseded by the D-C counted settle — it must not come back");
+  assert.match(apply, /scaleBelowOneSettled = scaleBelowOne\s*&&\s*scaleSettleTicked >= SCALE_SETTLE_TICKS/, "the settle verdict is counted, not one-frame: the candidate must have counted SCALE_SETTLE_TICKS ticks");
+  assert.match(apply, /Math\.abs\(scale - scaleSettleBaseline\) > SCALE_SETTLE_EPSILON/, "slow drift past ε against the candidate baseline breaks the candidate (D-C)");
+  assert.match(apply, /&& !zoomReturnFrame && !scaleSettlePending && raw > 1/, "entry stays shut on the return frame and while a candidate is pending; raw > 1 alone never opens");
+  assert.match(apply, /&& !\(scaleBelowOne && scale !== previousTerminalScale\);/, "sameGeometry carries the scale term inside scale < 1 — a scale step is NEW GEOMETRY (D2 rule 3)");
   assert.match(apply, /const KEYBOARD_ENTRY_RATIO = 0\.25;/, "portrait's 340/1062 keyboard enters at 25%");
   assert.match(apply, /const KEYBOARD_REENTRY_RATIO = 0\.50;/, "only a fresh 50% keyboard may re-enter after recovery");
   assert.match(apply, /raw >= layoutHeight \* entryRatio/, "the active entry edge uses the selected ratio");
@@ -1382,7 +1446,13 @@ test("v3.0 structure: every listener runs the same avoidance judgment, by name",
   assert.ok(init.includes(`window.addEventListener(type, applyVisualViewportOcclusion)`), "the window lifecycle edges run the judgment itself");
   assert.ok(init.includes(`document.addEventListener(type, applyVisualViewportOcclusion)`), "and so do the document lifecycle edges");
   assert.ok(init.includes(`applyVisualViewportOcclusion()`), "the init itself runs it once");
-  assert.ok(/setInterval\(\(\)\s*=>\s*\{[^}]*applyVisualViewportOcclusion\(\)/.test(init), "the 500ms backstop re-runs the judgment, not a height pin");
+  // D-C (arbitration commit 6e8a006): the interval body is the ONE caller that
+  // carries the "scaleSettleTick" token — the only pass allowed to COUNT
+  // toward the scale settle. No new timer, no new event source: the same
+  // interval, the same judgment, one extra argument.
+  assert.ok(/setInterval\(\(\)\s*=>\s*\{[^}]*applyVisualViewportOcclusion\("scaleSettleTick"\)/.test(init), "the 500ms backstop re-runs the judgment, not a height pin — and it is the ONLY caller carrying the D-C settle token");
+  const initCode = stripComments(init);
+  assert.equal((initCode.match(/applyVisualViewportOcclusion\("scaleSettleTick"\)/g) || []).length, 1, "the token appears in exactly one place — the interval body; every registration and the init call pass none, so only the tick can count");
   const reapply = stripComments(sliceBlock(src, "function reapplyVisualViewportOcclusion"));
   assert.equal(reapply.match(/(?<!re)applyVisualViewportOcclusion\(\)/g)?.length, 1, "the anchor does exactly one thing: re-run the judgment");
 });
