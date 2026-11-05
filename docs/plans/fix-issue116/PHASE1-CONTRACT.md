@@ -35,7 +35,7 @@
   2. **变档恢复锁窄例外**：仅当 scale<1 带外变档帧仍满足 `raw>1 && focusEditable`、即活动会话的退出仅由变档引起时，清旧锁、退出并付 0，且不得新置恢复锁；settle 后按未锁 25% 线以当前几何重判，单步 / 多步结果必须一致。若同帧 `raw<=1` 或失焦，其他冻结退出原因优先，恢复锁仍按冻结规则置 / 保留；settle 不清该锁，未经既有解锁时按 50% 重入。scale>1、同几何回落及其他普通退出同样保持冻结规则。本项是对冻结 §5.6 **源码置锁顺序**的 D2 窄例外，只记录在 PLAN 与本契约，不回写冻结文档。
   3. **settle 定义**：scale<1 初次 / 变档后，以及从带外返回 scale≈1 的 `zoomReturnFrame` 后，须连续两次既有 500ms tick pass 合格才 settled；相邻 scale 与相对首个候选 tick / 当前已 settle 基线的 scale 差均 `<=0.001`，候选期间 layoutHeight / vv.width / raw 不变，且无域跨越或新超限变化；基线只在重建时更新，累计超 ε 的慢速漂移同样重置。普通事件 pass 不计数但可重置；计数达 2 后饱和，同值 tick 幂等，不得反复退出。已 settled 后，累计亚 ε 漂移保持 settled，累计超 ε 才重建；单纯键盘 raw 开合不重置 scale settle，由冻结 §5 处理。scale>1 域不得开启或累计候选；由 scale<1 进入 scale>1 须清空既有候选，之后回带内重新计完整两 tick。沿用现有 tick 来源标记，不新增时钟 / timer；hidden 时不累计。**IEEE-754 口径**：ε 和 scale 都是 binary64 Number，以实际 `Math.abs(scale - scaleSettleBaseline)` 的比较为准；十进制看似恰好 0.001 不保证差值等于 ε，边界用例必须记录实际差；1 ULP 用例须按位构造相邻 Number，不以十进制文字冒充精确边界。A 的 153 帧只含精确 0.75、相邻差 0，无变档噪声样本，因此 N=2 / ε=0.001 为保守暂定参数，须由 Z-MENU / Z-MAGIC 真机复核，未复核不得宣称真机 settle PASS。
   4. **F14 回程与带内优先级**：0.75→1 与 scale>1→1 的回程变档帧必须付 0、作废旧几何判据并重新 settle，不得保留带外 active 状态而在回 1 当帧按新 raw 让位。自回程帧起至两 tick 完成前，D-C 的 `scaleSettlePending` 优先于通常的带内冻结准入；完成后交还冻结 §5。无回程 / 无候选的普通带内抖动仍只按冻结阈值处理，不受两 tick 压制。**恢复锁按来源而非一律清除**：纯 0.75→1 清旧锁且不新置锁，settle 后按 25%；scale>1 在先退出形成的旧锁不因 scale>1→1 或 settle 自动消失，回程只不新置锁，若未被独立几何 / click / focusin 解锁则 settle 后按 50%。D2-6 的同几何浅键盘用例即验证此保守方向，随后 click 解锁才按 25%；本条不覆盖或削弱细则 2 的 scale>1 冻结语义。
-  5. **诊断只读口径**：scale<1 帧的 `derivedState:none / zoomed-session-exempt` 只描述旧基线；若同帧 mirror `occlusion>0`，D2 以 reported `occlusion` 与相关 computed bottom 为准并记录该矛盾。本契约不授权修改诊断层。
+  5. **诊断只读口径**：scale<1 帧的 `derivedState:none / zoomed-session-exempt` 只描述旧基线；若同帧 mirror `occlusion>0`，D2 以 reported `occlusion` 与相关 computed bottom 为准并记录该矛盾。本契约原终审不授权修改诊断层。**2026-11-05 后续仲裁的窄例外**：`AUTH-20261105-D2-SETTLE-READONLY` 只准追加已有 settle 状态的只读镜像 / 传输，不改产品行为、timer、阈值、恢复锁、raw、owed 或 verdict，且必须由调度者独立派单和双评审；`AUTH-20261105-DIAG-PANEL-CLIENT` 另只修工具自身 client 界。zoom 派生标签本轮不改。上述授权不追溯改变 c3ee 的缺字段事实。
   6. **容器早退的 D2 状态**：`!container` 早退须同步当前 scale 历史并清空 scale settle 候选，容器恢复后的首帧不得因消失窗口内的变档伪造一次 `zoomReturnFrame`。该要求仅限 D2 scale / settle 状态，不改变冻结会话 / 恢复锁及其他历史字段的既有语义；对应容器消失 / 变档 / 恢复用例是直接单元门禁，不是真机 PASS。
 - **IME 组合态 ≠ 避让会话持续声明**：中文 / 日文等输入法尚未上屏的组合窗口期间是**同一个逻辑输入过程**，组合窗口占位不得被判为"键盘重新弹出"，也不得被当作除键盘顶边变化之外的新遮挡来源；但**几何避让会话是否 active 仍按上述冻结 §5 状态机的当帧条件判定**——"IME 属同一逻辑输入过程"不能推定避让会话始终 active，不得用 IME 表述覆盖冻结退出规则（`raw ≤ 1` / 失焦 / 缩放退出、同几何回落退出）；D2 新实现中的 scale 准入 / 退出按前一条已签署目标修正解释，其余 IME 口径不变。
 - **归属（所有权）**：由当前焦点决定的"谁负责输入可见性"，不是进程锁、不是标志位、不是 pan 开关。
@@ -167,6 +167,7 @@
 - **目标**：**活动避让会话**期间，终端**输入行**与**最后一行**位于键盘之上可见（client 坐标 `rect.bottom ≤ vv.height + 1`），不被键盘压住；二者是分别判定的两个量（术语章），须各自成立、不得互相代替。
 - **基线**：现役 p9 `verify-sop.mjs` **只在避让会话的让位稳定帧**判 `xtermRows.bottom ≤ vv.height + 1`；非会话期（owed = 0）终端满高、`xtermRows.bottom` 越出 `vv.height` 是冻结 §5 的预期，不是 FAIL。pan 帧下（GI-1 / GI-2 所述）该目标**未达成**。行数减少本身是产品可接受后果，但不等于"目标已实现"。
 - **事实补记（滞后实例）**：C 会话 `seq 573` 是 `periodic` **稳定帧**，`vv.height` 已由 679.5 变为 320，而 `occlusion` 仍为 `0`、`xtermRows.bottom` 仍为 `720`（即 applier 滞后一帧）；紧接的 `seq 574`（`resize` 过渡帧）applied 尺寸已更新为 `occlusion=428`、`xtermRows.bottom=295`，下一个稳定帧 `seq 575`（`settle`）保持正确。此类候选滞后帧的判据适用**GI-2 / GI-3 / GI-4 / GI-5 共用三态规则**（见 GI-5 后的专节；本契约新目标口径）；该稳定帧在现行 p9 重放口径下 owed `occlusion = 428` 而 reported `0`，按现行口径属已记录的不一致事实——本文不豁免、也不宣称其已通过冻结验收。
+- **2026-11-05 c3ee 存疑实例（不判 PASS / FAIL）**：`seq 254` 起出现 xterm helper client rect `top=839 / bottom=856` 的停滞观察；现有混合会话不能区分宿主聚焦位置、refit 滞后与真实输入行出屏，也没有同场 rows/cols / xtermRows / 截图闭合。GI-3 对 c3ee 维持 **INCONCLUSIVE**，列入 DATA-COLLECTION 的 `r3-D1-GI3` 专项：按 `pty-refit-check.mjs` 的 rows/cols / xtermRows / ack 字段定向复采。该 Headless 工具自身结果只证明 GI-7 工具链，不替代真机 GI-3；真机缺字段由 `AUTH-20261105-R3-GI3-READONLY` 独立补齐，不授权采集者临时改工具。
 
 ### GI-4 quick-keys（入口 / 面板 / 控制列）
 
@@ -208,6 +209,7 @@
 - **基线**：快照未上报 `#viewport-debug-panel` 自身 rect；`panelLayoutFor()` 只使用 `vv.height`，无 `vv.offsetTop` 输入；顶部居位在外壳 −403px 平移时离屏，底部居位在键盘下可能被覆盖；既有 Node/Headless 测试未覆盖底部居位与非零 `vv.offsetTop`（VALIDATION"诊断面板自身问题"节）。工具层修正与产品几何修改必须分开提交（PLAN Phase 2 任务 2）；本段基线描述不构成产品实现授权。
 - **Phase 2 矩阵口径（`937d91f` 的实现范围，不是真机 PASS）**：四角 `tl/tr/bl/br` 覆盖三档键盘 × 四档 pan（0、纵向 403、横向 44、横向 overscroll −120）；`free` 覆盖三档键盘 × 三档拖拽 × pan 0/纵向 403，另有横向与负 overscroll 边界用例。每格须满足 client rect 在屏显区域内，或显式 `unsupported` + 原因；Node 矩阵只证明纯函数与工具自报，不替代 iPadOS 真机 Capture / 截图。
 - **单值不支持原因**：`unsupportedReason` 保持单个**首要原因**，双轴或落位同时不满足时按“纵向 → 横向 → 落位越界”的确定顺序取首因；本契约不要求多值 schema。首因之外不得反推其他轴已经充足，整格仍按 `unsupported` 处理。
+- **2026-11-05 已登记工具回归**：c3ee `seq 253` 的 free 面板 client rect 实际位于屏显区域且自报 `insideVisibleViewport=true`，却因 layout viewport 界而报 `unsupported / visible-window-outside-layout-viewport`。这是工具坐标错配，不是产品 FAIL。`AUTH-20261105-DIAG-PANEL-CLIENT` 采用方案②：不把 layout 视口界作为 unsupported 理由，支持性与快照自省均按 client `[0,vv.width] × [0,vv.height]` 判定并补横向检查；须新增同形态 fixture、跑原矩阵并真机复采。本登记不追溯改写 seq253，也不因原 B-2 / E 系列批准而免除新改动的双评审。
 - **工具干净停止（R6）**：`stop()` 后不得残留工具注册的 document / window / visualViewport 监听器或待执行 RAF、settle / retry / continuous 计时器，不得再产生新采集；重复 start/stop 不得重复注册。已开始的上传可自然结束，但不得续队或重试。Node 判据须使 `docListeners` 与 VV 监听器可观测为空、第二轮每个注册键仍恰有一个、停止后事件不新增帧；未被测试覆盖的计时器 / 在途上传不得由该测试单独宣称已验证。
 
 ## E. D1–D4 签署状态
@@ -235,6 +237,8 @@
 - **FAIL**：任一 MUST 不变量在真机被观测不成立。持续 pan 与终端出屏为**停止型 FAIL**：停止实现并回到 D1，不追加阈值。
 - **INCONCLUSIVE**：关键字段缺失、seq 缺口、场景未被覆盖、诊断面板不可达、或只有 Headless Chrome / CDP 结构证据。**缺证据不等于通过**；Headless Chrome 不替代真机键盘 / pan / zoom 证据（核心原则 §8 第 6 条）。
 - **局部 PASS 不得覆盖整段**：`seq 367–486`（A 会话 `scale=1`）因 quick-keys 从未打开，该段单判 **INCONCLUSIVE**；`seq 88–99`（C 会话 quick-keys）只认证其几何与命中；C 全文件另有 8 个序列缺口，不得作为无缺口验收包。
+- **探索性会话的子项级 PASS（2026-11-05 补充，不放宽整行门槛）**：混合会话可以把字段齐全且可独立判定的已观测行为记为“子项级 PASS”，即使该次没有截图；但必须同时列出其未验证 MUST，且不得据此给契约整行 / 整个会话 PASS。截图、唯一来源、连续无缺口等整行要求仍按上一条 PASS 定义执行。尤其 c3ee 没有同场截图，31 帧 scale<1 几何与 owner“此次数据为准”只认证该行为子项，不豁免 D-C、D-B / D-D、F18、D1、GI-3 或视觉项。任何“99.2%”覆盖率都不是验收 verdict。
+- **结构性不可验不是产品失败**：探针 schema 未公开 `scaleSettle*` 且 1000ms periodic 无法观察产品 500ms tick 时，D-C 在 c3ee 中只能记 **INCONCLUSIVE**。只有完成另立的只读 schema 授权并采到连续 tick 链后才可判该子项；不得从稳定几何反推 settle，也不得用人工猜测的第一 tick 替代。
 - **证据完整性**：按冻结文档 §8 证据边界——缺 `probeVersion`、缺关键字段（`vv.height` / `app.bottom` / 根 `scrollTop` / `scrollingElementScrollTop` / `occlusion` / `controls` / `statusBar`）、缺结构字段、非 zoom 帧缺 `probe` 或 `probe.visualBottom`、seq 重复或有缺口，一律 **INCONCLUSIVE**。**戳记（`probeVersion`）必须匹配本次被测构建声明的值，不得在文档或判据里写死历史值**：现行冻结基线声明的戳记是 `p9-full-shell-session-avoidance-v1`（冻结文档 §8、现役 `evidence/verify-sop.mjs` 期望值）；`p8-full-shell-overlay-wheel-v1` 只出现在历史 A0-SOP（v3.1 / p8 时代历史执行 SOP）正文与其时代的历史会话中——**历史 SOP 与现役工具不同代**，回放历史 raw 时按该会话自身携带的戳记判定归属哪一代工具，不得混代比对，也不得以戳记不同反判历史会话造假。
 - **探针 `ptyHosts[].visible` 的语义边界**：`visible` 只表示该宿主未被隐藏（未被打上隐藏类 / `display:none`），**不等于**它位于屏显区域内。C 会话 `seq 218`（`scroll` 过渡帧）宿主 `top=-363`、`bottom=-103` 而 `visible=true`；同一形态在稳定帧中反复出现（`settle` / `periodic` 共 52 帧，如 `seq 38–42`、`seq 85–87`；计入 `manual` 后 56 帧；另有 `keyboard-hint` 1 帧（`seq 264`，宿主底边同形态 −103），按稳定帧定义合计 **57 帧**）。**验收一律以 rect 与屏显区域 `[0, vv.height]` 比较为准，不得以 `visible=true` 判"可见"。**
 
@@ -266,6 +270,8 @@
 | GI-1..GI-9（回归） | 暗色 / 浅色、safe-area | 截图是否无默认白画布缝；几何与视觉是否一致 | 移开诊断面板后的截图对照 | `elementFromPoint` 只是辅助证据、不等于实际像素验收，真机截图是必要证据（冻结文档 §8） |
 | R6 / GI-9 | 全部场景的诊断可达性（**本行超出 PLAN §6 矩阵，衔接对象为 PLAN R6、§1.2 第 3 条与 Phase 2 门禁**） | 面板在各居位与键盘状态下是否可读可操作；`stop()` 后工具是否干净停止 | 角集 `tl/tr/bl/br/free` × 键盘 × pan（含纵向 403、横向与负 overscroll；各组合按 GI-9 已实现矩阵口径）+ 监听器 / 计时器 / 重复启动停止检查 | 不可达即记“不支持”或缺证据 → INCONCLUSIVE，不得据此判 PASS；Node 的 `docListeners` 清空与无新增帧只证明其覆盖项，不替代真机可达性或未覆盖残留项 |
 
+**F13–F14 / D2 的 c3ee 登记（2026-11-05）**：该 483 帧文件是探索性混合会话，不是 Z-PINCH / Z-MENU / Z-MAGIC 验收包。可登记的行为子项为：scale=1 的 67 帧 428 三盒几何（其中 A3 `seq413–418` 是 HO-3 INPUT，仅作 D-A / R2 已知偏离实例）、scale=0.75 的五组共 31 帧 `occ=raw=570.34375`、scale>1 的 97 帧 occ=0，以及回程候选当帧付 0。**D2 整行仍 INCONCLUSIVE**：无唯一 zoomSource / 截图、缺 seq355、seq468 reload、settle 无字段、25% / 50% 同侧、D-B 未触发、F18 / D1 / GI-3 未闭合。owner 指令仅支持 scale<1 行为子项记录；r3 三个单源会话和 GI-3 专项仍是正式补证路径，详见 VALIDATION 与 DATA-COLLECTION SOP v3。
+
 **证据分级（R6，衔接 PLAN §1.2 第 5 条 / Phase 0）**：原始会话（`raw/*.jsonl`）、派生连续段（如 `raw/final116-20261104-a-scale1.jsonl`、`raw/final116-20261104-c-quickkeys.jsonl`）、最终验收记录三层**分开标识、不得互相冒充**；原始文件不改写；引用 PASS/FAIL 必须注明会话、连续 seq 段与适用场景。
 
 **衔接说明**：本表以 PLAN §6 矩阵场景为主；**三行超出 §6 范围**（切回旧实例 / 隐藏宿主 → 衔接 PLAN Phase 5 与 D3；IME 组合态 → 衔接 PLAN Phase 5"IME"与 §1.2；诊断可达性 → 衔接 PLAN R6、§1.2 第 3 条与 Phase 2 门禁），已在各行"场景"列就地标注衔接对象，不声称它们是 §6 原有条目。iPhone Safari 至少补一轮；不同 iPadOS 版本与 Chrome(iOS) 设备可得时补充；未执行项必须逐条列出（PLAN §6 末段）。本文不宣称任何一条已 PASS。
@@ -287,7 +293,7 @@
 | 旧 A0 判定树各分支（钉高坐标、准入守卫、flex 传导等）与 §3.2 必采矩阵（**历史**：v3.1 / p8 时代 A0-SOP 与旧高度计划的分类工具） | 各自服务旧高度/钉高路径的分类，且部分分支仍未关闭 | 属旧高度算法命题的分类工具，不定义输入归属；历史采证文档不得升格为 v2.0 结论 |
 | 旧计划中 #100 顶栏/动作矩阵、#118 Portal、`.pen` 设计门禁与 `pen` CLI 口径 | 其独立工作包自身范围 | v2.0 明确不纳入（PLAN §0），不阻塞也不作为本契约依据 |
 
-**历史证据处置**：`DATA-COLLECTION.md`、`CLUSTER-*.md`、`panel-check.mjs` / `panel-occlusion.mjs` 产物及 `raw/` 下 p7 / p8 / choiceA / sop* 会话仍是历史证据，**不改写、不升格**；当前有效证据以 VALIDATION 记述的 A 会话 `seq 367–486`（`scale=1` 连续段）、**A 会话早段 153 帧 `scale=0.75`（与 D2 依据字面对齐：只作为 zoom 豁免记录，不能认证键盘行为）**、C 会话 `seq 88–99`（quick-keys 段）、C 会话 pan 事实（`vv.offsetTop=403`、`app.top=-403`、120 稳定帧、宿主底边 −103），以及 2026-11-04 产品 owner 真机口头 / 文字反馈为限；owner 材料只作 **INCONCLUSIVE** 级产品证据，其中双指 / 缩放来源实测与明确指令可作为 D2 签署依据，debug 面板观察只作 follow-up 触发记录；二者都不是正式采证会话，不产生行为 PASS。
+**历史证据处置**：`DATA-COLLECTION.md`、`CLUSTER-*.md`、`panel-check.mjs` / `panel-occlusion.mjs` 产物及 `raw/` 下 p7 / p8 / choiceA / sop* 会话仍是历史证据，**不改写、不升格**；当前有效证据以 VALIDATION 记述的 A 会话 `seq 367–486`（`scale=1` 连续段）、**A 会话早段 153 帧 `scale=0.75`（与 D2 依据字面对齐：只作为 zoom 豁免记录，不能认证键盘行为）**、C 会话 `seq 88–99`（quick-keys 段）、C 会话 pan 事实（`vv.offsetTop=403`、`app.top=-403`、120 稳定帧、宿主底边 −103），以及 2026-11-04 产品 owner 真机口头 / 文字反馈为原签署依据；owner 材料只作 **INCONCLUSIVE** 级产品证据，其中双指 / 缩放来源实测与明确指令可作为 D2 签署依据，debug 面板观察只作 follow-up 触发记录；二者都不是正式采证会话，不产生行为 PASS。**2026-11-05 新增 c3ee 483 帧探索性混合会话与 owner“此次数据为准”指令，只按 VALIDATION 的行为子项表登记；D2 整行及其余未闭合项仍 INCONCLUSIVE，必须走 r3 单源补采。**
 
 ---
 

@@ -14,8 +14,72 @@
 | 2026-11-04；产品 owner；iPad 真机口头反馈 | `scale=1` 软键盘避让“基本符合需求”；`scale>1` 不随软键盘自适应，用户判定符合预期；`scale<1` 同样不响应，用户判定“与需求预期不符” | **INCONCLUSIVE（口头真机旁证）**。可登记用户观察与产品期望，并作为启动 D2 正式评估的产品指令；观察与冻结 §5.6 的双向 zoom 退出条件一致，但不得写成冻结行为或 D2 验收 PASS。本行只保留“启动评估”当时状态；同日后续来源实测与确定目标指令见下行，D2 已由本轮仲裁另行签署 | 无截图、无 raw 会话、无缩放来源标注或连续 seq；来源与产品目标由下行直接产品证据补充，实现后仍须按 PLAN §4 D2 的 Z 系列会话验收 |
 | 2026-11-04；产品 owner；iPad 真机操作观察（文字口径） | 一、双指手势缩小两种情况实测：<br>1. 当时 scale=1 时，双指不能缩小页面，直接缩小整个浏览器页面进入平铺标签页（Tab Overview 视图，不是 vv.scale<1）；<br>2. 当时 scale>1 时，双指可以缩小页面，但双手释放后必定回到 scale=1。<br>二、实测找到的实现 scale<1 的两种方法：<br>1. 妙控键盘/外接键盘 cmd+'-'（组合键）；<br>2. 浏览器菜单里的具体缩放指令。<br>三、产品指令："按照我这个需求（scale<1 场景终端软键盘避让）将它设为确定的目标"。 | **INCONCLUSIVE（产品 owner 真机操作观察、文字口径）**；作为 D2 来源判断的**直接产品证据**和确定目标的签署依据。可支持 D2 非对称目标签署，不可支持“实现已完成”或真机行为 PASS；Tab Overview 不得记为 `vv.scale<1`，释放回 1 也不得写成应用主动修改 scale | 无截图 / 无 raw 会话 / 无连续 seq；签署后仍须以独立连续 Z-PINCH / Z-MENU / Z-MAGIC 会话、手动 Capture 与同场截图验证已实现行为，A0 0.75 / 153 帧场景为必测锚点 |
 | 2026-11-04；产品 owner；iPad 真机口头反馈 | 打开链接后 debug 面板存在但默认未展开，需手动展开 | **INCONCLUSIVE（口头真机旁证）**；登记为独立可改进 follow-up，不判定 R6 / 冻结行为失败，不产生 PASS | 无截图或 raw；需先确认“未展开”指 More 次要控件还是主面板状态，再另行明确默认态需求与验收；未获授权不改诊断工具 |
+| 2026-11-05；c3ee 真机会话 + 双评审 + owner“此次数据为准，其余信息一致” | 483 帧探索性混合会话；`scale<1` 深键盘 31 帧让位几何与 owner 现场确认一致 | **D2 整行 INCONCLUSIVE；仅下列行为子项 PASS**。owner 指令允许把“scale<1 避让成立”登记为 D2 真机行的子项级记录，不升格为整行验收，不免除其余形态项 | 非验收包：混合来源、无 `zoomSource`、无截图、缺 `seq 355`、`seq 468` 为 reload 分界、无 settle 可见性；按 DATA-COLLECTION 的 SOP v3 补采 |
 
 **D2 签署前交叉核对（只读检查，不是新增真机测试）**：A 原始会话共 273 帧，其中早段 153 帧全为 `scale=0.75` 且 `occlusion=0`、后段 120 帧全为 `scale=1`；C 原始会话 583 帧全为 `scale=1`。因此 A 与旧 zoom guard 一致，C 不含 zoom 帧反例；A 没有唯一缩放来源标注，不能证明其 0.75 来自何种操作。历史 `DATA-COLLECTION.md` 将“双指/双击缩放”和“75% 与 100%”列在同一组合操作行，缺少唯一 `zoomSource`，既不足以构成“双指从 1 持续缩小至 `vv.scale<1`”的直接反例，也不可用作来源证明。本次未发现与 owner 文字口径直接冲突的现有帧证据；该结论不替代实现后的 Z 系列真机验收。
+
+## 2026-11-05 c3ee 探索性混合会话仲裁（D2 真机行，非验收包）
+
+### 登记口径与原始事实
+
+- 原始文件为 [c3ee73e2653ba89dc615d4554ceb7204.jsonl](raw/c3ee73e2653ba89dc615d4554ceb7204.jsonl)，本地重存档带 `seq` / `receivedAt`。共 **483 行 / 483 帧**，`seq 1–484` 中只缺 **`seq 355`**；`seq 1` 与 **`seq 468`** 均为 `init`，后者是同标签页 reload 的新运行时分界，不能把前后两段当作同一产品状态机连续链。评审报告中的行号 / seq 对应关系以评审报告为准；本节引用一律显式写 seq，不改写 raw。
+- 本会话混合双指、缩放指令、PTY / Web 输入与多次键盘操作，没有唯一 `zoomSource`，没有同场截图，不能拆事后冒充 Z-PINCH / Z-MENU / Z-MAGIC 三条独立验收会话。**登记为“探索性混合会话（非验收包）”；D2 真机整行维持 INCONCLUSIVE，不得上浮为整行 PASS，也不得以“99.2%”之类覆盖率代替 verdict。**
+- 仲裁只读复算与双评审一致的事实如下；这些事实支持指定的行为子项，不自动满足来源、时序、视觉或完整会话门禁。
+
+| 事实 | 复核结果 | 证明边界 |
+| --- | --- | --- |
+| applier mirror 与 reported | `mirrorOcclusion ≡ occlusion` **483/483** | 证明本会话镜像传输一致，不证明派生标签正确 |
+| 正让位与 raw | 正让位 **98/98** 帧 `occlusion=raw` | 不含 owed / latch / settle 的独立证明 |
+| 三盒几何 | 同 98 帧均为宿主 `raw`、控制列 `20+raw`、Transport `raw`，**98/98** 自洽 | 只证明数值与 computed bottom，不替代截图和输入行 / 最后一行验收 |
+| scale=1 深键盘 | A1 `seq 37–39`、A2 `seq 47–98`、A3 `seq 413–418`、A4 `seq 420–425`，共 **67 帧** `raw=occlusion=428`，四段符合冻结 §5 的已观测让位几何 | A3 是 HO-3 `INPUT / web-input`，不是 PTY 证明；见下方 D-A 偏离 |
+| scale=0.75 深键盘 | `seq 132–135`、`140–150`、`167–174`、`440–443`、`448–451` 共 **31 帧** `raw=occlusion=570.34375`；五组对应五次键盘开 / 合，scale 恒 0.75 | 可证稳定观察帧的 scale<1 让位几何；不能反推两个 500ms tick、来源或门线选择 |
+| scale>1 保守退出 | 带外 scale>1 共 **97 帧 occ=0**；`seq 319–324` 在 `scale=1.7473722696304321` 下 `raw=566.59375` 仍付 0，含手动 Capture `seq 323` | 是 opt-out 的硬证据；无唯一 zoomSource，仍只作行为子项 |
+| 回程付 0 | 双评审登记的 4 个回程候选均付 0；只有 **`seq 386`** 有判别力：前态 `scale=1.0103167295455933`，超过 0.01 的余量约 `0.00031673`（仅阈值的约 3.17%），当帧 `raw=428 / occ=0` | 不据此认证 D-D 全项；边缘样本、旧锁、settle 后重入均须定向补证 |
+| D-A / HO-3 现场实例 | A3 `seq 413–418` 为普通 Web `INPUT`，仍 `occ=428` | 登记为方案 B / 冻结通用 editable 谓词下的 **R2 已知偏离现场实例**；不判 D2 PTY PASS，不关闭 Phase 3，也不把该六帧改判为 HO-2 |
+| 派生 zoom 标签 | 多个 scale<1 正让位帧同时报 `derivedState:none / basis=zoomed-session-exempt` 与正 mirror | 以 reported + computed bottom 为准；标签矛盾登记为工具限制，不反判产品 FAIL |
+| 面板支持性 | `seq 253` 自报 `unsupported / visible-window-outside-layout-viewport`，但 panel client rect 在可视区内且 `insideVisibleViewport=true`；free 拖拽预算用 `vvWidth`，支撑判定另用 `layoutWidth`，而 `insideVisibleViewport` 只查纵向 | 属工具误判，不是产品不支持证据；修复授权见下 |
+
+### 行为子项 PASS 表（只限已观测行为，不是整行验收）
+
+| 子项 | verdict | 适用范围与保留项 |
+| --- | --- | --- |
+| B1：scale=1 深键盘三盒让位 / 恢复几何 | **PASS（子项级）** | 上述 A1–A4 共 67 帧；A3 只证明方案 B 下 Web 输入也会触发既有几何，不构成 HO-3 / R2 合规或 D2 PTY 准入证明 |
+| B2：scale=0.75 的 PTY 软键盘让位与无键盘归零 | **PASS（子项级；owner 现场确认 + 31 帧）** | 只登记“scale<1 避让成立”的已观测几何行为；D-C settle、25% / 50%、D-B / D-D、截图和唯一来源仍是独立未闭合项 |
+| B3：scale>1 全程保守 opt-out | **PASS（子项级）** | 97 帧 occ=0，含 raw=566.59375 硬证据；不认证双指来源前提或释放后的完整状态机 |
+| B4：回程候选当帧付 0 | **PASS（子项级观察）** | 只限当帧 `occ=0`；不扩张为 settle、恢复锁或回程后重入 PASS |
+
+**99.2% 把关结论：确认评审 1 的限制必须保留。** 本次没有截图，任何 PASS 只能是上述子项级、非整行登记；即使未来补了档外截图，也只能补足其明确对应的同场行为项，不能追溯把 c3ee 混合会话变成三条单源验收包或补齐 settle / latch 缺字段。
+
+### INCONCLUSIVE 清单与补采责任
+
+| 条目 | 本轮状态 / 原因 | r3 补采或前置条件 |
+| --- | --- | --- |
+| D2 整行 | **INCONCLUSIVE**；混合会话、无唯一来源、无截图、seq 缺口和 reload 分界 | 按 DATA-COLLECTION SOP v3 拆为独立 Z-PINCH / Z-MENU / Z-MAGIC，不 reuse c3ee 名义 |
+| D-C settle | **结构性 INCONCLUSIVE**；schema 无 `scaleSettle*`，1000ms periodic 看不到产品 500ms tick；`unlockTrace.captureTick` 不是 settle tick | 先执行另立授权 `AUTH-20261105-D2-SETTLE-READONLY`，再在 r3 采连续两 tick 及重置 / 回程链 |
+| 25% / 50% 判别 | **INCONCLUSIVE**；428 与 570.34375 同越两线，浅帧没有落在两线之间 | 在 `clientHeight=997` 时定向取得 **249.25 < raw < 498.5**，分别做未锁进入与恢复锁重入；达不到实际数值即保留 INCONCLUSIVE |
+| D-B 纯变档退出 | **INCONCLUSIVE / 未触发**；30 个 scale 变档帧无一落在五组抖动点，也无变档时活动会话 | 从 scale=1、PTY 持焦、深键盘活动让位中，用该行唯一来源做一次粗糙变档到 0.75；逐步保存变档帧与两个 settle tick |
+| D-D 恢复锁 / 回程重入 | **INCONCLUSIVE**；只有 seq386 一个边缘判别观察，缺旧锁和 settle 后 25% / 50% 分辨 | r3 分别保留纯 0.75→1 与 scale>1→1 链，不能用深键盘同越两线来宣称 latch 已证 |
+| F18 干净开→关→重开 | **INCONCLUSIVE**；混合操作不能证明焦点全程不离开终端 | 独立连续段全程 `xterm-helper-textarea` 前台持焦，无中间 Web 聚焦 / 点击解锁，保留全部事件帧 |
+| D1 对比 | **INCONCLUSIVE**；缺“xterm helper 持焦 + 键盘开 + Safari pan”与普通 Web input 的同场对比帧 | r3-D1-GI3 固定 scale=1，分别采普通 input 与 helper 的 rect、pan 和事件顺序 |
+| GI-3 / GI-7 helper 与 rows/cols | **INCONCLUSIVE**；`seq 254` 起 helper rect 出现 `top=839 / bottom=856` 的停滞观察，现有材料不能区分聚焦 rect、refit 滞后与真实出屏 | r3 专项以 `pty-refit-check.mjs` 的 rows / cols / xtermRows / ack 读数作定向清单；Headless 结果只证 GI-7 工具链，不替代真机 GI-3 |
+| 视觉与其余形态项 | **INCONCLUSIVE**；无截图，不能以 98 帧三盒数值关闭输入行、最后一行、quick-keys 视觉可达性或整行 | 每会话 1–2 张同场截图并绑定 seq；缺哪项就保留哪项，不用 owner 指令一并豁免 |
+
+补采清单同时固定为：①三个单源会话拆分；②逐会话 `zoomSource` 人工标注；③settle 计数 / tick 可见性；④截图同场链；⑤25% / 50% 中间 raw 用例；⑥D-B 活动会话中变档用例；⑦F18 干净用例；⑧D1 helper pan 对比帧；⑨GI-3 rows/cols 定向复采。执行细节见 DATA-COLLECTION“命题二：2026-11-05 首轮混合会话后二轮单源采证”。
+
+### settle 与两处诊断缺陷的仲裁
+
+1. **D-C 选择候选一：另立只读 schema 增补授权，不选择人工记“重启后第一 tick”，也不永久降级。** 原“不授权修改诊断层”的意图是防止 D2 把产品修复与 diagnostics 混成一轮、借工具试修产品或改判据制造 PASS；本例外只读取已经存在的状态，禁止写产品几何、改状态机 / 阈值 / timer、改 owed 或 verdict，故不破坏该意图。人工记录第一 tick 无法证明两个连续合格 tick、候选重置和 pending 优先，不能替代机器字段。若授权未落地，D-C 继续结构性 INCONCLUSIVE，不得以 31 帧稳定结果反推 settle PASS。
+2. **zoom 派生标签：本轮选择不改。** reported mirror 已有 483/483 一致证据，现行契约也明确派生标签不是权威；把 zoom 分支改为先读 mirror 只能消除文案矛盾，不能增加 settle / 来源 / 门线证据，反而会让旧基线标签语义和既有测试发生无关漂移。保留“以 reported 为准 + 记录矛盾”的读法；未来如确需消歧，必须另案改标签与直接测试并双评审，不得夹进 settle 或面板修复。
+3. **面板 vvWidth / layoutWidth 错配：批准另立修复，采用方案②。** 不用 layout viewport 的矩形界作为 `unsupported` 理由，支持性统一由 client 坐标的实际落点对 `[0,vv.width] × [0,vv.height]` 判定，并给快照 `insideVisibleViewport` 补横向 client 界。方案①把 free 拖拽和支撑判定都改随 layoutWidth，虽能消除一处不一致，却继续混用验收坐标并可能把实际屏外误判为 supported，故不取。修复后须以 seq253 同形态真机复采，不追溯改写本次 raw。
+
+### 另立授权清单（本轮只登记，未改代码、未执行、未 commit）
+
+| 编号 | 文件与改动范围 | 授权决定 / 评审路径 |
+| --- | --- | --- |
+| **AUTH-20261105-D2-SETTLE-READONLY** | `internal/ui/static/index.html`：仅允许在既有 applier mirror 边界发布 D2 settle 的只读诊断快照，不得改任何行为语句；`internal/ui/debugassets/viewport_debug.js`：追加读取与采集；`internal/app/viewport_debug.go`：追加 schema 传输 / 校验；直接测试限 `internal/ui/testdata/viewport_debug.test.mjs`、`internal/ui/viewport_debug_on_test.go`、`internal/app/viewport_debug_test.go`，既有锚点确需同步时才可窄改 `internal/ui/ui_test.go` | **批准，待调度者派编码。** 至少公开六个 `scaleSettle*` 状态值、`pending/settled`、当次 pass 来源与单调序号，并保证连续两个 500ms tick 都可观测（每 tick 只读 capture 或有界只读 journal 的实现选择须在编码前写清）；只有 1s periodic 终态不合格。同步新 `schemaRev/probeVersion`，旧 raw 不回填；不改 `evidence/*.mjs`、不新增 timer、不改门线 / latch / 验收判据。路径：独立诊断原子变更 → 针对性 Node + `go test -tags viewportdebug` → 双评审 → r3 真机双评审；通过工具门禁不等于 D-C 真机 PASS |
+| **AUTH-20261105-DIAG-PANEL-CLIENT** | `internal/ui/debugassets/viewport_debug.js` 的 `panelLayoutFor` / panel 自省，及 `internal/ui/testdata/viewport_debug.test.mjs` 直接测试；仅当既有资产锚点必须同步时窄改 `internal/ui/viewport_debug_on_test.go` | **批准方案②，待调度者派编码。** 删除 layout 界作为 unsupported 依据，保留 / 补齐 client 纵横界与 free 拖拽同场回归；不改产品 raw / occlusion，不改 evidence `.mjs`。路径：独立诊断原子变更 → Node 矩阵（含 seq253 同形态 fixture）→ 双评审 → 真机复采；原 `937d91f` 评审范围不能用来豁免本次回归复核 |
+| **AUTH-20261105-R3-GI3-READONLY** | `internal/ui/debugassets/viewport_debug.js`：追加前台 PTY 的 `.xterm-rows` client rect、`term.rows/cols` 与 `appliedTTYSize/lastSentTTYResize/pendingTTYResize` 只读快照，不可得必须显式标记；`internal/app/viewport_debug.go`：追加传输 / 校验；直接测试限 `internal/ui/testdata/viewport_debug.test.mjs`、`internal/ui/viewport_debug_on_test.go`、`internal/app/viewport_debug_test.go` | **批准，待调度者独立派单。** 不采 instance id、终端正文或 token，不改产品状态、refit / ack、evidence `pty-refit-check.mjs` 或其 judge，不新增 zoom 判据。路径：独立诊断原子变更 → Node + viewportdebug Go → 双评审 → r3-D1-GI3 真机；Headless pty-refit 只证 GI-7 工具链，不关闭 GI-3 |
+| **AUTH-20261105-DIAG-ZOOM-LABEL** | 无文件改动 | **本轮不授权、不派编码。** 保留派生标签及旧基线含义，验收继续以 reported + computed bottom 为准；若未来另提消歧，须独立授权和双评审，不得与上述两项捆绑 |
 
 ## D2 Phase 2 实施双评审终审登记（非真机验收）
 
@@ -23,7 +87,7 @@
 - D-B 的免置新锁在复评中收窄为“纯 scale<1 带外变档退出”（当帧仍 `raw>1 && focusEditable`），settle 后按未锁 25% 重判；同帧 raw<=1 / 失焦及 scale>1 仍按冻结规则置 / 保留恢复锁，settle 不自动清锁。这是 PLAN / PHASE1-CONTRACT 记录的对冻结 §5.6 源码置锁顺序的窄例外，不回写冻结文档。D-D 要求 0.75→1 / scale>1→1 回程帧付 0 并重新 settle；其中 scale>1→1 不抹除在先 scale>1 退出形成的旧锁，未被独立解锁时 settle 后按 50%，D2-6 的保守结果据此成立。
 - D-C 的 settle 定义固定为连续两次既有 500ms tick 合格：相邻 scale 与相对首个候选 tick / 当前已 settle 基线的差均 `<=0.001`，候选期间 layoutHeight / vv.width / raw 不变；基线只在重建时更新，累计超 ε 的慢速漂移同样重置，已 settled 的累计亚 ε 漂移保持。普通事件 pass 不计数，计数达 2 后饱和，已 settled 后单纯键盘 raw 开合不重置 scale settle。scale>1 域不得开启 / 累计候选，进入该域须清空旧候选。不新增 timer 或墙钟 / 单调时钟，hidden 不累计。ε 边界按 JavaScript binary64 的实际差判定，十进制“恰好 0.001”不保证等值，1 ULP 用例须按位构造。完整重置、回程和测试口径见 PLAN §4 D2 与 PHASE1-CONTRACT 术语章 / F13-F14。
 - **参数证据边界**：对 `raw/final116-20261104-a.jsonl` 只读复算，按文件顺序的早段 153 帧 scale 唯一值为精确 `0.75`，相邻 scale 差唯一值为 `0`；其中 raw 范围为 `0–571.34375`，100 帧 `raw>1`。它既没有变档过程，也没有 1 ULP 或亚 ε 抖动样本，不能据此估计噪声上限，也不能把这 153 帧概括成“全部 raw=0 / 无键盘”。因此 N=2 / ε=0.001 是保守暂定实现参数，不是实测结论；Z-MENU / Z-MAGIC 必须记录实际 scale、raw 和 tick 节奏复核，未达到精确 0.75 时该锚点 INCONCLUSIVE，其余实际 scale<1 场景按实记录。
-- 诊断层继续只读：`viewport_debug.js:675–680` 先对 zoom 帧返回 `derivedState:none / zoomed-session-exempt`，再检查 mirror `occlusion>1`，所以 D2 下同帧标签与正 occlusion 可并存。验收以 reported `occlusion` + computed bottom 为准并记录该矛盾，不授权修改诊断资产、探针或重放器。
+- 诊断层继续只读：`viewport_debug.js:675–680` 先对 zoom 帧返回 `derivedState:none / zoomed-session-exempt`，再检查 mirror `occlusion>1`，所以 D2 下同帧标签与正 occlusion 可并存。验收以 reported `occlusion` + computed bottom 为准并记录该矛盾；本句“不授权修改诊断资产、探针或重放器”是该次终审的历史边界，2026-11-05 仅由上方明确编号的独立只读 / 面板授权例外后续接替，不追溯扩大原编码包。
 - 当前实现仍须按上述 D-B / D-C / D-D 及 PLAN 所列测试锚点修订后再评审；本节不是 APPROVE，不替代 Z-PINCH / Z-MENU / Z-MAGIC，也不关闭 R2 的 Phase 3 门禁。
 
 ## D2 实施修订版复评登记（非真机验收）
