@@ -15,6 +15,7 @@
 | 2026-11-04；产品 owner；iPad 真机操作观察（文字口径） | 一、双指手势缩小两种情况实测：<br>1. 当时 scale=1 时，双指不能缩小页面，直接缩小整个浏览器页面进入平铺标签页（Tab Overview 视图，不是 vv.scale<1）；<br>2. 当时 scale>1 时，双指可以缩小页面，但双手释放后必定回到 scale=1。<br>二、实测找到的实现 scale<1 的两种方法：<br>1. 妙控键盘/外接键盘 cmd+'-'（组合键）；<br>2. 浏览器菜单里的具体缩放指令。<br>三、产品指令："按照我这个需求（scale<1 场景终端软键盘避让）将它设为确定的目标"。 | **INCONCLUSIVE（产品 owner 真机操作观察、文字口径）**；作为 D2 来源判断的**直接产品证据**和确定目标的签署依据。可支持 D2 非对称目标签署，不可支持“实现已完成”或真机行为 PASS；Tab Overview 不得记为 `vv.scale<1`，释放回 1 也不得写成应用主动修改 scale | 无截图 / 无 raw 会话 / 无连续 seq；签署后仍须以独立连续 Z-PINCH / Z-MENU / Z-MAGIC 会话、手动 Capture 与同场截图验证已实现行为，A0 0.75 / 153 帧场景为必测锚点 |
 | 2026-11-04；产品 owner；iPad 真机口头反馈 | 打开链接后 debug 面板存在但默认未展开，需手动展开 | **INCONCLUSIVE（口头真机旁证）**；登记为独立可改进 follow-up，不判定 R6 / 冻结行为失败，不产生 PASS | 无截图或 raw；需先确认“未展开”指 More 次要控件还是主面板状态，再另行明确默认态需求与验收；未获授权不改诊断工具 |
 | 2026-11-05；c3ee 真机会话 + 双评审 + owner“此次数据为准，其余信息一致” | 483 帧探索性混合会话；`scale<1` 深键盘 31 帧让位几何与 owner 现场确认一致 | **D2 整行 INCONCLUSIVE；仅下列行为子项 PASS**。owner 指令允许把“scale<1 避让成立”登记为 D2 真机行的子项级记录，不升格为整行验收，不免除其余形态项 | 非验收包：混合来源、无 `zoomSource`、无截图、缺 `seq 355`、`seq 468` 为 reload 分界、无 settle 可见性；按 DATA-COLLECTION 的 SOP v3 补采 |
+| 2026-11-05；42cd 真机混采单会话 + owner 截图目测口头判定 | 207 帧连续 `seq 1–207`、唯一 init；owner 口头登记本会话截图目测符合预期 | **D-C settle 与 D-B 纯变档可观察行为子项 PASS；D2 整行、F18、25% / 50%、D1、GI-3 均不上浮**。截图判定仅为 **INCONCLUSIVE（口头级视觉旁证）** | `zoomSource=menu/cmd` 不可分，B / C 段仅作形态记录；未向仲裁交付截图文件及逐 seq 绑定；深键盘重入不证明不新置锁或门线选择；详见下方 42cd 专节 |
 | 2026-11-05 下午；产品 owner；iPadOS 27 真机操作观察（文字口径） | 浮动键盘拖到任意位置 `rawShortfall` 恒 0；Stage Manager 无键盘拖至最矮时为 1、复原为 0、拖动中偶现 1；本机没有可用的分裂 / 靠边键盘形态 | **INCONCLUSIVE（口头级真机观察）**。可支持控件形态台账、本机 25%–50% 判别带不可达及 r3 改道；不支持产品行为 PASS / FAIL，也不推广到其他设备 | 无原始会话、截图或连续 seq；详见下方“判别带不可达与浮动键盘登记” |
 
 **D2 签署前交叉核对（只读检查，不是新增真机测试）**：A 原始会话共 273 帧，其中早段 153 帧全为 `scale=0.75` 且 `occlusion=0`、后段 120 帧全为 `scale=1`；C 原始会话 583 帧全为 `scale=1`。因此 A 与旧 zoom guard 一致，C 不含 zoom 帧反例；A 没有唯一缩放来源标注，不能证明其 0.75 来自何种操作。历史 `DATA-COLLECTION.md` 将“双指/双击缩放”和“75% 与 100%”列在同一组合操作行，缺少唯一 `zoomSource`，既不足以构成“双指从 1 持续缩小至 `vv.scale<1`”的直接反例，也不可用作来源证明。本次未发现与 owner 文字口径直接冲突的现有帧证据；该结论不替代实现后的 Z 系列真机验收。
@@ -284,3 +285,36 @@ C 会话还包含多轮额外滚动/平移与窗口变化，不能用上述局�
 - 旧 p9 暂存实验已恢复；无活动终端、全阶段未测量的 `RESULTS-smoke-no-backend.json` 已删除。
 - 保留了仍有验证价值的 PTY/侧栏检查脚本、p8 真机原始日志和侧栏改前/改后证据。
 - 本文件只是本轮验证记录，不宣称 issue #116 已完成旧 PLAN 的全部真机关闭条件。
+
+## 2026-11-05 42cd 混采单会话仲裁（D-C / D-B 子项，非单源验收包）
+
+### 原始事实、三段边界与 owner 口头证据
+
+- 原始文件为 [42cd679ea2cfdc147d6dc8b4ebdad910.jsonl](raw/42cd679ea2cfdc147d6dc8b4ebdad910.jsonl)。只读复核为 **207 行 / 207 帧，`seq 1–207` 连续无缺口**；只有 `seq 1` 为 init，没有 reload / 探针重启分界。207 帧的 `probeVersion` 均为 `p9-full-shell-session-avoidance-v1`，`schemaRev` 均为 `p9-additive-settle-readonly-v1`，`scaleSettle` 对象与 tick journal 均可读；`mirrorOcclusion ≡ occlusion` 为 207/207。手动 Capture 共 8 帧：`seq 36 / 59 / 83 / 116 / 135 / 146 / 164 / 184`。
+- A=scale=1 菜单缩放与全键盘、B=妙控键盘 attached、C=D1 对比与输入框，是采集操作说明给出的三段顺序标签，不是 raw 内的唯一来源字段。文件没有可拆分 `menu` 与 `cmd` 的 `zoomSource`，也没有硬件 attached 的独立判别字段；因此本会话只通过“连续 seq + 无 reload + 判别字段在场 + 可按事件 / 数值分时间线”的 **42cd 混采判读闸门**支持下文明确列出的行为子项，**不成为 Z-MENU / Z-MAGIC 单源验收包，B / C 段仅作形态记录**。
+- owner 已口头判定本会话截图目测符合预期。本仲裁未收到截图文件及截图↔seq 映射，故只登记 **INCONCLUSIVE（口头级视觉旁证）**；它不改写帧内数字，不单独产生视觉 PASS，也不豁免 D2 整行的同场截图链。
+- 粗读中的“`offsetTop` 全 0”需修正：206 帧为 0，**`seq 14` 为 `90.65625`**，位于文件开头的 `scale=0.75` 段。下文 A 的 scale=1 判读链及 C 的 Web input 链均为 0；尤其 `seq 173–186` 没有 Safari pan，不能把这组数据写成 D1 所需的 Web input pan ↔ helper pan 对偶。
+
+### A 段与回程：D-C settle 逐链判读
+
+1. **变档前确为活动深键盘，普通 scale<1 链是 `0→1→2`，不是“数满即清”。** `seq 49` 为 `scale=1 / raw=occ=428 / xterm-helper-textarea / HO-2`。`seq 50` 变到 `scale=0.8500000238418579`、`raw=503.53125`，仍 helper 持焦，但当帧 `occ=0`、`candidate=0.8500000238418579 / ticked=0 / pending=true`。`seq 52` 的 journal `pass 60` 为 `ticked=1 / pending=true / occ=0`；`seq 53` 的 journal `pass 61` 为 `ticked=2 / scaleBelowOneSettled=true / pending=false`，同帧重入 `occ=503.53125`。两条 journal 的 candidate / baseline 均为该 0.85 值，`layoutHeight=880 / VVwidth=1404.703125 / raw=503.53125` 不变，故普通 0.85 链 **PASS**。
+2. **0.85→0.75 是第二个活动中的纯变档样本，不是沿用旧候选。** `seq 54` 为 `scale=0.75 / raw=570.34375 / occ=0`，新候选 `candidate=baseline=0.75 / ticked=0 / pending=true`。`seq 57` 的同一 journal 同时保留 `pass 65: ticked=1 / pending=true` 与 `pass 66: ticked=2 / settled=true / pending=false`，两者 `layoutHeight=997 / VVwidth=1592 / raw=570.34375` 均不变；`seq 57` 当帧重入 `occ=570.34375`。这直接回答调度者关于“显示 2 后被清 0”的疑问：**普通链在 journal 中清楚显示 1→2，candidate 保持 0.75，不按回程清 0。**
+3. **深键盘回程按已登记的 `1→0` 完成形态闭链。** 回程前 `seq 74` 为 0.75 活动让位 `occ=570.34375`；`seq 75` 回到 0.85、`occ=0` 并建立新候选，`seq 77` journal `pass 92` 为 `ticked=1 / pending=true`。`seq 78` 是当前 scale/raw 已变为 `1 / 428`、applier mirror 仍停在旧 0.85 `pass 94 / ticked=2 / occ=503.53125` 的过渡帧，`derivedState=unknown`；不把它冒充回程完成帧，也不让其连坐其他独立证据。随后 `seq 79` / journal `pass 96` 已重建为 `candidate=baseline=1 / ticked=1 / pending=true / zoomReturnFramePending=true`，`occ=0`、`derivedState=recovering`；`seq 81` / journal `pass 97` 为 **`candidate 1→0 / ticked 1→0 / pending true→false / zoomReturnFramePending true→false`**，同帧重入 `occ=428`。pass 96→97 的 `layoutHeight=748 / VVwidth=1194 / raw=428` 不变，pass 序号单调；按既有回程读者规则，该 D-C 回程链 **PASS**。seq 78 的过渡镜像 / 几何错位只作原样保留，不据此反判 D-C 或扩张为 D-D 全项 verdict。
+4. 同文件另有一条无深键盘重入歧义的回程形态佐证：`seq 143` 普通 pass 169 为 `scale=1 / candidate=1 / ticked=0 / pending=true / returnPending=true / occ=0`；`seq 145` pass 170 为 `ticked=1` 且 pending / returnPending 保持 true；`seq 146` journal pass 171 为 `candidate=0 / ticked=0 / pending=false / returnPending=false`。三条均 `layoutHeight=748 / VVwidth=1194 / raw=68.5`，occ 保持 0。它同样证明回程清候选的合法形态，不把浅浮层写成键盘重入。
+5. 全部 207 帧未出现已登记的两类跨字段矛盾：`pending != (candidate!==0 && ticked<2)` 或 return-pending 投影与同帧 zoomed/candidate/ticked 不符；各帧 journal 均只含 `scaleSettleTick` 且 pass 序号严格递增。故没有按 F-4 必须将上述 settle 链降为 INCONCLUSIVE 的矛盾帧。
+
+**D-C 真机子项结论：PASS（子项级）**，范围仅为上述实际 scale 的普通候选链与回程完成链；不扩为 Z-MENU / Z-MAGIC、D-D latch、25% / 50% 或 D2 整行 PASS。
+
+### D-B、F18 与 90% 优先项的演进边界
+
+- **D-B 纯变档可观察行为由“缺样本”升级为 PASS（子项级）**：`seq 49→50→52→53` 与 `seq 53→54→57` 均满足变档前活动让位、变档帧仍 `raw>1 && focusEditable`、当帧付 0、重建候选、两个产品 tick 后重入。与 c3ee 的“活动中变档未触发”存在结构性差异。可是恢复锁字段未公开，且这些 raw 同时高于 50% 线，故“**不新置锁**”仍只是实现契约中的预期路径，**没有独立的真机判别 PASS**；不得以重入反推锁已清或实际选择 25% 线。
+- **F18 维持 INCONCLUSIVE，但事实有所推进**：`seq 29–49` 连续为前台、可见的 `xterm-helper-textarea / HO-2`，可读 `seq 32–37 active(428)` → `seq 38–43 recovering / occ=0` → `seq 44–49 active(428)`，没有 Web 聚焦、reload 或 seq 缺口。然而 `unlockTrace` 在收起后、重入前另记录 `tick 27` 的终端宿主 click；0.75 的 `seq 57→62→68` 开合链也在重入前记录 `tick 37` 终端宿主 click。因此它们不是 VALIDATION 已登记的“无中间点击解锁”干净段；本项只登记连续持焦与几何链，不升格 PASS，也不判产品 FAIL。
+- **D2 真机整行维持 INCONCLUSIVE**：本会话虽补齐 settle 与活动中变档，仍混用 menu/cmd 来源、起点不是正式矩阵要求的 scale=1 新会话，且截图只有 owner 口头级登记而无逐 seq 绑定；其他来源、形态与视觉义务不能用子项 PASS 覆盖。
+- **25% / 50% 真机判别维持 INCONCLUSIVE（本机当前形态不可达）**：本会话正 raw 只有约 9.1% 浅遮挡（68.5/80.59375/91）与约 57.2% 深键盘（428/503.53125/570.34375），没有落入两条门线之间的样本；settle 后重入不承担该项证明。
+
+### B / C 段形态、HO-3 与 GI-3 helper rect
+
+- **B 段只作形态记录**：人工说明的“妙控键盘 attached”不能从 raw 单独分出硬件或 zoom 来源。可复核的浅遮挡形态包括 `seq 93–97`、`102–104`、`110–118`、`123–127` 的 `scale=1 / raw=68.5 / occ=0`，以及 `seq 128–146` 的第二次 1→0.85→0.75→0.85→1 缩放往返；不得把后者单独命名为 Z-MAGIC 或 Z-MENU 验收。
+- **全文件 scale=1 的 PTY 深键盘让位共四组**：`seq 32–37`、`44–49`、`81–86`、`156–165`，均 `raw=occ=428` 且为 helper / HO-2；前三组属于 A 及其回程，第四组属于 C 的 PTY 形态记录。
+- **C 段 HO-3 是第二次 R2 已知偏离现场实例**：`seq 172` 为 focusout / HO-1，`seq 173` focusin 到普通 `INPUT / web-input / HO-3`；`seq 176–186` 连续 `raw=occ=428`，含手动 Capture `seq 184`。`seq 187` 是 settle / HO-1 / raw=occ=0，不是额外的 focusout 帧。该实例继续只登记 Phase 3 前的 D-A / R2 已知偏离，不用于 D2 PTY PASS，也不关闭 R2。因 Web input 与 helper 段均无 Safari pan，**D1 对比仍 INCONCLUSIVE**。
+- **GI-3 不是“本会话未见停滞”，而是新增同类停滞观察，仍 INCONCLUSIVE**：helper rect 在 `seq 15–26` 与 `29–54` 恒为 `top=958 / bottom=975`，且 `insideVisibleViewport=false`；这一不变值跨越 `seq 32–44` 的深键盘开、关、重开、`seq 50` 的 1→0.85 与 `seq 54` 的 0.85→0.75，直到 `seq 55` 才跳为 `210/227`。之后 helper 前台时的 `210/227` 又跨多组 scale/raw 变化保持，至 `seq 166` 键盘收起时才变为 `703/720`。这与 c3ee `seq 254+` 的 `839/856` 停滞属同类证据形态，但现有字段仍不能区分聚焦 rect、refit 滞后与真实出屏，也不凭 owner 的口头视觉符合预期反推 helper rect 正确；GI-3 不关闭、不判产品 FAIL。

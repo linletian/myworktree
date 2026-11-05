@@ -405,6 +405,7 @@ zoom 态整体豁免，与其余补偿一致。
 - S1–S5 是**步骤标签，不是把五步混在一个会话的许可**。本轮只开四个会话：`r3-Z-PINCH-*`、`r3-Z-MENU-*`、`r3-Z-MAGIC-*`、`r3-D1-GI3-*`。文件名采用 `r3-<z-pinch|z-menu|z-magic|d1-gi3>-<YYYYMMDD>-<a|b|…>.jsonl`，截图用同一 stem 加 `-<shotId>.png`；另存一张 session id ↔ 文件名 ↔ 被测构建对照表，不把 daemon 随机 session id 当场景名。
 - 每个 Z 会话都从**新页面 / 新 debug-session、`scale=1`、软键盘关闭、PTY 可交互**开始；前三会话各自只允许一种 zoom 来源。第四个会话全程 scale=1，`zoomSource=none`，不承担 Z 来源验收。
 - **capture 期间禁止在同一标签页重载**；禁止借用旧 `debug-session` 续采、混用第二种 zoom 来源、为“补镜头”事后从另一会话拼截图，或删掉过渡帧 / zoom 帧。若发生 reload、seq 缺口、来源混用或错误操作，保留 raw、标记断点与受影响项，另开新会话；不得把断点两侧作为同一状态机链。
+- **42cd 混采单会话判读闸门的窄例外**：只有在连续 seq、无 reload、所需判别字段（如 activeInput / ownership / settle journal）在场且操作与帧时间线可分时才可接受其作为相应**行为子项**证据；`zoomSource` 仍不可分、截图未逐 seq 绑定或整行要件缺失时，不得冒充单源 Z 会话或上浮整行 PASS，42cd 的 B / C 段因此仅作形态记录。
 - 不旋转、不切 Split View / Stage Manager、不前后台切换，除非该步本身是当次命题；这些动作一旦改变 layout / VV 宽度，必须重新标基线，且不得拿旧 raw / latch 解释新几何。
 - 全程开启 continuous 1000ms，但**事件优先于周期帧**：`focusin/focusout`、键盘开 / 关、`resize/scroll`、scale 变档与回程后立刻手动 Capture；settle 状态变化由只读 tick journal 留痕，不要求人工逐 tick Capture。Capture 使用保焦按钮，不为 Capture 点走终端焦点。手动 Capture 不代替自动事件帧，也不允许只保留稳定帧。
 - settle 字段未按 `AUTH-20261105-D2-SETTLE-READONLY` 落地前，可以先采其他行为，但 **D-C 必记 INCONCLUSIVE**；不得用 periodic 1000ms 的相邻帧或 `unlockTrace.captureTick` 冒充两次产品 500ms `scaleSettleTick`。增强后由有界只读 tick journal 保留两个连续 tick 的来源、单调 pass 序号与完整候选读数；只看到最终 `ticked=2` 而没有 tick 链仍不够。变档 / 回程后立即手动 Capture；**不要求人手踩中每个 500ms tick，也不由 applier 主动调用探针 Capture**。
