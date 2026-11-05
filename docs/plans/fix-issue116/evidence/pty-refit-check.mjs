@@ -1,6 +1,13 @@
 #!/usr/bin/env node
-// Real-browser check of the PTY resize/refit chain (issue #116, contract
-// p9-portrait-refit-import-v1). The last link the static gates cannot reach.
+// Real-browser check of the PTY resize/refit chain (issue #116). The last link
+// the static gates cannot reach. Kept per PLAN §5 Phase 2 task 5; what this tool
+// judges is the frozen §7 refit / ack chain that PHASE1-CONTRACT GI-7 restates
+// (trailing resize, final-size dedupe, no stale-ack revert). The tag
+// "p9-portrait-refit-import-v1" carried by earlier revisions of this header was a
+// HISTORICAL contract name — provenance only, not a current acceptance contract; the
+// pre-D2 runs and raw sessions this tool is associated with / that cite it are
+// 历史对照 only (PLAN §9): a historical association to be cited, not a pointer into
+// any criterion in force today.
 //
 // WHY THIS FILE EXISTS.
 //
@@ -38,7 +45,39 @@
 //     precisely that a local fit stays on screen while it waits);
 //   * it is HEADLESS CHROME, not iPadOS Safari, and `setDeviceMetricsOverride` is
 //     NOT the iOS soft keyboard. It certifies the browser's fit/ack chain at two
-//     viewport sizes; the keyboard-driven occlusion is A0/SOP field evidence.
+//     viewport sizes. Keyboard-driven occlusion belongs to field evidence: the
+//     A0-SOP era runs cited here are the v3.1/p8 历史 SOP (PHASE1-CONTRACT 历史文档
+//     定位) — 历史对照 only; current keyboard obligations are judged by the
+//     PHASE1-CONTRACT F table on the signed matrix, and the A0 0.75 / 153-frame
+//     material is a 必测锚点 for future field runs, not a PASS for anything;
+//   * IT CARRIES NO ZOOM / SCALE CRITERION (signed-D2 audit, PLAN §4 D2; the
+//     implementation is a260763 and the arbitration 6e8a006). judge() has no scale
+//     input, so there was never a "scale ≠ 1 ⇒ exempt / owe 0" rule here for D2 to
+//     relax: under the signed asymmetry scale > 1 keeps the conservative opt-out,
+//     |scale − 1| ≤ 0.01 keeps the frozen ±0.01 band semantics, and scale < 1 obeys
+//     the session machine (two existing 500 ms settle ticks with ε = 0.001; an
+//     out-of-band step frame pays occlusion = 0 and books NO new recovery latch ONLY
+//     when that step frame itself satisfies raw > 1 && focusEditable and the exit is
+//     caused solely by the step — the shipped guard is scaleStepNoLatchExit; a
+//     same-frame raw ≤ 1 or a focus loss still sets / keeps the recovery latch exactly
+//     per the frozen §5.6 rules; a pure 0.75 → 1 return re-enters unlocked at the 25%
+//     line; scale > 1 → 1 keeps any prior un-released latch and re-enters at 50%).
+//     That ladder lives in internal/ui/testdata/zoom_scale.test.mjs (direct behaviour
+//     cases, implementation a260763, arbitration 6e8a006), in the
+//     verify-live-choiceA.mjs offline replay, and in the Z-PINCH / Z-MENU / Z-MAGIC
+//     independent continuous real-machine matrix of PLAN §4 D2 — NOT in this refit
+//     check, and the Z series has not been run, so nothing here may be read as a zoom
+//     verdict. CDP's `deviceScaleFactor` below is an emulation knob, not `vv.scale`;
+//     the probe's `vvHeight` is context that judge never compares. Zoom frames and
+//     pre-D2 baselines are 历史对照 only (a260763, 6e8a006);
+//   * COORDINATES: every rect here is a client rect (getBoundingClientRect) and every
+//     judgement is a phase-to-phase height/width comparison inside that one space.
+//     This tool never compares a rect against the screen-visible area [0, vv.height]
+//     and never reads vv.offsetTop — that occlusion judgement is the session machine's,
+//     elsewhere (PHASE1-CONTRACT 术语章 / GI-2 / F17: 屏显区域 = client [0, vv.height],
+//     layout 可见窗口 [offsetTop, offsetTop + height] 是另一坐标描述，禁止混用/相加),
+//     and adding it here is deliberately out of scope: Phase 2 task 5 keeps and
+//     re-checks the existing criteria, it adds no new ones.
 //
 // VERDICTS: PASS / FAIL / INCONCLUSIVE → exit 0 / 1 / 2. INCONCLUSIVE is a real
 // answer: no active terminal session, no OPEN socket, or a host box that never
@@ -263,7 +302,8 @@ function judgePhase(name, p, base, baseUsable, fail, info, blocked) {
   // E. context only, never a verdict: the ack is the server's answer.
   if (p.applied && (p.applied.rows !== p.rows || p.applied.cols !== p.cols)) {
     info.push(tag + " server ack still " + p.applied.cols + "x" + p.applied.rows + " while local is " +
-      p.cols + "x" + p.rows + " — recorded as context; a fit waits, it does not revert (p9 rule)");
+      p.cols + "x" + p.rows + " — recorded as context; a fit waits, it does not revert " +
+        "(the frozen §7 refit chain that GI-7 restates — still the CURRENT chain baseline; 'p9' was only its era label)");
   } else if (!p.applied) {
     info.push(tag + " no ack yet (appliedTTYSize null) — context only");
   }
@@ -343,6 +383,24 @@ function judge(data) {
 // --self-test: the judgement itself, on fixtures, no browser.
 // ---------------------------------------------------------------------------
 function selfTest() {
+  // D2 fixture placement (PLAN §5 Phase 2 task 5): the two key signed-D2 cases —
+  // the scale < 1 session entry (foreground-PTY editable focus + raw > 1 + two
+  // settle ticks at ε = 0.001) and the out-of-band step frame paying occlusion = 0
+  // and booking no NEW latch, which holds only when that step frame itself satisfies
+  // raw > 1 && focusEditable and the exit is caused solely by the step (a same-frame
+  // raw ≤ 1 or a focus loss keeps the frozen §5.6 latch behaviour)
+  // — CANNOT be honest fixtures here, because judge() reads no scale / occlusion
+  // input: any zoom fixture added to this list would be vacuous (a forbidden shape).
+  // They are carried by internal/ui/testdata/zoom_scale.test.mjs (implementation
+  // a260763, arbitration 6e8a006) and by the verify-live-choiceA replay / field
+  // matrix instead. This alignment pass changed no judge input and no verdict rule,
+  // so pre-D2 payloads replay exactly as before. The fixture COUNT is deliberately NOT
+  // spelled out in this tool: the count is registered at the single point — VALIDATION's
+  // "Phase 2 任务 5 工具契约化终审" section — and a legal new fixture (no new judge
+  // input, no changed verdict rule or existing expectation) must update that same
+  // registration in the same change; anything more is a criteria change and belongs on
+  // the criteria-change path. Every PASS here stays headless-Chrome refit evidence —
+  // never a field or zoom PASS.
   // A coherent landscape reading: host 646px, 38 rows × 17px = 646, 103 cols.
   const phase = (name, over) => Object.assign({
     phase: name, innerWidth: 1194, innerHeight: 702, vvHeight: 702,
@@ -659,7 +717,20 @@ async function main() {
       page: redact(URL), engine: info.Browser || "",
       method: "CDP Emulation.setDeviceMetricsOverride " + PHASES.map((p) => (p.width ? p.width + "x" + p.height : "unchanged")).join(" -> ") +
         "; settle = two requestAnimationFrame + " + SETTLE_MS + "ms (> the 100ms queueTTYResize window)",
-      notProven: "headless Chrome, not iPadOS Safari; a driven viewport size, not the iOS soft keyboard",
+      notProven: "headless Chrome, not iPadOS Safari; a driven viewport size, not the iOS soft keyboard; " +
+        "no zoom/scale criterion here (signed D2 ladder lives in internal/ui/testdata/zoom_scale.test.mjs — a260763, arbitration 6e8a006)",
+      // Output MARKERS only (VALIDATION "Phase 2 任务 5 工具契约化终审" / 产物标记读法).
+      // `artifactRev` marks WHICH contract-aligned revision of this tool produced this
+      // artifact; it does NOT represent the judge's input schema, the criteria or the
+      // verdict version — judge() reads the same inputs and applies the same rules, so
+      // this field must never be read as a schema statement. `contractRev` names the
+      // contract the criteria sit under. Together they keep this artifact from being
+      // read against the historical 'p9-portrait-refit-import-v1' naming as if that
+      // were a current contract (历史对照, PLAN §9). This reading covers these two
+      // Phase 2 task 5 offline artifacts only: no repo-wide field rule, and the
+      // diagnostic frames' own `schemaRev` semantics are untouched.
+      artifactRev: "pty-refit-check-v2-contract-aligned",
+      contractRev: "PLAN v2.0 §5 Phase 2 task 5; refit/ack chain = frozen §7 restated by PHASE1-CONTRACT GI-7",
       settleMs: SETTLE_MS, hostGrowMinPx: HOST_GROW_MIN_PX, pxPerRowTolerance: PX_PER_ROW_TOLERANCE,
       phases: out.phases, result,
     }, null, 2));

@@ -1,6 +1,17 @@
 #!/usr/bin/env node
-// Real-geometry check for the sidebar title row (issue #116, contract
-// p9-portrait-refit-import-v1).
+// Real-geometry check for the sidebar title row (issue #116). Kept per PLAN §5
+// Phase 2 task 5. The tag "p9-portrait-refit-import-v1" carried by earlier
+// revisions of this header was a HISTORICAL contract name — provenance only, not a
+// current acceptance contract; what stays current is the coarse-pointer / flex
+// geometry the row must hold, judged here on today's bytes as TOOL-LOCAL RULES on
+// top of the SHIPPED CSS: every action button keeps a 44px coarse-pointer hit area,
+// no button crosses the sidebar's content right edge, and the title row does not
+// scroll its own box. PHASE1-CONTRACT sets NO GI entry for this row and none is
+// created for it, so a PASS here is the result of this targeted regression gate,
+// never a contract GI acceptance (VALIDATION "Phase 2 任务 5 工具契约化终审", PLAN §10).
+// Historical RESULTS-*.json (p8/p9 era) — including the ones this run's own output
+// lands beside in structural-check/ — are 历史结构/失败证明 and 历史对照 only
+// (PLAN §9), never inputs and never a current acceptance criterion for this check.
 //
 // WHY A SEPARATE CHECK, AND WHY IT HAS TO OPEN A BROWSER.
 //
@@ -39,10 +50,34 @@
 //     `hidden` is removed from #remote-badge, because the badge is revealed by a
 //     successful remote-transport check that needs a real Tailscale peer. The badge
 //    's own CSS is the shipped CSS; only its visibility is driven;
-//   * the widths are driven through an INLINE max-width on #sidebar so 200px and
-//     240px are both measured in one page load. At 834px CSS width the shipped
-//     middle-tier rule already caps #sidebar at 200px, so the 200px case is the
-//     page's own state, not an override.
+//   * the widths are driven through an INLINE max-width on #sidebar so 200px, 240px
+//     and 160px are all measured in one page load (WIDTHS is the single source of
+//     that tier list; each tier is asserted on the geometry actually read back). At
+//     834px CSS width the shipped middle-tier rule already caps #sidebar at 200px,
+//     so the 200px case is the page's own state, not an override;
+//   * IT CARRIES NO ZOOM / SCALE CRITERION (signed-D2 audit, PLAN §4 D2; the
+//     implementation is a260763 and the arbitration 6e8a006). judge() reads no scale
+//     and no occlusion, so there is no "scale ≠ 1 ⇒ exempt / owe 0" rule here for
+//     D2 to relax — the signed asymmetry (scale > 1 conservative opt-out; the frozen
+//     |scale − 1| ≤ 0.01 band semantics; scale < 1 obeying the keyboard session
+//     machine: two existing 500 ms settle ticks at ε = 0.001; an out-of-band step
+//     frame pays occlusion = 0 and books NO new recovery latch ONLY when that step
+//     frame itself satisfies raw > 1 && focusEditable and the exit is caused solely
+//     by the step (the shipped guard is scaleStepNoLatchExit) — a same-frame raw ≤ 1
+//     or a focus loss still sets / keeps the recovery latch exactly per the frozen
+//     §5.6 rules; a pure 0.75 → 1 return unlocked at the 25% line, scale > 1 → 1
+//     keeping its prior un-released latch and re-entering at 50%) is carried by
+//     internal/ui/testdata/zoom_scale.test.mjs plus the verify-live-choiceA replay and
+//     the Z-MENU / Z-MAGIC field matrix, not by this sidebar row. Zoom frames and
+//     pre-D2 baselines are 历史对照 only;
+//   * COORDINATES: all rects come from getBoundingClientRect — client space, the
+//     contract's single comparison space — and every check stays horizontal inside
+//     it (button right edge vs the sidebar's client content edge, both from the same
+//     read). vv.offsetTop is never read, nothing is added to a rect, and no
+//     [0, vv.height] keyboard-occlusion judgement exists or is added here: that
+//     obligation belongs to the session machine and GI-2/GI-5, not to this row's
+//     flex layout (PHASE1-CONTRACT 术语章: 屏显区域 = client [0, vv.height]，
+//     禁止把布局坐标或 offsetTop 混入同一比较).
 //
 // Usage:
 //   node sidebar-title-check.mjs [--url file:///…/index.html] [--width 834]
@@ -199,6 +234,23 @@ function judge(measured) {
 // --self-test: the judgement itself, driven by fixtures, no browser.
 // ---------------------------------------------------------------------------
 function selfTest() {
+  // D2 fixture placement (PLAN §5 Phase 2 task 5): the signed-D2 cases — scale < 1
+  // session entry, an out-of-band step frame paying occlusion = 0 and booking no NEW
+  // latch, which holds only when that step frame itself satisfies raw > 1 &&
+  // focusEditable and the exit is caused solely by the step (raw ≤ 1 or focus loss
+  // keeps the frozen latch behaviour) — have no honest fixture shape here: judge()
+  // reads no scale / occlusion / vv input, so any zoom fixture added to this list
+  // would be vacuous (a forbidden shape). They live in
+  // internal/ui/testdata/zoom_scale.test.mjs (implementation a260763, arbitration
+  // 6e8a006). This alignment pass changed no judge input and no verdict rule, so
+  // pre-D2 payloads replay exactly as before. The fixture COUNT is deliberately NOT
+  // spelled out in this tool: the count is registered at the single point — VALIDATION's
+  // "Phase 2 任务 5 工具契约化终审" section — and a legal new fixture (no new judge
+  // input, no changed verdict rule or existing expectation) must update that same
+  // registration in the same change; anything more is a criteria change and belongs on
+  // the criteria-change path. The p8/p9 names in the fixtures below mark the
+  // historical defect / shape they encode, not a current contract generation
+  // (历史对照, PLAN §9).
   const btn = (left) => ({ left, right: left + 44, top: 12, bottom: 56, width: 44, height: 44 });
   const base = {
     sidebarWidth: 200,
@@ -334,6 +386,20 @@ async function main() {
       engine: info.Browser || "", viewport: { width: WIDTH, height: HEIGHT },
       widths: WIDTHS, tolerancePx: TOLERANCE_PX, minTargetPx: MIN_TARGET_PX,
       simulated: "remote badge revealed by removing [hidden] and adding .remote-access to #app; widths driven by inline max-width on #sidebar",
+      // Output MARKERS only (VALIDATION "Phase 2 任务 5 工具契约化终审" / 产物标记读法).
+      // `artifactRev` marks WHICH contract-aligned revision of this tool produced this
+      // artifact; it does NOT represent the judge's input schema, the criteria or the
+      // verdict version — judge() reads the same inputs and applies the same rules, so
+      // this field must never be read as a schema statement. `contractRev` names the
+      // contract the criteria sit under. Together they keep a new run from being read
+      // against the historical 'p9-portrait-refit-import-v1' naming as if that were a
+      // current contract (历史对照, PLAN §9). No zoom/scale criterion lives here —
+      // signed D2 is judged in internal/ui/testdata/zoom_scale.test.mjs
+      // (implementation a260763, arbitration 6e8a006). This reading covers these two
+      // Phase 2 task 5 offline artifacts only: no repo-wide field rule, and the
+      // diagnostic frames' own `schemaRev` semantics are untouched.
+      artifactRev: "sidebar-title-check-v2-contract-aligned",
+      contractRev: "PLAN v2.0 §5 Phase 2 task 5; row geometry = tool-local rules + shipped CSS, judged on current bytes in client coords (PHASE1-CONTRACT sets no GI entry for this row: a PASS here is this targeted regression gate, not a contract GI acceptance)",
       measured, result,
     }, null, 2));
     console.log("evidence: " + outFile);

@@ -41,6 +41,18 @@
 - **最小处置与正确期望**：只改 `verify-live-choiceA.mjs` 的 0.75→1 回程断言块：回程普通 pass 为 hosts `["0px", "0px"]`；第一次 `avoid("scaleSettleTick")` 后仍为 `["0px", "0px"]`；第二次既有 tick 后为 `["428px", "428px"]`，控制列 / Transport 分别为 `448px` / `428px`，即“重新打开新会话”仍成立，但从当帧立即改为第二个 settle tick。除该块两次 tick 推进外，未改工具其他内容。该场景 raw 428 同时大于 702 的 25%（175.5）与 50%（351），所以本门禁不单独区分恢复锁是否清除；纯 0.75→1 的未锁 25% 与 scale>1→1 的保留旧锁 50% 仍由 PLAN / PHASE1-CONTRACT 的 D-D 及各自直接用例判定。
 - **run-the-gate 实况**：本仲裁亲自执行 `node docs/plans/fix-issue116/evidence/verify-live-choiceA.mjs --html internal/ui/static/index.html`，处置后在同一未提交 D2 工作区 **exit 0**，末尾输出 `PASS — verified against the repo bytes`；处置前同一命令在旧回程断言 **exit 1**，actual 为 `["0px", "0px"]`、expected 为 `["428px", "428px"]`。这是离线切片门禁结果，不是 live 服务或 iPadOS Safari 真机 PASS，也不把此前整体复评自动改判为 APPROVE。
 
+## Phase 2 任务 5 工具契约化终审（非真机验收）
+
+- **签署范围与完成口径**：本轮可签署的是两工具的窄结论——“保留现有 PTY refit / sidebar 几何工具；各自判据已经等于其应承担的现行契约，没有需要写入这两工具的 D2 zoom / scale 条款；旧 p9 结果只作历史对照”。这只是任务 5 的判据复核与契约对齐口径，**不据此把 Phase 2 任务 5 整体、Phase 2、D2 或 #116 标为正式完成**；Z-PINCH / Z-MENU / Z-MAGIC 真机矩阵仍未执行。
+- **判据属域（C1 / C4）**：`pty-refit-check.mjs` 的判据属于冻结 §7 的 refit / ack 链，即 PHASE1-CONTRACT GI-7 所重述的最终尺寸一致、旧 ack 不回刷等义务；本工具的 headless 检查不单独全证 GI-7 的去重、断开清理或真机最终一致性。`sidebar-title-check.mjs` 的标题行 flex 几何在 PLAN / PHASE1-CONTRACT / 冻结文档中没有 GI 落点，GI-4 只规范 quick-keys 入口 / 面板 / 控制列，不能写成该行的“GI-4 neighbourhood”。终审采用最小处置：该行判据明确登记为**工具本地规则 + shipped CSS**，其 PASS 只是该针对性回归门禁结果，不是契约 GI 验收；本轮不立 GI-10，不扩契约覆盖面。
+- **D2 判据承担者**：两工具的 `judge()` 都不读取 scale / occlusion 判定输入，新增 zoom fixture 只会形成不参与判定的空字段。D2 zoom 判据由 `internal/ui/testdata/zoom_scale.test.mjs` 的直接行为用例、`verify-live-choiceA.mjs` 的离线回放，以及 PLAN §4 D2 的 Z-PINCH / Z-MENU / Z-MAGIC 独立连续真机会话共同承担；前两者不能替代真机 verdict。
+- **判据零改动审计**：双评审一致的 AST 级审计结论为，判据相关的输入读取、分支 / 阈值、verdict 聚合、fixture 与既有预期均未改变；本仲裁又逐块核对了未提交 diff。PTY 的一处 stale-ack `info` 文案变化不参与 verdict。fixture 总数保持 PTY **18**、sidebar **12（10 cases + 2 tolerance edges）**。JSON 侧相对 HEAD 仅新增产物标记字段，未删除或改变已有字段；仓库内文本检索未发现这些离线 RESULTS 的标记字段消费者。
+- **产物标记读法（C3，仅本项约定）**：最终字段名为 `artifactRev`（编码将本轮尚未提交的 `schemaRev` 改名）与 `contractRev`。`artifactRev` 只标记“产物由哪一版契约对齐的工具修订产生”，**不代表 judge 输入 schema 或判据 / verdict 版本**；不得再写“no schemaRev bump needed”这类把两类版本混为一谈的句子。这句话只登记本轮两份离线证据产物的读法，**不立仓库级通用字段规范**，也不改诊断帧既有 `schemaRev` 语义。
+- **fixture 登记纪律（C2，采用 VALIDATION 单点登记方案）**：只新增 fixture、且不新增 judge 输入、不改 verdict 规则或既有预期时，不需重开判据仲裁，但必须在同一变更中更新本节 / 相应 VALIDATION 登记；工具注释不写死数量，只指向 VALIDATION。新增 judge 输入、改变 verdict 规则或既有预期即属判据变更，必须走判据变更路径，不能借“补 fixture”绕过。
+- **D-B 注释事实核查（P4）**：当前 `index.html` 的 `scaleStepNoLatchExit` 明确带 `raw > 1 && focusEditable` 限定；PLAN §4 D-B 与 PHASE1-CONTRACT 术语章细则 2 也只对“纯 scale<1 带外变档退出”免置新锁。两工具注释中“out-of-band step frames … book no new latch”必须补上该条件；同帧 `raw<=1` 或失焦仍按冻结规则置 / 保留恢复锁，不能写成无条件免置锁。
+- **p8 / p9 读法**：`p9-portrait-refit-import-v1` 只作历史 provenance，不是现行验收契约；fixture 中 p8 / p9 名称只标记历史缺陷或形状，历史 RESULTS 只作历史结构 / 失败证明与对照，不是当前判据输入。sidebar 默认 label 的 p9 改名（P6）本轮不做，已在 PLAN §10 登记 follow-up，不得借该遗留名称反推现行契约版本。
+- **签署时点离线基线（本仲裁亲自只读实跑）**：在 HEAD `b511197` 加两工具未提交改动的工作区，①`node docs/plans/fix-issue116/evidence/pty-refit-check.mjs --self-test` **exit 0，18/18**；②`node docs/plans/fix-issue116/evidence/sidebar-title-check.mjs --self-test` **exit 0，12/12**；③`node --test internal/ui/testdata/zoom_scale.test.mjs` **exit 0，37/37**；④`node docs/plans/fix-issue116/evidence/verify-live-choiceA.mjs --html internal/ui/static/index.html` **exit 0，PASS — verified against the repo bytes**。这些命令均未启动浏览器或写入证据产物；结果只证明离线 fixture / 切片与回放门禁，不是实时 PTY / sidebar 浏览器检查，更不是 iPadOS Safari 或 Z 系列真机 PASS。
+
 ## 已通过的自动化门禁（历史冻结基线；D2 工作区复评见上节）
 
 | 验证 | 结果 |
