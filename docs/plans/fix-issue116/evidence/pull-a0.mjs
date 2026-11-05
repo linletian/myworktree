@@ -1,7 +1,8 @@
 // A0 真机诊断增量拉取器（issue #116）。
 //
-// 用途：诊断会话每会话只保留最近 120 个事件、30 分钟 TTL
-// （internal/app/viewport_debug.go:24-27），所以必须在 iPad 操作过程中
+// 用途：诊断会话每会话保留最近 viewportDebugMaxEventsPerSes 个事件
+// （2026-11-05 起为 600，此前 120）、30 分钟 TTL
+// （internal/app/viewport_debug.go:24-39），所以必须在 iPad 操作过程中
 // 分段拉取，不能等全部做完再读。本脚本只做只读 GET，不写任何状态到服务端。
 //
 // 用法（token 只走环境变量，不落仓库）：
