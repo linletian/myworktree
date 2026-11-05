@@ -34,6 +34,14 @@
 4. **缩放边界**：A 会话早段 153 帧全部为 `scale=0.75`，当前实现按既有 guard 完全退出避让。普通网页与 Orca 也采用类似 zoom 豁免，但是否满足 myworktree 的终端目标需要独立产品决定。
 5. **证据链不完整**：部分采集有序列缺口；实时 Chrome/CDP 检查未取得 verdict；原始、派生和最终验收证据必须分开保存。
 
+### 1.3 控件形态台账与本机可验性（2026-11-05 下午）
+
+- **浮动键盘（floating keyboard）**：owner 报告无论拖到屏幕何处，`rawShortfall` 恒为 0，即可视视口没有键盘侵入。按现有契约，这一形态不能凭 `raw>1` 进入活动避让会话；若此前会话仍 active，`raw≤1` 按冻结规则退出。因此不触发终端让位、`occlusion=0` 是契约解释上的正确结果，不是遮挡 FAIL；终端持焦时 HO-2 归属也不因此改变。本笔只登记本机控件形态，不新设键盘分类或补偿分支。
+- **Stage Manager 无键盘缩放**：Safari 窗口拖至本机最矮时 `rawShortfall=1`，放大复原回 0，拖动中偶现 1。该 0/1 读数按 resize 间隙的噪声 / 竞态级数值登记，不构成真实遮挡事实，也不可用于制造门线样本。
+- **25%–50% 判别带**：浮动键盘不产生正 raw；停靠键盘在本机随布局高同比例变化（c3ee 的 0.75 深键盘约 57.2%）；无键盘窗口缩放只有 0/1。故原 `249.25 < raw < 498.5` 操作目标在**本机当前可用形态下不可达**。r3-Z-MENU-01 改承担 settle 序列观测，25% / 50% 门线本身不变，其真机判别子项继续 INCONCLUSIVE；不得用深键盘同越两线的重入反推门线或恢复锁已获真机证明。
+
+以上均来自 owner 文字口径，证据等级为 **INCONCLUSIVE（口头级真机观察）**，不是新行为 PASS；完整事实、设备形态限制与补证边界见 VALIDATION 同名补测节。
+
 ## 2. 产品契约
 
 ### R1：前台 PTY 终端
@@ -137,6 +145,8 @@ opencode、reasonix、dsh 等 iframe 内输入由 iframe / Safari 处理。父�
 **2026-11-05 c3ee 首轮真机仲裁与 r3 路径**：`c3ee73e2653ba89dc615d4554ceb7204` 的 483 帧登记为**探索性混合会话（非验收包）**。双评审及仲裁复核支持 scale=1 深键盘三盒几何、scale=0.75 的 31 帧 PTY 让位、scale>1 的 97 帧 occ=0 及回程当帧付 0 等**子项级行为 PASS**；但整行因混合来源、无 zoomSource / 截图、缺 seq355、seq468 reload 分界、D-C 无字段、25% / 50% 不可判别、D-B 未触发以及 F18 / D1 / GI-3 缺证，维持 **INCONCLUSIVE**。owner“此次数据为准，其余信息一致”只允许把“scale<1 避让成立”登记为 D2 真机行的行为子项记录，**不上浮整行，不豁免其他形态项**。任何 99.2% 类覆盖率不得充当 D2 verdict。逐帧事实、子项表与授权清单见 VALIDATION 同名节；二轮必须执行 [DATA-COLLECTION SOP v3](DATA-COLLECTION.md#10-sop-v3命题二2026-11-05-首轮混合会话后二轮单源采证) 的 r3-Z-PINCH / r3-Z-MENU / r3-Z-MAGIC 与 r3-D1-GI3 会话。上述矩阵所写“不改工具”仍是 c3ee 首轮的边界；r3 前只能使用另立授权已完成的只读诊断增强，不能由采集者临时改探针。
 
 **D-C 可验性后续裁决**：c3ee 的 1000ms periodic 与现有 schema 看不到两个产品 500ms tick，D-C 在本 schema 下是**结构性 INCONCLUSIVE**，不是 PASS / FAIL。选择只读 `scaleSettle*` schema 增补，而不采用 owner 手记第一 tick，也不永久取消该子项；原因是原禁令防止 D2 混入 diagnostics 试修或改判据，而只读镜像不写产品状态、不新增 timer、不改阈值 / 门线 / verdict。授权未实施前不得用稳定 31 帧反推 settle。zoom 派生标签本轮**不改**，继续以 reported 为准；面板 `seq253` 的 layout / client 错配则另批方案②：unsupported 只按实际 client 界判定并补横向 client 检查。GI-3 的 helper rect 停滞列入 r3-D1-GI3 专项，以 pty-refit-check 的 rows/cols / xtermRows / ack 读数定向复采；Headless 结果不得替代真机 GI-3。
+
+**2026-11-05 下午补充仲裁：r3-Z-MENU-01 改目标，不改门线。** 二选一选择 `AUTH-20261105-D2-SETTLE-READONLY`，不把 25% / 50% 判别降成“Node-only 永远自洽”。本机浮动键盘 raw=0、停靠深键盘约 57.2%、无键盘窗口缩放仅 0/1，使中间判别带不可达；真机门线子项因此保留 INCONCLUSIVE，Node 只继续承担实现逻辑回归。r3-Z-MENU-01 重定义为 **settle 序列可观测会话**：scale=1 深键盘活动让位 → 仅菜单变档并尝试 0.75 → 变档帧付 0 → 两个连续产品 tick 的候选 / 重建 / settled / 重入 → 菜单回 1 的回程链。它证明 settle 时序与已观测行为，不能用深键盘同越两线的重入宣称 25% / 50% 或恢复锁选择已判别。窗口形态选定新增只读 `window.__mwTerminalSettle` 与有界 tick journal，保留数值型 `window.__mwTerminalOcclusion`；字段、隐私、测试和双评审细则见 VALIDATION 的同名授权节。
 
 **后续编码 Sub-agent 的授权范围（仅 D2，调度者另行分派后生效）**：
 
@@ -308,7 +318,7 @@ iPhone Safari 按旧 PLAN 至少补一轮；不同 iPadOS 版本和 Chrome(iOS) 
 | NP-3 / F-5 的可选服务端收窄 | 当前传输层宽容声明为有意 | 若要求服务端强制“环成员 = 决策集”，转编码 Sub-agent 另授权 |
 | PO-2026-11-04：debug 面板默认未展开 | **独立 follow-up，可改进项**；产品 owner 口头观察，无截图 / raw，INCONCLUSIVE。源码显示 More 次要控件默认隐藏、可手动展开（`viewport_debug.js` 1779–1782、1995–1999）；不据此判定 R6 / 冻结行为失败，也不产生 PASS | 先确认“未展开”指 More 次要控件还是主面板状态；另立默认态需求、影响范围与真机验收后再授权。当前不改产品代码、诊断代码或 evidence 工具，也不改冻结文档 |
 | Phase 2 任务 5：PTY / sidebar 工具契约化终审（C1–C4、P4–P8） | 签署“现有判据已等于各自应承担的现行契约”的窄口径：PTY 属冻结 §7 / GI-7；sidebar 为工具本地规则 + shipped CSS、无 GI 落点，不立 GI-10；D2 由 `zoom_scale.test.mjs`、choiceA 离线回放与 Z 系列真机矩阵承担。fixture 计数采用 VALIDATION 单点登记：合法新增 fixture 须同变更更新 VALIDATION，工具注释去数字并指向该节；新增 judge 输入或改变 verdict 规则 / 既有预期仍须走判据变更路径。产物标记用 `artifactRev`，只表示契约对齐的产物修订，不代表判据版本 | 后续编码只落实终审所列注释 / 标记修订，不改判据；P6 默认 label 改名本轮不做，登记独立 follow-up。四命令 exit 0 仅为离线基线；Z 系列真机未做，不据此宣布任务整体正式完成。完整证据与读法见 VALIDATION“Phase 2 任务 5 工具契约化终审” |
-| AUTH-20261105-D2-SETTLE-READONLY | **已仲裁批准、待调度者独立派单**；只读公开六个 scaleSettle 状态及 pending/settled、pass 来源 / 序号，并保证两个连续 500ms tick 可逐条观测；只改既有诊断 mirror、探针 schema / 传输与直接测试，不改行为、timer、判据或 evidence `.mjs` | 与 D2 产品实现分离为独立诊断原子变更；Node + viewportdebug Go 门禁后双评审，再进入 r3 真机。未实施时 D-C 结构性 INCONCLUSIVE；详细文件边界见 VALIDATION |
+| AUTH-20261105-D2-SETTLE-READONLY | **已仲裁批准、待调度者独立派单**；新增只读 `window.__mwTerminalSettle`，公开六个 scaleSettle 状态、pending / settled / return-pending、pass 来源 / 序号，并以固定 8 条只读 tick journal 逐条保留两个连续 500ms 产品 tick；数值型 `window.__mwTerminalOcclusion` 不变。只改既有诊断 mirror、探针 schema / 传输与直接测试，不改行为、timer、判据或 evidence `.mjs` | 与 D2 产品实现分离为独立诊断原子变更；Node + viewportdebug Go 门禁后双评审，再进入 r3 真机。未实施时 D-C 结构性 INCONCLUSIVE；字段白名单、可空 probe 对象、隐私与测试细则见 VALIDATION；r3-Z-MENU-01 已改承担 settle 序列，不冒充 25% / 50% 真机判别 |
 | AUTH-20261105-DIAG-PANEL-CLIENT | **批准方案②、待独立派单**；unsupported 不再由 layout viewport 界触发，统一用 client 实际落点，并补快照横向 client 界；修 `viewport_debug.js` 及直接测试，不碰产品 raw / occlusion | 独立诊断提交，必须含 c3ee seq253 同形态 fixture、完整面板矩阵、双评审和真机复采；不得借既有 B-2 / E 系列 APPROVE 免审 |
 | AUTH-20261105-DIAG-ZOOM-LABEL | **本轮不改、不派编码**；保留 zoomed-session-exempt 的旧基线标签含义，D2 继续以 reported + computed bottom 为准并记录矛盾 | 若未来确需先读 mirror 再定 derivedState，须另案授权、直接测试和双评审；不得夹入 settle 或面板修复 |
 | AUTH-20261105-R3-GI3-READONLY | **批准仅诊断只读增补、待独立派单**；真机探针补前台 PTY 的 xtermRows client rect、rows/cols 与 applied/lastSent/pending 尺寸（不可得须显式标记），不采 instance id / 正文；沿用 pty-refit-check 的字段口径但不改其 judge、不新增 zoom 判据 | 与 settle 分包；探针 / 服务端 schema 及直接测试经双评审后执行 r3-D1-GI3。Headless pty-refit PASS 只证 GI-7 工具链，不关闭真机 GI-3 |

@@ -15,6 +15,7 @@
 | 2026-11-04；产品 owner；iPad 真机操作观察（文字口径） | 一、双指手势缩小两种情况实测：<br>1. 当时 scale=1 时，双指不能缩小页面，直接缩小整个浏览器页面进入平铺标签页（Tab Overview 视图，不是 vv.scale<1）；<br>2. 当时 scale>1 时，双指可以缩小页面，但双手释放后必定回到 scale=1。<br>二、实测找到的实现 scale<1 的两种方法：<br>1. 妙控键盘/外接键盘 cmd+'-'（组合键）；<br>2. 浏览器菜单里的具体缩放指令。<br>三、产品指令："按照我这个需求（scale<1 场景终端软键盘避让）将它设为确定的目标"。 | **INCONCLUSIVE（产品 owner 真机操作观察、文字口径）**；作为 D2 来源判断的**直接产品证据**和确定目标的签署依据。可支持 D2 非对称目标签署，不可支持“实现已完成”或真机行为 PASS；Tab Overview 不得记为 `vv.scale<1`，释放回 1 也不得写成应用主动修改 scale | 无截图 / 无 raw 会话 / 无连续 seq；签署后仍须以独立连续 Z-PINCH / Z-MENU / Z-MAGIC 会话、手动 Capture 与同场截图验证已实现行为，A0 0.75 / 153 帧场景为必测锚点 |
 | 2026-11-04；产品 owner；iPad 真机口头反馈 | 打开链接后 debug 面板存在但默认未展开，需手动展开 | **INCONCLUSIVE（口头真机旁证）**；登记为独立可改进 follow-up，不判定 R6 / 冻结行为失败，不产生 PASS | 无截图或 raw；需先确认“未展开”指 More 次要控件还是主面板状态，再另行明确默认态需求与验收；未获授权不改诊断工具 |
 | 2026-11-05；c3ee 真机会话 + 双评审 + owner“此次数据为准，其余信息一致” | 483 帧探索性混合会话；`scale<1` 深键盘 31 帧让位几何与 owner 现场确认一致 | **D2 整行 INCONCLUSIVE；仅下列行为子项 PASS**。owner 指令允许把“scale<1 避让成立”登记为 D2 真机行的子项级记录，不升格为整行验收，不免除其余形态项 | 非验收包：混合来源、无 `zoomSource`、无截图、缺 `seq 355`、`seq 468` 为 reload 分界、无 settle 可见性；按 DATA-COLLECTION 的 SOP v3 补采 |
+| 2026-11-05 下午；产品 owner；iPadOS 27 真机操作观察（文字口径） | 浮动键盘拖到任意位置 `rawShortfall` 恒 0；Stage Manager 无键盘拖至最矮时为 1、复原为 0、拖动中偶现 1；本机没有可用的分裂 / 靠边键盘形态 | **INCONCLUSIVE（口头级真机观察）**。可支持控件形态台账、本机 25%–50% 判别带不可达及 r3 改道；不支持产品行为 PASS / FAIL，也不推广到其他设备 | 无原始会话、截图或连续 seq；详见下方“判别带不可达与浮动键盘登记” |
 
 **D2 签署前交叉核对（只读检查，不是新增真机测试）**：A 原始会话共 273 帧，其中早段 153 帧全为 `scale=0.75` 且 `occlusion=0`、后段 120 帧全为 `scale=1`；C 原始会话 583 帧全为 `scale=1`。因此 A 与旧 zoom guard 一致，C 不含 zoom 帧反例；A 没有唯一缩放来源标注，不能证明其 0.75 来自何种操作。历史 `DATA-COLLECTION.md` 将“双指/双击缩放”和“75% 与 100%”列在同一组合操作行，缺少唯一 `zoomSource`，既不足以构成“双指从 1 持续缩小至 `vv.scale<1`”的直接反例，也不可用作来源证明。本次未发现与 owner 文字口径直接冲突的现有帧证据；该结论不替代实现后的 Z 系列真机验收。
 
@@ -56,15 +57,39 @@
 | --- | --- | --- |
 | D2 整行 | **INCONCLUSIVE**；混合会话、无唯一来源、无截图、seq 缺口和 reload 分界 | 按 DATA-COLLECTION SOP v3 拆为独立 Z-PINCH / Z-MENU / Z-MAGIC，不 reuse c3ee 名义 |
 | D-C settle | **结构性 INCONCLUSIVE**；schema 无 `scaleSettle*`，1000ms periodic 看不到产品 500ms tick；`unlockTrace.captureTick` 不是 settle tick | 先执行另立授权 `AUTH-20261105-D2-SETTLE-READONLY`，再在 r3 采连续两 tick 及重置 / 回程链 |
-| 25% / 50% 判别 | **INCONCLUSIVE**；428 与 570.34375 同越两线，浅帧没有落在两线之间 | 在 `clientHeight=997` 时定向取得 **249.25 < raw < 498.5**，分别做未锁进入与恢复锁重入；达不到实际数值即保留 INCONCLUSIVE |
-| D-B 纯变档退出 | **INCONCLUSIVE / 未触发**；30 个 scale 变档帧无一落在五组抖动点，也无变档时活动会话 | 从 scale=1、PTY 持焦、深键盘活动让位中，用该行唯一来源做一次粗糙变档到 0.75；逐步保存变档帧与两个 settle tick |
-| D-D 恢复锁 / 回程重入 | **INCONCLUSIVE**；只有 seq386 一个边缘判别观察，缺旧锁和 settle 后 25% / 50% 分辨 | r3 分别保留纯 0.75→1 与 scale>1→1 链，不能用深键盘同越两线来宣称 latch 已证 |
+| 25% / 50% 判别 | **INCONCLUSIVE（本机当前形态不可达）**；428 与 570.34375 同越两线，owner 下午补测又排除浮动键盘与窗口拖矮作为中间带来源 | 不再要求本机取得 `249.25 < raw < 498.5`；保留 Node 门线逻辑回归，真机不得据此 PASS。未来设备若自然产生中间带可另行补采；见下方补测裁决 |
+| D-B 纯变档退出 | **INCONCLUSIVE / 未触发**；30 个 scale 变档帧无一落在五组抖动点，也无变档时活动会话 | 从 scale=1、PTY 持焦、深键盘活动让位中，用该行唯一来源做一次粗糙变档到 0.75；逐步保存变档帧与两个 settle tick。深键盘重入仍不单独证明未置锁 / 25% 线 |
+| D-D 恢复锁 / 回程重入 | **INCONCLUSIVE**；只有 seq386 一个边缘判别观察，缺旧锁和 settle 后 25% / 50% 分辨 | r3 分别保留纯 0.75→1 与 scale>1→1 的 settle 链；深键盘同越两线时恢复锁 / 门线选择仍 INCONCLUSIVE，不用重入结果反推 latch |
 | F18 干净开→关→重开 | **INCONCLUSIVE**；混合操作不能证明焦点全程不离开终端 | 独立连续段全程 `xterm-helper-textarea` 前台持焦，无中间 Web 聚焦 / 点击解锁，保留全部事件帧 |
 | D1 对比 | **INCONCLUSIVE**；缺“xterm helper 持焦 + 键盘开 + Safari pan”与普通 Web input 的同场对比帧 | r3-D1-GI3 固定 scale=1，分别采普通 input 与 helper 的 rect、pan 和事件顺序 |
 | GI-3 / GI-7 helper 与 rows/cols | **INCONCLUSIVE**；`seq 254` 起 helper rect 出现 `top=839 / bottom=856` 的停滞观察，现有材料不能区分聚焦 rect、refit 滞后与真实出屏 | r3 专项以 `pty-refit-check.mjs` 的 rows / cols / xtermRows / ack 读数作定向清单；Headless 结果只证 GI-7 工具链，不替代真机 GI-3 |
 | 视觉与其余形态项 | **INCONCLUSIVE**；无截图，不能以 98 帧三盒数值关闭输入行、最后一行、quick-keys 视觉可达性或整行 | 每会话 1–2 张同场截图并绑定 seq；缺哪项就保留哪项，不用 owner 指令一并豁免 |
 
-补采清单同时固定为：①三个单源会话拆分；②逐会话 `zoomSource` 人工标注；③settle 计数 / tick 可见性；④截图同场链；⑤25% / 50% 中间 raw 用例；⑥D-B 活动会话中变档用例；⑦F18 干净用例；⑧D1 helper pan 对比帧；⑨GI-3 rows/cols 定向复采。执行细节见 DATA-COLLECTION“命题二：2026-11-05 首轮混合会话后二轮单源采证”。
+补采清单同时固定为：①三个单源会话拆分；②逐会话 `zoomSource` 人工标注；③settle 计数 / tick 可见性；④截图同场链；⑤r3-Z-MENU-01 改采 settle 变档 / 回程序列，25% / 50% 中间 raw 在本机登记为不可达而非必得用例；⑥D-B 活动会话中变档用例；⑦F18 干净用例；⑧D1 helper pan 对比帧；⑨GI-3 rows/cols 定向复采。执行细节见 DATA-COLLECTION“命题二：2026-11-05 首轮混合会话后二轮单源采证”。
+
+### 2026-11-05 下午 owner 补测：判别带不可达与浮动键盘登记（口头级）
+
+**证据边界**：以下来源只有 owner 当次真机操作的文字口径，没有新 raw 会话、连续 seq 或截图，全部按 **INCONCLUSIVE（口头级真机观察）**登记。它足以裁决“本机原采集目标不可执行、改采可观测 settle 序列”，不足以把任何新行为写成 PASS / FAIL。
+
+#### owner 实测文字口径
+
+1. **浮动键盘**：无论把 floating keyboard 拖到屏幕何处，`rawShortfall` 恒为 **0**；浮动键盘不写入可视视口、不产生任何 VV 侵入。
+2. **Stage Manager 无键盘窗口缩放**：把 Safari 窗口拖到本机允许的最矮高度（约屏幕一半，再不可矮）时 `rawShortfall` 变为 **1**；放大复原后回 **0**；拖动过程中偶现 **1**。仲裁按 resize 间隙刷新竞态 / 噪声级数值登记，不把它当作真实遮挡事实，也不据此判产品 FAIL 或制造门线样本。
+3. **本机可达形态**：owner 报告该 iPadOS 27 设备没有可用的分裂 / 靠边键盘。停靠键盘的 raw 与布局高同比例变化；既有 c3ee 的 `scale=0.75` 深键盘为 `570.34375 / 997 ≈ 57.2%`，窗口缩放没有改变该比例。owner 提供的 Apple 指南版本范围（拆分键盘指南止于 iPadOS 16、移动屏幕键盘指南仍至 26）仅作外部背景线索，本轮未独立检索核验；本裁决不依赖该线索，也不据此断言其他设备 / 系统版本永远没有这些形态。
+
+#### 仲裁结论
+
+- **本机 25%–50% 判别带不可达**：浮动键盘只有 raw=0，停靠深键盘约 57.2% 同越两线，无键盘 Stage Manager 缩放只有 0/1；原 `249.25 < raw < 498.5` 目标不再作为本机 r3 必做操作。25% / 50% 契约门线及其 Node 逻辑回归**不删除、不改值**，但本机真机门线子项维持 **INCONCLUSIVE（当前形态不可达）**。
+- **二选一裁决：选择 `AUTH-20261105-D2-SETTLE-READONLY`，不选择“25% / 50% 降为 Node-only 永远自洽”**。前者能直接补足 D-C、D-B 变档时序与回程的可观测性；后者不能产生真机证据，“永远自洽”也会掩盖测试可能失败及未覆盖场景。本机门线只作不可达登记，未来若其他设备 / 键盘形态自然产生中间带，可另开会话补真机判别，不在本机反复强行造数。
+- **浮动键盘不让位符合契约**：raw=0 不能凭 `raw>1` 进入活动避让会话；若此前 active，`raw≤1` 按冻结规则退出。因此浮动键盘不触发终端避让、`occlusion=0` 是契约解释上的正确行为；键盘几何义务休眠 / 退出不改变 PTY 焦点所决定的 HO-2 归属。此项是产品语义登记，不是本次口头材料升格出的实现 PASS。
+
+#### r3-Z-MENU-01 新判别判据框架（settle 序列可观测会话）
+
+1. **前置**：从 `scale=1`、前台 PTY editable focus、深键盘活动让位 `occ=raw>1` 开始，保存变档前 Capture；随后只使用 Safari 菜单缩小并尝试精确 0.75。`cmd+'-' / cmd+0` 只属于 Z-MAGIC 来源，不得在 Z-MENU 混用。
+2. **变档帧**：记录旧 / 新 scale、raw、focus、occ 及 settle 快照；纯 D-B 用例须仍 `raw>1 && focusEditable`，变档帧 `occ=0`、候选以新 scale / layout / VV width / raw 重建、`ticked=0`、pending。若 raw≤1 或失焦，改走冻结置锁路径，不计入纯变档样本。
+3. **0.75 的两个产品 tick**：首条来源必须为 `scaleSettleTick`，候选 / 基线及 layout / VV width / raw 不变，`ticked=1`、pending、`occ=0`；第二条同样稳定，`ticked=2`、`scaleBelowOneSettled=true`、pending 解除，满足其余冻结条件时可在该 pass 重入 `occ=raw`。普通 pass 不得增加计数；中间重置、来源不明或 journal 断链按相应子项 INCONCLUSIVE，不得补猜。
+4. **回 1**：菜单回程帧同样 `occ=0` 并开启 return pending；第一条 tick 后仍 pending / `occ=0`。第二条 tick 完成时按现实现清候选，故应读作 `candidate=0 / ticked=0 / zoomReturnFramePending=false`，而不是误等一个回程态的 `ticked=2`；须以此前第一条 tick、未变 baseline / layout / VV width / raw 和单调 pass 序号共同确认完成。`scaleBelowOneSettled=false` 在 scale=1 是正常结果。
+5. **证明边界**：深键盘 raw 同时大于 25% / 50%，所以 settle 后重入只证明“settle 后重入”，**不能单独证明实际选择未锁 25% 线、恢复锁已清或 D-B 不新置锁**。契约可以用“未锁 25% 重入”描述预期路径，但真机 verdict 不得越界。字段齐全且行为违反上述 MUST 时相应子项 FAIL；字段 / tick 链 / seq 缺失、reload 或场景未触发则 INCONCLUSIVE。整行仍须满足既有连续会话与截图门禁。
 
 ### settle 与两处诊断缺陷的仲裁
 
@@ -76,10 +101,34 @@
 
 | 编号 | 文件与改动范围 | 授权决定 / 评审路径 |
 | --- | --- | --- |
-| **AUTH-20261105-D2-SETTLE-READONLY** | `internal/ui/static/index.html`：仅允许在既有 applier mirror 边界发布 D2 settle 的只读诊断快照，不得改任何行为语句；`internal/ui/debugassets/viewport_debug.js`：追加读取与采集；`internal/app/viewport_debug.go`：追加 schema 传输 / 校验；直接测试限 `internal/ui/testdata/viewport_debug.test.mjs`、`internal/ui/viewport_debug_on_test.go`、`internal/app/viewport_debug_test.go`，既有锚点确需同步时才可窄改 `internal/ui/ui_test.go` | **批准，待调度者派编码。** 至少公开六个 `scaleSettle*` 状态值、`pending/settled`、当次 pass 来源与单调序号，并保证连续两个 500ms tick 都可观测（每 tick 只读 capture 或有界只读 journal 的实现选择须在编码前写清）；只有 1s periodic 终态不合格。同步新 `schemaRev/probeVersion`，旧 raw 不回填；不改 `evidence/*.mjs`、不新增 timer、不改门线 / latch / 验收判据。路径：独立诊断原子变更 → 针对性 Node + `go test -tags viewportdebug` → 双评审 → r3 真机双评审；通过工具门禁不等于 D-C 真机 PASS |
+| **AUTH-20261105-D2-SETTLE-READONLY** | `internal/ui/static/index.html`：仅允许在既有 applier mirror 边界发布 D2 settle 的只读诊断快照，不得改任何行为语句；`internal/ui/debugassets/viewport_debug.js`：追加读取与采集；`internal/app/viewport_debug.go`：追加 schema 传输 / 校验；直接测试限 `internal/ui/testdata/viewport_debug.test.mjs`、`internal/ui/viewport_debug_on_test.go`、`internal/app/viewport_debug_test.go`，既有锚点确需同步时才可窄改 `internal/ui/ui_test.go` | **批准，待调度者派编码。** 已选定新增只读 `window.__mwTerminalSettle`，保留数值型 `window.__mwTerminalOcclusion`；公开六个既有状态、pending / settled / return-pending、pass 来源 / 单调序号，并选固定 8 条只读 tick journal，只有 1s periodic 终态不合格。同步新 `schemaRev/probeVersion`，旧 raw 不回填；不改 `evidence/*.mjs`、不新增 timer、不改门线 / latch / 验收判据。字段、测试及双评审路径详见下一小节；工具门禁通过不等于 D-C 真机 PASS |
 | **AUTH-20261105-DIAG-PANEL-CLIENT** | `internal/ui/debugassets/viewport_debug.js` 的 `panelLayoutFor` / panel 自省，及 `internal/ui/testdata/viewport_debug.test.mjs` 直接测试；仅当既有资产锚点必须同步时窄改 `internal/ui/viewport_debug_on_test.go` | **批准方案②，待调度者派编码。** 删除 layout 界作为 unsupported 依据，保留 / 补齐 client 纵横界与 free 拖拽同场回归；不改产品 raw / occlusion，不改 evidence `.mjs`。路径：独立诊断原子变更 → Node 矩阵（含 seq253 同形态 fixture）→ 双评审 → 真机复采；原 `937d91f` 评审范围不能用来豁免本次回归复核 |
 | **AUTH-20261105-R3-GI3-READONLY** | `internal/ui/debugassets/viewport_debug.js`：追加前台 PTY 的 `.xterm-rows` client rect、`term.rows/cols` 与 `appliedTTYSize/lastSentTTYResize/pendingTTYResize` 只读快照，不可得必须显式标记；`internal/app/viewport_debug.go`：追加传输 / 校验；直接测试限 `internal/ui/testdata/viewport_debug.test.mjs`、`internal/ui/viewport_debug_on_test.go`、`internal/app/viewport_debug_test.go` | **批准，待调度者独立派单。** 不采 instance id、终端正文或 token，不改产品状态、refit / ack、evidence `pty-refit-check.mjs` 或其 judge，不新增 zoom 判据。路径：独立诊断原子变更 → Node + viewportdebug Go → 双评审 → r3-D1-GI3 真机；Headless pty-refit 只证 GI-7 工具链，不关闭 GI-3 |
 | **AUTH-20261105-DIAG-ZOOM-LABEL** | 无文件改动 | **本轮不授权、不派编码。** 保留派生标签及旧基线含义，验收继续以 reported + computed bottom 为准；若未来另提消歧，须独立授权和双评审，不得与上述两项捆绑 |
+
+### AUTH-20261105-D2-SETTLE-READONLY 可执行边界细化（2026-11-05 下午）
+
+本小节只是把已批准授权细化到可派单程度；**本轮未改代码、未运行实现测试、未 commit**。调度者仍须独立派单，编码后双评审路径不变。
+
+1. **窗口暴露形态：选新增 `window.__mwTerminalSettle`，不改 `window.__mwTerminalOcclusion` 的类型或值。** 后者是现有数值型 occlusion mirror，不能把字段“加”到 Number 上而不破坏既有读者。新对象只由 applier 在既有 mirror 边界发布为新的不可变快照：字段不可写，无 setter、方法或指向内部可变状态的引用；探针只复制读数，产品任何决策路径都不得读取它。
+2. **当前快照的 additive 字段白名单**如下；除了下列字段和 tick journal，不得借本授权公开 latch、宿主身份、正文或其他状态：
+
+   | 字段 | 只读语义 / 形状 |
+   | --- | --- |
+   | `scaleSettleCandidate` | 当前候选 scale；0 = 无候选 |
+   | `scaleSettleBaseline` | 当前候选的漂移基线；不得由探针重算 |
+   | `scaleSettleTicked` | 整数 0…2；仅既有产品 tick 可递增，2 饱和 |
+   | `scaleSettleLayoutHeight` / `scaleSettleVVWidth` / `scaleSettleRaw` | 候选建立时对应的三项几何读数；raw 只镜像既有算式，不新增 offsetTop 或第二 raw |
+   | `scaleSettlePending` | 镜像现有同名 pending 结果，不把 `ticked<2` 的探针猜测当产品状态 |
+   | `scaleBelowOneSettled` | 镜像当前 pass 的同名布尔结果；scale=1 回程完成时为 false 属正常 |
+   | `zoomReturnFramePending` | 仅诊断投影：`!zoomed && scaleSettleCandidate!==0 && scaleSettleTicked<SCALE_SETTLE_TICKS`；不得新建产品状态或回写决策 |
+   | `scaleSettlePassSource` | 固定枚举：只有收到既有 token 时为 `scaleSettleTick`，其余发布为 `other`；不得把 `other` 猜成某一种事件 |
+   | `scaleSettlePassSeq` | 每页运行时的正安全整数，随 applier 发布严格单调递增；只表示发布顺序，不是墙钟时间，也不是探针 `captureTick` |
+
+3. **选择有界只读 tick journal，不选择 applier 主动触发探针 Capture。** `window.__mwTerminalSettle.scaleSettleTickJournal` 固定最多 8 条，只记录来源为既有 `scaleSettleTick` 的发布后快照；每条携带上述标量字段，不嵌套 journal。这样普通 resize / scroll 不会挤掉 tick 链，也不新增 timer、事件源或产品→探针调用。探针在后续 Capture / periodic 中原样复制 journal，读者按 `scaleSettlePassSeq` 去重并按序号排序；普通 pass 造成的序号间隔不等于丢 tick，但序号回退、同号内容冲突、目标 tick 被覆盖、字段缺失或未实际取得 1→2 / 回程完成链即 INCONCLUSIVE，不插值补齐。500ms 只是现有 interval 的名义节奏，本授权不加时钟、不宣称精确墙钟间隔，hidden 仍不得累计。
+4. **探针与服务端同批 additive**：在 `keyboardSession.scaleSettle` 增加**可空对象**，字段名与上述窗口快照一致，并含 `scaleSettleTickJournal`。mirror 未发布 / 不可读时为 `null`，不得伪造成全零对象；旧 schema 根本没有该字段时也不得回填。`internal/app/viewport_debug.go` 必须为同一对象、journal 及每个字段增加严格传输 / 类型白名单，接受新旧声明的 `schemaRev` 并按各自字段集校验；客户端和服务端字段必须同批落地，避免 `DisallowUnknownFields` 把整帧 400。同步新 `schemaRev/probeVersion`，不改 `evidence/*.mjs`。
+5. **隐私与 verdict 边界**：只允许有限几何 Number、布尔、固定来源枚举和安全整数序号；不得出现 DOM / 文本、token、worktree / 实例标识、路径、任意错误正文或时间戳。所有字段只读、只作证据，绝不回灌产品 raw / occlusion / settle / latch，也不由服务端或探针重算 owed / verdict。`scaleBelowOneSettled=true` 单独不是 PASS；深键盘重入也不是 25% / 50% 或锁状态判别。
+6. **直接测试与评审**：至少覆盖①新对象字段 / 类型 / 不可变性及旧数值 occlusion mirror 不变；②变档 0→首 tick 1→次 tick 2、普通 pass 不计数、重置、饱和、scale>1 清候选、回 1 第二 tick 清候选的可读序列；③journal 固定容量、顺序、序号、只含产品 tick，以及 mirror 缺失时 probe 为 `null`；④新旧 schema 兼容、服务端往返、非法类型 / 未知字段拒绝和隐私字段审计。最小命令为 `node --test internal/ui/testdata/viewport_debug.test.mjs` 与 `go test -tags viewportdebug ./internal/ui ./internal/app`；若未改既有 Go 锚点不得顺手扩改 `ui_test.go`。路径固定为：独立诊断原子变更 → 上述门禁 → 双评审 → r3 真机双评审。工具 PASS 不等于 D-C 真机 PASS，未实施前 D-C 仍结构性 INCONCLUSIVE。
 
 ## D2 Phase 2 实施双评审终审登记（非真机验收）
 

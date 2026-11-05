@@ -397,21 +397,21 @@ zoom 态整体豁免，与其余补偿一致。
 
 ## 10. SOP v3：命题二：2026-11-05 首轮混合会话后二轮单源采证
 
-> 本节是 c3ee 探索性混合会话之后的**二轮执行规范**。它沿用冻结 §5 与已签署 D2，不复活本文 §5l 的 v3.1 / 0.15 历史地板，也不把旧 S1–S5 的组合操作当作本轮验收包。c3ee 只能提供行为子项记录；本轮目标是补齐单源、截图、settle、门线、变档与 refit 的可判别再采证。
+> 本节是 c3ee 探索性混合会话之后的**二轮执行规范**。它沿用冻结 §5 与已签署 D2，不复活本文 §5l 的 v3.1 / 0.15 历史地板，也不把旧 S1–S5 的组合操作当作本轮验收包。c3ee 只能提供行为子项记录；本轮目标是补齐单源、截图、settle、变档与 refit 的可判别再采证，并把本机 25% / 50% 中间带明确登记为不可达，而不是继续强行造数。
 
 ### 10.1 命名、会话边界与禁止事项
 
-- **步骤名保留上一轮语义，但统一加 `r3-` 前缀**：`r3-S1` 静止基线；`r3-S2` 终端软键盘开 / 关 / 重开；`r3-S3` 妙控键盘接入 / 命令操作；`r3-S4` 浮窗展开软键盘；`r3-S5` 触摸板滚动 / Safari pan。需要细分时写 `r3-S2-unlocked-25`、`r3-S2-latched-50`、`r3-S2-return`、`r3-S5-helper-pan` 等后缀。
+- **步骤名保留上一轮语义，但统一加 `r3-` 前缀**：`r3-S1` 静止基线；`r3-S2` 终端软键盘开 / 关 / 重开；`r3-S3` 妙控键盘接入 / 命令操作；`r3-S4` 浮窗展开软键盘；`r3-S5` 触摸板滚动 / Safari pan。需要细分时写 `r3-S2-settle`、`r3-S2-return`、`r3-S5-helper-pan` 等后缀；旧 `unlocked-25 / latched-50` 后缀不再是本机采集目标。
 - S1–S5 是**步骤标签，不是把五步混在一个会话的许可**。本轮只开四个会话：`r3-Z-PINCH-*`、`r3-Z-MENU-*`、`r3-Z-MAGIC-*`、`r3-D1-GI3-*`。文件名采用 `r3-<z-pinch|z-menu|z-magic|d1-gi3>-<YYYYMMDD>-<a|b|…>.jsonl`，截图用同一 stem 加 `-<shotId>.png`；另存一张 session id ↔ 文件名 ↔ 被测构建对照表，不把 daemon 随机 session id 当场景名。
 - 每个 Z 会话都从**新页面 / 新 debug-session、`scale=1`、软键盘关闭、PTY 可交互**开始；前三会话各自只允许一种 zoom 来源。第四个会话全程 scale=1，`zoomSource=none`，不承担 Z 来源验收。
 - **capture 期间禁止在同一标签页重载**；禁止借用旧 `debug-session` 续采、混用第二种 zoom 来源、为“补镜头”事后从另一会话拼截图，或删掉过渡帧 / zoom 帧。若发生 reload、seq 缺口、来源混用或错误操作，保留 raw、标记断点与受影响项，另开新会话；不得把断点两侧作为同一状态机链。
 - 不旋转、不切 Split View / Stage Manager、不前后台切换，除非该步本身是当次命题；这些动作一旦改变 layout / VV 宽度，必须重新标基线，且不得拿旧 raw / latch 解释新几何。
-- 全程开启 continuous 1000ms，但**事件优先于周期帧**：`focusin/focusout`、键盘开 / 关、`resize/scroll`、scale 变档、回程及每次 settle 状态变化后立刻手动 Capture；Capture 使用保焦按钮，不为 Capture 点走终端焦点。手动 Capture 不代替自动事件帧，也不允许只保留稳定帧。
-- settle 字段未按 `AUTH-20261105-D2-SETTLE-READONLY` 落地前，可以先采其他行为，但 **D-C 必记 INCONCLUSIVE**；不得用 periodic 1000ms 的相邻帧或 `unlockTrace.captureTick` 冒充两次产品 500ms `scaleSettleTick`。增强后必须保留两个连续 tick 的来源、序号与完整候选读数；只看到最终 `ticked=2` 而没有 tick 链仍不够。
+- 全程开启 continuous 1000ms，但**事件优先于周期帧**：`focusin/focusout`、键盘开 / 关、`resize/scroll`、scale 变档与回程后立刻手动 Capture；settle 状态变化由只读 tick journal 留痕，不要求人工逐 tick Capture。Capture 使用保焦按钮，不为 Capture 点走终端焦点。手动 Capture 不代替自动事件帧，也不允许只保留稳定帧。
+- settle 字段未按 `AUTH-20261105-D2-SETTLE-READONLY` 落地前，可以先采其他行为，但 **D-C 必记 INCONCLUSIVE**；不得用 periodic 1000ms 的相邻帧或 `unlockTrace.captureTick` 冒充两次产品 500ms `scaleSettleTick`。增强后由有界只读 tick journal 保留两个连续 tick 的来源、单调 pass 序号与完整候选读数；只看到最终 `ticked=2` 而没有 tick 链仍不够。变档 / 回程后立即手动 Capture；**不要求人手踩中每个 500ms tick，也不由 applier 主动调用探针 Capture**。
 
 ### 10.2 每会话截图与同场链
 
-- 每个会话至少 **1 张、目标 2 张**真机截图：一张 `r3-S1` 基线或无键盘缩放稳定态，一张最关键判别态。Z-PINCH 优先拍 scale>1 + 键盘仍 occ=0；Z-MENU / Z-MAGIC 优先拍 scale<1 + PTY 深键盘让位，以及中间 raw / 回程判别态（若做了则第二张拍它）；D1-GI3 **必须两张**，分别对应普通 Web input pan 与 xterm helper pan。
+- 每个会话至少 **1 张、目标 2 张**真机截图：一张 `r3-S1` 基线或无键盘缩放稳定态，一张最关键判别态。Z-PINCH 优先拍 scale>1 + 键盘仍 occ=0；Z-MENU / Z-MAGIC 优先拍 scale<1 + PTY 深键盘让位，以及变档付 0 / 回程稳定态（若做了则第二张拍它）；D1-GI3 **必须两张**，分别对应普通 Web input pan 与 xterm helper pan。
 - 截图前把诊断面板移离输入行、控制列、Transport 和底边，但不能停止采集。先 Capture 再截图，并在人工时间线记录 `shotId / session / seq / capturedAt / scale / raw / occ / activeInput.role / 面板corner`；截图须与该 seq 同场，不能用另一时刻或另一会话补位。
 - 缺截图时，已有数值最多登记对应**行为子项**；整行仍 INCONCLUSIVE。截图只证明其可见场景，不反推未拍到的 tick、latch 或来源。
 
@@ -427,22 +427,28 @@ zoom 态整体豁免，与其余补偿一致。
 
 | 会话 | 初始状态与妙控边界 | 必做按键 / 手势序列 | 判别目标与截图 |
 | --- | --- | --- | --- |
-| **r3-Z-PINCH-01** | `scale=1`、键盘关；妙控可接但**不得**用其缩放，也不用菜单 | `r3-S1` Capture → 双指放大至 scale>1，settle 后 Capture → `r3-S2` 保持该 scale 开 / 关真实软键盘 → 双指缩小并释放，记录是否回 1，回程与两 tick 连续 Capture → 回 1 后再开 / 关 / 重开 → 在 1 继续双指缩小，记录是否只进 Tab Overview；若真实持续 scale<1，保留全链并按 D2 来源冲突处理 | scale>1 即使 raw>1 也 occ=0；优先保留 raw>500 的硬样本。回程帧 occ=0，settle 后才重判。截图 1：>1 + 键盘；截图 2：释放回 1 后稳定态 |
-| **r3-Z-MENU-01** | `scale=1`、键盘关；妙控断开或不用于缩放；只用 Safari 浏览器菜单缩放 | `r3-S1` → 菜单缩小，必须尝试精确 0.75，无键盘 settle / Capture → `r3-S2` 在 PTY 持焦下开 / 关 / 重开 → 做下述中间 raw 的未锁 / 恢复锁对偶 → 菜单回 1 并 settle，做 F18 干净开→关→重开 → 在深键盘活动会话仍 active 时，只用菜单粗糙变档到 0.75，保存变档帧 + 两个 tick → 再回 1 | 997 布局深键盘锚点约 `raw=570.34375`；另必须尝试 **249.25 < raw < 498.5**。D-B 变档当帧 occ=0，纯变档不新置锁，settle 后按新几何 25% 重判。截图 1：0.75 深键盘；截图 2：中间 raw 或 D-B settle 后同场 |
-| **r3-Z-MAGIC-01** | `scale=1`、键盘关；妙控 / 外接键盘已接；只用键盘命令改 scale，不用双指 / 菜单 | `r3-S1` / `r3-S3` → 仅 `cmd+'-'` 缩小并尝试 0.75，无键盘 settle → 需要真实软键盘时按 `r3-S4` 明确记录浮窗展开，再执行 `r3-S2` 开 / 关 / 重开（焦点不离开 helper）→ 尝试中间 raw 对偶 → 只用同一键盘命令回 1 并 settle，重建 scale=1 深键盘 active → 仅用 `cmd+'-'` 粗糙变档到 0.75 → 只以同一键盘的放大 / 重置命令回 1，记录实际按键与 scale；达不到精确值就如实记 | 数值目标同 Z-MENU；`magic-hint` 不算软键盘。命令缩小但无键盘 occ=0；D-B 必须确证变档前 active、变档帧仍 raw>1 且 PTY editable focus，否则只记非纯变档对照。截图 1：妙控来源标注下的 0.75 深键盘；截图 2：中间 raw 或回程稳定态 |
+| **r3-Z-PINCH-01** | `scale=1`、键盘关；妙控可接但**不得**用其缩放，也不用菜单 | `r3-S1` Capture → 双指放大至 scale>1，settle 后 Capture → `r3-S2` 保持该 scale 开 / 关真实软键盘 → 双指缩小并释放，记录是否回 1，回程立即 Capture 并保留 tick journal 的两个连续产品 tick → 回 1 后再开 / 关 / 重开 → 在 1 继续双指缩小，记录是否只进 Tab Overview；若真实持续 scale<1，保留全链并按 D2 来源冲突处理 | scale>1 即使 raw>1 也 occ=0；优先保留 raw>500 的硬样本。回程帧 occ=0，settle 后才重判。截图 1：>1 + 键盘；截图 2：释放回 1 后稳定态 |
+| **r3-Z-MENU-01** | `scale=1`、键盘关；妙控断开或不用于缩放；只用 Safari 浏览器菜单缩放 | `r3-S1` → 只用菜单缩小并尝试 0.75，无键盘 settle / Capture，确认 occ=0 → 只用菜单回 1 并 settle → PTY 持焦并在 scale=1 打开深键盘，Capture 确证 `active / occ=raw>1` → 保持活动会话，**只用菜单**变档并尝试精确 0.75，保存变档普通 pass、只读 tick journal 中两个连续 `scaleSettleTick` 与 settle 后重入帧 → 在 0.75 做实际可达的开 / 关 / 重开及无键盘归零，分别 Capture → 深键盘再次 active 后只用菜单回 1，保存回程帧与两个 tick → settle 后做 F18 干净开→关→重开 | **目标替换为 AUTH-D2-SETTLE-READONLY 的 settle 序列可观测会话**，不再要求 249.25–498.5 中间 raw。变档帧 occ=0、候选重建、首 tick 1 / 次 tick 2、0.75 settled 与回程 pending 解除逐条核对；深键盘重入不单独证明 25% / 50% 或 latch。截图 1：0.75 深键盘；截图 2：变档付 0 或回程稳定同场 |
+| **r3-Z-MAGIC-01** | `scale=1`、键盘关；妙控 / 外接键盘已接；只用键盘命令改 scale，不用双指 / 菜单 | `r3-S1` / `r3-S3` → 仅 `cmd+'-'` 缩小并尝试 0.75，无键盘 settle → 需要真实软键盘时按 `r3-S4` 明确记录浮窗展开，再执行 `r3-S2` 开 / 关 / 重开（焦点不离开 helper）→ 只用同一键盘命令回 1 并 settle，重建 scale=1 深键盘 active → 仅用 `cmd+'-'` 粗糙变档到 0.75 → 只以同一键盘的放大 / `cmd+0` 重置命令回 1，记录实际按键与 scale；达不到精确值就如实记 | **D-B 变档触发段保持有效**；不再要求中间 raw 对偶，`magic-hint` 不算软键盘。命令缩小但无键盘 occ=0；D-B 必须确证变档前活动让位、变档帧仍 raw>1 且 PTY editable focus，否则只记非纯变档对照。settle 字段与 tick journal 按 Z-MENU 同一框架判读；深键盘重入不单独证明门线 / latch。截图 1：妙控来源标注下的 0.75 深键盘；截图 2：变档付 0 或回程稳定态 |
 | **r3-D1-GI3-01** | 全程 `scale=1`，`zoomSource=none`；妙控接入以产生键盘 / 触摸板场景；不在本会话改 zoom | `r3-S1` → 普通 Web INPUT 持焦 + 键盘开，记录 input client rect 与 Safari pan → 不 reload，回 PTY 后执行 `r3-S2`，确认 helper 身份 → `r3-S5-helper-pan` 用触摸板制造 Safari pan，采 pan 前 / 中 / 后事件与 Capture → 键盘开 / 关和窗口恢复后，按 `pty-refit-check.mjs` 的读数清单记录 helper rect、宿主 / `.xterm-rows` rect、`term.cols×rows`、lastSent / applied ack，直到稳定 | 必得“普通 input pan”与“xterm helper 持焦 + 键盘开 + pan”对比帧；针对 c3ee `seq254` 的 helper `839–856` 停滞复采。若持续 pan 且终端出屏，按 F17 是停止型 FAIL，不能记成一般缺证。截图 1 / 2 分别对应两类聚焦 pan |
 
-**中间 raw 对偶的判读（Z-MENU / Z-MAGIC 至少一条实际取得）**：在 `clientHeight=997` 时，25% / 50% 分别为 **249.25 / 498.5**。目标 raw 必须严格落在两线之间：未锁且其他 D-C / 焦点条件满足时，预期 settle 后按 25% 进入、`occ=raw`；已有恢复锁且没有新终端 click / 新 focusin / 窗口几何解锁时，预期 `occ=0`；独立解锁后才可按 25% 重入。**未锁臂**必须从干净基线开始，或先由一条明确记录的新终端 click / 新 focusin / 合法窗口几何变化解锁；**恢复锁臂**先以深键盘 active → 同布局 / 同 VV 宽度收起形成锁，再在不点击终端、不产生新 focusin 的条件下取得中间 raw。两臂须分别标注前置状态与事件证据，不能只凭 occ 结果倒推锁。若实际只能得到 91 或 570.34375 等同侧值，门线子项仍 INCONCLUSIVE，不调键盘 / 工具数值制造 PASS。若落在其他布局高，另算并记录该帧实际两线，不把 249.25–498.5 当跨设备常量。
+**25% / 50% 判别带不可达登记（Z-MENU / Z-MAGIC 均适用）**：2026-11-05 下午 owner 文字口径表明，浮动键盘 raw 恒 0；停靠键盘随布局高同比例变化（c3ee 的 997 布局深键盘 `raw=570.34375`，约 57.2%）；无键盘 Stage Manager 拖窗只出现 0/1 噪声 / 竞态级读数；本机没有可用的分裂 / 靠边键盘。因此**原 249.25 < raw < 498.5 的未锁 / 恢复锁对偶从本机 SOP 删除**，不再反复尝试造数。25% / 50% 门线及其 Node 逻辑回归不变，但真机门线子项记 **INCONCLUSIVE（本机当前形态不可达）**；settle 字段或深键盘重入不承担该门线判别。未来若其他设备 / 形态自然产生中间带，可另开会话按实际布局高重算两线，不把 997 的数值当跨设备常量。
 
-**D-B 专用记录**：变档前最后一帧必须显示活动 `occ=raw>1`；变档帧记录旧 / 新 scale、raw、focus、occ 与 latch 相关只读状态；之后保留两个连续 `scaleSettleTick` 和最终重入帧。若同帧 raw≤1 或失焦，走的是冻结置锁路径，不是 D-B“纯变档”用例；不得混入合格计数。
+**settle 序列判读框架（替代的是 r3-Z-MENU-01 的原采集目标，不是冻结门线）**：
+- 变档前须为 scale=1、前台 PTY editable focus、深键盘活动让位 `occ=raw>1`；Z-MENU 只用菜单，Z-MAGIC 只用键盘命令。变档帧仍 `raw>1 && focusEditable` 才算 D-B 纯变档，且须 `occ=0`、新候选 / 基线建立、`ticked=0`、pending。
+- 在 0.75，第一条合格 `scaleSettleTick` 后 `ticked=1 / pending / occ=0`；第二条在 candidate / baseline / layoutHeight / VV width / raw 均不变时到 `ticked=2 / scaleBelowOneSettled=true / pending=false`，满足其余冻结条件时可同 pass 重入。普通 pass 不计数；重置后必须重新取得完整两 tick，同尺度 settled 后计数饱和，不得反复重建。
+- 回 1 时回程帧与第一条 tick 均须 `occ=0`；第二条 tick 按现实现清候选，所以完成标志是此前 return pending 链后读到 `candidate=0 / ticked=0 / zoomReturnFramePending=false`，不是回程态 `ticked=2`。scale=1 下 `scaleBelowOneSettled=false` 不为失败。完整字段与 tick 链下违反 MUST 才判对应子项 FAIL；journal / 字段 / seq 缺口、reload、来源混用或场景未触发均 INCONCLUSIVE。
+- 深键盘 raw 同越 25% / 50%，故“settle 后重入”不能被写成“已证明未锁 25% 线 / 恢复锁已清 / D-B 未新置锁”。完整操作顺序和口头证据边界见 VALIDATION“判别带不可达与浮动键盘登记”。
 
-**F18 干净段**：开→关→重开全过程不点普通 Web input、不切实例、不 reload；逐帧确认前台 `xterm-helper-textarea` 持焦，保留所有 focus / click / resize / scroll 帧。键盘收起只切换几何义务，不把 HO-2 改判为 HO-1；重入门线另由上述中间 raw 对偶证明。
+**D-B 专用记录**：变档前最后一帧必须显示活动 `occ=raw>1`；变档帧记录旧 / 新 scale、raw、focus、occ 与 settle 只读状态；之后由 tick journal 保留两个连续 `scaleSettleTick` 和最终重入帧。恢复锁不是本授权新增公开字段，无法取得时明确记不可得；不得从深键盘重入反推锁已清或未新置。若同帧 raw≤1 或失焦，走的是冻结置锁路径，不是 D-B“纯变档”用例；不得混入合格计数。
+
+**F18 干净段**：开→关→重开全过程不点普通 Web input、不切实例、不 reload；逐帧确认前台 `xterm-helper-textarea` 持焦，保留所有 focus / click / resize / scroll 帧。键盘收起只切换几何义务，不把 HO-2 改判为 HO-1；F18 只证明该干净开合链，重入 25% / 50% 门线在本机仍为不可达的 INCONCLUSIVE 子项，不再由中间 raw 对偶承担。
 
 **GI-3 专项的两层证据**：现有 `pty-refit-check.mjs` 可原样运行作 rows/cols / ack 的 Headless 定向检查，但其结果只归 GI-7 工具链；r3 真机会话仍须取得同类读数与截图。真机只读字段由 `AUTH-20261105-R3-GI3-READONLY` 独立派单补齐；未落地或仍缺字段时该项如实 INCONCLUSIVE。不得借本 SOP 自行修改 evidence 工具，也不得用 Headless PASS 关闭真机 GI-3。
 
 ### 10.5 交付与停止条件
 
 1. 每会话提交原始 jsonl、人工时间线、zoomSource 表、Capture / 截图映射和必要的派生段；原始文件不改写，派生段另名保存。
-2. 双评审分别重算 mirror / raw / 三盒、scale 变档、settle tick、门线和 rows/cols；结论逐子项写 PASS / FAIL / INCONCLUSIVE，不用覆盖率汇总成整行通过。
+2. 双评审分别重算 mirror / raw / 三盒、scale 变档、settle tick 和 rows/cols，并单列 25% / 50% 的本机不可达登记；结论逐子项写 PASS / FAIL / INCONCLUSIVE，不用覆盖率汇总成整行通过。
 3. 目标数值无法产生、工具字段未落地、截图缺失、seq 缺口或 reload 均停止该项上升；不反复重跑同一失败，不顺手改产品或判据。
 4. 四个会话只关闭它们实际覆盖的命题；R2 的 Phase 3 门禁、D1 正向机制选择及未测设备 / 浏览器不因本轮完成而自动关闭。
