@@ -33,6 +33,8 @@
 - **D2 对“软键盘避让会话”的已签署目标修正（不改冻结基线描述）**：上一条完整保留 `5268869` 的“非缩放进入 / 任意缩放退出”基线事实；对新实现的 D2 验收，只把 scale 准入替换为：`scale>1` 保守 opt-out / 退出，`scale<1` 在前台 PTY editable focus、`raw>1` 且 settle 后稳定几何时可按其余冻结 §5 规则进入。**带外变档**（进入 / 处于 scale<1 带外域的超限变化，以及从带外返回 scale≈1）当帧与未 settle 过渡期不得触发避让，不复用旧 layout / raw / 让位结果，settle 后按当前值重判；恢复锁依下述细则 2 / 4 按退出来源处理，不作“一律清锁”解释。冻结 `abs(scale-1)<=0.01` 带内抖动不新增 D2 几何项，scale>1 内部台阶仍由全帧 opt-out 覆盖。`raw>1` 不绕过 25% / 50% 进入 / 重入门线，冻结 §5 的 raw、会话内全额、恢复退出、click / focusin / 几何解锁和一次 settle 宽容均不变；本项是待实现目标，不是已验证行为。
 - **D2 Phase 2 实施终审细则（与 PLAN §4 D2 同义，验收时必须可执行）**：
   1. **宿主过渡采用方案 B**：Phase 3 前沿用冻结通用 editable 谓词，不新增宿主识别或第二归属机器。scale<1 下普通 Web input / quick-keys 粘贴 textarea 若触发终端避让，记 **R2 已知偏离 / Phase 3 依赖**，不得据此判 D2 的 PTY 准入 PASS，也不得把 HO-3 改判为 HO-2；真机采集分列 PTY 宿主帧与 Web 输入帧，后者不用于 D2 verdict。
+
+     **Phase 3 已取代注记（`AUTH-20261105-P3-OWNERSHIP`，2026-11-06）**：本项上述内容仅保留为 Phase 2 / Phase 3 前的历史过渡语义；Phase 3 起由 B 章的前台 PTY 宿主归属判定取代其“不得做宿主识别”的过渡禁令。直接测试只可更新 D2-7 / D2-7b 中与该过渡宿主资格相关的预期和结构断言，使其验证 HO-3 不避让及前台宿主唯一准入；不得删除用例，也不得弱化或删除 `scale>1` opt-out、D-C settle、D-B / D-D、恢复锁与 25% / 50% 门线等其余 D2 行为断言。具体文件边界、纯 pass 形态和停止条件以 PLAN §5 Phase 3 授权包为准；本注不授权改 evidence `.mjs`。
   2. **变档恢复锁窄例外**：仅当 scale<1 带外变档帧仍满足 `raw>1 && focusEditable`、即活动会话的退出仅由变档引起时，清旧锁、退出并付 0，且不得新置恢复锁；settle 后按未锁 25% 线以当前几何重判，单步 / 多步结果必须一致。若同帧 `raw<=1` 或失焦，其他冻结退出原因优先，恢复锁仍按冻结规则置 / 保留；settle 不清该锁，未经既有解锁时按 50% 重入。scale>1、同几何回落及其他普通退出同样保持冻结规则。本项是对冻结 §5.6 **源码置锁顺序**的 D2 窄例外，只记录在 PLAN 与本契约，不回写冻结文档。
   3. **settle 定义**：scale<1 初次 / 变档后，以及从带外返回 scale≈1 的 `zoomReturnFrame` 后，须连续两次既有 500ms tick pass 合格才 settled；相邻 scale 与相对首个候选 tick / 当前已 settle 基线的 scale 差均 `<=0.001`，候选期间 layoutHeight / vv.width / raw 不变，且无域跨越或新超限变化；基线只在重建时更新，累计超 ε 的慢速漂移同样重置。普通事件 pass 不计数但可重置；计数达 2 后饱和，同值 tick 幂等，不得反复退出。已 settled 后，累计亚 ε 漂移保持 settled，累计超 ε 才重建；单纯键盘 raw 开合不重置 scale settle，由冻结 §5 处理。scale>1 域不得开启或累计候选；由 scale<1 进入 scale>1 须清空既有候选，之后回带内重新计完整两 tick。沿用现有 tick 来源标记，不新增时钟 / timer；hidden 时不累计。**IEEE-754 口径**：ε 和 scale 都是 binary64 Number，以实际 `Math.abs(scale - scaleSettleBaseline)` 的比较为准；十进制看似恰好 0.001 不保证差值等于 ε，边界用例必须记录实际差；1 ULP 用例须按位构造相邻 Number，不以十进制文字冒充精确边界。A 的 153 帧只含精确 0.75、相邻差 0，无变档噪声样本，因此 N=2 / ε=0.001 为保守暂定参数，须由 Z-MENU / Z-MAGIC 真机复核，未复核不得宣称真机 settle PASS。
   4. **F14 回程与带内优先级**：0.75→1 与 scale>1→1 的回程变档帧必须付 0、作废旧几何判据并重新 settle，不得保留带外 active 状态而在回 1 当帧按新 raw 让位。自回程帧起至两 tick 完成前，D-C 的 `scaleSettlePending` 优先于通常的带内冻结准入；完成后交还冻结 §5。无回程 / 无候选的普通带内抖动仍只按冻结阈值处理，不受两 tick 压制。**恢复锁按来源而非一律清除**：纯 0.75→1 清旧锁且不新置锁，settle 后按 25%；scale>1 在先退出形成的旧锁不因 scale>1→1 或 settle 自动消失，回程只不新置锁，若未被独立几何 / click / focusin 解锁则 settle 后按 50%。D2-6 的同几何浅键盘用例即验证此保守方向，随后 click 解锁才按 25%；本条不覆盖或削弱细则 2 的 scale>1 冻结语义。
@@ -63,6 +65,10 @@
 **终端输入宿主**是逻辑角色名：真机上它对应哪一类 DOM 宿主（例如 xterm 的 helper textarea）由 Phase 2 实测确认（PLAN Phase 2 任务 3），本文不预设、不点名实现。
 
 **Phase 2 探针命名不升格为产品契约**：`937d91f` 探针的 `activeInput.role` 及 xterm / helper class 启发式只是实测先行的诊断命名与归属线索，不是 HO-1..HO-4 之外的验收枚举，也不得单独充当“真实终端输入宿主”的权威证明；服务端当前对 `role` 只校验小写字母 / 连字符形状，并未登记一份契约角色枚举。产品显式宿主标记（例如 `data-input-host="pty"`）只能列为 Phase 3 候选改动，须有真机证据并另行取得产品实现授权；未经授权不得把启发式命名当作验收权威。
+
+**Phase 3 宿主判定授权注记（`AUTH-20261105-P3-OWNERSHIP`，本次授权签署轮生效）**：实现只准在当次 pass 内以 `document.activeElement` 为唯一焦点输入，沿祖先链 / 既有宿主 `data-instance-id` 与当前 `state.activeInst` 的前台对应关系作纯函数判定；只有属于该前台实例的真实终端输入宿主才取得 PTY 避让的焦点资格。普通 Web 输入（含 quick-keys 粘贴 textarea）、隐藏 / 非前台终端宿主与 iframe 焦点均无此资格；归属仍以当前焦点落点为准，不能以跨 pass 缓存替代。F1–F5、F8–F10 的交接必须当帧重判，终端 → Web 的退出沿用冻结焦点退出路径，不新造补偿。若纯 pass 形态无法满足这些要求，或需要跨 pass 状态、新增显式宿主标记 / 外部闭包依赖、修改 evidence 镜像（含夹具或断言），必须停止并回报再次仲裁；唯一例外是下述 A1 的 fixture-only 同步，本注不授权其他扩张。
+
+**A1 契约配套注记（`AUTH-20261105-P3-OWNERSHIP-A1`，本次生效）**：choiceA 的裸可编辑 stub 与全隐藏宿主无法表达 HO-2，必须只补“既有前台展示宿主 + 当前 editable 焦点祖先链”的夹具结构；BODY 与宿主外 Web editable 仍无资格。既有 contenteditable 帧在新夹具中仅表示前台宿主内 editable 的 `isContentEditable` 分支，不改变真实终端宿主身份、不扩张 HO-3。所有几何、帧序、bottom / journal、断言表达式及预期值保持逐字不变，仅 stub 结构和相应注释 / message 可同步；产品与镜像同一原子提交并跑既有离线命令。具体允许行段、禁改项和失败报告要求以 PLAN §5 Phase 3 的 A1 授权包为准。
 
 ### HO-1 无归属
 

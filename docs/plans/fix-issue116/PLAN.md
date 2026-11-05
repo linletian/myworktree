@@ -116,6 +116,8 @@ opencode、reasonix、dsh 等 iframe 内输入由 iframe / Safari 处理。父�
 **Phase 2 实施双评审终审（对 32fab22 签署口径的可执行化；不扩大产品目标）**：
 
 - **D-A：选择过渡方案 B，不提交 owner 追加拍板**。Phase 3 宿主分类尚未实施前，D2 只能沿用冻结 `document.activeElement` + `TEXTAREA / INPUT / contenteditable` 谓词（符号 `focusEditable`），不得新增 helper class、祖先链或显式宿主标记读取，也不得另建归属机器。由此，`scale<1` 下 quick-keys 粘贴 textarea 与普通 Web input 可能触发终端避让，登记为 **R2 已知偏离 / Phase 3 归属拆分依赖**，不是 D2 的 PTY 准入证明，也不改判 HO-3。Z-MENU / Z-MAGIC 必须分列“前台 PTY 宿主帧”（判 D2）与“Web 输入帧”（只记 R2 泄漏，不据此判 D2 PASS / FAIL）；R2 最终门禁仍在 Phase 3，不得借本过渡口径关闭。选择 B 的理由是 owner 已签署 scale<1 避让目标，而 A 会提前改动 Phase 3 的产品归属判定，C 则把确定目标再次无限期推迟；B 不改变冻结机制的所有权谓词，并保留可独立回退性。
+
+  **Phase 3 已取代注记（`AUTH-20261105-P3-OWNERSHIP`，2026-11-06 仲裁签署）**：上述方案 B 保留为 Phase 2 / Phase 3 前的历史过渡语义；自本次 Phase 3 授权生效起，其中禁止祖先链 / 宿主归属读取的过渡红线，由 Phase 3 的 **pass 内纯函数前台 PTY 宿主判定**取代。`zoom_scale.test.mjs` D2-7b 等结构断言只准更新这一过渡部分，使其表达“单次当前焦点读取 + 前台实例宿主祖先 / 既有 `data-instance-id` 匹配；普通 Web、隐藏 / 非前台宿主与 iframe 均无 PTY 避让资格”的新不变量；D2-7 的 D-A Web 输入过渡预期应改为 HO-3 不避让，不得删例。`scale>1` opt-out、D-C settle、D-B / D-D 锁与回程、`raw>1` 及 25% / 50% 门线等 D2 行为断言必须逐条保留并通过；本注不授权修改 evidence `.mjs`，也不追溯改写历史评审。
 - **D-B：批准 M8，但免置锁只覆盖“纯变档退出”**。在 `scale<1` 带外变档帧仍满足 `raw>1 && focusEditable`、即退出仅由变档引起时，先按新几何清旧锁、退出并付 `occlusion=0`，且该退出不得新置恢复锁；后续 settle 帧以未锁的 25% 进入线按当前几何重判，单步 / 多步结果必须一致。若同一变档帧另有 `raw<=1` 或失焦，冻结退出原因优先：活动会话仍按冻结规则置 / 保留恢复锁，settle 本身不清锁，未经 click / focusin / 几何解锁时按 50% 重入线判定。`scale>1`、同几何回落及其他普通退出也全部保持冻结置锁语义。源码顺序按符号核对：`geometryChanged` 清锁先于包含 `zoomOptOut` 的退出分支；`scaleStepNoLatchExit` 的 `raw>1 && focusEditable` 限定是防止路径依赖且不误免其他退出的必要组成。**冻结节目注记只写在本 PLAN 与 PHASE1-CONTRACT，不回写 `IPADOS-UI-COMPATIBILITY.md`**：“这是 D2 对冻结 §5.6 源码置锁顺序的窄例外，仅适用于上述纯 scale<1 带外变档退出；§5.6 历史基线描述不变，其余退出路径不变。”F14 回程按 D-D 分别处理 0.75→1 与 scale>1→1，不得扩张成普遍免置锁。
 - **D-C：settle 用两次既有周期 tick，禁止单帧 `===` 直接准入**。`scale<1` 初次进入或变档后，以及 `zoomReturnFrame` 从带外返回 scale≈1 后，只有**连续两次现有 500ms `setInterval` tick pass**均满足下列条件才算 settled；初始 scale≈1 且 `previousTerminalScale=0` 不得伪造回程或开启候选。①除明确的回程候选外，相关 pass 均在 `scale<1` 带外域，且相邻读数及相对首个候选 tick / 当前已 settle 基线读数的 `scale` 差均 `<= 0.001`；②候选期间 `layoutHeight`、`vv.width` 与 raw 均无变化；③其间没有带外域跨越或新的超限 scale 变化。任一条件破坏即清零候选计数并保持零让位；settled 基线仅在重建时更新，逐帧小于 ε 但累计超 ε 的慢速漂移必须重新进入候选；已 settled 后累计未超 ε 的亚 ε 漂移不重建候选，超过 ε 才退出并重新计数。resize / scroll / focus 等普通 pass 可破坏候选，但不得增加 tick 计数。达到两次后计数饱和，后续同尺度 tick 不得反复退出 / 再 settle；已 settled 后单纯键盘 raw 开合不再重置 scale settle，而交由冻结 §5 当帧处理。`scale>1` 不得开启或累计候选；从 scale<1 进入 scale>1 时须清空既有 `scaleSettle*` 候选，回带内后从完整两 tick 重新开始，避免在保守 opt-out 域银行化计数。
   - 参数依据与证据限度：A 原始会话早段 153 帧的 scale 全部精确为 `0.75`、相邻差全为 0，但没有变档 / ULP 抖动样本，不能从中估计真实噪声上限。故 `N=2`、`ε=0.001` 是保守实现参数：ε 小于冻结 ±0.01 带宽容差一个数量级，又远大于 1 ULP；它们不是实测阈值，必须在 Z-MENU / Z-MAGIC 真机记录相邻 scale、raw 与实际 tick 节奏后复核，证据不足时相应 settle 项 INCONCLUSIVE，不得追加调参来制造 PASS。**IEEE-754 边界**：`SCALE_SETTLE_EPSILON` 与 `vv.scale` 均按 JavaScript binary64 Number 运算，验收以实际 `Math.abs(scale - scaleSettleBaseline)` 与 ε 的比较为准；十进制书写上“恰好 0.001”不保证计算差等于 ε，不得用十进制直觉断言边界方向。1 ULP 用例须按位构造相邻 Number，并证明其差小于 ε；ε 边界用例须同时记录实际差和预期比较结果。
@@ -222,6 +224,22 @@ opencode、reasonix、dsh 等 iframe 内输入由 iframe / Safari 处理。父�
 **独立提交边界**：输入分类/交接及其直接测试为一组，不携带 PTY 几何算法重写。
 
 **门禁**：R2、R3、R4 的 Web/iframe 部分通过；PTY 几何仍保持可回退基线。
+
+**Phase 3 编码授权：`AUTH-20261105-P3-OWNERSHIP`（2026-11-06 仲裁签署，本次授权签署轮生效；评审对比基线 = `ae9ad00`）**
+
+- **允许修改**：`internal/ui/static/index.html` 中 `focusEditable` 谓词及其直接关联段，以最小实现把通用 editable 准入换成前台 PTY 终端输入宿主归属判定，包括 `scaleStepNoLatchExit`、既有退出与进入条件中的同一谓词；直接测试限 `internal/ui/testdata/viewport_height.test.mjs` 与 `internal/ui/testdata/zoom_scale.test.mjs`。若另有 testdata 文件直接切片引用该函数，只允许最小同步其切片夹具 / 归属断言。Go 侧只准同步直接锚定这些 JS 行为 / 源码形状的 `internal/ui/terminal_status_test.go`、`internal/ui/ui_test.go` 对应包装注释或断言，不得另改门禁语义。
+- **交接语义**：在 F1–F5、F8–F10 口径下，swap 前后除归属收窄外的冻结会话语义一致。终端 → Web 聚焦按既有焦点退出条件处理，不新增“额外补偿”路径；quick-keys 粘贴 textarea、本页其他 Web 输入、隐藏 / 非前台终端宿主及 iframe 焦点均不得取得 PTY 避让资格。必须补连续事件、`focusin` / `focusout` 顺序、键盘已打开、旧焦点残留与实例切换的直接行为测试。
+- **实现形态边界**：本包只放行 **pass 内纯函数判定**——从当次 `document.activeElement` 沿祖先链 / 既有宿主 `dataset`，与当前前台实例 `state.activeInst` 对应关系判定；不得新增跨 pass 归属缓存、第二状态机、事件源或显式 `data-input-host` 等 DOM 标记写入。应保持被切片函数在现有闭包依赖下可求值；不得以“纯函数”为名新增未镜像的外部 helper / 模块绑定。
+- **停止并回报待再次仲裁**：纯 pass 判定无法完整满足上述契约；或实现需要跨 pass 缓存、新增宿主标记、新增切片外部依赖，或需要修改任一 evidence `.mjs`；或需要超出主授权及下方 A1 的文件 / 语句清单。除下方 A1 明确登记的夹具-only 窄例外外，任一条件成立即停止，不得自行扩大、改镜像来放行或提交半成品。
+- **禁止**：改 raw 算式、把 `vv.offsetTop` 入算、改 25% / 50% 门线、click / focusin / 几何解锁、恢复锁语义、trailing resize / 最终尺寸去重 / 断开清理、D2 非对称 zoom guard 的 scale 准入 / settle / 回程语义、诊断 / 探针 / 服务端、evidence `.mjs`（仅下方 A1 的夹具-only 窄例外除外）、跨 iframe 协议或新增运行时依赖；不得携带 PTY 几何算法重写。上述事项如需变化，只能先回来再仲裁。
+- **评审与验证**：以 `ae9ad00` 为 diff / 行为回归基线，输入分类 / 交接及直接测试为一个原子变更。至少分别执行 `viewport_height.test.mjs`、`zoom_scale.test.mjs` 及受影响的直接 Go 门禁；Node / Go 通过不替代 Phase 3 真机确认。授权生效不表示实现或验收已完成。
+
+**A1 夹具同步修正案：`AUTH-20261105-P3-OWNERSHIP-A1`（2026-11-06 二轮仲裁签署，本次生效）**
+
+- **结构性冲突确认**：`verify-live-choiceA.mjs` 是 evidence 中唯一切片 `applyVisualViewportOcclusion` 的工具；其初始及后续焦点均为无宿主祖先链的裸 stub，且两个既有宿主初始均 `display:none`。任一符合 HO-2 的前台宿主判定都会使既有基线回放与 FOCUS edge 失去准入，故必须同步夹具；代码级禁词表不含 `closest` / `parentElement` / `dataset`，不存在靠该禁词表自动兼容的第三路径。
+- **只允许 fixture-only 同步**：在 `docs/plans/fix-issue116/evidence/verify-live-choiceA.mjs` 当前 `:225-236` 夹具块复用既有 `hosts[0]`，将其设为已展示前台宿主，并给默认 TEXTAREA 焦点提供指向该宿主的 `parentElement` 祖先链；在当前 `:407-428` 只给需要取得资格的 contenteditable / TEXTAREA stub 补同一祖先链，BODY 仍保持无宿主、无资格。可同步当前 `:225-236` 与 `:405-432` 的叙述注释及 assert message 文案，使其明确“前台宿主内 editable”；不得改其他语句。不得新增 `state` 或其他工厂绑定，`state.activeInst` 对应仍是语义要求；若产品必须直接读取未镜像的 `state` 或新增外部 helper，仍须停止上报。
+- **逐字不变项**：`makeHost`、宿主数组、工厂闭包、geometry、帧序、`avoid` / `sessionFrame` 调用、bottom / rect / journal、断言语句的表达式与预期值均不变；只允许上述 stub 结构和 assert message 文案变化。不得新增 / 删除帧或用断言值适配失败。contenteditable-in-host 仅延续既有 `isContentEditable` 分支在“前台宿主内 editable”模型下的覆盖，不声称真实 xterm helper 是 contenteditable，也不授予宿主外 Web contenteditable 资格，无须为此另改产品语义。若实现进一步限定特定 helper 身份、排除宿主内 contenteditable 并改变该既有断言结果，则属于新的产品语义收窄，超出本授权，必须停止回报。
+- **提交与验证**：A1 与主授权的产品实现、直接测试同一原子提交，以遵守 N1 的“同一变更枚举并同步所有切片镜像”，并避免产品先行提交留下必然红色的离线镜像；Node / Go 双评审必须同时覆盖产品 diff 与镜像 diff。必须从仓库根目录执行既有离线命令 `node docs/plans/fix-issue116/evidence/verify-live-choiceA.mjs --html internal/ui/static/index.html`，不新起服务；所有既有断言必须原值通过。失败即如实报告首个失败断言、actual / expected 与 exit code，保留 FAIL / INCONCLUSIVE，不得改 bottom 值、删帧、跳过工具或改用 live 服务制造 PASS。
 
 ### Phase 4：PTY 终端自有视口与 pan 处理
 
