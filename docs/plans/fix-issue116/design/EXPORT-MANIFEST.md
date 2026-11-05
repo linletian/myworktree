@@ -1,11 +1,76 @@
 # Issue #116 D0-1 / D0-2 设计导出与评审清单
 
-**日期**：2026-10-28（首版）／ 2026-11-02 修订 v2.1 ／ 2026-11-02 修订 v2.2 ／ 2026-11-03 修订 v3.0 / v3.0a / v3.1（均为历史）／ **2026-11-04 修订 v4（PLAN v2.0 输入所有权契约，当前口径）**
+**日期**：2026-10-28（首版）／ 2026-11-02 修订 v2.1 ／ 2026-11-02 修订 v2.2 ／ 2026-11-03 修订 v3.0 / v3.0a / v3.1（均为历史）／ 2026-11-04 修订 v4（历史）／ **2026-11-06 修订 v5（Phase 2 G08 补签，当前口径）**
 
 **工具**：`pen version` = **0.3.11**  
-**状态**：v4 设计源与受影响 PNG 已生成并校验；**设计评审与 Phase 2 门禁仍待签，本清单不含任何实现完成或真机 PASS 声明**。`preview-responsive.html` 不在本轮授权范围内，未同步其 v3.1 说明；它仍只是旧交互预览，不是 v4 契约来源或高度证据。
+**状态**：v5 设计源、受影响 PNG 与最新验收矩阵已完成一致签署，**Phase 2 门禁④ / G08 按补签口径关闭**；这只覆盖三项一致性，所有 INCONCLUSIVE 与其余评审 / 真机义务均保留，不表示产品或 #116 已完成。`preview-responsive.html` 不在本轮授权范围内，未同步其 v3.1 说明；它仍只是旧交互预览，不是 v5 契约来源或高度证据。
 
-## 0aaaa. 修订记录 v4（2026-11-04 · PLAN v2.0 输入所有权契约，当前）
+## 0aaaaa. 修订记录 v5（2026-11-06 · Phase 2 门禁④ / G08 补签，当前）
+
+**补签原因**：上一轮 Phase 2 收口时门禁④明确为“未达成＋显式推迟”，G08 保留为 Phase 3 开工前置；**本节即为该门禁的补签**。本轮只同步设计源文本、必要的既有容器高度与受影响 PNG，并登记签署；不授权产品 / 诊断 / evidence 改动，不新增设计结构节点，不执行新真机采证，不 commit。
+
+登记真源为 VALIDATION 的 c3ee / 42cd 专节、Phase 2 收口复核节，以及 **2026-11-06 G02 / D1 owner 限制接受与停采裁决**。后者是当前 G02 有效口径：owner 裁决关闭 / 挂起不等于证据 PASS，D1 证据子项仍 INCONCLUSIVE。
+
+### v5 改动节点与状态映射
+
+| 源稿 / 帧 | 改动节点 | 旧文 → 新文要点 |
+| --- | --- | --- |
+| `sidebar-states.pen` / `d1_notes` | `d1_text_0002` | v4 / 2026-11-04、仅设计声明 → v5 / 2026-11-06 G08 补签与三项一致性；不表示整行验收或 #116 完成 |
+| 同上 | `d1_text_0014` | D2 待真机、无任何真机 PASS → D2 已签署并实现，c3ee / 42cd 仅指定子项 PASS；D2 整行、D1 证据、25% / 50%、F18、D3 / D4 实测、GI-3、live CDP 缺口照实保留 |
+| 同上 / `i0LM2t` | `bx9BO` | 不宣称任何真机 PASS → PASS 只转述 VALIDATION 已登记行为子项，整行 / 未验项不上浮 |
+| 同上 | `P2vsjr` | D2 未决、待采证 → B1 / B3（c3ee 67 / 97 帧）、B2 scale<1 已实现并真机子项 PASS（c3ee 31 帧＋owner 确认）、B4 回程当帧付 0、D-B 纯变档与 D-C 两个既有 500ms 产品 tick（42cd）逐行登记；浮动键盘 raw=0 仅为 owner 口头级 INCONCLUSIVE |
+| 同上 | `Qx6HO`、`X66O6e` | 仅异常回退标题 / 正文 → 保留异常回退，并补入 Phase 2 收口矩阵 G01–G10；G02 使用 2026-11-06 owner 限制接受的最新口径 |
+| 同上 | `i0LM2t` 高 700→880；`d1_notes` 高 1700→1880 | 仅为完整容纳新增矩阵文字及底部留白；未新增 / 删除节点，未改其他节点坐标、色板或产品 UI 结构 |
+| `sidebar-states.pen` / `d1_viewport_geometry` | `d1_text_1201`、`d1_text_1202` | v4 / D2 未决 → v5 / D2 已签署并实现；c3ee / 42cd 子项 PASS 与整行 INCONCLUSIVE 分层，指向 `d1_notes` 矩阵 |
+| 同上 | `d1_text_1222` | 不宣称真机 PASS → 本图只转述登记，子项 PASS 不覆盖 D2 整行，未验项 INCONCLUSIVE |
+| 同上 | `d1_text_1242` | scale<1 未决 → 已实现、c3ee 真机子项 PASS；settle 两 tick / 42cd 子项 PASS；D2 整行与浮动键盘口头观察仍 INCONCLUSIVE |
+| 同上 | `d1_text_1243` | 泛化面板 fixed inset 说明 → 面板支持性按 client 实际落点修正（`938fcd2`），不再以 layout 界判 unsupported，并补横向 client 检查；c3ee `seq253` 同形态 free 复采未做，G01 保留；同步 G02 最新状态 |
+| `quick-keys-panel.pen` / `qk0001` | `qk0010b` | v4 D2 待真机 / 无真机 PASS → v5 G08 补签，连续两个 500ms 产品 tick、c3ee / 42cd 子项 PASS、D2 整行 INCONCLUSIVE、浮动键盘口头级与本机不可达登记；指向主矩阵。仅文本自动排版，无新节点 |
+
+### v5 画布验收矩阵登记
+
+下表与 `X66O6e` 的画布文字及最终 `notes-decisions.png` 一致；“部分达成＋登记”、决策签署和 owner 限制接受均不等于行为 PASS。
+
+| 行 | 当前登记状态 |
+| --- | --- |
+| G01 | Capture / 面板部分达成＋登记；b746 120/120 supported、无手动 Capture，c3ee 482/483＋32 次，42cd 207/207＋8 次；完整组合与 `seq253` 同形态复采仍 INCONCLUSIVE，client 口径已由 `938fcd2` 修正 |
+| G02 | **CLOSED（owner 限制接受 / 挂起，非证据 PASS）**；b746 / c3ee / 42cd 合格 Web↔helper 对偶仍为 0，Safari 归因仍 INCONCLUSIVE；Phase 4 的 D1 相应前置解除 |
+| G03 | D2 整行 / Z 系列 INCONCLUSIVE；c3ee / 42cd 非单源验收包且截图↔seq 不全；scale=1 三盒、scale<1、scale>1 等仅子项 PASS |
+| G04 | 25% / 50%、D-B 不新置锁、D-D latch **INCONCLUSIVE（本机不可达已登记）**；深键盘同越两线 |
+| G05 | F18 干净开→关→重开 INCONCLUSIVE；42cd 重入前有中间终端 click |
+| G06 | D3 决策已签署；隐藏 / 非活动宿主实现及切回真机 INCONCLUSIVE |
+| G07 | D4 决策已签署；refit / ack 与 GI-3 INCONCLUSIVE（c3ee `seq254+`、42cd helper rect 停滞） |
+| G08 | **CLOSED（本轮补签，仅一致签署）**；不改写任何 INCONCLUSIVE |
+| G09 | live Chrome / CDP INCONCLUSIVE；根因与 live verdict 未取得，不判产品 PASS / FAIL |
+| G10 | R2 / Web 输入已知偏离未关闭；c3ee A3 与 42cd HO-3 仅作现场实例，非 D2 PTY 证明 |
+
+### v5 原生导出、实际像素与回读
+
+使用 `pen version` = **0.3.11**；按节点 id 执行 `Export(ids,"png",dir)`，**未传 scale、未 resize、未裁剪、未做截图缩放或后期修图**，随后改为既定文件名。
+
+| Frame id | 既定 PNG | v5 实际像素 | v4 像素 / 变化 | 实际导出次数 |
+| --- | --- | ---: | --- | ---: |
+| `d1_notes` | `ui/notes-decisions.png` | **2362×3762** | 2362×3402；**高 +360**（源高 1700→1880） | **2**（首次回读发现矩阵底部截断；仅扩既有容器高后第 2 次，最终 G01–G10 完整可见） |
+| `d1_viewport_geometry` | `ui/viewport-geometry.png` | **2882×2482** | 2882×2482；未变 | **1** |
+| `qk0001` | `ui/quick-keys/notes-decisions.png` | **1002×1864** | 1002×1728；**高 +136**（文本自动排版） | **1**（此前两条失败命令均在 Export 执行前回滚，未生成图片；修正后实际导出 1 次） |
+
+实际成功导出命令：
+
+```
+pen interactive --in ui/sidebar-states.pen --out ui/sidebar-states.pen
+  save() → execute(Export(["d1_notes","d1_viewport_geometry"],"png","/tmp/issue116-v5-export-d3wmgm73/sidebar"))
+  execute(Update(i0LM2t/d1_notes 仅高度)) → save() → execute(Export(["d1_notes"],"png","/tmp/issue116-v5-export-d3wmgm73/sidebar-final"))
+pen interactive --in ui/quick-keys/quick-keys-panel.pen --out ui/quick-keys/quick-keys-panel.pen
+  save() → execute(Export(["qk0001"],"png","/tmp/issue116-v5-export-d3wmgm73/quick-keys"))
+```
+
+最终 3 张 PNG 均已回读：矩阵文字完整，几何帧和 quick-keys 说明未见新增文本截断或重叠。只读测量中一次远端 Noto Sans 拉取失败并返回零高度，未用该数值冒充版面验收；最终以实际 PNG 回读为准。**这只是设计产物检查，真机像素排版仍未做。** `d1_quick_short`、`qk0053`、`qk0124` 及其他源内容未变，对应 PNG 不重出。
+
+### v5 一致性签署
+
+**截至本轮提交，设计源文本=VALIDATION 登记状态=PNG 内容三项一致。** 本签署只关闭 Phase 2 门禁④ / G08 的一致性签署缺口；G02 的证据子项以及 G03–G05、G07、G09 等 INCONCLUSIVE 全部保留，G01 / G06 / G10 的既定承接不变，任何子项 PASS 均不上浮为整行或 #116 PASS。真机像素排版、完整 Z 系列及其他未验场景不因本补签关闭。
+
+## 0aaaa. 修订记录 v4（2026-11-04 · PLAN v2.0 输入所有权契约，历史）
 
 本版以 `PLAN.md` v2.0 的 R1–R6、§3 与 `PHASE1-CONTRACT.md`（含提交 `323fa91` 的修订）为现行口径。下方 v3.1 / v3.0a / v3.0 及更早段落**全部是历史记录**，其中 0.15 地板、555→147 让位、整壳钉高或根原点等旧叙事不得再作为设计或验收依据。当前进入线为布局高 ×25%，恢复后重入线为 ×50%，活动会话内 `occlusion = raw`；不存在 0.15 持续过滤地板。
 
@@ -213,7 +278,7 @@ pen interactive --in ui/quick-keys/quick-keys-panel.pen --out ui/quick-keys/quic
 - 三份源稿均通过 `pen interactive` 的 `get_app_state()` 文档/schema 校验，并由 `save()` 保存。
 - frame id 通过 `Get((n,c)=>{c.skipChildren();Print(n.id,n.name,n.width,n.height)})` 查询确认；未使用占位 id。
 - 所有 PNG 均通过 interactive `Export(ids, "png", dir)` 原生导出，**未传入 scale，也未做任何后期 resize、裁剪或截图缩放**。下表记录实际 PNG 像素尺寸；其大于 CSS 场景尺寸是 CLI 当前导出行为。
-- 本轮未升级 CLI，未混用不同 CLI/Export 路径。v4 仅重出主 UI 的 `d1_notes` / `d1_viewport_geometry` / `d1_quick_short` 与 quick-keys 的 `qk0001` / `qk0053` / `qk0124`；其余源内容与既有 PNG 保持不变。
+- 本轮未升级 CLI，未混用不同 CLI/Export 路径。v4 仅重出主 UI 的 `d1_notes` / `d1_viewport_geometry` / `d1_quick_short` 与 quick-keys 的 `qk0001` / `qk0053` / `qk0124`；v5 仅重出 `d1_notes` / `d1_viewport_geometry` / `qk0001`，其余源内容与既有 PNG 保持不变。
 - 已逐项目检主 UI 与 Portal 必需画面。初次主 UI 导出中发现的终端坐标遮挡、密度说明重叠及 Portal 空态表头换行问题均已回改 `.pen` 并重新导出，不以修图代替源稿修正。
 
 ## 2. D0-1 主 UI
@@ -223,7 +288,7 @@ pen interactive --in ui/quick-keys/quick-keys-panel.pen --out ui/quick-keys/quic
 
 | Frame id | PNG（`ui/`） | 实际像素 | 覆盖内容 |
 | --- | --- | ---: | --- |
-| `d1_notes` | `notes-decisions.png` | 2362×3402 | 状态矩阵、断点不变、全宽内联；v4 输入所有权、Web 输入、焦点交接、键盘/pan/zoom 与异常回退标注；设计/证据边界 |
+| `d1_notes` | `notes-decisions.png` | 2362×3762 | 状态矩阵、断点不变、全宽内联；v5 输入所有权、Web 输入、焦点交接、键盘/pan/zoom、异常回退与 Phase 2 G01–G10 最新登记矩阵；设计/证据边界 |
 | `d1_desktop_expanded` | `desktop-expanded.png` | 2882×1802 | 1440×900、240px 展开侧栏、running 仅 Stop |
 | `d1_desktop_collapsed` | `desktop-collapsed.png` | 2882×1802 | 折叠零宽、stopped 的 Restart + Delete 内联 |
 | `d1_action_states` | `desktop-action-states.png` | 2882×1962 | running / starting / stopping / stopped 四态及完整矩阵 |
@@ -237,17 +302,17 @@ pen interactive --in ui/quick-keys/quick-keys-panel.pen --out ui/quick-keys/quic
 | `d1_density390` | `worktree-density-390.png` | 782×1690 | 390×844、240px drawer、无动作无空行 |
 | `d1_density820` | `worktree-density-820.png` | 1642×2362 | 820×1180、200px 并排侧栏与滚动后果 |
 | `d1_density_matrix` | `worktree-density-matrix.png` | 3362×2602 | 320/390/820 × 0/1/multi 设计矩阵；真实滚动数据待回填 |
-| `d1_viewport_geometry` | `viewport-geometry.png` | 2882×2482 | v4 四格：PTY 活动/非活动会话两态、25%/50% 门线与历史数值重述、键盘/pan/zoom 边界；不含 0.15 地板 |
+| `d1_viewport_geometry` | `viewport-geometry.png` | 2882×2482 | v5 四格：PTY 活动/非活动会话两态、25%/50% 门线与历史数值重述、D2 子项/整行分层、浮动键盘、面板 client 口径及键盘/pan/zoom 边界；不含 0.15 地板 |
 | `d1_quick_short` | `quick-keys-short-viewport.png` | 1642×1202 | 820×600 矮视口；活动会话控制列随 `20+occlusion` 收缩，粘贴 textarea 为 HO-3；quick-keys 与新顶栏互不遮挡 |
 
 ### quick-keys 既有稿件复核
 
 设计源：[quick-keys-panel.pen](../../../../ui/quick-keys/quick-keys-panel.pen)
 
-- 形态、键集、入口、左展与内部滚动不变；说明帧（`qk0010b`）已按 v4 改写为焦点归属 + 冻结会话几何口径，不再使用 0.15 地板，也不再把 Web 粘贴输入当作 PTY 避让触发器。
+- 形态、键集、入口、左展与内部滚动不变；说明帧（`qk0010b`）已按 v5 改写为焦点归属 + 冻结会话几何 + Phase 2 当前登记状态，不再使用 0.15 地板，也不再把 Web 粘贴输入当作 PTY 避让触发器；D2 子项 PASS 不上浮整行。
 - 粘贴兜底组件（`qk0053` / `qk0062`）明确 textarea 持焦为 HO-3、Safari 最小 pan、无 PTY 避让/双重补偿，点回终端后按当帧会话重判；对应 `component-panel-paste-fallback.png` 为 **562×724**。
 - iPhone 软键盘帧（`qk0125` + `qk0156`）明确前台 PTY 持焦且活动会话前提，会话内 `occlusion=raw`；非会话 `occlusion=0`、满高被覆盖为预期，粘贴 textarea 则归 HO-3。
-- `qk0001` → `notes-decisions.png`（**1002×1728**）；`qk0053` → `component-panel-paste-fallback.png`（**562×724**）；`qk0124` → `scene-iphone-keyboard-panel.png`（**802×1772**，尺寸未变）。
+- `qk0001` → `notes-decisions.png`（**1002×1864**）；`qk0053` → `component-panel-paste-fallback.png`（**562×724**）；`qk0124` → `scene-iphone-keyboard-panel.png`（**802×1772**，尺寸未变）。
 
 ### preview 验证（只验证 preview，不是 PR1/真机证据）
 

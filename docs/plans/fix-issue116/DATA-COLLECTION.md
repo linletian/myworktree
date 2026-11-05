@@ -478,6 +478,7 @@ owner 选择 B 后，Phase 2 标记为**收口（有显式登记缺口）**。§
 | F18 无中间 click 的开→关→重开 | 已有连续持焦与几何链，但候选段存在中间终端 click，保持 **INCONCLUSIVE** | PLAN G05；**Phase 5** 键盘生命周期回归 |
 | D3 隐藏 / 非活动宿主、D4 refit 与 GI-3 rows/cols / ack | D3 / D4 设计已签署；实现和真机场景未验，GI-3 停滞观察未归因 | PLAN G06 / G07；**Phase 4** 实现与定向验证，**Phase 5** 实例切换和生命周期回归 |
 | 实时 Chrome/CDP live 检查 | 根因与 verdict 均未取得，低优先级独立工具链缺口；不是产品 PASS / FAIL | PLAN G09；**Phase 5** 浏览器回归前排期，仍需最终实时证据时最迟并入 Phase 6 |
+| **2026-11-06 判别带与 D1 停采** | 25% / 50% 中间判别带沿用既有“本机不可达、不强行造数”口径；D1 新增 owner 停采裁决，不再等待 Web ↔ helper 对偶帧。D1 证据子项仍 **INCONCLUSIVE**（对偶帧 0、Safari 归因不可采），owner 仅在产品层面接受低概率、可恢复 pan 并挂起，不是证据 PASS | PLAN G02 已按 owner 限制接受关闭并解除 Phase 4 的 D1 相应前置，Phase 3 输入所有权拆分（G10）照常。仅当未来复现率可观或发生致命 / 不可恢复遮挡时，按 PLAN 的 D1-FOLLOWUP 候选开独立 issue 重启归因与机制评估；本行是 D1 停采与门禁的最新口径，覆盖本节前述 D1 阻断表述 |
 
 ### 11.3 未来恢复采证的必要条件
 
