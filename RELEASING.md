@@ -220,7 +220,7 @@ both the default-off and enabled variants.
 
 - Reports contain geometry and limited device/UI metadata only, not terminal
   text, tokens, worktree names/paths or instance IDs. Storage is in-memory:
-  at most 8 sessions × 120 events, 30-minute idle TTL, and `Cache-Control:
+  at most 8 sessions × 600 events, 30-minute idle TTL, and `Cache-Control:
   no-store`. A daemon restart clears reports. See `docs/API.md` §"Viewport
   geometry diagnostics" for the schema and `docs/plans/fix-issue116/` for the
   current iPad evidence.

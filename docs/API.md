@@ -1293,7 +1293,7 @@ Upload shape (the static client builds this automatically):
 Privacy and bounds:
 
 - Only the fields above are accepted. Unknown fields, terminal text, tokens, worktree names/paths, and instance IDs are rejected; `vv`, `terminal`, `webPanel`, `xtermScreen`, and `xtermRows` may be `null` when unavailable.
-- Body limit: 64 KiB. At most 8 sessions, 120 events per session, and a 30-minute idle TTL. The oldest session is evicted at capacity; expired sessions return 404. Reports are in-memory only and disappear on daemon restart.
+- Body limit: 64 KiB. At most 8 sessions, 600 events per session, and a 30-minute idle TTL. The oldest session is evicted at capacity; expired sessions return 404. Reports are in-memory only and disappear on daemon restart.
 - `seq` is per-session and must be positive. Duplicate/older retries are idempotent no-ops and never overwrite newer observations; gaps are allowed after offline coalescing.
 - Response to upload: `{"accepted": true, "latestSeq": 4}`. A duplicate/older sequence returns `accepted: false` with the current latest sequence.
 - Download response: `{"session": "…", "updatedAt": "…", "latestSeq": 4, "events": [{"seq": 4, "receivedAt": "…", "snapshot": {…}}]}`. Omitting `after` (or `after=0`) returns the retained history.

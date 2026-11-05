@@ -403,8 +403,11 @@ func TestViewportDebugSessionTTLCapacityAndEventCap(t *testing.T) {
 		t.Fatal("newest session was incorrectly evicted")
 	}
 
-	// Event history is capped and keeps the newest sequence numbers.
-	for seq := 2; seq <= 125; seq++ {
+	// Event history is capped and keeps the newest sequence numbers. The loop
+	// overfills the cap by exactly five (seq 1 was uploaded above, so 2..605
+	// is 605 events against the 600-event window) so the drop itself is what
+	// this asserts at the new limit, not just the shape of a short window.
+	for seq := 2; seq <= 605; seq++ {
 		report := validViewportDebugReport(seq)
 		report.Session = "fedcba9876543210"
 		store.put(report)
@@ -413,7 +416,7 @@ func TestViewportDebugSessionTTLCapacityAndEventCap(t *testing.T) {
 	if !ok || len(got.Events) != viewportDebugMaxEventsPerSes {
 		t.Fatalf("event cap: ok=%v len=%d", ok, len(got.Events))
 	}
-	if got.Events[0].Seq != 6 || got.Events[len(got.Events)-1].Seq != 125 {
+	if got.Events[0].Seq != 6 || got.Events[len(got.Events)-1].Seq != 605 {
 		t.Fatalf("wrong retained range: first=%d last=%d", got.Events[0].Seq, got.Events[len(got.Events)-1].Seq)
 	}
 

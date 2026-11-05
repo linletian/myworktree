@@ -21,10 +21,22 @@ import (
 // exists so a remote iPad can upload geometry without Safari Web Inspector;
 // it is not a general-purpose log or terminal-content transport.
 const (
-	viewportDebugBodyLimit       = 64 * 1024
-	viewportDebugSessionTTL      = 30 * time.Minute
-	viewportDebugMaxSessions     = 8
-	viewportDebugMaxEventsPerSes = 120
+	viewportDebugBodyLimit   = 64 * 1024
+	viewportDebugSessionTTL  = 30 * time.Minute
+	viewportDebugMaxSessions = 8
+	// 600, per the product owner's floor of 500+ (given in the 2026-11-05
+	// scheduling session, recorded off-repo): one A0 SOP round measures 300+
+	// frames, and the real max a single session holds is 709 distinct events
+	// (evidence/raw/p7-854069baf9dee9f6b85788e6.jsonl, seq 1..758 — the 975 of
+	// evidence/raw/b90643be….jsonl is its line count over overlapping pulls, not
+	// a distinct-event count), so a 120-frame window truncated the early
+	// sequence of every long SOP run. A 600 window covers long sessions
+	// (~5-10 min at 1 fps) but sessions longer than 600 are still truncated
+	// (observed max 709). The window stays a RING (newest kept, oldest dropped)
+	// and stays bounded: each event is one ≤64KiB report, measured at ~6.5KB
+	// avg per frame on the current p9 probe (evidence/raw/b7460ddb….jsonl:
+	// 6542B avg, 7683B peak).
+	viewportDebugMaxEventsPerSes = 600
 	// issue #116 contract v3.0: every PTY host is listed in a snapshot because a
 	// stale bottom on a hidden host is the band the next switch produces. One
 	// host per session, and sessions are bounded by the instance cap, so 64 is
