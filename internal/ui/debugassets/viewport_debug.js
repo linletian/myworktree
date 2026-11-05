@@ -331,7 +331,116 @@
     // verifier's stamp has to keep matching; this string says which ADDITIVE field
     // set a frame carries, so a capture taken before Phase 2 task 1 is told apart
     // from one after it by a field, not by bumping the frozen stamp.
-    const SCHEMA_REV = "p9-additive-ownership-panel-v1";
+    // AUTH-20261105-D2-SETTLE-READONLY: the settle block below is the next
+    // additive field set on the same frozen stamp, so THIS marker moves with it —
+    // the server accepts both revisions, and a frame that never carried the block
+    // (this revision was not on the page yet) is told apart from one that carried
+    // it unpublished (`scaleSettle: null` + reason) by the fields, never by
+    // backfilled zeros.
+    const SCHEMA_REV = "p9-additive-settle-readonly-v1";
+
+    // AUTH-20261105-D2-SETTLE-READONLY: the applier publishes window.
+    // __mwTerminalSettle (see applyVisualViewportOcclusion in index.html) as an
+    // immutable snapshot of the D-C settle memory every pass. The probe COPIES the
+    // whitelisted scalars verbatim — it re-derives nothing, re-judges nothing and
+    // above all never zero-fills: a mirror that was never published, or that does
+    // not have the published shape, is `scaleSettle: null` with the one fixed
+    // reason, so absence stays absence and cannot be laundered into a measurement.
+    // The copy carries only numbers, booleans and the fixed two-word enum — no
+    // text, no DOM, no timestamps, no identity — and every key outside the
+    // whitelist is dropped, so nothing a future mirror might grow can ride.
+    // 仲裁 F-6（r3 前必须）前置对齐：服务端门禁（internal/app/viewport_debug.go）
+    // 会对整帧 400 的每一条【形状】规则，如今在复制后、上传前同样成立——几何有限
+    // 非负且有界、ticked 在 0…2、两词 enum、passSeq 正安全整数、journal 是数组
+    // 且 ≤8、条目 ticks-only、发布序号严格递增。任一不满足：整块降级
+    // null + 固定 reason，同帧其余字段（ownership / occlusion / panel）照常上传，
+    // 绝不排序、去重、修补或部分保留坏 journal，也不新增 reason 词表。留在门禁
+    // 之外的只有跨字段语义矛盾（pending vs candidate / ticked 之类）——那是仲裁
+    // F-4 明确的读者域，探针不得过滤。服务端同样的校验原样保留，作其他客户端的
+    // 防线（本项不改服务端）。
+    const SETTLE_UNAVAILABLE_REASON = "settle-mirror-not-published";
+    const SETTLE_JOURNAL_MAX = 8;
+    const SETTLE_NUMBER_KEYS = Object.freeze([
+        "scaleSettleCandidate", "scaleSettleBaseline", "scaleSettleLayoutHeight",
+        "scaleSettleVVWidth", "scaleSettleRaw", "scaleSettlePassSeq",
+    ]);
+    // The five geometry scalars the server additionally pins non-negative and
+    // abs ≤ 10M (validateViewportDebugScaleSettleScalars / viewportDebugNumber) —
+    // front-aligned here so a finite-but-negative mirror degrades THIS block
+    // instead of costing the whole frame a 400 at the door.
+    const SETTLE_GEOMETRY_KEYS = Object.freeze([
+        "scaleSettleCandidate", "scaleSettleBaseline", "scaleSettleLayoutHeight",
+        "scaleSettleVVWidth", "scaleSettleRaw",
+    ]);
+    const SETTLE_GEOMETRY_MAX_ABS = 10000000;
+    const SETTLE_BOOLEAN_KEYS = Object.freeze([
+        "scaleSettlePending", "scaleBelowOneSettled", "zoomReturnFramePending",
+    ]);
+
+    function settleScalarsCopyOf(source) {
+        if (!source || typeof source !== "object") return null;
+        const out = {};
+        for (const key of SETTLE_NUMBER_KEYS) {
+            if (!Number.isFinite(source[key])) return null;
+            out[key] = source[key];
+        }
+        // Front-aligned with the server's geometry gate: finite was proven above,
+        // non-negative and bounded come next — negative or oversized geometry the
+        // server would 400 is unreadable HERE, never a partial copy.
+        for (const key of SETTLE_GEOMETRY_KEYS) {
+            if (out[key] < 0 || Math.abs(out[key]) > SETTLE_GEOMETRY_MAX_ABS) return null;
+        }
+        // ticked is the D-C counter: an integer 0…2 by contract, not a count of
+        // anything the probe gets to recount. A mirror outside its documented
+        // shape is UNREADABLE as a whole — null with the reason, never a partial
+        // copy and never a re-judged correction.
+        if (!Number.isInteger(source.scaleSettleTicked) || source.scaleSettleTicked < 0 || source.scaleSettleTicked > 2) return null;
+        out.scaleSettleTicked = source.scaleSettleTicked;
+        if (!Number.isSafeInteger(source.scaleSettlePassSeq) || source.scaleSettlePassSeq < 1) return null;
+        for (const key of SETTLE_BOOLEAN_KEYS) {
+            if (typeof source[key] !== "boolean") return null;
+            out[key] = source[key];
+        }
+        if (source.scaleSettlePassSource !== "scaleSettleTick" && source.scaleSettlePassSource !== "other") return null;
+        out.scaleSettlePassSource = source.scaleSettlePassSource;
+        return out;
+    }
+
+    function scaleSettleFieldsOf(win) {
+        const unavailable = { scaleSettle: null, scaleSettleUnavailableReason: SETTLE_UNAVAILABLE_REASON };
+        try {
+            const mirror = win ? win.__mwTerminalSettle : null;
+            const scalars = settleScalarsCopyOf(mirror);
+            if (!scalars || !Array.isArray(mirror.scaleSettleTickJournal)) return unavailable;
+            // 仲裁 F-6：journal 超 8 是服务端整帧 400 的形状（`too many
+            // scaleSettleTickJournal entries`），所以这里【拒绝而非截断】——把环
+            // 裁短 launder 成一条被修补过的链，就是探针在替产品圆场。合法镜像由
+            // applier 在发布侧环限 8（index.html 的 slice(-SCALE_SETTLE_JOURNAL_MAX)
+            // 原样不动），探针读到的只可能是 ≤8；越界即形状已坏，整块降级。
+            if (mirror.scaleSettleTickJournal.length > SETTLE_JOURNAL_MAX) return unavailable;
+            const journal = [];
+            let previousSeq = 0;
+            for (const entry of mirror.scaleSettleTickJournal) {
+                const copy = settleScalarsCopyOf(entry);
+                if (!copy) return unavailable;
+                // The journal is the tick chain the r3-Z-MENU settle sequence is
+                // read from — ticks only, exactly the server's door rule
+                // (`the settle tick journal carries product ticks only`), checked
+                // BEFORE upload so one "other" entry costs only this block.
+                if (copy.scaleSettlePassSource !== "scaleSettleTick") return unavailable;
+                // Strictly increasing publish sequence — the server's
+                // `sequence must be strictly increasing` rule, duplicated /
+                // rewound seqs degrade the block, never get sorted or deduped.
+                if (copy.scaleSettlePassSeq <= previousSeq) return unavailable;
+                previousSeq = copy.scaleSettlePassSeq;
+                journal.push(copy);
+            }
+            scalars.scaleSettleTickJournal = journal;
+            return { scaleSettle: scalars, scaleSettleUnavailableReason: "" };
+        } catch (_) {
+            return unavailable;
+        }
+    }
 
     const TRACE_MAX_ENTRIES = 16;
     const XTERM_MARKER = "xterm";
@@ -961,8 +1070,12 @@
         // §5.5 unlock tick: a click that landed between the frames means the recovery
         // latch may already be open, so `recovering` is no longer derivable (B-3).
         const sessionSpan = { tick: ctx.unlockTick, previousTick: ctx.previousUnlockTick };
+        // AUTH-20261105-D2-SETTLE-READONLY: the additive settle block rides this
+        // same frame — a COPY of the applier's published mirror, or null plus the
+        // fixed reason. The probe reads nothing else from it and decides nothing.
+        const settleFields = scaleSettleFieldsOf(win);
         const keyboardSession = Object.assign({}, keyboardObservation,
-            keyboardSessionOf(keyboardObservation, ctx.keyboardPrevious, sessionSpan));
+            keyboardSessionOf(keyboardObservation, ctx.keyboardPrevious, sessionSpan), settleFields);
         const unlockTrace = ctx.eventTrace
             ? ctx.eventTrace.report()
             : {

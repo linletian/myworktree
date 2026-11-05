@@ -365,6 +365,193 @@ test("p9 reports the applier's mirrored occlusion, never a re-derived ratio", ()
   assert.equal(api.snapshotFromPage(fresh.page, "resize", "2026-10-27T12:00:00.000Z").occlusion, 0, "an unset mirror reads 0");
 });
 
+// --- AUTH-20261105-D2-SETTLE-READONLY: keyboardSession.scaleSettle -------------
+
+// A settle mirror shaped exactly like the frozen snapshot the applier publishes at
+// applyVisualViewportOcclusion: the whitelisted scalars plus the bounded tick
+// journal. `withJunk` is the privacy fixture — keys the whitelist forbids.
+function settleMirrorFixture({ seq = 41, ticked = 1, journalLength = 2, withJunk = false } = {}) {
+  const scalars = (passSeq, passTicked) => ({
+    scaleSettleCandidate: 0.75,
+    scaleSettleBaseline: 0.75,
+    scaleSettleTicked: passTicked,
+    scaleSettleLayoutHeight: 1180,
+    scaleSettleVVWidth: 820,
+    scaleSettleRaw: 280,
+    scaleSettlePending: passTicked < 2,
+    scaleBelowOneSettled: false,
+    zoomReturnFramePending: false,
+    scaleSettlePassSource: "scaleSettleTick",
+    scaleSettlePassSeq: passSeq,
+  });
+  const journal = [];
+  for (let i = 0; i < journalLength; i++) journal.push(scalars(seq - journalLength + 1 + i, Math.min(2, i + 1)));
+  const mirror = Object.freeze(Object.assign(scalars(seq, ticked), {
+    scaleSettleTickJournal: Object.freeze(journal.map((entry) => Object.freeze(entry))),
+  }));
+  if (!withJunk) return mirror;
+  // The mirror itself is frozen, so the junk fixture is a live object: the probe
+  // must not let anything the whitelist forbids ride the wire.
+  return Object.assign({}, mirror, {
+    terminalText: "must-not-ride",
+    innerHTML: "<b>must-not-ride</b>",
+    scaleSettleTickJournal: mirror.scaleSettleTickJournal.map((entry, index) => (index === 0 ? Object.assign({}, entry, { worktree: "must-not-ride" }) : entry)),
+  });
+}
+
+test("keyboardSession carries the applier's settle mirror as a whitelisted COPY, never a re-derivation", () => {
+  const api = loadAPI();
+  const thin = makePage();
+  thin.page.window.__mwTerminalSettle = settleMirrorFixture();
+  const settle = api.snapshotFromPage(thin.page, "manual", "2026-11-05T12:00:00.000Z").keyboardSession.scaleSettle;
+  assert.ok(settle, "a published mirror is carried, not dropped");
+  assert.equal(settle.scaleSettleCandidate, 0.75, "the candidate rides as the applier wrote it");
+  assert.equal(settle.scaleSettleTicked, 1, "the tick count is COPIED — the probe counts nothing");
+  assert.equal(settle.scaleSettlePending, true, "the guard's own pending word is mirrored, not re-spelled from ticked<2");
+  assert.equal(settle.scaleSettlePassSource, "scaleSettleTick", "the pass source is the applier's own token");
+  assert.equal(settle.scaleSettlePassSeq, 41, "the publish sequence travels untouched");
+  assert.equal(settle.scaleSettleTickJournal.length, 2, "the tick journal is copied");
+  assert.deepEqual(settle.scaleSettleTickJournal.map((entry) => entry.scaleSettlePassSeq), [40, 41], "journal entries keep their publish order for the reader's seq dedup");
+  assert.deepEqual(settle.scaleSettleTickJournal[0].scaleSettlePassSource, "scaleSettleTick", "the journal is ticks-only as published");
+  // The block's exact vocabulary — numbers, booleans, the enum, nothing else. A
+  // new key is a schema change and must fail this pin, not ride unnoticed.
+  assert.deepEqual(Object.keys(settle).sort(), [
+    "scaleBelowOneSettled", "scaleSettleBaseline", "scaleSettleCandidate", "scaleSettleLayoutHeight",
+    "scaleSettlePassSeq", "scaleSettlePassSource", "scaleSettlePending", "scaleSettleRaw",
+    "scaleSettleTickJournal", "scaleSettleTicked", "scaleSettleVVWidth", "zoomReturnFramePending",
+  ].sort());
+  assert.deepEqual(Object.keys(settle.scaleSettleTickJournal[0]).sort(), Object.keys(settle).filter((key) => key !== "scaleSettleTickJournal").sort(),
+    "journal entries carry the whitelisted scalars and NO nested journal");
+});
+
+test("the settle copy drops every key outside the whitelist — privacy is the field set, not a promise", () => {
+  const api = loadAPI();
+  const junk = makePage();
+  junk.page.window.__mwTerminalSettle = settleMirrorFixture({ withJunk: true });
+  const keyboardSession = api.snapshotFromPage(junk.page, "manual", "2026-11-05T12:00:00.000Z").keyboardSession;
+  const serialized = JSON.stringify(keyboardSession.scaleSettle);
+  for (const forbidden of ["must-not-ride", "terminalText", "innerHTML", "worktree"]) {
+    assert.equal(serialized.includes(forbidden), false, `${forbidden} must never ride the settle block`);
+  }
+  assert.equal(keyboardSession.scaleSettle.scaleSettleTickJournal.length, 2, "the junk key on the first entry dropped, the entries themselves survive");
+});
+
+// 仲裁 F-6 之前的旧口径是"截断保留最新 8"——作废。超 8 的 journal 是服务端整帧
+// 400 的形状（`too many scaleSettleTickJournal entries in snapshot`），探针把环
+// 裁短再上传，就是替产品把一个已坏的发布圆成一条被修补过的链。现在【拒绝而非
+// 截断】：整块降级 null + 固定 reason，同帧其余字段照常上传（不整帧吵）。
+test("the settle block REFUSES a journal past 8 — degraded whole, never laundered by truncation", () => {
+  const api = loadAPI();
+  const flooded = makePage();
+  flooded.page.window.__mwTerminalSettle = settleMirrorFixture({ seq: 60, ticked: 2, journalLength: 10 });
+  const snapshot = api.snapshotFromPage(flooded.page, "manual", "2026-11-05T12:00:00.000Z");
+  assert.equal(snapshot.keyboardSession.scaleSettle, null, "an over-long journal costs the settle block, not the frame");
+  assert.equal(snapshot.keyboardSession.scaleSettleUnavailableReason, "settle-mirror-not-published", "and states the one fixed reason — no new word");
+  assert.equal(snapshot.occlusion, OCCLUSION, "the same frame's occlusion rides on untouched");
+  assert.equal(snapshot.keyboardSession.mirrorOcclusion, OCCLUSION, "and so do the keyboard-session fields the settle has nothing to do with");
+});
+
+test("the settle block is null with its fixed reason when the mirror is absent or unreadable — never zero-filled", () => {
+  const api = loadAPI();
+  // Absent (the probe captured before the applier's first pass, or a build with
+  // no settle machine): null plus the one fixed marker.
+  const fresh = makePage();
+  const freshSession = api.snapshotFromPage(fresh.page, "init", "2026-11-05T12:00:00.000Z").keyboardSession;
+  assert.equal(freshSession.scaleSettle, null, "an unpublished mirror is absence, not a zero object");
+  assert.equal(freshSession.scaleSettleUnavailableReason, "settle-mirror-not-published");
+  // Unreadable mirrors of every shape degrade the SAME way — the whole block is
+  // dropped, never half-copied, never corrected by the probe.
+  const noJournal = Object.assign({}, settleMirrorFixture());
+  delete noJournal.scaleSettleTickJournal;
+  const unreadable = [
+    0, "0.75", null, true,
+    { scaleSettleCandidate: 0.75 }, // half a shape is not a shape
+    { scaleSettleCandidate: NaN, scaleSettleBaseline: 0.75, scaleSettleTicked: 1, scaleSettleLayoutHeight: 1180, scaleSettleVVWidth: 820, scaleSettleRaw: 280, scaleSettlePending: true, scaleBelowOneSettled: false, zoomReturnFramePending: false, scaleSettlePassSource: "scaleSettleTick", scaleSettlePassSeq: 7 }, // NaN is not a number here
+    { scaleSettleCandidate: 0.75, scaleSettleBaseline: 0.75, scaleSettleTicked: 3, scaleSettleLayoutHeight: 1180, scaleSettleVVWidth: 820, scaleSettleRaw: 280, scaleSettlePending: true, scaleBelowOneSettled: false, zoomReturnFramePending: false, scaleSettlePassSource: "scaleSettleTick", scaleSettlePassSeq: 7 }, // past the saturation the contract spells
+    { scaleSettleCandidate: 0.75, scaleSettleBaseline: 0.75, scaleSettleTicked: 1, scaleSettleLayoutHeight: 1180, scaleSettleVVWidth: 820, scaleSettleRaw: 280, scaleSettlePending: true, scaleBelowOneSettled: false, zoomReturnFramePending: false, scaleSettlePassSource: "resize", scaleSettlePassSeq: 7 }, // a fourth source word is not the applier's enum
+    { scaleSettleCandidate: 0.75, scaleSettleBaseline: 0.75, scaleSettleTicked: 1, scaleSettleLayoutHeight: 1180, scaleSettleVVWidth: 820, scaleSettleRaw: -280, scaleSettlePending: true, scaleBelowOneSettled: false, zoomReturnFramePending: false, scaleSettlePassSource: "scaleSettleTick", scaleSettlePassSeq: 7 }, // 仲裁 F-6: finite-but-negative geometry — the server's 400 shape, caught before the upload
+    { scaleSettleCandidate: 0.75, scaleSettleBaseline: 10000001, scaleSettleTicked: 1, scaleSettleLayoutHeight: 1180, scaleSettleVVWidth: 820, scaleSettleRaw: 280, scaleSettlePending: true, scaleBelowOneSettled: false, zoomReturnFramePending: false, scaleSettlePassSource: "scaleSettleTick", scaleSettlePassSeq: 7 }, // past the server's 10M bound, same front alignment
+    noJournal, // a scalar block with no journal at all is half a shape too
+  ];
+  for (const shape of unreadable) {
+    const page = makePage();
+    page.page.window.__mwTerminalSettle = shape;
+    const session = api.snapshotFromPage(page.page, "manual", "2026-11-05T12:00:00.000Z").keyboardSession;
+    assert.equal(session.scaleSettle, null, "unreadable degrades to null, never a partial or corrected copy: " + JSON.stringify(shape));
+    assert.equal(session.scaleSettleUnavailableReason, "settle-mirror-not-published", "and states the one fixed reason");
+  }
+});
+
+// 仲裁 F-6（r3 前必须）·(a)：坏 journal 前置降级。服务端门禁（viewport_debug.go）
+// 对非 tick 条目、非严格递增序号、超 8、负几何这些形状整帧 400——同帧的
+// ownership / occlusion / panel 证据会跟着一起丢。如今同一批形状规则在复制后、
+// 上传前先在探针成立：任一命中，只有 scaleSettle 整块降级为 null + 固定 reason，
+// 同帧其余字段照常上传。探针不排序、不去重、不修补、不新增 reason 词表。
+test("仲裁 F-6: every bad-journal shape the server would 400 degrades ONLY the settle block, before the upload", () => {
+  const api = loadAPI();
+  const base = settleMirrorFixture({ seq: 50, ticked: 2, journalLength: 2 }); // journal seq 49, 50
+  const entry = (seq, over = {}) => Object.assign({}, base.scaleSettleTickJournal[0], { scaleSettlePassSeq: seq }, over);
+  const mirrorWith = (journal) => Object.assign({}, base, { scaleSettleTickJournal: journal });
+  const nine = [];
+  for (let i = 0; i < 9; i++) nine.push(entry(42 + i));
+  const missingKey = Object.assign({}, entry(49));
+  delete missingKey.scaleSettlePending; // 条目键集不匹配：少一个白名单键就是半张形状
+  const badJournals = [
+    ["非数组 journal：字符串", "49,50"],
+    ["非数组 journal：类数组对象", { 0: entry(49), length: 1 }],
+    ["九条，超过授权的 8", nine],
+    ["乱序：seq 回退 50→49", [entry(50), entry(49)]],
+    ["重复：seq 49, 49（非严格递增，不得去重续命）", [entry(49), entry(49)]],
+    ["条目混入非 tick passSource：\"other\"（顶层合法词，journal 非法）", [entry(49), entry(50, { scaleSettlePassSource: "other" })]],
+    ["条目混入第四个 source 词：\"resize\"", [entry(49, { scaleSettlePassSource: "resize" })]],
+    ["条目几何有限但为负：raw −280", [entry(49, { scaleSettleRaw: -280 })]],
+    ["条目几何越过服务端 10M 界", [entry(49, { scaleSettleLayoutHeight: 10000001 })]],
+    ["条目缺白名单键 scaleSettlePending", [missingKey]],
+    ["非对象条目：null", [null]],
+  ];
+  for (const [label, journal] of badJournals) {
+    const page = makePage();
+    page.page.window.__mwTerminalSettle = mirrorWith(journal);
+    const snapshot = api.snapshotFromPage(page.page, "manual", "2026-11-05T12:00:00.000Z");
+    assert.equal(snapshot.keyboardSession.scaleSettle, null, "整个 scaleSettle 块降级，从不部分保留坏 journal: " + label);
+    assert.equal(snapshot.keyboardSession.scaleSettleUnavailableReason, "settle-mirror-not-published", "只有那一个固定 reason，不新增词表: " + label);
+    // 同帧其余字段照常上传——坏 settle 块不整帧吵。
+    assert.equal(snapshot.occlusion, OCCLUSION, "同帧 occlusion mirror 照常上传: " + label);
+    assert.equal(snapshot.keyboardSession.mirrorOcclusion, OCCLUSION, "同帧 keyboard-session 观测字段照常上传: " + label);
+    assert.equal(snapshot.keyboardSession.derived, true, "同帧派生会话标记照常上传: " + label);
+    assert.equal(snapshot.ownership && typeof snapshot.ownership === "object", true, "同帧 ownership 块照常上传: " + label);
+    assert.equal(snapshot.panel && typeof snapshot.panel === "object", true, "同帧 panel 块照常上传: " + label);
+    assert.equal(JSON.stringify(snapshot.keyboardSession.scaleSettle), "null", "坏 journal 的一个字节都不许上线: " + label);
+  }
+});
+
+// 仲裁 F-6·(c) 的反面钉：形状合法但跨字段语义矛盾的帧必须原样过。pending=true
+// 而 ticked=2（按 guard 自己的式子，数尽即不 pending）、candidate=0 而
+// zoomReturnFramePending=true（按 applier 发布时的式子产不出这组合）——矛盾归
+// 矛盾，那是仲裁 F-4 明确的读者域；探针只判形状，不得顺手过滤、修补或加标记。
+test("仲裁 F-6(c)/F-4: shape-legal but semantically contradictory frames ride through VERBATIM — no probe-side filtering", () => {
+  const api = loadAPI();
+  const page = makePage();
+  const contradictory = Object.assign({}, settleMirrorFixture({ seq: 50, ticked: 2, journalLength: 2 }), {
+    scaleSettlePending: true, // 而 ticked=2：语义矛盾，形状合法
+    zoomReturnFramePending: true, // 而 candidate=0：发布式子产不出的组合，形状仍合法
+  });
+  contradictory.scaleSettleCandidate = 0; // candidate=0 与 zoomReturnFramePending=true 的矛盾对
+  contradictory.scaleSettleTickJournal = Object.freeze(
+    settleMirrorFixture({ seq: 50, ticked: 2, journalLength: 2 }).scaleSettleTickJournal.map((item, index) => Object.freeze(Object.assign({}, item, { scaleSettlePending: index === 1 }))),
+  );
+  page.page.window.__mwTerminalSettle = contradictory;
+  const session = api.snapshotFromPage(page.page, "manual", "2026-11-05T12:00:00.000Z").keyboardSession;
+  assert.ok(session.scaleSettle, "矛盾不是形状违规：照抄，不过滤");
+  assert.equal(session.scaleSettleUnavailableReason, "", "没有 reason——它发布过，形状也在");
+  assert.equal(session.scaleSettle.scaleSettlePending, true, "guard 自己的矛盾词原样随行，探针不替它改成 false");
+  assert.equal(session.scaleSettle.scaleSettleTicked, 2, "与它相矛盾的计数器也原样随行——修正是读者的事");
+  assert.equal(session.scaleSettle.zoomReturnFramePending, true, "applier 式子产不出的组合照样上传——过滤就是探针越权");
+  assert.equal(session.scaleSettle.scaleSettleCandidate, 0, "candidate=0 的原样，不猜测、回填或重新归因");
+  assert.deepEqual(session.scaleSettle.scaleSettleTickJournal.map((item) => item.scaleSettlePassSeq), [49, 50], "journal 原序、原值、不排序不去重不修补");
+  assert.deepEqual(session.scaleSettle.scaleSettleTickJournal.map((item) => item.scaleSettlePending), [false, true], "条目里自相矛盾的 pending 词逐条原样");
+});
+
 test("p7 lists EVERY PTY host, hidden included, with its own bottom", () => {
   const { page, terminalContainer } = makePage({ hosts: [true, false, false] });
   const snapshot = loadAPI().snapshotFromPage(page, "manual", "2026-10-27T12:00:00.000Z");
@@ -1067,7 +1254,7 @@ test("a client frame carries ownership, the DERIVED session hint and the panel i
   await flushPromises();
   const first = h.uploads[0].snapshot;
   assert.equal(first.probeVersion, "p9-full-shell-session-avoidance-v1", "the frozen stamp is untouched by the additive schema");
-  assert.equal(first.schemaRev, "p9-additive-ownership-panel-v1");
+  assert.equal(first.schemaRev, "p9-additive-settle-readonly-v1");
   assert.equal(first.keyboardSession.derived, true, "B-3: the frame labels its session hint as derived");
   assert.equal(first.keyboardSession.derivedState, "active", "the fixture's applier mirror owes 320");
   assert.equal(first.keyboardSession.state, undefined, "no authoritative `state` field ships any more");
@@ -1146,7 +1333,7 @@ test("a client frame carries ownership, the DERIVED session hint and the panel i
   assert.equal(frame.snapshot.vv, null, "no zero-filled stand-in for an unread viewport");
   assert.equal(frame.snapshot.ptyHosts, null, "and none for the host list either");
   assert.equal(frame.snapshot.reason, "manual", "the reason stays the whitelisted reason of the attempt");
-  assert.equal(frame.snapshot.schemaRev, "p9-additive-ownership-panel-v1", "the frame still identifies its schema");
+  assert.equal(frame.snapshot.schemaRev, "p9-additive-settle-readonly-v1", "the frame still identifies its schema");
   assert.ok(frame.seq > 0, "a failed read still consumes a seq, so the gap a reader sees is honest");
 
   // A session that was never live never claims to be recovering.

@@ -46,6 +46,14 @@ const (
 	// against the geometry that followed it, small enough that a 1s capture never
 	// crowds the 64KiB body limit.
 	viewportDebugMaxTraceEntries = 16
+	// AUTH-20261105-D2-SETTLE-READONLY: the settle tick journal is capped at 8 by
+	// the authorization itself — the client rings it the same way, and the door is
+	// where a client that outgrew its own ring gets caught rather than averaged.
+	viewportDebugScaleSettleJournalMax = 8
+	// The D-C documented shape: the settle counter runs 0…SCALE_SETTLE_TICKS and
+	// SATURATES there (index.html SCALE_SETTLE_TICKS = 2), so anything past it is
+	// transport drift, not a longer settle. This is a shape bound, not a verdict.
+	viewportDebugScaleSettleMaxTicked = 2
 )
 
 var (
@@ -70,8 +78,16 @@ var (
 	// is optional so a pre-additive capture still uploads; when present it must be
 	// a revision the server has declarations for, because a client that invents one
 	// has added fields this struct would silently drop.
-	viewportDebugSchemaRevPattern = regexp.MustCompile(`^p9-additive-ownership-panel-v1$`)
-	viewportDebugReasons          = map[string]bool{
+	// AUTH-20261105-D2-SETTLE-READONLY: the settle block is the newest declared
+	// additive set; the previous revision stays accepted so frames stamped before
+	// it still upload — each revision is validated by the field set it declares
+	// (fields are presence-checked, the revision is vocabulary-checked).
+	viewportDebugSchemaRevPattern = regexp.MustCompile(`^p9-additive-(ownership-panel|settle-readonly)-v1$`)
+	// AUTH-20261105-D2-SETTLE-READONLY: the applier only ever knows its own token;
+	// every other pass is "other" and is never guessed at being resize / scroll /
+	// focusout / init. A fourth word is schema drift caught at the door.
+	viewportDebugSettlePassSourcePattern = regexp.MustCompile(`^(scaleSettleTick|other)$`)
+	viewportDebugReasons                 = map[string]bool{
 		"init": true, "resize": true, "scroll": true, "focusin": true,
 		"focusout": true, "orientationchange": true, "window-resize": true,
 		"visibilitychange": true, "pageshow": true, "settle": true,
@@ -288,6 +304,45 @@ type viewportDebugActiveInput struct {
 	UnavailableReason     string                   `json:"unavailableReason"`
 }
 
+// viewportDebugScaleSettleScalars is the WHITELISTED scalar half of the applier's
+// read-only settle mirror (AUTH-20261105-D2-SETTLE-READONLY): the six D-C memory
+// values, the guard's own pending / settled words, the return-pending DIAGNOSTIC
+// PROJECTION, the two-word pass-source enum and the publish sequence. Numbers,
+// booleans and one enum — no text, no DOM, no timestamp, no identity; the struct
+// cannot carry anything else, which is the privacy boundary spelled as a type.
+// The server COPIES these through and validates their shape; it re-derives nothing
+// and decides nothing (no owed / verdict recomputation, no feedback anywhere).
+type viewportDebugScaleSettleScalars struct {
+	ScaleSettleCandidate    float64 `json:"scaleSettleCandidate"`
+	ScaleSettleBaseline     float64 `json:"scaleSettleBaseline"`
+	ScaleSettleTicked       int     `json:"scaleSettleTicked"`
+	ScaleSettleLayoutHeight float64 `json:"scaleSettleLayoutHeight"`
+	ScaleSettleVVWidth      float64 `json:"scaleSettleVVWidth"`
+	ScaleSettleRaw          float64 `json:"scaleSettleRaw"`
+	ScaleSettlePending      bool    `json:"scaleSettlePending"`
+	ScaleBelowOneSettled    bool    `json:"scaleBelowOneSettled"`
+	ZoomReturnFramePending  bool    `json:"zoomReturnFramePending"`
+	ScaleSettlePassSource   string  `json:"scaleSettlePassSource"`
+	ScaleSettlePassSeq      int64   `json:"scaleSettlePassSeq"`
+}
+
+// viewportDebugScaleSettleJournalEntry is one publish of a product self-check tick
+// — the journal holds ticks only, never a jitter pass, and never a nested journal.
+type viewportDebugScaleSettleJournalEntry struct {
+	viewportDebugScaleSettleScalars
+}
+
+// viewportDebugScaleSettle is the nullable keyboardSession.scaleSettle block: the
+// current scalars plus the bounded tick journal. Absent/null is NOT zero-filled —
+// the probe publishes null with scaleSettleUnavailableReason when the mirror was
+// never published or did not have the published shape, and a frame whose schema
+// never knew this field stays absent. Absence, unpublished and measured are three
+// different claims and encode three different ways.
+type viewportDebugScaleSettle struct {
+	viewportDebugScaleSettleScalars
+	ScaleSettleTickJournal []viewportDebugScaleSettleJournalEntry `json:"scaleSettleTickJournal"`
+}
+
 // viewportDebugKeyboardSession is the applier's mirrored occlusion plus the
 // probe's DERIVED label over it. `rawShortfall` is a MEASUREMENT (clientHeight −
 // vv.height) and never an input: the occlusion the shell owes stays in
@@ -328,6 +383,14 @@ type viewportDebugKeyboardSession struct {
 	// `unavailableReason`, and these two numbers are the proof it says so on.
 	UnlockTick         *int `json:"unlockTick,omitempty"`
 	PreviousUnlockTick *int `json:"previousUnlockTick,omitempty"`
+	// AUTH-20261105-D2-SETTLE-READONLY, ADDITIVE: the applier's read-only settle
+	// mirror copied through by the probe. NO `omitempty` on `scaleSettle`: an
+	// explicit `null` (mirror not published / unreadable) must stay distinguishable
+	// from the pre-additive frame that never carried the field at all — and the
+	// null must never be laundered into a zero-filled object. The reason key is
+	// the one fixed marker; a carried block must not smuggle one beside it.
+	ScaleSettle                  *viewportDebugScaleSettle `json:"scaleSettle"`
+	ScaleSettleUnavailableReason string                    `json:"scaleSettleUnavailableReason"`
 }
 
 // viewportDebugTraceCounts is the COUNTER half of the journal. M-6 / N-1 are why
@@ -903,6 +966,45 @@ func validateViewportDebugAdditive(s viewportDebugSnapshot) error {
 		if k.PreviousUnlockTick != nil && *k.PreviousUnlockTick < 0 {
 			return errors.New("previous unlock tick must be non-negative")
 		}
+		// AUTH-20261105-D2-SETTLE-READONLY: the additive settle block goes through
+		// the same 400 door — every field a whitelisted number / boolean / enum,
+		// the journal capped at the authorized 8, ticks-only, sequence-only-rising.
+		// Shape checks, NOT verdicts: the server re-derives no settle, no owed,
+		// no PASS — it only refuses a frame that cannot mean what it says.
+		if k.ScaleSettleUnavailableReason != "" {
+			// m-2's one-word vocabulary, same door rule as the probe-read marker:
+			// a claimed absence carries the fixed marker and NOTHING beside it.
+			if k.ScaleSettleUnavailableReason != "settle-mirror-not-published" {
+				return errors.New("unknown scaleSettle unavailable reason")
+			}
+			if k.ScaleSettle != nil {
+				return errors.New("a carried scaleSettle block must not claim the mirror was not published")
+			}
+		}
+		if ss := k.ScaleSettle; ss != nil {
+			if err := validateViewportDebugScaleSettleScalars(ss.viewportDebugScaleSettleScalars); err != nil {
+				return err
+			}
+			if len(ss.ScaleSettleTickJournal) > viewportDebugScaleSettleJournalMax {
+				return errors.New("too many scaleSettleTickJournal entries in snapshot")
+			}
+			previousSeq := int64(0)
+			for _, entry := range ss.ScaleSettleTickJournal {
+				if err := validateViewportDebugScaleSettleScalars(entry.viewportDebugScaleSettleScalars); err != nil {
+					return err
+				}
+				// The journal is the tick chain the r3-Z-MENU settle sequence is
+				// read from: a jitter pass inside it, or a sequence that does not
+				// strictly rise, is a broken chain caught at the door.
+				if entry.ScaleSettlePassSource != "scaleSettleTick" {
+					return errors.New("the settle tick journal carries product ticks only")
+				}
+				if entry.ScaleSettlePassSeq <= previousSeq {
+					return errors.New("scaleSettleTickJournal sequence must be strictly increasing")
+				}
+				previousSeq = entry.ScaleSettlePassSeq
+			}
+		}
 	}
 	// m-2 / m-5: the two self-describing markers of the additive block. A frame
 	// that says it could not read must carry the marker's fixed text and must not
@@ -1019,6 +1121,34 @@ func validateViewportDebugAdditive(s viewportDebugSnapshot) error {
 				return errors.New("panel nominal height must be non-negative")
 			}
 		}
+	}
+	return nil
+}
+
+// validateViewportDebugScaleSettleScalars is the whitelist the settle scalars —
+// snapshot block and journal entries alike — pass through: geometry numbers finite
+// and non-negative, the tick counter inside its documented 0…2 saturation, the
+// two-word pass-source enum, the publish sequence a positive safe integer. Pure
+// shape: no recomputation, no cross-field verdict (the candidate's layout / width
+// / raw are the settle machine's OWN readings, not a re-derivation of the
+// frame's current observation, and the door never conflates them).
+func validateViewportDebugScaleSettleScalars(s viewportDebugScaleSettleScalars) error {
+	for _, n := range []float64{s.ScaleSettleCandidate, s.ScaleSettleBaseline, s.ScaleSettleLayoutHeight, s.ScaleSettleVVWidth, s.ScaleSettleRaw} {
+		if err := viewportDebugNumber(n); err != nil {
+			return err
+		}
+	}
+	if s.ScaleSettleCandidate < 0 || s.ScaleSettleBaseline < 0 || s.ScaleSettleLayoutHeight < 0 || s.ScaleSettleVVWidth < 0 || s.ScaleSettleRaw < 0 {
+		return errors.New("scale settle geometry must be non-negative")
+	}
+	if s.ScaleSettleTicked < 0 || s.ScaleSettleTicked > viewportDebugScaleSettleMaxTicked {
+		return errors.New("scaleSettleTicked must stay inside its documented 0…2 saturation")
+	}
+	if !viewportDebugSettlePassSourcePattern.MatchString(s.ScaleSettlePassSource) {
+		return errors.New("invalid scaleSettlePassSource")
+	}
+	if s.ScaleSettlePassSeq < 1 {
+		return errors.New("scaleSettlePassSeq must be a positive safe integer")
 	}
 	return nil
 }

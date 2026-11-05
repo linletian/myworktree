@@ -544,10 +544,10 @@ func TestViewportDebugAcceptsEveryClientField(t *testing.T) {
 	    "xtermScreen": {"top":50,"bottom":1151,"width":820,"height":1101},
 	    "xtermRows": {"top":50,"bottom":1151,"width":820,"height":1101},
 	    "ui": {"collapsed":false,"quickKeysOpen":false,"kind":"pty","status":"running","activeElementTag":"TEXTAREA"},
-	    "schemaRev": "p9-additive-ownership-panel-v1",
+	    "schemaRev": "p9-additive-settle-readonly-v1",
 	    "ownership": {"category":"HO-2","basis":"editable-focus-inside-foreground-terminal-host","unavailableReason":""},
 	    "activeInput": {"observed":true,"tag":"TEXTAREA","editable":true,"role":"xterm-helper-textarea","xtermMarker":true,"helperMarker":true,"insideTerminalContainer":true,"insideTerminalHost":true,"insideQuickKeysPanel":false,"hostIsForeground":true,"hostVisible":true,"ancestryReachedRoot":true,"rect":{"top":836,"bottom":864,"left":120,"right":420,"width":300,"height":28},"rectUnavailableReason":"","insideVisibleViewport":true,"unavailableReason":""},
-	    "keyboardSession": {"mirrorExposed":true,"mirrorOcclusion":280,"rawShortfall":280,"layoutHeight":1180,"vvHeight":900,"vvWidth":820,"vvOffsetTop":0,"scale":1,"zoomed":false,"vvObserved":true,"focusEditable":true,"derived":true,"derivedState":"active","basis":"applier-mirror-positive","evidence":"applier-mirror","unavailableReason":"","geometryChangedSincePrevious":false,"previousMirrorOcclusion":320,"unlockTick":6,"previousUnlockTick":4},
+	    "keyboardSession": {"mirrorExposed":true,"mirrorOcclusion":280,"rawShortfall":280,"layoutHeight":1180,"vvHeight":900,"vvWidth":820,"vvOffsetTop":0,"scale":1,"zoomed":false,"vvObserved":true,"focusEditable":true,"derived":true,"derivedState":"active","basis":"applier-mirror-positive","evidence":"applier-mirror","unavailableReason":"","geometryChangedSincePrevious":false,"previousMirrorOcclusion":320,"unlockTick":6,"previousUnlockTick":4,"scaleSettle":{"scaleSettleCandidate":0,"scaleSettleBaseline":0.75,"scaleSettleTicked":0,"scaleSettleLayoutHeight":1180,"scaleSettleVVWidth":820,"scaleSettleRaw":280,"scaleSettlePending":false,"scaleBelowOneSettled":false,"zoomReturnFramePending":false,"scaleSettlePassSource":"scaleSettleTick","scaleSettlePassSeq":13,"scaleSettleTickJournal":[{"scaleSettleCandidate":0.75,"scaleSettleBaseline":0.75,"scaleSettleTicked":1,"scaleSettleLayoutHeight":1180,"scaleSettleVVWidth":820,"scaleSettleRaw":280,"scaleSettlePending":true,"scaleBelowOneSettled":false,"zoomReturnFramePending":false,"scaleSettlePassSource":"scaleSettleTick","scaleSettlePassSeq":11},{"scaleSettleCandidate":0.75,"scaleSettleBaseline":0.75,"scaleSettleTicked":2,"scaleSettleLayoutHeight":1180,"scaleSettleVVWidth":820,"scaleSettleRaw":280,"scaleSettlePending":false,"scaleBelowOneSettled":true,"zoomReturnFramePending":false,"scaleSettlePassSource":"scaleSettleTick","scaleSettlePassSeq":12}]},"scaleSettleUnavailableReason":""},
 	    "unlockTrace": {"advisoryOnly":true,"captureTick":7,"geometryCountedOnly":true,"counts":{"click":2,"clickOnTerminalHost":1,"touchstart":1,"focusin":1,"focusout":0,"vvResize":3,"vvScroll":40,"windowResize":2,"other":0},"entries":[{"tick":6,"type":"click","tag":"TEXTAREA","editable":true,"onTerminalHost":true,"xtermMarker":true,"vvHeight":900,"vvWidth":820,"vvOffsetTop":0,"layoutHeight":1180,"scale":1,"mirrorOcclusion":280}]},
 	    "panel": {"exists":true,"corner":"tr","support":"supported","unsupportedReason":"","lifted":false,"panCorrected":false,"nominalHeight":520,"rect":{"top":32,"bottom":552,"left":466,"right":826,"width":360,"height":520},"rectUnavailableReason":"","keyboardOverlap":0,"insideVisibleViewport":true}
 	  }
@@ -950,6 +950,251 @@ func TestViewportDebugUnlockTraceRingsDecisionEvents(t *testing.T) {
 // mustDecodeJSON turns a raw JSON literal into a value the request helper can
 // re-marshal (it takes `any` and marshals it), keeping the fixture readable as
 // literal JSON rather than a deeply nested Go composite.
+// scaleSettleScalars builds a whitelisted settle scalar block for the tests
+// below — the shape the applier publishes and the probe copies (AUTH-20261105-D2-
+// SETTLE-READONLY). Only shape lives here; nothing in these tests makes a verdict.
+func scaleSettleScalars(passSeq int64, ticked int) viewportDebugScaleSettleScalars {
+	return viewportDebugScaleSettleScalars{
+		ScaleSettleCandidate: 0.75, ScaleSettleBaseline: 0.75, ScaleSettleTicked: ticked,
+		ScaleSettleLayoutHeight: 1180, ScaleSettleVVWidth: 820, ScaleSettleRaw: 280,
+		ScaleSettlePending: ticked < 2, ScaleBelowOneSettled: ticked >= 2, ZoomReturnFramePending: false,
+		ScaleSettlePassSource: "scaleSettleTick", ScaleSettlePassSeq: passSeq,
+	}
+}
+
+func settleKeyboardSessionJSON(band string) string {
+	return `{"derived":true,"derivedState":"none","basis":"no-keyboard-shortfall","evidence":"applier-mirror","unavailableReason":"","scale":1,"scaleSettle":` + band + `}`
+}
+
+// settleKeyboardSessionStruct is the struct twin of settleKeyboardSessionJSON —
+// a minimally valid derived session block to hang a scaleSettle block on.
+func settleKeyboardSessionStruct() *viewportDebugKeyboardSession {
+	return &viewportDebugKeyboardSession{
+		Derived: true, DerivedState: "none", Basis: "no-keyboard-shortfall",
+		Evidence: "applier-mirror", Scale: 1,
+	}
+}
+
+func settleFramePayload(seq int, schemaRev, keyboardSessionJSON string) string {
+	return `{"session":"0123456789abcdef","seq":` + fmt.Sprint(seq) + `,"snapshot":{
+	    "capturedAt":"2026-11-05T12:00:00.000Z","reason":"manual",
+	    "clientWidth":834,"clientHeight":1108,"dpr":2,
+	    "vv":{"width":834,"height":702,"offsetTop":0,"offsetLeft":0,"scale":1},
+	    "schemaRev":"` + schemaRev + `",
+	    "keyboardSession":` + keyboardSessionJSON + `
+	}}`
+}
+
+// TestViewportDebugScaleSettleAdditiveRoundTrip pins the AUTH-20261105-D2-
+// SETTLE-READONLY transport: the full block round-trips byte-visible, a null with
+// its fixed reason is ACCEPTED (absence is a claim, not an error), a bare null is
+// accepted too (never 400), the old schema that never carried the field keeps
+// uploading (never backfilled into a measured block), and both declared schemaRevs
+// are accepted. Accept, never verdict: what the settle numbers MEAN stays with the
+// r3 device readouts.
+func TestViewportDebugScaleSettleAdditiveRoundTrip(t *testing.T) {
+	srv := &Server{viewportDebug: newViewportDebugStore()}
+	full := viewportDebugScaleSettle{viewportDebugScaleSettleScalars: scaleSettleScalars(13, 0)}
+	for i := 0; i < 8; i++ {
+		full.ScaleSettleTickJournal = append(full.ScaleSettleTickJournal,
+			viewportDebugScaleSettleJournalEntry{viewportDebugScaleSettleScalars: scaleSettleScalars(int64(i+1), min(i+1, 2))})
+	}
+	fullJSON, err := json.Marshal(full)
+	if err != nil {
+		t.Fatalf("marshal the full block: %v", err)
+	}
+	cases := []struct {
+		name    string
+		rev     string
+		block   string
+		wantSub string
+	}{
+		{"full block with an 8-entry journal", "p9-additive-settle-readonly-v1", string(fullJSON), `"scaleSettleTickJournal":[{`},
+		{"null with the fixed reason", "p9-additive-settle-readonly-v1", `null`, `"scaleSettleUnavailableReason":"settle-mirror-not-published"`},
+		{"bare null is accepted, never 400", "p9-additive-settle-readonly-v1", `null`, `"scaleSettle":null`},
+	}
+	seq := 1
+	for _, tt := range cases {
+		payload := settleFramePayload(seq, tt.rev, settleKeyboardSessionJSON(tt.block))
+		if seq == 2 {
+			payload = strings.Replace(payload, `,"scaleSettle":null}`, `,"scaleSettle":null,"scaleSettleUnavailableReason":"settle-mirror-not-published"}`, 1)
+		}
+		if rec := doViewportDebugRequest(t, srv, http.MethodPost, "/api/viewport-debug/report", mustDecodeJSON(t, payload)); rec.Code != http.StatusOK {
+			t.Fatalf("%s must be accepted, status=%d body=%s", tt.name, rec.Code, rec.Body.String())
+		}
+		seq++
+	}
+	// The old schema: a keyboardSession without either new key, stamped with the
+	// old rev, still uploads — and its stored form stays ABSENT-as-null with an
+	// empty reason, never laundered into a measured block or a published-claim.
+	oldRevFrame := `{"session":"0123456789abcdef","seq":` + fmt.Sprint(seq) + `,"snapshot":{
+	    "capturedAt":"2026-11-05T12:00:01.000Z","reason":"manual",
+	    "clientWidth":834,"clientHeight":1108,"dpr":2,
+	    "vv":{"width":834,"height":702,"offsetTop":0,"offsetLeft":0,"scale":1},
+	    "schemaRev":"p9-additive-ownership-panel-v1",
+	    "keyboardSession":{"derived":true,"derivedState":"none","basis":"no-keyboard-shortfall","evidence":"applier-mirror","unavailableReason":"","scale":1}
+	}}`
+	if rec := doViewportDebugRequest(t, srv, http.MethodPost, "/api/viewport-debug/report", mustDecodeJSON(t, oldRevFrame)); rec.Code != http.StatusOK {
+		t.Fatalf("the pre-settle keyboardSession key space must stay accepted, status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	seq++
+	// And the OLD rev with the new keys is accepted too: the rev is vocabulary,
+	// the fields are presence-checked (both revisions are declared).
+	oldRevWithBlock := settleFramePayload(seq, "p9-additive-ownership-panel-v1", settleKeyboardSessionJSON(string(fullJSON)))
+	if rec := doViewportDebugRequest(t, srv, http.MethodPost, "/api/viewport-debug/report", mustDecodeJSON(t, oldRevWithBlock)); rec.Code != http.StatusOK {
+		t.Fatalf("the old rev with the declared block must upload, status=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	rec := doViewportDebugRequest(t, srv, http.MethodGet, "/api/viewport-debug/report?session=0123456789abcdef&after=0", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("download: status=%d", rec.Code)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, `"scaleSettleTickJournal":[{`) {
+		t.Fatalf("the tick journal must round-trip visible: %s", body)
+	}
+	if !strings.Contains(body, `"scaleSettleUnavailableReason":"settle-mirror-not-published"`) {
+		t.Fatalf("the null frame's fixed reason must round-trip: %s", body)
+	}
+	if !strings.Contains(body, `"scaleSettle":null,"scaleSettleUnavailableReason":""`) {
+		t.Fatalf("the pre-settle frame must come back absent-as-null with an empty reason, never backfilled: %s", body)
+	}
+	var got struct {
+		Events []struct {
+			Seq      int `json:"seq"`
+			Snapshot struct {
+				KeyboardSession *struct {
+					ScaleSettleUnavailableReason string `json:"scaleSettleUnavailableReason"`
+					ScaleSettle                  *struct {
+						ScaleSettleCandidate   float64 `json:"scaleSettleCandidate"`
+						ScaleSettleTicked      int     `json:"scaleSettleTicked"`
+						ScaleSettlePassSeq     int64   `json:"scaleSettlePassSeq"`
+						ScaleSettleTickJournal []struct {
+							ScaleSettlePassSeq int64 `json:"scaleSettlePassSeq"`
+						} `json:"scaleSettleTickJournal"`
+					} `json:"scaleSettle"`
+				} `json:"keyboardSession"`
+			} `json:"snapshot"`
+		} `json:"events"`
+	}
+	if err := json.Unmarshal([]byte(body), &got); err != nil {
+		t.Fatalf("decode download: %v", err)
+	}
+	first := got.Events[0].Snapshot.KeyboardSession
+	if first == nil || first.ScaleSettle == nil || first.ScaleSettle.ScaleSettlePassSeq != 13 || len(first.ScaleSettle.ScaleSettleTickJournal) != 8 {
+		t.Fatalf("the full block must come back whole: %+v", first)
+	}
+	if first.ScaleSettleUnavailableReason != "" {
+		t.Fatalf("a carried block must not carry a reason: %q", first.ScaleSettleUnavailableReason)
+	}
+}
+
+// TestViewportDebugRejectsMalformedScaleSettleBlocks walks the settle block's
+// whitelist at the door: a tick past its saturation, a fourth source word, a
+// journal longer than the authorized 8, a sequence that does not rise, a jitter
+// pass inside the tick-only journal, a reason smuggled beside a block, a free-form
+// reason on a null, and every wrong JSON type / unknown key are all 400 — shape
+// only, no verdicts, no backfilled absences.
+func TestViewportDebugRejectsMalformedScaleSettleBlocks(t *testing.T) {
+	srv := &Server{viewportDebug: newViewportDebugStore()}
+	blockWith := func(mutate func(*viewportDebugScaleSettle)) *viewportDebugScaleSettle {
+		block := viewportDebugScaleSettle{viewportDebugScaleSettleScalars: scaleSettleScalars(13, 2)}
+		block.ScaleSettleTickJournal = []viewportDebugScaleSettleJournalEntry{
+			{viewportDebugScaleSettleScalars: scaleSettleScalars(11, 1)},
+			{viewportDebugScaleSettleScalars: scaleSettleScalars(12, 2)},
+		}
+		mutate(&block)
+		return &block
+	}
+	table := []struct {
+		name   string
+		mutate func(*viewportDebugKeyboardSession)
+	}{
+		{"tick count past its saturation", func(k *viewportDebugKeyboardSession) {
+			k.ScaleSettle = blockWith(func(b *viewportDebugScaleSettle) { b.ScaleSettleTicked = 3 })
+		}},
+		{"negative candidate", func(k *viewportDebugKeyboardSession) {
+			k.ScaleSettle = blockWith(func(b *viewportDebugScaleSettle) { b.ScaleSettleCandidate = -0.25 })
+		}},
+		{"negative settle raw", func(k *viewportDebugKeyboardSession) {
+			k.ScaleSettle = blockWith(func(b *viewportDebugScaleSettle) { b.ScaleSettleRaw = -1 })
+		}},
+		{"a fourth pass-source word", func(k *viewportDebugKeyboardSession) {
+			k.ScaleSettle = blockWith(func(b *viewportDebugScaleSettle) { b.ScaleSettlePassSource = "resize" })
+		}},
+		{"sequence is not positive", func(k *viewportDebugKeyboardSession) {
+			k.ScaleSettle = blockWith(func(b *viewportDebugScaleSettle) { b.ScaleSettlePassSeq = 0 })
+		}},
+		{"journal past the authorized 8", func(k *viewportDebugKeyboardSession) {
+			k.ScaleSettle = blockWith(func(b *viewportDebugScaleSettle) {
+				for i := 0; i < 7; i++ {
+					b.ScaleSettleTickJournal = append(b.ScaleSettleTickJournal,
+						viewportDebugScaleSettleJournalEntry{viewportDebugScaleSettleScalars: scaleSettleScalars(int64(100+i), 2)})
+				}
+			})
+		}},
+		{"a jitter pass inside the tick-only journal", func(k *viewportDebugKeyboardSession) {
+			k.ScaleSettle = blockWith(func(b *viewportDebugScaleSettle) {
+				b.ScaleSettleTickJournal[1].ScaleSettlePassSource = "other"
+			})
+		}},
+		{"journal sequence does not rise", func(k *viewportDebugKeyboardSession) {
+			k.ScaleSettle = blockWith(func(b *viewportDebugScaleSettle) {
+				b.ScaleSettleTickJournal[1].ScaleSettlePassSeq = 11
+			})
+		}},
+		{"reason smuggled beside a carried block", func(k *viewportDebugKeyboardSession) {
+			k.ScaleSettle = blockWith(func(*viewportDebugScaleSettle) {})
+			k.ScaleSettleUnavailableReason = "settle-mirror-not-published"
+		}},
+		{"a free-form reason on a null", func(k *viewportDebugKeyboardSession) {
+			k.ScaleSettleUnavailableReason = "the applier was quiet"
+		}},
+	}
+	for _, tt := range table {
+		t.Run(tt.name, func(t *testing.T) {
+			report := validViewportDebugReport(1)
+			k := settleKeyboardSessionStruct()
+			tt.mutate(k)
+			report.Snapshot.KeyboardSession = k
+			if rec := doViewportDebugRequest(t, srv, http.MethodPost, "/api/viewport-debug/report", report); rec.Code != http.StatusBadRequest {
+				t.Fatalf("status=%d body=%s, want 400", rec.Code, rec.Body.String())
+			}
+		})
+	}
+	// JSON-level: every wrong type and every unknown key inside the block or its
+	// journal is a 400 (DisallowUnknownFields + the declared Go types do the
+	// heavy lifting; these pins prove the door, not the tag).
+	malformed := []struct{ name, band string }{
+		{"ticked is a string", `{"scaleSettleCandidate":0.75,"scaleSettleBaseline":0.75,"scaleSettleTicked":"2","scaleSettleLayoutHeight":1180,"scaleSettleVVWidth":820,"scaleSettleRaw":280,"scaleSettlePending":false,"scaleBelowOneSettled":true,"zoomReturnFramePending":false,"scaleSettlePassSource":"scaleSettleTick","scaleSettlePassSeq":13,"scaleSettleTickJournal":[]}`},
+		{"raw is a boolean", `{"scaleSettleCandidate":0.75,"scaleSettleBaseline":0.75,"scaleSettleTicked":1,"scaleSettleLayoutHeight":1180,"scaleSettleVVWidth":820,"scaleSettleRaw":true,"scaleSettlePending":false,"scaleBelowOneSettled":false,"zoomReturnFramePending":false,"scaleSettlePassSource":"scaleSettleTick","scaleSettlePassSeq":13,"scaleSettleTickJournal":[]}`},
+		{"pending is a string", `{"scaleSettleCandidate":0.75,"scaleSettleBaseline":0.75,"scaleSettleTicked":1,"scaleSettleLayoutHeight":1180,"scaleSettleVVWidth":820,"scaleSettleRaw":280,"scaleSettlePending":"yes","scaleBelowOneSettled":false,"zoomReturnFramePending":false,"scaleSettlePassSource":"scaleSettleTick","scaleSettlePassSeq":13,"scaleSettleTickJournal":[]}`},
+		{"the block is a string", `"0.75-settled"`},
+		{"journal is an object", `{"scaleSettleCandidate":0.75,"scaleSettleBaseline":0.75,"scaleSettleTicked":1,"scaleSettleLayoutHeight":1180,"scaleSettleVVWidth":820,"scaleSettleRaw":280,"scaleSettlePending":false,"scaleBelowOneSettled":false,"zoomReturnFramePending":false,"scaleSettlePassSource":"scaleSettleTick","scaleSettlePassSeq":13,"scaleSettleTickJournal":{"0":{"scaleSettleCandidate":0.75,"scaleSettleBaseline":0.75,"scaleSettleTicked":1,"scaleSettleLayoutHeight":1180,"scaleSettleVVWidth":820,"scaleSettleRaw":280,"scaleSettlePending":false,"scaleBelowOneSettled":false,"zoomReturnFramePending":false,"scaleSettlePassSource":"scaleSettleTick","scaleSettlePassSeq":1}}}`},
+	}
+	for i, tt := range malformed {
+		t.Run(tt.name, func(t *testing.T) {
+			payload := settleFramePayload(50+i, "p9-additive-settle-readonly-v1", settleKeyboardSessionJSON(tt.band))
+			if rec := doViewportDebugRequest(t, srv, http.MethodPost, "/api/viewport-debug/report", mustDecodeJSON(t, payload)); rec.Code != http.StatusBadRequest {
+				t.Fatalf("status=%d body=%s, want 400", rec.Code, rec.Body.String())
+			}
+		})
+	}
+	// Unknown keys inside the block / an entry never ride through — content that
+	// was never declared cannot enter the evidence channel.
+	for i, tt := range []struct{ name, band string }{
+		{"unknown key inside scaleSettle", `{"scaleSettleCandidate":0.75,"scaleSettleBaseline":0.75,"scaleSettleTicked":1,"scaleSettleLayoutHeight":1180,"scaleSettleVVWidth":820,"scaleSettleRaw":280,"scaleSettlePending":false,"scaleBelowOneSettled":false,"zoomReturnFramePending":false,"scaleSettlePassSource":"scaleSettleTick","scaleSettlePassSeq":13,"scaleSettleTickJournal":[],"terminalText":"secret"}`},
+		{"unknown key inside a journal entry", `{"scaleSettleCandidate":0.75,"scaleSettleBaseline":0.75,"scaleSettleTicked":1,"scaleSettleLayoutHeight":1180,"scaleSettleVVWidth":820,"scaleSettleRaw":280,"scaleSettlePending":false,"scaleBelowOneSettled":false,"zoomReturnFramePending":false,"scaleSettlePassSource":"scaleSettleTick","scaleSettlePassSeq":13,"scaleSettleTickJournal":[{"scaleSettleCandidate":0.75,"scaleSettleBaseline":0.75,"scaleSettleTicked":1,"scaleSettleLayoutHeight":1180,"scaleSettleVVWidth":820,"scaleSettleRaw":280,"scaleSettlePending":false,"scaleBelowOneSettled":false,"zoomReturnFramePending":false,"scaleSettlePassSource":"scaleSettleTick","scaleSettlePassSeq":12,"worktree":"secret"}]}`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			payload := settleFramePayload(70+i, "p9-additive-settle-readonly-v1", settleKeyboardSessionJSON(tt.band))
+			if rec := doViewportDebugRequest(t, srv, http.MethodPost, "/api/viewport-debug/report", mustDecodeJSON(t, payload)); rec.Code != http.StatusBadRequest {
+				t.Fatalf("status=%d body=%s, want 400", rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
 func mustDecodeJSON(t *testing.T, raw string) any {
 	t.Helper()
 	var v any

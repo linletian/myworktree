@@ -92,3 +92,77 @@ func TestViewportDebugAssetAnchors(t *testing.T) {
 		}
 	}
 }
+
+// TestViewportDebugSettleMirrorAnchors pins AUTH-20261105-D2-SETTLE-READONLY：
+// applier 在既有 occlusion mirror 边界旁新增只读 `window.__mwTerminalSettle`
+// 发布，数值型 `window.__mwTerminalOcclusion` 一行原样、类型与值不动；探针只
+// 复制、绝不写回。任何一项缺失，r3-Z-MENU 的 settle 序列就没有可读的证据链，
+// 相应条目只能记 INCONCLUSIVE——这是可观测性锚点，不是产品行为锚点。
+// 双评审复回收口仲裁 F-3（r3 前必须）：applier 切片的位置/发布锚点保留，但
+// "产品任何决策路径不得读取"改为对整份 index.html 用 stripJSComments 剥注释后
+// 的全文件计数红线（一次自续读、一次写入，恰好 2 次）。
+func TestViewportDebugSettleMirrorAnchors(t *testing.T) {
+	bodyText := fetchIndexHTML(t)
+	// 数值 mirror 原样，且全文件只此一处发布（settle 是新增旁路，不是替换）。
+	if n := strings.Count(bodyText, "window.__mwTerminalOcclusion = occlusion;"); n != 1 {
+		t.Fatalf("the numeric occlusion mirror must stay verbatim and single, found %d", n)
+	}
+	// settle mirror 在同一 pass 尾部发布，恰好一次，且是不可变快照。
+	apply := sliceJSFunction(t, bodyText, "applyVisualViewportOcclusion")
+	publish := "window.__mwTerminalSettle = Object.freeze(Object.assign({}, settleSnapshotScalars, {"
+	if n := strings.Count(apply, publish); n != 1 {
+		t.Fatalf("the settle mirror must publish exactly once inside applyVisualViewportOcclusion, found %d", n)
+	}
+	occlusionAt := strings.Index(apply, "window.__mwTerminalOcclusion = occlusion;")
+	settleAt := strings.Index(apply, publish)
+	if occlusionAt < 0 || settleAt < 0 || settleAt < occlusionAt {
+		t.Fatal("the settle mirror must be published at the existing mirror boundary, beside the numeric occlusion mirror")
+	}
+	for _, want := range []string{
+		// 白名单字段的原样拼写（VALIDATION 2026-11-05 细化表）。
+		"scaleSettleCandidate: scaleSettleCandidate,",
+		"scaleSettlePending: scaleSettlePending,",
+		"scaleBelowOneSettled: scaleBelowOneSettled,",
+		"zoomReturnFramePending: !zoomed && scaleSettleCandidate !== 0 && scaleSettleTicked < SCALE_SETTLE_TICKS,",
+		`scaleSettlePassSource: selfCheckPass ? "scaleSettleTick" : "other",`,
+		"scaleSettlePassSeq: settleSeqPrevious + 1,",
+		// 有界 tick journal：固定 8 条、只由既有自检 tick 入环、冻结拷贝。
+		"const SCALE_SETTLE_JOURNAL_MAX = 8;",
+		".slice(-SCALE_SETTLE_JOURNAL_MAX)",
+		// 普通 pass 只续序号、不动 journal——jitter 永远挤不掉 tick 链。
+		": Object.freeze(settleJournalPrevious.slice());",
+		// 发布失败不得中断产品 pass。
+		"} catch (_) { /* the diagnostic is dropped; the product pass is untouched */ }",
+	} {
+		if !strings.Contains(apply, want) {
+			t.Fatalf("index.html settle publication missing %q", want)
+		}
+	}
+	// 仲裁 F-3：这条红线是对整份 index.html 的【全文件】计数，用 ui_test.go 现成
+	// 的引号感知 stripJSComments 剥注释——自写的 `[^\n]*` 方式作废，因为它会把
+	// 字符串里的 `//`（URL、token）之后的真实代码一并吞掉，计数不可信。剥注释后
+	// 可执行代码里完全限定名 `window.__mwTerminalSettle` 必须恰好出现 2 次：发布
+	// 块内的一次自发布续读（序号/journal 续接，非判据）与一次写入。任何产品决策
+	// 路径新增读取——applier 内或 applier 外——都会让计数越过 2，测试必须红。
+	// 探针文件（viewport_debug.js）的只读复制检查在下方单独进行，不计入这 2 次。
+	full := stripJSComments(bodyText)
+	if n := strings.Count(full, "window.__mwTerminalSettle"); n != 2 {
+		t.Fatalf("index.html executable code may only read-and-publish the settle mirror once each, found %d mentions", n)
+	}
+	// 探针侧：只读、只复制、失败退化为 null + 固定标记；绝不写回窗口 mirror。
+	asset := fetchStaticAsset(t, "/static/viewport_debug.js")
+	for _, want := range []string{
+		"win.__mwTerminalSettle", "scaleSettleFieldsOf", "scaleSettleUnavailableReason",
+		`"settle-mirror-not-published"`, "scaleSettleTickJournal", "SETTLE_JOURNAL_MAX",
+		// additive schema 标记随字段集移动；冻结 stamp 不动（verify-sop 的 stamp 门依赖它）。
+		`const SCHEMA_REV = "p9-additive-settle-readonly-v1";`,
+		`const PROBE_VERSION = "p9-full-shell-session-avoidance-v1";`,
+	} {
+		if !strings.Contains(asset, want) {
+			t.Fatalf("viewport_debug.js settle block missing %q", want)
+		}
+	}
+	if strings.Contains(asset, "__mwTerminalSettle =") {
+		t.Fatal("the probe must never write the settle mirror — it only copies it")
+	}
+}

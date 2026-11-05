@@ -4053,6 +4053,71 @@
             // Mirror of what was OWED this pass, for the diagnostic probe
             // (viewport_debug.js reads this value; it never re-derives it).
             window.__mwTerminalOcclusion = occlusion;
+            // AUTH-20261105-D2-SETTLE-READONLY (VALIDATION 2026-11-05, executable
+            // refinement): the read-only settle mirror, published at THIS same
+            // mirror boundary, beside the numeric occlusion mirror above — which it
+            // neither replaces nor touches. Every value in it is a COPY of a number
+            // this pass already computed (the D-C settle memory, its settled /
+            // pending results, the frozen ±0.01 zoom flag): the product judged,
+            // latched and wrote its boxes BEFORE this block, and NOTHING in the
+            // product reads this object back. It carries bounded numbers, booleans
+            // and the two-word pass-source enum only — no text, no DOM, no
+            // timestamps, no identity, no reference into the live settle variables.
+            // The single read it performs is of its OWN last published snapshot,
+            // and only to continue the publish sequence and the bounded tick journal
+            // INSIDE this diagnostic channel: no judgment is re-taken from it and
+            // no number flows back into raw / occlusion / settle / latch. The
+            // published snapshot itself IS the continuity memory — the sequence and
+            // the journal live on the window, not on new module bindings, so the
+            // sliced-evaluated copies of this function (verify-live-choiceA.mjs's
+            // factory mirror among them, untouched under this authorization) run
+            // this block without new bindings to mirror, and "per page runtime"
+            // holds per page runtime: each window gets its own sequence from 1. A
+            // tampered or unreadable previous frame restarts the sequence at 1 with
+            // an empty journal, and if the read or the publish throws (a sealed
+            // page, a frozen stand-in window) the try/catch drops the DIAGNOSTIC
+            // ONLY — this pass has already owed and written everything it owes.
+            try {
+                // The ONLY read of the mirror: its own last published frame, for
+                // sequence / journal continuation. Not a judgment input.
+                const settlePublished = window.__mwTerminalSettle;
+                const settleSeqPrevious = settlePublished && Number.isSafeInteger(settlePublished.scaleSettlePassSeq)
+                    && settlePublished.scaleSettlePassSeq >= 1 ? settlePublished.scaleSettlePassSeq : 0;
+                const settleJournalPrevious = settlePublished && Array.isArray(settlePublished.scaleSettleTickJournal)
+                    ? settlePublished.scaleSettleTickJournal : [];
+                const SCALE_SETTLE_JOURNAL_MAX = 8;
+                const settleSnapshotScalars = {
+                    scaleSettleCandidate: scaleSettleCandidate,
+                    scaleSettleBaseline: scaleSettleBaseline,
+                    scaleSettleTicked: scaleSettleTicked,
+                    scaleSettleLayoutHeight: scaleSettleLayoutHeight,
+                    scaleSettleVVWidth: scaleSettleVVWidth,
+                    scaleSettleRaw: scaleSettleRaw,
+                    // The guard's OWN word, copied — not ticked<2 re-spelled.
+                    scaleSettlePending: scaleSettlePending,
+                    scaleBelowOneSettled: scaleBelowOneSettled,
+                    // Diagnostic projection over the EXISTING D-C memory: the trip
+                    // back into the band is in flight while its candidate still
+                    // counts. This is NOT the zoomReturnFrame const above (that names
+                    // THIS frame's exit edge) and NOT a new product state — it is
+                    // the authorization's formula, read-only, never written back.
+                    zoomReturnFramePending: !zoomed && scaleSettleCandidate !== 0 && scaleSettleTicked < SCALE_SETTLE_TICKS,
+                    // Fixed two-word enum: the existing token or "other". An
+                    // "other" pass is never guessed at being resize / scroll /
+                    // focusout / init — the applier only ever knows the token.
+                    scaleSettlePassSource: selfCheckPass ? "scaleSettleTick" : "other",
+                    scaleSettlePassSeq: settleSeqPrevious + 1,
+                };
+                // Only a product self-check tick enters the journal (never a jitter
+                // pass), the ring is frozen copies capped at 8 — no nested journal,
+                // no new timer, no new event source, no product→probe call.
+                const settleTickJournal = selfCheckPass
+                    ? Object.freeze(settleJournalPrevious.concat([Object.freeze(settleSnapshotScalars)]).slice(-SCALE_SETTLE_JOURNAL_MAX))
+                    : Object.freeze(settleJournalPrevious.slice());
+                window.__mwTerminalSettle = Object.freeze(Object.assign({}, settleSnapshotScalars, {
+                    scaleSettleTickJournal: settleTickJournal,
+                }));
+            } catch (_) { /* the diagnostic is dropped; the product pass is untouched */ }
             previousTerminalRaw = raw;
             previousTerminalLayoutHeight = layoutHeight;
             previousTerminalVVWidth = vv ? vv.width : 0;
