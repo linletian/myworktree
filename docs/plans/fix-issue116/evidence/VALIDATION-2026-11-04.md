@@ -381,3 +381,13 @@ C 会话还包含多轮额外滚动/平移与窗口变化，不能用上述局�
 | 门禁 | 补签 verdict | 签署记录 |
 | --- | --- | --- |
 | ④ / **G08** 设计源、PNG、验收矩阵一致并签署 | **CLOSED（签署达成；仅一致性域）** | **上一轮 Phase 2 收口时门禁④未达成，本节即为补签。** [EXPORT-MANIFEST v5](../design/EXPORT-MANIFEST.md) 已登记矩阵状态入稿、改动节点与重出清单；`d1_notes` / `d1_viewport_geometry` / `qk0001` 对应 PNG 实际像素分别为 **2362×3762 / 2882×2482 / 1002×1864**。**截至本轮提交，设计源文本=VALIDATION 登记状态=PNG 内容三项一致。** G02 证据子项、D2 整行 / Z 系列、25% / 50%（本机不可达）、F18、GI-3、live CDP 等 INCONCLUSIVE 全部保留，子项 PASS 不上浮；真机像素排版仍未验证。本轮未改产品 / 诊断 / evidence 会话，未 commit。 |
+
+## 2026-11-06 Phase 3 输入所有权拆分离线实现轮
+
+- **授权与提交**：`AUTH-20261105-P3-OWNERSHIP` 及 `AUTH-20261105-P3-OWNERSHIP-A1`（[PLAN §5 授权包](../PLAN.md#L230-L244)）；实现提交 `0258f1e`，授权登记提交 `b49d34e`。本节只登记离线实现与门禁事实，**不是真机 verdict**。
+- **产品谓词**：`document.activeElement` 单读，editable 逐字三分支保持为 `TEXTAREA` / `INPUT` / `isContentEditable`；随后当帧沿 `parentElement` 祖先链取首个 `data-instance-id` 真值宿主，仅在其为 `#terminal-container` 直接子且 inline `display !== "none"` 时取得资格。`scaleStepNoLatchExit`、既有退出边与进入门三处消费同一 `focusEditable` 布尔。
+- **A1 夹具-only 同步**：`verify-live-choiceA.mjs` 仅同步 stub 的前台宿主祖先链并展示既有 `hosts[0]`；既有断言表达式与预期值保持原值，不新增 / 删除帧，不改几何或回放语义。
+- **门禁计数（调度者独立复跑原文，本登记轮未复跑）**：`node --test internal/ui/testdata/viewport_height.test.mjs` **40 pass / 0 fail**；`zoom_scale.test.mjs` **37/37**；`terminal_status.test.mjs` **68/68**；`viewport_debug.test.mjs` **48/48**；`go test -count=1` 三锚点均 **ok**；`node docs/plans/fix-issue116/evidence/verify-live-choiceA.mjs --html internal/ui/static/index.html` 离线 **PASS / exit 0**，既有断言原值通过。以上均不替代真机确认。
+- **双评审**：评审 1 `opencode-go/muse-spark-1.3-contributor` **APPROVE**（0 BLOCKER / 0 MAJOR，MINOR×4）；评审 2 `minimax-cn/MiniMax-M3.1-Flash` **APPROVE**（0 BLOCKER / 0 MAJOR，MINOR×6 + CHALLENGE×4）。修复轮已完成 MINOR-1 / MINOR-2 / MINOR-4 / MINOR-5。**未认证声明**：MINOR-3 / MINOR-6（A1 措辞张力）按登记解释处理，未改码。
+- **G10 状态更新（不整行关闭）**：R2 已知偏离在**已交付代码**上关闭；c3ee A3 与 42cd HO-3 仍是 Phase 3 前的历史现场实例，历史证据及其性质不改写。真机 HO-3 / R2 验证仍未执行，Phase 3 任务 4 待安排，故 [PLAN §11.3 G10](../PLAN.md#L393) 余项保持，不写成整行关闭或真机 PASS。
+- **已登记后续项（不新开工号，均不阻塞本轮）**：D2-7b 结构断言之外，tab 误判的当帧行为回归仍缺 tab 结构桩；单 shown host 不变量仍缺结构断言；`focusEditable` 复合布尔命名易混淆，可后续复查是否采用 `ptyFocusEligible` 之类命名。
