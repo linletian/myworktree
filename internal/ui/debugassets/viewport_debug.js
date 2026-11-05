@@ -877,7 +877,12 @@
             rect: box,
             rectUnavailableReason: box ? "" : "panel-client-rect-unavailable",
             keyboardOverlap: box && vv ? Math.max(0, finite(box.bottom) - finite(vv.height)) : null,
-            insideVisibleViewport: box && vv ? (box.top >= 0 && box.bottom <= finite(vv.height) + 1) : null,
+            // 方案②第 3 条（AUTH-20261105-DIAG-PANEL-CLIENT）：补快照横向 client 界。
+            // 旧口径只查纵向，seq253 那一帧会出现"rect 在可见窗口内、横向从不过问"的
+            // 盲区，与 panelLayoutFor 的支撑判定互相打脸；横向沿用纵向同款 +1 容差，
+            // 字段名保持不变（评审 R2/N-2 曾把命名列为需另授权项，本授权明确只加条件）。
+            insideVisibleViewport: box && vv ? (box.top >= 0 && box.bottom <= finite(vv.height) + 1
+                && box.left >= 0 && box.right <= finite(vv.width) + 1) : null,
         };
     }
 
@@ -1438,7 +1443,8 @@
     //   * 顶边居位：外壳被 Safari pan 平移（vv.offsetTop ≠ 0）时，fixed 盒子的
     //     client rect = 书写的 layout 位置 − vv.offsetTop，顶部居位整块出屏。
     // 修正只有一句话：把面板这个工具自己的盒子放进「可见窗口」内——client 坐标
-    // [0, vv.height]，等价于 layout 坐标 [vv.offsetTop, vv.offsetTop + vv.height]
+    // [0, vv.height]（方案② AUTH-20261105-DIAG-PANEL-CLIENT：横向同样 [0, vv.width]），
+    // 等价于 layout 坐标 [vv.offsetTop, vv.offsetTop + vv.height]
     // （PHASE1-CONTRACT 术语章：同一个窗口的两种坐标描述，禁止相加混用）。写出的
     // 仍只是面板自己的 fixed inset，与产品几何（index.html 的避让写入集合）零耦合：
     // 这里不写任何产品 DOM / 样式，不参与 occlusion / raw 算式，也不读 applier 的
@@ -1528,10 +1534,24 @@
         // M-4：free 居位的上界含 PANEL_MARGIN，与顶/底/左/右四边的贴边口径一致
         // （冻结基线里面板从不贴边）。少了这个边距，拖到极限的面板会压在键盘顶边
         // 或屏幕边缘那 1px 上，自报"在可见窗口内"而像素上已经出界。
+        // AUTH-20261105-DIAG-PANEL-CLIENT 方案②第 2 条：拖拽预算（材质区夹紧）就是
+        // 可见窗口（client / visible-window）口径——直接以 vvWidth / vvHeight 计，不随
+        // layoutWidth；夹完的 client 落点天然落在 [0, vvWidth] × [0, vvHeight] 内，与下面
+        // 的 support 判定同一口径，拖得到的位置 = 判 supported 的位置。换算成 layout 空间的
+        // inset 只经唯一合成点 authored() 一处（client = layout − offset，术语章换算注）。
         const freeTop = clamp(finite(src.dragY) + PANEL_MARGIN + safeTop, 0, Math.max(0, vvHeight - height - PANEL_MARGIN));
         const freeLeft = clamp(finite(src.dragX) + PANEL_MARGIN, 0, Math.max(0, vvWidth - width - PANEL_MARGIN));
         // authored(offsetTop, offsetLeft) = 这个 pan 下要写进 style 的 fixed inset。
         // 同一函数对照 pan=0 的写法，才能诚实回答"这一格真的被平移修正过吗"。
+        // layout↔client 的换算只在这里合成：右缘 inset 由 layoutWidth 反推，scale<1 下
+        // 可为负而夹回 0 → 右缘贴 layout 右缘（right-inset 物理上写得出去的最右位）。
+        // inset 相对 layoutWidth 越界不描述任何绘制事实：layoutWidth 只是工具从
+        // documentElement.clientWidth 读到的**输入**，缩放过渡帧里它与当帧真正渲染的
+        // ICB 不同源（读到的是过期 ICB，因果见下面的方案②注）。seq253 也**不**支持
+        // "free 的 left inset 大于 layoutWidth"——本格写出的 left inset = 1104
+        // < layoutWidth 1194，越出 layout 右缘的是盒子右缘 client right = 1464
+        // （= 1104 + width 360），不是 left inset。
+        // 两种写法的落点都由上面的 client 口径判支撑，layout 远界不再是拒绝理由。
         function authored(offsetTop, offsetLeft) {
             const anchoredBottom = keyboardPresent
                 ? Math.min(layoutHeight, offsetTop + vvHeight)
@@ -1558,13 +1578,30 @@
         const clientLeft = layoutLeft - vvOffsetLeft;
         const clientRight = clientLeft + width;
 
+        // 方案②（AUTH-20261105-DIAG-PANEL-CLIENT）：支撑判定 = 纯 client 坐标一致性——
+        // 写出去的实际落点在 [0, vvWidth] × [0, vvHeight] 之内（严格比较，沿用既有写法语义）
+        // 就是 supported。原先的 `layoutTop + height > layoutHeight / layoutLeft + width >
+        // layoutWidth` 两条 layout 远界删除，真实因果是**缩放过渡帧里 documentElement
+        // .clientWidth 与当帧真正渲染的 ICB 不同源（工具读到过期 ICB）**：c3ee seq253
+        // 读到 layoutWidth 1194，旧远界就拿这份过期输入否决了完整显示的面板。
+        // **seq253 无 gutter**——可视视口 1592 完整落在布局视口内，当帧渲染的 ICB 必
+        // ≥1592，越出 1194 的 client right 1464 落在仍要绘制的区域内，不存在"fixed 盒子
+        // 画到 gutter"这回事（真机 getBoundingClientRect 宽 360 只是盒子自报尺寸，
+        // 不证明绘制；真机面板完整可见）。落点 client [1104,1464] 全在可见窗口
+        // [0,1592] 内，再拿远界拒绝就是 unsupported 与同帧
+        // insideVisibleViewport=true 的工具自相矛盾。保留的
+        // layoutTop / layoutLeft < 0 两条不是「layout 远界拒绝」，而是物理不可放的「overscroll
+        // 负值」：负值 = 需要的 inset 写不出去、算出的盒子顶 / 左边落在 fixed 包含块之外
+        // （负 pan 底部居位就是这一格），它与纵向 too-short / 横向 too-narrow 并列为仅存的
+        // 三个物理原因。free 预算（freeLeft / freeTop）本就以 vv 尺寸为 client 口径夹紧，
+        // 与本判定同场同口径——「拖得到的位置 = 判 supported 的位置」在删掉远界后才成立。
         if (support === "supported"
-            && (layoutTop < 0 || layoutTop + height > layoutHeight
-                || layoutLeft < 0 || layoutLeft + width > layoutWidth
-                || clientTop < 0 || clientTop + height > vvHeight
-                || clientLeft < 0 || clientRight > vvWidth)) {
-            // 写不出去（inset 被夹）或落点越出可见窗口：这一格无处可放，明说
-            // "不支持"，不硬摆一个落在键盘下或屏外的面板让人误以为采到了证。
+            && (clientTop < 0 || clientTop + height > vvHeight
+                || clientLeft < 0 || clientRight > vvWidth
+                || layoutTop < 0 || layoutLeft < 0)) {
+            // 写不出去（overscroll 负 inset 被夹到 0 后落点仍出界）或 client 落点越出可见
+            // 窗口：这一格无处可放，明说"不支持"，不硬摆一个落在键盘下或屏外的面板让人误以为
+            // 采到了证。
             support = "unsupported";
             unsupportedReason = "visible-window-outside-layout-viewport";
         }

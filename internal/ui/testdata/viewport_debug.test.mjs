@@ -1167,13 +1167,17 @@ test("a client frame carries ownership, the DERIVED session hint and the panel i
   assert.equal(mute.uploads[0].snapshot.occlusion, 0, "the frozen occlusion field keeps its 'unset reads 0' meaning");
 
   // The panel reports itself once it is on the page.
+  // 夹具修正（AUTH-20261105-DIAG-PANEL-CLIENT 方案②第 3 条）：原 rect right=826 对这个
+  // harness 的 vv.width=820 本来就越出可见窗口 6px——旧纵向-only 口径没查横向，才把它
+  // 报成 insideVisibleViewport=true。本用例的意图是"完整可见的 br 停靠位"，所以把夹具
+  // 修成窗内自洽值（br 右 inset 8 → client 右缘 812），原越界值挪给下面的横向反证格。
   const { page } = makePage();
   const panel = {
     dataset: {
       debugCorner: "br", debugSupport: "supported", debugUnsupportedReason: "",
       debugLifted: "1", debugPanCorrected: "0", debugNominalHeight: "520",
     },
-    getBoundingClientRect: () => ({ top: 154, bottom: 674, left: 466, right: 826, width: 360, height: 520 }),
+    getBoundingClientRect: () => ({ top: 154, bottom: 674, left: 452, right: 812, width: 360, height: 520 }),
   };
   const original = page.document.getElementById;
   page.document.getElementById = (id) => (id === "viewport-debug-panel" ? panel : original(id));
@@ -1183,14 +1187,22 @@ test("a client frame carries ownership, the DERIVED session hint and the panel i
   assert.equal(withPanel.panel.support, "supported");
   assert.equal(withPanel.panel.lifted, true);
   assert.equal(withPanel.panel.nominalHeight, 520);
-  assert.deepEqual(withPanel.panel.rect, { top: 154, bottom: 674, left: 466, right: 826, width: 360, height: 520 });
+  assert.deepEqual(withPanel.panel.rect, { top: 154, bottom: 674, left: 452, right: 812, width: 360, height: 520 });
   assert.equal(withPanel.panel.keyboardOverlap, 0, `bottom 674 against vv.height ${VV_HEIGHT}`);
   assert.equal(withPanel.panel.insideVisibleViewport, true);
   // A panel under the keyboard says so instead of being quietly unreachable.
-  panel.getBoundingClientRect = () => ({ top: 900, bottom: 1012, left: 466, right: 826, width: 360, height: 112 });
+  // 纵向越界格：横向保持窗内（452..812），让 insideVisibleViewport=false 归因纯纵向。
+  panel.getBoundingClientRect = () => ({ top: 900, bottom: 1012, left: 452, right: 812, width: 360, height: 112 });
   const covered = loadAPI().snapshotFromPage(page, "manual", "2026-11-04T12:00:00.000Z");
   assert.equal(covered.panel.keyboardOverlap, 152, "1012 − 860: the covered part of the panel, as a number");
   assert.equal(covered.panel.insideVisibleViewport, false);
+  // 横向-only 越界反证（方案②补的横向界真正生效的证明）：纵横都在 [0, vv.height] 内、
+  // 只有右缘越出 [0, vv.width=820] 一格——旧纵向-only 口径会放行报 true，必须如实 false。
+  // 这就是 seq253 形状的反方向镜像：横向盲区不再存在。
+  panel.getBoundingClientRect = () => ({ top: 154, bottom: 674, left: 466, right: 826, width: 360, height: 520 });
+  const sideways = loadAPI().snapshotFromPage(page, "manual", "2026-11-04T12:00:00.000Z");
+  assert.equal(sideways.panel.keyboardOverlap, 0, "这一格纵向完全在窗内，失败只能归因横向");
+  assert.equal(sideways.panel.insideVisibleViewport, false, "横向越出 [0, vv.width=820] 不得再算可见（方案②快照横向界）");
 
   // B-2: a panel that EXISTS but whose dataset was never written answers
   // `unavailable` + a reason — from the ONE vocabulary the server whitelists. A
@@ -1589,6 +1601,71 @@ test("free 居位（拖拽）落在可见窗口内并保留边距（M-2 ④ + M-
     "free 格数 = 三档键盘 × 三档拖拽 × 两档 pan，一格不能少，且落位结果互异");
 });
 
+test("c3ee seq253 同形态：scale<1 回弹瞬间 free 落点在可见窗口内必须 supported（AUTH-20261105-DIAG-PANEL-CLIENT 方案②）", () => {
+  const api = loadAPI();
+  // 真机输入原样（raw c3ee73e2653ba89dc615d4554ceb7204 seq 253）：vv 1592×906 /
+  // layout 1194×748 / vv.offsetTop 90.65625 / corner=free + dragX 1096。
+  // 旧口径同帧自报 unsupported / visible-window-outside-layout-viewport，而真机
+  // getBoundingClientRect（left 1104, right 1464）与 insideVisibleViewport=true 都
+  // 说明面板完整可见——VALIDATION 2026-11-05 仲裁定案：工具误判，修 layout↔client
+  // 口径错配，layout 远界不再作为 unsupported 理由。
+  const SRC = {
+    innerWidth: 1592, innerHeight: 906,
+    layoutWidth: 1194, layoutHeight: 748,
+    vvWidth: 1592, vvHeight: 906,
+    vvOffsetTop: 90.65625, vvOffsetLeft: 0,
+    corner: "free", dragX: 1096, dragY: 0,
+  };
+  const layout = api.panelLayoutFor(SRC);
+  assert.equal(layout.support, "supported", `seq253 同形态必须 supported，实得 ${layout.support} / ${layout.unsupportedReason}`);
+  assert.equal(layout.unsupportedReason, "");
+  const box = layout.clientRect;
+  assert.ok(box.left >= 0 && box.right <= 1592, `横向落点 ${box.left}..${box.right} 必须在 [0, vv.width=1592] 内`);
+  assert.ok(box.top >= 0 && box.bottom <= 906, `纵向落点 ${box.top}..${box.bottom} 必须在 [0, vv.height=906] 内`);
+  // 反证旧界仍在现场：这一格的落点越过**工具读取的 layout 视口输入**
+  // （layoutWidth 读自 documentElement.clientWidth = 1194，与同帧实测 ICB ≥1592 不同源，
+  // 不描述绘制事实——seq253 无 gutter），正是被删除的 `layoutLeft + width > layoutWidth`
+  // 曾经误判的那条界；本断言作为旧远界回归钉子保留。
+  assert.ok(box.right > layout.layoutWidth, `这一格必须真的越出 layout 远缘 ${layout.layoutWidth}，否则没有证到旧 layout 界`);
+  assert.equal(layout.left, "1104px", "free+drag 1096 写出的 left inset = dragX + PANEL_MARGIN，与真机 client left 1104 同值（唯一合成点不折返）");
+  // 拖拽预算 = 支撑判定（方案②第 2 条）：拖到 free 预算右 / 下极限（贴 vv − PANEL_MARGIN）
+  // 这一格必须同样 supported——预算允许拖到的任何位置，判定都不许把它抹成不支持。
+  const limit = api.panelLayoutFor({ ...SRC, dragX: 1592 - 360 - 8 - 8, dragY: 9999 });
+  assert.equal(limit.support, "supported", `free 拖拽预算极限必须 supported，实得 ${limit.support} / ${limit.unsupportedReason}`);
+  assert.ok(Math.abs(1592 - limit.clientRect.right - 8) <= 1 && Math.abs(906 - limit.clientRect.bottom - 8) <= 1,
+    `极限格保留 8px 贴边余量：实得右 ${1592 - limit.clientRect.right} 下 ${906 - limit.clientRect.bottom}`);
+
+  // 快照级同场自洽（panelReportOf 读法）：seq253 实测 client rect（真机测量值）补上
+  // 横向界后仍判 true，与 support=supported 同帧一致，消除"纵向 true / 横向 unsupported"。
+  const panel = {
+    style: {},
+    dataset: {
+      debugCorner: "free", debugSupport: "supported", debugUnsupportedReason: "",
+      debugLifted: "0", debugPanCorrected: "1", debugNominalHeight: "520",
+    },
+    getBoundingClientRect: () => ({ top: 7.65625, bottom: 233.734375, left: 1104, right: 1464, width: 360, height: 226.078125 }),
+  };
+  const win = {
+    innerWidth: 1592, innerHeight: 906, devicePixelRatio: 2,
+    visualViewport: { width: 1592, height: 906, offsetTop: 90.65625, offsetLeft: 0, scale: 0.75 },
+    getComputedStyle: () => ({ display: "none" }),
+    matchMedia: () => ({ matches: true }),
+    __mwTerminalOcclusion: 0,
+  };
+  win.document = {
+    documentElement: { clientWidth: 1194, clientHeight: 748 },
+    getElementById: (id) => (id === "viewport-debug-panel" ? panel : null),
+  };
+  api.applyPanelLayout(win, panel, { corner: "free", safeTop: 0, safeRight: 0, safeBottom: 0, dragX: 1096, dragY: 0, collapsed: false });
+  assert.equal(panel.style.left, "1104px", "写出的 fixed inset 与 seq253 真机 client 落点同值");
+  assert.equal(panel.dataset.debugSupport, "supported", "applyPanelLayout 在 seq253 几何必须写 supported");
+  const snapshot = api.snapshotFromPage({ window: win, document: win.document, state: { collapsed: false, quickKeysOpen: false, kind: "pty", status: "running" } }, "manual", "2026-11-05T02:21:40.005Z");
+  assert.equal(snapshot.panel.support, "supported");
+  assert.equal(snapshot.panel.unsupportedReason, "");
+  assert.equal(snapshot.panel.insideVisibleViewport, true, `实测 rect ${snapshot.panel.rect.left}..${snapshot.panel.rect.right} 必须在 [0, vv.width=${snapshot.vv.width}] 内（横向界补完后可见窗完整成立）`);
+  assert.equal(snapshot.panel.keyboardOverlap, 0);
+});
+
 test("不支持只留给真放不下的场合", () => {
   const api = loadAPI();
   const px = (value) => parseFloat(value);
@@ -1617,7 +1694,7 @@ test("不支持只留给真放不下的场合", () => {
     layoutWidth: MATRIX_WIDTH, layoutHeight: MATRIX_LAYOUT_HEIGHT,
     vvWidth: MATRIX_WIDTH, vvHeight: 680, vvOffsetTop: -400, corner: "br", safeBottom: 20,
   });
-  assert.equal(outOfBoundsBottom.support, "unsupported", "底部居位同样无处可放：可见窗口顶边在包含块之上");
+  assert.equal(outOfBoundsBottom.support, "unsupported", "底部居位同样无处可放：落点顶边落在 fixed 包含块之上（origin 负值 = overscroll 负值物理原因；layout 远界已按方案②删除，这里不得是远界拒绝）");
   // 3. 六分屏级窄宽：面板宽度无处安放。
   const narrow = api.panelLayoutFor({
     innerWidth: 150, innerHeight: 702, layoutWidth: 150, layoutHeight: 702,
