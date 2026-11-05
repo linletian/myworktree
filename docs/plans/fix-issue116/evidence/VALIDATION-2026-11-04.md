@@ -318,3 +318,39 @@ C 会话还包含多轮额外滚动/平移与窗口变化，不能用上述局�
 - **全文件 scale=1 的 PTY 深键盘让位共四组**：`seq 32–37`、`44–49`、`81–86`、`156–165`，均 `raw=occ=428` 且为 helper / HO-2；前三组属于 A 及其回程，第四组属于 C 的 PTY 形态记录。
 - **C 段 HO-3 是第二次 R2 已知偏离现场实例**：`seq 172` 为 focusout / HO-1，`seq 173` focusin 到普通 `INPUT / web-input / HO-3`；`seq 176–186` 连续 `raw=occ=428`，含手动 Capture `seq 184`。`seq 187` 是 settle / HO-1 / raw=occ=0，不是额外的 focusout 帧。该实例继续只登记 Phase 3 前的 D-A / R2 已知偏离，不用于 D2 PTY PASS，也不关闭 R2。因 Web input 与 helper 段均无 Safari pan，**D1 对比仍 INCONCLUSIVE**。
 - **GI-3 不是“本会话未见停滞”，而是新增同类停滞观察，仍 INCONCLUSIVE**：helper rect 在 `seq 15–26` 与 `29–54` 恒为 `top=958 / bottom=975`，且 `insideVisibleViewport=false`；这一不变值跨越 `seq 32–44` 的深键盘开、关、重开、`seq 50` 的 1→0.85 与 `seq 54` 的 0.85→0.75，直到 `seq 55` 才跳为 `210/227`。之后 helper 前台时的 `210/227` 又跨多组 scale/raw 变化保持，至 `seq 166` 键盘收起时才变为 `703/720`。这与 c3ee `seq 254+` 的 `839/856` 停滞属同类证据形态，但现有字段仍不能区分聚焦 rect、refit 滞后与真实出屏，也不凭 owner 的口头视觉符合预期反推 helper rect 正确；GI-3 不关闭、不判产品 FAIL。
+
+## 2026-11-05 Phase 2 收口复核与门禁裁决（owner B）
+
+本节是 Phase 2 停止推进时的证据盘点，不是新增真机验收。复核方式为只读逐行解析既有 JSONL、核对提交与已登记文档；**未改 raw、未启动浏览器、未重跑实时 Chrome/CDP、未运行新真机采集**。owner 选择 B 后，本周期不再补采；未闭环项统一由 [PLAN §11.3](../PLAN.md#113-phase-2-收口时显式登记的已知缺口) 承接。
+
+### 快速盘点复核
+
+1. **提交编号以仓库实际对象为准**：任务 1+2 诊断基座为 **`937d91f`**，不是不存在的 `937d914`；任务 5 工具判据落地为 **`4a17f9c`**，`14c2b90` 只归档 42cd raw。设计源 / PNG 为 `ef5037b`，面板 client 界修复为 `938fcd2`。
+2. **面板真机读数**：三份新 schema 会话共 810 帧，`support=supported` 809 帧；唯一例外为 c3ee `seq253`，其同帧 `insideVisibleViewport=true`，已确认为工具坐标误判。手动 Capture 是实际可达性的直接操作证据，周期帧的 `supported` 只是面板自报，二者不混写。
+
+   | 会话 | 帧数 | supported | 手动 Capture | 居位覆盖与边界 |
+   | --- | ---: | ---: | ---: | --- |
+   | b746 | 120 | 120 | 0 | tr 77、free 43；短窗口 / pan 形态，无手动 Capture |
+   | c3ee | 483 | 482 | 32 | tl / tr / bl / br / free 均有手动 Capture；唯一 `seq253` unsupported 为工具误判 |
+   | 42cd | 207 | 207 | 8 | 全部 tr；在 `938fcd2` 后采集，但不是 `seq253` 同形态 free 复采 |
+   | **合计** | **810** | **809** | **40** | 已有主体证据，不等于完整键盘 × pan × 居位矩阵全部执行 |
+
+3. **D1 不是零 pan 样本，但仍零合格对偶归因链**：身份、归属和同帧 rect 已由真机取得；同时 raw 确有 focus + 非零 `offsetTop`，不得概括成“Safari 从未 pan”。
+   - b746 有 28 帧非零 `offsetTop`，其中 25 帧为 helper / HO-2；它们属于短窗口 / 缩放与 pan 混合形态，没有普通 Web input 对偶。
+   - c3ee 有 69 帧非零 `offsetTop`，其中 55 帧 editable；普通 Web input 在 `seq385 focusin` 后的 `seq386–388` 为 `offsetTop=190.5`，helper 另有多段缩放 / pan。`seq413–418` A3 则是有 Web input 身份 + rect、无 pan 的 HO-3 实例。上述材料可证 pan 替代事实与同帧几何，但不能区分 Safari 自动聚焦、手势 / 窗口操作及采样先后。
+   - 42cd 只有 `seq14` 为 helper + `offsetTop=90.65625`；HO-3 `seq173–186` 全为 `offsetTop=0`。它没有普通 Web input pan ↔ helper pan 对偶。
+   - 因此，**同条件、可归因的普通 Web input ↔ xterm helper 对偶帧组仍为 0**；D1 有部分实测依据，但不能据此选择正向机制。
+4. **D2–D4 的决策与实测分层**：D2 已签署，c3ee / 42cd 只上浮指定行为子项，D2 真机整行仍 INCONCLUSIVE；这是明确的结论分层，不是行为全通过。D3 / D4 按 PHASE1-CONTRACT §E 已分别签署等价性、refit 分类与最终一致口径，未实测的是实现和场景验收，不得改写成“未签署”。
+5. **设计与 CDP 现状**：`ef5037b` 的 v4 设计源与 PNG 已交付，但 EXPORT-MANIFEST 的评审签字仍空白，也没有与最新验收矩阵的一致签署记录。实时 Chrome/CDP 仍只有本节上文“页面启动 / CDP 无响应”的独立工具 / 环境问题记录，没有新 verdict 或具体根因。
+
+### 逐门禁正式判定
+
+| 门禁 | verdict | 证据理由与后续边界 |
+| --- | --- | --- |
+| ① Capture 真机可达 | **部分达成＋登记** | 四角 / free 有实际 Capture、主体 supported 证据充分；完整组合未覆盖，`seq253` 同形态复采未做。对应 PLAN G01 |
+| ② D1 有实测依据 | **明判：有部分实测依据，但不足以决定 D1；部分达成＋登记** | 身份 / rect / pan 替代事实成立，合格对偶与 Safari 归因仍缺；D1 正向机制不签署，Phase 4 对应实现继续阻断。对应 G02 |
+| ③ D2–D4 有明确结论 | **closed（决策结论域）** | D2 的签署 + 子项 PASS + 整行 INCONCLUSIVE 是明确结论；D3/D4 已签署。G03–G07 继续承担行为实测，不被本 verdict 关闭 |
+| ④ 设计源、PNG、矩阵一致并签署 | **未达成＋显式推迟** | 设计产物存在不等于完成一致签署；推迟为 Phase 3 开工前置，补签不得抹平 INCONCLUSIVE。对应 G08 |
+| ⑤ 实时 Chrome/CDP 单独归因 | **部分达成＋低优先级登记** | 已与产品修复隔离，未捆绑、未反判产品；具体根因和 live verdict 未取得。对应 G09 |
+
+**收口结论**：Phase 2 按 owner B 标记为“收口（有显式登记缺口）”。本登记不关闭任何 INCONCLUSIVE，不把子项 PASS 上浮为整行 PASS，不把 D3/D4 签署当成真机验收，也不表示 #116 完成。

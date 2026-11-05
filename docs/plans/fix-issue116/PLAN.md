@@ -1,7 +1,7 @@
 # Issue #116 v2.0：输入所有权驱动的 iPadOS 视口适配计划
 
 **日期**：2026-11-04
-**状态**：规划基线。按阶段签署，未签署的实现任务不得提前开工。
+**状态**：Phase 2 已于 2026-11-05 按 owner B 方案**收口（有显式登记缺口）**；这不等于各门禁全通过或 #116 完成。Phase 3 及以后仍须独立授权与门禁，未签署的实现任务不得提前开工。
 **核心原则**：[iPadOS 输入与视口设计指导思想](../../IPADOS-INPUT-OWNERSHIP-DESIGN.md)（`47c5c3e`）。
 
 > **终端输入归应用，Web 输入归 Safari；归属由当前焦点决定，切换时明确交接，不做全局 pan 锁死。**
@@ -193,6 +193,8 @@ opencode、reasonix、dsh 等 iframe 内输入由 iframe / Safari 处理。父�
 
 ### Phase 2：测量、诊断与设计稿门禁
 
+**阶段状态：收口（有显式登记缺口，2026-11-05，owner B）。** 本 LLM 周期不再发起真机补采；已提交的诊断、设计与判据产物按实际范围验收，未闭环项不按完成计算，统一见 §11 的逐门禁裁决与承接清单。
+
 **任务**
 
 1. 在不采集正文、token、worktree 名称/路径的前提下，补足：输入归属类别、活动输入宿主类型及可见 rect（或明确的不可得标记）、`vv.height/offsetTop/scale`、诊断面板自身 rect/corner。
@@ -324,3 +326,54 @@ iPhone Safari 按旧 PLAN 至少补一轮；不同 iPadOS 版本和 Chrome(iOS) 
 | AUTH-20261105-DIAG-ZOOM-LABEL | **本轮不改、不派编码**；保留 zoomed-session-exempt 的旧基线标签含义，D2 继续以 reported + computed bottom 为准并记录矛盾 | 若未来确需先读 mirror 再定 derivedState，须另案授权、直接测试和双评审；不得夹入 settle 或面板修复 |
 | AUTH-20261105-R3-GI3-READONLY | **批准仅诊断只读增补、待独立派单**；真机探针补前台 PTY 的 xtermRows client rect、rows/cols 与 applied/lastSent/pending 尺寸（不可得须显式标记），不采 instance id / 正文；沿用 pty-refit-check 的字段口径但不改其 judge、不新增 zoom 判据 | 与 settle 分包；探针 / 服务端 schema 及直接测试经双评审后执行 r3-D1-GI3。Headless pty-refit PASS 只证 GI-7 工具链，不关闭真机 GI-3 |
 | 2026-11-05 42cd 混采单会话仲裁 | [42cd raw](evidence/raw/42cd679ea2cfdc147d6dc8b4ebdad910.jsonl) 连续 207 帧、唯一 init。**D-C settle 真机子项 PASS**：0.85 / 0.75 普通链均有 journal 1→2，回程链有 concrete→0 / ticked 1→0 / pending 与 returnPending 同帧解除；**D-B 纯变档可观察行为 PASS**：seq 49→50→53 与 53→54→57 覆盖活动中变档付 0、重建候选、settle 后重入。owner 截图目测符合预期仅作口头级旁证 | **D2 真机整行、F18、25% / 50%、D1、GI-3 均维持 INCONCLUSIVE**。menu/cmd 的 zoomSource 不可分，B / C 仅作形态记录；深键盘同越两线，重入不能证明“不新置锁”或门线选择；F18 候选链存在中间终端点击；GI-3 新增 seq 29–54 helper rect 958/975 停滞观察。完整 seq / journal 证据见 VALIDATION 42cd 专节；本行不升格单源 Z 验收、不关闭 R2 / Phase 3 |
+
+## 11. Phase 2 正式收口仲裁（2026-11-05，owner B）
+
+### 11.1 收口原则与逐门禁裁决
+
+owner 选择 B：**就此打住，未闭环项按已登记状态如实收束，Phase 2 结束。** 本仲裁据此结束的是 Phase 2 的持续推进，不是把缺口改判为 PASS，也不是豁免后续阶段的实现、签署或验收义务。本 LLM 周期不再运行真机补采 / 补验；后续只有在对应阶段重新派单时才激活。
+
+| 门禁 | 正式裁决 | 判据与保留项 |
+| --- | --- | --- |
+| ① 诊断 Capture 在要求的真机场景中可达 | **部分达成＋登记，不判无例外 closed** | 三份新 schema 会话共 810 帧，面板自报 `supported` 809 帧；c3ee 四角与 free 有 32 次手动 Capture，42cd 另有 8 次，均自报 supported 且在可视区。唯一 `unsupported` 是 c3ee `seq253` 的已确认工具误判，已由 `938fcd2` 修复；但完整键盘 × pan × 居位组合未全部真机执行，且 `seq253` 同形态 free 复采未做，故保留 G01。详见 VALIDATION 收口复核节 |
+| ② D1 有实测依据 | **明判：有部分实测依据，但不足以决定 D1；部分达成＋登记** | 聚焦目标身份、归属与同帧 rect 已实测成立；raw 也存在非零 `offsetTop` 的 focus 帧，不能写成“完全没有 pan 样本”。但同条件普通 Web input ↔ xterm helper 对偶链为 0，Safari 内部 pan 归因及同帧子帧时序仍 INCONCLUSIVE。D1 维持“仅禁止手段部分签署”，正向机制未选、未验证，Phase 4 对应实现不得开工；保留 G02 |
+| ③ D2–D4 有明确结论 | **closed（仅决策结论域）** | D2 已签署，且有指定行为子项 PASS 与真机整行 INCONCLUSIVE 的明确分层；“整行 INCONCLUSIVE”是明确证据结论，不是无结论，也不是行为 PASS。D3 已签署等价性口径，D4 已签署 refit 分类与最终一致口径，二者缺的是 Phase 4 实现和 Phase 4/5 实测，不是设计结论。实测缺口分别保留 G03–G07 |
+| ④ 设计源、PNG 和验收矩阵一致并签署 | **未达成＋显式推迟** | `ef5037b` 已交付 v4 设计源与 6 张 PNG，但 EXPORT-MANIFEST 仍明确“设计评审与 Phase 2 门禁待签”；v4 又形成于 D2 签署及 c3ee / 42cd 子项判读之前，当前没有设计源 / PNG / 最新验收矩阵的一致签署记录。不得追认 all-closed；设计签署推迟为 **Phase 3 开工前置**，保留 G08。补签可如实签署含 INCONCLUSIVE 的矩阵，不要求把未验项伪造成 PASS |
+| ⑤ 实时 Chrome/CDP 问题单独归因，不与产品修复捆绑 | **部分达成＋低优先级登记** | 既有记录已把页面启动 / CDP 无响应隔离为独立验证环境或工具问题，未与产品修复捆绑，也未据此判产品 FAIL；但具体根因与实时 verdict 均未取得，本仲裁未重启 Chrome / CDP。隔离义务已执行，归因与 live 检查未闭环，保留 G09 |
+
+**总判定：Phase 2 为“收口（有显式登记缺口）”，不是“门禁全部通过”。** 其中门禁③的 closed 只覆盖 D2–D4 的决策明确性，不上浮任何真机整行 verdict。
+
+### 11.2 VA-IDAP 主简报底稿：已提交产物汇总
+
+| Phase 2 任务 / 关联线 | 已提交层级 | 收口状态（供最终简报引用） |
+| --- | --- | --- |
+| 任务 1：诊断字段与归属 / 宿主 rect 能力 | **`937d91f`**（任务描述中的 `937d914` 为不存在编号） | 诊断 schema、归属类别、活动输入宿主及同帧 rect、面板自省已交付；测试与双评审完成。工具能力不等于所有真机命题已验 |
+| 任务 2：Capture / 面板可达性 | `937d91f`＋**`938fcd2`** client 坐标修复 | 已提交并有真机主体证据；四角与 free 有实际手动 Capture。完整组合及 `seq253` 同形态复采按 G01 登记，不写全矩阵 PASS |
+| 任务 3：D1 对比测量 | `d42b62e`（c3ee raw）、`f394d48`（b746 raw）、`14c2b90`（42cd raw）；`1488ead`、`9df1914` 判读 | **部分达成＋G02 显式推迟**：身份 / rect 与若干 pan 替代事实存在；对偶归因不足，D1 正向机制仍未签署 |
+| 任务 4：v4 设计源与 PNG | **`ef5037b`** | 设计产物已提交；与最新矩阵的一致签署未完成，按 G08 推迟至 Phase 3 开工前 |
+| 任务 5：PTY refit / sidebar 工具判据 | **`4a17f9c`**；`14c2b90` 仅为 42cd raw 归档，不是工具判据提交 | 判据窄口径 closed：PTY = 冻结 §7 / GI-7 重述，sidebar = 工具本地规则＋shipped CSS；判据类双评审 APPROVE。实时 Chrome/CDP verdict 未取得，按 G09 独立登记 |
+| 关联 D2 实证（不另立 Phase 2 任务） | `a260763` 实现；`4383788` settle 只读诊断；上述 raw / 判读提交 | 已签署＋指定子项级 PASS；D2 真机整行、25% / 50%、D-B 锁判别、F18 等仍 INCONCLUSIVE，按 G03–G05 由 Phase 5 承接 |
+
+### 11.3 Phase 2 收口时显式登记的已知缺口
+
+下表是本周期停止补采 / 补验时的**未闭环清单**，不是关闭清单。各项保留原有 PASS / FAIL / INCONCLUSIVE 状态；后续承接不表示已获实现或采证授权。
+
+| 编号 | 已知缺口与当前状态 | 后续承接 |
+| --- | --- | --- |
+| **G01** | 面板完整真机组合未覆盖；`938fcd2` 的 c3ee `seq253` 同形态 free 复采未做。其余已观测帧不上浮为完整矩阵 PASS | **Phase 3 真机验收的诊断前置**；Phase 5 全表面回归复核 |
+| **G02** | D1 缺同条件 Web ↔ helper 对偶 pan 时序 / 归因；正向机制未签署，现状身份 / rect 与 pan 替代事实不足以选型 | **Phase 4 的 D1 机制实现前置阻断项**；未补签前不得开工 |
+| **G03** | D2 的 Z-PINCH / Z-MENU / Z-MAGIC 三条独立单源会话、完整截图 ↔ seq 链与整行形式要件未满足；整行 **INCONCLUSIVE** | **Phase 5** D2 真机矩阵与 A0 0.75 锚点验收 |
+| **G04** | 本机 25% / 50% 中间判别带不可达；深键盘重入不能证明门线选择、D-B 不新置锁或 D-D latch 语义，相关真机子项 **INCONCLUSIVE** | **Phase 5**；仅在未来设备 / 形态自然产生可判别几何时补采，不强行造数，Node 逻辑回归继续独立承担实现覆盖 |
+| **G05** | F18 虽有连续持焦与开→关→重开几何链，但重入前存在中间终端 click；干净段 **INCONCLUSIVE** | **Phase 5** 键盘生命周期回归 |
+| **G06** | D3 已签署但隐藏 / 非活动宿主的实现形态与切回旧实例真机等价性未验证 | **Phase 4** 实现选择；**Phase 5** 实例切换 / 隐藏宿主实测 |
+| **G07** | D4 已签署但 refit 时序实现与最终一致性未实测；GI-3 helper rect 停滞及 rows/cols / ack 真机链 **INCONCLUSIVE** | **Phase 4** refit / ack 实现与定向验证；**Phase 5** 生命周期回归 |
+| **G08** | v4 设计源 / PNG 与最新验收矩阵的一致签署未完成 | **Phase 3 开工前置补签**；必要时先同步设计源与 PNG，不在本次收口擅自改设计产物 |
+| **G09** | 实时页面启动 / CDP 无响应的具体根因和 live verdict 未取得；不是产品 PASS，也未证明产品 FAIL（低优先级独立工具链项） | **Phase 5** 浏览器全表面回归前排期；需要最终实时证据时最迟并入 **Phase 6** |
+| **G10** | D-A 过渡期普通 Web input 触发终端避让的 **R2 已知偏离**仍存在；c3ee A3 与 42cd HO-3 是现场实例，不是 D2 PTY 证明 | **Phase 3** 输入所有权拆分与 Web 原生交接门禁 |
+
+### 11.4 诚实收束声明
+
+- owner B 的含义是**本周期不再采真机、不再为 Phase 2 缺口追加工具或测试轮次**，不是这些缺口以后永久免验。
+- 所有 INCONCLUSIVE 项继续原样保留；本登记只改变 Phase 2 的推进状态，**不改变任何行为 verdict**。
+- D2 子项 PASS 不覆盖整行；D3/D4 设计签署不覆盖实现与真机；D1 有部分实测依据不等于正向机制已签署。
+- Phase 2 收口不自动放行 Phase 3/4/5，不关闭 R1–R6，不表示 #116 已完成；各后续阶段仍按本计划独立派单、验证和回退。
