@@ -223,16 +223,25 @@ const liveDocument = {
   body: rootBox,
   scrollingElement: rootBox,
   createElement: (tagName) => ({ tagName: String(tagName).toUpperCase(), dataset: {}, style: {} }),
-  // The focus half of the v3.2 session gate. The terminal's editable helper is a
-  // TEXTAREA (xterm's input helper), so keyboard frames legitimately carry it;
-  // setFocus below swaps it for BODY / contenteditable to drive the edge cases.
-  activeElement: { tagName: "TEXTAREA", isContentEditable: false },
+  // A1 fixture sync (AUTH-20261105-P3-OWNERSHIP-A1): the session gate's focus half
+  // is a FOREGROUND-HOST editable from Phase 3 on. hosts[0] is the SHOWN
+  // foreground host (kinds/pty.js shows exactly one host; every other stays
+  // display:none and has no eligibility), and the default TEXTAREA — xterm's
+  // input helper — hangs INSIDE it via the parentElement chain, so keyboard
+  // frames legitimately carry a host-internal editable. setFocus below swaps it
+  // for BODY (bare: no host chain, no eligibility) / a host-internal
+  // contenteditable to drive the edge cases.
+  activeElement: { tagName: "TEXTAREA", isContentEditable: false, parentElement: hosts[0] },
   getElementById: (id) => (id === "app" ? app
     : id === "terminal-container" ? container
       : id === "terminal-controls" ? controls
         : id === "status-bar" ? statusBar
           : null),
 };
+hosts[0].style.display = "block"; // A1: hosts[0] = the SHOWN foreground host
+// The DOM appendChild semantic the shipped container carries: a host's parent IS
+// the container (MINOR-1 names the container's DIRECT stamped child as the host).
+hosts[0].parentElement = container;
 const setFocus = (el) => { liveDocument.activeElement = el; };
 const liveWindow = {
   visualViewport: vv,
@@ -404,28 +413,31 @@ assert.equal(controlsBottom(), "448px", "…and the column lifts again after the
 assert.equal(statusBarBottom(), "428px", "…and so does the strip");
 console.log("✓ the 0.75 → 1 return paid 0 through the first tick; the second tick settled scale 1 and re-armed the session judgment");
 
-// FOCUS edges, on the live bytes: the session is LIVE at 274 (raw 428, TEXTAREA
-// helper focused). A NON-editable focus (BODY) must END it — hosts restore flush
-// even with the same covering geometry — and a contenteditable focus (the gate the
-// product reads `isContentEditable` for) must open a session at the same raw. The
-// soft keyboard here is whatever iOS shows; the session follows the FOCUS, which is
-// why the probe reports activeElementTag and this stub can swap it.
-sessionFrame(274, 428, "TEXTAREA focus keeps the session live");
+// FOCUS edges, on the live bytes (Phase 3 caliber, A1 fixture sync): the session
+// is LIVE at 274 (raw 428, the TEXTAREA helper INSIDE the SHOWN foreground host).
+// A NON-editable focus (BODY — bare, no host chain) must END it: hosts restore
+// flush even with the same covering geometry. A contenteditable INSIDE that host
+// (the isContentEditable branch of the gate, covered as a host-internal editable —
+// not a claim about helper identity, and no eligibility outside the host) must open
+// a session at the same raw. The soft keyboard here is whatever iOS shows; the
+// session follows the FOCUS and its host, which is why the probe reports
+// activeElementTag and this stub can swap it.
+sessionFrame(274, 428, "host-TEXTAREA focus keeps the session live");
 vv.height = 555; // same-geometry decrease is already recovery
 avoid();
 assert.deepEqual(bottoms(), ["0px", "0px"], "recovery exits at 555 instead of holding 147px");
-setFocus({ tagName: "BODY", isContentEditable: false });
+setFocus({ tagName: "BODY", isContentEditable: false }); // bare: no host chain
 avoid();
 assert.deepEqual(bottoms(), ["0px", "0px"], "non-editable focus ENDS the session: hosts flush at the same raw 147");
 assert.equal(controlsBottom(), "20px", "…and the column drops back to its authored 20px");
 vv.height = 274; // the keyboard is gone with the focus; even a tall raw stays 0
 avoid();
 assert.deepEqual(bottoms(), ["0px", "0px"], "even raw 428 pays NOTHING without editable focus");
-setFocus({ tagName: "DIV", isContentEditable: true });
+setFocus({ tagName: "DIV", isContentEditable: true, parentElement: hosts[0] }); // INSIDE the shown host
 avoid();
-assert.deepEqual(bottoms(), ["428px", "428px"], "contenteditable focus ENTERS at raw 428 — the isContentEditable half of the gate");
-setFocus({ tagName: "TEXTAREA", isContentEditable: false });
-console.log("✓ focus edges executed: BODY ended the session (raw 428 paid nothing), contenteditable re-entered it");
+assert.deepEqual(bottoms(), ["428px", "428px"], "contenteditable INSIDE the foreground host ENTERS at raw 428 — the isContentEditable half of the gate");
+setFocus({ tagName: "TEXTAREA", isContentEditable: false, parentElement: hosts[0] }); // the helper back inside the host
+console.log("✓ focus edges executed: BODY ended the session (raw 428 paid nothing), a host-internal contenteditable re-entered it");
 
 // A host born under a covered bottom must not wait for the next event: the
 // shipped createTerminalHost runs the same call.

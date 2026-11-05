@@ -46,7 +46,9 @@
 //     PTY host's OWN `bottom`, inside #terminal-container (`position:absolute;
 //     inset:0` in both host factories). At scale = 1, with editable focus
 //     (TEXTAREA / INPUT / contenteditable, stubbed as document.activeElement)
-//     and raw = max(0, clientHeight − vv.height):
+//     that also sits INSIDE the SHOWN foreground host — Phase 3 ownership,
+//     AUTH-20261105-P3-OWNERSHIP: a bare editable outside the host is HO-3
+//     Web input and owes nothing — and raw = max(0, clientHeight − vv.height):
 //       ENTER at raw >= clientHeight * 0.50 (274 → raw 428 pays 428px, host
 //       bottom 254); HOLD at raw every pass while the session lives (340 /
 //       206.1 / 147 retract frames of ONE keyboard move exactly that far, no
@@ -330,8 +332,11 @@ function makeTerminalContainer({ top = 0, bottom = HOST_BOTTOM, width = 1194 } =
     appendChild(node) {
       // A node created through document.createElement arrives bare; promote it
       // exactly the way the shipped factory's host behaves once it is in the
-      // container, so the applier can see and lift it.
+      // container, so the applier can see and lift it. The parentElement stamp
+      // mirrors the DOM appendChild semantic itself: a host's parent IS the
+      // container — Phase 3's judgment names the container's DIRECT child.
       if (!node.getBoundingClientRect) promoteHost(node, container);
+      node.parentElement = container;
       container.hosts.push(node);
       return node;
     },
@@ -368,11 +373,21 @@ function makeDocument(app, root, container, overlays = {}) {
     body: root.box,
     scrollingElement: root.box,
     hidden: false,
-    // v3.2 focus half of the session gate. Mutable: a case sets this to
-    // { tagName: "BODY" } to end the session, or to a contenteditable stub to
-    // open one — the applier reads exactly this field. Default is the xterm
-    // helper TEXTAREA, so the keyboard cases below really do hold a session.
-    activeElement: { tagName: "TEXTAREA" },
+    // v3.2 focus half of the session gate, Phase 3 caliber (AUTH-20261105-P3-OWNERSHIP):
+    // eligibility belongs to an editable INSIDE the SHOWN foreground host, judged
+    // from THIS pass's chain. Mutable: a case sets this to { tagName: "BODY" } to
+    // end the session, or to a bare Web stub (no host chain — HO-3, no eligibility)
+    // to prove the refusal, or to { tagName: ..., parentElement: <shown host> } to
+    // open one — the applier reads exactly this field and walks its parentElement.
+    // The default getter hands back the host kinds/pty.js shows (`display: block`
+    // on exactly one host) so the focused helper always lives inside the foreground
+    // box, and an instance switch moves it — no asserted value below changes.
+    get activeElement() {
+      if (this._activeElement !== undefined) return this._activeElement;
+      const shown = container.hosts.find((h) => h.style.display !== "none") ?? null;
+      return { tagName: "TEXTAREA", parentElement: shown };
+    },
+    set activeElement(el) { this._activeElement = el; },
     // Bare on purpose: createTerminalHost stamps dataset / cssText itself, and
     // the container promotes the node when it is appended, so the factory path
     // and the pre-built hosts in the harness go through the same code.
@@ -538,6 +553,11 @@ function viewportHarness({
   const container = makeTerminalContainer({ top: 0, bottom: layoutHeight - SAFE_BOTTOM });
   const app = makeAppElement(layoutHeight, appAttempts);
   for (const id of hosts) container.addHost(id);
+  // Phase 3 caliber (AUTH-20261105-P3-OWNERSHIP): hosts[0] is the SHOWN
+  // foreground host — kinds/pty.js shows exactly one host and hides every other,
+  // so the focused xterm helper hangs inside THIS box (the document stub's
+  // activeElement walks to it). Hidden hosts stay display:none: no eligibility.
+  if (container.hosts.length) container.hosts[0].style.display = "block";
   // #workspace is NOT stubbed as a writable box — it stays a NUMBER, the floor
   // the two overlay children resolve against (bottom = layoutHeight − safe area,
   // the same 682 the hosts bottom out at). A stub could be written by a
@@ -833,10 +853,14 @@ test("v3.2(d): a NEW explicit keyboard after shallow overlay states starts a new
   assert.equal(h.statusBarBottom(), "428px");
 });
 
-test("v3.2(e): focus leaving the editable ends the session; INPUT and contenteditable can start one", () => {
+test("v3.2(e): focus leaving the editable ends the session; INPUT / contenteditable INSIDE the shown host can start one", () => {
   // The keyboard is a focus fact: BODY focus (or any non-editable focus) closes
   // the session even while vv.height is still short, and an editable regains it
-  // only across the entry line.
+  // only across the entry line. Phase 3 caliber (AUTH-20261105-P3-OWNERSHIP):
+  // the INPUT / contenteditable branches still enter — when the focused editable
+  // sits INSIDE the SHOWN foreground host (the walk ends at the stamped host and
+  // admits it while displayed); the bare outside-host spelling of the same tags
+  // is HO-3 / HO-1 and owes nothing — see the P3 handoff cases below.
   const h = viewportHarness({ hosts: ["a"] });
   h.api.initVisualViewportHandling();
   h.openKeyboard(274);
@@ -854,19 +878,20 @@ test("v3.2(e): focus leaving the editable ends the session; INPUT and contentedi
   h.openKeyboard(555);
   assert.deepEqual(h.bottoms(), ["0px"], "BODY focus + 147 short: overlap, no lift");
 
-  // INPUT re-enters across the entry line.
-  h.document.activeElement = { tagName: "INPUT" };
+  // INPUT re-enters across the entry line — INSIDE the shown foreground host.
+  h.document.activeElement = { tagName: "INPUT", parentElement: h.container.host("a") };
   h.openKeyboard(274);
-  assert.equal(h.api.isAvoidanceActive(), true, "INPUT focus + raw 428 enters");
+  assert.equal(h.api.isAvoidanceActive(), true, "host-internal INPUT focus + raw 428 enters");
   assert.deepEqual(h.bottoms(), ["428px"]);
 
-  // contenteditable counts too.
+  // contenteditable counts too — same host-internal caliber (A1: the branch,
+  // not a new helper identity).
   h.document.activeElement = { tagName: "BODY" };
   h.applyFocusEdge();
   assert.deepEqual(h.bottoms(), ["0px"], "focus out closes again");
-  h.document.activeElement = { tagName: "DIV", isContentEditable: true };
+  h.document.activeElement = { tagName: "DIV", isContentEditable: true, parentElement: h.container.host("a") };
   h.openKeyboard(274);
-  assert.equal(h.api.isAvoidanceActive(), true, "contenteditable focus + raw 428 enters");
+  assert.equal(h.api.isAvoidanceActive(), true, "host-internal contenteditable focus + raw 428 enters");
   assert.deepEqual(h.bottoms(), ["428px"]);
 
   // focusout is a registered lifecycle edge — the same judgment, no extra plumbing.
@@ -874,6 +899,161 @@ test("v3.2(e): focus leaving the editable ends the session; INPUT and contentedi
   h.document.dispatch("focusout");
   assert.equal(h.api.isAvoidanceActive(), false, "the focusout edge runs the judgment too");
   assert.deepEqual(h.bottoms(), ["0px"]);
+});
+
+// --- Phase 3 (§5 Phase 3, AUTH-20261105-P3-OWNERSHIP): input ownership handoff --
+// The same frozen machine, one predicate: an editable earns the PTY avoidance ONLY
+// inside the SHOWN foreground host (contract B HO-1..HO-4). Every handoff below is
+// a focusin / focusout sequence run through the EXISTING edges — no new path.
+// C-table coverage: P3(a)=F1/F2/F10, P3(b)=F4/F5, P3(c)=F8/F11 + HO-1 hidden
+// host, P3(d)=rapid consecutive switches (last landing wins), P3(e)=handoff with
+// the keyboard already open + iframe boundary + no stale-decision residue,
+// P3(f)=focusout / focusin interleaved order (F9's focusout edge rides here;
+// F9's BODY form is covered by the existing v3.2(e)).
+
+test("P3(a) F1/F2/F10: the rename / settings INPUT is HO-3 — bare outside the host it never owns the keyboard, back inside the host re-judges", () => {
+  const h = viewportHarness({ hosts: ["a"] });
+  h.api.initVisualViewportHandling();
+  h.openKeyboard(274); // fixture default: the host helper inside the SHOWN host — HO-2 lives
+  assert.equal(h.api.isAvoidanceActive(), true, "foreground-host focus + raw 428 lives");
+  assert.deepEqual(h.bottoms(), ["428px"]);
+  // F1 (and F3's settings form is the same HO-3 branch): focus the rename INPUT.
+  // A bare Web input — no host chain — exits through the existing `!focusEditable`
+  // edge, recovery latch included; Safari owns the input's visibility from here.
+  h.document.activeElement = { tagName: "INPUT" }; // the rename dialog, Web layer
+  h.applyFocusEdge();
+  assert.equal(h.api.isAvoidanceActive(), false, "F1: a bare HO-3 INPUT has no PTY eligibility");
+  assert.deepEqual(h.bottoms(), ["0px"], "no old terminal avoidance survives the handoff");
+  h.openKeyboard(274);
+  assert.deepEqual(h.bottoms(), ["0px"], "even a deep keyboard pays NOTHING to a HO-3 input");
+  // F2 / F10: back to the terminal — focus lands inside the SHOWN host and the
+  // frame re-judges through the untouched §5 entry (focusin unlocked, raw 428
+  // clears the 25% line); no Safari-era residue is carried over.
+  h.document.activeElement = { tagName: "TEXTAREA", parentElement: h.container.host("a") };
+  h.applyFocusEdge();
+  assert.equal(h.api.isAvoidanceActive(), true, "F2/F10: host-helper focus re-enters on the frozen entry line");
+  assert.deepEqual(h.bottoms(), ["428px"]);
+});
+
+test("P3(b) F4/F5: the quick-keys paste textarea is HO-3 — the panel stays reachable, the host re-entry judges the CURRENT raw", () => {
+  const h = viewportHarness({ hosts: ["a"] });
+  h.api.initVisualViewportHandling();
+  h.openKeyboard(274);
+  assert.deepEqual(h.bottoms(), ["428px"]);
+  // F4: focus into the paste textarea — Web-layer, OUTSIDE the host: the session
+  // leaves through the existing focus edge (this closes the D-A plan B R2 leak).
+  h.document.activeElement = { tagName: "TEXTAREA", id: "quick-keys-paste-textarea" };
+  h.applyFocusEdge();
+  assert.equal(h.api.isAvoidanceActive(), false, "F4: the paste TEXTAREA has no PTY eligibility (HO-3)");
+  assert.deepEqual(h.bottoms(), ["0px"]);
+  // The panel's reachability is the INDEPENDENT proposition (contract HO-3 note):
+  // the column owns its authored anchor, unchanged by the ownership split.
+  assert.equal(h.controlsBottom(), "20px", "the quick-keys column stays authored-reachable while HO-3 owns focus");
+  // F5: back to the terminal helper — the CURRENT session state and keyboard edge
+  // decide, not the paste-time history: shallow raw 147 stays under the line.
+  h.openKeyboard(555);
+  h.document.activeElement = { tagName: "TEXTAREA", parentElement: h.container.host("a") };
+  h.applyFocusEdge();
+  assert.deepEqual(h.bottoms(), ["0px"], "F5: raw 147 < 175.5 refuses on the CURRENT facts — no paste-era value rides");
+  h.openKeyboard(274);
+  assert.equal(h.api.isAvoidanceActive(), true, "F5: a full keyboard crosses the line and re-enters");
+  assert.deepEqual(h.bottoms(), ["428px"]);
+});
+
+test("P3(c) F8/F11: a hidden host's focus never earns eligibility; the instance switch moves it to the SHOWN host's helper", () => {
+  const h = viewportHarness({ hosts: ["a", "b"] });
+  h.api.initVisualViewportHandling();
+  h.openKeyboard(274); // focus follows the shown host "a" — HO-2
+  assert.deepEqual(h.bottoms(), ["428px", "428px"], "both hosts pay the shared CURRENT value");
+  // HO-1 / F11: focus lands inside host "b" while b is STILL display:none —
+  // a hidden host has no eligibility (contract HO-1 / B.5), the session leaves.
+  h.document.activeElement = { tagName: "TEXTAREA", parentElement: h.container.host("b") };
+  h.applyFocusEdge();
+  assert.equal(h.api.isAvoidanceActive(), false, "hidden-host focus: no eligibility, HO-1");
+  assert.deepEqual(h.bottoms(), ["0px", "0px"]);
+  // F8: PTY A → B — b is shown, its helper holds focus: B is the new foreground,
+  // judged fresh this frame; no per-instance persisted avoidance, no restored
+  // history (GI-8): the lift equals THIS frame's raw on every host.
+  h.container.host("b").style.display = "block";
+  h.container.host("a").style.display = "none";
+  h.applyFocusEdge();
+  assert.equal(h.api.isAvoidanceActive(), true, "F8: B shown + focus inside it — B is the new foreground");
+  assert.deepEqual(h.bottoms(), ["428px", "428px"], "the shared current value, never a per-instance remembered lift");
+});
+
+test("P3(d): rapid consecutive handoffs — every judgment reads THIS pass's focus, the LAST landing wins", () => {
+  const h = viewportHarness({ hosts: ["a"] });
+  h.api.initVisualViewportHandling();
+  h.openKeyboard(274);
+  assert.equal(h.api.isAvoidanceActive(), true);
+  // One focusin storm, three landings; each pass judges exactly its own frame:
+  h.document.activeElement = { tagName: "INPUT" }; // HO-3
+  h.applyFocusEdge();
+  assert.equal(h.api.isAvoidanceActive(), false, "Web INPUT pass: refused");
+  h.document.activeElement = { tagName: "TEXTAREA", parentElement: h.container.host("a") }; // HO-2
+  h.applyFocusEdge();
+  assert.equal(h.api.isAvoidanceActive(), true, "host pass: admitted again on the frozen lines");
+  assert.deepEqual(h.bottoms(), ["428px"]);
+  h.document.activeElement = { tagName: "TEXTAREA", id: "quick-keys-paste-textarea" }; // HO-3
+  h.applyFocusEdge();
+  assert.equal(h.api.isAvoidanceActive(), false, "paste textarea pass: refused again");
+  assert.deepEqual(h.bottoms(), ["0px"]);
+  // Final landing inside the SHOWN host — no earlier Web-frame verdict survives.
+  h.document.activeElement = { tagName: "TEXTAREA", parentElement: h.container.host("a") };
+  h.applyFocusEdge();
+  assert.equal(h.api.isAvoidanceActive(), true, "the LAST landing decides — no stale verdict");
+  assert.deepEqual(h.bottoms(), ["428px"]);
+});
+
+test("P3(e): handoff with the keyboard already open re-judges per frame; an IFRAME box is non-editable; no stale avoidance residue", () => {
+  const h = viewportHarness({ hosts: ["a"] });
+  h.api.initVisualViewportHandling();
+  h.openKeyboard(274); // keyboard opens while the host helper holds focus → §5 entry
+  assert.deepEqual(h.bottoms(), ["428px"]);
+  // Keyboard STILL open, terminal → Web: exit at the same frame, latch included.
+  h.document.activeElement = { tagName: "INPUT" }; // a settings form (F3 branch)
+  h.applyFocusEdge();
+  assert.deepEqual(h.bottoms(), ["0px"], "the avoidance returns the SAME frame — no held old decision");
+  // Nothing residue-checks: repeated passes at the same raw with the ineligible
+  // focus stay silent flush (write-only-on-change, no phantom re-lift).
+  const writes = h.stats.hostWrites();
+  h.tick();
+  h.tick();
+  assert.equal(h.stats.hostWrites(), writes, "an ineligible focus owes zero rewrite across ticks");
+  assert.equal(h.effectiveOcclusion(), 0, "the mirror reports 0 for HO-3 focus, keyboard or not");
+  // The iframe boundary (F6/F7 shape inside the parent doc): the parent sees the
+  // non-editable IFRAME box — HO-1 / HO-4: never a PTY eligibility.
+  h.document.activeElement = { tagName: "IFRAME" };
+  h.applyFocusEdge();
+  assert.deepEqual(h.bottoms(), ["0px"], "iframe focus never owns the PTY keyboard");
+  // Web → terminal with the keyboard still open: re-entry through §5 only.
+  h.document.activeElement = { tagName: "TEXTAREA", parentElement: h.container.host("a") };
+  h.applyFocusEdge();
+  assert.equal(h.api.isAvoidanceActive(), true, "Web→PTY with the keyboard open re-enters on §5");
+  assert.deepEqual(h.bottoms(), ["428px"]);
+});
+
+test("P3(f): interleaved focusin / focusout order — every edge re-judges THIS pass, the LAST landing owns, no stale avoidance", () => {
+  const h = viewportHarness({ hosts: ["a"] });
+  h.api.initVisualViewportHandling();
+  h.openKeyboard(274); // focusin into the host (fixture default) → session lives
+  assert.deepEqual(h.bottoms(), ["428px"], "focusin inside the host owns the frame");
+  // A bare focusout while the focus fact is STILL host-internal ends nothing:
+  // the edge runs the judgment, it does not hardwire an exit (iOS closes the
+  // keyboard without blur — the same fact shape).
+  h.document.dispatch("focusout");
+  assert.deepEqual(h.bottoms(), ["428px"], "focusout while focus reads host-internal: no phantom exit");
+  // Now the focus fact lands Web-layer and the focusout edge runs — it exits
+  // on the CURRENT fact, flush the same frame.
+  h.document.activeElement = { tagName: "INPUT" };
+  h.document.dispatch("focusout");
+  assert.deepEqual(h.bottoms(), ["0px"], "focusout over a bare HO-3 INPUT: flush, no old decision held");
+  // Interleaved back: focusin inside the shown host — the LAST landing owns,
+  // re-entering through the untouched §5 line; zero residue of the outside epoch.
+  h.document.activeElement = { tagName: "TEXTAREA", parentElement: h.container.host("a") };
+  h.document.dispatch("focusin");
+  assert.equal(h.api.isAvoidanceActive(), true, "the LAST landing (host focusin) owns the frame");
+  assert.deepEqual(h.bottoms(), ["428px"]);
 });
 
 test("v3.2(f): zoom ENDS the session — the mid-session raw cannot survive a pinch", () => {

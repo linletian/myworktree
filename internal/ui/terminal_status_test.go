@@ -234,9 +234,11 @@ func TestViewportHeightHandling(t *testing.T) {
 // paying 0 and book NO new recovery latch (D-B / D-D scaleStepNoLatchExit),
 // so post-settle re-entry rides the unlocked 25% line identically for
 // single- and multi-step arrivals; the raw > 1 entry floor, the same-geometry
-// decrease exit and the 25% / 50% lines stay frozen; and the ownership
-// boundary is not widened (D-A plan B: the frozen generic editable predicate,
-// Web-input frames registered as R2 known deviations, not D2 admissions).
+// decrease exit and the 25% / 50% lines stay frozen; and the ownership caliber is
+// the Phase 3 foreground-host admission (AUTH-20261105-P3-OWNERSHIP: the editable
+// test PLUS the in-pass walk to the SHOWN foreground host — the former D-A plan B
+// generic predicate and its registered R2 known-deviation Web-input frames are
+// superseded, bare Web inputs no longer admit; testdata D2-7 / D2-7b).
 // Same slicing harness as TestViewportHeightHandling; skips when node is
 // absent.
 func TestZoomScaleAvoidance(t *testing.T) {

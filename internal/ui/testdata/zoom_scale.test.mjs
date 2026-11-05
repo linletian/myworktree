@@ -14,9 +14,11 @@
 //     BY THE FROZEN THRESHOLD, D-D; the fuller scale = 1 matrix lives in
 //     viewport_height.test.mjs).
 //   * scale < 1  — NO blanket opt-out. A SETTLED scale enters through the
-//     UNTOUCHED §5 gates: editable focus through the existing
-//     document.activeElement path (D-A plan B — the frozen generic predicate,
-//     no new host machine), raw = max(0, clientHeight − vv.height) > 1, the
+//     UNTOUCHED §5 gates: eligible focus through the existing
+//     document.activeElement path — as of Phase 3 (AUTH-20261105-P3-OWNERSHIP)
+//     the editable test PLUS the walk to the SHOWN foreground [data-instance-id]
+//     host (test D2-7; the former D-A plan B generic predicate is superseded),
+//     raw = max(0, clientHeight − vv.height) > 1, the
 //     25% entry / 50% re-entry lines, click / focusin / geometry-change
 //     unlocks, the same-geometry-decrease exit and its recovery latch,
 //     occlusion = raw in full.
@@ -45,12 +47,13 @@
 //     recovering line unless a click / focusin / geometry change unlocked it
 //     first (D-D / D2-6). Every other exit — scale > 1, raw <= 1, focus loss,
 //     the same-geometry decrease — keeps the frozen latch exactly as before.
-//   * ownership stays where the frozen code put it: the guard's ONLY focus
-//     input is document.activeElement + the frozen editable test (D-A plan B).
-//     This file PROVES the D2 edit owns nothing NEW (no parentElement /
-//     closest / classList / getAttribute read); under scale < 1 an ordinary
-//     Web input passing that generic predicate is the registered R2 known
-//     deviation — a Phase 3 dependency, never a D2 PTY-admission proof.
+//   * ownership (Phase 3, AUTH-20261105-P3-OWNERSHIP): the guard's ONLY focus
+//     input is document.activeElement + the frozen editable test PLUS the
+//     in-pass walk to the SHOWN foreground host (the old D-A plan B generic
+//     predicate, under which a bare Web input was the registered R2 known
+//     deviation, is now superseded): a bare INPUT / the quick-keys PASTE
+//     textarea is HO-3 and owes NOTHING, the host-internal editable keeps the
+//     untouched §5 behaviour (test D2-7, structure D2-7b).
 //
 // Device-faithful geometry (from the read-only evidence A0 0.75 segment, 153
 // frames, raw/final116-20261104-a.jsonl — referenced, never rewritten here):
@@ -191,7 +194,11 @@ function zoomHarness({
   baseLayout = L0,
   baseWidth = W0,
   baseVisible = KB_VISIBLE,
-  focus = { tagName: "TEXTAREA" }, // the xterm helper — the existing editable path
+  // Phase 3 caliber (AUTH-20261105-P3-OWNERSHIP): the default focus is the xterm
+  // helper INSIDE the SHOWN foreground host below; a caller passing its own stub
+  // (BODY, a bare Web INPUT) is exactly the HO-1 / HO-3 shape — no host chain,
+  // no PTY eligibility.
+  focus,
   hostId = "a",
 } = {}) {
   const root = { clientHeight: baseLayout };
@@ -211,6 +218,12 @@ function zoomHarness({
   };
   const containerListeners = new Map();
   const host = makeBottomBox(hostId);
+  // Phase 3 caliber: this harness's one host IS the SHOWN foreground host — it
+  // carries the stamped data-instance-id and the displayed state the new judgment
+  // walks (kinds/pty.js shows exactly one host). The default focus hangs inside it.
+  host.dataset = { instanceId: hostId };
+  host.style.display = "block";
+  if (!focus) focus = { tagName: "TEXTAREA", parentElement: host };
   Object.defineProperty(host, "getBoundingClientRect", {
     value: () => {
       const bottom = (root.clientHeight - SAFE_BOTTOM) - (parseFloat(host.style.bottom || "0") || 0);
@@ -230,6 +243,9 @@ function zoomHarness({
       return [host];
     },
   };
+  // The DOM appendChild semantic: the host's parent IS the container — Phase 3's
+  // judgment names the container's DIRECT stamped child as the foreground host.
+  host.parentElement = container;
   const controls = makeBottomBox("terminal-controls");
   const statusBar = makeBottomBox("status-bar");
   const docEvents = new Map();
@@ -618,62 +634,76 @@ test("D2-6 a settled scale=0.75 session jumps to scale>1: exits at once and latc
   assert.deepEqual(h.bottoms(), ["252px"]);
 });
 
-// --- 7. the ownership boundary does not widen -----------------------------------
+// --- 7. the ownership boundary: Phase 3 foreground-host admission ------------------
 
-test("D2-7 the frozen GENERIC editable predicate is the whole host gate at scale<1 — non-editable focus never avoids; an INPUT / the quick-keys paste TEXTAREA passing it is an HO-3 / R2 known deviation, NOT a PTY-host proof (D-A plan B)", () => {
-  // D-A (arbitration commit 6e8a006, plan B, wording corrected by the
-  // re-review / C12): until Phase 3 ships the host split, the ONLY focus input
-  // stays the frozen document.activeElement + TEXTAREA / INPUT /
-  // contenteditable predicate. No helper class, no ancestor chain, no explicit
-  // host marker — so under scale < 1 an ordinary Web INPUT, and the quick-keys
-  // PASTE textarea (#quick-keys-paste-textarea, a TEXTAREA whose focus belongs to
-  // the Web layer under HO-3), can open the terminal avoidance through that
-  // generic predicate. Every one of those hosts is the R2 KNOWN DEVIATION /
-  // Phase 3 dependency registered by the arbitration: passing the generic
-  // predicate is NOT a proof of PTY-host admission and must never be cited as
-  // one, and it does not turn HO-3 into HO-2. What this case DOES prove: the
-  // predicate still refuses non-editables, and the D2 edit gained no host
-  // eligibility of its own.
+test("D2-7 Phase 3: scale<1 admission belongs to the SHOWN foreground PTY host — non-editable focus never avoids, and a bare INPUT / the quick-keys paste TEXTAREA (HO-3) passing the OLD generic predicate no longer enters: the D-A plan B R2 leak is CLOSED (AUTH-20261105-P3-OWNERSHIP)", () => {
+  // Phase 3 replaced the plan B transitional generic predicate (the D-A verdict
+  // of 6e8a006 deferred the host split to exactly here): the editable test
+  // survives the three branches verbatim, but eligibility additionally requires
+  // THIS pass's focus to sit INSIDE the shown [data-instance-id] host. The Web
+  // inputs the plan B verdict had to register as R2 known deviations — a bare
+  // INPUT, the quick-keys PASTE textarea — now owe NOTHING at a settled scale < 1
+  // (contract HO-3 / R2), while the host-internal editable keeps the untouched
+  // §5 behaviour (TEXTAREA / INPUT / contenteditable — no helper narrowed).
   const h = zoomHarness({ focus: { tagName: "BODY" } });
   h.api.initVisualViewportHandling();
   h.zoomOutPass(0.75);
   h.keyboardTo(KB_VISIBLE / 0.75);
   h.tick();
   h.tick(); // the SCALE settles even with BODY focus — the settle machine is geometry-only…
-  assert.equal(h.active(), false, "…but a settled scale cannot substitute for the editable focus: BODY never opens the session");
+  assert.equal(h.active(), false, "…but a settled scale cannot substitute for eligible focus: BODY never opens the session");
   assert.equal(h.occlusion(), 0);
   assert.deepEqual(h.bottoms(), ["0px"]);
-  assert.equal(h.recovering(), false, "a focus-loss-shaped block at the baseline pages owes no latch either");
-  // An INPUT entering through the SAME frozen predicate opens the session on
-  // the focus frame itself — the scale is already settled, so nothing else is
-  // missing. That is the generic predicate doing exactly what the frozen code
-  // always did: an HO-3 Web host owning the keyboard geometry, i.e. the
-  // registered R2 leak. Narrowing it to the PTY host is Phase 3's job, not
-  // this guard's, and this pass is not a D2 admission proof.
+  assert.equal(h.recovering(), false, "a focus-shaped block at the baseline page owes no latch either");
+  // A bare Web INPUT — the rename / settings form of HO-3 — has NO PTY
+  // eligibility any more: passing the old generic predicate was the registered
+  // R2 leak, closed here. Same settled scale, same raw 570.6, nothing enters.
   h.document.activeElement = { tagName: "INPUT" };
   h.focusin();
-  assert.equal(h.active(), true, "the frozen editable-focus path admits ANY editable host — an INPUT is the HO-3 / R2 known deviation by design, not a PTY admission (C12)");
-  assert.deepEqual(h.bottoms(), [(936 - KB_VISIBLE / 0.75) + "px"]);
-  // The quick-keys PASTE textarea is the same story in the product's own words:
-  // it is a TEXTAREA in the Web layer, so the frozen predicate admits it too and
-  // the terminal pays for a Web input's keyboard. Registered R2 leak, HO-3
-  // ownership; never a PTY-host proof.
-  h.keyboardTo(936); // close the keyboard, then let the Web-layer host focus
+  assert.equal(h.active(), false, "HO-3: a bare INPUT outside the foreground host is refused — the plan B leak is closed, not re-litigated");
+  assert.deepEqual(h.bottoms(), ["0px"]);
+  assert.equal(h.occlusion(), 0);
+  // The quick-keys PASTE textarea is the product's own word for HO-3: a
+  // TEXTAREA in the Web layer, OUTSIDE the host — never a PTY admission, and
+  // closing/reopening the keyboard cannot change that verdict.
+  h.keyboardTo(936); // close
   h.document.activeElement = { tagName: "TEXTAREA", id: "quick-keys-paste-textarea" };
   h.focusin();
-  h.keyboardTo(KB_VISIBLE / 0.75);
-  assert.equal(h.active(), true, "the quick-keys paste TEXTAREA passes the generic predicate too — HO-3 / R2 known deviation (Phase 3 dependency), not a PTY-host proof");
+  h.keyboardTo(KB_VISIBLE / 0.75); // reopen, same settled raw 570.6
+  assert.equal(h.active(), false, "the quick-keys paste TEXTAREA is Web-layer input (HO-3): no PTY avoidance rides it");
+  assert.deepEqual(h.bottoms(), ["0px"]);
+  // And the host back — INSIDE the shown host the INPUT branch still enters
+  // (helper identity NOT narrowed): the same settled geometry that refused the
+  // Web input admits it on the focus pass itself (raw 570.6 ≥ 234 = 25%).
+  h.document.activeElement = { tagName: "INPUT", parentElement: h.host };
+  h.focusin();
+  assert.equal(h.active(), true, "an INPUT INSIDE the shown foreground host keeps the INPUT branch — HO-2 admits");
   assert.deepEqual(h.bottoms(), [(936 - KB_VISIBLE / 0.75) + "px"]);
+  // host-internal contenteditable: the isContentEditable branch, same caliber.
+  h.document.activeElement = { tagName: "DIV", isContentEditable: true, parentElement: h.host };
+  h.focusin();
+  assert.equal(h.active(), true, "contenteditable INSIDE the host keeps the isContentEditable branch — still live");
+  assert.deepEqual(h.bottoms(), [(936 - KB_VISIBLE / 0.75) + "px"]);
+  // Leaving the host again exits through the existing focus edge, latch included.
+  h.document.activeElement = { tagName: "TEXTAREA" }; // bare again: HO-3
+  h.focusin();
+  assert.equal(h.active(), false, "leaving the host mid-session exits at the same frozen edge");
+  assert.deepEqual(h.bottoms(), ["0px"]);
 });
 
-test("D2-7b structure: the guard's focus input is the frozen activeElement read — no host-ownership machine may appear (red line, D-A plan B)", () => {
+test("D2-7b structure: the guard's focus input is THIS pass's activeElement + the SHOWN foreground-host walk — fresh every pass, no cache, no marker, no second machine (Phase 3 red line, AUTH-20261105-P3-OWNERSHIP)", () => {
   const apply = stripComments(sliceBlock(inlineScript(indexSource), "function applyVisualViewportOcclusion"));
   assert.equal((apply.match(/document\.activeElement/g) || []).length, 1,
-    "the focused element stays the SINGLE focus input of the judgment — D2 added no second ownership path");
+    "the focused element stays the SINGLE focus input of the judgment — Phase 3 added no second ownership path");
   assert.match(apply, /focus\.tagName === "TEXTAREA" \|\| focus\.tagName === "INPUT" \|\| focus\.isContentEditable/,
-    "the editable test survives character for character");
-  for (const banned of [/parentElement/, /parentNode/, /\.closest\(/, /\.classList/, /getAttribute/, /className/]) {
-    assert.equal(banned.test(apply), false, `the D2 guard must not consult ${banned} — no new host-ownership machine (PLAN §4 D2 rule 2)`);
+    "the editable test survives character for character — the editable half is unchanged, no helper narrowed");
+  assert.match(apply, /focus\.parentElement/, "the eligibility walk STARTS at this pass's focused element");
+  assert.match(apply, /hostNode\.parentElement/, "it WALKS the ancestor chain every pass — a fresh read, never a cache");
+  assert.match(apply, /dataset\.instanceId/, "host identity is the EXISTING data-instance-id stamp every host factory writes — no new marker");
+  assert.match(apply, /hostNode\.parentElement === container/, "the stamped ancestor must be a DIRECT child of the bound #terminal-container — the tab template stamps the same attribute outside it");
+  assert.match(apply, /style\.display !== "none"/, "admission requires the host SHOWN — the DOM-observable foreground pty.js maintains");
+  for (const banned of [/parentNode/, /\.closest\(/, /\.classList/, /getAttribute/, /className/, /setAttribute/, /data-input-host/, /getComputedStyle/, /state\.activeInst/, /getActiveTerminalSession/, /offsetTop/]) {
+    assert.equal(banned.test(apply), false, `the Phase 3 judgment must not consult ${banned} — pure in-pass walk of activeElement + ancestors + shown host, nothing else (PLAN §5 Phase 3 实现形态边界)`);
   }
 });
 
@@ -1025,7 +1055,7 @@ test("D2-21 a scale step whose frame ALSO loses focus keeps the frozen latch; af
   assert.equal(h.active(), false);
   assert.deepEqual(h.bottoms(), ["0px"]);
   assert.equal(h.recovering(), true, "focus loss is a frozen exit reason — it keeps its latch over the step exemption");
-  h.document.activeElement = { tagName: "TEXTAREA" }; // the xterm helper back
+  h.document.activeElement = { tagName: "TEXTAREA", parentElement: h.host }; // the xterm helper back INSIDE the shown host
   h.tick();
   h.tick();
   assert.equal(h.api.settleState().ticked, 2, "the scale question settled");

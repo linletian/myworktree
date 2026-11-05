@@ -3839,9 +3839,12 @@
             //     scale (D-C below: SCALE_SETTLE_TICKS self-check ticks at an
             //     unchanged scale / layout / VV-width / raw, inside ε of the
             //     candidate baseline) is handed to the frozen §5 session machine
-            //     below, whose existing gates still all have to be met: editable
-            //     focus through the existing document.activeElement path (no new
-            //     ownership machine), raw > 1 real occlusion, the 25% entry / 50%
+            //     below, whose existing gates still all have to be met: eligible
+            //     focus through the existing document.activeElement path — as of
+            //     Phase 3 (AUTH-20261105-P3-OWNERSHIP) the editable-half plus the
+            //     SHOWN foreground-host ownership walk at the focus block below,
+            //     not the former generic editable-only admission (D-A plan B),
+            //     raw > 1 real occlusion, the 25% entry / 50%
             //     re-entry lines, the click / focusin / geometry unlocks and the
             //     same-geometry-decrease exit. Nothing is bypassed: raw > 1 alone
             //     owes nothing.
@@ -3877,11 +3880,60 @@
             // is a real floating overlay / closed keyboard: raw 0 ends the
             // session, nothing moves.
             const raw = vv ? Math.max(0, layoutHeight - vv.height) : 0;
-            // The focus half of the session: the keyboard is up only while an
-            // editable owns focus (xterm's helper is a TEXTAREA; the guard also
-            // accepts INPUT and contenteditable hosts).
+            // The focus half of the session — issue #116 Phase 3 (PLAN §5 Phase 3,
+            // AUTH-20261105-P3-OWNERSHIP): an editable owning focus is no longer
+            // enough to own the PTY keyboard. The frozen editable test below stays
+            // the editable HALF, character for character (xterm's helper is a
+            // TEXTAREA; INPUT and contenteditable hosts stay accepted — the helper
+            // identity is NOT narrowed), but to become `focusEditable` — the
+            // session's PTY eligibility read by scaleStepNoLatchExit, the exit edge
+            // and the entry gate below, ONE boolean at the same three sites — this
+            // pass's focused element must ALSO live inside the SHOWN foreground
+            // terminal host. The walk is a pure read of THIS pass's live DOM: from
+            // document.activeElement (the single focus input) up the parentElement
+            // chain, the FIRST ancestor stamped with the EXISTING data-instance-id
+            // (both host factories stamp it — createTerminalHost here,
+            // PtyRenderer._createSession in kinds/pty.js) decides, and it admits
+            // only while displayed: kinds/pty.js shows exactly one host and hides
+            // every other, so the shown host IS this frame's foreground-instance
+            // box — the DOM-observable front correspondence, re-taken fresh on
+            // every pass. No cache across passes, no second ownership machine, no
+            // new event source, no explicit marker written anywhere. A focus inside
+            // a hidden / non-foreground host has no eligibility (contract HO-1 /
+            // B.5); ordinary Web inputs — the rename / settings forms, the
+            // quick-keys PASTE textarea, any editable outside the host — are HO-3
+            // and iframe focus reads as the frozen non-editable IFRAME box (HO-4 /
+            // HO-1): none of them ever rides the PTY avoidance (contract HO-3,
+            // R2). This replaces the D-A plan B transitional wording ("no new
+            // ownership machine" — Phase 3 IS the host split the plan B verdict
+            // deferred to): Web frames passing the generic predicate were the
+            // registered R2 known deviation and are now refused here. Terminal →
+            // Web handoff exits through the UNTOUCHED `!focusEditable` edge below,
+            // recovery latch included; Web → terminal re-entry runs the untouched
+            // §5 entry below on the CURRENT frame — no new exit, no compensation,
+            // no behavior branch added to the handoff itself (F1–F5 / F8–F10).
             const focus = document.activeElement;
-            const focusEditable = !!(focus && (focus.tagName === "TEXTAREA" || focus.tagName === "INPUT" || focus.isContentEditable));
+            const focusEditableElement = !!(focus && (focus.tagName === "TEXTAREA" || focus.tagName === "INPUT" || focus.isContentEditable));
+            let focusEditable = false;
+            if (focusEditableElement) {
+                for (let hostNode = focus.parentElement; hostNode; hostNode = hostNode.parentElement) {
+                    if (hostNode.dataset && hostNode.dataset.instanceId) {
+                        // The FIRST stamped ancestor decides, with NO backtracking:
+                        // a foreground host must be a DIRECT child of
+                        // #terminal-container (the `container` bound at the top of
+                        // this function) AND displayed. The tab template stamps the
+                        // same data-instance-id OUTSIDE the container — a stamped
+                        // element there is NOT a terminal host, and the walk ends
+                        // AT it without climbing further. Real host chains pass
+                        // BOTH tests exactly once (hosts are the container's own
+                        // children); a truthy instanceId keeps an empty-string
+                        // stamp from masquerading as a host.
+                        focusEditable = hostNode.parentElement === container
+                            && hostNode.style.display !== "none";
+                        break;
+                    }
+                }
+            }
             // D-B / D-D (arbitration commit 6e8a006): the trip BACK into the band
             // (0.75 → 1, scale > 1 → 1). Like a scale step it exits the session
             // through the frozen edge below and pays occlusion 0, and it leaves no
