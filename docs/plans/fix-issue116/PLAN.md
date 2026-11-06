@@ -223,6 +223,8 @@ opencode、reasonix、dsh 等 iframe 内输入由 iframe / Safari 处理。父�
 
 **阶段状态（2026-11-06 离线实现轮）**：任务 1–3 离线完成（提交 `0258f1e`，双评审 APPROVE）；任务 4 真机确认待安排、待 verdict。门禁：R2 / R3 / R4 的 Web 部分在真机确认未执行前不得写通过。
 
+**阶段状态（2026-11-07 真机首轮 p3-A-WEB-01 判读后）**：**任务 4 首轮完成：F1 / F3 / F8 / F9 + F10 子项 PASS；F5 焦点常驻 FAIL 待修；R2 / R3 / R4 未整行闭环。** 会话 a22c（374 帧，seq 1–375，唯一缺口 seq169），判读见 [VALIDATION“2026-11-06 Phase 3 真机首轮 p3-A-WEB-01 判读”](evidence/VALIDATION-2026-11-04.md)。子项 PASS 不上浮整行：iframe 侧（HO-4 / GI-3 / GI-7）**INCONCLUSIVE**，seq84 单帧告警保留登记。**F5 FAIL**（quick-keys 粘贴 textarea 持焦时被程序化抢回终端）经代码身份核对归为**冻结基线 `5268869` 既有行为（分类 b）**，修复授权见下方 `AUTH-20261105-P3-FOCUS-GUARD`；**异常 B**（失焦回终端第一下不弹软键盘）按**同根假设**登记、**未归因**，并入同一复验会话，不孤立复采。
+
 **独立提交边界**：输入分类/交接及其直接测试为一组，不携带 PTY 几何算法重写。
 
 **门禁**：R2、R3、R4 的 Web/iframe 部分通过；PTY 几何仍保持可回退基线。
@@ -242,6 +244,42 @@ opencode、reasonix、dsh 等 iframe 内输入由 iframe / Safari 处理。父�
 - **只允许 fixture-only 同步**：在 `docs/plans/fix-issue116/evidence/verify-live-choiceA.mjs` 当前 `:225-236` 夹具块复用既有 `hosts[0]`，将其设为已展示前台宿主，并给默认 TEXTAREA 焦点提供指向该宿主的 `parentElement` 祖先链；在当前 `:407-428` 只给需要取得资格的 contenteditable / TEXTAREA stub 补同一祖先链，BODY 仍保持无宿主、无资格。可同步当前 `:225-236` 与 `:405-432` 的叙述注释及 assert message 文案，使其明确“前台宿主内 editable”；不得改其他语句。不得新增 `state` 或其他工厂绑定，`state.activeInst` 对应仍是语义要求；若产品必须直接读取未镜像的 `state` 或新增外部 helper，仍须停止上报。
 - **逐字不变项**：`makeHost`、宿主数组、工厂闭包、geometry、帧序、`avoid` / `sessionFrame` 调用、bottom / rect / journal、断言语句的表达式与预期值均不变；只允许上述 stub 结构和 assert message 文案变化。不得新增 / 删除帧或用断言值适配失败。contenteditable-in-host 仅延续既有 `isContentEditable` 分支在“前台宿主内 editable”模型下的覆盖，不声称真实 xterm helper 是 contenteditable，也不授予宿主外 Web contenteditable 资格，无须为此另改产品语义。若实现进一步限定特定 helper 身份、排除宿主内 contenteditable 并改变该既有断言结果，则属于新的产品语义收窄，超出本授权，必须停止回报。
 - **提交与验证**：A1 与主授权的产品实现、直接测试同一原子提交，以遵守 N1 的“同一变更枚举并同步所有切片镜像”，并避免产品先行提交留下必然红色的离线镜像；Node / Go 双评审必须同时覆盖产品 diff 与镜像 diff。必须从仓库根目录执行既有离线命令 `node docs/plans/fix-issue116/evidence/verify-live-choiceA.mjs --html internal/ui/static/index.html`，不新起服务；所有既有断言必须原值通过。失败即如实报告首个失败断言、actual / expected 与 exit code，保留 FAIL / INCONCLUSIVE，不得改 bottom 值、删帧、跳过工具或改用 live 服务制造 PASS。
+
+**Phase 3 真机首轮修复授权：`AUTH-20261105-P3-FOCUS-GUARD`（2026-11-07 仲裁签署，本次生效；评审对比基线 = `e6bb0da`）**
+
+- **授权起因（owner 当次需求驱动，非自主修复）**：owner 在 Phase 3 任务 4 真机首轮（会话 a22c）中亲自报告 **F4 焦点问题**——quick-keys 粘贴 textarea 持焦时焦点被抢回终端（VALIDATION 异常 A），以及失焦回终端第一下不弹软键盘（异常 B）。本授权只承接该 owner 需求。
+- **与冻结基线的关系（必须登记明的口径）**：`focusTerminalIfPossible()` 属**冻结基线 `5268869` 机制**，且经逐字 diff 核对，`5268869`（:7842-7863）与当前 `index.html`（:8238-8253）**函数体完全相同**（含 #122 rename 守卫、末行 `session.term.focus()`），无粘贴 / 通用 editable 守卫。**本修复是有意改动冻结机制，依据仅限上方 owner 当次需求 + 本节授权，不得被后读为“AGENTS.md 冻结核对遗漏”或“自动回退 / 试修”**。改动点唯一：在该函数内新增一个提前 return 守卫；函数其余语句、九个调用点、`#122` 守卫、`session.term.focus()` 末行身份不变。按 AGENTS.md“新反馈先记录并等待指令，不自动回退或试修”，本授权即为该指令。
+- **允许修改**：
+  1. `internal/ui/static/index.html` 的 `focusTerminalIfPossible()` 函数体（当前 **:8238-8253**）：**仅新增一个守卫**，位置在该函数既有两个 early-return 组之后、`session.term.focus()` 之前。
+  2. 新增 minimal 直接测试——对该函数做最小 stub 切片，至少覆盖两条：**(i) 粘贴 textarea 持焦时轮询不抢焦点**（焦点不动、`term.focus()` 未被调用）；**(ii) 终端宿主内 helper 持焦时照常 `focus()`**。测试文件须为**新增**独立文件或既有 Node 测试文件中的**新增**用例，不得改写既有断言。
+- **裁决：采用通用守卫（优先候选），不采用 paste-mode 专用窄标记。** 形态：
+
+  `activeElement` 为可编辑（`tagName === "TEXTAREA" || tagName === "INPUT" || isContentEditable`）**且其祖先链上不存在带真值 `data-instance-id` 的元素**时，直接 `return`（不抢焦）。
+
+  **理由（证据锚点）**：(a) 与 `0258f1e` 已交付的产品所有权模型**判据完全同源**——`index.html:3916` 的 `focusEditableElement` 三分支与 `:3922-3934` 的 `data-instance-id` 祖先链走法，本守卫只是复用同一读法，不引入第二套输入分类，也不与 `focusEditable` 谓词本身冲突（谓词未被修改）；(b) 修复面覆盖 **HO-3 全类**（INPUT / TEXTAREA / contenteditable），不止粘贴框——raw 显示 `HO-3` 同时含 INPUT（seq 36–60 等）与 TEXTAREA，窄标记只堵粘贴框、同类抢焦仍会复现；(c) 窄候选需新增 paste-mode 状态读取（`quickKeysPasteSession` / `#quick-keys-panel.paste-mode`，`index.html:4883-4897`），把**面板 UI 状态**耦合进焦点函数，扩大跨模块耦合，与 `0258f1e` 的“pass 内纯 DOM 判定、不新增跨 pass 状态”口径相悖。
+  **已指认的通用守卫风险（须在实现说明中逐条回应，不构成否决）**：(1) **循环 / 自激**：`document.activeElement` 是同步只读，守卫**不写 DOM、不派发事件、不调用 `focus()`**，不构成 `focusin` ↔ 守卫的重入回路；但**禁止**在守卫内调用 `ensureIosImeDirectInputBridge()` 或任何 `focus()`，否则会形成“守卫拒抢 → 桥接抢 → 再触发”的自激，实现须保证守卫位于这些副作用之后仍是纯读。(2) **自动后台行为**：守卫让轮询**不再**纠正“用户把焦点留在本页 Web 输入上”的漂移——这是**本授权的目标语义**（与 `0258f1e` 的 `focusEditable` 收窄一致：HO-3 不取得终端归属）；须在注释中写明“这是有意行为，不是回归”。(3) **不可编辑宿主内焦点**（如 xterm 隐藏 help textarea 之外的挂件）：本守卫**不改变**其在宿主内 / 宿主外的既有结果，只拦“可编辑且无宿主祖先”一类。
+- **禁止**：改 `focusEditable` 谓词本身及其三处消费点（`:4032`、`:4072`、`:4094`）；改避让状态机 / 25% / 50% 门线 / click、focusin、几何解锁 / 恢复锁 / raw 算式 / `vv.offsetTop`；改 quick-keys 面板逻辑（`enterQuickKeysPasteFallback` 及 `paste-mode` 生命周期）；改事件监听结构或新增事件源；新增任何**跨 pass** 状态变量；新增运行时依赖；改 `internal/ui/debugassets/*`、服务端、探针 schema；改任一 `docs/plans/fix-issue116/evidence/*.mjs`；改本节与 VALIDATION 判读口径。
+- **停止并回报待再次仲裁**：若最小实现需要触碰上述任何禁止项，或需要产品代码新增跨 pass 缓存 / 新 DOM 标记 / 新 helper 绑定，或四类 Node 文件 + Go 三锚点中有任一因本改动而需**修改既有断言**（而非新增），立即停止，不得自行扩大。
+- **验证清单（全部必须执行并原文回报）**：
+  1. `node --test internal/ui/testdata/viewport_height.test.mjs`；
+  2. `node --test internal/ui/testdata/zoom_scale.test.mjs`；
+  3. Go 三锚点匹配测试（沿用既有锚点，不新增门禁语义）：`go test -count=1 -run 'TestViewportHeightHandling|TestZoomScaleAvoidance|TestTerminalStatusHandling' ./internal/ui`（`internal/ui/terminal_status_test.go:21/211/244`）；
+  4. `go test -tags viewportdebug -count=1 -run 'ViewportDebug' ./internal/ui`（viewportdebug ON 变体，`internal/ui/viewport_debug_on_test.go`）；
+  5. `node docs/plans/fix-issue116/evidence/verify-live-choiceA.mjs --html internal/ui/static/index.html` **离线无关确认**（从仓库根目录、不新起服务、既有断言原值通过）；
+  6. 新增的 `focusTerminalIfPossible` 最小 stub 用例（守卫 (i)(ii) 两条）。
+  以上全绿**不替代**真机复验，也不关闭 F5 / R2 / R3 / R4。
+- **复验条款（异常 B 并入，不做孤立复采）**：修复后由 owner 在**同一复验会话**内同时确认：F5 焦点常驻（粘贴 textarea 持焦不被抢）、异常 B（失焦回终端第一下即弹软键盘）、S2 焦点常驻子项。**不得为异常 B 单独发起一次采证会话**；若同一会话仍复现 B，则 B 的“同根假设”被削弱，转独立归因再议。
+- **提交边界**：产品守卫 + 其直接 minimal 测试为**一个原子提交**；不携带 A/B 之外的任何改动；不与 raw 文件提交、不与其他产物混入；文档登记（本节 + VALIDATION）单独提交。
+
+**raw 文件处置裁决（a22c，Q4：`AUTH-20261105-P3-FOCUS-GUARD` 同轮仲裁，2026-11-07）**
+
+- **判读先行、raw 后置**：本轮先提交**判读与派生文档**（本节 + VALIDATION“2026-11-06 Phase 3 真机首轮 p3-A-WEB-01 判读”，含全部计数、seq 锚点与复核订正），**再**以**独立提交**归档 raw 本体 `docs/plans/fix-issue116/evidence/raw/a22c660f67a1347b1f4e38ca0126a7d0.jsonl`（3 559 089 字节，374 帧）。两者**不得同提交**，以维持“原始不改写、判读与派生分开标识”（§8、§9）。
+- **raw 本体逐字节不改写**：不得裁剪、重排、补 seq169、重采样或格式化该文件；缺口 seq169 作为原始事实保留（已在 VALIDATION 登记为 61ms 突发、无 verdict 跨越）。
+- **不需要 `.gitignore` 例外、也不需要特殊归属**：`evidence/raw/` 下既有 raw 已按同一路径入库（如 `42cd679e…jsonl`、`b7460ddb…jsonl`），`git status` 显示该文件为**普通 untracked**（非 ignored）；本裁决沿用既有证据归档惯例，**不新增 ignore 规则、不改 `.gitattributes`**。仓库无 LFS 使用先例，约 3.4MB 直入 Git 可接受。
+- **提交信息与边界**：raw 提交只含该一个文件，提交信息须标明“原始设备会话、未改写、缺口 seq169、判读见 VALIDATION 对应节”；不得夹带 PLAN / VALIDATION 或其他任何改动。
+- **本仲裁轮不执行任何 `git add` / `git commit`**：上述两次提交由调度者按本裁决派单执行。
+
+**Phase 3 授权包层级声明（`P3-OWNERSHIP` / `-A1` ↔ `P3-FOCUS-GUARD`）**：`AUTH-20261105-P3-FOCUS-GUARD` 是**追加的窄修复包**，**不改变 P3 主包边界**——不重新打开 `AUTH-20261105-P3-OWNERSHIP` / `-A1` 的文件清单、谓词形态与已关闭的评审结论，不改 `G10` 主口径，不改 `focusEditable` 谓词；两包在 `index.html` 内**不相交**（主包 = `applyVisualViewportOcclusion` 内谓词段；本包 = `focusTerminalIfPossible()` 函数体）。`A1` 的 fixture-only 例外**不适用于**本包（本包不触碰 `verify-live-choiceA.mjs`，只作离线无关确认）。
 
 ### Phase 4：PTY 终端自有视口与 pan 处理
 
@@ -320,6 +358,7 @@ iPhone Safari 按旧 PLAN 至少补一轮；不同 iPadOS 版本和 Chrome(iOS) 
 | `sidebar_collapse.test.mjs` 对 `queueTTYResize` 的适配 | 独立测试提交，保留 | Phase 0 / Phase 4 回归 |
 | `pty-refit-check.mjs`、`sidebar-title-check.mjs` | 独立验证工具提交，保留并在 Phase 2 复核判据 | Phase 2 |
 | A/C 原始会话、连续 scale=1 / quick-keys 派生段、p8 原始记录 | 独立证据提交，原始与派生分开标识 | Phase 0 / Phase 6 |
+| a22c 原始会话（`evidence/raw/a22c660f67a1347b1f4e38ca0126a7d0.jsonl`） | **判读先行（PLAN §5 + VALIDATION 2026-11-06 Phase 3 真机首轮节），raw 本体单独一并提交**；原始不改写、派生与原始分开，不新增 `.gitignore` 规则 | Phase 3 |
 | `RESULTS-authenticated-shell-p9.json`、侧栏 baseline/working 结果 | 仅作历史结构/失败证明，不宣称最终真机验收 | Phase 2 |
 | CHANGELOG 两处测试总数 27 → 34 | 独立计数修正提交 | Phase 0 门禁 |
 | 无活动终端的 smoke、旧 p9 暂存实验 | 清理，不提交 | 已完成，若再出现同类内容继续排除 |

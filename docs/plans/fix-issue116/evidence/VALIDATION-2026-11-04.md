@@ -391,3 +391,67 @@ C 会话还包含多轮额外滚动/平移与窗口变化，不能用上述局�
 - **双评审**：评审 1 `opencode-go/muse-spark-1.3-contributor` **APPROVE**（0 BLOCKER / 0 MAJOR，MINOR×4）；评审 2 `minimax-cn/MiniMax-M3.1-Flash` **APPROVE**（0 BLOCKER / 0 MAJOR，MINOR×6 + CHALLENGE×4）。修复轮已完成 MINOR-1 / MINOR-2 / MINOR-4 / MINOR-5。**未认证声明**：MINOR-3 / MINOR-6（A1 措辞张力）按登记解释处理，未改码。
 - **G10 状态更新（不整行关闭）**：R2 已知偏离在**已交付代码**上关闭；c3ee A3 与 42cd HO-3 仍是 Phase 3 前的历史现场实例，历史证据及其性质不改写。真机 HO-3 / R2 验证仍未执行，Phase 3 任务 4 待安排，故 [PLAN §11.3 G10](../PLAN.md#L393) 余项保持，不写成整行关闭或真机 PASS。
 - **已登记后续项（不新开工号，均不阻塞本轮）**：D2-7b 结构断言之外，tab 误判的当帧行为回归仍缺 tab 结构桩；单 shown host 不变量仍缺结构断言；`focusEditable` 复合布尔命名易混淆，可后续复查是否采用 `ptyFocusEligible` 之类命名。
+
+## 2026-11-06 Phase 3 真机首轮 p3-A-WEB-01 判读
+
+- **会话**：[a22c raw](raw/a22c660f67a1347b1f4e38ca0126a7d0.jsonl)，session `a22c660f67a1347b1f4e38ca0126a7d0`，`latestSeq` 375，文件内实际 **374 帧 / seq 1–375**，唯一缺口 `seq168 → seq170`（两条 `receivedAt` 相差 **61ms**，两侧均为 `periodic`、相邻帧无 verdict 跨越，按调度突发处理，不判 FAIL）。`probeVersion` 全 374 帧一致为 `p9-full-shell-session-avoidance-v1`；`keyboardSession.scale` 全 374 帧为 **1**；设备为 iPad / iPadOS 18_7 / Safari 27.2（`dpr` 2，`touchPoints` 5）。**raw 截至本节登记时仍为 untracked，尚未进入任何提交**（处置见 PLAN §5 `AUTH-20261105-P3-FOCUS-GUARD` 同轮的“raw 文件处置裁决”与 §9 表格新增行）。
+- **判读口径**：本节全部 verdict 为 **单会话、单轮、子项级**。判据 = 帧字段 + owner 目测（**owner 2026-11-06 口头裁决取消本轮全部截图门槛**，故本轮任何子项都不得写成“截图确认”）。子项 PASS 一律不上浮为 R2 / R3 / R4 整行 verdict，Phase 3 任务 4 不因本节关闭。
+- **独立性声明**：本节由仲裁 Sub-agent 从 raw 文件逐帧重算；**不采信测试 Sub-agent / 调度者的转述计数**。以下凡与转述不一致处均按 raw 重算值登记（见“复核订正”）。
+
+### 原始帧分类计数（本节实测）
+
+| `ownership.category` | 帧数 | 说明 |
+| --- | --- | --- |
+| `HO-2`（前台 PTY 宿主内 editable） | **246** | 其中 `raw > 0` 的 101 帧，`raw <= 0` 的 145 帧 |
+| `HO-1`（非 editable / BODY / BUTTON / DIALOG） | **54** | `occlusion` 全 54 帧为 0 |
+| `HO-3`（本页普通 Web 输入，editable 但不在终端宿主内） | **51** | 9 个连续块：36–43、53–60、86–94、109–112、119–120、125–126、130–134、347–350、355–363 |
+| `unknown`（`iframe-inner-focus-not-inspectable`，**IFRAME 焦点，非 `HO-4` 计数值**） | **23** | seq 175–197，`occlusion` 全 23 帧为 0 |
+
+`reason` 分布：`periodic` 174、`settle` 96、`resize` 47、`focusin` 28、`visibilitychange` 8、`scroll` 7、`manual` 7、`focusout` 6、`init` 1。
+
+### 逐子项 verdict
+
+| 编号 | 判读问题 | verdict | raw 证据锚点 |
+| --- | --- | --- | --- |
+| **S0** | 会话可采、schema / 版本一致 | **PASS** | 374 帧全 `probeVersion` 一致；`scale` 全 1；唯一缺口 seq168→170 61ms 突发、无 verdict 跨越 |
+| **S1 / F1 + F3** | 本页普通 Web 输入（INPUT / 重命名等）不搭载 PTY 避让 | **PASS（子项）** | `HO-3` **51/51 帧 `occlusion` = 0**；`insideTerminalHost` 全 false、`insideTerminalContainer` 全 false；seq36–60 / 86–94 / 347–350 / 355–363 为 INPUT |
+| **S4 / F8** | PTY 前台宿主持焦时避让回归 | **PASS（子项）** | `HO-2` 且 `raw > 0` 的 **101 帧中 81 帧 `occlusion` == `raw`**；区别的 20 帧全是 `raw` = **68.5** 的浅浮条帧（seq 4–8、322–326、332–333、338–341、369–370、373–374），`occlusion` = 0，属源码 `index.html:3622-3625` 明写的“低于 50% 进入线的浮条离开会话后不可自行重开”契约，**不是避让失败**。命中例：seq 61–83、113–118 等 `occ` 428 = `raw` 428 |
+| **S5 / F9 + F10** | 失焦后无残留让位；焦点交接顺序 | **PASS（子项）** | 6 个 `focusout`（seq 35、52、154、279、327、334）**全部同帧 `occlusion` = 0** 且 `HO-1`；seq 327 / 334 的 `focusout` 帧本身仍带 `raw` 68.5（浅浮条），`occlusion` 仍为 0，无残留。之后 seq 331 / 345 / 364 重新 focusin 回到 `HO-2` 且 `occ` 0，几何无滞留 |
+| **S2（几何）** | quick-keys 面板在键盘活动中可达 | **PASS（仅几何子项）** | `keyboardSession.derivedState == "active"` 的 82 帧中，`quickKeys.open` 为 true 的块（seq 113–137、199–203）面板 rect `bottom` = **272** ≤ `vv.height` = **320**；`panel.rect` 自身 `bottom` 219.2 / 244.2 全在 vv 内 |
+| **S2（焦点常驻）** | 粘贴 textarea 持焦期间不被抢回终端 | **FAIL** | 见“异常 A” |
+| **S3 / iframe（HO-4 侧）** | opencode / reasonix / dsh iframe 父页无干预 | **INCONCLUSIVE** | 23 帧全部 `activeInput.tag` = IFRAME、`unavailableReason` = `iframe-inner-focus-not-inspectable`、`occlusion` = 0、`hostIsForeground` = null。**父页数值面无干预成立**（23/23 `occ` 0），但 iframe 内部焦点不可检视，HO-4 / GI-3 / GI-7 **不出 verdict，不上浮** |
+| **告警帧 seq84** | `HO-2` 但 `raw` 0 / `occ` 428 | **登记，不判 FAIL** | seq 80–85 均为 `HO-2`、`occ` 428、`derivedState` active；仅 seq84 单帧 `vvHeight` 748（`raw` 0），seq85 立即回到 320 / `raw` 428。判为单帧采样抖动（探针 `vv.height` 与镜面 `__mwTerminalOcclusion` 非同源读数），保留登记 |
+
+### 复核订正（对上游转述的实证修正，以 raw 为准）
+
+1. **“宿主 bottom 恒 728”不成立**：`HO-3` 51 帧的 `app.bottom` 实为 **748**（49 帧）与 **557**（seq 356–363，8 帧），**不存在 728**。748 是 shell 恒高（`screenshot-free` 口径下 shell 不被缩），557 出现在 `vv.offsetTop` = **190.5** 的 Safari pan 段（seq 356–363，`vv.height` 320）。该 pan 段正是 F1 要观察的“系统输入可见性交给 Safari”形态，已如实登记，但**未作为截图 / 视频门槛**（owner 已取消）。
+2. **“HO-2 且 raw>0 的 81/81”不准确**：分母实为 **101**，`occ==raw` 为 **81**；差额 20 帧全为 68.5 浅浮条帧（见上表），按源码契约预期，**不改判 S4 结论**，但计数须按 81/101 登记。
+3. **iframe 帧不是 `HO-4`**：`ownership.category` 实为 `unknown` + `iframe-inner-focus-not-inspectable`，不是契约分类里的 `HO-4`。登记时不得写成“HO-4 已取得分类”。
+4. **探针 `keyboardSession.focusEditable` 不是产品谓词真值**：该字段由探针自身 `isEditableHost(doc.activeElement)`（`viewport_debug.js:467-471`、`:726`）独立计算，只看 TAG 是否可编辑、**不叠加** `0258f1e` 的前台宿主归属判定，故 `HO-3` 51/51 帧该字段为 `true` 属**探针口径**，不构成“产品谓词未收窄”。`HO-3` 全部 `occ` 0 = 反证。**限制**：当前无任何帧字段直接暴露产品侧 `focusEditable` 布尔，AUTH-20261105-P3-OWNERSHIP 真机验证的这一面属**结构性盲区**，与本轮修复无关，登记为后续诊断项。
+
+### 异常 A：quick-keys 粘贴 textarea 焦点被程序化抢回（FAIL）
+
+- **现象**：粘贴 fallback 的 `#quick-keys-paste-textarea` 持焦期间被程序化抢回终端。raw 上表现为 `HO-3` TEXTAREA 块被打断后落回 `HO-2`：seq 109–112 → 113、119–120 → 121–122、125–126 → 127–128、130–134 → 135，共 **4 次**；`click` / `clickOnTerminalHost` 计数在各次打断前后**未变化**（`clicks_between` = 0），即**不是指针事件驱动**。
+- **间隔实测（纠正转述）**：各块“最后 HO-3 帧 → 首个 HO-2 帧”间隔为 **73.9ms（112→113）、73.7ms（120→122）、80.1ms（126→128）、74.2ms（134→135）**；两次打断的“HO-2 落点 ↔ 上一次打断落点”为 **739ms（113→122）、757ms（122→135）**。**与 2000ms 轮询周期、以及与 `periodic` 帧间实测中位数 ~1005ms 均不相符**，故本节**不采用上游“约 2013 / 2079ms、2000ms 轮询驱动”的时序表述**，只保留与之相容的定性结论（见下）。
+- **代码身份（仲裁独立核对，逐字 diff）**：`git show 5268869:internal/ui/static/index.html` 的 `focusTerminalIfPossible()` 位于 **:7842-7863**，当前 `internal/ui/static/index.html` 同函数位于 **:8238-8253**；对两段取函数体做 `diff -u` **无差异（IDENTICAL）**。函数体含 `if (state.renamingInst || state.renamingWT) return;`（#122 rename 守卫）并以 **`session.term.focus()` 结尾**，**无任何粘贴 / 通用 editable 守卫**。基线 `pollTimer = setInterval(refresh, 2000)` 在 **:5071**，当前 **:5467**；`refresh()`（`:3302`）→ `render()`（`:5799`）→ `renderWorkspace()`（`:6386`）→ `focusTerminalIfPossible()`（`:6432`）。基线提交 `5268869d60687ad1256f5ffd9bde1408612972c9`（2026-11-03）。
+- **归因裁决**：分类 **(b) 冻结基线既有行为**。依据 = **代码身份**（`5268869` 与当前逐字同一，且无 paste 守卫）+ **设备帧同现**（4 次程序化抢焦、`clicks_between` = 0、无 `onTerminalHost` 指针事件）。**不归因于 `0258f1e`**：该提交只收窄避让谓词，不改本函数；本轮 `HO-3` 51/51 `occ` 0 亦表明避让未参与。
+- **未定项（诚实标注）**：具体**触发调用点**未能由 raw 唯一确定——`focusTerminalIfPossible()` 有 9 处调用（:5497、:6432、:6713、:6766、:8278、:8321、:9179，另有导出 :10319），`clicks_between` = 0 只能排除 `:6432` 由点击解锁路径触发的可能定式，**不能**排除其余调用点；739 / 757ms 的节律与 2s 轮询、~1005ms 帧间均不吻合，故“轮询驱动”仅作**相容假设**保留，不写为已证。
+
+### 异常 B：失焦回终端第一下不弹软键盘、第二下才弹（同根假设，未归因）
+
+- **现象（owner 口头级 + 帧侧间接）**：失焦后点回终端，第一下只出现实心光标、不弹软键盘，第二下才弹。帧侧：多个 `focusin` 帧相对上一帧 **`click` 计数 delta = 0**（seq 97、113、122、128、135、153、258、270、283、331），即焦点已在帧间被程序化取得，随后用户点击才产生键盘。
+- **裁决**：按 **同根假设** 登记——与异常 A 同属 `focusTerminalIfPossible()` 的程序化 `session.term.focus()` 与用户触摸意图竞态。**不孤立复采、不单独修复、不冒充已归因**；修复后并入同一复验会话验证（见 PLAN `AUTH-20261105-P3-FOCUS-GUARD` 的复验条款）。
+- **证据限制**：探针**无键盘显隐真值字段**，`keyboardSession.derivedState` 是 `vv` 高度差的派生推断而非键盘真值，故 B 不能仅凭帧定性；owner 目测为本条的唯一直接观察来源（截图门槛已取消，目测为口头级）。
+
+### 本轮明确未完成 / 不上浮
+
+- **R2 / R3 / R4 未整行闭环**：`HO-3` / `HO-2` / `focusout` 子项 PASS 不覆盖 R2 的“键盘已打开”全链路与 R4 的实例切换、PTY A→B 段；本节无任何整行 verdict。
+- **iframe HO-4、GI-3 / GI-7 维持 INCONCLUSIVE**，不因本节 23 帧 `occ` 0 升格。
+- **seq84 告警**保留为未定单帧。
+- **F5 焦点常驻 FAIL** 已由 PLAN `AUTH-20261105-P3-FOCUS-GUARD` 承接，修复后须以**同一复验会话**同时复验 A、B 与 S2 焦点常驻子项。
+
+### G10 状态更新（真机首轮后，仍不整行关闭）
+
+- 上一节“离线实现轮”登记的“真机 HO-3 / R2 验证仍未执行”**已作废**：本轮 a22c 会话已执行真机首轮。
+- 现状态：**HO-3 / R2 的“Web 输入不搭载 PTY 避让”子项 PASS**（`HO-3` 51/51 `occ` 0）；**R2 整行仍不闭合**——本轮未覆盖“普通 Web 输入自身被 Safari 保证可见”的完整链路（`clicks_between` 与 `HO-3` 段内出现 seq 356–363 的 `vv.offsetTop` 190.5 pan 段，未作截图门槛判定，owner 已取消截图门槛）。
+- 另新增 **F5 焦点常驻 FAIL**，与 G10 无关但同属 Phase 3 任务 4，承接于 `AUTH-20261105-P3-FOCUS-GUARD`。
