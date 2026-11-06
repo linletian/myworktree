@@ -8249,6 +8249,50 @@
             // sidebar worktree row's (issue #122).
             if (state.renamingInst || state.renamingWT) return;
 
+            // AUTH-20261105-P3-FOCUS-GUARD (sanctioned 2026-11-07): the
+            // owner-reported Phase 3 device defect — the quick-keys PASTE
+            // textarea had its focus stolen back to the terminal by this
+            // poll (VALIDATION a22c anomaly A / F5). focusTerminalIfPossible
+            // is a frozen-baseline 5268869 mechanism; this early return is
+            // the ONE authorized deviation, driven ONLY by the owner's
+            // current request and PLAN section AUTH-20261105-P3-FOCUS-GUARD
+            // — it is not a freeze-audit miss, an automatic revert, or a
+            // speculative fix. It reuses the SAME two reads as the Phase 3
+            // ownership predicate in applyVisualViewportOcclusion — the
+            // focusEditableElement trio (TEXTAREA / INPUT / contenteditable)
+            // and the stamp-finding parentElement walk (that predicate and
+            // its three consumers are untouched here). The host test HERE is
+            // DELIBERATELY LOOSE: ANY truthy data-instance-id ancestor counts
+            // as "inside a terminal", whereas the ownership predicate
+            // ADDITIONALLY requires that stamped ancestor to be a DIRECT
+            // child of #terminal-container and NOT display:none. So an
+            // editable (TEXTAREA / INPUT / contenteditable) with NO truthy
+            // data-instance-id ancestor ANYWHERE is an HO-3 Web input and
+            // keeps its focus, and the refusal stays the NARROWER set — an
+            // editable whose stamped ancestor fails those two extra tests
+            // still reaches session.term.focus() exactly as the frozen
+            // baseline did. The poll deliberately NO LONGER corrects that
+            // drift — leaving the focus where the user put it on a page Web
+            // input is the TARGET SEMANTICS of this authorization, not a
+            // regression. The guard is a PURE READ: it calls no focus() and
+            // no ensureIosImeDirectInputBridge (which already ran above,
+            // unchanged), writes no DOM, dispatches no events, so no focusin
+            // ↔ guard re-entry loop can form.
+            // Non-editable focus — with or without a stamped ancestor —
+            // reaches the same outcome as before; only "editable without a
+            // stamped ancestor" is newly refused.
+            const active = document.activeElement;
+            if (active && (active.tagName === "TEXTAREA" || active.tagName === "INPUT" || active.isContentEditable)) {
+                let hostAncestor = null;
+                for (let node = active.parentElement; node; node = node.parentElement) {
+                    if (node.dataset && node.dataset.instanceId) {
+                        hostAncestor = node;
+                        break;
+                    }
+                }
+                if (!hostAncestor) return;
+            }
+
             session.term.focus();
         }
 
