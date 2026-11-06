@@ -271,6 +271,34 @@ opencode、reasonix、dsh 等 iframe 内输入由 iframe / Safari 处理。父�
 - **复验条款（异常 B 并入，不做孤立复采）**：修复后由 owner 在**同一复验会话**内同时确认：F5 焦点常驻（粘贴 textarea 持焦不被抢）、异常 B（失焦回终端第一下即弹软键盘）、S2 焦点常驻子项。**不得为异常 B 单独发起一次采证会话**；若同一会话仍复现 B，则 B 的“同根假设”被削弱，转独立归因再议。
 - **提交边界**：产品守卫 + 其直接 minimal 测试为**一个原子提交**；不携带 A/B 之外的任何改动；不与 raw 文件提交、不与其他产物混入；文档登记（本节 + VALIDATION）单独提交。
 
+**修正案 `AUTH-20261105-P3-FOCUS-GUARD-A1`（2026-11-07 仲裁签署：编码停止回报的 fixture-only 裁决）**
+
+- **停止回报事实（仲裁独立复核，非转述）**：守卫在 `index.html:8276` 新增 `document.activeElement` 读取。既有 testdata 文件 `internal/ui/testdata/sidebar_wt_rename.test.mjs`（`32d1766` 引入，**不在本节验证清单四类 Node 文件内**）的 `focusFactory` 切片（:205-211）以 `new Function("deps", …)` 组装、其 deps 解构（:206）**从未包含 `document`**，故运行期抛 `ReferenceError: document is not defined`（实测：切片内第 45 行、调用点 :691）。该函数原先不读 `document`，本改动使其成为新的 stub 依赖缺口。
+- **裁决：签发 A1。** 理由：该失败**不属**本节停止条款所列任一情形——不需产品代码新增跨 pass 缓存 / 新 DOM 标记 / 新 helper 绑定，不需**修改既有断言**（:692、:693、:697-698、:703-704、:708-709 的断言表达式与预期值全部原样保留），也不属“自主试修”：它是守卫引入的**测试夹具依赖链**缺口，补齐属本次改动的直接对外后果。
+- **A1 唯一允许改动**：`internal/ui/testdata/sidebar_wt_rename.test.mjs` 的 `focusFactory` 夹具，**恰好两处、均在不含任何断言的夹具区**：
+  1. :206 的 deps 解构追加 `document` 标识符（该行本就不含断言）：由 `const { state, getActiveTerminalSession, isInstanceLiveStatus, ensureIosImeDirectInputBridge } = deps;` 改为 `…, ensureIosImeDirectInputBridge, document } = deps;`。
+  2. :684-689 的 `focusFactory({ … })` 实参对象内追加一行 `document: { activeElement: null },`。
+  可选：同步 :198-204 的夹具叙述注释，使“#116 FOCUS-GUARD 使 `document.activeElement` 成为新的 stub 依赖”有据可读。
+- **对编码建议的一处订正（必读）**：编码建议“只在 deps 处加一行 `document: { activeElement: null }`”**不充分**。`new Function("deps", …)` 不会把 deps 对象的键变成词法变量，只加键不加解构仍抛同一 `ReferenceError`（仲裁已用临时探针实测：单点补链后仍为 18 项中 1 项失败）；**必须按上述两处一起补**，探针实测两处齐补后 18/18 通过。
+- **语义不变证明**：`activeElement = null` 时守卫首语句 `if (active && …)` 短路、直接落到既有 `session.term.focus()`，与守卫前行为等价；该用例的焦点 / 桥接调用序列（1→1→1→2 与 1→2→3→4）全部保持原预期值。
+- **禁止（A1 不扩大既有边界）**：不得触碰或改写任何既有断言表达式、预期值、`test()` 标题与用例结构；不得改动 :150 / :171 切片及其 :393 / :471 的 `document` 注入；不得改 `index.html` 守卫形态（A1 为夹具补链，不是产品改动）；不得顺带修该文件其余任何内容；不得新增测试用例（新增用例已由 `focus_terminal_guard.test.mjs` 承担）。
+- **A1 验证清单**：
+  1. `node --test internal/ui/testdata/sidebar_wt_rename.test.mjs` → 回绿 **18/18**；
+  2. `node --test internal/ui/testdata/focus_terminal_guard.test.mjs` → 全绿（**当前实测为 5 个用例，非 6**：该文件 :141 / :155 / :169 / :182 / :196 共五处 `test()`，其中 :155 为“spread”变体、内部含 INPUT 与 contenteditable 两次断言；以该文件实际 `ℹ tests` 计数为准回报）；
+  3. **不因 A1 复跑** `viewport_height` / `zoom_scale` / Go 三锚点 / viewportdebug / `verify-live-choiceA.mjs`：A1 只增 `docs` 之外的**测试夹具对象字面量**，不触碰 `index.html`、`framework.js` 或任何证据脚本，上述五项的输入字节不变，复跑不产生新信息；其已于 `d1ccbb6` + 本轮产品改动下由编码自跑全绿，该结果对这些项继续有效。
+- **A1 与提交边界**：夹具补链的这 3–4 行**并入同一个原子提交**（产品守卫 + 其直接 minimal 测试 + 守卫引入的既有夹具补链），不单独成为一个提交，也不与 raw 文件或文档登记混入。
+
+**评审处置与遗留（`AUTH-20261105-P3-FOCUS-GUARD` / `-A1` 编码双评审后登记，2026-11-07；本节仅登记，不改动上方授权语义）**
+
+- **双评审结论**：编码产出经两名评审独立 APPROVE——评审 1 号（`opencode-go/muse-spark-1.3-contributor`）：0 BLOCKER / 0 MAJOR / CHALLENGE×3；评审 2 号（`minimax-cn/MiniMax-M3.1-Flash`）：0 BLOCKER / 0 MAJOR / MINOR×6 / CHALLENGE×6。无停线项，下方逐条给出处置或留待归属。**本节登记不重新打开、不修改、不放宽**上方 `AUTH-20261105-P3-FOCUS-GUARD`、`-A1` 及下方 raw 处置裁决的任何授权语义、文件清单或禁止项。
+- **【登记项 1 · 两评审共同点】守卫的宿主测试是「宽松版」，不得后读为与所有权谓词等价。** 守卫（`internal/ui/static/index.html:8284-8294`，判定读 `:8284-8285`、宿主祖先遍历 `:8286-8292`、拒绝 `:8293`）的宿主判定 = **祖先链上任一真值 `data-instance-id` 祖先**即视为“终端内”，命中即放行 `session.term.focus()`；所有权谓词（同文件 `:3915-3936`，`focusEditableElement` 于 `:3915-3916`、`focusEditable` 赋值分支 `:3917-3936`）额外要求首个 stamp 祖先必须是 **`#terminal-container` 的直接子元素且非 `display:none`**。差异方向是**保守的**：本守卫把“stamp 祖先不合那两项额外条件”的可编辑焦点仍归入终端内，因此**宁可多抢**，其 refusal 面（拒绝抢焦的集合）比所有权谓词**更窄**；但反过来说，宿主外、仅挂在模板 stamp 下的可编辑元素在本守卫口径下会被当作终端内输入。**这是刻意的口径差异**，代码注释已如实改写为 “stamped ancestor” 口径并显式标注 `DELIBERATELY LOOSE`，不得被后读当作“守卫与谓词同一判据”或“两处可互推等价”。
+- **【登记项 2 · MINOR-6】“九个调用点”的计数更正（追加注记，不改写原句）。** 上方 `AUTH-20261105-P3-FOCUS-GUARD` 的正文与 `-A1` 的引用句中使用“九个调用点”，该计数**先于本 diff 存在**于已提交的授权文本中（`65ded23`），不是本轮编码产出引入的；本轮实测：`focusTerminalIfPossible` 的**调用点 7 处**——`:5497`、`:6432`、`:6713`、`:6766`、`:8322`、`:8365`、`:9223`；另有 **1 处 `window` 导出**（`:10363` `window.focusTerminalIfPossible = …`）与 **1 处函数声明**（`:8238`）。**实质主张不受影响**：调用点身份（位置与形态）在本 diff 前后不变，本守卫不改写、不新增、不删除任何调用点，故“九”属计数笔误而非语义错误。**本条以追加更正注记的形式登记，不改写原句**，以免破坏已签署授权的可追溯性。
+- **【登记项 3 · MINOR-5】下方 `-A1` 节内行号为补丁前偏移。** `-A1` 节（下方 :276-289 一带）引用的 `sidebar_wt_rename.test.mjs` 行号 `:206` / `:684-689` / `:198-204` 是**本轮补丁前**的偏移。补丁在 :203 后新增了 3 行 A1 注释，故补丁后实际为：deps 解构行 **:209**、`focusFactory({ … })` 实参对象 **:688-693**（新增的 `document: { activeElement: null },` 位于 **:692**）、夹具叙述注释块 **:198-207**（新增的三行 A1 注释在 **:204-206**，`:209` 为 deps 解构行）。同节内 `:692` / `:693` / `:697-698` / `:703-704` / `:708-709` 为 `-A1` 节所断言的**断言区 / 调用区**行号（如 :697-698 的两条 `assert`），均位于本轮新增行之前，故补丁前后一致、不需换算；`:150` / `:171` 切片及 `:393` / `:471` 的 `document` 注入位于新增行之前，同样不需换算。**作为补丁前指令自洽**：该节是“补丁前写的指令”，按补丁前偏移阅读即为其本意，本条只作补丁后偏移的对照注记，不改写原行号。
+- **【已处置 · 注释级】本轮编码已收敛、落码待提交（不计入遗留）。** MINOR-1：`index.html` 守卫注释中“SAME read-only judgment”的表述收窄为 **“SAME two reads”**（只声称复用同样的两处读取，不声称同一判定）；MINOR-2：注释与口径统一为 **host ancestor → stamped ancestor**；评审 1 的 CHALLENGE-1 即上述【登记项 1】，其要求已在注释中以 `DELIBERATELY LOOSE` + 差异方向说明落码；`focus_terminal_guard.test.mjs:89-96` 的自述修正（MINOR-3，把“activeElement 身份断言”明确定性为**辅助观测**、主证据是 `term.focusCount`）——以上**均已落码**，但**尚未提交**，随产品守卫同一原子提交入库。
+- **【保留未动】明确不改的两项。** (a) `focus_terminal_guard.test.mjs:194` 的 assert message 仍含旧措辞 “editable without a host ancestor”（严格说应为 “stamped ancestor”）：它属**断言实参**，而 A1 与授权“禁止改断言”条款覆盖的正是这一层，**禁止改断言，保留原样**；措辞不准不影响断言表达式与预期值。(b) MINOR-4（新测试的正向形状断言略收紧、可讨论）：**保留现状，不扩大**，不在本包内追加收敛。
+- **【设计级遗留 · 不阻塞本包】转复验清单 / 后续独立任务。** (a) **INPUT 一刀切**：守卫把**所有** `tagName === "INPUT"` 视为可编辑，不区分输入类型；若未来出现“点了宿主外按钮后终端不回焦”的反馈，**先回看本守卫**再归因其他路径。(b) **iframe（HO-4）**：iframe 持焦不在本守卫覆盖面内（授权已显式锁定本包不动 iframe 语义，**保持不变**），列入 owner 复验清单。(c) **shadow-DOM / slottable**：`isContentEditable` + `parentElement` 链在 shadow root / slot 边界处会截断，属**已知未覆盖面**，复验会话宜含一个 contenteditable 探针。(d) **新测试 DOM stub 的建模边界**：`focus_terminal_guard.test.mjs` 的 stub 未建模 body 以外元素（`document` 元素、shadow-root host），故对 (b)(c) 不构成证据。以上四项均为设计级、**不阻塞本包提交**，转复验与后续独立任务处理。
+- **【门禁与状态】** 双评审均独立复跑并通过 **8/8** 全部检查项：`viewport_height` 40/0、`zoom_scale` 37/0、`sidebar_wt_rename` 18/0、`focus_terminal_guard` 5/0、`terminal_status` 68/0、Go 三锚点 `ok`、viewportdebug `ok`、`verify-live-choiceA.mjs` 离线原值 PASS。**提交边界不变**：产品守卫 + 新测试 + A1 夹具将并为一个原子提交，本登记为 docs 单独提交（与上方 `-A1` 提交边界及 raw 处置裁决一致）。**真机复验未执行**：F5 / 异常 B 同根假设 / S2 焦点常驻子项须由 owner 在**同一复验会话**内完成，因此 **F5 / R2 / R3 / R4 不整行关闭**；离线 8/8 全绿不替代真机证据。
+
 **raw 文件处置裁决（a22c，Q4：`AUTH-20261105-P3-FOCUS-GUARD` 同轮仲裁，2026-11-07）**
 
 - **判读先行、raw 后置**：本轮先提交**判读与派生文档**（本节 + VALIDATION“2026-11-06 Phase 3 真机首轮 p3-A-WEB-01 判读”，含全部计数、seq 锚点与复核订正），**再**以**独立提交**归档 raw 本体 `docs/plans/fix-issue116/evidence/raw/a22c660f67a1347b1f4e38ca0126a7d0.jsonl`（3 559 089 字节，374 帧）。两者**不得同提交**，以维持“原始不改写、判读与派生分开标识”（§8、§9）。
