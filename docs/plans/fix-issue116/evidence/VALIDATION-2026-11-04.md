@@ -861,3 +861,120 @@ C 会话还包含多轮额外滚动/平移与窗口变化，不能用上述局�
 - **本授权不 substitute 真机**：离线全绿 + 双 APPROVE **不产生**真机触摸证据。**B 的证据状态维持 INCONCLUSIVE**；`touchTruth` 真机帧的采集与判读为**独立后续**，**owner = 调度者**（约时安排）。本节**不**关闭 R2 / R3 / R4，**不**改判任何 verdict。
 
 **本节结论**：`AUTH-20261107-P3-PROBE-TOUCHV2` 编码产出经**第二轮双评审双双 APPROVE**，M1 / M2 / M3 **全部关闭**并有锚点；两处授权偏差（字段改名、`cancelled` 交叉校验）**追认，越权 = 否**；门禁 **8/8** 经**三方独立复跑**一致。**B 维持 INCONCLUSIVE**，真机帧判读为独立后续，不关闭 #116。
+
+## 2026-11-07 Phase 3 真机 p3-B-EVID-01 B 归因真值轮（touchTruth）
+
+> **本节性质**：**纯追加登记**。上方各节（含 `AUTH-20261107-P3-PROBE-TOUCHV2` 正文、PROBE-TOUCHV2 评审轮追认）**一字不改、语义不放宽**；本节只**登记**真机采到的 `touchTruth` 帧与**判读结论**。**不改任何产品／测试代码**，**不执行 `git add` / `git commit`**。**证据等级：INCONCLUSIVE——B 未达"已归因"。**
+
+### 会话与原始文件
+
+| 项 | 值 |
+| --- | --- |
+| session | `382f4da6a88a077f8ac0fea79d8ff3d8` |
+| 原始文件 | [382f4da6a88a077f8ac0fea79d8ff3d8.jsonl](raw/382f4da6a88a077f8ac0fea79d8ff3d8.jsonl)（**已冻结归档、未提交**；工作区 `git status` 中唯一未跟踪项） |
+| md5 | `50e94c14540b5c74e5f840daf5dc87a4`（本仲裁独立 `md5sum` 复核一致） |
+| 规模 | 单行 JSON：`events` **497** 条，`seq` **1–497** 连续无缺口（`latestSeq=497`），`updatedAt=2026-11-07T13:17:54…+08:00` |
+| 设备 | iPad / iPadOS 18_7 / Safari 27.2，横屏 `landscape-primary`，`dpr=2`（`device` 字段 497/497） |
+| 探针身份 | `probeVersion=p9-full-shell-session-avoidance-v1`（未 bump）；`schemaRev` = `p9-additive-touch-truth-v1` **497/497**；`touchTruth` 块 **497/497** 存在 |
+| 构建 | 工 HEAD `583681f`（`AUTH-20261107-P3-PROBE-TOUCHV2` 落地提交）；raw 帧**不含** git 构建身份字段，构建归属沿用会话登记口径 |
+
+### owner 目测（人工观测，非帧级证据）
+
+**步骤 3b（新建 worktree 命名框，`#wtTask` 所在 DIALOG）5 次点击中，第 3 / 4 / 5 次第一击不弹软键盘；高亮外圈已出现但光标不进；第 2 击弹出。其余步骤无异常。**
+
+### 本仲裁独立抽验（不转述，逐项实测；表内 seq 均为 raw 中 `seq` 字段）
+
+| # | 抽验点 | 独立实测结果 | 结论 |
+| --- | --- | --- | --- |
+| a | `touchTruth` 覆盖与 rev | `schemaRev` = `p9-additive-touch-truth-v1` **497/497**；`'touchTruth' in snapshot` **497/497**；`probeVersion` 全程未变 | **成立** |
+| b | F1 / F2 / F3 的环条目与 mousedown tick 冻结 | **F1 `seq174`**：`taps` 末项 `{touchmoveCount:1, clickSuppressed:true, dyMax:0, dyCumulative:0, endType:"touchend", cancelled:false}`；`mousedown` 仍为 `{targetTag:"BUTTON", tick:88, defaultPrevented:false}` —— 与前帧 `seq171`（`mousedown.tick=88`、`click 13/touchstart 21`）**完全相同**。**F2 `seq197`**：末项 `{touchmoveCount:0, clickSuppressed:false}`；`mousedown` 仍 `{targetTag:"INPUT", tick:101}` = `seq186` 同值。**F3 `seq211`**：末项 `{touchmoveCount:0, clickSuppressed:false}`；`mousedown` 仍 `{tick:106}` = `seq200` 同值。三例均落在 DIALOG 段内（`probe.visualBottom.tag="DIALOG"`，段界 `171-175 / 181-186 / 192-200 / 206-213 / 219-224 / 230-241`），`mousedown.tick` 与 `unlockTrace.counts` 逐帧比对**无新到达、无新 `click`** | **成立**（tick 冻结 = 该击 native mousedown 未到达 document） |
+| c | S1–S5 的 native mousedown + click + 键盘顶起 | **S1 `seq176`**、**S2 `seq187`**、**S3 `seq201`**、**S4 `seq214`**、**S5 `seq225`**：每例**前序帧** `mousedown.tick` 递增（96→101→106→111→114），同帧 `unlockTrace.counts.click` 亦递增（14→15→16→17→18），且均为 `reason:"scroll"` + `vv.height 748→320`、`vv.offsetTop 0→127`、`innerHeight 748→621`（键盘顶起几何）。`activeElementTag="INPUT"`、`ownership=HO-3` | **成立**（成功击 = native mousedown 到达 + click 派发 + 键盘顶起，三者在同一击链） |
+| d | `touchcancelCount` 全帧 | **497/497 帧 = 0**；`taps[].cancelled` 全帧 **0** 条为 `true`；`endType` 全帧无 `"touchcancel"` | **成立**（A7 之路无 touchcancel 通路证据） |
+| e | `userActivation` 52/52 | 全 497 帧激活环**去重并集** = **52** 条 `{kind∈{focusin,focusout}, isActive, tick}` 记录；`isActive` **52/52 = `true`**，**无 `false`、无 `null`**（软件键盘显示期间 `navigator.userActivation.isActive` 恒真） | **成立** |
+| f | journal 184 条与 counts 相符、零淘汰 | 终帧 `seq497`：`counts` = `{click:64, clickOnTerminalHost:25, touchstart:68, focusin:27, focusout:25, vvResize:69, vvScroll:10, windowResize:0, other:11}`；**journal 必记类型合计 `64+68+27+25 = 184`**（= `TRACE_JOURNAL_TYPES` 四类，`viewport_debug.js:865`）。`entries` 长度 = **16** = `TRACE_MAX_ENTRIES`（`:449`），即只保留**最近 16 条**；**零淘汰不可从 16 条终帧推出**：184 条记录中有 **168 条**已被环 `slice(-16)` 淘汰（`:924`），故 184 = **流入 journal 的条数**而非留存数 | **部分偏差，已订正表述**（见下"订正注记 1"） |
+
+**订正注记 1（`f` 项表述订正，不改写上方抽验表原文）**：抽验要求写的是"journal **184 条**与 counts 和相符**零淘汰**"。实测：184 是 `click + touchstart + focusin + focusout` 四类**流经** journal 的**条数**，与 `counts` 逐项相符；但环上限为 **16**（`TRACE_MAX_ENTRIES`，终帧恰为 16 条），因此**淘汰 168 条是常态而非零淘汰**。**不得**把 `unlockTrace.entries`（16 条）当作"本轮全部点击序列"。判读下列逐击时一律**不以 `entries` 为唯一依据**，而以 `counts` 增量 + `touchTruth` 环为准。
+
+**订正注记 2（`taps[]` 读取须逐帧归并，不改写上方正文）**：`touchTruth.taps` 是**最近 8 链**的**滑动环**（`TAP_RING_MAX=8`，`viewport_debug.js:1009`），**不是增量**。本会话经环差去重可见 **91 条链端**（`taps[]` 逐帧做最长公共后缀比对），终帧只留 8 条，故**跨帧读取必须按"第 N 条新出现"做集合差**，不可把任一帧的 `taps[0..7]` 顺序直接映射到 seq 相邻的 8 次点击。下表"逐击"已按该口径归并；`seq16` 与 `seq17` 两帧各为**半填充**（1 条 / 6 条），`seq52` 起进入**满环**，`seq53` 起开始滚动淘汰。
+
+### 判读真值表（逐击；`seq` = 该击首次可见的帧）
+
+| # | 首次可见 seq | 归属 | `touchmoveCount` | `clickSuppressed` | `dyMax` / `dyCumulative` | `endType` / `cancelled` | 本击 native mousedown | 本击 click | 键盘顶起 | 结论 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1–2 | `seq16` / `seq17` | 起手（`BUTTON` / `DIV`，`HO-1`/`HO-2`） | 0 / 0 | false / false | 0 | touchend / false | — 环内可见（`md.tick=12`、`onTerminalHost=1`） | 有 | 起手即 `vv 320` | 不判（起手序列，非 3b 步） |
+| 3 | `seq16` | `#terminal-container` 内 | 25 | **true** | 0 / 0 | touchend / false | 有 | 有 | 见 `seq45` 段 | 拖拽链，非 tap（`seq16` 起可见，`seq53` 被环淘汰） |
+| 4 | `seq16`末 / `seq17` | `BUTTON` | 0 | false | 0 | touchend / false | **`md.tick=44` `targetTag=BUTTON` `defaultPrevented=false`** | 有 | — | 成功击（键盘因焦点从 TEXTAREA 转移而先收） |
+| 5 | `seq17` | `BUTTON` | 0 | false | 0 | touchend / false | 有（`md.tick=48`） | 有 | — | — |
+| 6 | `seq20` | `DIV` 宿主 | 0 | false | 0 | touchend / false | 有 | 有 | — | — |
+| 7 | `seq52` | `DIV` 宿主 | 0 | false | 0 | touchend / false | 有 | 有 | — | — |
+| 8 | `seq53` | quick-keys 链 | — | — | — | — | — | — | `vv` 320 段 `45–49` | 非 3b |
+| 9–13 | `seq58`…`seq132` | 宿主 `DIV` 系列 | 0 | false | 0 | touchend / false | 有（`md.tick` 57→76，`onTerminalHost` 2→4） | 有 | 见 `resize` 段 | — |
+| **F1** | **`seq174`** | **DIALOG**（`probe.*.tag=DIALOG`），`activeElementTag=BUTTON`、`HO-1` | **1** | **true** | **0 / 0** | touchend / false | **无**（`md.tick` 停在 **88** = `seq171` 同值；`targetTag=BUTTON`） | **无**（`counts.click` 13→13） | **无**（`vv 748` 不变） | **失败击（第 1 次不弹）** |
+| **S1** | `seq176` | DIALOG 内 `INPUT`，`HO-3` | 0 | false | 0 / 0 | touchend / false | **有**（`md.tick=96`） | **有**（`click` 13→14，`focusin` 5→6 于 `seq175`） | **有**（`vv 320 / offTop 127 / innerH 621`） | **成功击（第 2 击弹出）** |
+| **F2** | **`seq197`** | **DIALOG**，`activeElementTag=INPUT`、`HO-3`（**INPUT 已聚焦**） | **0** | **false** | **0 / 0** | touchend / false | **无**（`md.tick` 停在 **101** = `seq186` 同值；`targetTag=INPUT`） | **无**（`click` 15→15；`touchstart` 25 于 `seq197`） | **无**（`vv 748` 不变） | **失败击（第 1 次不弹）** |
+| **S2** | `seq187` | 同上 | 0 | false | 0 / 0 | touchend / false | **有**（`md.tick=101`） | 有（`click` 14→15） | 有（`vv 320 / offTop 127`） | **成功击（第 2 击弹出）** |
+| **S3** | `seq201` | 同上 | 0 | false | 0 / 0 | touchend / false | **有**（`md.tick=106`） | 有（`click` 15→16） | 有（`vv 320 / offTop 127`） | **成功击（第 2 击弹出）** |
+| **F3** | **`seq211`** | **DIALOG**，`activeElementTag=INPUT`、`HO-3` | **0** | **false** | **0 / 0** | touchend / false | **无**（`md.tick` 停在 **106** = `seq200` 同值） | **无**（`click` 16→16；`touchstart` 27 于 `seq211`） | **无**（`vv 748` 不变） | **失败击（第 1 次不弹）** |
+| **S4** | `seq214` | 同上 | 0 | false | 0 / 0 | touchend / false | **有**（`md.tick=111`） | 有（`click` 16→17） | 有（`vv 320 / offTop 127`） | **成功击（第 2 击弹出）** |
+| **S5** | `seq225` | 同上 | 0 | false | 0 / 0 | touchend / false | **有**（`md.tick=114`） | 有（`click` 17→18） | 有（`vv 320 / offTop 127`） | **成功击（第 2 击弹出）** |
+| 收尾 | `seq242`→`seq497` | 面板 / 键盘收放 | 0 | false | 0 | touchend / false | 有（`md` 后续 `DIV` / `INPUT`） | 有 | `vv 679.5 / 565.5` 段见缺口 | 非 3b |
+
+> **关键对照（本表最承重的一行）**：**F2（`seq197`）与 S3（`seq201`）落在同一 DIALOG、同一 `INPUT`、同一 `HO-3`、相邻 4 帧内**；F2 无 `mousedown` + 无 `click` + 键盘不弹，S3 有 `mousedown` + 有 `click` + 键盘弹出。**页面侧输入面（焦点、归属、元素身份）在两次击之间没有可观测变化**，变化的只有"iOS 是否为这一击合成并派发鼠标/点击事件"。
+
+### 判别式（本轮 B 归因的唯一可观测判据）
+
+> **判据**：**"本击是否到达 native `mousedown` 且派发 `click`" ⇔ "软键盘是否顶起"**。
+>
+> 本会话强证据：**8/8 无反例**——5 次成功击（S1–S5）全部 `mousedown.tick` 递增 + `click` 计数递增 + 紧随 `vv.height 748→320`、`offsetTop 0→127` 键盘顶起帧；3 次失败击（F1/F2/F3）全部 `mousedown.tick` **冻结** + `click` 计数**不变** + `vv.height` **全程 748**。
+>
+> **该判据把"结果"与"原因"分开**：它**不**告诉你"为什么 iOS 没合成鼠标事件"，只告诉你**键盘不弹当且仅当**鼠标事件没到。**随机性因此被定位在 iOS 的鼠标事件合成决策上**——而**不是**"页面存在多个并列缺陷轮流触发"。这一点是本节相对矩阵 v2 的**最大进展**：矩阵 v2 把 A12 / A13 / A11 / A1 / A2 当作**并列**候选，真值表明它们**只能解释"鼠标事件没到"之后或之前的局部**，不能解释"同一像素、同一焦点状态、相邻两击一个到一个不到"。
+
+### 逐候选新状态（相对矩阵 v2 的更新；**排序数值化的依据，仍非"已归因"**）
+
+| 候选 | 基线描述 | 本轮真值给出的新状态 | 依据 |
+| --- | --- | --- | --- |
+| **A12** | `showModal()` UA 自动聚焦、`#wtTask` 无兜底 `focus()` | **正向支持（页面侧唯一尚可承重者，且仍不足以解释随机性）** | F2 / F3：目标为 DIALOG 内 `INPUT`（`activeInput.role=web-input`、`insideTerminalContainer=false`、`insideVisibleViewport=true`），击前 `activeElementTag` **已是 `INPUT`**、`ownership=HO-3`；`touchmoveCount=0` ⇒ **页面侧没有任何 `preventDefault` 机会**（`clickSuppressed=false` 是页面侧"无可归因拦截"的**正面读数**）。**即：页面已把焦点放对、也没拦输入，但 iOS 仍未把这一击变成鼠标/点击事件。** |
+| **A2**（局部） | document 级条件性 `touchmove` 锁 | **局部保留（1/3 失败击相关）** | F1（`seq174`）是唯一带 `touchmoveCount=1` 的失败击；目标 `BUTTON` 不在 `#terminal-container` 内 ⇒ 不被 `ownsTouchGesture`（`index.html:4442-4455`）豁免 ⇒ 落到 **`document` 锁 `index.html:4456-4460`** 的 `preventDefault`。该项**只解释 F1，不解释 F2/F3**。 |
+| **A1**（局部） | `#terminal-container` 的 hard page lock（`index.html:4498-4499`） | **局部保留（0/3 失败击命中，但不可排除）** | 3 次失败击的 `touchmove` 均**不发生在 `#terminal-container` 内**（目标为 DIALOG 内 `BUTTON` / `INPUT`），故 **A1 对 F1/F2/F3 无可归因面**；F1 归 `document` 锁（A2 线）而非 A1。维持"归口 Phase 4、不判死"。 |
+| **A11** | helper textarea 离屏 ⇒ 终端无原生可聚焦目标 | **削弱** | 3 次失败击发生在 **`HO-3`（`web-input`，非 xterm helper）** 语境，不涉及 helper textarea 可聚焦性；且失败击前后 `activeInput.insideVisibleViewport=true`。 |
+| **A13** | 非手势态 `focusTerminalIfPossible()` 抢焦 | **削弱（但仍须保全）** | 失败击前 `ownership=HO-3` ⇒ FOCUS-GUARD 守卫（`AUTH-20261105-P3-FOCUS-GUARD`，`index.html:8276+`）下 `focusTerminalIfPossible()` **不抢焦**；但**轮询确实存在**，且 52 条 `userActivation` 记录中有 **2 次程序化 `focusin`**（`tick=120`、`tick=256` 附近为 `focusout→focusin` 连发）**随后键盘随即抬起**，故"抢焦是否间接影响合成"**不能判死**。 |
+| **A8** | 重命名框 rAF 延时 focus | **无真值覆盖** | 步 4 / 5 无**元素 id 锚点**（`targetTag` 只到 `BUTTON`/`INPUT`/`DIV` 粒度），`mousedown` 只有单槽，无法把 rAF `focus()+select()` 的时机与任一失败击对齐。维持 INCONCLUSIVE。 |
+| **A7** | vendored xterm document 级 `touchend` `preventDefault` | **维持判死** | `touchcancelCount` **497/497 = 0**、`cancelled` 全帧 **0**，且该候选取的是 `touchend` 而非 `touchcancel` 通路，本轮无任何帧支持其成立。 |
+
+**候选新排序（数值化，仅排序，非结论）**
+
+> **A12 ＞ A2（局部，1/3 失败击）＞ A1（局部，0/3 命中且不可排除）＞ A13 ＞ A11 ＞ A8 ＞ A7（判死）**
+
+- **排序依据**：以"该候选能否解释**失败击 `mousedown` 缺失**"为主标，以"能否解释**随机性**"为副标。A12 与全部 3 次失败击的**击前状态**吻合（已聚焦、无 touchmove、无页面拦截）；A2 只解释 F1；A1 对 3 次均无命中面；A13 / A11 被 HO-3 语境削弱；A8 无覆盖；A7 判死。
+- **上浮限制**：**A12 排第一 ≠ A12 是根因**。A12 描述的是"`showModal()` 之后 `#wtTask` 已自动聚焦"，而**已聚焦本身是 iOS 正常行为**（第 2 击在同一已聚焦状态下就能弹出）——真正的断点在**"已聚焦 + 键盘自收后，iOS 是否对该击重新合成鼠标事件"**，这是**平台域**，不是 A12 代码域。故 A12 排第一**只表示"页面侧最值得先排除/先验证的一项"**，不表示"改 A12 就能修好"。
+
+### 撤销措辞（防上浮，本节的边界声明）
+
+- **不作"B 已归因"声明。** `AUTH-20261107-P3-PROBE-TOUCHV2` 交付的是**可观测判据**，不是根因。
+- **已闭环的是"页面侧可归因面"**：**3 次失败击中 2 次（F2 / F3）与页面无关、1 次（F1）与 `document` 锁相关（A2 线）；剩余根因在 iOS 对"已聚焦 + 键盘自收"之后是否重合成鼠标事件（平台域）。**
+- **不得据此改判**：F5 / S2 的 PASS 不变；R2 / R3 / R4 不整行关闭；矩阵 v2 的既有登记作**历史排序**保留，本节排序为**现行排序**；B 的**证据等级维持 INCONCLUSIVE**。
+
+### 缺口清单（本轮真值字段未覆盖、下一轮若要闭环必须补的）
+
+| # | 缺口 | 影响 | 补法（**仅建议，不签发**） |
+| --- | --- | --- | --- |
+| 1 | **tap 环上限 8**（`TAP_RING_MAX=8`，`viewport_debug.js:1009`） | 只能覆盖最近 8 链；本会话 29 链需跨帧归并 | 维持 8（体积预算），判读侧做集合差；或加大到 16 并重估体积 |
+| 2 | **`mousedown` 单槽**（`viewport_debug.js:1173-1182`） | 只记**最后一次** `mousedown`；同一帧内多次 `mousedown` 只留末条，**无法逐击对齐** | 加 `mousedownRing`（≤8，`{tick, targetTag, onTerminalHost, defaultPrevented}`） |
+| 3 | **无 `document.activeElement` @ `mousedown` 快照** | 无法证明"`mousedown` 到达时焦点已在目标上" | 在 `mousedown` 观察者内读 `doc.activeElement` 的 `tag/id/class`（只读） |
+| 4 | **无 `showModal()` 位** | 无法区分 DIALOG 打开/关闭的真实时机；本轮只能靠 `probe.visualBottom.tag` 反推段界 | 加 `dialogOpen` 布尔位 + 打开时刻 tick |
+| 5 | **无 `touches.length`** | 多指帧不可自证；单指假设靠"`unstable` 时序列单调"间接维持 | 每条 tap 记 `maxTouches` |
+| 6 | **`vv.height` 679.5 / 565.5 语义未定义** | `seq476` / `478` / `485` / `492` / `494` 出现非 320 / 748 高度，**语义未标定**（可能是分屏/Stage Manager/键盘过渡），本轮**不下任何结论** | 标定：记 `vv.height` 原始值 + `orientation` + `screen` 尺寸以备解释 |
+| 7 | **步 4 / 5 无元素 id 锚点** | `targetTag` 仅到 `BUTTON`/`INPUT`/`DIV`，无法绑定到具体控件；A8 因之无覆盖 | `targetTag` → `targetTag + id + 首段 class`（限长） |
+| 8 | **多指自证缺** | 本会话 `seed` 全单指但**探针不证** | 同缺口 5 |
+
+> **缺口对结论的影响（诚实边界）**：上列 8 项**不改变**"`mousedown`/`click` ⇔ 键盘顶起 8/8"这一**可观测事实**，也**不改变**"2/3 失败击与页面无关"的结论；但它们**确使**"为什么 iOS 不合成鼠标事件"**不可判**——这正是本节维持 INCONCLUSIVE 的**技术理由**，而不是措辞谨慎。
+
+### 状态与提交边界
+
+- **B 证据等级**：**INCONCLUSIVE**（归因排序已数值化，见上表）。
+- **F5 / S2**：PASS 登记**不变**（本节不重算、不改判）。
+- **R2 / R3 / R4**：**不整行关闭**（B 缺口仍在，R2 受本轮缺口影响）。
+- **提交边界**：本节为**docs-only**，与 PLAN 同批提交；raw `.jsonl` **不提交**（保持冻结归档、未跟踪）。
+- **下一轮建议（不签发）**：见 PLAN 同轮登记节。
+
+**本节结论**：真机 `touchTruth` 帧覆盖 **497/497**、`schemaRev` 一致、`touchcancelCount=0`、`userActivation` 52/52=true；**键盘顶起 ⇔ 本击 native `mousedown` + `click`（8/8 无反例）**；3 次失败击中 **F2/F3 与页面无关、F1 与 `document` 锁（A2 线）相关**；候选新排序 **A12 ＞ A2 ＞ A1 ＞ A13 ＞ A11 ＞ A8 ＞ A7（判死）**。**B 维持 INCONCLUSIVE**，不作"已归因"声明；剩余根因在**平台域的鼠标事件合成**，须 Phase 4 / 扩展真值字段另行处理。

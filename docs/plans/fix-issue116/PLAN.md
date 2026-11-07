@@ -311,6 +311,8 @@ opencode、reasonix、dsh 等 iframe 内输入由 iframe / Safari 处理。父�
 
 **阶段状态（2026-11-07 真机复验 p3-A-WEB-02 判读后）**：**任务 4 复验完成下列子项：F5 焦点常驻 PASS、S2 焦点常驻 PASS（均为帧级一致）；iframe 侧观察级 PASS；回归-重命名 INCONCLUSIVE；异常 B 未归因、维持登记。R2 / R3 / R4 未整行闭环。** 会话 `2a33f246…`（534 帧，seq 1–534 无缺口，`scale` 534/534 ≡ 1），逐子项 verdict、逐击分析与复核订正见 [VALIDATION“2026-11-07 Phase 3 真机复验 p3-A-WEB-02 判读”](evidence/VALIDATION-2026-11-04.md)。**R2 / R3 / R4 不整行关闭的理由**：R2 属本轮 B 缺口所在门禁——B 的两个子问题（“helper 持焦下键盘自行收起”32 次转变、同域内 click 派发随机）**均缺真值字段**，R2 的“普通 Web 输入自身由 Safari 保证可见”完整链路也未覆盖，故 R2 **受缺口影响、不整行关闭**；R3 的 iframe 内部焦点不可检视（12 帧 `occ` 0 仅父页数值面无干预）；R4 的实例切换 / PTY A→B 段本轮未覆盖。**子项 PASS 不上浮整行。**
 
+**阶段状态补充（2026-11-07 Phase 3 真机 p3-B-EVID-01 B 归因真值轮判读后）**：**B 处置 = 候选排序数值化「A12 ＞ A2（局部 1/3 失败击）＞ A1（局部 0/3 命中、不可排除）＞ A13 ＞ A11 ＞ A8 ＞ A7（判死）」，判别式 =「本击是否 native `mousedown` + `click`」⇔「键盘是否顶起（8/8 无反例）」；已闭环的只是「页面侧可归因面」（3 次失败击中 2 次与页面无关、1 次与 document 锁相关），剩余根因在 iOS 对「已聚焦 + 键盘自收」之后是否重合成鼠标事件（平台域 / Phase 4 D1 域）。B 证据等级维持 INCONCLUSIVE，不作「已归因」声明；F5 / S2 的 PASS 登记不变，R2 / R3 / R4 维持不整行关闭。** 判读细节见 [VALIDATION「2026-11-07 Phase 3 真机 p3-B-EVID-01 B 归因真值轮」](evidence/VALIDATION-2026-11-04.md)。
+
 **阶段状态补充（2026-11-07 owner B 最终决策登记后）**：**B 处置 = 维持 `2b64e7e` + 候选矩阵 v2 权重排序收口，归因闭环归 Phase 4；帧真值归因走探针 additive 增补路线，授权见下方 `AUTH-20261107-P3-PROBE-TOUCHV2`。** 本次"收口"收的是**处置决定**，**不是** B 的证据结论——**B 的归因状态维持 INCONCLUSIVE**。上述 F5 / S2 的 PASS 登记与 R2 / R3 / R4 的"不整行关闭"结论**均不变**。
 
 **异常 B 与 owner 回退建议的处置登记（2026-11-07，p3-A-WEB-02 同轮仲裁）**
@@ -658,3 +660,48 @@ owner 选择 B：**就此打住，未闭环项按已登记状态如实收束，P
 - **文档欠账（本轮已清）**：VALIDATION:741 的旧字段名已在同文档**追加订正注记**（不改写原行），无需另派 docs-only 工单。
 
 **本节结论**：`AUTH-20261107-P3-PROBE-TOUCHV2` 的编码产出经**第二轮双评审双双 APPROVE**，3 项 MAJOR **全部关闭**并有锚点；两处授权偏差（字段改名、`cancelled` 交叉校验）**追认，越权 = 否**；门禁 **8/8** 经**三方独立复跑**一致。**B 维持 INCONCLUSIVE**，真机帧判读为独立后续，不关闭 #116。
+
+### 12.6 Phase 3 真机 p3-B-EVID-01 B 归因真值轮判读（2026-11-07，`touchTruth`）
+
+> **本节性质**：**纯追加登记**。**不重新打开、不修改、不放宽** §12.1–§12.5 与 [VALIDATION 授权正文](evidence/VALIDATION-2026-11-04.md) 的任何授权语义、文件清单或禁止项；已签署与已登记正文**一字不改**。本节只**登记真机判读结果**，**不改任何产品／测试代码**，**不执行 `git add` / `git commit`**。判读全文（含逐击真值表、独立抽验表、缺口清单）见 [VALIDATION「2026-11-07 Phase 3 真机 p3-B-EVID-01 B 归因真值轮（touchTruth）」](evidence/VALIDATION-2026-11-04.md)。
+
+#### 12.6.1 会话与抽验（本仲裁**独立实测**，非转述）
+
+- **会话**：`382f4da6a88a077f8ac0fea79d8ff3d8`，**497 帧**（`seq 1–497` 连续无缺口），raw **已冻结归档未提交**，md5 `50e94c14540b5c74e5f840daf5dc87a4`（本仲裁 `md5sum` 复核一致）。工 HEAD `583681f`；工作区 `git status` 唯一未跟踪项即该 raw。
+- **探针身份**：`probeVersion=p9-full-shell-session-avoidance-v1`（未 bump，符合 §12.3 口径）；`schemaRev=p9-additive-touch-truth-v1` **497/497**；`touchTruth` 块 **497/497**。
+- **抽验 6 点全部独立复跑**（`a`–`f`）：`(a)` 覆盖 497/497 ✅；`(b)` F1/F2/F3 的环条目与 `mousedown.tick` 冻结（88 / 101 / 106 分别等于前序帧）✅；`(c)` S1–S5 的 native `mousedown` + `click` + 键盘顶起（`md.tick` 96/101/106/111/114、`click` 14/15/16/17/18、`vv 748→320` 且 `offsetTop 0→127`）✅；`(d)` `touchcancelCount` **497/497 = 0** ✅；`(e)` `userActivation` 去重并集 **52 条、52/52 `isActive=true`** ✅；`(f)` journal 四类**流入**条数 `64+68+27+25 = 184` 与 `counts` 相符 ✅，但**"零淘汰"表述不成立**——`TRACE_MAX_ENTRIES=16`（`viewport_debug.js:449`），终帧 `entries` 恰 16 条、**168 条已淘汰**，已按**订正注记**处理（不改写抽验原文）。
+
+#### 12.6.2 判读结论与候选新排序（**排序数值化，仍 INCONCLUSIVE**）
+
+- **判别式**：**"本击是否到达 native `mousedown` 且派发 `click`" ⇔ "软键盘是否顶起"**，本会话 **8/8 无反例**。该判据把**结果**与**原因**分开：它不解释 iOS 为何不合成，只把**随机性定位到 iOS 的鼠标事件合成决策**。
+- **失败击**：F1 `seq174`（`touchmoveCount=1`、`clickSuppressed=true` ⇒ 目标 `BUTTON` 不走 `ownsTouchGesture` 豁免，落 **`index.html:4456` document 锁** = **A2 线**）；F2 `seq197` / F3 `seq211`（`touchmoveCount=0`、`defaultPrevented=false` ⇒ **页面侧无可归因 `preventDefault`**，击前 `ownership=HO-3`、`activeElementTag=INPUT` ⇒ **A12 线**）。
+- **关键对照**：**F2（`seq197`）与 S3（`seq201`）同一 DIALOG、同一 `INPUT`、同一 `HO-3`、相隔 4 帧**，一个不弹一个弹——**页面侧输入面在两次击之间无可观测变化**。
+
+| 候选 | 本轮新状态 | 一句话依据 |
+| --- | --- | --- |
+| **A12** | **正向支持**（页面侧唯一尚可承重者，仍不足以解释随机性） | F2/F3：击前已聚焦 `INPUT`、`role=web-input`、`insideVisibleViewport=true`、`touchmoveCount=0` |
+| **A2** | **局部**（1/3 失败击相关） | 仅 F1 有 `touchmoveCount=1` 且目标在 `#terminal-container` 外 ⇒ `document` 锁 |
+| **A1** | **局部**（0/3 命中，不可排除） | 3 次失败击的 `touchmove` 均不在 `#terminal-container` 内 ⇒ A1 无可归因面；维持归口 Phase 4、不判死 |
+| **A13** | **削弱**（仍须保全） | 失败击前后 `HO-3` ⇒ 守卫下不抢焦；但轮询存在，52 条激活记录中 **2 次程序化 `focusin` 后键盘随即抬起** |
+| **A11** | **削弱** | 失败击发生在 `web-input` 语境，非 xterm helper 可聚焦性 |
+| **A8** | **无真值覆盖** | 步 4/5 无元素 id 锚点、`mousedown` 单槽，rAF `focus()+select()` 无法对齐 |
+| **A7** | **维持判死** | `touchcancelCount` 497/497 = 0、`cancelled` 全帧 0 |
+
+**候选新排序（现行排序；矩阵 v2 作历史排序保留，不改写）**：**`A12 ＞ A2（局部）＞ A1（局部）＞ A13 ＞ A11 ＞ A8 ＞ A7（判死）`**。
+
+- **排序是排序，不是结论**（复用 §12.4 口径）：A12 排第一**只表示"页面侧最值得先排除/先验证的一项"**，**不表示**"改 A12 就能修好"——**已聚焦本身是 iOS 正常行为**（第 2 击在同一已聚焦状态下就能弹出），断点在**平台域**的鼠标事件合成。
+- **随机性的重新定位**：矩阵 v2 隐含"多个页面缺陷并列、随机触发"的模型；本轮真值**不支持**该模型——**随机性在"iOS 对已聚焦 + 键盘自收后的这一击是否重合成鼠标事件"**，不在"页面多个缺陷轮流命中"。
+
+#### 12.6.3 撤销措辞与状态边界（**防上浮**）
+
+- **不作"B 已归因"声明。** 已闭环的**仅是"页面侧可归因面"**——**3 次失败击中 2 次与页面无关、1 次与 document 锁相关**；**剩余根因在 iOS 对"已聚焦 + 键盘自收"之后是否重合成鼠标事件（平台域）**。
+- **B 的证据等级维持 INCONCLUSIVE**（归因排序**已数值化**，但根因未落到可修页面点）。
+- **F5 / S2 的 PASS 登记不变**；**R2 / R3 / R4 维持不整行关闭**；不据此改判任何既有帧级 verdict；§12.1 的"维持 `2b64e7e`"、§12.4 的"矩阵权重与结论的分界"**继续有效**。
+- **缺口清单（8 项，判读须知）**：tap 环上限 8 / `mousedown` 单槽 / 无 `activeElement`@`mousedown` 快照 / 无 `showModal` 位 / 无 `touches.length` / `vv.height` 679.5–565.5 语义未定义 / 步 4、5 无元素 id 锚点 / 多指自证缺。全文见 VALIDATION 同节。
+
+#### 12.6.4 建议（**不签发，owner 决定**）
+
+- **若 owner 要最终闭 root，唯一稳健路径仍是 Phase 4**（D1 own-viewport：键盘自收 / 再入路径按登记重设计）——因为断点位于平台合成域，页面侧候选已无剩余承重项。
+- **替代路径 = 一轮扩展真值字段授权**（`touches.length` / `showModal` 位 / `vv.height` 语义标定 / `mousedown` 多槽）——**本仲裁不签发**，仅**建议**；是否派单由 **owner 决定**。
+
+**本节结论**：`touchTruth` 真机帧给出了**可观测判据**（native `mousedown` + `click` ⇔ 键盘顶起，8/8 无反例）与**数值化排序**（`A12 ＞ A2 ＞ A1 ＞ A13 ＞ A11 ＞ A8 ＞ A7`）；**页面侧可归因面已闭环（2/3 失败击与页面无关、1/3 与 document 锁相关）**，**剩余根因在平台域**。**B 维持 INCONCLUSIVE**，不作"已归因"声明；本节**不签发**任何新授权、**不关闭** R2 / R3 / R4 或 #116。
