@@ -740,6 +740,8 @@ C 会话还包含多轮额外滚动/平移与窗口变化，不能用上述局�
 | `touchTruth.userActivation[]` | 最近 8 条 `{ kind: "focusin"|"focusout", isActive: bool\|null, tick }`（`isActive` 读 `navigator.userActivation.isActive`，不可得 ⇒ `null`，**禁补零**） | 只读快照 |
 | `touchTruth.mousedown` | `{ synthesizedOnTerminalHost: int, targetTag: string(限长 ≤32), defaultPrevented: bool, tick }`，只记**到达**与真值 | 见下方硬红线 |
 
+> **订正注记（2026-11-07 追加；上一行原样保留，不改写）**：上表 `synthesizedOnTerminalHost` 为**签署时的字段名**；本包返工后**实际实现为 `onTerminalHost`**（事由 = 评审 M3：`synthesized` 声称了探针无法铸造也无法读取的信任分类，属过度承诺）。**语义不变**——两端均已声明"**不区分合成与真实**"。旧名在服务端**锁死为 400**（`internal/app/viewport_debug_test.go:1336`，实跑 PASS），无静默兼容。追认全文见下方"PROBE-TOUCHV2 评审轮与返工追认（2026-11-07）"与 [PLAN §12.5](../PLAN.md)。
+
 - `dy` 以 **CSS 像素为正**记录（`clientY` 方向，与产品 `activeTouchLastY - touch.clientY` **同号**）；仅记 `e.touches[0]` 的纵向位移，**不记横轴、不记坐标、不记时间戳原文**。
 - 每帧**新增体积上限 ≈ 3.5KB**（8 × ≤300B + 8 × ≤80B + 常数）：编码**必须**在直接测试中加一条"帧字节数 ≤ 16KB"的量级断言，**防止**逼近 64KiB 门限。
 - 新增监听**必须**走既有 `observeOnly()` / `listeners` 注册与 `stop()` 三元组摘除路径；**不得**新增 start/stop 旁路、不得在 `stop()` 后残留监听。
@@ -801,3 +803,61 @@ C 会话还包含多轮额外滚动/平移与窗口变化，不能用上述局�
 - 实测发现 64KiB 门限被逼近（单帧 > 16KB）⇒ 停止，回仲裁，**不得**自行删减既有字段或提高 body limit。
 
 **本节结论**：`AUTH-20261107-P3-PROBE-TOUCHV2` **已签署**（基线 `cc9a8d8`，允许面 = 探针 additive 块 + 服务端放行 + rev 三数并存 + 测试新增），**待调度者独立派单**。授权生效**不等于** B 已归因、**不等于**任何 verdict 变动；B 的证据状态维持 **INCONCLUSIVE**，直到**真机采到含 `touchTruth` 的帧并另行判读**。
+
+## 2026-11-07 PROBE-TOUCHV2 评审轮与返工追认（纯追加登记）
+
+> **本节性质**：**纯追加**。上方 `AUTH-20261107-P3-PROBE-TOUCHV2` 的**已签署正文一字不改**；本包与之不符的两处（字段名、枚举外校验）以**订正注记 + 追认**处理。本节**不重新打开、不修改、不放宽**该授权的任何语义、文件清单或禁止项。
+> **基线**：`cc9a8d8`；工 HEAD `d1bc6c8`；被评审对象 = 工作区**未提交**的 5 文件改动。本仲裁轮**只读代码**，**不改产品／测试文件**，**不执行 `git add` / `git commit`**。
+> **对应登记**：[PLAN §12.5](../PLAN.md)（同一内容的计划侧落点）。
+
+### 双评审结论（首轮 → 返工 → 第二轮）
+
+| 评审 | 首轮 | 第二轮 |
+| --- | --- | --- |
+| 1 号 `opencode-go/muse-spark-1.3-contributor` | **APPROVE** | **APPROVE**：M1 / M2 / M3 全关（逐项锚点），8/8 门禁绿；遗留 MINOR×3 / CHALLENGE×1 |
+| 2 号 `minimax-cn/MiniMax-M3.1-Flash` | **NOT APPROVE**（MAJOR×3） | **APPROVE**：`/tmp` 内**变异实测**证明 M3 负例**承重**；`synthesizedOnTerminalHost` 生产代码**0 残留**（仅测试护栏 2 处）；6 项门禁全绿（a–f 原文）；遗留 MINOR×4 / CHALLENGE×3 |
+
+**3 项 MAJOR 的修复与关闭锚点**（行号为本工作区实际，仲裁已独立复读源码核对）：
+
+| MAJOR | 问题本质 | 修复落点 | 关闭锚点 |
+| --- | --- | --- | --- |
+| **M1** `mousedown.defaultPrevented` 相位结构不可读 | capture 相位早于产品 TARGET/BUBBLE 的 `preventDefault`，当场读恒 `false` ⇒ **字段测不出真值** | 延迟回读 + 引用即弃 | `viewport_debug.js:1077`（`pendingMousedown = null`）、`:1182`（只存引用）、`:1187-1189`（`report()` 回读后**置 `null`**）、`:1175-1179`（暂定值不发布）、`:968-976`（相位理由） |
+| **M2** 配套用例用测不出真值的字面量 | 自证自话，读点错了用例仍绿 | 派发后置真值 + 二次帧防回溯 | `viewport_debug.test.mjs:2264` / `:2266` / `:2267` / `:2273`；防回溯 `:2276-2283` |
+| **M3** 宿主命中口径不同源 + `synthesized` 命名过度承诺 | 与 ownership 谓词**不同源**；名称声称信任分类 | 窄口径同源 + 改名 + 负例 | 口径 `viewport_debug.js:1045-1065`；负例 `viewport_debug.test.mjs:2301-2307`；命名 `:1173` + `:1167-1170` 声明不区分合成与真实 |
+
+> **锚点归属澄清（本仲裁实测）**：1 号第二轮所给"负例 `:2301-2307`"**位于 `viewport_debug.test.mjs`**，`viewport_debug.js:2301-2307` 是启动序列、与负例无关。此处按**测试文件**登记，结论不变。
+
+### 两处授权偏差的追认（**越权 = 否**）
+
+**偏差 A · `synthesizedOnTerminalHost` → `onTerminalHost`**：授权正文（上方允许改动表 `touchTruth.mousedown` 行）写的是旧名；实现用新名（`viewport_debug.js:1173`、Go 孪生、测试多处）。事由 = 评审 M3；**语义两端均已声明"不区分合成与真实"**。**追认**：属**授权同意的字段面内的名称收窄**，不扩大采集面、不弱化只读性，且旧名被 **400 锁死**（见下）。上方该行已加**订正注记**（原行保留）。
+
+**偏差 B · 服务端交叉校验 `cancelled ⟺ endType == "touchcancel"`**：授权正文枚举清单（上方"② 服务端放行"节）未列此项；实现 `viewport_debug.go:1277-1282` 拒收矛盾帧（400），事由 = 调度者派单**小项 2**。**追认，定性为「附加一致性校验」，非门禁语义扩权**：①只校验**同一事实两种写法**是否自洽（`:514-525` 同口径），不引入新事实维度；②**只拒自相矛盾帧**，不使任何自洽合法帧失败，与"旧 rev 帧永远可上传、不 backfill"**不冲突**；③走既有 `validateViewportDebugReport` 通道，**未触碰** TTL／容量／体积机制与"新字段进 verdict"两条红线。
+
+**"越权 = 否"的三条总理由**：①**字面量护栏 400（测试锁死）**——旧名 `viewport_debug_test.go:1336`、`cancelled` 矛盾 `:1330-1331`（双向），均实跑 PASS；②**口径收紧方向与禁止清单无冲突**——`index.html` 零改动、`evidence/*.mjs` 零改动、`PROBE_VERSION` 未动（`viewport_debug.js:80`）、`SCHEMA_REV` = `p9-additive-touch-truth-v1`（`:344`）、服务端三 rev 并存（`viewport_debug.go:95`）、无 `passive:false`、`mousedown` 监听零 DOM 写；③**`dyMax` 语义落差 = 措辞落差，不死结**——授权正文只列字段名未定义语义，实现取**单步 `max |dy|` 幅度**（`viewport_debug.js:1134-1135`），`dyCumulative` 为带符号累加；**判读以"幅度 = 单步 max abs"为准**，不改写授权正文。
+
+### 遗留项分级（**只登记，不阻塞提交**）
+
+- 1 号 **MINOR×3** / **CHALLENGE×1**、2 号 **MINOR×4** / **CHALLENGE×3**：均为**后续判读须知 / 低优先留待**，不含停线项。
+- **多指帧须标注**：`viewport_debug.js:996-1002` 的 KNOWN 多指限制已声明；任何多指帧的 `taps[]` 不得作单指真值使用（B 为单指，不阻塞）。
+- **`display:none` 不对称**：`index.html:3931-3932` 含 `style.display !== "none"` 条件，`mousedownInsideTerminalHost` 不含（`viewport_debug.js:990-994` 已声明为字段边界）——后续判读须知，不在本包修。
+- **文档欠账**：上方 `synthesizedOnTerminalHost` 旧名已由**本轮 docs-only 订正注记**清账，不需另派工单。
+
+### 门禁：8 项、三方独立复跑
+
+| # | 项 | 数字 | 2 号 | 本仲裁轮独立复跑 |
+| --- | --- | --- | --- | --- |
+| 1 | `viewport_debug.test.mjs` | **54 / 0** | ✅ | ✅（帧 8735B，`touchTruth` 1565B，门 65536，预算 16384） |
+| 2 | Go `viewportdebug` 双包 | **ok / ok** | ✅ | ✅ |
+| 3 | Go 三锚点 | **ok** | ✅ | ✅ `-count=1` 非缓存重跑，三项 PASS |
+| 4 | `verify-live-choiceA.mjs` 离线 | **PASS** | ✅ | ✅（`.mjs` 零改动） |
+| 5 | `viewport_height` | **40 / 0** | ✅ | ✅ |
+| 6 | `zoom_scale` | **37 / 0** | ✅ | ✅ |
+| 7 | `sidebar_wt_rename` | **18 / 0** | ✅ | ✅ |
+| 8 | `focus_terminal_guard` / `terminal_status` | **5 / 0** · **68 / 0** | ✅ | ✅ `5 / 0` · `68 / 0` |
+
+### 状态与提交边界
+
+- **提交边界**：产品／测试**同 diff 一个原子提交**（`internal/ui/debugassets/viewport_debug.js` + `internal/app/viewport_debug.go` + 三处测试同步面）；**文档登记单独提交**。措辞与 `AUTH-20261105-P3-FOCUS-GUARD` 既有边界一致（PLAN:272 / :289 / :300）。
+- **本授权不 substitute 真机**：离线全绿 + 双 APPROVE **不产生**真机触摸证据。**B 的证据状态维持 INCONCLUSIVE**；`touchTruth` 真机帧的采集与判读为**独立后续**，**owner = 调度者**（约时安排）。本节**不**关闭 R2 / R3 / R4，**不**改判任何 verdict。
+
+**本节结论**：`AUTH-20261107-P3-PROBE-TOUCHV2` 编码产出经**第二轮双评审双双 APPROVE**，M1 / M2 / M3 **全部关闭**并有锚点；两处授权偏差（字段改名、`cancelled` 交叉校验）**追认，越权 = 否**；门禁 **8/8** 经**三方独立复跑**一致。**B 维持 INCONCLUSIVE**，真机帧判读为独立后续，不关闭 #116。
