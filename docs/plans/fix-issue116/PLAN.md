@@ -1161,3 +1161,71 @@ owner 选择 B：**就此打住，未闭环项按已登记状态如实收束，P
 | **服务 / 证据卫生** | **`p5` 独立进程（pid 1178118）由调度者收工清理**（**在收口后执行，非本登记内容**）；**主 / 补 raw md5 与归档 commit 已入 §17.10** |
 
 **本节结论**：Phase 5 按 **owner 决定收口**——**L2「键盘开着刷新」按「平台前提不可达 + owner 接受不补采」闭格**；**逐场景 final verdict 冻结**（**Z1 / Z4 子项 PASS；Z2 / Z3 与 Z5 行为子项 PASS（owner-attributed）、Z5 门线 INCON；L1 缺口闭合；L2 / L4 / L6 按 owner-attested 与 probe 盲区口径；L5 数字更正；I1 子项 PASS + HO-4 INCON；P5-D 完成**），**无一处虚标 PASS、INCON 均有成因声明**；**Phase 6 真机终验阻塞不再来自 Phase 5 未采项**。本节**不关闭 #116**、**不宣称 R1–R6 通过**、**不改写 §17.x**。
+
+## 19. Phase 6 离线收束（2026-11-07）
+
+**本节性质**：**纯追加**。本节只登记 **Phase 6 任务 1（离线门禁）** 与 **任务 3 / 任务 4 的文档与回退清点** 的**执行结果**；**不关闭 #116**、**不宣称 R1–R6 通过**、**不改写 §13–§18**、**不改写任何 raw 证据**。Phase 6 的**真机终验（任务 2）不在本节执行范围**，其前置以 §18.4 为准。
+
+### 19.1 离线门禁六项（执行基线 `97df3d0` 及本节前两个文档提交）
+
+| # | 门禁 | 命令 | 结果 |
+| --- | --- | --- | --- |
+| 1 | 诊断专项（ON 变体） | `go test -tags viewportdebug -run ViewportDebug ./internal/ui ./internal/app` | **2/2 包 ok**（`internal/ui` 0.691s、`internal/app` 0.067s） |
+| 2 | 全仓 Go | `go test ./...` | **22 包 ok / 0 FAIL**（另 2 个 `cmd/*` 无测试文件） |
+| 3 | Node 全量 | `node --test internal/ui/testdata/*.mjs` | **450 例 / 20 文件 / pass 450 / fail 0** |
+| 4a | 折门禁工具（自检） | `node docs/plans/fix-issue116/evidence/verify-sop.mjs --self-test` | **54/54 fixture 判定符合规范**（exit 0） |
+| 4b | 折门禁工具（真实源码） | `node docs/plans/fix-issue116/evidence/verify-live-choiceA.mjs --html internal/ui/static/index.html` | **工具输出 PASS**（`offline bytes: 575654`；工具自身结论，**不是**真机验收结论，见 19.5） |
+| 5 | 格式 | `gofmt -l internal/` | **空** |
+
+**口径说明**：
+
+- 第 1 项为 **`viewportdebug` ON 变体**，与无 tag 的同名 `-run`（仅覆盖 OFF 变体与不限标签的 JS 包装测试）**不是同一门禁**；本节按 §5 Phase 6 任务 1 要求的 ON 形式执行。
+- 第 3 项 **450 例** 是 20 个文件的合计；三个被 CHANGELOG 引用的文件按 `^test(` 实测：`zoom_scale` **37**、`tty_resize_refit` **16**、`terminal_status` **71**。
+- 第 4b 项 `verify-live-choiceA.mjs` 的 PASS 是**该离线工具对仓库字节的判定**；§8 口径不变——**Headless / 离线工具不能替代真机**，不得据此推出任何真机结论。
+
+### 19.2 提交链（`eb9afc3..` 追加，倒序执行、正序列出于下）
+
+`a55bbec` → `e4c771f` → `24ef436` → `773e2b7` → `628911d` → `5451845` → `9a3022e` → `0c006d2` → `b39f487` → `04c3719` → `9043840` → `d736bf8` → `5215db9` → `f9df156` → `937b6ae` → `e357a7f` → `8e87606` → `64a1e87` → `10f47b6` → `bb983c1` → `ea916a3` → `d071a95` → `ea4b4c4` → `399efe8` → `97df3d0` → `7b00450` → `984b910` → **本节**。
+
+**数量**：本节之前 `eb9afc3..HEAD` 共 **27 个提交**，含本节提交后为 **28 个**（`git log --oneline eb9afc3..HEAD | wc -l` 实测）。
+
+**产品面与测试面各几个，须逐项说清**：
+
+- **触及产品代码（`internal/ui/static/`）的提交只有 1 个：`a55bbec`**。`773e2b7` 虽在提交信息里与 `a55bbec` 并列引用，但**实际只改 `CHANGELOG.md` 与 `internal/ui/testdata/terminal_status.test.mjs`，是纯测试提交**（`git show --name-only 773e2b7` 为证）。此前若按「产品变更 2 个」计数，与仓库事实不符，本节按事实更正。
+- 产品 diff 合计（`git diff eb9afc3..HEAD --stat -- internal/ui/static internal/ui/testdata CHANGELOG.md`）：**4 files changed, 123 insertions(+), 4 deletions(-)**，其中 `internal/ui/static/kinds/pty.js` **+13**、`tty_resize_refit.test.mjs` **+34**、`terminal_status.test.mjs` **+70/−2**、`CHANGELOG.md`。
+- 其余 25 个为 **PLAN / SOP / 证据归档 / CHANGELOG 计数同步** 类文档提交。
+
+### 19.3 文档收束清单
+
+| 动作 | 载体 | 结果 |
+| --- | --- | --- |
+| **CHANGELOG** | `CHANGELOG.md` 顶部 Unreleased | 提交 `7b00450`：**一条 #116 收束条目**，概括非对称缩放避让 + 前台 PTY 宿主所有权 + activate/旋转 + 竞态窗口收敛；coverage 引三文件实数 **37 / 16 / 71**；**未使用**被 `TestTerminalStatusChangelogCount` 活体守卫的 `Pinned by N \`node --test\` cases` 短语（全文件该短语仍仅 1 处，值 71）。验证：`TestTerminalStatusChangelogCount` / `TestResponsiveLayerChangelogCounts` **PASS**，`go test -count=1 ./internal/ui` **PASS** |
+| **CHANGELOG 计数同步** | 同上 | 已在前序提交 `24ef436` / `9a3022e` 完成，本节未再改 |
+| **兼容性说明** | `docs/IPADOS-UI-COMPATIBILITY.md` | 提交 `984b910`：**纯追加 §10**（10 行新增 / 0 删除），登记 #116 对 `5268869` 基线的叠加；§1–§9 **逐字未改** |
+| **PRD** | `docs/PRD.md` | **不动**。其 §7 仍描述**已被本分支撤除的 v2.1「钉 `#app` 内联高度」**机制（`applyVisualViewportHeight` 在现行 `index.html` 中**已不存在**，实测 grep 计数 0），追加注记会与紧邻段落直接矛盾，而修正它等于改写既有内容——按「宁缺勿乱」**跳过**，**以 PLAN §18 / 本节为准** |
+| **设计稿状态** | `docs/plans/fix-issue116/design/` | **不动**（历史资产，`EXPORT-MANIFEST.md` 的 v5 签署口径仍在）；本节未改任何 `.pen` / PNG / PNG 清单 |
+
+### 19.4 回退点清点
+
+| 回退点 | `git cat-file -e` | 语义 |
+| --- | --- | --- |
+| `2e857de` | **存在** ✓ | 原先的稳定基础版本 |
+| `5268869` | **存在** ✓ | 本计划冻结的完整兼容性机制基线 |
+| `47c5c3e` | **存在** ✓ | 输入归属原则提交 |
+| `a55bbec` | **存在** ✓ | 唯一的**产品行为**提交 |
+
+**独立可回退段**：
+
+- `git revert --no-commit a55bbec`：撤回 **activate() 主动请求实测尺寸**（改回「等下一帧 ResizeObserver」）及其同日结构测试；**这是唯一会改变用户可见行为的回退**。
+- `git revert --no-commit 773e2b7`：撤回 **activate witness 的行为化断言**与 CHANGELOG 中 terminal_status 计数 68→71 的同步。**注意依赖**：该 witness 断言 activate 会调用 `queueTTYResize`，而该调用由 `a55bbec` 引入（`pty.js` 第 357–358 行）——**单独 revert `773e2b7` 是安全的（只删测试），但若先 revert `a55bbec` 而保留 `773e2b7`，该 witness 会失败**；两个一起回退时**先退测试、后退产品**，或按 `a55bbec` 的单个 revert 一次性处理。
+- 文档提交 `7b00450` / `984b910` / 本节：各自独立可回退，互不依赖产品行为。
+
+### 19.5 诚实边界
+
+1. **本节不宣称 #116 修复完成**，只登记收束状态；**#116 维持开放**。
+2. **R1–R6 未整行关闭**：本节未把任何一行从 `INCON` 改为 `PASS`；`KNOWN-P4-SEQ-GRACE` / `KNOWN-P4-PAN` 维持**接受不修**（§16.1 / §16.2）。
+3. 全绿的是**离线门禁**（§19.1 六项），**不是真机验收**。真机结论以 §13–§18 的逐场景 verdict 为准，且其中仍含 **INCON 与 owner-attributed 项**。
+4. Phase 6 **任务 2（真机截图 / 几何矩阵）不在本节执行范围**；其前置缺口按 §18.4 处理。
+5. **合并与关闭 #116 由 owner 执行**——本节**未**执行 `git push`、merge 或 issue 关闭，也不代表 owner 已批准这些动作。
+
+**本节结论**：Phase 6 的**离线面已收束**——门禁六项全绿、提交链事实清点完成（**产品提交实为 1 个：`a55bbec`**，此前「2 个」的计数已在 §19.2 更正）、文档收束落在 CHANGELOG 与兼容性说明（PRD 按「宁缺勿乱」不动）、回退点 `2e857de` / `5268869` / `47c5c3e` 可回退性确认。**#116 维持开放**，**不宣称 R1–R6 通过**，**合并与关闭留给 owner**。
