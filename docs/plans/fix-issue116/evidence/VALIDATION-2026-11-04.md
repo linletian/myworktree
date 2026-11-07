@@ -498,6 +498,7 @@ C 会话还包含多轮额外滚动/平移与窗口变化，不能用上述局�
   - **获得支持的部分**（可写为帧事实）：helper 持焦与键盘收起可以并存且互不打扰（第 5 点：32 次 active→recovering 转变，`focusin`/`focusout` 增量全 0）；同一点击前帧域内 click 派发呈随机二分（第 2 点）；守卫前后同形（第 6 点）。
   - **未获支持 / 已削弱的部分**：owner 早前的“固定两击、staged/unstaged 标题专有”前提**被 a22c 帧推翻**（第 7 点）；本轮也**不显示守卫引入新机制**（第 4、6 点）——但**这同样不等于“已证守卫无关”**，只等于“帧内找不到守卫参与的痕迹”。
   - **未能归因的部分（缺口，不可强化为已归因）**：cause 段的页内诱因——`touchend` 处理、`pointermove` 抖动、`preventDefault` 调用、以及“键盘为何在 helper 持焦时收起”——**探针均无真值字段**。在没有这些字段前，本节**只发布“click 派发随机 + 焦点未丢 + 无守卫拒绝帧”三项帧事实**，**不发布 B 的根因**。
+    > **订正注记（2026-11-07，代码级审计追加，不改本行上文结论）**：上句中“`preventDefault` 调用——探针均无真值字段”**需收紧**：探针缺的是**调用计数／真值字段**，而 `preventDefault` 的**调用点**可静态定位，且终端 tap 链上**确认存在且仅存在一处无条件出口**——`internal/ui/static/index.html:4499`（`initTerminalTouchScroll` 的 `touchmove` 首句，`{ passive: false }` 见 `:4523`）。该调用点构成 A1 候选，详见本节末新增小节 **[代码级候选补登（2026-11-07）](#代码级候选补登2026-11-07)**。**本行的“缺口／不可强化为已归因”结论本身不变**：A1 仍未逐击验证，B 仍未归因。
 - **与 PLAN 复验条款的关系**：PLAN `AUTH-20261105-P3-FOCUS-GUARD` 复验条款写明“若同一会话仍复现 B，则同根假设被削弱、转独立归因再议”。本轮同一会话仍复现 B，但**削弱的是 owner 的“固定两击 / 标题专有”前提**，不是“poll 先聚焦宿主”这一机制假设本身——后者反获支持。**唯一可确证的同根命题（F5 与 B 共享同一 `focus()` 抢焦根因）不能被本会话证实**，因为 F5 的抢焦路径（宿主外可编辑元素被抢回）与 B 的路径（宿主内 helper 已持焦、click 未派发）在帧上**是两条不同形态**。故本节按“**同根假设降级为部分支持、B 转独立归因候选**”登记，**不作同根假设成立的裁决**。
 
 ### 复核订正（对上游转述的实证修正，以 raw 为准）
@@ -523,3 +524,43 @@ C 会话还包含多轮额外滚动/平移与窗口变化，不能用上述局�
   3. `focusTerminalIfPossible()` **拒绝路径的计数**（只计数、不改行为），使“守卫参与与否”从不可证伪变为可测；
   4. **键盘真值旁证**（如 `visualViewport` 与 `focusin` 之外的可观测代理，或 owner 同场目测记录表）。
 - **替代路线（成本更低，可先做）**：在**守卫前 `0258f1e` 构建**上重采一段**同时包含 F5 与 B** 的会话——若守卫前同段也能出现“helper 持焦 + 键盘收起”帧，则“B 与守卫无关”由**对照实证**取代当前的“帧内无痕迹”推断。此路线**不需改探针**，但需 owner 一次真机操作。
+
+### 代码级候选补登（2026-11-07）
+
+**补登性质**：本节为对上述 p3-A-WEB-02 判读的**追加**，不改写其既有任一行的结论。作用有两层：①补登一条**代码级机制候选**（帧证据之外的新证据类型）；②**更正**上节“同根假设本轮状态”中“未能归因的部分（缺口／不可强化为已归因）”末句的措辞——该句把“`preventDefault` 调用”整体写成“探针均无真值字段”，实际只有**调用计数**缺真值字段。**本节不撤回“同根假设部分支持”的既有登记**，也不发布 B 的根因。
+
+**证据口径声明**：本节全部结论来自**只读源码审计 + 独立复核**，**不是真机证据**；它不产生任何新帧、不取代帧级 verdict、不上浮为任何子项 PASS／FAIL。凡“探针未记录该量”处，一律保持不可证伪，不写为“已证”。
+
+#### A1（唯一残余代码候选）：`#terminal-container` 的无条件 `touchmove` `preventDefault`（页面硬锁）
+
+- **锚点（逐行复核成立）**：`internal/ui/static/index.html`
+  - `:4485` `function initTerminalTouchScroll()`；`:4486` 取 `#terminal-container` — 即 **xterm 主机的父容器**（主机由 `createTerminalHost()` 在 `:7273` `document.getElementById("terminal-container").appendChild(host)` 追加，主机 `:7271` 为 `position:absolute; inset:0`），故宿主／helper 上的触摸**必然**冒泡到该容器。
+  - `:4488-4497` `touchstart` 监听器为 `{ passive: true }`，只记 `activeTouchId` / `activeTouchLastY` / `touchScrollRemainderPx` 复位，**不调用 `preventDefault`**——tap 的起点在此不被干预。
+  - `:4498` `container.addEventListener("touchmove", …)`，`:4499` 首句 `e.preventDefault(); // hard page lock — all iOS, session or not`，`:4523` 注册为 `{ passive: false }`。该调用位于 `:4500` 的 `activeTouchId === null` 早退**之前**、也位于 `:4509` 的会话查询之前，故**无会话、多指中止（`activeTouchId === null`）、位移为 0（`:4508`）等所有分支一律先锁页面**。
+  - 追溯判据：`touchstart` 先把 `activeTouchLastY = clientY`（`:4491`）；同一 tap 序列中**首个** `touchmove` 即在 `:4506` 算出 `dy`，**`dy === 0` 也会先经过 `:4499`**。即“tap 期间是否发生 touchmove”是开关，“位移是否超过阈值”不是。
+- **测试背书（双重）**：
+  - `internal/ui/testdata/terminal_touch_scroll.test.mjs:143` 断言 `touchmove` 注册项 `{ passive: false }`，**:151** 断言 `down.prevented === true`（"touchmove hard-locks the page"），**:190** 在多指中止路径上再次断言 `move.prevented === true`（"the page lock is unconditional"），**:199** 断言**无会话**时 `move.prevented === true`。文件头 `:6-7` 与 `:15` 明文把该 `preventDefault` 记为 "the unconditional non-passive touchmove preventDefault hard-locks the page rubber-band on every iOS version"、"the no-session lock"——**即契约刻意要求“任何 touchmove 即吞”**，A1 的语义是**被测试签名的预期行为，不是回归缺陷**。
+  - `internal/ui/ui_test.go:2119-2142` 另有一层 Go 级断言：`initTerminalTouchScroll` 必须含 `e.preventDefault();`，且 `:2141-2142` 明确要求 `preventDefault` **先于** `getActiveTerminalSession()`——同样把“无条件先锁”写成强制契约。
+  - **覆盖缺口（如实登记）**：`node` 测试以 `touchEvent()` 桩事件驱动（`:99-105`），**从不验证浏览器在 `preventDefault` 之后是否仍合成 `click`**；Go 测试只做源码包含性断言。故**现有测试既不支持也不反驳 A1 的 iOS 语义，只能证明代码形态稳固**。
+- **机制（按 iOS/WebKit 事件语义的推断，非实测）**：WebKit 在 `touchend` 后合成 tap `click` 时，若该手势的任一分量已触及 `cancelable` 且已被 `preventDefault` 的 `touchmove`，手势被取消、**后随 `click` 不派发**。因此：用户 tap 若在按下—抬起之间**指尖产生任何 touchmove**（哪怕 `dy` 为 0，只要事件被派发），`:4499` 即吞掉默认行为 → 无 `click` → 落在 xterm 内 `textarea` 上的“聚焦／唤键盘”动作不发生 → **键盘不弹**；下一击若恰好无 touchmove，则正常弹。**随机性来源 = 指尖是否产生 touchmove，属自然的物理随机，与“无复现规律”的 owner 自述形态吻合。**
+- **与已登记帧事实的衔接（不越级）**：A1 方向**与**上节“异常 B 逐击分析”第 1 点（helper taper 44 派发 / 25 不派发）及第 2 点（同一点击前帧域内两类并存、区分度为零）**相容**——若 `click` 缺失由逐击的触摸抖动决定，则任何**点击前**静态快照字段（`occ` / `vv.height` / `derivedState` / `activeElement`）都不可能有鉴别力，这恰好解释了第 2 点的“互有大量反例”。同时 A1 **不解释**第 5 点“helper 持焦时键盘自行收起”（32 次 active→recovering 转变、零焦点事件），该缺口**独立保留**。
+- **存在于守卫前构建（a22c 同形闭合）**：a22c 归档提交 `d1ccbb6` 中的 `internal/ui/static/index.html:4499` 为**逐字相同的** `e.preventDefault(); // hard page lock — all iOS, session or not`（`initTerminalTouchScroll` 同在 `:4485`），行号亦相同。**证据强度边界**：raw 帧含 `probeVersion` / UA / 几何，但**不含 git 构建身份字段**（已核 2a33 与 a22c 首帧），故“a22c 运行的就是该源码”仍属**已知前提上的推断（与该会话登记时的构建口径一致）**，不是探针直证。由此可作**机理性闭合**：A1 在守卫前后**同时存在** ⇒ 它能统一解释两轮同形的 no-click 样本，**且回退不改变 B**。
+- **状态：候选，未归因。** 未达“已归因”，理由三条：① iOS 的“touchmove `preventDefault` ⇒ 抑制 tap `click`”语义**未在本仓库实测**（无真机 + 无探针字段）；② 帧证据中**没有** `touchmove` 计数／`dy` 分布／`clickSuppressed` 真值，无法把某一次 no-click tap **逐击**对上 A1；③ A1 只能解释“click 缺失”，尚不能解释“键盘收起”与“click 已派发但键盘仍不弹”（若有）等其余形态。**故本节只登记 A1 为“最具体、且与两轮帧形态与 iOS 语义均相容的残余代码候选”，不登记为 B 的根因。**
+
+#### 既有排除项复核（抽样，均成立）
+
+- **无其他 tap 链干预者**：全文件 `addEventListener` 扫描（`touch*` / `click` / `pointer*`）共 12 处——`:4266`、` :4456`、`:4488`、`:4498`、`:4535`、`:4536`、`:5479`、`:5486`、`:5754-5756`、`:6799`、`:6815`。其中终端 tap 可触达的仅 `:4266`（`#terminal-container` 上的 `click`，仅复位 `terminalAvoidanceRecovering`，`passive`，**不阻止**）与 `:4488/4498/4535/4536`（A1 本族）。其余全部位于状态栏／监控表／侧栏手柄／模态（`wtImport*`），**均不在终端 tap 链上**；`xterm` 的 `onClick` 无自定义覆盖。
+- **document 级页面锁不背这个锅**：`:4456-4460` 的 `touchmove` 处理器有三重早退（多指 `:4457`、`ownsTouchGesture()` `:4458`、`nativeScrollOwner()` `:4481`），且 `ownsTouchGesture()` 在 `:4446` 对 `id === "terminal-container"` 及 `:4447` 对 `.xterm` **直接返回 true（豁免）**，故终端上的 touchmove **不会**被 document 级锁 `preventDefault`；`preventDefault` 的出口仍只剩 A1（另见 `:4437-4441` 的注释明言终端锁“权威”于此）。
+- **CSS `touch-action: none` 不构成 A1**：`#terminal-container` 的 `touch-action: none`（`:1556-1577`）作用于**触摸导航**（pan/zoom），按规范**不会**抑制 `click` 合成；它也不是 JS `preventDefault`。**不得**把 `touch-action` 与 A1 混为一谈或相加计入。
+- **`session.term.blur()` 全产品唯一处**：`:8650`，位于 disconnect／清理路径，**不在 tap 链**上；`focus()` 调用点 `:4897`（quick-keys 粘贴 textarea）、`:5017`（隐藏 textarea 复制）、`:5958`、`:6056`（模态 input）与 `:8296`（`focusTerminalIfPossible()` 放行末行）**均不被 tap 驱动**，`FOCUS-GUARD` 无 tap 驱动调用点（与上节第 4 点一致）。
+- **IME bridge**：`ensureIosImeDirectInputBridge()`（`:5215` 起）只在 `term.textarea` 上绑 input/composition 类事件，**无 touch／click 干预**。
+
+#### 闭环路径（只登记，不签发）
+
+| 路径 | 需要什么 | 是否本轮可做 |
+| --- | --- | --- |
+| **P1 探针强化（可选）** | 在 `viewport_debug.js` / schema 增真值字段：`touchmove` **计数**与 `dy` 序列、`clickSuppressed`（`touchend` 时 `preventDefault` 是否已被调用）、`touchcancel` 计数。可使 A1 从“候选”转为“逐击可验证／可否定” | **否**（探针属 `AUTH-20261105-P3-FOCUS-GUARD` 明列禁改面，需 owner 另发授权；**本轮不签发**） |
+| **P2 代码收敛／重构** | 让 A1 从“无条件”变为“有条件”：仅当 `dy` 越过滚动阈值才 `preventDefault`，或在 `touchend` 前短手势不锁。**注意这直接改测试签名契约**（`test.mjs:151`、`:190`、`:199` 与 `ui_test.go:2141-2142` 均断言无条件锁），且属**冻结基线 `5268869` 的 pan 处理域** → 归口 **Phase 4（PTY 终端自有视口与 pan 处理）**，届时需 owner 新指令 + 仲裁授权 | **否**（本轮不签发） |
+| **P3 先验实测（零改码）** | owner 同场目测记录：若“首击不弹”与“首击时刻是否轻微滑动”强相关，则 A1 得旁证 | 需 owner 一次真机操作；本轮未做 |
+
+- **结论口径**：A1 **不是**“本轮已查明 B 的原因”，而是“B 在代码层**唯一仍站得住**的残余候选，且它天然属于 Phase 4 的 pan 处理面”。在 P1 或 P3 落地前，**B 维持“click 派发随机 + 焦点未丢 + 无守卫拒绝帧”三项帧事实 + A1 代码候选**的登记状态。
