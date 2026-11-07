@@ -705,3 +705,44 @@ owner 选择 B：**就此打住，未闭环项按已登记状态如实收束，P
 - **替代路径 = 一轮扩展真值字段授权**（`touches.length` / `showModal` 位 / `vv.height` 语义标定 / `mousedown` 多槽）——**本仲裁不签发**，仅**建议**；是否派单由 **owner 决定**。
 
 **本节结论**：`touchTruth` 真机帧给出了**可观测判据**（native `mousedown` + `click` ⇔ 键盘顶起，8/8 无反例）与**数值化排序**（`A12 ＞ A2 ＞ A1 ＞ A13 ＞ A11 ＞ A8 ＞ A7`）；**页面侧可归因面已闭环（2/3 失败击与页面无关、1/3 与 document 锁相关）**，**剩余根因在平台域**。**B 维持 INCONCLUSIVE**，不作"已归因"声明；本节**不签发**任何新授权、**不关闭** R2 / R3 / R4 或 #116。
+
+## 13. Phase 4 首个窄切片：REFIT-CLASS 授权与 C1 交付（2026-11-07，issue #116）
+
+**本节性质**：**纯追加**登记。**不重新打开、不修改、不放宽**上文任何既有行的授权语义、文件清单或口径；**已签署正文一字不改**。本节只登记 **Phase 4 第一条已授权窄切片**的开工与交付，**不代表 Phase 4 完成**，**不关闭**任何 G 缺口或 R1–R6。
+
+### 13.1 授权流程（2026-11-07，本轮）
+
+- **调度者起草 → 范围分析子代理只读增量分析**：结论为现状**已结构性满足** D4 纯 pan 不 refit（`index.html:4247-4250` 零写入）、**单一 ack 通道**（`index.html:9217-9226` / `:9355-9372` establishment 直发为**注释自证豁免**）、**D3 形态一成立**（`index.html:4191-4203` 全宿主共享 + **创建即应用** `pty.js:247-249`）；**唯一缺口 = D4② 激活路径 fit 后未投递**（`internal/ui/static/kinds/pty.js` activate）。
+- **仲裁轮 1 = MODIFY**（11 处草案修正 P1–P11）。
+  - **裁决 (a)**：**D4① 的含义是「不得新增由键盘 / 归属信号主动发起的 refit」**，**不是**豁免 GI-7 几何收敛；实现须「**不引入 refit 起源状态**」，**RO→fit→`queueTTYResize` 收敛链与 trailing、去重、拒绝不占槽、断开清理完整保留**。
+  - **裁决 (b)**：**不新建** settle 状态机 / timer / 事件源 / 跨 pass 来源标记；「合并」由**既有** 100ms leading + 单 trailing + `dispatchTTYResize` 同尺寸去重 + 宿主 bottom write-only-on-change 承担，**`MIN_RESIZE_MS = 100` 原值不动**。
+- **终稿 v2 → 同一仲裁复核 = SIGN**（非阻断附注：**行号引用以稳定标题为先**；**真正不可改锚点**为测试 `sliceResizeObserver` 精确字符串及其全文件唯一性；**无产品用途的焦点核对一律不写**）。
+- **N1–N7 不签发面**：
+  1. **Phase 4 任务 1**（D1 正向机制）与**任务 4**（真机）；
+  2. **A1 / A2「无条件锁」收敛**与 **touchmove 硬锁**（`terminal_touch_scroll.test.mjs:143/151/190/198`、`ui_test.go:2119-2142`）；
+  3. **D2 zoom guard** 任何语义；
+  4. **`internal/app`** 与服务端最小尺寸 / ack 协议；
+  5. **诊断 / 探针 / `evidence/*.mjs`**；
+  6. **D3 形态二**；
+  7. **`queueTTYResize` 窗口常量 / leading / 同尺寸去重 / 拒绝不占槽**。
+
+### 13.2 C1 交付与双评审
+
+- **提交 `a55bbec`**（原子：`internal/ui/static/kinds/pty.js` **+13** + 直接测试 `internal/ui/testdata/tty_resize_refit.test.mjs` **+34**）：activate fit **原位保留**，fit 后经**既有** `queueTTYResize` 投递**已测量尺寸**（**尺寸守卫**保隔离单测安全、**`typeof` 守卫**对齐 observer 投递形状；同尺寸被既有去重吸收；**无新 timer / 事件源 / 跨 pass 状态**）；新增 **1 条**结构断言用例钉住 activate 送达形状。评审 **MINOR**（注释把隔离保护归给 `typeof`）已微修并经调度者**独立确认**（16/16、68/68 复跑）后才提交。
+- **双评审（并行、互不可见）**：
+  - **评审 1 号** `opencode-go/muse-spark-1.3-contributor`（delta-diff 分工）= **APPROVE**（0 BLOCKER / 0 MAJOR / 1 MINOR：`s.term` nil 检查与 observer 首行 `if (!session.term) return` **不对称**，理论问题；核实 `terminal_status.test.mjs:610-628` fake-window activate 用例属实、`s.term` 恒存在）。
+  - **评审 2 号** `minimax-cn/MiniMax-M3.1-Flash`（独立抽验 + 门禁复跑）= **APPROVE**（0B / 0M / 2 MINOR / 2 CHALLENGE）。
+- **门禁复跑记录（三方独立，数字一致）**：`tty_resize_refit` **16/16**；七文件只读回归 **181/181**；`testdata` 全 **20 文件逐个全绿**；`go ./internal/ui` 与 `-tags viewportdebug` **仅存量红** `TestResponsiveLayerChangelogCounts`（CHANGELOG 34 vs viewport_height 40；评审 2 以只读 `git archive HEAD` 导出 pristine 树复跑证明**基线原样红**）；`go ./internal/app` **ok**；`pty-refit-check.mjs --self-test` **18/18**；`verify-live-choiceA.mjs --html` **PASS**。
+- **变异承重（评审 2，全部 /tmp 副本）**：**9/9 变异使新用例唯一红**——删块 / 形参互换 / 接收者错 / 位置错 / 仅去 `typeof` / 全去守卫（`terminal_status` 14 红例）/ 尺寸守卫弱化 / 重复投递 / 早于 fit。
+
+### 13.3 诚实边界
+
+- 产物状态 = **离线绿 + 真机未验**；**不得**以任何离线结果宣称 GI-7 / D4 / GI-3 / R1 PASS（PHASE1-CONTRACT.md:204 / :242 / :246）。
+- Phase 4 门禁「**同一 iPad 证明 R1**」（§5）**仍开放**。
+- `seq 573→574` 三态规则**仅适用 applied 滞后类**；**持续 pan 为停止型 FAIL**。
+
+### 13.4 登记的后续项（不阻塞本节交付）
+
+1. **行为见证升级**（下一切片候选）：activate 投递断言从源码形状断言升级为**行为见证**（fake-window harness 已真实执行 activate，补 `term:{cols,rows}` / `fitAddon` / `queueTTYResize` 桩即可，顺带让 `typeof` 守卫在隔离环境**真正承重**；一并处置 `s.term` nil 不对称，**低优先、生产不可达**）。
+2. **首次激活 socket 未 OPEN 的收敛缺口**（独立事项，归属待确认）：D4②「激活即收敛」**仅在激活时 WS 已 OPEN 成立**；connect 路径（`pty.js:208-215` loadLog→connectTTY）未触碰、端到端未证，是否符合既有 establishment 直发豁免语义**待仲裁 / owner 确认**。
+3. **存量红独立处置**：`TestResponsiveLayerChangelogCounts`（CHANGELOG 计数 34 vs 40，基线原样红）需**独立小提交**，不与 Phase 4 行为提交混同。
