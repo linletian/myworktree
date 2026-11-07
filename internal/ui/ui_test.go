@@ -3726,3 +3726,91 @@ func TestSidebarWorktreeRenameAnchors(t *testing.T) {
 		t.Fatal(".wt-rename-input:focus should take var(--active-color) like the tab input (issue #122)")
 	}
 }
+
+// TestWebPanelsBleedAnchors pins the served-asset half of the web-kind panel
+// hosting posture (issue #116, AUTH-20261107-P5-IFRAME-BLEED, arbitration:
+// M1-only). The three web-kind panels share ONE absolute inset:0 shape — the
+// panel box is exactly #workspace's padding box, never past it. The three frame
+// classes stay plain flex items (width/flex/min-height/border:0) and must NOT
+// reintroduce the withdrawn M2: no `height: calc(100% + ...)`, no negative
+// margin/offset — the iframe's bleed past #workspace's padding box is
+// unreachable under its overflow:hidden, and the safe-area band belongs to
+// #workspace's --term-bg box-shadow. No px magic numbers, no background-color
+// (a background would repaint the light-theme white band), no z-index /
+// transform / filter.
+func TestWebPanelsBleedAnchors(t *testing.T) {
+	bodyText := fetchIndexHTML(t)
+	styleStart := strings.Index(bodyText, "<style>")
+	styleEnd := strings.Index(bodyText, "</style>")
+	if styleStart < 0 || styleEnd < 0 {
+		t.Fatal("GET / lost the inline <style> block")
+	}
+	css := stripCSSComments(bodyText[styleStart:styleEnd])
+
+	ruleFor := func(anchor string) string {
+		t.Helper()
+		start := strings.Index(css, anchor)
+		if start < 0 {
+			t.Fatalf("GET / lost the %s rule (issue #116 iframe bleed)", anchor)
+		}
+		end := strings.Index(css[start:], "}")
+		if end < 0 {
+			t.Fatalf("GET / %s rule has no closing brace", anchor)
+		}
+		return css[start : start+end+1]
+	}
+
+	// M1: one shared absolute inset:0 shape — #workspace (position:relative)
+	// stays the containing block; the panel box is exactly its padding box
+	// (no negative top, no bottom:-N). The [hidden] rules are separate rules
+	// and stay untouched.
+	for _, sel := range []string{"#opencode-panel {", "#reasonix-panel {", "#dsh-panel {"} {
+		rule := ruleFor(sel)
+		for _, decl := range []string{"position: absolute;", "inset: 0;", "display: flex;", "flex-direction: column;"} {
+			if !strings.Contains(rule, decl) {
+				t.Fatalf("%s should declare %q (issue #116 iframe bleed M1)", sel, decl)
+			}
+		}
+		if regexp.MustCompile(`(?:top|bottom|left|right):\s*-`).MatchString(rule) {
+			t.Fatalf("%s must not carry a negative offset — the panel box stays inside #workspace's padding box (issue #116 iframe bleed)", sel)
+		}
+	}
+	dshFrames := ruleFor("#dsh-frames {")
+	if !strings.Contains(dshFrames, "position: relative;") {
+		t.Fatal("#dsh-frames keeps position: relative — #dsh-remote-mask resolves against it (issue #116 iframe bleed)")
+	}
+
+	// M2 is WITHDRAWN by arbitration (M1-only): every frame class keeps the
+	// plain baseline AND must not reintroduce the extrapolation pair — a
+	// `height: calc(100% + …)`, a negative margin, or any env() reference —
+	// because the bleed it claimed is unreachable under #workspace's
+	// overflow:hidden.
+	bannedFrameBits := []string{"height: calc(100% +", "margin-bottom: calc(-1", "env("}
+	for _, sel := range []string{".opencode-frame {", ".reasonix-frame {", ".dsh-frame {"} {
+		rule := ruleFor(sel)
+		for _, decl := range []string{"width: 100%;", "flex: 1;", "min-height: 0;", "border: 0;"} {
+			if !strings.Contains(rule, decl) {
+				t.Fatalf("%s should declare %q (issue #116 iframe bleed M1-only baseline)", sel, decl)
+			}
+		}
+		for _, banned := range bannedFrameBits {
+			if strings.Contains(rule, banned) {
+				t.Fatalf("%s must not contain %q — the safe-area extrapolation was WITHDRAWN by arbitration, and it bleeds past #workspace's overflow:hidden clip (issue #116 iframe bleed M1-only)", sel, banned)
+			}
+		}
+		if regexp.MustCompile(`(?:top|bottom|margin-top|margin-bottom)\s*:\s*-`).MatchString(rule) {
+			t.Fatalf("%s must not carry a negative offset/margin — no box may cross #workspace's padding box (issue #116 iframe bleed M1-only)", sel)
+		}
+		if strings.Contains(rule, "background") {
+			t.Fatalf("%s must carry no background — the band shows #workspace's --term-bg where the page is transparent (issue #116 iframe bleed)", sel)
+		}
+		for _, banned := range []string{"z-index", "transform", "filter"} {
+			if strings.Contains(rule, banned) {
+				t.Fatalf("%s must not introduce %s (issue #116 iframe bleed)", sel, banned)
+			}
+		}
+		if regexp.MustCompile(`\d+(\.\d+)?px`).MatchString(rule) {
+			t.Fatalf("%s must hold no px constant — plain flex sizing only (rule: %s) (issue #116 iframe bleed M1-only)", sel, rule)
+		}
+	}
+}
