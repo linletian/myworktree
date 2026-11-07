@@ -747,7 +747,7 @@ owner 选择 B：**就此打住，未闭环项按已登记状态如实收束，P
 2. **首次激活 socket 未 OPEN 的收敛缺口**（独立事项，归属待确认）：D4②「激活即收敛」**仅在激活时 WS 已 OPEN 成立**；connect 路径（`pty.js:208-215` loadLog→connectTTY）未触碰、端到端未证，是否符合既有 establishment 直发豁免语义**待仲裁 / owner 确认**。
 3. **存量红独立处置**：`TestResponsiveLayerChangelogCounts`（CHANGELOG 计数 34 vs 40，基线原样红）需**独立小提交**，不与 Phase 4 行为提交混同。
 
-### 13.5 C2 行为见证与 A0 计数同步（AUTH-20261107-P4-ACT-WITNESS / -A1，C2）
+### 13.5 C2 行为见证与 A1 计数同步（AUTH-20261107-P4-ACT-WITNESS / -A1，C2）
 
 **本小节性质**：**纯追加**登记，**不改写** 13.1–13.4 与任何既有行；只登记 Phase 4 **第二条已授权窄切片**（**纯测试**）与**一条追加授权**，**不关闭**任何 G 缺口或 R1–R6，产物状态仍为「**离线绿 + 真机未验**」。
 
