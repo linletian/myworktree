@@ -1229,3 +1229,50 @@ owner 选择 B：**就此打住，未闭环项按已登记状态如实收束，P
 5. **合并与关闭 #116 由 owner 执行**——本节**未**执行 `git push`、merge 或 issue 关闭，也不代表 owner 已批准这些动作。
 
 **本节结论**：Phase 6 的**离线面已收束**——门禁六项全绿、提交链事实清点完成（**产品提交实为 1 个：`a55bbec`**，此前「2 个」的计数已在 §19.2 更正）、文档收束落在 CHANGELOG 与兼容性说明（PRD 按「宁缺勿乱」不动）、回退点 `2e857de` / `5268869` / `47c5c3e` 可回退性确认。**#116 维持开放**，**不宣称 R1–R6 通过**，**合并与关闭留给 owner**。
+
+## 20. web-kind 面板托管姿态修复（AUTH-20261107-P5-IFRAME-BLEED，M1-only，2026-11-07）
+
+**本节性质**：**纯追加**登记。本节收束 **owner 真机报的小 bug**（**web-kind iframe 未到物理底、正好停在 transport 条顶**）的修复；**不满足 owner 视觉诉求的「iframe 内容渗底」**——该诉求**待 owner 二选一**（**接受现状 / 另立 B 授权**）；**#116 维持开放**；机制以 **`5268869`** fórmula 为准。
+
+### 20.1 授权流转
+
+- **草案 v0 → 仲裁 M1–M6 签署**：**M1** 面板 `absolute insets:0`；**M2** frame 外推对；**M3** 测试面；**M4** 门禁预 `./internal/... ./cmd/...`、**禁根 `./...`**；**M5** 验收；**M6** 双通道。
+- **编码落地 M1 + M2 → 双评审**：**评审 1 = APPROVE + MINOR**；**评审 2 = APPROVE + MAJOR-1**——`#workspace overflow:hidden` 的 **scrollport = padding box**，**越界像素被裁、内嵌文档视口虚高 20px**。
+- **仲裁复核终裁 = A**：**删 M2、保 M1**，并**纠正仲裁自身机制断言**（**漏了「父也是裁剪容器」半句**）。
+- **返工落地 + 仲裁 READY → 提交 `8f1476e`**（**+111 / −3**：`index.html` **+26 / −3**、`ui_test.go` **+88**）→ **push 至 PR #138**。
+
+### 20.2 落地条款五条（供后续引用）
+
+1. **三面板统一 `position:absolute; inset:0`**（= **`#workspace` padding box**，**不越界**）。
+2. **frame 类回普通 `flex` 项**，**禁**任何 `calc(100%+env())` / **负 margin** / **负 inset**（该写法**被裁且抬内嵌视口**）。
+3. **20px 底带颜色由 `#workspace` 的 `box-shadow var(--term-bg)` 承担**（同 **§3.1** 背景全渗 / 内容内缩）。
+4. **frame `border:0` 为承重项**（**border 在 iframe 自盒绘制 = 浅色主题白带回魂**）。
+5. **`#workspace overflow:hidden` 与 `#app` safe-area padding 不得为此而改**（保 **xterm 裁剪**与 **§3.1 分工**）。
+
+### 20.3 诚实边界（**逐字登记模板**）
+
+- 本次修复使 **web-kind 列在视觉上与「背景全渗、内容内缩」契约对齐**（**底部 20px 带为 `--term-bg`，无白 / 灰横带、无越界像素、内嵌文档视口不高出 20px**）；**但 owner 报告的视觉诉求（iframe 页面本体伸到物理底、被半透明 transport 条盖住）未满足**——**iframe 内容仍停在 transport 条上沿**。
+- **原因**：**`#app` 的 `env(safe-area-inset-bottom)` 底 padding + `#workspace` 的 `overflow:hidden`（scrollport = padding box）**把「**iframe 像素进入该带**」**锁死**；绕过需要把**承载层上移 `#app` 级**（**结构迁移 + 重验**）或**取消裁剪**（**违 §3.1 / xterm**）。
+- **owner 二选一**：
+  - **(a) 接受现状**（契约口径 = **色带渗底**）；
+  - **(b) 另立第二份授权**（**B 路**：`#app` 级 `absolute` 承载 + **hidden / spinner / oc-hidden / 避让零耦合重验** + **测试面扩锚**）。
+
+### 20.4 门禁登记
+
+- `go ./internal/ui` **ok**；`-tags viewportdebug -run ViewportDebug` **双包 ok**；**19 个 node 套件全绿**（`terminal_status` **71** / `viewport_height` **40** / `canvas_paint` **23** / **次级合计 299**——**以仲裁复核口径为准，不写「次级七件 186」**）；`verify-live-choiceA` **PASS**；**禁根级 `go test ./...`**（**接线残留先例**）。
+
+### 20.5 评审记录
+
+- **评审 1**（`muse-spark`，delta-diff）= **APPROVE**（**2 MINOR** 测试加固建议，其中 **panel 规则的 background / z-index 禁断言加实体** + `ui_test` **实际已含负向覆盖**）。
+- **评审 2**（`minimax`，抽验）= **APPROVE + MAJOR-1**（**8 组变异全部使新锚点用例唯一红**、「**其余既有用例不因变异变红**」**证明承重**；**源码级推导 + `/tmp` 副本已还原**）。
+
+### 20.6 真机口径
+
+- **未做真机验收**；探针 `webPanel` **量面板非 iframe**（`viewport_debug.js` selector），**无法证明「iframe 渗底」**——若 owner 在线判定**只能看图**。
+- **safe-area = 0（iPhone）档下两写法等价**，**不作契约证据**。
+
+### 20.7 流程卫生注记
+
+- 本轮出现**两次工具纪律事件**，均在会话内澄清：**仲裁代理一次未核路径的通配 `rm`**（后核实**未造成仓库 / 用户数据损失**，`git ls-files` 证明涉事路径**本就不在索引内**）与**一次在仓库根跑 `go test ./...` 生成接线残留**（**后续禁用根级 `./...`**）。二者均为**记录项，无产品影响**。
+
+**本节结论**：web-kind 面板托管姿态按 **M1-only** 收束——**提交 `8f1476e`（+111 / −3）已 push 至 PR #138**，**三面板 `absolute inset:0` + frame 回 flex 项 + `border:0` 承重 + `#workspace` `box-shadow` 承担 20px 底带**，**与「背景全渗、内容内缩」契约对齐**；**但 owner 的「iframe 渗底」视觉诉求未满足**（受 `#app` safe-area padding + `#workspace overflow:hidden` 锁死），**待 owner 二选一（接受现状 / 另立 B 授权）**。本节**不关闭 #116**、**不宣称视觉诉求达成**。
