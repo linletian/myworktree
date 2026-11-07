@@ -488,3 +488,5 @@ owner 选择 B 后，Phase 2 标记为**收口（有显式登记缺口）**。§
 2. 恢复后仍按 §10 的单源、连续 seq、无 reload、人工时间线、截图 ↔ seq 绑定和隐私约束执行；失败或缺字段继续记 INCONCLUSIVE，不为了收口降低判据。
 3. D1 未补签前不得进入 Phase 4 的 PTY pan / 视口机制实现；D2 / D3 / D4 的已签署设计不免除 Phase 4 / 5 实测。
 4. Phase 2 的停止决定不代表这些场景永久免验，也不表示 #116 关闭；最终交付仍须按 PLAN Phase 6 的关闭条件处理所有未覆盖项。
+
+**2026-11-07 Phase 5 收口（owner 决定）**：D2 zoom 非对称 guard 真机行为面（"行为子项 PASS（owner-attributed）"：`occ==raw` 精确、settle 门、回程付 0、scale>1 全程豁免——判读 PLAN §17/§17.9）；生命周期与 L 全表面按 §17.4 + §17.10 定格；**L2"键盘开着刷新"按"平台前提不可达 + owner 接受不补"闭格**（Safari 刷新先收键盘、重建即无键盘；3 次 init 帧几何干净在案）。已知台账承接：KNOWN-P4-PAN（频度上限沿用 §15.1 台账）、KNOWN-P4-SEQ-GRACE（+1 补采样本 44/45）、quick-keys 粘贴直通观察项、verify-sop 工具缺陷另案。全文见 PLAN §18。
