@@ -338,6 +338,27 @@ opencode、reasonix、dsh 等 iframe 内输入由 iframe / Safari 处理。父�
 - **(c) A1 未达“已归因”**：缺少 `touchmove` **计数／`dy` 序列**、`clickSuppressed`、`touchcancel` 计数等真值字段，无法**逐击**把 no-click tap 对上 A1。上述探针真值字段**仍列为可选强化授权**（与下方“后续归因任务建议”①–④同级），**本周不签发**；零改码替代是 owner 同场目测（首击不弹是否与“指尖轻微滑动”强相关）。
 - **结论口径（不变）**：本节仍**不替 owner 作决定**，上表两选项并列维持，“建议维持 `2b64e7e`”的建议倾向维持；上条“建议”的证据权重因 (b) 增强，但**主因是 A1 归口 Phase 4 而非“必须维持”**——即便 owner 选择回退，B 也不会消失。
 
+**二选一处追加注记 v2（2026-11-07，owner 补充实验 + 候选矩阵 v2 裁决轮；不改写上方任一行、不作产品决定）**
+
+- **登记性质**：本节为对上方两段（原二选一表、代码级候选补登追加注记）的**追加注记**，不改写其上任何已签署文本；证据细节见 [VALIDATION 候选矩阵 v2 节](evidence/VALIDATION-2026-11-04.md)。**证据口径**：owner 三条为**目测级**（debug panel 关闭 ⇒ 本轮 **0 帧**）；候选矩阵为只读源码审计 + 仲裁独立抽验。**权重是排序，不是结论。**
+
+- **(a) owner 实验③ 的"仅本页面"结论与候选矩阵 v2 一并归入 B 处置**：
+  - owner 观察（目测）：**其他网站、本项目 iframe 内 dsh web 页面均无此问题**；本页面其他原生 web 输入框（`#wtTask`）同样随机不弹，形态为"**`:focus` 高亮外圈已发生、光标未进、键盘不弹**"。
+  - 归入 B 处置的含义：B 的嫌疑面**收窄到本 `index.html` 的页面级 touch／focus 链**，不再视作整机 iPadOS 状态问题。**该收窄本身不构成归因**，且因 iframe 内同样是 vendored xterm 且工作正常，**xterm 自身的合成 mousedown／focus 链不能被单独当作充分条件**。
+  - 候选矩阵 v2（排序，**非结论**）：**候选 A13（非手势态 `focusTerminalIfPossible()` 抢焦）＞ 候选 A11（helper textarea 离屏 ⇒ 终端无原生可聚焦目标）＞ 候选 A2（document 级条件性 `touchmove` 锁）＞ 候选 A8（重命名框 rAF 延时 focus）＞ 候选 A12（`showModal()` UA 自动聚焦、`#wtTask` 无兜底 `focus()`）＞ 候选 A1 ＞ A7（判死）**。**仅 A13 能同时覆盖 owner ①②③**；`#wtTask` 一侧最贴合 A12 + A13。**候选 A7 判死**：vendored xterm 的 document 级 `touchend` `preventDefault` **代码存在、通路不可达**（`Gesture.INSTANCE` 仅由 `addTarget`／`ignoreTarget` 构造，二者调用点 0，故构造函数内的 document 监听器**从未安装**）。**候选 A1 权重下调但未判死**：owner ①（谨慎空击仍复现）削弱其"有／无 touchmove 决定开关"的强预测。
+
+- **(b) "回退"选项：结论不变，但改善期望按 v2 收紧为 0**：
+  - **结论不变的部分**：候选 A1 在守卫前构建中**逐字存在**（`a22c` 归档 `d1ccbb6` 的 `index.html:4499` 与 `:4485` 同形），故**回退不改变 A1**；回退仍会确定性带回 **F5 粘贴框抢焦（原始缺陷 A）与 S2 焦点常驻回退**。上表两选项**仍并列**，"建议维持 `2b64e7e`"的建议倾向**维持**。
+  - **本轮新增的核验结论（逐一构建归属 grep 佐证）**：本仲裁**已逐项核验**，全部候选（A2／A8／A11／A12／A13／A1）**均存在于守卫前构建**——证据：A2 基线 `5268869:4060`(`document` `touchmove`)、`:4046`(`ownsTouchGesture`)；A8 基线 `:5560-5563`／`:5658-5661`（rAF `focus()+select()`）；A12 基线 `:2554`（`#wtTask`，产品侧 0 处 `focus()/select()`）；A13 基线 `:7842`(函数)、`:7856`(`session.term.focus()`)、`:5071`(`pollTimer` 2000ms)；A1 基线 `:4103`（hard page lock，`touchstart` passive 同形 `:4092-4101`）；A11 依赖的 vendored xterm 的 `xterm.js`／`xterm.css` **自 `5268869` 起 blob id 未变**（`e47e2dd…`／`819654e…`，`git diff --stat 5268869 HEAD -- internal/ui/static/vendor/xterm/` 为空）。
+  - **因此**：既然**全部核心候选都存在于守卫前构建**，回退对任一候选的**改善期望近期为 0**（回退不消除任何候选），同时确定性地带回 F5／S2 回退。**该表述已经独立核验成立**，故在此按结论写入，而非"未逐一核验"。
+  - **诚实边界（不变）**：raw 帧不含 git 构建身份字段，"a22c 运行的就是该源码"仍是**已知前提上的推断**；本核验是**源码归属**证据，不是探针直证。
+
+- **(c) B 闭环路线（两条，仅登记、不签发）**：
+  - **(i) Phase 4 pan／own-viewport 域（已有归口）**：候选 A1／A2 均属**冻结基线 `5268869` 的 pan 处理域**，归口 **Phase 4"PTY 终端自有视口与 pan 处理"**。收敛它们会**改动已被测试签名的"无条件锁"契约**（`terminal_touch_scroll.test.mjs:143/151/190/199`、`ui_test.go:2119-2142`），须 **owner 新指令 + 仲裁授权**另行签发。**本轮不签发。**
+  - **(ii) 若 owner 需要在 Phase 4 前就 B 给出更强归因，唯一途径是探针 additive schema 增补授权**：**本轮不签发**，留待 **owner 用户同意后另行派单**。所需字段（additive、只读）见 [VALIDATION 真值字段清单](evidence/VALIDATION-2026-11-04.md)：`touchmove` 次数／`dy` 序列、`touchend` 时 `preventDefault` 真值、**`navigator.userActivation.isActive` 于 `focus()` 调用时刻**、`mousedown` 合成／派发真值、`showModal()` 后 `activeElement` 序列。**在这些字段落地前，矩阵 v2 只能是排序；任何人不得据矩阵把 B 写成"已归因"。**
+
+- **不改项**：本节不改变 F5 / S2 的 PASS 登记、R2 / R3 / R4 禁令与状态行、raw 文件处置裁决，以及既有探针字段排布。
+
 **后续归因任务建议（Q3：本轮只登记，不签发授权）**
 
 - **需一次新授权**：B 的 cause 段归因依赖探针真值字段，而 `internal/ui/debugassets/*` 与**探针 schema 属 `AUTH-20261105-P3-FOCUS-GUARD` 明列禁改面**；故须由 owner 另发**独立授权**，**本轮不签发**。

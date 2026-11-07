@@ -564,3 +564,98 @@ C 会话还包含多轮额外滚动/平移与窗口变化，不能用上述局�
 | **P3 先验实测（零改码）** | owner 同场目测记录：若“首击不弹”与“首击时刻是否轻微滑动”强相关，则 A1 得旁证 | 需 owner 一次真机操作；本轮未做 |
 
 - **结论口径**：A1 **不是**“本轮已查明 B 的原因”，而是“B 在代码层**唯一仍站得住**的残余候选，且它天然属于 Phase 4 的 pan 处理面”。在 P1 或 P3 落地前，**B 维持“click 派发随机 + 焦点未丢 + 无守卫拒绝帧”三项帧事实 + A1 代码候选**的登记状态。
+
+### 2026-11-07 B 归因 owner 补充实验与候选矩阵 v2
+
+**本节性质**：对 [代码级候选补登（2026-11-07）](#代码级候选补登2026-11-07) 的**追加**，不改写该节及其之前任何一行的既有签署文本。作用有三层：①登记 owner 本轮**三条目测补充实验**；②把候选从"唯一残余 A1"扩展为**矩阵 v2**并给出**权重排序（非结论）**；③登记 A1 权重削弱与 A7 判死，并更新致闭口的真值字段清单。**本节不撤回 A1 的既有登记，也不发布 B 的根因。** 上节末句"B 在代码层**唯一仍站得住**的残余候选"（`:566`）**按本节作权重更正**：A1 仍是候选，但**不再是"唯一"**——矩阵 v2 列出 5 条与 A1 并列的核心候选；该既有行原文不改写。
+
+**证据口径声明**：owner 三条为**目测级证据**（debug panel 关闭，本轮**0 帧数据**），不进 raw、不产生 seq、不充当帧级 verdict；候选矩阵主体为**只读源码审计 + 仲裁独立抽验**，同样不是真机证据。**矩阵权重是排序，不是结论**——任何候选在拿到真值字段前都**不得**写成"已归因"。
+
+**命名口径（重要，防与旧 ID 撞号）**：本节新增候选沿用 v2 审计的 `A2 / A8 / A11 / A12 / A13` 标签。其中 **`A2` 与旧帧段 ID 撞号**——上节 `:36` 的 `A2` 指"scale=1 深键盘 `seq 47–98` 帧段"，与本节的 `A2`（document 级 touchmove 条件性锁）**不是同一对象**；本节凡 `A2` 一律写作 **候选 A2（document-touchmove）**。`A1` 同理存在"授权包 `-A1`（夹具同步修正案）"与"候选 A1"两义，沿用上节已约定的"候选 A1"指称。`A8 / A11 / A12 / A13` 在本记录中**无旧义撞号**。
+
+#### owner 补充实验（目测级，debug panel 关闭 ⇒ 无帧数据）
+
+| # | owner 观察（原样登记） | 证据级别 |
+| --- | --- | --- |
+| ① 终端输入区 | 反复"收起软键盘 → 点输入区"，**即使操作非常小心（无滑动意图）**，仍有概率首击不弹 | 目测，无帧 |
+| ② 页面全局性 | 本页面**其他原生 web 输入框**（新建 worktree 命名输入框 `#wtTask` 为代表）反复点击／收起键盘也随机不弹；**不弹时输入框有高亮外圈但光标没进去、键盘不弹**（"focus 样式已发生、键盘／光标未发生"形态） | 目测，无帧 |
+| ③ 范围收窄 | 其他网站、本项目 **iframe 内 dsh web 页面均无此问题** ⇒ 嫌疑收窄到**本 `index.html` 页面级 touch／focus 链**，非整机状态 | 目测，无帧 |
+
+- **①对候选 A1 不利的登记（如实）**：owner 强调"非常小心、无滑动意图"仍会复现。若候选 A1 的机制成立，复现率应与"指尖是否产生 touchmove"正相关，则**刻意谨慎的操作应显著降低复现率**。owner 未观察到该相关性 ⇒ 候选 A1 的**权重下调**，但不判死（目测无法排除极短 touchmove；`dy`=0 的 touchmove 亦足以触发 `:4499`，"无滑动意图"≠"无 touchmove"事件）。
+- **②的形态是本节最有信息量的一条**：`#wtTask` 是**原生可聚焦 input**，其 `focus()`／光标进入由 UA 默认行为完成，**不经过 xterm 的合成 `mousedown` → `preventDefault(); this.focus()` 链**（见候选 A11）。它同样出现"高亮外圈（`:focus` 样式已生效）但光标未进、键盘不弹"，说明**失败点位于"focus 已发生之后"或"focus 可见样式与可编辑态脱钩"**，而不止于"click 未派发"。这是把候选 A13（非手势态延时／轮询 `focus()` 竞争）与 userActivation 时机推到前列的**直接动机**。
+- **③的范围收窄**：iframe 内 dsh web 页面无此问题，而 iframe 内**同样是 vendored xterm**（`ownsTouchGesture` 对 `IFRAME` 直接豁免，见抽验 T2）。故"同 xterm 在 iframe 内正常"意味着**候选 A11 不能被单独当作充分条件**——xterm 自身的 mousedown 合成链在 iframe 出口下工作正常。
+- **重复声明**：①②③ 全部为**目测级**；debug panel 关闭 ⇒ **本轮 0 帧**，不得回填 raw，也不得据此改判任何既有帧级 verdict。
+
+#### A1 权重修正注记（追加，不改上节原文）
+
+- 上节 A1 节（`:534-548`）的**锚点、测试背书、`preventDefault` 语义与"存在于守卫前构建"四项结论全部维持不变**（本轮已独立复核，见抽验 T1／T7）。
+- **修正的只是权重**：依据 owner ①（谨慎空击仍复现）与 ③（同 xterm 在 iframe 内无问题），候选 A1 从"唯一残余代码候选"降为**矩阵 v2 中次于 A13/A11/A2/A8/A12 的候选**。A1 **不注销、不判死**——它仍是 tap 链上**唯一**的 `touchmove` 早退前无条件 `preventDefault`（抽验 T1 确认），只是其"确定性开关 = 有／无 touchmove"的强预测**未被 owner ① 支持**。
+- **不得**把本注记读成"候选 A1 已被排除"。
+
+#### A7 判死：vendored xterm 的 document 级 `touchend` `preventDefault` 通路不可达
+
+- **代码存在**：`internal/ui/static/vendor/xterm/xterm.js` 的 `Gesture` 构造函数内注册 `document` 级 `touchstart`（`{passive:false}`）、`touchend`、`touchmove`（`{passive:false}`）；`onTouchEnd` 末段的 `this.dispatched && (t.preventDefault(), t.stopPropagation(), this.dispatched = !1)` 即 v2 审计所指的"document 级 touchend preventDefault"。
+- **通路 0 命中（仲裁独立复核，见抽验 T3）**：①`Gesture.INSTANCE` **只在** `addTarget` / `ignoreTarget` 两个静态方法内被构造（`p.INSTANCE || (p.INSTANCE = markAsSingleton(new p))`）；②二者在 vendored bundle 与产品 asset 中的**调用点均为 0**（`.addTarget(` / `["addTarget"]` 计数 0；产品侧仅 `index.html:4336-4369` 有一段自述注释）；③`dispatched` 只在 `dispatchEvent` 遍历 `this.targets` 命中目标时被置 `true`，`targets` 恒为空 LinkedList ⇒ `dispatched` 恒 `false`；④`Gesture.INSTANCE` 未构造 ⇒ 构造函数内三个 document 级监听器**从未安装**；⑤`ignoreGesture`（`Widget.ignoreGesture` → `Gesture.ignoreTarget`）在本 bundle 中**仅 1 处定义、0 处调用**，未构成触发链路。
+- **判定**：**A7 判死 —— 代码存在、通路不可达。** 它不是 B 的候选，也从不是候选矩阵成员。**诚实边界**：本判定为**静态审计**，未在真机上验证"document 无该监听器"；若 xterm 未来升级把 `Gesture` 接到 `SelectionService`（`index.html:4366-4369` 已留 FORWARD WARNING），须重开此项。另注：`index.html:4364-4369` 的自述文字把结论写成"构造函数内的 document 级监听器从未安装"——**该表述本轮判定为正确**，但上节 `:552` 的 "`xterm` 的 `onClick` 无自定义覆盖"与本节互不冲突，勿混读。
+
+#### 候选矩阵 v2（全列；每行 = 机理 + 对 owner 三条的覆盖度）
+
+覆盖度记号：**✅ 可解释｜～ 部分／有条件｜✗ 不解释**。
+
+| 候选 | 锚点（逐行复核成立） | 机理（推断，非实测） | ①终端 | ②`#wtTask` | ③仅本页 | 守卫前存在 |
+| --- | --- | --- | --- | --- | --- | --- |
+| **候选 A13**：非手势态 `focus()` 竞争 | `index.html:8238` `focusTerminalIfPossible()`；唯一真正 `term.focus()` 在 **`:8296`**，前置早退 `:8242`／`:8243`／`:8244`／`:8250`；轮询 `:6432`（`setInterval(refresh, 2000)` 驱动）、WebSocket 握手 `:6713`、`connectTTY` 后 `:6766`、`windowHasFocus=true` 时 `:8322`、`close()` 后 `setTimeout(…,10)` `:8365`、初始 `setTimeout(…,100)` `:5497`、ws 消息 `:9223` | 用户 focus 发生后，**非手势态**的定时／事件驱动 `term.focus()` 把焦点从刚被点中的输入抢回终端；用户看到的是"高亮外圈闪了一下／已发生、光标没进去、键盘不弹" | ～ | **✅（最贴合"focus 样式已发生、键盘未发生"）** | ✅ | **✅ `5268869:7842/7856/5071`** |
+| **候选 A11**：终端无原生可聚焦目标 | `xterm.css:61-75` 的 `.xterm-helper-textarea` 为 `position:absolute; opacity:0; left:-9999em; width:0; height:0; z-index:-5`；xterm 的 `bindMouse()` 中 `t = this.element`，`addDisposableListener(t,"mousedown", e => { e.preventDefault(); this.focus(); … })` | helper textarea **离屏 0×0**，终端区**无原生可聚焦目标**；焦点 100% 依赖 xterm 在**合成 `mousedown`** 上执行 `preventDefault()` + `this.focus()`。一旦该合成 mousedown 不发生（被上游 `touchmove` `preventDefault` 吞、或 WebKit 的 tap 合成序列被取消），**没有任何兜底通道**；且 `left:-9999em` 使"有无可编辑态"无法从视觉判断 | **✅** | ✗（`#wtTask` 是真 input，不走此链） | ✅ | **✅ vendored blob 与基线逐字相同** |
+| **候选 A2（document-touchmove）**：document 级条件性 `touchmove` 锁 | `index.html:4456-4460`：`:4457` 多指早退、`:4458` `ownsTouchGesture(e.target)` 早退、`:4459` `preventDefault()`、`:4460` `{passive:false}`；豁免逻辑 `:4442-4455`（`:4445` iframe、`:4446` `#terminal-container`、`:4447` `.xterm`、`:4449` 原生滚动容器、`:4452` 逐级 `parentElement`） | 在**非终端、非 iframe、非原生滚动容器**的页面上任何单指 touchmove 都被吞默认行为。`#wtTask` 位于 modal 内，不在 `#terminal-container` / `.xterm` 子树，**不会被豁免**；若其祖先链上无原生滚动容器，则其 tap 的 touchmove 走到 `:4459` | ～（终端区被 `:4446`／`:4447` 豁免，**必须**依赖多指或祖先判定不成立才可达） | **✅（`#wtTask` 不在豁免子树内）** | ✅ | **✅ `5268869:4060/4046`** |
+| **候选 A8**：重命名框 rAF 异步 focus+select | `index.html:5955-5961`（tab 重命名 `rename-input-`）、`:6053-6059`（worktree 重命名 `wt-rename-input-`），均在 `requestAnimationFrame` 内 `input.focus(); input.select()` | 一次 rAF **延时**可见的 focus 在下一帧才发生；与该帧期间任何同步／异步焦点迁移竞争。**但** `#wtTask` 走 modal，不走这两条 rAF 链 | ✗（终端无 rAF focus） | ～（同一"延时 focus"家族，但 `#wtTask` 本身无 rAF，须换锚） | ✅ | **✅ `5268869:5560-5563/5658-5661`** |
+| **候选 A12**：`showModal()` UA 自动聚焦 | `index.html:2554` `<input id="wtTask">`；**`#wtTask` 全产品 0 处 `focus()` / `select()`**（仅 `.value` 读写 `:6778/:6969/:10163/:10174`）；`showModal` 调用 `:6835`／`:7069`／`9884`／`10226`；`showModal` 被 `:8355-8359` 包装但**只登记 `openDialogs`、不改聚焦** | 命名框的聚焦**完全依赖 UA 在 `showModal()` 时的自动聚焦（autofocus 语义）**。若 UA 的自动聚焦**不把元素带入可编辑态**（或与 `touch-action`／页面级 `touchmove` 拦截耦合），可出现"`:focus` 样式生效、光标不进、键盘不弹"。产品**没有**二次 `focus()` 兜底 | ～（`#wtTask` 侧 ✅；终端区不直接命中，须经跨组件假设） | **✅（②的唯一直接解释）** | ✅ | **✅ `5268869:2554`** |
+| 候选 A1（权重下调，不判死） | `index.html:4488-4497` passive touchstart；`:4498-4523` `touchmove` 首句 `:4499` `e.preventDefault()` 早于 `:4500`／`:4508`／`:4509` 全部分支 | tap 期间**任何** touchmove（含 `dy`=0）→ 手势被取消 → 后随 `click` 不派发 → 终端收不到合成 mousedown | ～（强预测"谨慎操作应降低复现"被 owner ① 削弱） | ✗ | ✅ | **✅ 守卫前 `a22c`/`d1ccbb6:4499` 逐字相同** |
+
+**排除项（不进入矩阵）**：**候选 A7** —— 通路不可达，已判死（见上）。
+
+**矩阵一致性检查**：仅候选 A13 与候选 A12 能同时解释 owner ②；仅候选 A13 **同时**触及①②③。故 v2 的**最省假设集**是"**A13 ＋ A12 组合**（非手势态抢焦 + 无兜底自动聚焦）"，而非任何单一候选。**这是排序理由，不是结论**。
+
+#### 候选权重声明（排序，非结论）
+
+**A13 ＞ A11 ＞ A2（document-touchmove） ＞ A8 ＞ A12 ＞ A1 ＞ A7（判死）**
+
+- **A13 居首**：唯一同时覆盖 owner ①②③，且直接对上②的"focus 样式已发生、键盘未发生"。其时间尺度候选为 `:6432`（实例状态转为 live 时随 `render` 重新抢焦）与 `:8365`（`close()` 后 `setTimeout(…, 10)` 抢焦），二者都落在"用户刚点完输入框"的窗口内，与"随机 0–2 次不弹"吻合。**反证压力**：`pollTimer` 虽为 2000ms，但 `:6432` 只在"非 web 且实例 live"分支命中，**并非每次轮询都抢焦**；且本记录**没有任何字段**能证明某次 no-click 前确实发生了一次 `focusTerminalIfPossible()` 放行——**不可证伪，故只排首位、不判归因**。
+- **A11 次席**：结构性事实最强（helper 离屏 = 无原生聚焦目标，已逐字复核），但只解释①③。**不能**解释②，因为它不作用于 `#wtTask`；若②成立，则 B **至少**需要一个同时作用于原生 input 的候选 ⇒ 这正是不把 A11 单独当根因的理由。
+- **A2 第三**：它是**唯一**能把拦截面从终端区扩展到 `#wtTask` 的页面级锁（`#wtTask` 不在 `:4446`／`:4447` 豁免子树）。但起点弱：终端 tap 上它被 `ownsTouchGesture` 豁免，须引入"多指误触"或"祖先判定不成立"这类**额外假设**。
+- **A8 第四**：机理成立（rAF 延时 focus），但**锚点对不上** `#wtTask`（它不走 rAF 链）；保留是因为"延时 focus 竞争"这一**家族**与 A13 同源。
+- **A12 第五**：它**是**②的直接解释，但**单条覆盖度很窄**（表格 ① 列记 ✗）。排在 A8 之后是因为 A12 的失败方式依赖 UA autofocus 语义，本仓库**无任何测试或帧**覆盖该语义；且产品侧 `showModal` 包装（`:8355-8359`）只登记 `openDialogs`、**无任何二次 `focus()` 兜底**，机理是否成立完全取决于 UA 行为。
+- **A1 第六**：见上方权重修正注记。**A7 判死**，不参与排序。
+- **a22c 对照不变**：上述排序**不改变** a22c（守卫前）与本轮"同形"的既有登记（69 次 helper tap 44 派发／25 不派发 vs 40 次 28／12；`preVvH=748` 域 38／23 vs 14／11）。矩阵 v2 中**全部候选都存在于守卫前构建**（见上表末列），故排序同样**不改变**"回退不改变 B"的机理结论。
+
+#### 致"归因闭口"的真值字段清单（更新版；本轮不签发）
+
+在 [上节 P1](#闭环路径只登记不签发) 的四项之外，追加 v2 所需的真值字段。**全部仍属 `AUTH-20261105-P3-FOCUS-GUARD` 明列禁改面，本轮不签发、不改探针。**
+
+| 字段 | 回答哪个候选 | 该字段缺失时的状态 |
+| --- | --- | --- |
+| `touchmove` **次数 / `dy` 序列**（按 tap 分组） | 候选 A1、候选 A2（document-touchmove） | 无法把某次 no-click tap 对上 A1/A2 |
+| **`touchend` 时 `preventDefault` 真值**（`defaultPrevented`，含 xterm 的 `dispatched` 路径） | 候选 A1、候选 A2（document-touchmove）、A7 复核 | 只能静态判断"代码存在"，不能证明"实际被调用" |
+| **`navigator.userActivation.isActive` 于 `focus()` 调用时刻** | **候选 A13（新增，关键）** | 无此字段则**无法区分**"focus 被抢"与"focus 发生了但 UA 因失去 user activation 而拒绝拉键盘"——这是 owner ② 形态的核心判别量 |
+| **`mousedown` 合成／派发真值**（是否收到合成 mousedown、其目标与 `defaultPrevented`） | 候选 A11 | 无法证明终端区是否收到合成 mousedown |
+| **`showModal()` 后的 `activeElement` 序列**（showModal 前 / 后 / 下一帧） | 候选 A12 | 无法区分"UA 自动聚焦未发生"与"发生后被夺" |
+
+#### 仲裁独立抽验表（本节结论的复核依据）
+
+**抽验口径**：下表为**本仲裁**对 v2 审计关键锚点的**独立复核**（不转述其报告）。`PASS` = 逐行／逐计数复核一致；`PASS（已修正）` = 结论成立但审计表述需收紧或命名需校正。
+
+| # | 复核对象 | 复核方法 | 结果 |
+| --- | --- | --- | --- |
+| T1 | `:4499` 无条件锁 + `:4488-4497` passive touchstart | 读 `index.html:4488-4523`；确认 `preventDefault` 在 `:4500`／`:4508`／`:4509` 之前；`:4497` `{passive:true}` | **PASS** |
+| T2 | `:4456-4460` 条件性锁 + `:4442-4455` 豁免 | 读 `:4436-4460`；确认三处早退 `:4457`／`:4458`／（wheel 支路 `:4480`）与 `:4445`/`:4446`/`:4447`/`:4449` 豁免 | **PASS**（"v1 无条件"表述确需修正为**条件性**） |
+| T3 | A7 通路不可达 | `.addTarget(`／`["addTarget"]` 全 asset 计数 **0**；`INSTANCE` 仅 2 处赋值且均在 `addTarget`／`ignoreTarget` 内；`ignoreGesture` 仅 1 处**定义**、0 处调用；`dispatched` 仅由 `dispatchEvent` 命中目标时置位 | **PASS** |
+| T4 | `:4535-4536` touchend／touchcancel passive | 读 `:4535-4536` 与 `endTouchScroll` `:4524-4534`——只复位三个变量，**不含** `preventDefault` | **PASS** |
+| T5 | helper textarea 离屏 CSS | 读 `vendor/xterm/xterm.css:61-75`：`opacity:0`、`left:-9999em`、`width:0`、`height:0`、`z-index:-5` | **PASS** |
+| T6 | `:4266-4268` 只清闩 | 读 `:4264-4269`：`click` 处理器唯一语句为 `terminalAvoidanceRecovering = false`，`{passive:true}`，**无** `focus()`／`preventDefault` | **PASS** |
+| T7 | `:5955-5961` rAF focus+select | 读 `:5955-5961`；同形 `:6053-6059`。确认 `focus()`／`select()` 均在 `requestAnimationFrame` 回调内 | **PASS** |
+| T8 | 产品无 tap→focus 通道 | 全文件 `addEventListener` 扫描 12 处（与上节 `:552` 计数一致）；touch／click／pointer 处理器体内**无** `focus()`／`select()`；`.focus()` 全产品**调用点 5 处**（`:4897`／`:5017`／`:5958`／`:6056`／`:8296`；另有 `:8273` 一处**注释**提及，不计入） | **PASS** |
+| T9 | A13 锚点 | `:8296` 为唯一 `session.term.focus()`；早退 `:8242`／`:8243`／`:8244`／`:8245`／`:8250`；调用点 7 处（`:5497`／`:6432`／`:6713`／`:6766`／`:8322`／`:8365`／`:9223`）上下文逐一核对 | **PASS** |
+| T10 | A12 锚点 | `#wtTask` 全产品**无** `focus()`／`select()`（仅 `.value` 读写）；`showModal` 包装 `:8355-8359` **只登记 `openDialogs`** | **PASS** |
+| T11 | 候选 A2 命名撞号 | 上节 `:36` 已用 `A1/A2/A3/A4` 指**帧段** ⇒ 本节改名"候选 A2（document-touchmove）" | **PASS（已修正）** |
+| T12 | 全部候选项存在于守卫前构建 | `git show 5268869:internal/ui/static/index.html`：A2 `:4060`/`:4046`、A8 `:5560-5563`/`:5658-5661`、A12 `:2554`、A13 `:7842`/`:7856`/`:5071`、A1 `:4103`；vendored xterm `xterm.js`／`xterm.css` 自 `5268869` **blob id 未变**（A11） | **PASS** |
+
+- **结论**：在**上表五项**任一缺失的情况下，候选矩阵 v2 **只能是排序**；任一人（含本仲裁）**不得**据矩阵把 B 写成"已归因"。矩阵的作用是把**验证优先级**排定，而不是替代验证。
