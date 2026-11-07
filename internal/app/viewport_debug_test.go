@@ -1203,3 +1203,159 @@ func mustDecodeJSON(t *testing.T, raw string) any {
 	}
 	return v
 }
+
+// ── AUTH-20261107-P3-PROBE-TOUCHV2: snapshot.touchTruth passthrough ───────────
+// The door for the read-only tap-level touch truth: the full block round-trips
+// byte-visible, a legacy frame without the block keeps uploading 200 with nothing
+// backfilled, all three declared schemaRevs are accepted, and every shape break —
+// a ring past its authorized 8, a negative count, a non-finite or oversized dy, a
+// third end word, a fourth kind word, a tag outside the tag discipline, a
+// non-boolean isActive — is a 400. Accept, never verdict: what the taps MEAN
+// stays with the B device readout, and B stays INCONCLUSIVE until a real-device
+// capture carrying this block is separately adjudicated.
+
+func touchTruthFramePayload(seq int, schemaRev, touchTruthJSON string) string {
+	payload := `{"session":"0123456789abcdef","seq":` + fmt.Sprint(seq) + `,"snapshot":{
+	    "capturedAt":"2026-11-07T12:00:00.000Z","reason":"manual",
+	    "clientWidth":834,"clientHeight":1108,"dpr":2,
+	    "vv":{"width":834,"height":702,"offsetTop":0,"offsetLeft":0,"scale":1},
+	    "schemaRev":"` + schemaRev + `"`
+	if touchTruthJSON != "" {
+		payload += `,"touchTruth":` + touchTruthJSON
+	}
+	return payload + `}}`
+}
+
+const touchTruthFullBlock = `{"taps":[` +
+	`{"touchmoveCount":2,"dyCumulative":30.5,"dyMax":40,"clickSuppressed":true,"endType":"touchend","ticksSinceStart":3,"cancelled":false},` +
+	`{"touchmoveCount":0,"dyCumulative":-12.25,"dyMax":0,"clickSuppressed":false,"endType":"touchcancel","ticksSinceStart":1,"cancelled":true}],` +
+	`"touchcancelCount":1,` +
+	`"userActivation":[{"kind":"focusin","isActive":true,"tick":8},{"kind":"focusout","isActive":null,"tick":9}],` +
+	`"mousedown":{"onTerminalHost":1,"targetTag":"TEXTAREA","defaultPrevented":false,"tick":10}}`
+
+func TestViewportDebugTouchTruthRoundTripAndThreeRevisions(t *testing.T) {
+	srv := &Server{viewportDebug: newViewportDebugStore()}
+	if rec := doViewportDebugRequest(t, srv, http.MethodPost, "/api/viewport-debug/report",
+		mustDecodeJSON(t, touchTruthFramePayload(1, "p9-additive-touch-truth-v1", touchTruthFullBlock))); rec.Code != http.StatusOK {
+		t.Fatalf("the full touchTruth frame must upload, status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	// The negative dy is legal and stays signed: UP-positive is the product's own
+	// convention and the door pins finiteness, not direction.
+	rec := doViewportDebugRequest(t, srv, http.MethodGet, "/api/viewport-debug/report?session=0123456789abcdef&after=0", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("download: status=%d", rec.Code)
+	}
+	body := rec.Body.String()
+	for _, want := range []string{
+		`"touchTruth":{"taps":[{`,
+		`"endType":"touchcancel"`,
+		`"dyCumulative":-12.25`,
+		`"isActive":null`,
+		`"mousedown":{"onTerminalHost":1,"targetTag":"TEXTAREA"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("the touchTruth block must round-trip visible (%s): %s", want, body)
+		}
+	}
+
+	// A legacy frame without touchTruth still uploads — on EVERY declared rev —
+	// and comes back with the field ABSENT, never backfilled into an empty ring
+	// that a reader could mistake for "observed, nothing happened".
+	for i, rev := range []string{"p9-additive-ownership-panel-v1", "p9-additive-settle-readonly-v1", "p9-additive-touch-truth-v1"} {
+		if rec := doViewportDebugRequest(t, srv, http.MethodPost, "/api/viewport-debug/report",
+			mustDecodeJSON(t, touchTruthFramePayload(10+i, rev, ""))); rec.Code != http.StatusOK {
+			t.Fatalf("rev %s without the block must upload, status=%d body=%s", rev, rec.Code, rec.Body.String())
+		}
+	}
+	// And the older revs WITH the block are accepted too: the rev is vocabulary,
+	// the fields are presence-checked (all three revisions are declared).
+	for i, rev := range []string{"p9-additive-ownership-panel-v1", "p9-additive-settle-readonly-v1"} {
+		if rec := doViewportDebugRequest(t, srv, http.MethodPost, "/api/viewport-debug/report",
+			mustDecodeJSON(t, touchTruthFramePayload(20+i, rev, touchTruthFullBlock))); rec.Code != http.StatusOK {
+			t.Fatalf("rev %s with the declared block must upload, status=%d body=%s", rev, rec.Code, rec.Body.String())
+		}
+	}
+
+	// The pre-additive frame in its own store: absent must STAY absent.
+	legacy := &Server{viewportDebug: newViewportDebugStore()}
+	if rec := doViewportDebugRequest(t, legacy, http.MethodPost, "/api/viewport-debug/report",
+		mustDecodeJSON(t, touchTruthFramePayload(1, "p9-additive-settle-readonly-v1", ""))); rec.Code != http.StatusOK {
+		t.Fatalf("the legacy frame must upload, status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	rec = doViewportDebugRequest(t, legacy, http.MethodGet, "/api/viewport-debug/report?session=0123456789abcdef&after=0", nil)
+	if strings.Contains(rec.Body.String(), `"touchTruth"`) {
+		t.Fatalf("a frame that never carried touchTruth must come back without it, never backfilled: %s", rec.Body.String())
+	}
+}
+
+func TestViewportDebugRejectsMalformedTouchTruthBlocks(t *testing.T) {
+	srv := &Server{viewportDebug: newViewportDebugStore()}
+	tap := func(endType string) string {
+		return `{"touchmoveCount":1,"dyCumulative":5,"dyMax":5,"clickSuppressed":false,"endType":"` + endType + `","ticksSinceStart":1,"cancelled":false}`
+	}
+	nineTaps := "["
+	for i := 0; i < 9; i++ {
+		if i > 0 {
+			nineTaps += ","
+		}
+		nineTaps += tap("touchend")
+	}
+	nineTaps += "]"
+	nineActs := "["
+	for i := 0; i < 9; i++ {
+		if i > 0 {
+			nineActs += ","
+		}
+		nineActs += `{"kind":"focusin","isActive":null,"tick":` + fmt.Sprint(i+1) + `}`
+	}
+	nineActs += "]"
+	malformed := []struct{ name, block string }{
+		{"taps past the authorized 8", `{"taps":` + nineTaps + `,"touchcancelCount":0,"userActivation":[],"mousedown":null}`},
+		{"userActivation past the authorized 8", `{"taps":[],"touchcancelCount":0,"userActivation":` + nineActs + `,"mousedown":null}`},
+		{"a third end word", `{"taps":[` + strings.Replace(tap("touchend"), "touchend", "touchhold", 1) + `],"touchcancelCount":0,"userActivation":[],"mousedown":null}`},
+		{"a fourth kind word", `{"taps":[],"touchcancelCount":0,"userActivation":[{"kind":"focusover","isActive":true,"tick":1}],"mousedown":null}`},
+		{"a negative touchmoveCount", `{"taps":[{"touchmoveCount":-1,"dyCumulative":0,"dyMax":0,"clickSuppressed":false,"endType":"touchend","ticksSinceStart":0,"cancelled":false}],"touchcancelCount":0,"userActivation":[],"mousedown":null}`},
+		{"a negative ticksSinceStart", `{"taps":[{"touchmoveCount":1,"dyCumulative":0,"dyMax":0,"clickSuppressed":false,"endType":"touchend","ticksSinceStart":-1,"cancelled":false}],"touchcancelCount":0,"userActivation":[],"mousedown":null}`},
+		{"a negative touchcancelCount", `{"taps":[],"touchcancelCount":-1,"userActivation":[],"mousedown":null}`},
+		{"dyCumulative past the finite bound", `{"taps":[{"touchmoveCount":1,"dyCumulative":1e12,"dyMax":5,"clickSuppressed":false,"endType":"touchend","ticksSinceStart":1,"cancelled":false}],"touchcancelCount":0,"userActivation":[],"mousedown":null}`},
+		{"a negative dyMax magnitude", `{"taps":[{"touchmoveCount":1,"dyCumulative":0,"dyMax":-5,"clickSuppressed":false,"endType":"touchend","ticksSinceStart":1,"cancelled":false}],"touchcancelCount":0,"userActivation":[],"mousedown":null}`},
+		{"targetTag outside the tag discipline", `{"taps":[],"touchcancelCount":0,"userActivation":[],"mousedown":{"onTerminalHost":0,"targetTag":"<script>","defaultPrevented":false,"tick":1}}`},
+		{"isActive is not a boolean", `{"taps":[],"touchcancelCount":0,"userActivation":[{"kind":"focusin","isActive":"yes","tick":1}],"mousedown":null}`},
+		{"a negative host-mousedown count", `{"taps":[],"touchcancelCount":0,"userActivation":[],"mousedown":{"onTerminalHost":-1,"targetTag":"DIV","defaultPrevented":false,"tick":1}}`},
+		{"the block is a string", `"eight-taps"`},
+		{"unknown key inside the block", `{"taps":[],"touchcancelCount":0,"userActivation":[],"mousedown":null,"terminalText":"secret"}`},
+		{"unknown key inside a tap", `{"taps":[{"touchmoveCount":1,"dyCumulative":0,"dyMax":0,"clickSuppressed":false,"endType":"touchend","ticksSinceStart":1,"cancelled":false,"clientY":123}],"touchcancelCount":0,"userActivation":[],"mousedown":null}`},
+		// Rework 小项: `cancelled` and `endType` carry ONE fact — a pair that
+		// contradicts itself is transport drift, not evidence, in both directions.
+		{"a touchend flagged cancelled", `{"taps":[{"touchmoveCount":1,"dyCumulative":0,"dyMax":0,"clickSuppressed":false,"endType":"touchend","ticksSinceStart":1,"cancelled":true}],"touchcancelCount":0,"userActivation":[],"mousedown":null}`},
+		{"a touchcancel not flagged cancelled", `{"taps":[{"touchmoveCount":1,"dyCumulative":0,"dyMax":0,"clickSuppressed":false,"endType":"touchcancel","ticksSinceStart":1,"cancelled":false}],"touchcancelCount":0,"userActivation":[],"mousedown":null}`},
+		// Rework M3: the RENAMED field. The old `synthesizedOnTerminalHost` name must
+		// 400 now — it claimed a trust classification the probe cannot make, and a
+		// client still speaking the old name must be caught at the door, not silently
+		// defaulted to a zero.
+		{"the retired synthesizedOnTerminalHost name", `{"taps":[],"touchcancelCount":0,"userActivation":[],"mousedown":{"synthesizedOnTerminalHost":1,"targetTag":"DIV","defaultPrevented":false,"tick":1}}`},
+	}
+	for i, tt := range malformed {
+		t.Run(tt.name, func(t *testing.T) {
+			payload := touchTruthFramePayload(50+i, "p9-additive-touch-truth-v1", tt.block)
+			if rec := doViewportDebugRequest(t, srv, http.MethodPost, "/api/viewport-debug/report", mustDecodeJSON(t, payload)); rec.Code != http.StatusBadRequest {
+				t.Fatalf("status=%d body=%s, want 400", rec.Code, rec.Body.String())
+			}
+		})
+	}
+	// The ring at EXACTLY 8 is the authorized shape and uploads — the cap is
+	// inclusive, the 400 above is the drift, and neither is a verdict.
+	eightTaps := "["
+	for i := 0; i < 8; i++ {
+		if i > 0 {
+			eightTaps += ","
+		}
+		eightTaps += tap("touchend")
+	}
+	eightTaps += "]"
+	full := `{"taps":` + eightTaps + `,"touchcancelCount":0,"userActivation":[{"kind":"focusin","isActive":null,"tick":1}],"mousedown":null}`
+	if rec := doViewportDebugRequest(t, srv, http.MethodPost, "/api/viewport-debug/report",
+		mustDecodeJSON(t, touchTruthFramePayload(99, "p9-additive-touch-truth-v1", full))); rec.Code != http.StatusOK {
+		t.Fatalf("the authorized ring of exactly 8 must upload, status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}

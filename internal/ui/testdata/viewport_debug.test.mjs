@@ -1254,7 +1254,7 @@ test("a client frame carries ownership, the DERIVED session hint and the panel i
   await flushPromises();
   const first = h.uploads[0].snapshot;
   assert.equal(first.probeVersion, "p9-full-shell-session-avoidance-v1", "the frozen stamp is untouched by the additive schema");
-  assert.equal(first.schemaRev, "p9-additive-settle-readonly-v1");
+  assert.equal(first.schemaRev, "p9-additive-touch-truth-v1");
   assert.equal(first.keyboardSession.derived, true, "B-3: the frame labels its session hint as derived");
   assert.equal(first.keyboardSession.derivedState, "active", "the fixture's applier mirror owes 320");
   assert.equal(first.keyboardSession.state, undefined, "no authoritative `state` field ships any more");
@@ -1333,7 +1333,7 @@ test("a client frame carries ownership, the DERIVED session hint and the panel i
   assert.equal(frame.snapshot.vv, null, "no zero-filled stand-in for an unread viewport");
   assert.equal(frame.snapshot.ptyHosts, null, "and none for the host list either");
   assert.equal(frame.snapshot.reason, "manual", "the reason stays the whitelisted reason of the attempt");
-  assert.equal(frame.snapshot.schemaRev, "p9-additive-settle-readonly-v1", "the frame still identifies its schema");
+  assert.equal(frame.snapshot.schemaRev, "p9-additive-touch-truth-v1", "the frame still identifies its schema");
   assert.ok(frame.seq > 0, "a failed read still consumes a seq, so the gap a reader sees is honest");
 
   // A session that was never live never claims to be recovering.
@@ -2056,4 +2056,321 @@ test("the probe measures the product and writes none of it", () => {
   assert.equal(snapshot.panel.exists, false);
   trace.note("click", { target: host });
   assert.equal(trace.report().counts.clickOnTerminalHost, 1, "journalling the host reads structure only");
+});
+
+// ── AUTH-20261107-P3-PROBE-TOUCHV2: snapshot.touchTruth, READ-ONLY ─────────────
+// The per-tap touch truth for the B attribution: rings bounded at 8, the
+// product's own dy sign (UP is positive), the page's preventDefault read back at
+// dispatch completion, userActivation tristate (null, never a zero-filled false)
+// and the frame staying ≤16KB against the 64KiB body limit. Observation only:
+// nothing here is consumed by a verdict, and the block never schedules a frame.
+
+function fireDoc(h, type, event) {
+  const handlers = [];
+  for (const [key, list] of h.docListeners) {
+    if (key.split("|")[0] === type) handlers.push(...list.slice());
+  }
+  assert.ok(handlers.length > 0, `no document listener registered for ${type}`);
+  for (const handler of handlers) handler(event);
+}
+
+function touchStart(y) {
+  return { type: "touchstart", touches: [{ identifier: 1, clientX: 200, clientY: y }] };
+}
+function touchMove(y) {
+  return { type: "touchmove", touches: [{ identifier: 1, clientX: 200, clientY: y }], defaultPrevented: false };
+}
+function touchEnd() {
+  return { type: "touchend", touches: [], changedTouches: [{ identifier: 1 }] };
+}
+function touchCancel() {
+  return { type: "touchcancel", touches: [], changedTouches: [{ identifier: 1 }] };
+}
+
+test("touchTruth starts as observed-empty — rings empty, mousedown absent, never zero-filled claims", async () => {
+  const h = makeHarness();
+  h.client.start();
+  await flushPromises();
+  assert.deepEqual(h.uploads[0].snapshot.touchTruth, {
+    taps: [], touchcancelCount: 0, userActivation: [], mousedown: null,
+  }, "a fresh session has completed no chain and seen no mousedown — absence stays absence");
+});
+
+test("touchTruth completes tap chains with the product's dy sign, ring cap 8, and clickSuppressed read back after dispatch", async () => {
+  const h = makeHarness();
+  h.client.start();
+  await flushPromises();
+  // Chain 1: start 500 → move 460 (dy +40, UP is positive like the product's
+  // activeTouchLastY − clientY) → move 470 (dy −10) → touchend. The product's
+  // preventDefault lands in a LATER phase than the probe's capture listener, so
+  // the fake marks the already-dispatched move exactly where the browser would.
+  fireDoc(h, "touchstart", touchStart(500));
+  fireDoc(h, "touchmove", touchMove(460));
+  const preventedMove = touchMove(470);
+  fireDoc(h, "touchmove", preventedMove);
+  preventedMove.defaultPrevented = true;   // the document/container lock, post-dispatch
+  fireDoc(h, "touchend", touchEnd());
+  h.client.capture("manual");
+  await flushPromises();
+  let taps = h.uploads[h.uploads.length - 1].snapshot.touchTruth.taps;
+  assert.equal(taps.length, 1);
+  assert.equal(taps[0].touchmoveCount, 2);
+  assert.equal(taps[0].dyCumulative, 30, "the dy sign is the product's: +40 then −10 sums to +30");
+  assert.equal(taps[0].dyMax, 40, "dyMax is the largest single-move magnitude");
+  assert.equal(taps[0].clickSuppressed, true, "a prevented touchmove inside the chain is the page's own suppression fact");
+  assert.equal(taps[0].endType, "touchend");
+  assert.equal(taps[0].cancelled, false);
+  assert.ok(taps[0].ticksSinceStart >= 3, "ticks are ordinals across the chain (start → moves → end), never timestamps");
+
+  // Chain 2: cancelled, unsuppressed — endType and the cumulative touchcancel counter.
+  fireDoc(h, "touchstart", touchStart(500));
+  fireDoc(h, "touchcancel", touchCancel());
+  h.client.capture("manual");
+  await flushPromises();
+  const truth = h.uploads[h.uploads.length - 1].snapshot.touchTruth;
+  assert.equal(truth.taps.length, 2);
+  assert.equal(truth.taps[1].endType, "touchcancel");
+  assert.equal(truth.taps[1].cancelled, true);
+  assert.equal(truth.taps[1].clickSuppressed, false, "a cancel without a prevented move suppresses nothing");
+  assert.equal(truth.taps[1].dyCumulative, 0, "no move means no displacement recorded");
+  assert.equal(truth.touchcancelCount, 1);
+
+  // Ring cap 8: twelve more chains, oldest fall off, newest keep their numbers.
+  for (let i = 0; i < 12; i++) {
+    fireDoc(h, "touchstart", touchStart(600));
+    fireDoc(h, "touchmove", touchMove(600 - (10 + i)));
+    fireDoc(h, "touchend", touchEnd());
+  }
+  h.client.capture("manual");
+  await flushPromises();
+  taps = h.uploads[h.uploads.length - 1].snapshot.touchTruth.taps;
+  assert.equal(taps.length, 8, "TAP_RING_MAX = 8 keeps the frame inside its size budget");
+  assert.equal(taps[0].dyMax, 14, "the ring keeps the newest eight — 10+4 survived, 10+0 fell off");
+  assert.equal(taps[7].dyMax, 21);
+
+  // A multi-finger restart abandons the open chain without inventing an end:
+  // no chain-end event, so the ring must not grow.
+  const before = taps.length;
+  fireDoc(h, "touchstart", touchStart(300));
+  fireDoc(h, "touchstart", touchStart(320));
+  fireDoc(h, "touchend", touchEnd());
+  h.client.capture("manual");
+  await flushPromises();
+  taps = h.uploads[h.uploads.length - 1].snapshot.touchTruth.taps;
+  assert.equal(taps.length, before, "an abandoned multi-finger start invents no chain end");
+  assert.equal(taps[taps.length - 1].touchmoveCount, 0, "the restarted chain counted only its own moves");
+
+  // 多指语义 (recorded, NOT fixed — the chain logic is the authorized one): finger A
+  // opens at 500 and travels to 460 (+40). The second finger's touchstart REOPENS
+  // the chain at 320, so A's +40 is gone, and the next move is measured against the
+  // NEW baseline — +20, not the +180 a reader would reconstruct from the two
+  // fingers. Same defect seen from the other side: when a lift hands `touches[0]` to
+  // the remaining finger, the next dy is taken against the WRONG baseline and jumps
+  // by the gap between them. Nothing in this block marks such a chain, so a
+  // multi-finger frame must be EXCLUDED from the B readout, not re-interpreted — B
+  // (the registered defect) is a single-finger tap, and the fields above are only
+  // "truth" under that declared assumption.
+  fireDoc(h, "touchstart", touchStart(500));
+  fireDoc(h, "touchmove", touchMove(460));
+  fireDoc(h, "touchstart", touchStart(320));
+  fireDoc(h, "touchmove", touchMove(300));
+  fireDoc(h, "touchend", touchEnd());
+  h.client.capture("manual");
+  await flushPromises();
+  taps = h.uploads[h.uploads.length - 1].snapshot.touchTruth.taps;
+  assert.equal(taps.length, before, "the ring stays capped at 8 as the restarted chain lands");
+  assert.equal(taps[taps.length - 1].endType, "touchend", "the restarted chain ends once, at its own touchend");
+  assert.equal(taps[taps.length - 1].dyCumulative, 20, "dy restarts at the SECOND finger's baseline — the documented multi-finger jump, asserted as behaviour and not smoothed over");
+  assert.equal(taps[taps.length - 1].touchmoveCount, 1, "finger A's dropped move is not counted either");
+});
+
+test("touchTruth userActivation is tristate — isActive null when the engine has no userActivation, never a zero-filled false", async () => {
+  const h = makeHarness();
+  h.client.start();
+  await flushPromises();
+  // The stand-in window has no navigator.userActivation: every read is null.
+  fireDoc(h, "focusin", { type: "focusin", target: { tagName: "TEXTAREA" } });
+  fireDoc(h, "focusout", { type: "focusout", target: { tagName: "TEXTAREA" } });
+  h.client.capture("manual");
+  await flushPromises();
+  let acts = h.uploads[h.uploads.length - 1].snapshot.touchTruth.userActivation;
+  assert.ok(acts.length >= 2);
+  const kinds = acts.slice(-2).map((item) => item.kind);
+  assert.deepEqual(kinds, ["focusin", "focusout"]);
+  assert.equal(acts[acts.length - 2].isActive, null, "unobtainable is null — never false, never 0");
+  assert.equal(acts[acts.length - 1].isActive, null);
+  assert.ok(acts[acts.length - 1].tick > acts[acts.length - 2].tick, "ticks order the ring");
+
+  // An engine that exposes it is read verbatim at the event.
+  h.page.window.navigator.userActivation = { isActive: true };
+  fireDoc(h, "focusin", { type: "focusin", target: { tagName: "TEXTAREA" } });
+  h.client.capture("manual");
+  await flushPromises();
+  acts = h.uploads[h.uploads.length - 1].snapshot.touchTruth.userActivation;
+  assert.equal(acts[acts.length - 1].isActive, true);
+
+  // Ring cap 8 on the activation side too.
+  for (let i = 0; i < 12; i++) {
+    fireDoc(h, "focusin", { type: "focusin", target: { tagName: "INPUT" } });
+  }
+  h.client.capture("manual");
+  await flushPromises();
+  acts = h.uploads[h.uploads.length - 1].snapshot.touchTruth.userActivation;
+  assert.equal(acts.length, 8, "the activation ring is capped at 8 as well");
+});
+
+// The host test is the PRODUCT's ownership predicate, so the fixture builds its
+// chain under the SAME #terminal-container object the probe reads through
+// getElementById (index.html:3774 / :3915-3936), not a look-alike.
+function mousedownChainOn(page) {
+  const container = page.document.getElementById("terminal-container");
+  const html = { tagName: "HTML", parentNode: null, parentElement: null, getAttribute: () => null };
+  function node(tagName, parent, instanceId) {
+    return {
+      tagName,
+      getAttribute: (name) => (name === "data-instance-id" ? instanceId || null : null),
+      parentNode: parent,
+      parentElement: parent,
+    };
+  }
+  // Real PTY host: stamped, and a DIRECT child of #terminal-container.
+  const host = node("DIV", container, "instance-private-id");
+  // The tab template: the SAME stamp, OUTSIDE the container (index.html:6198 area).
+  const tab = node("DIV", html, "instance-private-id");
+  // An ordinary Web input: no truthy stamp anywhere on the chain.
+  const webBox = node("DIV", html, null);
+  return {
+    container,
+    html,
+    helper: node("TEXTAREA", host, null),
+    webInput: node("INPUT", webBox, null),
+    tabLabel: node("SPAN", tab, null),
+  };
+}
+
+test("touchTruth mousedown counts arrivals on the product's host criterion, and reads defaultPrevented after dispatch — never at capture", async () => {
+  const h = makeHarness();
+  h.client.start();
+  await flushPromises();
+  assert.equal(h.uploads[0].snapshot.touchTruth.mousedown, null, "no arrival yet — absence, not zero");
+
+  const chain = mousedownChainOn(h.page);
+
+  // FAIR mousedown (M1 / M2 rework): a document-CAPTURE listener runs before the
+  // page's own handlers, so `defaultPrevented` is structurally false at arrival and
+  // the probe never reads it there. The fixture therefore dispatches the arrival and
+  // marks it prevented ONLY AFTER dispatch returned — the same post-dispatch marking
+  // the touchmove case above uses — and the frame is built afterwards.
+  const arrival = { type: "mousedown", target: chain.helper, defaultPrevented: false };
+  fireDoc(h, "mousedown", arrival);
+  assert.equal(arrival.defaultPrevented, false, "capture-phase: the page has not had its turn yet");
+  arrival.defaultPrevented = true;   // the page's own preventDefault, post-dispatch
+  h.client.capture("manual");
+  await flushPromises();
+  let md = h.uploads[h.uploads.length - 1].snapshot.touchTruth.mousedown;
+  assert.equal(md.onTerminalHost, 1, "a stamped DIRECT child of #terminal-container is the product's host — the terminal-reached side of B is now data");
+  assert.equal(md.targetTag, "TEXTAREA");
+  assert.equal(md.defaultPrevented, true, "read back off the ALREADY-DISPATCHED event at report(), the only moment the UA has decided");
+  assert.ok(md.tick > 0);
+
+  // The reference never outlives the frame that settled it: mutating the event again
+  // must NOT retroactively rewrite the published truth of a later frame.
+  const settled = h.uploads[h.uploads.length - 1].snapshot.touchTruth.mousedown.defaultPrevented;
+  arrival.defaultPrevented = false;
+  h.client.capture("manual");
+  await flushPromises();
+  assert.equal(h.uploads[h.uploads.length - 1].snapshot.touchTruth.mousedown.defaultPrevented, settled,
+    "the dropped reference cannot re-decide an already-settled frame");
+
+  // A Web-side arrival: counted as an arrival, never inflating the host counter.
+  const web = { type: "mousedown", target: chain.webInput, defaultPrevented: false };
+  fireDoc(h, "mousedown", web);
+  h.client.capture("manual");
+  await flushPromises();
+  md = h.uploads[h.uploads.length - 1].snapshot.touchTruth.mousedown;
+  assert.equal(md.onTerminalHost, 1, "a web-side mousedown does not inflate the host counter");
+  assert.equal(md.targetTag, "INPUT");
+  assert.equal(md.defaultPrevented, false, "nothing prevented this one, and the deferred read says so");
+
+  // NEGATIVE case (M3): the stamped ancestor is NOT under #terminal-container — the
+  // tab template stamps the SAME data-instance-id outside it, and the product's
+  // ownership predicate refuses it (index.html:3915-3936: the stamped ancestor must be
+  // a DIRECT child of the container). `focusTerminalIfPossible()` (index.html:8238+)
+  // DELIBERATELY accepts ANY stamped ancestor, so this is exactly where the two
+  // criteria differ, and the counter follows the narrow one.
+  fireDoc(h, "mousedown", { type: "mousedown", target: chain.tabLabel, defaultPrevented: false });
+  h.client.capture("manual");
+  await flushPromises();
+  md = h.uploads[h.uploads.length - 1].snapshot.touchTruth.mousedown;
+  assert.equal(md.onTerminalHost, 1, "a stamped ancestor OUTSIDE #terminal-container is not a host — the counter stays put");
+  assert.equal(md.targetTag, "SPAN");
+
+  // The field counts ARRIVALS and cannot tell them apart by origin: an
+  // isTrusted:false (automation / page-dispatched) mousedown rides the same listener
+  // and bumps the same counter, so the field never claims "real finger only".
+  fireDoc(h, "mousedown", { type: "mousedown", target: chain.helper, defaultPrevented: false, isTrusted: false });
+  h.client.capture("manual");
+  await flushPromises();
+  assert.equal(h.uploads[h.uploads.length - 1].snapshot.touchTruth.mousedown.onTerminalHost, 2,
+    "a second host arrival bumps the counter; synthesized and real arrivals are indistinguishable to the probe and are NOT separated here");
+
+  // Tags outside the [A-Za-z0-9] vocabulary are sanitized before upload — the
+  // door would 400 an `svg:` colon otherwise.
+  fireDoc(h, "mousedown", { type: "mousedown", target: { tagName: "svg:text", getAttribute: () => null, parentNode: chain.html, parentElement: chain.html }, defaultPrevented: false });
+  h.client.capture("manual");
+  await flushPromises();
+  assert.equal(h.uploads[h.uploads.length - 1].snapshot.touchTruth.mousedown.targetTag, "SVGTEXT");
+  assert.equal(JSON.stringify(h.uploads[h.uploads.length - 1].snapshot.touchTruth).includes("instance-private-id"), false,
+    "the host counter leaves the id in the walk — only booleans and tags travel");
+});
+
+test("touchTruth rides the observeOnly triple — registered once each, zero residue after stop, and no extra frames (AUTH-20261107)", async () => {
+  const h = makeHarness();
+  h.client.start();
+  await flushPromises();
+  const framesAfterStart = h.uploads.length;
+  for (const type of ["touchmove", "touchend", "touchcancel", "mousedown"]) {
+    assert.equal((h.docListeners.get(type + "|capture") || []).length, 1, `${type} registers exactly once, in capture`);
+    assert.equal(h.docListeners.get(type + "|bubble"), undefined, `${type} never registers a bubble listener here`);
+  }
+  assert.equal((h.docListeners.get("touchstart|capture") || []).length, 1, "touchstart still gets exactly ONE capture listener — the truth rides beside the journal, not beside a second registration");
+  // focusin / focusout keep their ONE existing bubble listener (journal +
+  // schedule, untouched) and gain exactly ONE capture observer each.
+  assert.equal((h.docListeners.get("focusin|capture") || []).length, 1);
+  assert.equal((h.docListeners.get("focusout|capture") || []).length, 1);
+  assert.equal((h.docListeners.get("focusin|bubble") || []).length, 1, "the pre-existing bubble registration is not doubled");
+  assert.equal((h.docListeners.get("focusout|bubble") || []).length, 1, "the pre-existing bubble registration is not doubled");
+  // Observing a flood adds NO frames — observeOnly never schedules.
+  for (let i = 0; i < 5; i++) fireDoc(h, "touchmove", touchMove(500 - i));
+  assert.equal(h.uploads.length, framesAfterStart, "touch truth never adds a captured frame");
+  h.client.stop();
+  for (const [key, list] of h.docListeners) {
+    assert.deepEqual(list, [], `stop() left a listener on ${key}`);
+  }
+});
+
+test("a frame with a FULL touchTruth ring stays ≤16KB — nowhere near the 64KiB door (AUTH-20261107 budget)", async () => {
+  const h = makeHarness();
+  h.client.start();
+  await flushPromises();
+  const html = { tagName: "HTML", parentNode: null, getAttribute: () => null };
+  for (let i = 0; i < 12; i++) {
+    fireDoc(h, "touchstart", touchStart(600));
+    fireDoc(h, "touchmove", touchMove(600 - (10 + i)));
+    fireDoc(h, "touchmove", touchMove(600 - (10 + i) + 3));
+    fireDoc(h, "touchend", touchEnd());
+  }
+  for (let i = 0; i < 12; i++) fireDoc(h, "focusin", { type: "focusin", target: { tagName: "INPUT", getAttribute: () => null, parentNode: html } });
+  fireDoc(h, "mousedown", { type: "mousedown", target: { tagName: "TEXTAREA", getAttribute: () => null, parentNode: html }, defaultPrevented: false });
+  h.client.capture("manual");
+  await flushPromises();
+  const serialized = JSON.stringify(h.uploads[h.uploads.length - 1]);
+  const block = JSON.stringify(h.uploads[h.uploads.length - 1].snapshot.touchTruth);
+  // The measured numbers ride the diagnostic line: the frame is a full-ring
+  // worst case, still nowhere near the 64KiB door the 2a33 median (~9.8KB)
+  // already sits under.
+  console.log(`AUTH-20261107 frame bytes=${serialized.length} touchTruth bytes=${block.length} (door 65536, budget ≤16384)`);
+  assert.ok(serialized.includes("\"touchTruth\""), "the frame really carries the block");
+  assert.ok(serialized.length <= 16 * 1024, `a full-ring frame must stay ≤16KB (measured median ~9.8KB), got ${serialized.length} bytes`);
+  assert.ok(block.length <= 3500, `the touchTruth block itself must stay ≈3.5KB-capped, got ${block.length}`);
 });

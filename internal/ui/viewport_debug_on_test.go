@@ -155,7 +155,7 @@ func TestViewportDebugSettleMirrorAnchors(t *testing.T) {
 		"win.__mwTerminalSettle", "scaleSettleFieldsOf", "scaleSettleUnavailableReason",
 		`"settle-mirror-not-published"`, "scaleSettleTickJournal", "SETTLE_JOURNAL_MAX",
 		// additive schema 标记随字段集移动；冻结 stamp 不动（verify-sop 的 stamp 门依赖它）。
-		`const SCHEMA_REV = "p9-additive-settle-readonly-v1";`,
+		`const SCHEMA_REV = "p9-additive-touch-truth-v1";`,
 		`const PROBE_VERSION = "p9-full-shell-session-avoidance-v1";`,
 	} {
 		if !strings.Contains(asset, want) {

@@ -337,7 +337,11 @@
     // (this revision was not on the page yet) is told apart from one that carried
     // it unpublished (`scaleSettle: null` + reason) by the fields, never by
     // backfilled zeros.
-    const SCHEMA_REV = "p9-additive-settle-readonly-v1";
+    // AUTH-20261107-P3-PROBE-TOUCHV2: the touchTruth block below is the next
+    // additive field set on the same frozen stamp — read-only per-tap touch truth
+    // for the B soft-keyboard attribution; the marker moves with it, the server
+    // accepts all three revisions, nothing is backfilled.
+    const SCHEMA_REV = "p9-additive-touch-truth-v1";
 
     // AUTH-20261105-D2-SETTLE-READONLY: the applier publishes window.
     // __mwTerminalSettle (see applyVisualViewportOcclusion in index.html) as an
@@ -937,6 +941,263 @@
         };
     }
 
+    /* AUTH-20261107-P3-PROBE-TOUCHV2: snapshot.touchTruth — READ-ONLY per-tap
+     * touch truth for the B soft-keyboard attribution ("first tap randomly does
+     * not raise the keyboard"). It rides the frozen p9 stamp on the additive
+     * `p9-additive-touch-truth-v1` revision, enters NOTHING else: no verdict,
+     * no derivedState / keyboardSession / ownership consumption, no product
+     * behaviour. Every listener that feeds it is { passive: true, capture: true }
+     * on the existing observeOnly()/listeners + stop() triple — nothing here
+     * preventDefaults, stops propagation, focuses, scrolls or writes the DOM.
+     *
+     * Sign convention, verbatim from the product's own touch mapping
+     * (index.html: `const dy = activeTouchLastY - touch.clientY`): dy is POSITIVE
+     * when the finger travels UP, in CSS pixels, and only touches[0] is read —
+     * never the x axis, never a raw coordinate pair, never a raw timestamp. The
+     * only time-like number is the probe's own ordinal tick.
+     *
+     * clickSuppressed is the page's own fact read by the probe, computed here and
+     * nowhere else: a preventDefault-ed touchmove inside the tap chain. The
+     * product's preventDefault lands in the TARGET/BUBBLE phase (index.html's
+     * document `touchmove` lock and the #terminal-container hard lock), so a
+     * capture-phase listener running BEFORE them cannot see `defaultPrevented` on
+     * the live event; the flag is therefore read from an already-dispatched move
+     * at the next checkpoint (the following move, then the chain end), which is
+     * exactly when the UA has decided.
+     *
+     * mousedown.defaultPrevented (M1 / M2 rework) defers the SAME way for the SAME
+     * reason: reading `event.defaultPrevented` in this capture-phase listener is
+     * structurally false — the page's preventDefault has not run yet — so the
+     * listener keeps only the event REFERENCE (`pendingMousedown`: one reference,
+     * replaced by every arrival, read-only, dropped by every serialization so it
+     * never outlives the frame whose report settles it) and `report()` reads
+     * `defaultPrevented` off that already-dispatched object. Every capture runs in
+     * a LATER task than the listener that fed it, so the read is the UA's settled
+     * word; the field is isomorphic to the deferred touchmove read above.
+     *
+     * mousedown.onTerminalHost (M3 rework) counts mousedowns whose target reached a
+     * PTY host on the PRODUCT's OWN ownership criterion (index.html:3915-3936): the
+     * FIRST `data-instance-id` ancestor decides, with NO backtracking, and it is a
+     * host ONLY when it is a DIRECT child of #terminal-container — the tab template
+     * stamps the same attribute OUTSIDE the container and a stamp there is NOT a
+     * host. That is the NARROW ownership predicate, deliberately NOT the looser
+     * `focusTerminalIfPossible` walk (index.html:8238+, where ANY truthy
+     * data-instance-id ancestor counts as "inside a terminal"). The container
+     * reference is READ only, never written. And the field is a COUNT OF ARRIVALS:
+     * it does NOT distinguish a synthesized (isTrusted:false, automation or
+     * page-dispatched) mousedown from a real finger-generated one — the probe can
+     * neither mint nor read trust, so it invents no trust classification. No
+     * foreground / visibility gate is added here either (no new behaviour, no new
+     * field): `focusAncestryOf`'s already-computed `hostIsForeground` / `hostVisible`
+     * are NOT read by this listener and are NOT gating — the product's predicate
+     * additionally refuses a host whose own `display` is `none`, this count gates on
+     * the ancestor rule alone, and that asymmetry is the field's declared boundary.
+     *
+     * KNOWN multi-finger limitation (recorded, NOT fixed — the chain logic is the
+     * authorized one, and B is a single-finger tap): a second `touchstart` while a
+     * chain is open RESTARTS it, so the first finger's running totals are dropped
+     * and no chain end is invented, and because only `touches[0]` is followed, a
+     * lift hands index 0 to another finger so `dyCumulative` / `dyMax` can jump by
+     * the gap between two fingers. Any multi-finger frame must be stated as such
+     * when this block is read; these fields read true for B only under one finger.
+     *
+     * Absence stays absence: `mousedown` is null until the first one arrives, and
+     * `isActive` is null when the engine does not expose navigator.userActivation —
+     * never a zero-filled "read, it was off". Rings are bounded at TAP_RING_MAX / 8
+     * so a frame cannot crowd the 64KiB body limit (median frame ~9.8KB; this block
+     * carries ≤ ~3.5KB). */
+    const TAP_RING_MAX = 8;
+    const ACTIVATION_RING_MAX = 8;
+
+    function tagSanitized(tag) {
+        const upper = typeof tag === "string" ? tag.toUpperCase() : "";
+        return upper.replace(/[^A-Za-z0-9]/g, "").slice(0, 32);
+    }
+
+    // Tristate by contract: null means the engine has no userActivation object,
+    // or its isActive is not readable as a boolean — NEVER false and never 0.
+    function userActivationIsActive(win) {
+        const activation = win && win.navigator ? win.navigator.userActivation : null;
+        if (!activation || typeof activation.isActive !== "boolean") return null;
+        return activation.isActive;
+    }
+
+    /* M3 rework: "did this mousedown land on a PTY host?" answered on the
+     * PRODUCT's OWN ownership predicate (index.html:3915-3936, whose `container` is
+     * bound at :3774) and on NOTHING else:
+     *   · the FIRST truthy `data-instance-id` ancestor decides, with NO backtracking;
+     *   · that ancestor is a host ONLY when it is a DIRECT child of
+     *     #terminal-container — the tab template stamps the same attribute OUTSIDE
+     *     the container (index.html:6198 area), and a stamp there is not a host;
+     *   · the container is READ through getElementById and never written.
+     * This is deliberately the NARROW set. `focusTerminalIfPossible()`
+     * (index.html:8238+, the FOCUS-GUARD round) tests the same ancestry DELIBERATELY
+     * LOOSELY — ANY truthy data-instance-id ancestor counts as "inside a terminal"
+     * there — so a stamped ancestor outside #terminal-container keeps its focus in
+     * the product and is NOT counted here. The two criteria differ on purpose and the
+     * difference is the point of this field.
+     * Tristate: null = this cannot be told (no container read, unreadable attributes),
+     * never dressed up as a false. The walk starts AT the target and climbs
+     * `parentElement` (falling back to `parentNode` where an engine or a stand-in
+     * only carries the other): the product starts at `focus.parentElement` because
+     * there the focus IS the editable, while a mousedown's target may itself BE the
+     * host div, and a press that lands on the host is exactly a press on the host. */
+    function mousedownInsideTerminalHost(doc, target) {
+        if (!target || typeof target !== "object") return null;
+        if (!doc || typeof doc.getElementById !== "function") return null;
+        const container = doc.getElementById("terminal-container");
+        if (!container) return null;
+        let node = target;
+        for (let depth = 0; depth < 32 && node && node !== container; depth++) {
+            if (typeof node.getAttribute !== "function") return null;
+            const stamp = node.getAttribute("data-instance-id");
+            if (stamp !== undefined && stamp !== null && stamp !== "") {
+                const parent = node.parentElement !== undefined && node.parentElement !== null
+                    ? node.parentElement
+                    : node.parentNode;
+                return parent === container;
+            }
+            node = node.parentElement !== undefined && node.parentElement !== null
+                ? node.parentElement
+                : node.parentNode;
+        }
+        return false;
+    }
+
+    function createTouchTruth(win, doc) {
+        let tick = 0;
+        let touchcancelCount = 0;
+        let taps = [];
+        let activations = [];
+        let mousedown = null;
+        // The ONLY source of `mousedown.defaultPrevented`, and it is held for less
+        // than one frame: captured by reference at arrival, read back at the next
+        // report() — by then the dispatch has run its target/bubble phase, so the UA
+        // has decided — and dropped at that same report(). See the block header.
+        let pendingMousedown = null;
+        let mousedownOnTerminalHost = 0;
+        // The OPEN chain: recorded only when it ENDS (touchend / touchcancel);
+        // a second touchstart while one is open restarts it (invent no end for an
+        // abandoned multi-finger start — the ring keeps only real chain ends).
+        //
+        // KNOWN MULTI-FINGER DEFECT, recorded and NOT fixed here (the chain logic is
+        // the authorized one): a second finger's `touchstart` RESTARTS the open chain,
+        // so the first finger's accumulated moves/dy are dropped, and because only
+        // `touches[0]` is followed, a lift hands index 0 to the other finger and the
+        // next `dy` is measured against the WRONG baseline — `dyCumulative` / `dyMax`
+        // then jump by the gap between the two fingers. A chain that saw more than one
+        // finger is therefore NOT a single-finger stroke, and nothing in this block
+        // flags it. B is a single-finger tap, so the fields read true for B as long as
+        // the reader DECLARES the single-finger assumption; a multi-finger frame must be
+        // excluded from the B readout, not re-interpreted.
+        let open = null;
+
+        function closeOpen(endType, cancelled) {
+            if (!open) return;
+            // Last move already dispatched — its defaultPrevented is now the UA's
+            // settled word on this chain.
+            if (open.lastMove && open.lastMove.defaultPrevented) open.preventedSeen = true;
+            open.lastMove = null;
+            taps.push({
+                touchmoveCount: open.moveCount,
+                dyCumulative: finite(open.dyCumulative),
+                dyMax: finite(open.dyMax),
+                clickSuppressed: open.preventedSeen === true,
+                endType: endType,
+                ticksSinceStart: Math.max(0, tick - open.startTick),
+                cancelled: cancelled === true,
+            });
+            if (taps.length > TAP_RING_MAX) taps = taps.slice(taps.length - TAP_RING_MAX);
+            open = null;
+        }
+
+        return {
+            touchstart(event) {
+                tick++;
+                const touch = event && event.touches ? event.touches[0] : null;
+                const y = touch && Number.isFinite(touch.clientY) ? touch.clientY : null;
+                open = { startTick: tick, lastY: y, moveCount: 0, dyCumulative: 0, dyMax: 0, preventedSeen: false, lastMove: null };
+            },
+            touchmove(event) {
+                tick++;
+                if (!open) return;
+                open.moveCount++;
+                if (open.lastMove && open.lastMove.defaultPrevented) open.preventedSeen = true;
+                open.lastMove = event;
+                const touch = event && event.touches ? event.touches[0] : null;
+                const y = touch && Number.isFinite(touch.clientY) ? touch.clientY : null;
+                if (y === null) return;
+                if (open.lastY !== null) {
+                    // Product sign: positive when the finger travels UP.
+                    const dy = open.lastY - y;
+                    open.dyCumulative += dy;
+                    const magnitude = Math.abs(dy);
+                    if (magnitude > open.dyMax) open.dyMax = magnitude;
+                }
+                open.lastY = y;
+            },
+            touchend(event) {
+                tick++;
+                closeOpen("touchend", false);
+            },
+            touchcancel(event) {
+                tick++;
+                touchcancelCount++;
+                closeOpen("touchcancel", true);
+            },
+            focusin(event) {
+                tick++;
+                activations.push({ kind: "focusin", isActive: userActivationIsActive(win), tick: tick });
+                if (activations.length > ACTIVATION_RING_MAX) activations = activations.slice(activations.length - ACTIVATION_RING_MAX);
+            },
+            focusout(event) {
+                tick++;
+                activations.push({ kind: "focusout", isActive: userActivationIsActive(win), tick: tick });
+                if (activations.length > ACTIVATION_RING_MAX) activations = activations.slice(activations.length - ACTIVATION_RING_MAX);
+            },
+            mousedown(event) {
+                tick++;
+                // No event object, no record: an unreadable arrival must never be
+                // published as a fabricated `defaultPrevented:false`.
+                if (!event || typeof event !== "object") return;
+                const target = event.target ? event.target : null;
+                // Structure only, on the PRODUCT's ownership criterion
+                // (mousedownInsideTerminalHost: first stamped ancestor, DIRECT child of
+                // #terminal-container, container read never written). The count is
+                // ARRIVALS inside a host: it does NOT distinguish a synthesized
+                // (isTrusted:false, e.g. an automation or a page-dispatched event)
+                // mousedown from a finger-generated one — this probe cannot mint trust,
+                // so the field never claims to.
+                if (mousedownInsideTerminalHost(doc, target) === true) mousedownOnTerminalHost++;
+                mousedown = {
+                    onTerminalHost: mousedownOnTerminalHost,
+                    targetTag: tagSanitized(typeof target === "object" && typeof target.tagName === "string" ? target.tagName : ""),
+                    // Provisional and NEVER published as it stands: report() reads this
+                    // back off `pendingMousedown` — the already-dispatched event, the
+                    // only place the UA's word lives — before it serializes the block.
+                    defaultPrevented: false,
+                    tick: tick,
+                };
+                // One reference, replaced by every later arrival, dropped by report().
+                pendingMousedown = event;
+            },
+            report() {
+                // Settle the deferred read FIRST, then publish, then let the event go:
+                // the reference never outlives the frame that read it.
+                if (mousedown && pendingMousedown) {
+                    mousedown.defaultPrevented = pendingMousedown.defaultPrevented === true;
+                    pendingMousedown = null;
+                }
+                return {
+                    taps: taps.map((item) => Object.assign({}, item)),
+                    touchcancelCount: touchcancelCount,
+                    userActivation: activations.map((item) => Object.assign({}, item)),
+                    mousedown: mousedown ? Object.assign({}, mousedown) : null,
+                };
+            },
+        };
+    }
+
     // R6 / GI-9, the tool's own introspection: where the diagnostic panel is and
     // whether it is reachable. The corner and the placement verdict are the ones
     // applyPanelLayout just authored, mirrored onto the panel as data attributes so
@@ -1034,6 +1295,7 @@
             keyboardSession: null,
             unlockTrace: null,
             panel: null,
+            touchTruth: null,
         };
     }
 
@@ -1218,6 +1480,10 @@
             keyboardSession: keyboardSession,
             unlockTrace: unlockTrace,
             panel: panelReport,
+            // AUTH-20261107-P3-PROBE-TOUCHV2, ADDITIVE: the read-only tap-level
+            // touch truth (see createTouchTruth). A frame built without the client
+            // tracker reports null — absence, never an empty ring dressed as one.
+            touchTruth: ctx.touchTruth ? ctx.touchTruth.report() : null,
         };
     }
 
@@ -1256,6 +1522,10 @@
         // keyboard-session memory, so a frame can state `recovering` / `geometryGrace`
         // from the applier's mirror plus the previous frame instead of staying mute.
         const eventTrace = createEventTrace(page.window, page.document);
+        // AUTH-20261107-P3-PROBE-TOUCHV2: the read-only tap-level touch truth
+        // (touchTruth). Same lifecycle as the journal: listeners registered in
+        // start(), detached by the (type, handler, capture) triple in stop().
+        const touchTruth = createTouchTruth(page.window, page.document);
         let previousKeyboardObservation = null;
         // The §5.5 unlock tick as of the LAST captured frame: the span between it
         // and the current tick is the only window in which `recovering` may be
@@ -1330,6 +1600,7 @@
                     eventTrace,
                     unlockTick: eventTrace.unlockTick(),
                     previousUnlockTick: previousUnlockTick,
+                    touchTruth: touchTruth,
                 });
                 previousKeyboardObservation = observation;
                 previousUnlockTick = eventTrace.unlockTick();
@@ -1424,12 +1695,26 @@
         // §5.5 unlock evidence: `click` and `touchstart` are observed and journalled
         // WITHOUT scheduling a capture, so recording the unlock never adds frames —
         // and never feeds back into the applier, which is passive on both.
-        function observeOnly(target, type) {
+        // AUTH-20261107-P3-PROBE-TOUCHV2: the same path takes the read-only
+        // touchTruth observers — an OPTIONAL observer runs beside the journal (or
+        // alone, `journal:false`, when the type is no unlock evidence and must not
+        // touch `counts`), and the registration still lives in `listeners` so
+        // stop() detaches it on the same (type, handler, capture) triple (B-1).
+        // Still { passive: true, capture: true }, still never scheduling a frame.
+        function observeOnly(target, type, observer, journal) {
             if (!target || typeof target.addEventListener !== "function") return;
+            const noteJournal = journal !== false;
             const handler = (event) => {
-                try {
-                    eventTrace.note(type, event);
-                } catch (_) { /* the unlock stays recorded by the counters that did run */ }
+                if (noteJournal) {
+                    try {
+                        eventTrace.note(type, event);
+                    } catch (_) { /* the unlock stays recorded by the counters that did run */ }
+                }
+                if (observer) {
+                    try {
+                        observer(event);
+                    } catch (_) { /* the touch truth stays advisory too */ }
+                }
             };
             target.addEventListener(type, handler, { passive: true, capture: true });
             listeners.push({ target, type, handler, capture: true });
@@ -1448,7 +1733,20 @@
             listen(page.document, "focusout", "focusout");
             listen(page.document, "visibilitychange", "visibilitychange");
             observeOnly(page.document, "click");
-            observeOnly(page.document, "touchstart");
+            observeOnly(page.document, "touchstart", touchTruth.touchstart);
+            // AUTH-20261107-P3-PROBE-TOUCHV2: read-only touch truth, journal:false —
+            // these types are NOT §5.5 unlock evidence and never enter its counts
+            // or ring; { passive: true, capture: true } on document only.
+            observeOnly(page.document, "touchmove", touchTruth.touchmove, false);
+            observeOnly(page.document, "touchend", touchTruth.touchend, false);
+            observeOnly(page.document, "touchcancel", touchTruth.touchcancel, false);
+            observeOnly(page.document, "mousedown", touchTruth.mousedown, false);
+            // The userActivation ring reads navigator.userActivation.isActive at
+            // the focus event itself (capture, passive, read-only). The existing
+            // bubble `listen()` registration keeps journalling and scheduling —
+            // this one never counts twice there (journal:false).
+            observeOnly(page.document, "focusin", touchTruth.focusin, false);
+            observeOnly(page.document, "focusout", touchTruth.focusout, false);
             capture("init");
             emitStatus();
         }

@@ -54,6 +54,13 @@ const (
 	// SATURATES there (index.html SCALE_SETTLE_TICKS = 2), so anything past it is
 	// transport drift, not a longer settle. This is a shape bound, not a verdict.
 	viewportDebugScaleSettleMaxTicked = 2
+	// AUTH-20261107-P3-PROBE-TOUCHV2: the touch-truth rings are capped at 8 by
+	// the authorization itself — the client rings them the same way, and the door
+	// is where a client that outgrew its own ring gets caught. The block carries
+	// only small numbers, a two-word enum and a ≤32-char tag, so the ≤8 caps keep
+	// the frame's new budget at ~3.5KB against the 64KiB body limit (measured
+	// median frame ~9.8KB). TTL / capacity / body limit / event caps: untouched.
+	viewportDebugTouchTruthRingMax = 8
 )
 
 var (
@@ -82,12 +89,24 @@ var (
 	// additive set; the previous revision stays accepted so frames stamped before
 	// it still upload — each revision is validated by the field set it declares
 	// (fields are presence-checked, the revision is vocabulary-checked).
-	viewportDebugSchemaRevPattern = regexp.MustCompile(`^p9-additive-(ownership-panel|settle-readonly)-v1$`)
+	// AUTH-20261107-P3-PROBE-TOUCHV2: the touch-truth block is the newest declared
+	// additive set on the SAME frozen PROBE_VERSION; all three revisions keep
+	// uploading — forgetting `touch-truth` here would 400 every new probe frame.
+	viewportDebugSchemaRevPattern = regexp.MustCompile(`^p9-additive-(ownership-panel|settle-readonly|touch-truth)-v1$`)
 	// AUTH-20261105-D2-SETTLE-READONLY: the applier only ever knows its own token;
 	// every other pass is "other" and is never guessed at being resize / scroll /
 	// focusout / init. A fourth word is schema drift caught at the door.
 	viewportDebugSettlePassSourcePattern = regexp.MustCompile(`^(scaleSettleTick|other)$`)
-	viewportDebugReasons                 = map[string]bool{
+	// AUTH-20261107-P3-PROBE-TOUCHV2: the two-word enums of the read-only touch
+	// truth. A chain ends in exactly one of touchend / touchcancel — anything else
+	// (a third word, a fifth tap type) is schema drift caught at the door; the
+	// activation ring carries only focusin / focusout, the two focus events the
+	// probe observes its userActivation snapshot on. Vocabulary checks, never
+	// verdicts: the field VALUES stay read-only observations the tool does not
+	// consume anywhere (PLAN §12: no judge / derivedState / ownership reader).
+	viewportDebugTouchEndTypePattern        = regexp.MustCompile(`^(touchend|touchcancel)$`)
+	viewportDebugTouchActivationKindPattern = regexp.MustCompile(`^(focusin|focusout)$`)
+	viewportDebugReasons                    = map[string]bool{
 		"init": true, "resize": true, "scroll": true, "focusin": true,
 		"focusout": true, "orientationchange": true, "window-resize": true,
 		"visibilitychange": true, "pageshow": true, "settle": true,
@@ -473,6 +492,84 @@ type viewportDebugPanel struct {
 	InsideVisibleViewport *bool                    `json:"insideVisibleViewport"`
 }
 
+// ── AUTH-20261107-P3-PROBE-TOUCHV2: snapshot.touchTruth, READ-ONLY ─────────────
+// The per-tap touch truth the B soft-keyboard attribution is read from, copied
+// through from the probe (see internal/ui/debugassets/viewport_debug.js).
+// Every field here is a twin of a client field the DisallowUnknownFields decoder
+// demands — one missing twin is every upload answered 400 (the pageTop incident).
+// Nothing in this group can carry content: counts, signed CSS-pixel dy reads on
+// touches[0] only, two-word enums, uppercase tags and ordinals — no text, no
+// raw coordinates, no raw timestamps, no identity. The server validates SHAPES
+// (ring caps, non-negative counts, finite dy, enum and tag vocabularies) and
+// decides nothing: no verdict, no judge, no derivedState, no ownership reader
+// consumes any of it (PLAN §12 / VALIDATION 2026-11-07 hard red lines).
+
+// viewportDebugTouchTap is one COMPLETED tap chain (touchstart → touchend /
+// touchcancel). `dyCumulative` / `dyMax` keep the product's own sign convention
+// (`activeTouchLastY - touch.clientY`: positive when the finger travels UP, CSS
+// pixels); `dyMax` is the largest single-move magnitude, so it never goes
+// negative. `clickSuppressed` is the probe's page-internal judgment — a
+// preventDefault-ed touchmove was seen inside this chain — a fact recorded, not
+// a product decision, the same nature as `focusEditable`.
+// `cancelled` and `endType` carry the SAME fact in two words (the chain ended by
+// touchcancel or by touchend), so the door cross-checks them: a pair that
+// contradicts itself is transport drift, never evidence (see
+// validateViewportDebugTouchTruth).
+type viewportDebugTouchTap struct {
+	TouchmoveCount  int     `json:"touchmoveCount"`
+	DyCumulative    float64 `json:"dyCumulative"`
+	DyMax           float64 `json:"dyMax"`
+	ClickSuppressed bool    `json:"clickSuppressed"`
+	EndType         string  `json:"endType"`
+	TicksSinceStart int     `json:"ticksSinceStart"`
+	Cancelled       bool    `json:"cancelled"`
+}
+
+// viewportDebugTouchActivation is one focus-event snapshot of
+// navigator.userActivation.isActive. A pointer, because "the engine has no
+// userActivation object" is `null` — never false, never a backfilled zero
+// dressed up as a measurement.
+type viewportDebugTouchActivation struct {
+	Kind     string `json:"kind"`
+	IsActive *bool  `json:"isActive"`
+	Tick     int    `json:"tick"`
+}
+
+// viewportDebugTouchMousedown describes the LAST observed mousedown arrival.
+// `onTerminalHost` is the cumulative count of observed mousedowns whose target
+// landed on a PTY host, measured on the PRODUCT's OWN ownership criterion
+// (index.html:3915-3936): the FIRST `data-instance-id` ancestor decides, with no
+// backtracking, and it is a host ONLY when it is a DIRECT child of
+// #terminal-container — a stamp outside that container (the tab template) is NOT a
+// host. That is deliberately the narrow ownership predicate and NOT the loose
+// `focusTerminalIfPossible()` test (index.html:8238+), where ANY truthy stamped
+// ancestor counts as "inside a terminal"; the two criteria differ on purpose, and
+// this door enforces neither — it shape-checks a number.
+// The field is a count of ARRIVALS: a synthesized (isTrusted:false) mousedown and a
+// finger-generated one bump it identically, because the probe can neither mint nor
+// read trust. That is why it is named `onTerminalHost` and NOT "synthesized" — no
+// reader may treat it as a trust classification. `targetTag` / `defaultPrevented` /
+// `tick` are the truth of that last arrival, `defaultPrevented` settled by the
+// client AFTER the event finished dispatching (its listener is capture-phase, where
+// the flag is structurally false — reading it there was the false guarantee the
+// rework removed). Null on the block itself means none has arrived yet.
+type viewportDebugTouchMousedown struct {
+	OnTerminalHost   int    `json:"onTerminalHost"`
+	TargetTag        string `json:"targetTag"`
+	DefaultPrevented bool   `json:"defaultPrevented"`
+	Tick             int    `json:"tick"`
+}
+
+// viewportDebugTouchTruth is the nullable snapshot block itself. The rings are
+// capped by viewportDebugTouchTruthRingMax, mirrored client-side, and the door
+// re-checks the caps — a ring that outgrew 8 is transport drift, not evidence.
+type viewportDebugTouchTruth struct {
+	Taps             []viewportDebugTouchTap        `json:"taps"`
+	TouchcancelCount int                            `json:"touchcancelCount"`
+	UserActivation   []viewportDebugTouchActivation `json:"userActivation"`
+	Mousedown        *viewportDebugTouchMousedown   `json:"mousedown"`
+}
+
 type viewportDebugSnapshot struct {
 	// issue #116: which build of the instrument produced this snapshot. Two
 	// verification rounds were spent on reports that turned out to describe a
@@ -539,6 +636,12 @@ type viewportDebugSnapshot struct {
 	KeyboardSession       *viewportDebugKeyboardSession `json:"keyboardSession,omitempty"`
 	UnlockTrace           *viewportDebugUnlockTrace     `json:"unlockTrace,omitempty"`
 	Panel                 *viewportDebugPanel           `json:"panel,omitempty"`
+	// AUTH-20261107-P3-PROBE-TOUCHV2, ADDITIVE: the read-only tap-level touch
+	// truth (pointer + omitempty: a legacy frame without the block is legal, and
+	// absent is never zero-filled). Read at the door for shape only — no verdict,
+	// no judge, no derivedState / keyboardSession / ownership consumer exists for
+	// any of these fields, on either side of the wire.
+	TouchTruth *viewportDebugTouchTruth `json:"touchTruth,omitempty"`
 }
 
 type viewportDebugReport struct {
@@ -1120,6 +1223,79 @@ func validateViewportDebugAdditive(s viewportDebugSnapshot) error {
 			if *p.NominalHeight < 0 {
 				return errors.New("panel nominal height must be non-negative")
 			}
+		}
+	}
+	// AUTH-20261107-P3-PROBE-TOUCHV2: the touchTruth block goes through the same
+	// 400 door — ring caps, non-negative counts, finite dy, enum and tag
+	// vocabularies. Shape only: the server re-derives no click-suppression, no
+	// activation verdict, no PASS; what the taps MEAN stays with the B readout,
+	// and B stays INCONCLUSIVE until a real-device capture carrying this block is
+	// separately adjudicated.
+	if err := validateViewportDebugTouchTruth(s.TouchTruth); err != nil {
+		return err
+	}
+	return nil
+}
+
+// validateViewportDebugTouchTruth is the door for snapshot.touchTruth
+// (AUTH-20261107-P3-PROBE-TOUCHV2): the rings stay inside their authorized 8,
+// every count is a non-negative int, both dy reads are finite (cumulative is
+// signed by the product's own convention — UP is positive — so only finiteness
+// is pinned there; `dyMax` is a magnitude, so it is additionally non-negative),
+// `endType` and `kind` stay inside their two-word enums, `targetTag` passes the
+// same character discipline every tag always had, and a null mousedown stays a
+// legal "none has arrived yet" — never an error, never backfilled.
+func validateViewportDebugTouchTruth(t *viewportDebugTouchTruth) error {
+	if t == nil {
+		return nil
+	}
+	if len(t.Taps) > viewportDebugTouchTruthRingMax {
+		return errors.New("too many touchTruth taps in snapshot")
+	}
+	if len(t.UserActivation) > viewportDebugTouchTruthRingMax {
+		return errors.New("too many touchTruth userActivation entries in snapshot")
+	}
+	if t.TouchcancelCount < 0 {
+		return errors.New("touchTruth touchcancelCount must be non-negative")
+	}
+	for _, tap := range t.Taps {
+		if tap.TouchmoveCount < 0 || tap.TicksSinceStart < 0 {
+			return errors.New("touchTruth tap counts must be non-negative")
+		}
+		if err := viewportDebugNumber(tap.DyCumulative); err != nil {
+			return err
+		}
+		if err := viewportDebugNumber(tap.DyMax); err != nil {
+			return err
+		}
+		if tap.DyMax < 0 {
+			return errors.New("touchTruth dyMax is a magnitude and must be non-negative")
+		}
+		if !viewportDebugTouchEndTypePattern.MatchString(tap.EndType) {
+			return errors.New("invalid touchTruth endType")
+		}
+		// cancelled and endType are the SAME fact in two words; a pair that
+		// contradicts itself is transport drift caught at the door, never evidence
+		// (a `touchend` flagged cancelled would let a reader count a finished tap as a
+		// cancel, and the reverse would hide one). Shape, not verdict.
+		if tap.Cancelled != (tap.EndType == "touchcancel") {
+			return errors.New("touchTruth cancelled must agree with endType")
+		}
+	}
+	for _, a := range t.UserActivation {
+		if !viewportDebugTouchActivationKindPattern.MatchString(a.Kind) {
+			return errors.New("invalid touchTruth activation kind")
+		}
+		if a.Tick < 0 {
+			return errors.New("touchTruth activation tick must be non-negative")
+		}
+	}
+	if md := t.Mousedown; md != nil {
+		if md.OnTerminalHost < 0 || md.Tick < 0 {
+			return errors.New("touchTruth mousedown counts must be non-negative")
+		}
+		if !viewportDebugTagPattern.MatchString(md.TargetTag) {
+			return errors.New("invalid touchTruth mousedown targetTag")
 		}
 	}
 	return nil
