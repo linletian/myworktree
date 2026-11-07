@@ -455,3 +455,71 @@ C 会话还包含多轮额外滚动/平移与窗口变化，不能用上述局�
 - 上一节“离线实现轮”登记的“真机 HO-3 / R2 验证仍未执行”**已作废**：本轮 a22c 会话已执行真机首轮。
 - 现状态：**HO-3 / R2 的“Web 输入不搭载 PTY 避让”子项 PASS**（`HO-3` 51/51 `occ` 0）；**R2 整行仍不闭合**——本轮未覆盖“普通 Web 输入自身被 Safari 保证可见”的完整链路（`clicks_between` 与 `HO-3` 段内出现 seq 356–363 的 `vv.offsetTop` 190.5 pan 段，未作截图门槛判定，owner 已取消截图门槛）。
 - 另新增 **F5 焦点常驻 FAIL**，与 G10 无关但同属 Phase 3 任务 4，承接于 `AUTH-20261105-P3-FOCUS-GUARD`。
+
+## 2026-11-07 Phase 3 真机复验 p3-A-WEB-02 判读
+
+- **会话**：[2a33 raw](raw/2a33f24644d4ffa0fa060bf891911180.jsonl)，session `2a33f24644d4ffa0fa060bf891911180`，`latestSeq` **534**，文件内实际 **534 帧 / seq 1–534，无缺口**（逐帧 `seq[i] === seq[i-1]+1` 全 534 帧成立）。`probeVersion` 全 534 帧一致为 `p9-full-shell-session-avoidance-v1`；`schemaRev` 全 534 帧一致为 `p9-additive-settle-readonly-v1`；`vv.scale` **534/534 ≡ 1**。设备 iPad / iPadOS 18_7 / Safari 27.2（`dpr` 2、`touchPoints` 5、`landscape-primary`）。会话墙钟 `2026-11-07T10:03:16` → `10:09:03`（约 347s）。**raw 截至本节登记时仍为 untracked**（md5 `75e32f913c238d053bdf832f4a33d3b9`，5 081 383 字节），提交处置见 PLAN §5。
+- **判读口径**：本节全部 verdict 为**单会话、单轮、子项级或观察级**；子项 PASS 一律不上浮为 R2 / R3 / R4 整行 verdict。**截图门槛仍按 owner 2026-11-06 口头裁决取消**，故本轮任何子项都不得写成“截图确认”。
+- **独立性声明**：本节由仲裁 Sub-agent 从 raw 文件逐帧重算（差分 `unlockTrace.counts`、逐帧比对 `ownership` / `activeInput` / `keyboardSession` / `vv`），**不采信测试 Sub-agent 与调度者的转述计数**；凡与转述不一致处，均按 raw 重算值登记并在“复核订正”列出。
+- **构建身份**：产品侧 = `2b64e7e`（FOCUS-GUARD 守卫，位置 `internal/ui/static/index.html:8284-8294`：判定读 `:8284`、宿主祖先遍历 `:8287-8292`、拒绝 `:8293`、放行 `session.term.focus()` `:8296`）。**守卫为纯读**（不调 `focus()`、不写 DOM、不派发事件），**产品与探针均未设“拒绝计数器”**——全 534 帧与 raw 文件全文检索 `refus` / `focusGuard` / `FOCUS-GUARD` / `rejected` **均为 0 命中**。
+
+### 逐步骤 verdict（SOP p3-A-WEB-02）
+
+| 步骤 | 帧域 | verdict | raw 证据锚点 |
+| --- | --- | --- | --- |
+| **步骤 1 基线** | seq 1–53 | **PASS（子项）** | 静候段 `HO-2` 稳定；全段 `occlusion` 0、`vvH` 748；仅 seq 5 / 25 两次终端宿主点击 |
+| **步骤 2 / F5 粘贴框持焦** | seq 54–133 | **PASS（子项）** | `HO-3` **TEXTAREA 64 帧，`occlusion` 全 64 帧 = 0**；两段连续持焦 seq 55–101（**35.5s**）、117–133（**15.8s**），合计 **51.3s**。**如实更正**：两段之间 seq 104–116 与 seq 54 为 `HO-2` 帧（`vvH` 748、`derivedState` none），即“粘贴框持焦 → 终端 → 粘贴框”的一次往返，**不是“无 HO-2 穿插”**；但**关键事实成立**：`HO-3` 的 64 帧 `occlusion` **无一非零**，且 seq 104–116 的 `HO-2` 帧全部 `occ` 0，**无任何一帧由程序化抢焦把粘贴框焦点夺回并触发避让**。对比 a22c 同子项 FAIL（4 次程序化抢回、`clicks_between` = 0）：**守卫对本子项有效** |
+| **步骤 3 / 异常 B 窄路径** | seq 134–192 | **见下“异常 B 逐击分析”** | 本段 18 次 `touchstart`、11 次 `click`、6 次 `clickOnTerminalHost`、`focusin` 7 / `focusout` 7 |
+| **步骤 4 / 对照 A** | seq 195–267 | **PASS（观察级，非子项验收）** | 15 次 tap 中 **11 次一击即弹**（`ts1/cl1/ho1` 且随即 `occ` 0 → 428），其中 seq **219–267 连续 9 次**一击即弹；另 4 次为 seq 201 / 209 / 211 / 212 无 click 的多击前序 |
+| **步骤 5 / 对照 B（tag 级）** | seq 272–340 | **INCONCLUSIVE（逐击归属不可定）** | 本段 14 次 `touchstart`、10 次 `click`、5 次 `clickOnTerminalHost`；**帧内仅有 level/tag，无元素 id**，无法判定每次点击的落点归属，故不逐击判定 |
+| **步骤 6 / S2 面板持焦** | seq 419–445 | **PASS（子项）** | 27 帧全 `quickKeys.open` = true、`quickKeys.bottom` = 272、`panel.insideVisibleViewport` = true；**`occlusion` 全 27 帧 = 0**；焦点由 `HO-2`（seq 419–421，面板已开前的终端段）过渡为 `HO-3`（seq 422–445 **连续 24 帧无回退**），**该 24 帧中无一帧落回 `HO-2`**——即无“粘贴面板持焦时被程序化抢回终端”。对比 a22c 同子项 FAIL（同一失效形态出现 4 次）|
+| **步骤 7 / 回归** | seq 446–456 | **INCONCLUSIVE（两个子项均无帧证）** | **键盘升降子项不成立**：该 11 帧 `derivedState` 恒为 `none`、`vv.height` 恒为 748，**全段无升降变化可判**；**重命名子项**：全 534 帧 `activeInput.tag === "INPUT"` 计数为 **0**，无 INPUT `focusin` 帧。**本步骤判定从“键盘升降一致 PASS”下调为 INCONCLUSIVE**（上游转述称“回归-键盘升降一致”，raw 无支撑） |
+| **步骤 8 / iframe** | seq 457–468 | **PASS（观察级）** | 12 帧全 `ownership.category = unknown`、`unavailableReason = iframe-inner-focus-not-inspectable`、`occlusion` **0**、`hostIsForeground` = null；**`focusin` 计数在 12 帧内恒为 24、零增量**（父页无焦点干预）。**守卫不覆盖 iframe 属授权设计语义**（PLAN §5 评审处置【设计级遗留】(b)），故不上浮为 HO-4 / GI-3 / GI-7 verdict |
+
+### 异常 B 逐击分析（本轮帧结论）
+
+**口径声明**：帧级只能判定“tap 是否随首击派发 `click`”，**不能判定键盘真值**（探针无 `beforeinput` / `visualViewport` 与键盘直连的字段）。以下凡涉“弹 / 不弹”均按 `derivedState` 派生推断 + owner 目测，**不冒充键盘真值**。
+
+1. **终端区 tap 的 click 派发不完整（帧级事实）**：以“点击**前**一帧 `activeInput.xtermMarker = true` 且 `insideTerminalHost = true`”（即焦点已在终端宿主 helper）筛选，全轮共 **69 次**这类 tap，其中 **44 次派发 `click`、25 次不派发 `click`**。
+2. **两类帧在“点击前”同域，且区分度为零**：按**点击前一帧**域交叉统计——
+   `preVvH=748 / preOcc=0` → 派发 click **38 次**、不派发 click **23 次**；
+   `preVvH=320 / preOcc=428` → 派发 **4**、不派发 **2**。
+   **同一点击前帧域内两类结果并存**，故 `occ`、`vv.height`、`derivedState`、`activeElement` 均**不具备鉴别力**。本点**纠正**上游转述“两类帧完全同域”的表述：转述单看点击**后**帧（点击后 vvH 已被键盘改变），结论方向对，但**正确做法是看点击前帧**；按点击前帧，两类同域且**互有大量反例**，比“同域”更强。
+3. **焦点未丢失**：69 次 helper tap 的点击前帧 `activeInput.insideTerminalHost = true`、`xtermMarker = true` **按筛选定义即全程成立**；25 次 no-click tap 中**仅 3 次**（seq 55、117、422）同帧带 `focusout`，其余 22 次点击前后焦点均未产生 `focusout` 事件。全轮 **30 次** `focusout` 中 **24 次**与 `click` 同帧、**6 次**（seq 55、102、117、166、422、521）无 `click` 伴随。**故“焦点先丢失再点击”不是本类 B 样本的形态**（B 样本的点击前帧焦点在 helper 上）。
+4. **无守卫拒绝帧证**：守卫 `:8293` 的 `return` 只对“可编辑且宿主祖先链无 `data-instance-id`”的可编辑元素生效；本类 tap 的点击前 `activeElement` 为 **宿主内 helper**（`xtermMarker/helperMarker` 均 true、`insideTerminalHost` true），**必然走到 `:8296` 放行**；且全轮**无任何拒绝日志字段**（见上文检索 0 命中）。**结论：无守卫拒绝证据，也无守卫直接冲突帧证。**
+5. **本轮最具体且经帧确证的新事实（此前无登记）**：`HO-2` 持焦与“键盘 `active`”**并非绑定**。全轮共 **32 次**“上一帧 `derivedState = active` 且 `vv.height = 320` → 本帧 `derivedState = recovering` 且 `vv.height = 748`，同时 `activeInput.xtermMarker = true` 且 `insideTerminalHost = true`（焦点始终在终端 helper）”的转变，落点为 **seq 17、28、187、192、198、206、216、222、228、234、240、246、252、258、264、270、282、293、305、319、340、351、364、375、383、393、404、472、480、488、492、496**。这 32 次转变的**`focusin` 与 `focusout` 增量全部为 0**。即：**软键盘收起时焦点从未离开终端 helper，且无任何焦点事件伴随**。这与 owner 目测“点回终端只出现实心光标、键盘不弹”**形态一致**，说明 B 的触发域是“**helper 持焦 + 键盘处于收起态**”，在这一域内 tap 是否补派发 `click` 呈随机分布（第 1、2 点）。**但“键盘为何收起”本身仍无帧证**——这 32 次转变帧的 `touchstart` / `click` / `clickOnTerminalHost` / `focusin` / `focusout` 增量**全部为 0**（仅 31 帧各带 `vvResize` 1，seq 496 连 `vvResize` 也为 0），即**键盘收起不是由任何被探针记录的输入或焦点事件驱动**，只与视口尺寸变化同帧，故“helper 持焦下键盘自行收起”的具体机制**未归因**，属本节第二个诚实缺口。**注意**：`HO-2 + helper + vvH748` 的静态帧远多于 32（全轮 **230 帧**），上列 32 个 seq 是**状态转变点**，不是该静态形态的穷举；引用时须注明口径。
+6. **a22c（守卫前）同形对照**：以同一 helper 筛选口径，a22c 共 **40 次** helper tap，**28 次派发 click、12 次不派发**；按点击前帧域 `preVvH=748` → 派发 **14**、不派发 **11**。**两轮在“守卫前后”以几乎相同的比例出现同形 multi / no-click 样本，无守卫特异性差异。**
+7. **owner 早前前提不成立**：owner 早前“a22c 第一下必不弹、第二下必弹”的**固定两击模式**与“staged/unstaged 标题专有”的定位，**均不被 a22c 帧支持**（a22c 有 14 次 `preVvH=748` 首击即派发 click）。本轮 owner 自述“随机 0–2 次、无复现规律”与 a22c 帧形态**一致**，故**应取本轮自述口径**。
+
+### 同根假设本轮状态（必读，不得冒充已归因）
+
+- **同根假设内容**：`focusTerminalIfPossible()` 的轮询 `session.term.focus()` 抢先把焦点放到终端 helper → 用户 tap 落在“已聚焦”的宿主上 → iOS 对部分 tap 不派发 `click` → 表现为“第一下不弹、第二下才弹”。
+- **本轮状态：获得帧形态支持，但未能唯一归因。**
+  - **获得支持的部分**（可写为帧事实）：helper 持焦与键盘收起可以并存且互不打扰（第 5 点：32 次 active→recovering 转变，`focusin`/`focusout` 增量全 0）；同一点击前帧域内 click 派发呈随机二分（第 2 点）；守卫前后同形（第 6 点）。
+  - **未获支持 / 已削弱的部分**：owner 早前的“固定两击、staged/unstaged 标题专有”前提**被 a22c 帧推翻**（第 7 点）；本轮也**不显示守卫引入新机制**（第 4、6 点）——但**这同样不等于“已证守卫无关”**，只等于“帧内找不到守卫参与的痕迹”。
+  - **未能归因的部分（缺口，不可强化为已归因）**：cause 段的页内诱因——`touchend` 处理、`pointermove` 抖动、`preventDefault` 调用、以及“键盘为何在 helper 持焦时收起”——**探针均无真值字段**。在没有这些字段前，本节**只发布“click 派发随机 + 焦点未丢 + 无守卫拒绝帧”三项帧事实**，**不发布 B 的根因**。
+- **与 PLAN 复验条款的关系**：PLAN `AUTH-20261105-P3-FOCUS-GUARD` 复验条款写明“若同一会话仍复现 B，则同根假设被削弱、转独立归因再议”。本轮同一会话仍复现 B，但**削弱的是 owner 的“固定两击 / 标题专有”前提**，不是“poll 先聚焦宿主”这一机制假设本身——后者反获支持。**唯一可确证的同根命题（F5 与 B 共享同一 `focus()` 抢焦根因）不能被本会话证实**，因为 F5 的抢焦路径（宿主外可编辑元素被抢回）与 B 的路径（宿主内 helper 已持焦、click 未派发）在帧上**是两条不同形态**。故本节按“**同根假设降级为部分支持、B 转独立归因候选**”登记，**不作同根假设成立的裁决**。
+
+### 复核订正（对上游转述的实证修正，以 raw 为准）
+
+1. **“决策事件（click 75 / touchstart 101 / focusin 31 / focusout 30）与 ring 计数逐一相等，零驱逐”不成立。** 终帧计数确为 `click 75 / clickOnTerminalHost 37 / touchstart 101 / focusin 31 / focusout 30 / vvResize 96 / vvScroll 9 / windowResize 0 / other 20`，合计 **399**；但 `unlockTrace.entries` 是**容量 16 的环形缓冲**，终帧 ring 仅保留 tick **335–359**（最高 tick 359 < 事件总数 399），全轮 **533 个可比帧中有 530 帧 ring 尾部 tick < 累计事件数**。即 **ring 存在按容量的常规淘汰，不是“零驱逐”，也不能拿 ring 长度与累计计数做“逐一相等”校验**。**本节的逐击分析因此只用帧间 `counts` 差分，不用 ring 内容做事件序重建**（ring 只记录非几何事件、tick 全局计且跳号，单靠 ring 无法重建完整事件序）。
+2. **“对照A 一击即弹连续 12 次”应为 11 次、且连续段为 9 次。** seq 195–267 段共 15 次 tap，`ts1/cl1/ho1` 的**一击即弹 11 次**（195、203、219、225、231、237、243、249、255、261、267），其中 **seq 219–267 连续 9 次**；seq 201、209、211（`ts2`）、212 为无 click 的多击前序。另 seq 213 为 `ts0/cl1`（只有 click、无 touchstart），属探针事件切分噪声，不计入 tap。
+3. **“38 次终端点击尝试：21 一击即弹 / 15 需 2–3 击 / 1 无 click / 1 click 已派发未弹（seq446）”的计数无法按 raw 复现。** 本轮按统一 helper 筛选口径得 **69 次** helper tap（44 派发 / 25 不派发）；按 `clickOnTerminalHost` 增量得 **37 次**宿主点击。上游的 38 / 21 / 15 分组口径（筛选用指纹未给出）**不可复现**，本节不沿用其分母。**seq 446 确证为 `HO-1` / `BODY` / `occ` 0 / `vvH` 748 / `derivedState` none**，即“点击落点已不在终端宿主（焦点已在 `click` 前落入 BODY）”，与“click 已派发未弹”的描述**在落点归属上不同**：该帧不是“弹了没弹”的问题，而是**点击时焦点已离开终端宿主**。
+4. **“守卫拒绝帧为 0（守卫纯读无拒绝日志）”表述需收紧为“无拒绝日志字段可查”。** “拒绝帧为 0”是不可证伪的陈述——探针根本不记录该量。可登记的只有：守卫代码为纯读（`index.html:8284-8294`）、本类 tap 的点击前 `activeElement` 必命中 `:8296` 放行路径、全轮无拒绝类字段。**不得写成“已证明守卫零拒绝”。**
+5. **“S2 seq419–445 面板持焦 + 持续输入零抢焦”成立且可复核**：27 帧 `quickKeys.open` true、`occlusion` 全 0、焦点 seq 422 起稳定 `HO-3`。**“持续输入”一面无帧证**（探针不记录输入事件），本节只登记**持焦与几何**两面。
+
+### 本轮明确未完成 / 不上浮
+
+- **R2 / R3 / R4 均不整行闭环**（理由见下条与 PLAN §5 状态行）：R2 的“普通 Web 输入自身由 Safari 保证可见”完整链路仍无真值字段；R3 的 iframe 内部焦点不可检视；R4 的实例切换 / PTY A→B 段本轮未覆盖。
+- **异常 B 未归因**，且**“键盘为何在 helper 持焦时收起”为新增独立缺口**（32 次 active→recovering 转变实证，焦点全程在 helper、零焦点事件），与“click 派发随机”并列为两个未闭环子问题。
+- **步骤 7 回归整项 INCONCLUSIVE**：键盘升降子项在 seq 446–456 无升降变化（恒 `none` / 748）；重命名子项无 INPUT 帧。**对照 B 逐击归属不可定**（无元素 id）。
+- **本节不作 owner 回退建议的处置决定**；retention vs revert 的成本对照见 PLAN §5 对应登记，**决定权在 owner**。
+
+### 后续归因建议（本轮只登记，不签发授权）
+
+- **需一次新授权**（探针 `viewport_debug.js` / schema 属 PLAN `AUTH-20261105-P3-FOCUS-GUARD` 明列禁改面），建议作为**独立任务**提出，所需授权范围最小集：
+  1. `unlockTrace.entries` 或新增字段记录**元素标识**（`id` / 稳定 xpath 摘要），使逐击落点归属可判（补步骤 5 缺口）；
+  2. 事件级**高精度时间戳**（`touchend` / `touchstart` / `click` 的 `event.timeStamp`）与 `preventDefault` 调用计数（补 cause 段诱因）；
+  3. `focusTerminalIfPossible()` **拒绝路径的计数**（只计数、不改行为），使“守卫参与与否”从不可证伪变为可测；
+  4. **键盘真值旁证**（如 `visualViewport` 与 `focusin` 之外的可观测代理，或 owner 同场目测记录表）。
+- **替代路线（成本更低，可先做）**：在**守卫前 `0258f1e` 构建**上重采一段**同时包含 F5 与 B** 的会话——若守卫前同段也能出现“helper 持焦 + 键盘收起”帧，则“B 与守卫无关”由**对照实证**取代当前的“帧内无痕迹”推断。此路线**不需改探针**，但需 owner 一次真机操作。
