@@ -659,3 +659,145 @@ C 会话还包含多轮额外滚动/平移与窗口变化，不能用上述局�
 | T12 | 全部候选项存在于守卫前构建 | `git show 5268869:internal/ui/static/index.html`：A2 `:4060`/`:4046`、A8 `:5560-5563`/`:5658-5661`、A12 `:2554`、A13 `:7842`/`:7856`/`:5071`、A1 `:4103`；vendored xterm `xterm.js`／`xterm.css` 自 `5268869` **blob id 未变**（A11） | **PASS** |
 
 - **结论**：在**上表五项**任一缺失的情况下，候选矩阵 v2 **只能是排序**；任一人（含本仲裁）**不得**据矩阵把 B 写成"已归因"。矩阵的作用是把**验证优先级**排定，而不是替代验证。
+
+## 2026-11-07 owner B 最终决策与本票生效登记（Q1）
+
+**本节性质**：对 [候选矩阵 v2 节](#2026-11-07-b-归因-owner-补充实验与候选矩阵-v2) 及其之前**全部**已登记文本的**纯追加**登记。**不改写、不删除任何既有行**；早前各节中"两选项并列待决""建议维持（不等于决定）""本轮不签发"等表述**保留原状**（它们是**当时**的登记状态，具备历史可追溯性），其**现行效力**由本节统一覆盖。评审对比基线 = `cc9a8d8`；本节登记时工作区干净（`git status --porcelain` 为空），HEAD 为 `cc9a8d8`。
+
+**证据口径（必读）**：本节是 **owner 决策的登记**，**不是新帧级证据**。owner 三项实验仍为**目测级**（debug panel 关闭 ⇒ 0 帧）；候选矩阵 v2 仍为**只读源码审计 + 仲裁独立抽验**。因此本节**不把 B 写成"已归因"**，矩阵权重的"排序非结论"性质不变。
+
+### 决策 ①：维持 `2b64e7e`（B 处置收口，归因闭环归 Phase 4）
+
+- **owner 决定（2026-11-07，本票生效）**：**维持 `2b64e7e`**。B 按「**候选 A13 + A12 / A11 领衔、候选 A1 降权、候选 A7 判死**」收口，**归因闭环归 Phase 4**。
+- **对候选矩阵 v2 的确认范围**：只确认**权重排序**（`A13 > A11 > 候选 A2(document-touchmove) > A8 > A12 > 候选 A1 > A7判死`）与本记录已核验的事实（T1–T12，含 T12「全部候选均存在于基线 `5268869`」），**不确认**其中任何候选为 B 的根因。
+- **早前"条件式回退倾向"的处置**：PLAN 二选一处「owner 条件式指令的登记状态」与「仲裁的建议倾向（不等于决定）」「建议维持 `2b64e7e`」等表述，其被 owner 提出的**条件**（"如归因不出原因 → 回退"）**未被触发为生效决定**，改为由本决策直接落定。**据本决策**：①「回退至 `0258f1e` 一带」选项**不再并列待决**，**已被本决策取代**；②候选 A1 的权重修正注记（下调、未判死）与 A7 判死**维持有效**；③回退会确定性带回的 **F5 粘贴框抢焦（原始缺陷 A）与 S2 焦点常驻回退**风险因此**不再发生**，两项既有 PASS 登记（a22c 首轮 F5 FAIL → `2b64e7e` 复验 PASS；S2 PASS）**原样维持**。
+- **闭环状态（不得上浮）**：B **仍未归因**。本次"收口"收的是**处置决定**（维持哪个构建、走哪条归因路线），**不是** B 的证据结论。**B 的归因状态在 `2b64e7e` 上维持 INCONCLUSIVE**，任何人不得据本节把 B 写成"已归因"或"已修复"。
+- **归因闭口路线**：B 的**帧真值归因**走**探针 additive schema 增补路线**（决策②，授权见下节 `AUTH-20261107-P3-PROBE-TOUCHV2`）；候选 A1／候选 A2(document-touchmove) 所属的 pan 处理域**仍在 Phase 4**（PLAN Phase 4 任务 1），两线**并行不互代**：探针路线只**测量**，收敛 A1／A2 仍须 **owner 新指令 + 仲裁授权**（会改动已被测试签名的"无条件锁"契约，见 PLAN 二选一处追加注记 (c)(i)）。
+
+### 决策 ②：批准探针 additive schema 增补路线（"先 1 后 2"之路线 2）
+
+- owner 批准在 **Phase 4 之前**签发探针增补授权，目的是把 B 从"**候选**"推进到"**帧真值归因**"。该路线**不改变**"未拿到真值字段前矩阵只能是排序"的既有限制（候选矩阵 v2 节末句），只**移除**其阻塞——**字段落地并采到帧之后**，才允许对 B 作归因判定。
+- 授权正文、逐项允许／禁止、验证清单与停止条款见下节 **`AUTH-20261107-P3-PROBE-TOUCHV2`**。
+- **本决策不派编码**：授权"签署"只表示**边界已定**，实际改动须由调度者**独立派单**的编码 Sub-agent 执行；未经派单的实现视为越权。
+
+### 本节不与既有登记的冲突面（自洽声明）
+
+- **`AUTH-20261105-P3-FOCUS-GUARD` 明列"禁止改 `internal/ui/debugassets/*`、服务端、探针 schema、新增事件源"**：该禁令**在其授权包范围内继续完全有效**。`AUTH-20261107-P3-PROBE-TOUCHV2` 是**另一独立包**，只豁免**其自身列明的**文件与字段，**不重新打开** FOCUS-GUARD 的产品面（`focusTerminalIfPossible()` 函数体、`focusEditable` 谓词、事件监听结构、跨 pass 状态）。
+- **PLAN「后续归因任务建议」明列"本轮不签发授权"**：该句指**其当时轮次**。决策②**取代其"本轮不签发"的时效**，但该节所列 ①–④ 字段**不是**本授权的清单——本授权的字段集以下节为准（交集：`mousedown` 真值、`preventDefault` 真值、事件时序；**不含** `unlockTrace.entries` 元素标识与"守卫拒绝计数"）。
+- **`unlockTrace` 既有排布不改**：本授权**不新增** `unlockTrace` 类型／条目字段，`viewportDebugTraceTypePattern` 与 trace 环形排布不动。
+
+### 关于 `showModal()` 后 `activeElement` 序列（候选 A12 字段）：本授权**不覆盖**
+
+候选矩阵 v2 的致闭口清单中，**"`showModal()` 后的 `activeElement` 序列"** 一项被直接测量，而**该测量对象（本页面自身产品代码）**本就是 owner ② 口中"随机不弹"的嫌疑形态之一。若把它**一并纳入**本授权，则探针会**观测并记录被它测量／改变的行为**（观察者直接嵌入被观察面），其自身可能经由 `focus()`／`activeElement` 读取路径成为新的观察者—被观察者耦合，污染 B 的归因。
+
+- **本授权的立场**：**不在本包授权该项**。终端／`#wtTask` 一侧的 `activeElement` 序列**可读性**已在既有帧中通过 `ownership` / `activeInput` / `focusEditable` 间接可见；本包只采 **`mousedown` 合成／到达真值**与 **focusin／focusout 的 `userActivation` 快照**（均为事件时刻的只读读数，而非对 `activeElement` 的额外轮询）。
+- **若后续确需** `showModal()` 前后 `activeElement` 的显式序列：**须另立授权**（单独评估观察者耦合、隐私与判读工具兼容），**不得**在本包内"顺手"加入。列入 PLAN Phase 3 诊断 follow-up 台账候选，本轮**不签发**。
+
+**本节结论**：owner 两项决策**已在 VALIDATION 落地登记**；B 的处置 = **维持 `2b64e7e` + 候选矩阵 v2 权重排序收口**，归因闭口走**探针真值路线**；B 的**证据状态维持 INCONCLUSIVE**，不因本次决策升格。
+
+## 2026-11-07 `AUTH-20261107-P3-PROBE-TOUCHV2` 授权签署（Q2）
+
+**授权标识**：`AUTH-20261107-P3-PROBE-TOUCHV2`
+**签署人**：仲裁 Sub-agent（owner 决策② 授权的签署轮）
+**签署日期**：2026-11-07
+**评审对比基线**：`cc9a8d8`（`git status --porcelain` 为空时的 HEAD）
+**状态**：**已签署、待调度者独立派单**；本仲裁轮**不改任何代码**、**不执行任何 `git add` / `git commit`**。
+**目的**：在 Phase 4 之前，把 B 从"候选"推进到"**帧真值归因**"——为候选 A1／候选 A2(document-touchmove)／候选 A11／候选 A13 的**逐击判别**提供只读真值字段。
+
+### 授权边界复核结论（签署前按仓库实际逐项核过）
+
+| 复核项 | 实际机制（锚点） | 签署结论 |
+| --- | --- | --- |
+| 服务端未知字段即 400 | `internal/app/viewport_debug.go:606` `dec.DisallowUnknownFields()`；设计说明 `:261-265`（每个客户端字段须有 Go 孪生，否则**每次上传 400**，即 issue #116 的 `pageTop` 事故） | **成立**。additive 必须先加 Go 字段，**同 diff** 完成，否则真机采证全 400 |
+| rev 字段机制 | `viewport_debug.go:85` `viewportDebugSchemaRevPattern = ^p9-additive-(ownership-panel\|settle-readonly)-v1$`；`:1020-1022` 仅做**词表**校验；`SchemaRev` **只被**该正则消费（全仓 grep 无第二处读者）；`:527-529` 注释明示"marks the additive field set **without bumping the frozen PROBE_VERSION**" | **成立且为唯一正确路径**：rev **是** additive 的登记点；`PROBE_VERSION` **必须不动** |
+| `PROBE_VERSION` 冻结 | `viewport_debug.js:80` `p9-full-shell-session-avoidance-v1`；消费方 `docs/.../evidence/verify-sop.mjs:111` `EXPECTED_PROBE_VERSION` 及其 `:463-464` stamp 门 | **Bump `PROBE_VERSION` 会让所有真机采集被 verify-sop 判 INCONCLUSIVE**。故**禁止** bump |
+| 既有 additive 先例 | `AUTH-20261105-D2-SETTLE-READONLY`：`SCHEMA_REV` 由 `p9-additive-ownership-panel-v1` → `p9-additive-settle-readonly-v1`；服务端正则**同时接受两个 rev**（旧帧仍可上传）；`internal/app/viewport_debug_test.go:1021-1040` 有**双 rev 并存**测试 | **本授权照此办理**，rev id 见下 |
+| TTL／容量／体积机制 | `viewport_debug.go:24-26` `bodyLimit 64KiB` / `TTL 30min` / `maxSessions 8`；`:20-45` `maxEventsPerSes 600`、`maxTraceEntries 16` | **本授权一律不动**；新增字段须**自带上限**以不挤爆 64KiB |
+| 每帧体积现状（**真实约束**） | 2a33 raw 534 帧：median **9 817B**、p95 9 911B、max **9 947B**，上限 **65 536B** ⇒ 新字段预算**约 ≤4KB**（含 JSON 键名） | **风险真实**，写入强制上限 |
+| 只读观测先例 | `viewport_debug.js:702-727` `keyboardObservationOf` 内 `focusEditable: isEditableHost(doc.activeElement)` ——纯读、只进观测块、不进任何 verdict | **`clickSuppressed` / `userActivation` 同性质**，可签 |
+| 只读监听先例 | `viewport_debug.js:1428-1436` `observeOnly()`：`{ passive: true, capture: true }`，**不 schedule 采集帧**；`stop()` 按 (type, handler, capture) 三元组逐一摘除（`:1476-1481`，B-1 修复） | 新监听**必须复用既有注册／摘除路径**，不得自建旁路 |
+| 构建注入 | `internal/ui/viewport_debug_on.go:1,10` `//go:build viewportdebug` + `//go:embed debugassets/viewport_debug.js`；稳定构建不内嵌 | 仅 debug 构建可达，**不进产品语义** |
+| 直接测试 | `internal/ui/testdata/viewport_debug.test.mjs` 直读 `debugassets/viewport_debug.js`（`:8`）；Go 包装 `TestViewportDebugHandling`（`terminal_status_test.go:261`）；源码形状锚 `internal/ui/viewport_debug_on_test.go:156-162` 含**逐字常量断言** | 见下方"测试同步授权" |
+| 验证门禁耗时（实测） | `go test -tags viewportdebug -run ViewportDebug ./internal/ui ./internal/app` **3s 全绿**；三锚点 `TestViewportHeightHandling`／`TestZoomScaleAvoidance`／`TestViewportDebugHandling` | 门禁成本低，可全量执行 |
+
+### rev 口径定稿（bump 规则，防下游断版）
+
+- **`PROBE_VERSION` 不动**：保持 `p9-full-shell-session-avoidance-v1`。**规则**：`PROBE_VERSION` 只标记"**被测壳行为**的代次"，壳行为未变即不动；`verify-sop.mjs` 的 stamp 门依赖它，改动即**使全部真机采集失效**。
+- **`SCHEMA_REV` bump 为 `p9-additive-touch-truth-v1`**（客户端 `viewport_debug.js:340` 的 `const SCHEMA_REV`）。
+- **服务端正则必须同时接受三个 rev**：`^p9-additive-(ownership-panel|settle-readonly|touch-truth)-v1$`（`viewport_debug.go:85`）。**规则同既有先例**：`probeVersion`／`schemaRev` 是**词表**、字段是**存在性检查**——旧 rev 帧**永远继续可上传**，不 backfill、不补零。**漏加 `touch-truth` 会使新探针 100% 400**。
+- **判读工具断版口径**：`evidence/*.mjs` **不读** `schemaRev`（全仓 grep 仅注释提及，无判定逻辑），故**无需改动**且**禁止改动**；`verify-sop.mjs` 只认 `PROBE_VERSION`，**未 bump 故不受影响**。下游判读工具对**未知新字段**必须保持**忽略**语义。
+
+### 允许改动（严格 additive，仅此三处）
+
+**① `internal/ui/debugassets/viewport_debug.js`（ATED probe 源，由 `-tags viewportdebug` 注入 `/static/viewport_debug.js`）**
+
+仅**新增**以下只读采集字段；每帧最多包含**最近 8 个 tap 链**（环形，`TAP_RING_MAX = 8` 常量，新增自带上限）：
+
+| 字段 | 语义 | 只读性约束 |
+| --- | --- | --- |
+| `touchTruth.taps[]` | 每 tap 链（`touchstart` → `touchend`）一项：`touchmoveCount`、`dyCumulative`、`dyMax`、`clickSuppressed`（页内判定：tap 链内发生过 `preventDefault` 的 touchmove ⇒ `true`）、`endType`（`"touchend"` / `"touchcancel"`）、`ticksSinceStart`、`cancelled` | **只读观测**；`clickSuppressed` 的值为**探针自算**，性质与 `focusEditable` 相同，**不得**被下游当作产品判定 |
+| `touchTruth.touchcancelCount` | 累计 `touchcancel` 计数（tap 链与 document 级各一） | 计数，非事件 |
+| `touchTruth.userActivation[]` | 最近 8 条 `{ kind: "focusin"|"focusout", isActive: bool\|null, tick }`（`isActive` 读 `navigator.userActivation.isActive`，不可得 ⇒ `null`，**禁补零**） | 只读快照 |
+| `touchTruth.mousedown` | `{ synthesizedOnTerminalHost: int, targetTag: string(限长 ≤32), defaultPrevented: bool, tick }`，只记**到达**与真值 | 见下方硬红线 |
+
+- `dy` 以 **CSS 像素为正**记录（`clientY` 方向，与产品 `activeTouchLastY - touch.clientY` **同号**）；仅记 `e.touches[0]` 的纵向位移，**不记横轴、不记坐标、不记时间戳原文**。
+- 每帧**新增体积上限 ≈ 3.5KB**（8 × ≤300B + 8 × ≤80B + 常数）：编码**必须**在直接测试中加一条"帧字节数 ≤ 16KB"的量级断言，**防止**逼近 64KiB 门限。
+- 新增监听**必须**走既有 `observeOnly()` / `listeners` 注册与 `stop()` 三元组摘除路径；**不得**新增 start/stop 旁路、不得在 `stop()` 后残留监听。
+
+**② `internal/app/viewport_debug.go`（服务端放行）**
+
+- 在 `viewportDebugSnapshot` 增加 `TouchTruth *viewportDebugTouchTruth \`json:"touchTruth,omitempty"\``（**指针 + omitempty**：老帧缺字段须合法，缺失**不等于**零值）。
+- 新增对应 Go 结构（`viewportDebugTouchTap` / `viewportDebugTouchActivation` / `viewportDebugTouchMousedown`），**与客户端字段逐一对齐**（`DisallowUnknownFields` 使漏一个孪生即全量 400）。
+- `viewportDebugSchemaRevPattern` 扩为三 rev（见上）。
+- `validateViewportDebugReport` 内**新增**校验：`taps` / `userActivation` 长度 ≤ 8；计数非负；`dyMax` / `dyCumulative` 有限；`targetTag` 匹配既有 `viewportDebugTagPattern`；`endType` ∈ `{touchend, touchcancel}`。**`viewportDebugMaxSessions` / TTL / `bodyLimit` / `maxEventsPerSes` / `maxTraceEntries` 一律不动。**
+
+**③ 测试同步（只准新增，"不改既有断言"）**
+
+| 文件 | 允许 | 禁止 |
+| --- | --- | --- |
+| `internal/ui/testdata/viewport_debug.test.mjs` | **新增**用例：新块形状、环上限 8、`isActive` 不可得 ⇒ `null`、`clickSuppressed` 语义、帧字节量级断言 | **禁改** `:333`、`:1257`、`:1336` 三处既有 stamp / rev 断言——**它们是本授权的变更对象，见下方"rev bump 的既有断言冲突（停止条款例外）"** |
+| `internal/app/viewport_debug_test.go` | **新增**用例：新字段 round-trip、缺 `touchTruth` 老帧仍 200、超限 ⇒ 400、三 rev 均接受 | **禁改**既有 `TestViewportDebugRejectsMalformedReports` 等用例的**期望**；仅当 rev 白名单扩含 `touch-truth` 时**可**新增行，不得删改旧行 |
+| `internal/ui/viewport_debug_on_test.go` | **可**同步 `:158` 的 `SCHEMA_REV` 字面量（**本授权的意图变更，非削弱**） | 不得改 `stripJSComments` 全文件计数 ==2 的红线（`:145-149`）及其他 settle 锚 |
+
+### 授权边界内的既有断言冲突（**必须走停止条款，不得自行改**）
+
+核过仓库后确认，rev bump 会与**四处既有断言/常量**直接冲突，且它们都**不是"可随意同步"的**：
+
+1. `internal/ui/testdata/viewport_debug.test.mjs:1257` `assert.equal(first.schemaRev, "p9-additive-settle-readonly-v1")`；
+2. 同文件 `:1336` `assert.equal(frame.snapshot.schemaRev, "p9-additive-settle-readonly-v1", "the frame still identifies its schema")`；
+3. `internal/ui/viewport_debug_on_test.go:158` `const SCHEMA_REV = "p9-additive-settle-readonly-v1";`（源码形状锚）；
+4. `internal/app/viewport_debug_test.go` 内 `schemaRev` 字面量共 13 行（其中 `:266` 的 `"p10-invented-revision"` 必须**保持**被拒不改）。
+
+- **授权口径（裁定）**：①–③ 是 **rev bump 的必然同步面**，属**本授权意图内的字面量同步**，**允许**且**必须**在同 diff 完成；**但**只准改**该字面量本身**，**不得**顺手改断言的消息、结构或增删用例。④ 只准**新增**行，旧行逐字保留。
+- **除上述外，任何"既有断言必须改"的情形 ⇒ 触发下方停止条款。**
+
+### 禁止（硬红线，任一条即越权）
+
+1. 改**产品** `internal/ui/static/index.html` 的**任何语义**（含 `:4499` 硬页锁、`:4456-4460` 条件锁、`focusTerminalIfPossible()`、`focusEditable` 谓词、避让状态机、25% / 50% 门线）。
+2. 改 **FOCUS-GUARD** 守卫（`focusTerminalIfPossible()` 函数体）与其授权登记。
+3. 改避让状态机、quick-keys 面板逻辑、探针 TTL / 容量 / 体积机制。
+4. 改 `docs/plans/fix-issue116/evidence/*.mjs` 任一文件（**只读兼容**，一律不改）。
+5. **把任何新字段接进任何已有 verdict 判定**：新块**只准**进入 `snapshot.touchTruth`，**不得**被 `derivedState` / `keyboardSession` / `ownership` / 任一 judge 或 evidence 工具消费。
+6. **bump `PROBE_VERSION`**（会全量毁掉 verify-sop 的 stamp 门）。
+7. 在 `mousedown` 只读 listener 内调用 **`preventDefault()` / `stopPropagation()` / `stopImmediatePropagation()` 或任何 DOM 写操作**；新监听不得用 `passive: false`（必须 `{ passive: true, capture: true }`）。
+8. 引入**新的产品行为**：新增 `focus()` 调用、改 `activeTouchId` / 滚动余量、改事件派发顺序。
+9. 记录**正文、实例 id、worktree 名、坐标、原文时间戳**等隐私面（沿用既有 `viewport_debug.test.mjs` 的禁词表口径）。
+10. 新增运行时依赖，或新增非本授权列明的文件。
+
+### 验证清单（编码 Sub-agent 逐条执行并回报）
+
+1. **新增 / 同步测试跑绿**：`node --test internal/ui/testdata/viewport_debug.test.mjs`（或经 Go 包装 `TestViewportDebugHandling`）。
+2. **Go 三锚点**：`go test -run 'TestViewportHeightHandling|TestZoomScaleAvoidance|TestViewportDebugHandling' ./internal/ui` **全绿**。
+3. **viewportdebug 全链**：`go test -tags viewportdebug -run ViewportDebug ./internal/ui ./internal/app` **全绿**（参照基线实测 ~3s）。
+4. **`internal/app` 直接测试**：`go test -run 'TestViewportDebug' ./internal/app` 全绿，含"缺 `touchTruth` 老帧仍 200"与"三 rev 均接受"。
+5. **离线 choiceA 无关确认**：`node docs/plans/fix-issue116/evidence/verify-live-choiceA.mjs` **离线原值 PASS**，且 `git diff` 显示该文件**零改动**（只作无关确认，不作本包证据）。
+6. **体积量级断言**：直接测试断言单帧 ≤ 16KB（对 9.8KB 现状 + 新块）。
+7. **uppetts 级真机验证本授权不做**：真机采证由调度者 / owner **另行安排时间**；离线全绿**不得**写成"B 已归因"或"B 已修复"。
+
+### 停止条款
+
+- 需触碰**任一禁止项**（尤其 `index.html` 语义、evidence `.mjs`、`PROBE_VERSION`、`passive:false` / `preventDefault` 写路径、新字段进 verdict）⇒ **立即停止并回报，不得自行扩大授权**。
+- 需改**既有断言**（本文件"授权边界内的既有断言冲突"①–④ 之外）⇒ **立即停止并回报**。
+- 实测发现 64KiB 门限被逼近（单帧 > 16KB）⇒ 停止，回仲裁，**不得**自行删减既有字段或提高 body limit。
+
+**本节结论**：`AUTH-20261107-P3-PROBE-TOUCHV2` **已签署**（基线 `cc9a8d8`，允许面 = 探针 additive 块 + 服务端放行 + rev 三数并存 + 测试新增），**待调度者独立派单**。授权生效**不等于** B 已归因、**不等于**任何 verdict 变动；B 的证据状态维持 **INCONCLUSIVE**，直到**真机采到含 `touchTruth` 的帧并另行判读**。
