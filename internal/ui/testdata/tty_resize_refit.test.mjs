@@ -459,6 +459,40 @@ test("#116: every fit path asks; only the ack adopts", () => {
   assert.equal(calls, 3, "exactly three mentions of the revert helper remain in index.html");
 });
 
+// D4②: "a foreground instance was activated → refit and converge at once" only
+// holds if activate, having fitted the host it just re-showed, IMMEDIATELY
+// hands the measured size to the shared throttle — the same delivery the
+// shipped ResizeObserver callback makes. A behaviour-level witness would need
+// the full page host (document, state, connectTTY), so this pins the shipped
+// delivery shape of the sliced activate method instead of a fake half-execution.
+test("#116 D4②: activate fits, then delivers the measured size through queueTTYResize", () => {
+  const activate = stripComments(sliceMethod(ptySource, "activate"));
+  const fitIdx = activate.indexOf("s.fitAddon.fit()");
+  assert.notEqual(fitIdx, -1, "activate no longer fits the foreground host it just re-showed");
+  const deliverIdx = activate.indexOf("window.queueTTYResize(s,");
+  assert.notEqual(deliverIdx, -1,
+    "activate must ask for the size it just fitted — a fresh activation converges at once");
+  assert.ok(deliverIdx > fitIdx, "the delivery follows the fit; nothing is asked before it is measured");
+  assert.equal(activate.indexOf("window.queueTTYResize(s,", deliverIdx + 1), -1,
+    "exactly one delivery in activate — a second one reopens double-asks per activation");
+
+  // The guard + ask block matches the shipped observer's modulo the receiver
+  // name: the same positive-size guard, the same same-session property args
+  // (cols/rows read off the fitted `term`). The isolation `typeof` guard is
+  // part of that shape — neither factory may assume the shell is loaded.
+  const deliveryShape = (code, varName, label) => {
+    const at = code.indexOf(`${varName}.term.cols > 0`);
+    assert.notEqual(at, -1, `${label}: the delivery must be guarded by a positive-size check`);
+    const ifAt = code.lastIndexOf("if (", at);
+    assert.notEqual(ifAt, -1, `${label}: no guard if-block found around the size check`);
+    return code.slice(ifAt, braceEnd(code, code.indexOf("{", ifAt), label))
+      .replace(new RegExp(`\\b${varName}\\b`, "g"), "@").replace(/\s+/g, "");
+  };
+  assert.equal(deliveryShape(activate, "s", "activate"),
+    deliveryShape(stripComments(rendererObserver), "session", "the pty.js shipped observer"),
+    "the activation-time delivery is the observer's shipped shape — one channel, both fit paths");
+});
+
 test("#116: the retired leading-only gate is gone from both factories", () => {
   for (const [label, src] of [["index.html", indexBody], ["kinds/pty.js", ptySource]]) {
     assert.equal(stripComments(src).includes("now - session.lastResizeTime > 100"), false,

@@ -76,6 +76,19 @@ class PtyRenderer {
             try { s.fitAddon.fit(); } catch (e) { console.error('xterm fit error:', e); }
         }
 
+        // issue #116 D4②: a fit only ASKS. fit() above measured the size this
+        // foregrounded instance shows the moment it is activated, so deliver
+        // that measurement through the same shared throttle the ResizeObserver
+        // below uses; do NOT revert here — the ack is adopted only on the
+        // `resize` control frame that carries it, in index.html. A refused send
+        // (socket not OPEN) keeps its existing meaning of not occupying the
+        // dedupe slot. The size guard is what keeps this file safe to unit-test
+        // in isolation; the `typeof` guard mirrors the observer's delivery shape.
+        if (s.term.cols > 0 && s.term.rows > 0
+            && typeof window.queueTTYResize === 'function') {
+            window.queueTTYResize(s, s.term.cols, s.term.rows);
+        }
+
         // Hand off the connect / log-load / focus dance to the
         // existing global helpers. These depend on the page-wide
         // `state` and `api` and stay in index.html.
