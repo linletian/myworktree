@@ -746,3 +746,22 @@ owner 选择 B：**就此打住，未闭环项按已登记状态如实收束，P
 1. **行为见证升级**（下一切片候选）：activate 投递断言从源码形状断言升级为**行为见证**（fake-window harness 已真实执行 activate，补 `term:{cols,rows}` / `fitAddon` / `queueTTYResize` 桩即可，顺带让 `typeof` 守卫在隔离环境**真正承重**；一并处置 `s.term` nil 不对称，**低优先、生产不可达**）。
 2. **首次激活 socket 未 OPEN 的收敛缺口**（独立事项，归属待确认）：D4②「激活即收敛」**仅在激活时 WS 已 OPEN 成立**；connect 路径（`pty.js:208-215` loadLog→connectTTY）未触碰、端到端未证，是否符合既有 establishment 直发豁免语义**待仲裁 / owner 确认**。
 3. **存量红独立处置**：`TestResponsiveLayerChangelogCounts`（CHANGELOG 计数 34 vs 40，基线原样红）需**独立小提交**，不与 Phase 4 行为提交混同。
+
+### 13.5 C2 行为见证与 A0 计数同步（AUTH-20261107-P4-ACT-WITNESS / -A1，C2）
+
+**本小节性质**：**纯追加**登记，**不改写** 13.1–13.4 与任何既有行；只登记 Phase 4 **第二条已授权窄切片**（**纯测试**）与**一条追加授权**，**不关闭**任何 G 缺口或 R1–R6，产物状态仍为「**离线绿 + 真机未验**」。
+
+- **授权 `AUTH-20261107-P4-ACT-WITNESS`**（仲裁 **SIGN**）：范围 = **纯测试切片**，**唯一允许文件** `internal/ui/testdata/terminal_status.test.mjs`；**产品文件**、`tty_resize_refit.test.mjs`（**含注释**）、其他 **testdata**、**evidence**、**internal/app** **零改动**；**不得改** `ptyHarness` / `makeSession` **默认值**；**既有断言不得弱化**；见证必须经 **shipped `activate()` 真实执行**、**不得以 stub 绕过产品路径**。**强制项**：fit **先于**投递用**单 trace 一次成型**的**顺序断言**；`queueTTYResize` **恰一次** + **同一 session 引用**；**无 witness 时**以 `assert.doesNotThrow` **包裹**且 `typeof` 守卫**承重**；`term: {}` 时**不上报**（**尺寸守卫承重**）。
+- **追加授权 `AUTH-20261107-P4-ACT-WITNESS-A1`**（仲裁 **SIGN**）：**起因** = C2 编码按原停止条款 ④ **正确停下**——`go test ./internal/ui` **唯一红** `TestTerminalStatusChangelogCount` 属**结构性必然红**（该门禁在 `internal/ui/terminal_status_test.go:500-534` 对被测文件 `^test(` **总数**与 CHANGELOG **短语逐处活体比对**，**新增用例必然要求计数同步**）。**裁决**：**计数同步与 C2 同一次原子提交**（拆分会提交一个**使 go 门禁转红的原子变更**，违反 AGENTS.md §6；先例 `24ef436` 属「基线已红单独修」，**不构成拆分先例**）；A1 新增允许 = **仅** `CHANGELOG.md:93` 的 `Pinned by 68` → `71` **一个数字**，其余**一字不动**；**拒绝豁免**（需改门禁断言）与**回退**（重新打开行为见证缺口）两个选项。
+- **C2 交付 `773e2b7`**（一次原子：`internal/ui/testdata/terminal_status.test.mjs` **+69 / −1** + `CHANGELOG.md` **1+ / 1−**）：
+  - `activateWith` 增 **opt-in** options `queueTTYResize = null`（**唯一 −1 行**）+ **3 条**新行为见证用例（置于 activate 区段，注释**单向引用** `tty_resize_refit.test.mjs:462-494` 形状断言，**该文件未动**）。
+  - ①② **合一单 trace** `["fit","queue 103x58 (same session)"]`（**顺序 / 恰一次 / 实参 / 同 session 引用**）；③ **无 witness** → `assert.doesNotThrow` + witness **缺席** + `lastKnownStatus === "running"`（**`typeof` 守卫承重**，activate **跑完全程**）；④ `term: {}` → trace **仅** `["fit"]`（**正尺寸守卫承重**）。
+- **双评审（并行）**：
+  - **评审 1 号** `opencode-go/muse-spark-1.3-contributor`（delta-diff 分工）= **APPROVE**（**无分级问题**；核验 −1 行**仅为** options 解构扩展、CHANGELOG **字节级唯一 opcode** `replace '68'->'71'`、**单 trace 强制项全落实**、**71/71**）。
+  - **评审 2 号** `minimax-cn/MiniMax-M3.1-Flash`（独立抽验）= **APPROVE**（**阻断 0**；**变异实测 6 组全红**：删 witness 注入 / 删 shipped 交付 / 改形参 / 顺序对调 / CHANGELOG 回 68→**计数门禁红** / session 浅拷贝→`(COPY!)` 红 / 删正尺寸守卫→③ 红；**机器证明**：删除新用例与注入并还原签名后与 **HEAD 逐字节相等** ⇒ **既有 68 用例断言零改动**）。
+- **门禁复跑（三方一致，离线）**：`terminal_status` **71/71**；`testdata` 全 **20 文件逐个 20/20**（含计数 23/5/20/23/9/27/17/4/18/**71**/5/9/26/16/54/40/8/8/30/37）；`go test -count=1 ./internal/ui` **ok**（整包绿）；`go test -count=1 ./internal/app` **ok**；`pty-refit-check.mjs --self-test` **18/18**；`verify-live-choiceA.mjs --html` **PASS**。
+- **登记的评审观察（非阻断，不阻塞提交）**：
+  1. 第一用例**未断言**「交付的是 **fit 后测量值**」（**尺寸新鲜度**由源码级锚 `tty_resize_refit.test.mjs:468-494` 承担，**变异同时打红该 Go 门禁**）。
+  2. 「**走到尾部**」的见证字段 `lastKnownStatus` **早于** live 路径，但**足以证明守卫被吞而非抛错**；后续如需更强见证可用 `activated.calls.reset` / `loadLog`。
+  - 评审 1/2 与仲裁**共同意见**：`assert.equal(delivered, session)` 显式断言**不加**（trace 已承重，M5 实证）、`makeSession` 深合并**不做**（违反 harness 基准）。
+- **诚实边界**：本小节产物只登记「**离线绿 + 真机未验**」；**计数同步不构成任何行为 PASS**，也**不改写** `:93` 条目的历史陈述（该短语的定义即「当前文件总数」）；`s.term` **nil 不对称**（MINOR-2）继续登记**待后续切片**；**首次激活 socket 未 OPEN 的收敛缺口**（13.4 后续项 2）归属**待确认事项状态不变**。
