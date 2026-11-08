@@ -226,7 +226,7 @@
                and the rail use), NOT the terminal ink.
                Why not var(--term-bg): design truth ui/sidebar-states.pen names
                the safe-area strip $bg-root (#F4F6FA) — a neutral chrome value
-               sitting beside $bg-sidebar (#F7F7F9), never $term-bg (#1B1A23).
+               sitting beside $bg-sidebar (#F7F7F9), never $term-bg (#000000).
                Painting the terminal colour here turned the strip into a dark slab.
                The strip must also never be treated as its own painted object: the
                design rules are "background bleeds fully, content insets" (the
@@ -278,21 +278,19 @@
                #workspace stay full height in EVERY keyboard state, and the covered
                strip is lifted by the TERMINAL'S OWN boxes only: each PTY host
                inside #terminal-container moves its OWN `bottom` up by the occlusion,
-               and so do the two absolutely positioned overlay children of
-               #workspace — #terminal-controls, the quick-keys entry / panel column,
-               which keeps its authored 20px clearance ON TOP of the occlusion, and
-               #status-bar (applyVisualViewportOcclusion below). Gmail also grows a
+               and the quick-keys control column moves its OWN `bottom` to
+               20px plus the measured host offset. Transport stays fixed at the
+               physical bottom and is deliberately excluded from keyboard avoidance. Gmail also grows a
                hidden strip under the keyboard that the user can scroll the whole page
                into; that half is deliberately NOT copied — the user's standing
                requirement is that this page is never scrollable and never
                auto-returns to the top, so the root stays clipped and no scroll range
                is created at all.
-               R7 (issue #100 L2), the containing-block audit, survives the swap
-               UNCHANGED in substance: a fixed element is a positioned element, so
-               #app remains the positioning containing block for the narrow-tier
-               drawer and its mask (both absolutely positioned children; the box
-               they resolve against is still #app's PADDING box, safe areas
-               included). Re-audited against every pre-existing positioned element,
+               R7 containing-block audit for the current structure: the positioned
+               #content-shell is the containing block for the narrow-tier drawer and
+               its mask. #app's safe-area padding insets that shell, and the shell's
+               overflow + rounded corners clip both overlays. Transport uses z-index
+               20, below the mask at 25, so an open drawer also masks Transport. Re-audited against every pre-existing positioned element,
                markup OR JS-created, because fixed — unlike relative — also takes
                its OWN containing block away from the flow: #connection-overlay is
                position:fixed (containing block = viewport, ancestors irrelevant);
@@ -300,16 +298,13 @@
                resolves against the viewport as before — #app carries no
                transform / filter / perspective, and a fixed ANCESTOR does not
                capture fixed DESCENDANTS, so the anchor left:
-               calc(var(--sidebar-width) - 1px) still measures from x=0 of the
-               viewport; #status-bar, #terminal-controls and #empty-state are
+               calc(env(safe-area-inset-left, 0px) + var(--sidebar-width) - 1px)
+               measures from the viewport and includes the left safe-area inset; #status-bar, #terminal-controls and #empty-state are
                direct children of #workspace (position:relative — already their
                containing block; #empty-state is #terminal-container's SIBLING,
-               not its child) — and #status-bar / #terminal-controls are the two
-               OVERLAY children the keyboard avoidance therefore lifts by their OWN
-               `bottom` (occlusion, and 20 + occlusion), precisely BECAUSE their
-               containing block stays full height and they would otherwise sit under
-               the keyboard, while the quick-keys panel inherits the shorter column
-               through its `max-height: 100%`; the JS-created
+               not its child). Only #terminal-controls joins the hosts in keyboard
+               avoidance; Transport stays bottom-fixed, while the quick-keys panel
+               inherits the shorter column through its `max-height: 100%`; the JS-created
                #dsh-remote-mask (kinds/dsh_web.js)
                sits inside #dsh-frames (position:relative); the JS-created
                measurement span in truncatePath (body-appended, position:fixed in
@@ -318,8 +313,8 @@
                createTerminalHost in this file and PtyRenderer._createSession in
                kinds/pty.js — (position:absolute; inset:0 in their style.cssText)
                are appended to #terminal-container (position:relative), already
-               their containing block — and hosts, together with the two overlay
-               children named above, are exactly the set of boxes this build moves:
+               their containing block — and the hosts plus the control column are
+               exactly the set of boxes this build moves:
                the PTY-local avoidance writes each box's OWN `bottom`, which
                resolves against that same #terminal-container / #workspace, so the
                terminal's content AND its furniture lift off the covered strip while
@@ -514,21 +509,8 @@
                 /* Above the mask (25), below the sidebar toggle tab (40); the
                    whole ladder stays under the 9999 modal layer. */
                 z-index: 30;
-                /* PR #110 review (B2): the drawer's containing block is
-                   #app's PADDING box, so top:0/bottom:0 bleed across the
-                   safe-area bands — on a notched iPhone the drawer's first
-                   content (the sidebar title with the New/Import buttons)
-                   sat inside the status-bar band, invisible and untappable,
-                   and the bottom panel pressed into the Home Indicator.
-                   The box itself stays full-bleed (the iOS convention for a
-                   drawer: its background runs edge to edge) and these four
-                   insets inset only the CONTENT — the same padding
-                   declaration #app consumes, so landscape left/right insets
-                   are covered too; border-box keeps the drawer's width at
-                   var(--sidebar-width). The mask deliberately gets NO such
-                   padding: it has no content to protect and must stay
-                   full-bleed so a tap anywhere outside the drawer closes
-                   it. */
+                /* The positioned #content-shell already applies the safe-area
+                   insets and rounded clipping. The drawer adds no second padding. */
                 padding: 0;
             }
             /* Drawer closed: off-canvas, NOT zero-width (that is the wide
@@ -1637,11 +1619,8 @@
                so this resolves against the viewport even though #status-bar stays a
                DOM child of #workspace; #workspace's overflow:hidden never clips it
                (a fixed box is painted outside an untransformed ancestor's clip). The
-               keyboard avoidance below still writes this box's OWN bottom =
-               occlusion (its authored bottom is 0), so a raised soft keyboard hands
-               the strip back at its physical-top edge, and occlusion 0 — or the
-               closed avoidance session — hands exactly 0 back at the physical bottom.
-               Never a second layout truth: the authored 0 is the baseline. */
+               keyboard avoidance never changes this box's bottom: Transport remains
+               at the physical bottom by owner-approved design. */
             position: fixed;
             left: 0;
             right: 0;
@@ -3707,26 +3686,11 @@
         //      follow-ups) and was vetoed on-device; v2.2 pinned the whole shell
         //      to vv.height and is superseded by this round. Neither name
         //      survives as a code path here: the calls are gone, not renamed.
-        //      What DOES move is the terminal's own furniture, because the
-        //      original requirement is that the INPUT and the quick-keys stay
-        //      reachable while the keyboard is up — leaving the control column
-        //      and the status strip under the keyboard would have kept exactly
-        //      the half of the defect the fix exists to close. So
-        //      #terminal-controls (absolutely positioned in #workspace, whose
-        //      containing block the keyboard does NOT shorten) and #status-bar
-        //      (position:fixed, resolving against the viewport) each get their OWN
-        //      `bottom` written: the strip by the
-        //      occlusion (its authored bottom is 0), the column by 20 + occlusion
-        //      (its authored bottom is 20px, the clearance that keeps it above
-        //      the transport strip). `top: 20px` on the column is untouched, so
-        //      the quick-keys ENTRY BUTTON never moves and never jumps; only the
-        //      column's height shortens, which is what the panel's
-        //      `max-height: 100%` resolves against (PRD-CHANGE §3.1: a percentage
-        //      against a definite containing block), so the quick-keys panel
-        //      shrinks with the keyboard and keeps its own internal scroll
-        //      instead of sitting under it. The geometry matches what those child
-        //      layers had when the whole page was pinned: same bottoms, reached by
-        //      moving the children instead of the shell.
+        //      What DOES move is the PTY host and the quick-keys control column.
+        //      The host subtracts the measured container chrome so its real bottom
+        //      meets the keyboard top. The column keeps its authored 20px offset
+        //      plus occlusion, with a fixed top and a shrinking panel. Transport
+        //      never joins that write set and remains at the physical bottom.
         //   3. EVERY HOST, INCLUDING THE HIDDEN AND INACTIVE ONES. The applier
         //      iterates ALL #terminal-container hosts, not just the active one,
         //      so a host cannot keep a stale `bottom` and show a band the moment
@@ -3734,7 +3698,7 @@
         //      change, so the 500ms backstop cannot invalidate layout (and
         //      re-fire every host's ResizeObserver) on a stable page; a hidden
         //      host costs one string compare until the switch that reads it. The
-        //      two overlay boxes are guarded the same way, and a missing element
+        //      control column is guarded the same way, and a missing element
         //      (a login gate, a page before boot) is skipped, never fatal.
         //   4. ZOOM opts out entirely (scale != 1 -> bottom:0px): vv.height
         //      shrinks with the pinch and fires resize, so without the

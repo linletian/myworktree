@@ -14,7 +14,7 @@
 - 竖屏直接打开软键盘可以局部避让，收起后恢复；
 - 竖屏第一次和后续再次打开软键盘都可以重新进入避让；
 - 横竖屏转换不会把已有键盘会话误当成关闭，也不会把旧恢复状态错误带到新窗口；
-- 外壳和侧栏保持满高，终端与 Transport 只做必要的局部避让；
+- 外壳和侧栏保持满高，终端与快捷控制列只做必要的局部避让，Transport 始终贴物理底边；
 - 整页不使用自动回顶来掩盖底部色带；
 - 终端整行取整留下的不足一行余量被明确保留，不通过调整行距来消除。
 
@@ -74,8 +74,9 @@
 `#status-bar`：
 
 - 使用 `position: fixed`；
-- 无避让时 `bottom: 0`，贴物理视口底边；
-- 有软键盘避让时，只写自己的 `bottom = occlusion`。
+- `bottom: 0`，始终贴物理视口底边；
+- 不参与软键盘避让，不允许写入它的 `style.bottom`；即使被系统 UI 遮挡也保持贴底；
+- `z-index: 20`，低于窄屏抽屉遮罩的 25，抽屉打开时 Transport 同样被遮罩覆盖。
 
 `#terminal-controls`：
 
@@ -98,9 +99,10 @@ raw = max(0, documentElement.clientHeight - visualViewport.height)
 
 有效避让量只允许写到：
 
-1. `#terminal-container` 下每个 PTY 宿主的 `style.bottom = occlusion`；
-2. `#terminal-controls` 的 `style.bottom = 20 + occlusion`；
-3. `#status-bar` 的 `style.bottom = occlusion`。
+1. `#terminal-container` 下每个 PTY 宿主的 `style.bottom = max(0, occlusion - bottomChrome)`，其中 `bottomChrome = max(0, layoutHeight - container.getBoundingClientRect().bottom)`，使宿主真实底边贴合键盘顶缘；
+2. `#terminal-controls` 的 `style.bottom = 20 + occlusion`。
+
+`#status-bar` 不属于避让写入集合，始终固定底部。
 
 不得写 `#app`、`#main`、`#workspace`、`#terminal-container` 的尺寸，也不得写根滚动。
 
@@ -278,7 +280,7 @@ xterm 按整行布局时，不足一行的高度余量是明确接受的行为�
 本节为**追加注记**，不修改、不取代上文 §1–§9：上文仍以 `5268869` 的机制为准，本节只登记在其之后经 owner 签署叠加的行为，判读以 `docs/plans/fix-issue116/PLAN.md` 为准。
 
 - **缩放口径改为非对称**：`scale < 1` 不再沿用 §5 的整体退出，改由缩放 settle 先判定、只在**已 settle 的 `scale < 1`** 上才把该帧交给避让判定；`scale > 1` 维持保守豁免，既不进入候选也不参与 settle 判定。
-- **让位归属终端自身**：避让只写入终端自己的三个底边，并由当前处于前台的 PTY 宿主决定是否抬升；不在前台的宿主不被代替移动，处于被遮挡底边下新建的宿主在被创建时即抬升。
+- **让位归属终端自身**：焦点准入由当前前台 PTY 宿主决定；一旦进入避让，所有宿主（包括隐藏和非活动宿主）共享同一当前目标，避免切换后残留旧底边；新建宿主在创建时立即应用当前值。
 - **前台切换与转屏收敛**：`activate()` 经与 resizer 相同的共享节流请求实测尺寸，不再等待下一帧 ResizeObserver；转屏 / Split View 几何变化只做一次 settle，外壳本身不回顶。
 
 已知问题（`KNOWN-P4-SEQ-GRACE` / `KNOWN-P4-PAN`）维持接受不修，登记与复现台账见 PLAN §13–§18 与 §18.3；本节不构成任何真机验收结论，R1–R6 未整行关闭。
