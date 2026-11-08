@@ -1,5 +1,8 @@
 name: Go CI
 
+# Runs only on the three moments that need a gate: a merge landed on develop,
+# a merge landed on main, and a pull request whose base is main. Pull requests
+# targeting develop (or any other branch) intentionally do NOT run here.
 on:
   push:
     branches:
@@ -8,7 +11,6 @@ on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
     branches:
-      - develop
       - main
 
 jobs:
