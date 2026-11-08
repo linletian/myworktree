@@ -23,8 +23,8 @@ import (
 //
 //	REASONIX_CONTRACT=1 go test ./internal/instance/reasonix/ -run TestReasonixUpstreamContract -v
 //
-// `go test -short` always skips it. CI invokes it explicitly in go-ci.yml and
-// in .github/workflows/reasonix-contract.yml; runners without a reasonix
+// `go test -short` always skips it. CI invokes it explicitly as a step of
+// go-ci.yml — the only CI home for this contract; runners without a reasonix
 // binary skip quietly (green), ones with one run the check for real.
 func TestReasonixUpstreamContract(t *testing.T) {
 	if testing.Short() {

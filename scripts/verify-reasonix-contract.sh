@@ -16,9 +16,9 @@
 # Any of these changing on a reasonix upgrade means the embedded web UI
 # integration may break — run this before/after upgrading reasonix. It is also
 # reachable via `go test` (opt-in: REASONIX_CONTRACT=1, see
-# internal/instance/reasonix/contract_test.go) and via the CI workflow
-# (.github/workflows/reasonix-contract.yml, which SKIPs when no reasonix
-# binary is present on the runner).
+# internal/instance/reasonix/contract_test.go) and as a step of the Go CI
+# workflow (.github/workflows/go-ci.yml, the only CI home for this contract;
+# it SKIPs when no reasonix binary is present on the runner).
 #
 # Usage:
 #   scripts/verify-reasonix-contract.sh             # finds reasonix on PATH

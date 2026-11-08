@@ -66,8 +66,8 @@ gh pr create --base main --head chore/vX.Y.Z-release-prep \
 ```
 
 - PR body lists the delta (`main..develop`: merged PRs, fixed issues).
-- Wait for **all four checks** (Go CI `test-build` × {ubuntu, macOS}, Reasonix
-  contract `verify` × {ubuntu, macOS}).
+- Wait for **both checks** (Go CI `test-build` × {ubuntu, macOS}; its *Verify
+  reasonix upstream contract* step SKIPs on runners without a reasonix binary).
 - **Squash merge**, delete the branch:
 
 ```bash
