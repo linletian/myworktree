@@ -5,7 +5,11 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"os/exec"
 	"testing"
+
+	"myworktree/internal/framework"
 )
 
 // TestProbeHealth pins the health-probe contract: a reachable server
@@ -70,4 +74,31 @@ func splitAddr(t *testing.T, srv *httptest.Server) (string, string) {
 		t.Fatalf("split %q: %v", srv.Listener.Addr(), err)
 	}
 	return h, p
+}
+
+// TestStatusHealthProbeFailureIsUnhealthyNotFailed pins issue #136: a
+// health-probe failure is degraded, not terminal. StatusFailed makes
+// runLifecycle drop the only handle to a still-live process, after which
+// Manager.Stop finds nothing and the proxy listener leaks.
+func TestStatusHealthProbeFailureIsUnhealthyNotFailed(t *testing.T) {
+	h := &Handle{host: "127.0.0.1", port: "1"}
+	// Status checks cmd/Process only to distinguish "spawned" from
+	// "never started"; it does not signal this process.
+	h.cmd = &exec.Cmd{Process: &os.Process{Pid: os.Getpid()}}
+	d := &Driver{}
+	handle := framework.NewHandle(kindName, h)
+
+	h.failCount.Store(int32(healthFailThreshold - 1))
+	if got, _ := d.Status(handle); got != framework.StatusRunning {
+		t.Fatalf("status below threshold = %v, want running", got)
+	}
+
+	h.failCount.Store(int32(healthFailThreshold))
+	got, reason := d.Status(handle)
+	if got != framework.StatusUnhealthy {
+		t.Fatalf("status at threshold = %v, want unhealthy (not failed)", got)
+	}
+	if reason == "" {
+		t.Fatal("unhealthy status lost its reason")
+	}
 }

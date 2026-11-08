@@ -437,7 +437,11 @@ func (d *Driver) Status(handle framework.Handle) (framework.Status, string) {
 		return framework.StatusStarting, ""
 	}
 	if h.failCount.Load() >= int32(healthFailThreshold) {
-		return framework.StatusFailed, "dsh health probe failed"
+		// The process is still alive and stoppable; a failed probe is a
+		// degraded state, not a terminal one. Reporting Failed here makes
+		// runLifecycle drop the only handle to a live process (issue #136:
+		// Stop then becomes a 200 no-op and the proxy listener leaks).
+		return framework.StatusUnhealthy, "dsh health probe failed"
 	}
 	return framework.StatusRunning, ""
 }
@@ -798,15 +802,17 @@ func (d *Driver) healthLoop(ctx context.Context, h *Handle) {
 				continue
 			}
 			if probeHealth(ctx, host, port) {
-				h.failCount.Store(0)
+				if prev := h.failCount.Swap(0); int(prev) >= healthFailThreshold {
+					d.logf("instance %s: health probe recovered after %d consecutive failures", h.instanceID, prev)
+				}
 				continue
 			}
 			n := h.failCount.Add(1)
-			if int(n) >= healthFailThreshold {
-				if p := h.loadPublisher(); p != nil {
-					_ = p.MarkFailed("dsh health probe failed")
-				}
-				return
+			if int(n) == healthFailThreshold {
+				// Keep the process and the framework handle: the probe may be
+				// transient and Stop must stay effective. Status() reports
+				// Unhealthy from here until a probe succeeds.
+				d.logf("instance %s: health probe failed %d consecutive times; keeping process alive and re-probing", h.instanceID, n)
 			}
 		}
 	}
