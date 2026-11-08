@@ -1107,9 +1107,8 @@ func TestViewportAndHeightAnchors(t *testing.T) {
 	//     occlusion = max(0, documentElement.clientHeight - vv.height)
 	//     every PTY host's bottom  = occlusion
 	//     #terminal-controls'       = 20 + occlusion   (authored bottom 20px)
-	//     #status-bar's             = occlusion        (authored bottom 0)
-	// which reproduces the old terminal geometry (702/682 layout: vv.height 274
-	// -> host bottom 428px -> host rect 254; controls 448px; status 428px)
+	//     #status-bar stays fixed at the physical bottom (no avoidance write)
+	// -> host bottom is aligned to the keyboard top; controls use 20 + occlusion
 	// without resizing an ancestor. The quick-keys entry stays put because the
 	// column's `top: 20px` is never written — only its height shortens, and that
 	// is what the panel's max-height:100% resolves against. Leaving the column and
@@ -1435,35 +1434,31 @@ func TestViewportAndHeightAnchors(t *testing.T) {
 func TestNarrowDrawerAnchors(t *testing.T) {
 	bodyText := fetchIndexHTML(t)
 
-	// R7: #app is the positioning containing block for the drawer and its
-	// mask. In-rule assertion, same style as TestViewportAndHeightAnchors —
-	// other rules in the file also set position and a bare Contains would
-	// anchor nothing.
-	//
-	// REVISED under issue #116 contract v2.2: the value is now `fixed`, not
-	// `relative`. The requirement R7 actually encodes is "there IS a positioned
-	// ancestor for the absolutely positioned drawer", and a fixed box is one —
-	// the anchor stays satisfied. What the change DOES cost, and what this
-	// anchor therefore also pins, is that the containing block is the
-	// LAYOUT VIEWPORT rather than the in-flow box, so the drawer's insets are
-	// resolved against the viewport. That is the same consequence the shell
-	// itself already lives with (it cannot be panned any more), so the drawer
-	// inherits a behaviour the page now guarantees everywhere, not a new one.
-	appStart := strings.Index(bodyText, "#app {\n")
-	if appStart < 0 {
-		t.Fatal("GET / lost the #app rule (issue #100 L2 R7)")
+	// R7 under the approved visual shell: #content-shell, not #app, is the
+	// positioned containing block for the drawer and mask. Its overflow and
+	// rounded corners clip both overlays; Transport stays below the mask.
+	shellStart := strings.Index(bodyText, "#content-shell {\n")
+	if shellStart < 0 {
+		t.Fatal("GET / lost the #content-shell rule")
 	}
-	appEnd := strings.Index(bodyText[appStart:], "\n        }")
-	if appEnd < 0 {
-		t.Fatal("GET / #app rule has no closing brace")
+	shellEnd := strings.Index(bodyText[shellStart:], "\n        }")
+	if shellEnd < 0 {
+		t.Fatal("GET / #content-shell rule has no closing brace")
 	}
-	appRule := bodyText[appStart : appStart+appEnd]
-	if !strings.Contains(appRule, "position: fixed;") {
-		t.Fatal("GET / #app rule should declare position: fixed — it must stay the drawer's positioned containing block (issue #100 L2 R7) while taking the shell out of the document's flow (issue #116 contract v2.2)")
+	shellRule := bodyText[shellStart : shellStart+shellEnd]
+	for _, decl := range []string{"position: relative;", "overflow: hidden;", "border-radius: var(--content-shell-radius);"} {
+		if !strings.Contains(shellRule, decl) {
+			t.Fatalf("GET / #content-shell should declare %q for the drawer/mask containing block", decl)
+		}
 	}
-	// The drawer's own positioning is asserted below, against the narrow-tier
-	// rule that actually restyles it: it stays ABSOLUTE, so it resolves against
-	// this now-fixed containing block instead of escaping it.
+	statusStart := strings.Index(bodyText, "\n        #status-bar {\n")
+	if statusStart < 0 {
+		t.Fatal("GET / lost the #status-bar rule")
+	}
+	statusEnd := strings.Index(bodyText[statusStart:], "\n        }")
+	if statusEnd < 0 || !strings.Contains(bodyText[statusStart:statusStart+statusEnd], "z-index: 20;") {
+		t.Fatal("GET / Transport must remain at z-index 20, below the drawer mask at 25")
+	}
 
 	// R7 + §3.1: PR1's zero-width collapse rule is scoped off the narrow
 	// tier by the SEAMLESS complement of the drawer's max-width: 768px
