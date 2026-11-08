@@ -455,6 +455,15 @@ class OpencodeWebRenderer {
         const id = session.id;
         const tick = async () => {
             if (abort.aborted) return;
+            // Issue #137: the main page reported the credential dead. This
+            // polls with a bare fetch (not window.api), so it has to honour
+            // the same single stop flag itself — ~40 req/min against the
+            // 20/min auth limiter would trip 429 in ~30s. Re-activation after
+            // re-login starts a fresh poll.
+            if (window.state && window.state.authExpired === true) {
+                this._stopScopeMonitoring();
+                return;
+            }
             // Self-stop (issue #120): the backend answers 200 for a
             // stopped instance forever, so the poll must watch the
             // instance status itself. Gone or terminal → clear the

@@ -707,6 +707,18 @@
                 min-width: 44px;
                 min-height: 44px;
             }
+            /* Issue #137: the connection overlay's re-login action is the only
+               interactive element of a full-screen overlay, and the issue's
+               scenario is remote access — often a first-screen touch device.
+               Same R10 floor as the controls above; min-* only, so the box
+               stays padding-driven. No :hover anywhere (R11). */
+            #connection-overlay .conn-action {
+                min-width: 44px;
+                min-height: 44px;
+                display: inline-flex;
+                align-items: center;
+                justify-content: center;
+            }
             /* Safe-area refinement (issue #100 L3 review): with the box
                centered in the 39px content box its top sits at y=-2.5
                relative to the header, and #header does not clip — but
@@ -3397,15 +3409,32 @@
             if (monitorTimer) { clearInterval(monitorTimer); monitorTimer = null; }
         }
 
-        function showAuthExpired() {
+        // Classification (issue #137). Status, not history:
+        //   401 — the daemon's withAuth answer for a token mismatch, i.e.
+        //         exactly "the server is up and does not accept you";
+        //   429 — allowAuthAttempt's per-IP limiter, which only counts FAILED
+        //         auth attempts, so it is the same family (and "unreachable,
+        //         retrying" is precisely the wrong promise: the retry is the
+        //         attack);
+        //   403 — NOT this family. Every 403 this server emits is a
+        //         route-level refusal or sameOriginHost ("forbidden origin"),
+        //         and a re-login would be refused the same way, so offering
+        //         the login link there would be a dead end. It keeps the
+        //         reachability copy.
+        function showAuthExpired(throttled) {
+            // Single writer of the stop latch; only a fresh page load (which
+            // rebuilds window.state) resets it. No other overlay state may
+            // clear it — see showConnectionLost/hideConnectionOverlay.
             state.authExpired = true;
             const overlay = document.getElementById("connection-overlay");
             if (overlay) {
                 const title = overlay.querySelector(".conn-title");
                 const sub = overlay.querySelector(".conn-sub");
                 const action = document.getElementById("conn-login");
-                if (title) title.textContent = "Session expired";
-                if (sub) sub.textContent = "This token is no longer valid. The server is running — log in again to continue.";
+                if (title) title.textContent = throttled ? "Too many failed attempts" : "Session expired";
+                if (sub) sub.textContent = throttled
+                    ? "This address is rate-limited after failed logins. Wait a minute, then log in again."
+                    : "This token is no longer valid. The server is running — log in again to continue.";
                 if (action) {
                     action.href = "/login?next=" + encodeURIComponent(loginNextPath(location.pathname, location.search));
                     action.style.display = "";
@@ -3416,7 +3445,9 @@
         }
 
         function showConnectionLost() {
-            state.authExpired = false;
+            // Deliberately does NOT touch state.authExpired: the latch is
+            // one-way so an auth state can never be "downgraded" into a
+            // retrying overlay with no timer actually retrying.
             const overlay = document.getElementById("connection-overlay");
             if (!overlay) return;
             const title = overlay.querySelector(".conn-title");
@@ -3429,7 +3460,8 @@
         }
 
         function hideConnectionOverlay() {
-            state.authExpired = false;
+            // Same rule: hiding is not a credential state change (it can only
+            // be reached with a live credential), so the latch stays put.
             const overlay = document.getElementById("connection-overlay");
             if (overlay) overlay.style.display = "none";
             const action = document.getElementById("conn-login");
@@ -3437,25 +3469,23 @@
         }
 
         // The poll's catch, in one place (issue #137): classify, then decide.
-        // An auth failure OUTRANKS the liveness split — "websocket live
+        // A credential failure OUTRANKS the liveness split — "websocket live
         // (status refresh failed)" describes a throttled poll and would tell
         // the user the session is fine while the credential is dead, which is
         // the exact misdirection this issue is about.
         function showConnectionFailure(e) {
             console.error(e);
             const status = e && e.status;
-            const authFailure = status === 401 || status === 403
-                || (status === 429 && state.authExpired === true);
-            if (!authFailure) {
-                const inst = getActiveInstance();
-                if (inst && isInstanceLiveStatus(inst.status) && hasLiveTTYConnection(inst.id)) {
-                    updateStatus("websocket live (status refresh failed)");
-                    return;
-                }
-                showConnectionLost();
+            if (status === 401 || status === 429) {
+                showAuthExpired(status === 429);
                 return;
             }
-            showAuthExpired();
+            const inst = getActiveInstance();
+            if (inst && isInstanceLiveStatus(inst.status) && hasLiveTTYConnection(inst.id)) {
+                updateStatus("websocket live (status refresh failed)");
+                return;
+            }
+            showConnectionLost();
         }
 
         async function refresh() {
@@ -8483,8 +8513,15 @@
         // Trigger browser confirmation on any page close/refresh/navigation.
         // Instances continue running regardless of user choice.
         window.addEventListener('beforeunload', (event) => {
-            event.preventDefault();
-            event.returnValue = '';
+            // Issue #137: with a dead credential the overlay's "Log in again"
+            // is this page's ONLY recovery path and there is nothing in flight
+            // to lose, so the leave-site confirmation would stand between the
+            // user and the login form (verified in a real browser: the dialog
+            // does fire on that click). Every other unload keeps it.
+            if (state.authExpired !== true) {
+                event.preventDefault();
+                event.returnValue = '';
+            }
             // Clean up timers and measurement span when the page is unloaded or hidden.
             if (gitChangesTimer) clearInterval(gitChangesTimer);
             stopMonitorAlertsPolling();
@@ -8495,6 +8532,11 @@
                 if (gitChangesTimer) clearInterval(gitChangesTimer);
                 stopMonitorAlertsPolling();
             } else if (document.visibilityState === 'visible') {
+                // Issue #137: a hidden→visible round trip must not revive what
+                // stopAuthPolling() just cleared — that would silently resume
+                // 401/429 traffic with no click, which is how the limiter
+                // window got burned in the first place.
+                if (state.authExpired === true) return;
                 // The alert channel is global (the status bar shows on every
                 // worktree), so it restarts unconditionally; git changes stay
                 // gated on the active worktree.
@@ -10005,6 +10047,11 @@
         }
 
         function startMonitorAlertsPolling() {
+            // Issue #137: called from init AND from the visibilitychange
+            // restart, so the dead-credential check belongs here rather than
+            // at each call site — a hidden→visible tab switch needs no click
+            // and the overlay cannot block it.
+            if (state.authExpired === true) return;
             if (monitorAlertsTimer) clearInterval(monitorAlertsTimer);
             monitorAlertsTimer = setInterval(fetchMonitorAlerts, MONITOR_ALERTS_POLL_MS);
             fetchMonitorAlerts();
