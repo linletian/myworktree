@@ -135,11 +135,12 @@ func TestTTYSizeAggregationRecomputesOnDisconnect(t *testing.T) {
 	_ = mustReadTTYSize(t, updates2)
 
 	srv.updateTTYClientSize("inst-2", client2, 120, 40)
+	if got := mustReadTTYSize(t, updates2); got != (ttySize{Cols: 80, Rows: 24}) {
+		t.Fatalf("requester must receive the unchanged applied size as its ack, got %#v", got)
+	}
 	select {
 	case <-updates1:
-		t.Fatal("larger second client should not change aggregated size")
-	case <-updates2:
-		t.Fatal("larger second client should not change aggregated size")
+		t.Fatal("an unchanged request must not broadcast a duplicate frame to the other client")
 	case <-time.After(200 * time.Millisecond):
 	}
 

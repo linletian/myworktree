@@ -535,7 +535,14 @@ func (s *Server) updateTTYClientSize(instanceID, clientID string, cols, rows int
 	}
 	s.ttyClients[instanceID][clientID].size = ttySize{Cols: cols, Rows: rows}
 	s.ttyClients[instanceID][clientID].hasSize = true
+	requester := s.ttyClients[instanceID][clientID].updates
 	applied, changed, notify := s.recomputeTTYSizeLocked(instanceID)
+	if !changed && applied.Cols > 0 && applied.Rows > 0 {
+		// An unchanged shared minimum still acknowledges the requester. Its local
+		// fit may differ from the applied size, so silence would leave that screen
+		// waiting forever for the authoritative resize frame.
+		notify = append(notify, requester)
+	}
 	s.ttyMu.Unlock()
 
 	s.applyTTYSize(instanceID, applied, changed, notify)
@@ -576,10 +583,7 @@ func (s *Server) recomputeTTYSizeLocked(instanceID string) (ttySize, bool, []cha
 }
 
 func (s *Server) applyTTYSize(instanceID string, size ttySize, changed bool, notify []chan ttySize) {
-	if !changed {
-		return
-	}
-	if s.instanceMgr != nil && size.Cols > 0 && size.Rows > 0 {
+	if changed && s.instanceMgr != nil && size.Cols > 0 && size.Rows > 0 {
 		if err := s.instanceMgr.Resize(instanceID, size.Cols, size.Rows); err != nil {
 			if s.logger != nil {
 				s.logger.Printf("tty resize apply failed for %s: %v", instanceID, err)

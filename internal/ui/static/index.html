@@ -8517,7 +8517,12 @@
             if (cols <= 0 || rows <= 0) return false;
             const last = session.lastSentTTYResize;
             if (last && last.cols === cols && last.rows === rows) return false;
-            if (!sendResize(session, cols, rows)) return false;
+            if (!sendResize(session, cols, rows)) {
+                // No request reached the server, so no ack can arrive. Restore the
+                // last applied size instead of leaving the fitted screen mismatched.
+                syncTerminalToAppliedSize(session);
+                return false;
+            }
             session.lastSentTTYResize = { cols, rows };
             return true;
         }

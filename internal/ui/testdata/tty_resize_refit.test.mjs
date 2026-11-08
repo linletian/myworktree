@@ -213,24 +213,24 @@ test("#116: a fresh fit stays on screen (legacy ResizeObserver)", () => {
   assert.equal(clock.pending(), 0, "outside the window the leading edge sent at once");
 });
 
-test("#116: a fit on a socket-less session keeps the new height and asks nothing", () => {
+test("#116: a fit on a socket-less session returns to the last applied size", () => {
   const { api } = resizeLayer();
-  // SSE-only, or a reconnect in flight. Under the retired shape this was the
-  // permanent case: the revert painted the stale ack and no ack could follow.
+  // SSE-only, or a reconnect in flight. No request reaches the server, so the
+  // last authoritative applied size is the only consistent local fallback.
   const session = makeSession({ socket: null });
   api.applyTTYSize(session, 103, 38);
   refitTo(session, 103, 58);
 
   runObserver(legacyObserver, session, api.queueTTYResize);
 
-  assert.deepEqual({ cols: session.term.cols, rows: session.term.rows }, { cols: 103, rows: 58 },
-    "no answer must NOT mean the old size comes back");
+  assert.deepEqual({ cols: session.term.cols, rows: session.term.rows }, { cols: 103, rows: 38 },
+    "without an OPEN socket the screen returns to the last applied size");
   assert.equal(session.lastSentTTYResize, null, "a refused send is not remembered as sent");
 });
 
 test("#116: the renderer factory (kinds/pty.js) behaves identically", () => {
   const { api } = resizeLayer();
-  const session = makeSession();
+  const session = makeSession({ socket: makeSocket() });
   api.applyTTYSize(session, 103, 38);
   refitTo(session, 103, 58);
 
@@ -453,10 +453,10 @@ test("#116: every fit path asks; only the ack adopts", () => {
     assert.equal(stripped.includes("queueTTYResize"), true,
       `${label} must route its fit through the shared throttle`);
   }
-  // One definition plus the two socket-establishment sites. A fourth call means a
-  // fit path has come back.
+  // One definition, two socket-establishment sites, and the dispatch refusal
+  // fallback. No fit observer may call the revert helper directly.
   const calls = stripComments(indexBody).split("syncTerminalToAppliedSize(").length - 1;
-  assert.equal(calls, 3, "exactly three mentions of the revert helper remain in index.html");
+  assert.equal(calls, 4, "only the two socket paths and dispatch's refused-send fallback may use the revert helper");
 });
 
 // D4②: "a foreground instance was activated → refit and converge at once" only
