@@ -8,13 +8,20 @@
         :root {
             --sidebar-width: 240px;
             --header-height: 40px;
-            --bg-color: #f9f9f9;
-            --border-color: #e1e4e8;
-            --active-color: #005cc5;
+            --bg-color: #f8fafc;
+            --safe-area-bg: #e9edf3;
+            --safe-area-line: rgba(69, 82, 102, 0.34);
+            --safe-area-highlight: rgba(255, 255, 255, 0.72);
+            --content-shell-radius: 18px;
+            --transport-height: 24px;
+            --panel-bg: #ffffff;
+            --sidebar-bg: #f3f5f8;
+            --border-color: #dce1e8;
+            --active-color: #0969da;
             --accent-color: #4a9eff;
-            --active-bg: #f1f8ff;
-            --hover-bg: #f6f8fa;
-            --term-bg: #0b1020;
+            --active-bg: #e7f0fc;
+            --hover-bg: rgba(70, 85, 105, 0.08);
+            --term-bg: #000000;
             --main-accent: #6f42c1;
             --main-accent-bg: #faf8ff;
             --main-accent-hover: #f3eeff;
@@ -23,12 +30,12 @@
             --term-ctrl-btn-size: 32px;
             --term-ctrl-btn-gap: 10px;
 
-            --text-primary: #24292e;
-            --text-secondary: #586069;
+            --text-primary: #242b36;
+            --text-secondary: #657084;
             --text-muted: #6a737d;
-            --tab-bg: #fbfbfb;
-            --tab-active-bg: #fff;
-            --main-bg: #fff;
+            --tab-bg: #ffffff;
+            --tab-active-bg: #f8fafc;
+            --main-bg: #f8fafc;
             --button-bg: #fafbfc;
             --button-hover-bg: #f3f4f6;
             --button-border: #ddd;
@@ -79,15 +86,20 @@
         @media (prefers-color-scheme: dark) {
             :root {
                 --bg-color: #0d1117;
+                --safe-area-bg: #080b10;
+                --safe-area-line: rgba(139, 148, 158, 0.43);
+                --safe-area-highlight: rgba(230, 237, 243, 0.06);
+                --panel-bg: #161b22;
+                --sidebar-bg: #11161d;
                 --border-color: #30363d;
                 --active-color: #58a6ff;
                 --accent-color: #1f6feb;
-                --active-bg: #0f2647;
-                --hover-bg: #161b22;
+                --active-bg: rgba(88, 166, 255, 0.15);
+                --hover-bg: rgba(139, 148, 158, 0.13);
                 --main-accent: #a371f7;
                 --main-accent-bg: #1a1525;
                 --main-accent-hover: #252035;
-                --text-primary: #c9d1d9;
+                --text-primary: #e6edf3;
                 --text-secondary: #8b949e;
                 --text-muted: #6e7681;
                 --tab-bg: #161b22;
@@ -226,7 +238,7 @@
                only guarantees that anything the columns do not cover (overscroll,
                zoom-out, the URL-bar gap before dvh settles) is chrome-toned
                instead of white. */
-            background: var(--bg-color);
+            background: var(--safe-area-bg);
             /* Declares that this document supports both themes off the same
                signal its @media blocks already use, so the UA canvas, form
                controls and scrollbars follow the system instead of defaulting
@@ -349,7 +361,8 @@
                file-wide, so the insets inset the children instead of
                growing the box; every desktop browser reports all four
                insets as 0, which makes this a literal no-op there. */
-            padding: env(safe-area-inset-top, 0px) env(safe-area-inset-right, 0px) env(safe-area-inset-bottom, 0px) env(safe-area-inset-left, 0px);
+            padding: env(safe-area-inset-top, 0px) env(safe-area-inset-right, 0px) var(--transport-height) env(safe-area-inset-left, 0px);
+            background: var(--safe-area-bg);
         }
 
         /* R5: progressive enhancement — dvh tracks the dynamic toolbars
@@ -367,27 +380,31 @@
             }
         }
 
+        /* Approved visual benchmark: one shared shell clips the rounded content. */
+        #content-shell {
+            position: relative;
+            flex: 1;
+            min-width: 0;
+            min-height: 0;
+            display: flex;
+            overflow: hidden;
+            background: var(--main-bg);
+            border: 1px solid var(--safe-area-line);
+            border-radius: var(--content-shell-radius);
+            box-shadow:
+                0 0 0 1px var(--safe-area-highlight),
+                inset 0 0 0 1px var(--safe-area-highlight);
+        }
+
         /* Sidebar */
         #sidebar {
             width: var(--sidebar-width);
-            background: var(--bg-color);
+            min-height: 0;
+            background: var(--sidebar-bg);
             border-right: 1px solid var(--border-color);
             display: flex;
             flex-direction: column;
-            /* issue #116 "background bleeds fully, content insets": #app's safe-area padding stops
-               every column 20px (env(safe-area-inset-bottom)) above the physical
-               edge, so the rail's own ink has to be carried across that strip or
-               the strip reads as an ownerless block under a light-inked sidebar.
-               box-shadow with zero blur/spread and a downward y-offset paints
-               exactly the strip using the element's OWN colour — no wrapper, no
-               magic constant (the offset IS the env() value, so it is 0 on every
-               desktop and collapses automatically on iPad), and no layout effect:
-               the sidebar's box is untouched, so flex sizing, the collapsed
-               width:0 state and the drawer transform all behave as before. A
-               ::after bleed would need position/height bookkeeping and would be
-               clipped by the collapsed state's overflow:hidden; the shadow cannot.
-               Design: ui/sidebar-states.pen "drawer / main / workspace backgrounds bleed fully". */
-            box-shadow: 0 env(safe-area-inset-bottom, 0px) 0 0 var(--bg-color);
+            /* No sidebar color band: the shared shell and Transport own the finish. */
             /* CONTRACT v3.1 (issue #116): the containing block for the divider
                ::after below. `relative` with no offsets keeps the box exactly where
                the flex row already put it and creates no stacking context (no
@@ -464,7 +481,7 @@
                 left: 100%;
                 top: 0;
                 width: 1px;
-                height: calc(100% + env(safe-area-inset-bottom, 0px));
+                height: 100%;
                 background: var(--border-color);
                 pointer-events: none;
             }
@@ -512,7 +529,7 @@
                    padding: it has no content to protect and must stay
                    full-bleed so a tap anywhere outside the drawer closes
                    it. */
-                padding: env(safe-area-inset-top, 0px) env(safe-area-inset-right, 0px) env(safe-area-inset-bottom, 0px) env(safe-area-inset-left, 0px);
+                padding: 0;
             }
             /* Drawer closed: off-canvas, NOT zero-width (that is the wide
                tier's rendering, scoped away from here). */
@@ -592,13 +609,13 @@
                   pointer-typed value and is not worth it. */
             #app:not(.collapsed) #sidebar-toggle-btn {
                 position: fixed;
-                left: calc(var(--sidebar-width) - 1px);
+                left: calc(env(safe-area-inset-left, 0px) + var(--sidebar-width) - 1px);
                 top: calc(env(safe-area-inset-top, 0px) + 6px);
                 z-index: 40;
-                background: var(--bg-color);
+                background: var(--panel-bg);
                 border: 1px solid var(--border-color);
                 border-left: none;
-                border-radius: 0 6px 6px 0;
+                border-radius: 0 7px 7px 0;
             }
             /* PR #110 review: the tab rule's background: var(--bg-color)
                (2,1,0) permanently outranks .icon-btn:hover's background
@@ -932,7 +949,7 @@
             border-bottom: 1px solid var(--border-color);
             gap: 6px;
             flex-shrink: 0;
-            background: var(--bg-color);
+            background: var(--sidebar-bg);
             cursor: pointer;
             user-select: none;
         }
@@ -1246,6 +1263,7 @@
             display: flex;
             flex-direction: column;
             min-width: 0;
+            min-height: 0;
             background: var(--main-bg);
         }
 
@@ -1322,7 +1340,7 @@
             cursor: pointer;
             border: 1px solid transparent;
             border-bottom: none;
-            border-radius: 4px 4px 0 0;
+            border-radius: 7px 7px 0 0;
             user-select: none;
             color: var(--text-secondary);
             margin-bottom: -1px;
@@ -1354,7 +1372,7 @@
             background: var(--main-bg);
             border-color: var(--border-color);
             color: var(--text-primary);
-            border-top: 2px solid var(--active-color);
+            border-top: 1px solid var(--border-color);
         }
 
         /* Inline rename input */
@@ -1554,29 +1572,23 @@
         #workspace {
             flex: 1;
             position: relative;
-            background: var(--term-bg);
+            background: var(--safe-area-bg);
             overflow: hidden;
             display: flex;
             flex-direction: column;
-            /* issue #116 "background bleeds fully, content insets", terminal column: the terminal's
-               ink runs to the physical bottom edge while the ROWS stay inset,
-               which is what makes the safe-area strip disappear instead of
-               reading as a band. Same zero-blur/zero-spread shadow as #sidebar,
-               for the same reason — and here it is the only option that works:
-               #workspace is overflow:hidden (xterm needs the clip), so an
-               absolutely positioned ::after bleed sitting at top:100% would be
-               clipped away entirely, whereas box-shadow is painted outside the
-               element's own overflow context and survives.
-               Deliberately NOT folded into #main: #main carries var(--main-bg),
-               the panel ink, and bleeding THAT would put a panel-coloured band
-               under a terminal-coloured column — the very seam this removes. */
-            box-shadow: 0 env(safe-area-inset-bottom, 0px) 0 0 var(--term-bg);
+            /* The area outside the terminal's rounded card follows the system canvas. */
         }
 
         #terminal-container {
             flex: 1;
-            width: 100%;
-            height: 100%;
+            width: auto;
+            height: auto;
+            min-height: 0;
+            margin: 10px;
+            background: var(--term-bg);
+            border: 1px solid rgba(139, 148, 158, 0.24);
+            border-radius: 10px;
+            overflow: hidden;
             position: relative;
             /* R17 (issue #100 padOS②, PR #110 beta): measured on the
                vendored xterm v6 — touches land on .xterm-screen, the
@@ -1595,6 +1607,11 @@
                one-finger drag to terminal scrolling. Desktop mouse/wheel
                paths are untouched — touch-action governs touch only. */
             touch-action: none;
+        }
+
+        #terminal-container .xterm {
+            padding: 8px 10px;
+            background: var(--term-bg);
         }
 
         #empty-state {
@@ -1626,27 +1643,43 @@
                closed avoidance session — hands exactly 0 back at the physical bottom.
                Never a second layout truth: the authored 0 is the baseline. */
             position: fixed;
-            /* issue #116 v3.0: 0 is the AUTHORED bottom. While the keyboard is up
-               applyVisualViewportOcclusion writes this box's OWN bottom =
-               occlusion, so the transport strip stays above the keyboard instead of
-               under it, and occlusion 0 hands exactly 0 back — the same geometry the
-               old full-page pin produced, reached by moving the child instead of the
-               shell. Never a second layout truth: the authored value below is the
-               baseline the avoidance offsets from. */
-            bottom: 0;
+            left: 0;
             right: 0;
-            background: var(--status-bar-bg);
-            color: var(--status-bar-text);
-            padding: 2px 8px;
+            bottom: 0;
+            height: var(--transport-height);
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            overflow: hidden;
+            padding: 0 calc(10px + env(safe-area-inset-right, 0px)) 0 calc(10px + env(safe-area-inset-left, 0px));
+            background: var(--safe-area-bg);
+            color: var(--text-secondary);
             font-size: 11px;
-            z-index: 10;
+            z-index: 50;
             pointer-events: auto;
             cursor: pointer;
-            border-top-left-radius: 4px;
+        }
+        #status-bar > span {
+            min-width: 0;
+            min-height: 20px;
+            display: inline-flex;
+            align-items: center;
+            padding: 1px 8px;
+            white-space: nowrap;
+            background: var(--panel-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 999px;
+            line-height: 14px;
+        }
+        #status-bar > span[hidden] { display: none !important; }
+        #status-bar-alerts { flex: none; }
+        #status-bar-transport {
+            overflow: hidden;
+            text-overflow: ellipsis;
         }
         @media (hover: hover) {
         #status-bar:hover {
-            background: var(--hover-bg);
+            background: var(--safe-area-bg);
             color: var(--text-primary);
         }
         }
@@ -1659,20 +1692,24 @@
            set `color` on #status-bar itself, which cascaded to
            #status-bar-transport; the color now lives only on the badge.) */
         #status-bar.status-alert-amber {
-            background: rgba(255, 179, 0, 0.30);
+            background: var(--safe-area-bg);
         }
         #status-bar.status-alert-red {
-            background: rgba(255, 68, 68, 0.34);
+            background: var(--safe-area-bg);
         }
         #status-bar.status-alert-amber #status-bar-alerts {
-            color: #ffd479;
+            color: var(--warning-text);
+            background: var(--warning-bg);
+            border-color: var(--warning-border);
         }
         #status-bar.status-alert-red #status-bar-alerts {
-            color: #ffb0b0;
+            color: var(--danger-text);
+            background: var(--danger-bg);
+            border-color: var(--danger-border);
         }
         #status-bar-alerts {
             font-weight: 600;
-            margin-right: 6px;
+            margin-right: 0;
         }
 
         /* Resource Monitor Modal */
@@ -2415,6 +2452,7 @@
             <div class="conn-sub">Backend server unreachable. Retrying...</div>
         </div>
 
+        <div id="content-shell">
         <!-- Sidebar: Worktrees -->
         <div id="sidebar">
             <div class="sidebar-title">
@@ -2553,6 +2591,7 @@
                 </div>
                 <div id="status-bar"><span id="status-bar-alerts" hidden></span><span id="status-bar-transport">Transport: idle</span></div>
             </div>
+        </div>
         </div>
     </div>
 
@@ -4198,7 +4237,12 @@
             // settle compares against (the candidate baseline above is the other
             // half), nothing else.
             previousTerminalScale = scale;
-            const target = occlusion + "px";
+            // Align the host's real bottom with the keyboard's top edge. The
+            // terminal container already sits above Transport and its own margin /
+            // border, so subtract that measured bottom chrome from the occlusion
+            // instead of leaving a second status-bar-sized blank above the keyboard.
+            const bottomChrome = Math.max(0, layoutHeight - container.getBoundingClientRect().bottom);
+            const target = Math.max(0, occlusion - bottomChrome) + "px";
             // EVERY host in #terminal-container, hidden and inactive included
             // (createTerminalHost here, PtyRenderer._createSession in
             // kinds/pty.js — both stamp data-instance-id and write
@@ -4221,35 +4265,16 @@
                     written++;
                 }
             }
-            // THE TERMINAL'S OWN OVERLAY CHILDREN, same occlusion, two authored
-            // offsets. #terminal-controls and #status-bar are absolutely positioned
-            // children of #workspace, and v3.0 does NOT shorten that containing
-            // block, so left alone they stay exactly where the keyboard arrives:
-            // the quick-keys entry, its panel and the transport strip would sit
-            // UNDER the keyboard, and the original requirement — the input and the
-            // quick-keys stay reachable — would still be broken. Writing each box's
-            // OWN `bottom` is the same local avoidance, in the same one pass, with
-            // the same guard: each keeps its authored offset (20px for the column,
-            // the clearance over the transport strip; 0 for the strip) and adds the
-            // occlusion on top of it. #terminal-controls keeps its `top: 20px`, so
-            // the quick-keys ENTRY BUTTON never moves; the column's HEIGHT is what
-            // shortens, and that height is exactly what the panel's
-            // `max-height: 100%` resolves against, so the panel shrinks with the
-            // keyboard and keeps its own internal scroll instead of parking rows
-            // beneath it. Element missing => skip: a login gate or a page that has
-            // not booted must not make the hosts' avoidance fatal.
+            // Only the quick-keys control column joins the PTY hosts in local
+            // avoidance. Its top stays fixed while its height and panel shrink.
+            // Transport deliberately stays fixed at the physical bottom, including
+            // during keyboard avoidance; it is not part of this write set.
+            // Missing controls are skipped for login/pre-boot pages.
             const controls = document.getElementById("terminal-controls");
             if (controls) {
                 const controlsTarget = (CONTROLS_BOTTOM_OFFSET + occlusion) + "px";
                 if (controls.style.bottom !== controlsTarget) {
                     controls.style.bottom = controlsTarget;
-                    written++;
-                }
-            }
-            const statusBar = document.getElementById("status-bar");
-            if (statusBar) {
-                if (statusBar.style.bottom !== target) {
-                    statusBar.style.bottom = target;
                     written++;
                 }
             }
@@ -7304,6 +7329,32 @@
             return host;
         }
 
+        function terminalThemeBackground() {
+            return getComputedStyle(document.documentElement).getPropertyValue("--term-bg").trim() || "#000000";
+        }
+
+        // Keep existing PTY canvases on the same system theme as the rounded
+        // shell. New sessions read the same token in both terminal factories.
+        function syncTerminalTheme() {
+            const renderer = window.__ptyRenderer;
+            if (!renderer || typeof renderer.allSessions !== "function") return;
+            const background = terminalThemeBackground();
+            renderer.allSessions().forEach(session => {
+                if (!session.term) return;
+                session.term.options.theme = Object.assign({}, session.term.options.theme, { background });
+            });
+        }
+        const terminalColorScheme = typeof window.matchMedia === "function"
+            ? window.matchMedia("(prefers-color-scheme: dark)")
+            : null;
+        if (terminalColorScheme) {
+            if (typeof terminalColorScheme.addEventListener === "function") {
+                terminalColorScheme.addEventListener("change", syncTerminalTheme);
+            } else if (typeof terminalColorScheme.addListener === "function") {
+                terminalColorScheme.addListener(syncTerminalTheme);
+            }
+        }
+
         function createTerminalSession(id) {
             // PtyRenderer owns session creation since the
             // renderer split. If a caller still hits this path,
@@ -7420,7 +7471,7 @@
             session.term = new Terminal({
                 convertEol: true, cursorBlink: true,
                 fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
-                fontSize: 13, theme: { background: "#0b1020" },
+                fontSize: 13, theme: { background: window.terminalThemeBackground ? window.terminalThemeBackground() : "#000000" },
                 scrollback: 10000
             });
 

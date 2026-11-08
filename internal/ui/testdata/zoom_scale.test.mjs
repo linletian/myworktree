@@ -85,7 +85,7 @@ const indexSource = readFileSync(join(staticDir, "index.html"), "utf8");
 // keyboard leaving vv.height 274 -> raw 428 = 61.0% of 702.
 const L0 = 702;
 const W0 = 1194;
-const SAFE_BOTTOM = 20;
+const TERMINAL_BOTTOM_CHROME = 0; // isolate scale behavior; bottom-chrome arithmetic is covered in viewport_height.test.mjs
 const KB_VISIBLE = 274; // keyboard-open visible height at scale = 1
 
 function inlineScript(html) {
@@ -226,7 +226,7 @@ function zoomHarness({
   if (!focus) focus = { tagName: "TEXTAREA", parentElement: host };
   Object.defineProperty(host, "getBoundingClientRect", {
     value: () => {
-      const bottom = (root.clientHeight - SAFE_BOTTOM) - (parseFloat(host.style.bottom || "0") || 0);
+      const bottom = (root.clientHeight - TERMINAL_BOTTOM_CHROME) - (parseFloat(host.style.bottom || "0") || 0);
       return { top: 0, bottom, height: bottom };
     },
   });
@@ -241,6 +241,9 @@ function zoomHarness({
     querySelectorAll(selector) {
       assert.equal(selector, ":scope > [data-instance-id]", "the host selector the applier queries changed; re-audit the harness");
       return [host];
+    },
+    getBoundingClientRect() {
+      return { top: 0, bottom: root.clientHeight - TERMINAL_BOTTOM_CHROME };
     },
   };
   // The DOM appendChild semantic: the host's parent IS the container — Phase 3's
@@ -339,7 +342,7 @@ test("D2-1a scale=1: entering keyboard at raw 428 still avoids exactly as before
   assert.deepEqual(h.bottoms(), ["428px"]);
   assert.equal(h.occlusion(), 428, "an active session pays occlusion = raw, unchanged");
   assert.equal(h.controls.style.bottom, "448px");
-  assert.equal(h.statusBar.style.bottom, "428px");
+  assert.equal(h.statusBar.style.bottom, "", "Transport remains bottom-fixed during keyboard avoidance");
 });
 
 test("D2-1b scale=1: a same-geometry decrease exits into the recovery latch; a fresh 50% keyboard re-enters", () => {
@@ -395,9 +398,9 @@ test("D2-2a scale=0.75 settled, editable focus, raw > 1: enters at the 25% line 
   assert.equal(h.active(), true, "editable focus + raw 570.67 > 1 + TWO consecutive counting ticks: the settled scale < 1 enters");
   assert.equal(h.occlusion(), Math.max(0, 936 - KB_VISIBLE / 0.75), "occlusion = raw, in full");
   assert.deepEqual(h.bottoms(), [h.occlusion() + "px"]);
-  assert.equal(h.hostBottomRect(), 936 - SAFE_BOTTOM - h.occlusion(), "the host sits exactly raw px above its authored bottom");
+  assert.equal(h.hostBottomRect(), 936 - TERMINAL_BOTTOM_CHROME - h.occlusion(), "the host sits exactly raw px above its authored bottom");
   assert.equal(h.controls.style.bottom, (20 + h.occlusion()) + "px", "the column pays 20 + raw at zoom too");
-  assert.equal(h.statusBar.style.bottom, h.occlusion() + "px");
+  assert.equal(h.statusBar.style.bottom, "", "Transport remains bottom-fixed at zoom too");
   // Stable passes re-write nothing — the guarded-write mechanism is untouched:
   // exactly ONE host write happened after the init baseline (the lift itself).
   h.tick();
@@ -494,7 +497,7 @@ test("D2-3 scale=0.75 keyboard-free: raw is 0 by arithmetic, the terminal never 
     assert.equal(h.active(), false, `scale ${scale} settled, no keyboard: still nothing owed`);
     assert.deepEqual(h.bottoms(), ["0px"], "the terminal stays at its authored full height");
   }
-  assert.equal(h.hostBottomRect(), 936 - SAFE_BOTTOM, "full height at rest, exactly like the 153-frame A0 segment");
+  assert.equal(h.hostBottomRect(), 936 - TERMINAL_BOTTOM_CHROME, "full height at rest, exactly like the 153-frame A0 segment");
   assert.equal(h.hostWrites(), before, "keyboard-free zoom steps write nothing new");
 });
 
@@ -590,7 +593,7 @@ test("D2-5b scale>1 exits an active scale=1 session through the frozen edge, aut
   assert.equal(h.active(), false, "zoom-in ends the session in flight, exactly as the frozen baseline");
   assert.deepEqual(h.bottoms(), ["0px"]);
   assert.equal(h.controls.style.bottom, "20px", "opt-out restores the authored bottoms");
-  assert.equal(h.statusBar.style.bottom, "0px");
+  assert.equal(h.statusBar.style.bottom, "", "Transport remains bottom-fixed when the session exits");
 });
 
 // --- 6. a scale<1 session suddenly returns to scale>1, then back to 1 --------

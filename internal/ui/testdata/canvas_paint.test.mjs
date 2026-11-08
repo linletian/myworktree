@@ -89,11 +89,8 @@ test("the root canvas is painted with the CHROME token, not the terminal ink", (
   const body = bodiesFor(/^(?:body,\s*html|html,\s*body)$/)[0] || "";
   assert.equal(
     decl(body, "background"),
-    "var(--bg-color)",
-    "issue #116: the root canvas is the app's chrome tone. Design truth is " +
-      "ui/sidebar-states.pen, where the safe-area strip is $bg-root (#F4F6FA) and " +
-      "sits beside $bg-sidebar (#F7F7F9) — never $term-bg (#1B1A23). Painting the " +
-      "terminal ink here produced a dark slab across the bottom of every column.",
+    "var(--safe-area-bg)",
+    "the approved safe-area visual benchmark uses a dedicated chrome canvas token, never the terminal ink",
   );
 });
 
@@ -118,25 +115,26 @@ test("color-scheme is declared so the UA canvas itself is theme-aware", () => {
   );
 });
 
-test("--term-bg resolves to one value in BOTH themes (no light/dark split)", () => {
-  // The claim pinned in the fix comment and in DATA-COLLECTION.md: --term-bg is
-  // defined once and is NOT redefined under prefers-color-scheme: dark, so
-  // painting it matches #workspace byte-identically in either theme.
+test("--term-bg is pure black inside the terminal's rounded card", () => {
   const defined = rules
     .flatMap((r) => stripComments(r.body).match(/--term-bg\s*:[^;]+;?/g) || [])
     .map((d) => d.replace(/--term-bg\s*:\s*/, "").replace(/;$/, "").trim());
-  assert.equal(defined.length, 1, `--term-bg must be defined exactly once, got ${JSON.stringify(defined)}`);
-  assert.equal(defined[0], "#0b1020", `--term-bg must stay #0b1020 (measured rgb(11,16,32) on #workspace), got ${defined[0]}`);
+  assert.deepEqual(defined, ["#000000"], "the terminal card and xterm share one pure-black token in both system themes");
 });
 
-test("#workspace keeps painting the terminal background the band must join", () => {
+test("existing PTY canvases follow live system color-scheme changes", () => {
+  assert.match(indexSource, /function syncTerminalTheme\(\)/, "the live theme synchronizer exists");
+  assert.match(indexSource, /matchMedia\("\(prefers-color-scheme: dark\)"\)/, "it listens to the same system theme signal as the CSS");
+  assert.match(indexSource, /session\.term\.options\.theme\s*=\s*Object\.assign\(\{\},\s*session\.term\.options\.theme,\s*\{ background \}\)/, "existing terminals adopt the current --term-bg without recreation");
+});
+
+test("#workspace outside the terminal card follows the system safe-area canvas", () => {
   const bodies = bodiesFor(/^#workspace$/);
   assert.equal(bodies.length, 1, "expected exactly one #workspace rule");
   assert.equal(
     decl(bodies[0], "background"),
-    "var(--term-bg)",
-    "#workspace is the layer the safe-area band must stay continuous with; if its " +
-      "background token changes, the root-canvas background must change with it",
+    "var(--safe-area-bg)",
+    "the rounded terminal's exterior must follow the system theme, never the black terminal interior",
   );
 });
 
@@ -154,48 +152,28 @@ test("#app still consumes the safe-area insets that create the band", () => {
   );
 });
 
-// --- 「背景全出血，内容内缩」 (design: ui/sidebar-states.pen) ---------------
-// The design does not decorate the safe-area strip; it makes the strip vanish by
-// having each column carry its OWN background down to the physical edge while the
-// content stays inset. These cases pin that per-column contract.
+// --- Approved safe-area visual benchmark -----------------------------------
+// A shared content shell clips the rounded UI. The bottom Transport is fixed to
+// the physical edge and uses the safe-area canvas; no per-column color slab is
+// painted into the old bottom inset.
 
-for (const [selector, ink] of [
-  ["#sidebar", "var(--bg-color)"],
-  ["#workspace", "var(--term-bg)"],
-]) {
-  // #sidebar has several variant rules (base, .collapsed width:0, the narrow-tier
-  // drawer); the bleed belongs to the BASE rule, so pick the one that carries it
-  // rather than assuming a rule count.
-  const bleedRule = () =>
-    bodiesFor(new RegExp(`^${selector}$`)).find((b) => (decl(b, "box-shadow") || "").includes("env(safe-area-inset-bottom"));
+test("#content-shell owns the rounded, clipped visual frame", () => {
+  const bodies = bodiesFor(/^#content-shell$/);
+  assert.equal(bodies.length, 1, "expected exactly one shared content shell");
+  assert.equal(decl(bodies[0], "overflow"), "hidden");
+  assert.equal(decl(bodies[0], "border-radius"), "var(--content-shell-radius)");
+  assert.equal(decl(bodies[0], "border"), "1px solid var(--safe-area-line)");
+});
 
-  test(`${selector}: the column bleeds its own background past the safe area`, () => {
-    assert.ok(
-      bodiesFor(new RegExp(`^${selector}$`)).length >= 1,
-      `expected at least one ${selector} rule`,
-    );
-    const body = bleedRule();
-    assert.ok(body, `${selector} must carry a safe-area bleed box-shadow`);
+for (const selector of ["#sidebar", "#workspace"]) {
+  test(`${selector}: no legacy bottom safe-area color bleed`, () => {
+    const declarations = bodiesFor(new RegExp(`^${selector}$`))
+      .map((body) => decl(body, "box-shadow") || "")
+      .filter(Boolean);
     assert.equal(
-      decl(body, "box-shadow"),
-      `0 env(safe-area-inset-bottom, 0px) 0 0 ${ink}`,
-      `${selector} must carry its own ink ${ink} across env(safe-area-inset-bottom). ` +
-        "Design 「drawer/main/workspace 背景全出血」: the strip reads as the column, " +
-        "not as a separate painted band. Zero blur and zero spread are load-bearing — " +
-        "they make the shadow a solid colour extension rather than a glow.",
-    );
-  });
-
-  test(`${selector}: the bleed carries no magic number`, () => {
-    const shadow = decl(bleedRule(), "box-shadow") || "";
-    // The offset must BE the env(): 20px is Apple's iPad value today and changes
-    // per device/orientation, so a literal would be wrong elsewhere. env()'s own
-    // 0px fallback is the declared default, not a magic number, so it is removed
-    // before the scan.
-    const withoutEnvFallbacks = shadow.replace(/env\([^)]*\)/g, "env()");
-    assert.ok(
-      !/\b\d+(\.\d+)?px\b/.test(withoutEnvFallbacks),
-      `${selector} bleed must derive its offset from env(), not a px constant (got "${shadow}")`,
+      declarations.some((value) => value.includes("env(safe-area-inset-bottom")),
+      false,
+      `${selector} must not paint a separate bottom color slab under the approved Transport design`,
     );
   });
 }
@@ -277,7 +255,6 @@ test("no 100vh column bleed anywhere — the strip is covered by paint, not by r
   // never shrinks; keeping the
   // widening would hide a regression of exactly that reasoning.
   const bleeds = rules.flatMap((r) => stripComments(r.body).match(/box-shadow:[^;]+/g) || []);
-  assert.ok(bleeds.length >= 2, "the columns are expected to carry their bleeds");
   for (const b of bleeds) {
     assert.equal(/100vh|100dvh/.test(b), false, `no box-shadow may reach a viewport height (2ac6c83's reverted bleed): ${b}`);
   }
@@ -303,8 +280,8 @@ test("no script ever sizes or positions the root boxes or the shell", () => {
   // block stays full height by contract, so their OWN bottom is the only way the
   // quick-keys entry and panel stay reachable.
   assert.match(code, /hosts\[i\]\.style\.bottom\s*=/, "each PTY host's own bottom is one of the geometry writes this build makes");
-  assert.match(code, /controls\.style\.bottom\s*=/, "#terminal-controls' own bottom is written too — the quick-keys entry/panel must stay reachable above the keyboard");
-  assert.match(code, /statusBar\.style\.bottom\s*=/, "and #status-bar's own bottom with it");
+  assert.match(code, /controls\.style\.bottom\s*=/, "#terminal-controls' own bottom is written — quick-keys stays reachable above the keyboard");
+  assert.doesNotMatch(code, /statusBar\.style\.bottom\s*=/, "Transport stays fixed at the physical bottom during keyboard avoidance");
   assert.match(code, /CONTROLS_BOTTOM_OFFSET \+ occlusion/, "the column lifts by 20 + occlusion, keeping its authored clearance over the transport strip");
 });
 

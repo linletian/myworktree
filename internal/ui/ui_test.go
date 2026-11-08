@@ -1028,16 +1028,15 @@ func TestViewportAndHeightAnchors(t *testing.T) {
 	if strings.Contains(rule, "width: 100vw;") {
 		t.Fatal("GET / #app rule must not use width: 100vw — vw counts the scrollbar gutter and overflows horizontally (issue #100 L1 R5)")
 	}
-	// The safe-area padding is what the viewport-fit=cover meta above buys.
-	// All four insets, so both the notch (left/right in landscape) and the
-	// Home Indicator (bottom) are covered; desktop insets are all 0.
-	if !strings.Contains(rule, "env(safe-area-inset-") {
-		t.Fatal("GET / #app rule should consume env(safe-area-inset-*) for the notch / Home Indicator (issue #100 L1 R5)")
-	}
-	for _, inset := range []string{"safe-area-inset-top", "safe-area-inset-right", "safe-area-inset-bottom", "safe-area-inset-left"} {
+	// The approved shell keeps top/left/right safe-area insets. The bottom
+	// reserves only the direct-bottom Transport, not an additional blank inset.
+	for _, inset := range []string{"safe-area-inset-top", "safe-area-inset-right", "safe-area-inset-left"} {
 		if !strings.Contains(rule, inset) {
-			t.Fatalf("GET / #app rule should consume %s (issue #100 L1 R5)", inset)
+			t.Fatalf("GET / #app rule should consume %s (approved safe-area visual benchmark)", inset)
 		}
+	}
+	if !strings.Contains(rule, "env(safe-area-inset-right, 0px) var(--transport-height) env(safe-area-inset-left, 0px)") {
+		t.Fatal("GET / #app must reserve only --transport-height at the bottom while preserving left/right safe-area insets")
 	}
 
 	// R5: the dvh upgrade lives in an @supports block and must come AFTER
@@ -1166,7 +1165,7 @@ func TestViewportAndHeightAnchors(t *testing.T) {
 		// The diagnostic mirror: the probe reports THIS number, never a copy of
 		// the arithmetic (viewport_debug.js occlusionOf reads it off the window).
 		"window.__mwTerminalOcclusion = occlusion;",
-		`const target = occlusion + "px"`,
+		`const target = Math.max(0, occlusion - bottomChrome) + "px"`,
 		// The judgment writes per host and only when it changed, so the 500ms
 		// backstop cannot invalidate layout (and re-fire the terminal's
 		// ResizeObserver) on every pass.
@@ -1177,13 +1176,10 @@ func TestViewportAndHeightAnchors(t *testing.T) {
 		// its OWN authored bottom. Without these the quick-keys entry, its panel
 		// and the transport strip sit under the keyboard.
 		`document.getElementById("terminal-controls")`,
-		`document.getElementById("status-bar")`,
 		"const CONTROLS_BOTTOM_OFFSET = 20;",
 		`const controlsTarget = (CONTROLS_BOTTOM_OFFSET + occlusion) + "px"`,
 		"controls.style.bottom !== controlsTarget",
 		`controls.style.bottom = controlsTarget`,
-		"statusBar.style.bottom !== target",
-		`statusBar.style.bottom = target`,
 	} {
 		if !strings.Contains(apply, check) {
 			t.Fatalf("GET / applyVisualViewportOcclusion should include %q (issue #100 L1 R6, contract v3.0 under issue #116)", check)
@@ -1537,15 +1533,11 @@ func TestNarrowDrawerAnchors(t *testing.T) {
 	if strings.Contains(drawer, "width:") {
 		t.Fatal("GET / narrow-tier #sidebar drawer rule must not declare a width — the open drawer keeps the base var(--sidebar-width); zeroing it here is the §3.1 invisible-drawer trap (issue #100 L2)")
 	}
-	// PR #110 review (B2): the drawer's containing block is #app's padding
-	// box, so top:0/bottom:0 bleed across the safe-area bands; the rule must
-	// consume the four env(safe-area-inset-*) insets as content padding —
-	// asserted in-rule so the box stays full-bleed while only the content
-	// insets (a padding on #main or the mask would be the wrong element).
-	if !strings.Contains(drawer, "env(safe-area-inset-top") ||
-		!strings.Contains(drawer, "env(safe-area-inset-bottom") ||
-		!strings.Contains(drawer, "env(safe-area-inset-left") {
-		t.Fatal("GET / narrow-tier #sidebar drawer rule should consume env(safe-area-inset-*) as padding — the drawer's padding-box containing block bleeds across the notch / Home Indicator bands (PR #110 review, issue #100 L2)")
+	// The shared #content-shell already consumes top/left/right safe-area
+	// insets and ends above the direct-bottom Transport. The drawer must not
+	// apply a second set of insets inside that clipped shell.
+	if !strings.Contains(drawer, "padding: 0;") {
+		t.Fatal("GET / narrow-tier #sidebar drawer must use padding:0 inside the safe-area-aware #content-shell (approved visual benchmark)")
 	}
 
 	// Drawer CLOSED state: off-canvas + focus-order lift, NOT zero-width.
@@ -1634,13 +1626,13 @@ func TestNarrowDrawerAnchors(t *testing.T) {
 	tabRule := narrow[tabRuleStart : tabRuleStart+tabRuleEnd]
 	for _, decl := range []string{
 		"position: fixed;",
-		"left: calc(var(--sidebar-width) - 1px)",
+		"left: calc(env(safe-area-inset-left, 0px) + var(--sidebar-width) - 1px)",
 		"top: calc(env(safe-area-inset-top, 0px) + 6px)",
 		"z-index: 40;",
-		"background: var(--bg-color);",
+		"background: var(--panel-bg);",
 		"border: 1px solid var(--border-color);",
 		"border-left: none;",
-		"border-radius: 0 6px 6px 0;",
+		"border-radius: 0 7px 7px 0;",
 	} {
 		if !strings.Contains(tabRule, decl) {
 			t.Fatalf("GET / narrow-tier open-state tab rule should declare %q (PR #110 design change, issue #100 L2)", decl)

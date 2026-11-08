@@ -86,8 +86,8 @@ function makePage({ withVV = true, hosts = [true, false] } = {}) {
     { bottom: controlsBottom + "px", display: "block" },
   );
   const statusBar = fakeElement(
-    fakeRect(WORKSPACE_BOTTOM - OCCLUSION - 17, WORKSPACE_BOTTOM - OCCLUSION, 120, 17),
-    { bottom: OCCLUSION + "px", display: "block" },
+    fakeRect(WORKSPACE_BOTTOM - 17, WORKSPACE_BOTTOM, 120, 17),
+    { bottom: "", display: "block" },
   );
   const quickKeys = fakeElement(
     fakeRect(60, 60 + (WORKSPACE_BOTTOM - controlsBottom - 60), 200, WORKSPACE_BOTTOM - controlsBottom - 60),
@@ -580,8 +580,8 @@ test("p7 reports the controls column and the status strip with their own bottoms
   assert.equal(snapshot.controls.computedBottom, snapshot.controls.inlineBottom, "computed agrees with inline — the longhand won, in the engine's own words");
   assert.equal(snapshot.controls.bottom, WORKSPACE_BOTTOM - CONTROLS_AUTHORED_BOTTOM - OCCLUSION, "the column's rect bottom lifted by the occlusion");
   assert.ok(snapshot.controls.visible, "the column is on screen in this fixture");
-  assert.equal(snapshot.statusBar.inlineBottom, OCCLUSION + "px", "the strip lifts by the occlusion itself, its authored bottom being 0");
-  assert.equal(snapshot.statusBar.bottom, WORKSPACE_BOTTOM - OCCLUSION, "and its rect bottom says so");
+  assert.equal(snapshot.statusBar.inlineBottom, "", "Transport has no avoidance inline bottom; it remains bottom-fixed");
+  assert.equal(snapshot.statusBar.bottom, WORKSPACE_BOTTOM, "and its rect stays at the physical bottom");
   // The one number a reviewer is likely to get wrong: the two bottoms are NOT
   // equal, and they must not be — the column keeps its clearance.
   assert.notEqual(snapshot.controls.inlineBottom, snapshot.statusBar.inlineBottom, "the column keeps its 20px clearance, it does not copy the host target");

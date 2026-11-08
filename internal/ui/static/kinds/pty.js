@@ -317,7 +317,7 @@ class PtyRenderer {
             cursorBlink: true,
             fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
             fontSize: 13,
-            theme: { background: '#0b1020' },
+            theme: { background: window.terminalThemeBackground ? window.terminalThemeBackground() : '#000000' },
             scrollback: 10000,
         });
 

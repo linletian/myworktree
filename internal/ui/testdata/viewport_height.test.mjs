@@ -83,8 +83,8 @@ const ptySource = readFileSync(join(staticDir, "kinds", "pty.js"), "utf8");
 // #workspace / #terminal-container — and every host inside them — bottom out at
 // 682 while the shell bottoms out at 702.
 const LAYOUT_HEIGHT = 702;
-const SAFE_BOTTOM = 20;
-const HOST_BOTTOM = LAYOUT_HEIGHT - SAFE_BOTTOM; // 682
+const TERMINAL_BOTTOM_CHROME = 35; // Transport 24 + terminal margin 10 + border 1
+const HOST_BOTTOM = LAYOUT_HEIGHT - TERMINAL_BOTTOM_CHROME; // 667
 // #terminal-controls' authored offsets, straight out of the shipped CSS: the
 // column sits 20px from the top of #workspace and 20px from its bottom (the
 // clearance over the transport strip). The avoidance NEVER writes top, so the
@@ -340,7 +340,7 @@ function makeTerminalContainer({ top = 0, bottom = HOST_BOTTOM, width = 1194 } =
       container.hosts.push(node);
       return node;
     },
-    getBoundingClientRect: () => ({ top, bottom, height: bottom - top, left: 0, right: width, width }),
+    getBoundingClientRect: () => ({ top, bottom: container.bottom, height: container.bottom - top, left: 0, right: width, width }),
     addHost(id) {
       return container.appendChild(makePtyHost(id, container, container.stats));
     },
@@ -550,7 +550,12 @@ function viewportHarness({
     terminal: makeInnerScroller("xtermViewport", { scrollTop: 0, writes: {} }),
     list: makeInnerScroller("wtList", { scrollTop: 0, writes: {} }),
   };
-  const container = makeTerminalContainer({ top: 0, bottom: layoutHeight - SAFE_BOTTOM });
+  const container = makeTerminalContainer({ top: 0, bottom: layoutHeight - TERMINAL_BOTTOM_CHROME });
+  // Rotation changes the real container bottom with the layout; model that
+  // relationship instead of leaving the container at its pre-rotation offset.
+  Object.defineProperty(container, "bottom", {
+    get: () => root.box.clientHeight - TERMINAL_BOTTOM_CHROME,
+  });
   const app = makeAppElement(layoutHeight, appAttempts);
   for (const id of hosts) container.addHost(id);
   // Phase 3 caliber (AUTH-20261105-P3-OWNERSHIP): hosts[0] is the SHOWN
@@ -562,7 +567,7 @@ function viewportHarness({
   // the two overlay children resolve against (bottom = layoutHeight − safe area,
   // the same 682 the hosts bottom out at). A stub could be written by a
   // regression without any case noticing; a number cannot be.
-  const workspaceBottom = layoutHeight - SAFE_BOTTOM;
+  const workspaceBottom = layoutHeight - TERMINAL_BOTTOM_CHROME;
   // `overlays: { controls: false }` omits the element; an absent key builds the
   // stub. Both spellings are accepted because "I did not think about it" and "I
   // removed it on purpose" must not look the same in the option bag.
@@ -714,10 +719,10 @@ test("v3.2(a): an editable-focused keyboard entering 428 activates the session a
 
   h.openKeyboard(274);
   assert.equal(h.api.isAvoidanceActive(), true, "raw 428 >= 702*0.50 with editable focus enters");
-  assert.deepEqual(h.bottoms(), ["428px"], "the host pays the raw shortfall");
-  assert.deepEqual(h.hostBottoms(), [254], "the host's real bottom lands at 254");
+  assert.deepEqual(h.bottoms(), ["393px"], "the host pays the raw shortfall");
+  assert.deepEqual(h.hostBottoms(), [274], "the host's real bottom meets the keyboard top at 274");
   assert.equal(h.controlsBottom(), "448px", "the column lifts by 20 + 428");
-  assert.equal(h.statusBarBottom(), "428px", "the strip lifts by the raw itself");
+  assert.equal(h.statusBarBottom(), "", "Transport stays bottom-fixed while hosts and controls lift");
   assert.equal(h.effectiveOcclusion(), 428, "the diagnostic mirror reports the number owed");
   assert.equal(h.appBottom(), LAYOUT_HEIGHT, "the shell stays FULL HEIGHT at 702");
   assert.equal(h.layoutGap(), 0, "layoutGap = clientHeight − app.bottom, and it stays 0");
@@ -730,22 +735,22 @@ test("v3.3: a portrait keyboard at 340/1062 enters — the 50% entry gate was th
   h.vv.height = 722; // measured portrait soft keyboard: raw 340 = 32.0%
   h.vv.dispatch("resize");
   assert.equal(h.api.isAvoidanceActive(), true, "340/1062 clears the 25% entry line");
-  assert.deepEqual(h.bottoms(), ["340px"]);
-  assert.deepEqual(h.hostBottoms(), [1042 - 340]);
+  assert.deepEqual(h.bottoms(), ["305px"]);
+  assert.deepEqual(h.hostBottoms(), [722], "the host's real bottom meets the portrait keyboard top");
 });
 
 test("v3.3: a same-geometry decrease exits — Magic overlays cannot re-lift the terminal", () => {
   const h = viewportHarness({ hosts: ["a"] });
   h.api.initVisualViewportHandling();
   h.openKeyboard(274);
-  assert.deepEqual(h.bottoms(), ["428px"]);
+  assert.deepEqual(h.bottoms(), ["393px"]);
 
   // No full-height event is required: the recovery direction itself ends the lift.
   h.openKeyboard(495.9); // raw 206.1, decreasing from 428
   assert.equal(h.api.isAvoidanceActive(), false);
   assert.deepEqual(h.bottoms(), ["0px"]);
   assert.deepEqual(h.hostBottoms(), [HOST_BOTTOM]);
-  assert.equal(h.statusBarBottom(), "0px", "Transport returns in the same pass");
+  assert.equal(h.statusBarBottom(), "", "Transport never leaves the physical bottom");
 
   for (const visible of [555, 633.5, 495.9]) {
     h.openKeyboard(visible);
@@ -757,7 +762,7 @@ test("v3.3: a same-geometry decrease exits — Magic overlays cannot re-lift the
 
   h.openKeyboard(274); // a NEW explicit keyboard clears the recovery latch
   assert.equal(h.api.isAvoidanceActive(), true);
-  assert.deepEqual(h.bottoms(), ["428px"]);
+  assert.deepEqual(h.bottoms(), ["393px"]);
 });
 
 test("v3.3: orientation resize gets one settle pass before recovery detection", () => {
@@ -768,14 +773,14 @@ test("v3.3: orientation resize gets one settle pass before recovery detection", 
   h.vv.width = 834;
   h.vv.height = 274;
   h.vv.dispatch("resize"); // geometry changed: raw 788, still avoiding
-  assert.deepEqual(h.bottoms(), ["788px"]);
+  assert.deepEqual(h.bottoms(), ["753px"]);
 
   // This is the observed orientation sequence: the next resize decreases raw
   // while the keyboard is still alive. It is not the Magic-keyboard close path.
   h.vv.height = 722;
   h.vv.dispatch("resize");
   assert.equal(h.api.isAvoidanceActive(), true, "the first same-geometry settle pass is not a recovery");
-  assert.deepEqual(h.bottoms(), ["340px"]);
+  assert.deepEqual(h.bottoms(), ["305px"]);
 
   h.vv.height = 1062;
   h.vv.dispatch("resize");
@@ -797,8 +802,8 @@ test("v3.3: a NEW portrait session after landscape recovery clears the stale re-
   h.vv.height = 722; // direct portrait keyboard: raw 340 = 32%
   h.vv.dispatch("resize");
   assert.equal(h.api.isAvoidanceActive(), true, "340/1062 uses the normal 25% entry, not the old 50% recovery gate");
-  assert.deepEqual(h.bottoms(), ["340px"]);
-  assert.equal(h.statusBarBottom(), "340px");
+  assert.deepEqual(h.bottoms(), ["305px"]);
+  assert.equal(h.statusBarBottom(), "");
 
   // The SECOND opening is a NEW user input session, not a floating-overlay
   // transition. A fresh terminal click clears the old recovery latch.
@@ -809,8 +814,8 @@ test("v3.3: a NEW portrait session after landscape recovery clears the stale re-
   h.vv.height = 722;
   h.vv.dispatch("resize");
   assert.equal(h.api.isAvoidanceActive(), true, "the second direct portrait keyboard opens after a new terminal click");
-  assert.deepEqual(h.bottoms(), ["340px"]);
-  assert.equal(h.statusBarBottom(), "340px");
+  assert.deepEqual(h.bottoms(), ["305px"]);
+  assert.equal(h.statusBarBottom(), "");
 });
 
 test("v3.2(c): raw back to 0 closes the session — shallow 206.1 / 147 / 68.5 then stay 0 even with editable focus", () => {
@@ -848,9 +853,9 @@ test("v3.2(d): a NEW explicit keyboard after shallow overlay states starts a new
   assert.deepEqual(h.bottoms(), ["0px"], "nor did 147");
   h.openKeyboard(274);
   assert.equal(h.api.isAvoidanceActive(), true, "raw 428 ≥ 351 opens a NEW session");
-  assert.deepEqual(h.bottoms(), ["428px"], "and the fresh keyboard pays its raw");
+  assert.deepEqual(h.bottoms(), ["393px"], "and the fresh keyboard pays its raw");
   assert.equal(h.controlsBottom(), "448px");
-  assert.equal(h.statusBarBottom(), "428px");
+  assert.equal(h.statusBarBottom(), "");
 });
 
 test("v3.2(e): focus leaving the editable ends the session; INPUT / contenteditable INSIDE the shown host can start one", () => {
@@ -872,7 +877,7 @@ test("v3.2(e): focus leaving the editable ends the session; INPUT / contentedita
   assert.equal(h.api.isAvoidanceActive(), false, "non-editable focus ends the session");
   assert.deepEqual(h.bottoms(), ["0px"], "the terminal descends without waiting for vv");
   assert.equal(h.controlsBottom(), "20px");
-  assert.equal(h.statusBarBottom(), "0px");
+  assert.equal(h.statusBarBottom(), "");
 
   // And the shallow states stay shut while BODY holds focus.
   h.openKeyboard(555);
@@ -882,7 +887,7 @@ test("v3.2(e): focus leaving the editable ends the session; INPUT / contentedita
   h.document.activeElement = { tagName: "INPUT", parentElement: h.container.host("a") };
   h.openKeyboard(274);
   assert.equal(h.api.isAvoidanceActive(), true, "host-internal INPUT focus + raw 428 enters");
-  assert.deepEqual(h.bottoms(), ["428px"]);
+  assert.deepEqual(h.bottoms(), ["393px"]);
 
   // contenteditable counts too — same host-internal caliber (A1: the branch,
   // not a new helper identity).
@@ -892,7 +897,7 @@ test("v3.2(e): focus leaving the editable ends the session; INPUT / contentedita
   h.document.activeElement = { tagName: "DIV", isContentEditable: true, parentElement: h.container.host("a") };
   h.openKeyboard(274);
   assert.equal(h.api.isAvoidanceActive(), true, "host-internal contenteditable focus + raw 428 enters");
-  assert.deepEqual(h.bottoms(), ["428px"]);
+  assert.deepEqual(h.bottoms(), ["393px"]);
 
   // focusout is a registered lifecycle edge — the same judgment, no extra plumbing.
   h.document.activeElement = { tagName: "BODY" };
@@ -916,7 +921,7 @@ test("P3(a) F1/F2/F10: the rename / settings INPUT is HO-3 — bare outside the 
   h.api.initVisualViewportHandling();
   h.openKeyboard(274); // fixture default: the host helper inside the SHOWN host — HO-2 lives
   assert.equal(h.api.isAvoidanceActive(), true, "foreground-host focus + raw 428 lives");
-  assert.deepEqual(h.bottoms(), ["428px"]);
+  assert.deepEqual(h.bottoms(), ["393px"]);
   // F1 (and F3's settings form is the same HO-3 branch): focus the rename INPUT.
   // A bare Web input — no host chain — exits through the existing `!focusEditable`
   // edge, recovery latch included; Safari owns the input's visibility from here.
@@ -932,14 +937,14 @@ test("P3(a) F1/F2/F10: the rename / settings INPUT is HO-3 — bare outside the 
   h.document.activeElement = { tagName: "TEXTAREA", parentElement: h.container.host("a") };
   h.applyFocusEdge();
   assert.equal(h.api.isAvoidanceActive(), true, "F2/F10: host-helper focus re-enters on the frozen entry line");
-  assert.deepEqual(h.bottoms(), ["428px"]);
+  assert.deepEqual(h.bottoms(), ["393px"]);
 });
 
 test("P3(b) F4/F5: the quick-keys paste textarea is HO-3 — the panel stays reachable, the host re-entry judges the CURRENT raw", () => {
   const h = viewportHarness({ hosts: ["a"] });
   h.api.initVisualViewportHandling();
   h.openKeyboard(274);
-  assert.deepEqual(h.bottoms(), ["428px"]);
+  assert.deepEqual(h.bottoms(), ["393px"]);
   // F4: focus into the paste textarea — Web-layer, OUTSIDE the host: the session
   // leaves through the existing focus edge (this closes the D-A plan B R2 leak).
   h.document.activeElement = { tagName: "TEXTAREA", id: "quick-keys-paste-textarea" };
@@ -957,14 +962,14 @@ test("P3(b) F4/F5: the quick-keys paste textarea is HO-3 — the panel stays rea
   assert.deepEqual(h.bottoms(), ["0px"], "F5: raw 147 < 175.5 refuses on the CURRENT facts — no paste-era value rides");
   h.openKeyboard(274);
   assert.equal(h.api.isAvoidanceActive(), true, "F5: a full keyboard crosses the line and re-enters");
-  assert.deepEqual(h.bottoms(), ["428px"]);
+  assert.deepEqual(h.bottoms(), ["393px"]);
 });
 
 test("P3(c) F8/F11: a hidden host's focus never earns eligibility; the instance switch moves it to the SHOWN host's helper", () => {
   const h = viewportHarness({ hosts: ["a", "b"] });
   h.api.initVisualViewportHandling();
   h.openKeyboard(274); // focus follows the shown host "a" — HO-2
-  assert.deepEqual(h.bottoms(), ["428px", "428px"], "both hosts pay the shared CURRENT value");
+  assert.deepEqual(h.bottoms(), ["393px", "393px"], "both hosts pay the shared CURRENT value");
   // HO-1 / F11: focus lands inside host "b" while b is STILL display:none —
   // a hidden host has no eligibility (contract HO-1 / B.5), the session leaves.
   h.document.activeElement = { tagName: "TEXTAREA", parentElement: h.container.host("b") };
@@ -978,7 +983,7 @@ test("P3(c) F8/F11: a hidden host's focus never earns eligibility; the instance 
   h.container.host("a").style.display = "none";
   h.applyFocusEdge();
   assert.equal(h.api.isAvoidanceActive(), true, "F8: B shown + focus inside it — B is the new foreground");
-  assert.deepEqual(h.bottoms(), ["428px", "428px"], "the shared current value, never a per-instance remembered lift");
+  assert.deepEqual(h.bottoms(), ["393px", "393px"], "the shared current value, never a per-instance remembered lift");
 });
 
 test("P3(d): rapid consecutive handoffs — every judgment reads THIS pass's focus, the LAST landing wins", () => {
@@ -993,7 +998,7 @@ test("P3(d): rapid consecutive handoffs — every judgment reads THIS pass's foc
   h.document.activeElement = { tagName: "TEXTAREA", parentElement: h.container.host("a") }; // HO-2
   h.applyFocusEdge();
   assert.equal(h.api.isAvoidanceActive(), true, "host pass: admitted again on the frozen lines");
-  assert.deepEqual(h.bottoms(), ["428px"]);
+  assert.deepEqual(h.bottoms(), ["393px"]);
   h.document.activeElement = { tagName: "TEXTAREA", id: "quick-keys-paste-textarea" }; // HO-3
   h.applyFocusEdge();
   assert.equal(h.api.isAvoidanceActive(), false, "paste textarea pass: refused again");
@@ -1002,14 +1007,14 @@ test("P3(d): rapid consecutive handoffs — every judgment reads THIS pass's foc
   h.document.activeElement = { tagName: "TEXTAREA", parentElement: h.container.host("a") };
   h.applyFocusEdge();
   assert.equal(h.api.isAvoidanceActive(), true, "the LAST landing decides — no stale verdict");
-  assert.deepEqual(h.bottoms(), ["428px"]);
+  assert.deepEqual(h.bottoms(), ["393px"]);
 });
 
 test("P3(e): handoff with the keyboard already open re-judges per frame; an IFRAME box is non-editable; no stale avoidance residue", () => {
   const h = viewportHarness({ hosts: ["a"] });
   h.api.initVisualViewportHandling();
   h.openKeyboard(274); // keyboard opens while the host helper holds focus → §5 entry
-  assert.deepEqual(h.bottoms(), ["428px"]);
+  assert.deepEqual(h.bottoms(), ["393px"]);
   // Keyboard STILL open, terminal → Web: exit at the same frame, latch included.
   h.document.activeElement = { tagName: "INPUT" }; // a settings form (F3 branch)
   h.applyFocusEdge();
@@ -1030,19 +1035,19 @@ test("P3(e): handoff with the keyboard already open re-judges per frame; an IFRA
   h.document.activeElement = { tagName: "TEXTAREA", parentElement: h.container.host("a") };
   h.applyFocusEdge();
   assert.equal(h.api.isAvoidanceActive(), true, "Web→PTY with the keyboard open re-enters on §5");
-  assert.deepEqual(h.bottoms(), ["428px"]);
+  assert.deepEqual(h.bottoms(), ["393px"]);
 });
 
 test("P3(f): interleaved focusin / focusout order — every edge re-judges THIS pass, the LAST landing owns, no stale avoidance", () => {
   const h = viewportHarness({ hosts: ["a"] });
   h.api.initVisualViewportHandling();
   h.openKeyboard(274); // focusin into the host (fixture default) → session lives
-  assert.deepEqual(h.bottoms(), ["428px"], "focusin inside the host owns the frame");
+  assert.deepEqual(h.bottoms(), ["393px"], "focusin inside the host owns the frame");
   // A bare focusout while the focus fact is STILL host-internal ends nothing:
   // the edge runs the judgment, it does not hardwire an exit (iOS closes the
   // keyboard without blur — the same fact shape).
   h.document.dispatch("focusout");
-  assert.deepEqual(h.bottoms(), ["428px"], "focusout while focus reads host-internal: no phantom exit");
+  assert.deepEqual(h.bottoms(), ["393px"], "focusout while focus reads host-internal: no phantom exit");
   // Now the focus fact lands Web-layer and the focusout edge runs — it exits
   // on the CURRENT fact, flush the same frame.
   h.document.activeElement = { tagName: "INPUT" };
@@ -1053,7 +1058,7 @@ test("P3(f): interleaved focusin / focusout order — every edge re-judges THIS 
   h.document.activeElement = { tagName: "TEXTAREA", parentElement: h.container.host("a") };
   h.document.dispatch("focusin");
   assert.equal(h.api.isAvoidanceActive(), true, "the LAST landing (host focusin) owns the frame");
-  assert.deepEqual(h.bottoms(), ["428px"]);
+  assert.deepEqual(h.bottoms(), ["393px"]);
 });
 
 test("v3.2(f): zoom ENDS the session — the mid-session raw cannot survive a pinch", () => {
@@ -1068,7 +1073,7 @@ test("v3.2(f): zoom ENDS the session — the mid-session raw cannot survive a pi
   assert.equal(h.api.isAvoidanceActive(), false, "zoom ends the session, it does not pause it");
   assert.deepEqual(h.bottoms(), ["0px"], "zoom restores the host bottom");
   assert.equal(h.controlsBottom(), "20px", "zoom restores the column's authored 20px too");
-  assert.equal(h.statusBarBottom(), "0px", "…and the strip's 0");
+  assert.equal(h.statusBarBottom(), "", "…and Transport remains bottom-fixed");
 
   // Release the pinch at a SHALLOW height: the retired rule would have paid it
   // straight back (the terminal jumps); the session machine re-enters only at
@@ -1092,9 +1097,9 @@ test("v3.2(f): zoom ENDS the session — the mid-session raw cannot survive a pi
   assert.equal(h.api.isAvoidanceActive(), false, "D-C: ONE counting tick — the candidate has not settled");
   h.tick();
   assert.equal(h.api.isAvoidanceActive(), true, "back at scale 1, settled by two consecutive ticks, a raw ≥ 50% keyboard enters fresh — the frozen scale>1 exit kept its latch, so the recovering 50% line governs");
-  assert.deepEqual(h.bottoms(), ["428px"]);
+  assert.deepEqual(h.bottoms(), ["393px"]);
   assert.equal(h.controlsBottom(), "448px");
-  assert.equal(h.statusBarBottom(), "428px");
+  assert.equal(h.statusBarBottom(), "");
 });
 
 test("v3.0: the quick-keys column's usable height shrinks by exactly the occlusion (panel max-height:100%)", () => {
@@ -1130,7 +1135,7 @@ test("v3.0: occlusion 0 restores controls 20px and status 0px — and repeated c
   h.openKeyboard(274);
   const afterOpen = { c: h.stats.controlsWrites(), s: h.stats.statusBarWrites() };
   assert.equal(h.controlsBottom(), "448px");
-  assert.equal(h.statusBarBottom(), "428px");
+  assert.equal(h.statusBarBottom(), "");
 
   // Same target, over and over: guarded writes mean the 500ms backstop cannot
   // rewrite an identical value — every extra write would invalidate the layout of
@@ -1146,7 +1151,7 @@ test("v3.0: occlusion 0 restores controls 20px and status 0px — and repeated c
   // authored values come back, and they come back ONCE.
   h.closeKeyboard();
   assert.equal(h.controlsBottom(), "20px", "occlusion 0 restores the authored 20px, not 0px");
-  assert.equal(h.statusBarBottom(), "0px", "and the strip's authored 0");
+  assert.equal(h.statusBarBottom(), "", "and Transport needs no restore write");
   const afterClose = { c: h.stats.controlsWrites(), s: h.stats.statusBarWrites() };
   h.tick();
   h.tick();
@@ -1167,14 +1172,14 @@ test("v3.0: zoom restores controls 20px and status 0px — the opt-out covers al
   h.zoom(2);
   assert.deepEqual(h.bottoms(), ["0px"], "zoom restores the host bottom");
   assert.equal(h.controlsBottom(), "20px", "zoom restores the column's authored 20px too");
-  assert.equal(h.statusBarBottom(), "0px", "…and the strip's 0");
+  assert.equal(h.statusBarBottom(), "", "…and Transport remains bottom-fixed");
 
   // Still zoomed, the keyboard's shortfall is NOT owed anything.
   h.vv.height = 274;
   h.vv.dispatch("resize");
   assert.deepEqual(h.bottoms(), ["0px"], "while zoomed, no shortfall is paid");
   assert.equal(h.controlsBottom(), "20px", "…and the column stays authored");
-  assert.equal(h.statusBarBottom(), "0px", "…and so does the strip");
+  assert.equal(h.statusBarBottom(), "", "…and Transport stays bottom-fixed");
 
   // D-D (arbitration commit 6e8a006): the return to scale 1 is the EXIT frame
   // — it pays 0 and does not carry the pre-zoom shortfall straight back.
@@ -1182,7 +1187,7 @@ test("v3.0: zoom restores controls 20px and status 0px — the opt-out covers al
   assert.equal(h.api.isAvoidanceActive(), false, "the return frame exits; it does not re-enter on the same pass");
   assert.deepEqual(h.bottoms(), ["0px"], "the return frame pays 0 — not one frame of new raw rides the step home");
   assert.equal(h.controlsBottom(), "20px", "the authored bottoms stay authored on the return frame");
-  assert.equal(h.statusBarBottom(), "0px", "…and so does the strip's");
+  assert.equal(h.statusBarBottom(), "", "…and Transport stays bottom-fixed");
   // D-C: two consecutive counting ticks settle the return, and the frozen
   // machine re-judges on current geometry — the raw still clears the line the
   // frozen scale>1 exit latched (the recovering 50% re-entry, unchanged).
@@ -1190,9 +1195,9 @@ test("v3.0: zoom restores controls 20px and status 0px — the opt-out covers al
   assert.equal(h.api.isAvoidanceActive(), false, "D-C: one tick is not a settle");
   h.tick();
   assert.equal(h.api.isAvoidanceActive(), true, "settled back at scale 1 the keyboard clears the recovering 50% entry line");
-  assert.deepEqual(h.bottoms(), ["428px"], "back at scale 1 the shortfall is owed again — after the settle");
+  assert.deepEqual(h.bottoms(), ["393px"], "back at scale 1 the shortfall is owed again — after the settle");
   assert.equal(h.controlsBottom(), "448px", "…and the column lifts again");
-  assert.equal(h.statusBarBottom(), "428px", "…and the strip lifts again");
+  assert.equal(h.statusBarBottom(), "", "…and Transport still does not lift");
 });
 
 test("v3.0: a missing controls column or status strip is skipped, never fatal — hosts still avoid", () => {
@@ -1204,10 +1209,10 @@ test("v3.0: a missing controls column or status strip is skipped, never fatal �
   const h = viewportHarness({ hosts: ["a"], overlays: { controls: null, statusBar: null } });
   h.api.initVisualViewportHandling();
   h.openKeyboard(274);
-  assert.deepEqual(h.bottoms(), ["428px"], "the host still avoids with no overlays on the page");
-  assert.deepEqual(h.bottoms(), ["428px"]);
+  assert.deepEqual(h.bottoms(), ["393px"], "the host still avoids with no overlays on the page");
+  assert.deepEqual(h.bottoms(), ["393px"]);
   h.tick();
-  assert.deepEqual(h.bottoms(), ["428px"], "and the backstop keeps running without them");
+  assert.deepEqual(h.bottoms(), ["393px"], "and the backstop keeps running without them");
 });
 
 test("v3.0: #app's inline height is NEVER written — the retired v2.2 pin fails at the write", () => {
@@ -1229,7 +1234,7 @@ test("v3.0: full height and keyboard close both hand the bottom back — bottom 
   assert.deepEqual(h.bottoms(), ["0px"], "the init runs the judgment once: nothing covered, bottom 0px");
 
   h.openKeyboard(274);
-  assert.deepEqual(h.bottoms(), ["428px"]);
+  assert.deepEqual(h.bottoms(), ["393px"]);
   h.closeKeyboard();
   assert.deepEqual(h.bottoms(), ["0px"], "closing hands the bottom back, it does not strand the lift");
   assert.deepEqual(h.hostBottoms(), [HOST_BOTTOM]);
@@ -1248,19 +1253,19 @@ test("v3.0: EVERY host gets the avoidance, hidden and inactive included — no s
   h.api.initVisualViewportHandling();
   h.openKeyboard(274);
   // All three — including the two the user cannot see — carry the same value.
-  assert.deepEqual(h.bottoms(), ["428px", "428px", "428px"]);
-  assert.deepEqual(h.hostBottoms(), [254, 254, 254]);
+  assert.deepEqual(h.bottoms(), ["393px", "393px", "393px"]);
+  assert.deepEqual(h.hostBottoms(), [274, 274, 274]);
 
   // A switch: the host the user lands on must already be correct, because the
   // lift was written while it was hidden.
   h.container.host("b").style.display = "block";
   h.container.host("a").style.display = "none";
-  assert.deepEqual(h.bottoms(), ["428px", "428px", "428px"], "no residue: a hidden host never keeps an old bottom");
+  assert.deepEqual(h.bottoms(), ["393px", "393px", "393px"], "no residue: a hidden host never keeps an old bottom");
 
   // And a host BORN under a covered bottom is lifted at creation, not at the
   // next event — the same idempotent applier, called by createTerminalHost.
   h.api.createTerminalHost("d");
-  assert.equal(h.container.host("d").style.bottom, "428px", "a host created while the keyboard is up is born lifted");
+  assert.equal(h.container.host("d").style.bottom, "393px", "a host created while the keyboard is up is born lifted");
 });
 
 test("v3.0: writes happen ONLY on change — a stable page writes nothing at all", () => {
@@ -1287,7 +1292,7 @@ test("v3.0: zoom restores bottom 0px and touches nothing else", () => {
   const h = viewportHarness({ hosts: ["a"] });
   h.api.initVisualViewportHandling();
   h.openKeyboard(274);
-  assert.deepEqual(h.bottoms(), ["428px"]);
+  assert.deepEqual(h.bottoms(), ["393px"]);
 
   // Pinch: vv.height shrinks with the scale, and without the short-circuit the
   // terminal would be lifted off a page the user is panning around.
@@ -1305,7 +1310,7 @@ test("v3.0: zoom restores bottom 0px and touches nothing else", () => {
   h.tick();
   assert.deepEqual(h.bottoms(), ["0px"], "D-C: one tick is not a settle");
   h.tick();
-  assert.deepEqual(h.bottoms(), ["428px"], "settled back at scale 1 the shortfall is owed again");
+  assert.deepEqual(h.bottoms(), ["393px"], "settled back at scale 1 the shortfall is owed again");
   h.closeKeyboard();
   assert.deepEqual(h.bottoms(), ["0px"]);
 });
@@ -1327,13 +1332,13 @@ test("v3.1: a stranded lift is cleared by the 500ms tick when the keyboard leave
   // A REAL keyboard entering over editable focus (274 pays raw 428 ≥ 50% of
   // 702), so there IS a lift that could strand.
   h.openKeyboard(274);
-  assert.deepEqual(h.bottoms(), ["428px"]);
+  assert.deepEqual(h.bottoms(), ["393px"]);
 
   // The silent recovery: the geometry moves back and NO event fires (b90643be…,
   // seq54 — inline cleared, overlay gone, vv back at 702, not one resize/scroll
   // event in between). Only the tick can know.
   h.vv.height = LAYOUT_HEIGHT;
-  assert.deepEqual(h.bottoms(), ["428px"], "without the tick the terminal stays stranded above a bottom that is visible again");
+  assert.deepEqual(h.bottoms(), ["393px"], "without the tick the terminal stays stranded above a bottom that is visible again");
   h.tick();
   assert.deepEqual(h.bottoms(), ["0px"], "the tick re-runs the judgment and hands the bottom back");
 });
@@ -1356,7 +1361,7 @@ test("v3.0: a shortfall that appears silently is paid by the tick and by every l
     h.vv.height = 274; // no resize event: the edge alone must run the judgment
     if (edge.where === "window") h.dispatchWindow(edge.type);
     else h.document.dispatch(edge.type);
-    assert.deepEqual(h.bottoms(), ["428px"], `${edge.where} ${edge.type} must run the avoidance itself`);
+    assert.deepEqual(h.bottoms(), ["393px"], `${edge.where} ${edge.type} must run the avoidance itself`);
   }
   const h = viewportHarness({ hosts: ["a"] });
   h.api.initVisualViewportHandling();
@@ -1369,7 +1374,7 @@ test("v3.0: a shortfall that appears silently is paid by the tick and by every l
   assert.equal(h.vv.listenerCount("scroll"), 1);
   h.vv.height = 274;
   h.tick();
-  assert.deepEqual(h.bottoms(), ["428px"], "the periodic tick runs the avoidance too");
+  assert.deepEqual(h.bottoms(), ["393px"], "the periodic tick runs the avoidance too");
 });
 
 test("v3.0: vv.offsetTop is not an input — a pan cannot change or re-write the avoidance", () => {
@@ -1382,7 +1387,7 @@ test("v3.0: vv.offsetTop is not an input — a pan cannot change or re-write the
   // against the stable layout height, so the target does not move and — because
   // writes are guarded — nothing is written at all.
   h.pan(428);
-  assert.deepEqual(h.bottoms(), ["428px"]);
+  assert.deepEqual(h.bottoms(), ["393px"]);
   assert.equal(h.stats.hostWrites(), before, "a pan must not rewrite a style");
   h.pan(0);
   assert.equal(h.stats.hostWrites(), before);
@@ -1436,13 +1441,13 @@ test("issue #100 L1 R12: collapse + keyboard coexist — the class and the host 
   h.api.applySidebarCollapsed(true);
   assert.deepEqual([...h.classes], ["collapsed"]);
   h.openKeyboard(300);
-  assert.deepEqual(h.bottoms(), ["402px"]);
+  assert.deepEqual(h.bottoms(), ["367px"]);
   assert.deepEqual([...h.classes], ["collapsed"], "the viewport handler owns the host bottom only — the class stays");
 
   h.flushFrames();
   h.api.applySidebarCollapsed(false);
   assert.deepEqual([...h.classes], []);
-  assert.deepEqual(h.bottoms(), ["402px"], "expanding does not undo the keyboard avoidance");
+  assert.deepEqual(h.bottoms(), ["367px"], "expanding does not undo the keyboard avoidance");
 
   h.closeKeyboard();
   assert.deepEqual(h.bottoms(), ["0px"]);
@@ -1484,24 +1489,31 @@ test("v3.0 structure: html/body declare hidden FIRST and clip SECOND", () => {
   assert.equal(/position:/.test(rule), false, "body/html must NOT be positioned — the body-fixed combination was measured and reverted (2ac6c83)");
 });
 
-test("v3.0 structure: the covered strip is PAINT, not a scroll area — workspace keeps its ink and its bleed", () => {
-  // v3.0 never shortens #workspace / #terminal-container / #app, so the strip
-  // iOS covers with the keyboard is still there under the keyboard and must be
-  // the app's own ink rather than a white band. A 100vh column bleed is still
-  // banned: the shell no longer moves, so the bleed is exactly the safe-area
-  // strip it always was.
+test("approved structure: rounded content shell and direct-bottom Transport replace the old color strip", () => {
   const css = styleBlock(indexSource);
-  for (const [name, selector] of [["#sidebar", /#sidebar\b/], ["#workspace", /#workspace\b/]]) {
-    const rules = cssRules(css, selector);
-    const bleeds = rules.flatMap((r) => r.match(/box-shadow:[^;]+/g) || []);
-    assert.ok(bleeds.length >= 1, `${name} must carry its downward bleed`);
-    for (const b of bleeds) {
-      assert.equal(/100vh|100dvh/.test(b), false, `${name} bleed must be env(safe-area-inset-bottom), not a viewport height: ${b}`);
-      assert.match(b, /env\(safe-area-inset-bottom/, `${name} bleed must stay safe-area sized: ${b}`);
-    }
+  const shell = cssRules(css, /#content-shell\b/).join("\n");
+  assert.match(shell, /overflow:\s*hidden/, "the shared shell clips the rounded content");
+  assert.match(shell, /border-radius:\s*var\(--content-shell-radius\)/, "the shell owns the approved rounded frame");
+  const app = cssRules(css, /#app\b/).join("\n");
+  assert.match(app, /padding:[^;]*var\(--transport-height\)[^;]*env\(safe-area-inset-left/, "the bottom reserves only Transport; left/right remain safe-area aware");
+  for (const selector of [/#sidebar\b/, /#workspace\b/]) {
+    const rules = cssRules(css, selector).join("\n");
+    assert.equal(/box-shadow:[^;]*env\(safe-area-inset-bottom/.test(rules), false, "the retired per-column bottom color bleed stays retired");
   }
+  const status = cssRules(css, /#status-bar\b/).join("\n");
+  assert.match(status, /position:\s*fixed/, "Transport remains a viewport-owned overlay for keyboard avoidance");
+  assert.match(status, /bottom:\s*0/, "Transport rests at the physical bottom");
+  assert.match(status, /height:\s*var\(--transport-height\)/, "Transport does not add a bottom safe-area blank");
+  assert.match(status, /background:\s*var\(--safe-area-bg\)/, "the long strip disappears into the safe-area canvas");
+  const statusPills = cssRules(css, /#status-bar\s*>\s*span\b/).join("\n");
+  assert.match(statusPills, /border-radius:\s*999px/, "individual statuses use compact pills");
+  const terminalContainer = cssRules(css, /#terminal-container\b/).join("\n");
+  assert.match(terminalContainer, /margin:\s*10px;/, "the rounded terminal uses the same 10px margin on its sides and bottom");
+  const xterm = cssRules(css, /#terminal-container\s+\.xterm\b/).join("\n");
+  assert.match(xterm, /padding:\s*8px 10px/, "terminal text has internal breathing room without changing the avoidance state machine");
+  assert.match(xterm, /background:\s*var\(--term-bg\)/, "xterm shares the terminal card's pure-black interior");
   const workspace = cssRules(css, /#workspace\b/).join("\n");
-  assert.match(workspace, /background:\s*var\(--term-bg\)/, "#workspace paints the terminal ink, so the area under a lifted host is a column of the app, not the UA canvas");
+  assert.match(workspace, /background:\s*var\(--safe-area-bg\)/, "the terminal card's exterior follows the system safe-area canvas");
   assert.match(workspace, /overflow:\s*hidden/, "#workspace clips its own children and owns no scroll");
 });
 
@@ -1539,11 +1551,12 @@ test("v3.0 structure: the viewport layer writes the TERMINAL'S OWN bottoms and N
   // missing one.
   const apply = stripComments(sliceBlock(src, "function applyVisualViewportOcclusion"));
   assert.match(apply, /style\.bottom\s*=\s*target/, "the hosts' own bottom is written from the occlusion");
+  assert.match(apply, /occlusion\s*-\s*bottomChrome/, "the host subtracts measured Transport/margin/border chrome so its real bottom meets the keyboard top");
   assert.match(apply, /Math\.max\(0,\s*layoutHeight\s*-\s*vv\.height\)/, "raw = max(0, clientHeight − vv.height) — the shortfall itself, before the session gate");
   assert.match(apply, /const CONTROLS_BOTTOM_OFFSET = 20;/, "the column's authored 20px clearance is stated as a named constant, agrees with the CSS rule, and is not a threshold");
   assert.match(apply, /const controlsTarget = \(CONTROLS_BOTTOM_OFFSET \+ occlusion\) \+ "px";/, "controls bottom = 20 + occlusion, so the authored clearance survives the lift");
   assert.match(apply, /controls\.style\.bottom = controlsTarget/, "the controls column is lifted by the same pass");
-  assert.match(apply, /statusBar\.style\.bottom = target/, "the transport strip is lifted by the occlusion itself (authored bottom 0)");
+  assert.doesNotMatch(apply, /statusBar\.style\.bottom/, "Transport is excluded from keyboard avoidance and stays at the physical bottom");
   // v3.2: the session half of the judgment, stated exactly once — the flag, the
   // editable focus read, the ENTRY-only ratio, and the diagnostic mirror. This is
   // the whole machine; four edges, no timers, no history arrays.
@@ -1577,8 +1590,8 @@ test("v3.0 structure: the viewport layer writes the TERMINAL'S OWN bottoms and N
   const targets = new Set((apply.match(/[\w.[\]]+\.style\.\w+\s*=/g) || []));
   assert.deepEqual(
     [...targets].sort(),
-    ["controls.style.bottom =", "hosts[i].style.bottom =", "statusBar.style.bottom ="],
-    `the terminal's own three bottoms are the only assignment targets in the judgment, got ${[...targets].join(", ")}`,
+    ["controls.style.bottom =", "hosts[i].style.bottom ="],
+    `only PTY hosts and quick-keys controls are avoidance targets; Transport stays bottom-fixed, got ${[...targets].join(", ")}`,
   );
 });
 
