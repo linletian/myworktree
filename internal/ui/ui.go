@@ -8,7 +8,7 @@ import (
 	"net/http"
 )
 
-//go:embed static/index.html static/preview.html static/framework.js static/kinds static/vendor
+//go:embed static/*
 var staticFS embed.FS
 
 //go:embed static/preview.html
