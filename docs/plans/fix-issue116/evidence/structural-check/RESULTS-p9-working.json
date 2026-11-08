@@ -1,0 +1,268 @@
+{
+  "label": "p9-working",
+  "checkedAt": "2026-11-03T08:50:58.304Z",
+  "page": "file:///home/linletian/SoftwareWorkspace/myworktree-myworktree/fix-fix-issue116/internal/ui/static/index.html",
+  "engine": "Chrome/154.0.8037.97",
+  "viewport": {
+    "width": 834,
+    "height": 1062
+  },
+  "widths": [
+    200,
+    240,
+    160
+  ],
+  "tolerancePx": 1,
+  "minTargetPx": 44,
+  "simulated": "remote badge revealed by removing [hidden] and adding .remote-access to #app; widths driven by inline max-width on #sidebar",
+  "measured": {
+    "widths": [
+      {
+        "sidebarWidth": 200,
+        "sidebar": {
+          "left": 0,
+          "right": 200,
+          "top": 0,
+          "bottom": 1062,
+          "width": 200,
+          "height": 1062
+        },
+        "sidebarContentRight": 199,
+        "title": {
+          "left": 0,
+          "right": 199,
+          "top": 0,
+          "bottom": 69,
+          "width": 199,
+          "height": 69
+        },
+        "titleScrollWidth": 199,
+        "titleClientWidth": 199,
+        "textCell": {
+          "left": 12,
+          "right": 83,
+          "top": 19,
+          "bottom": 49,
+          "width": 71,
+          "height": 30
+        },
+        "actions": {
+          "left": 91,
+          "right": 187,
+          "top": 12,
+          "bottom": 56,
+          "width": 96,
+          "height": 44
+        },
+        "buttons": [
+          {
+            "left": 91,
+            "right": 135,
+            "top": 12,
+            "bottom": 56,
+            "width": 44,
+            "height": 44
+          },
+          {
+            "left": 143,
+            "right": 187,
+            "top": 12,
+            "bottom": 56,
+            "width": 44,
+            "height": 44
+          }
+        ],
+        "badge": {
+          "left": 18,
+          "right": 79.78125,
+          "top": 33.5625,
+          "bottom": 48.5625,
+          "width": 61.78125,
+          "height": 15
+        },
+        "badgeDisplay": "inline",
+        "badgeText": "Remote"
+      },
+      {
+        "sidebarWidth": 240,
+        "sidebar": {
+          "left": 0,
+          "right": 240,
+          "top": 0,
+          "bottom": 1062,
+          "width": 240,
+          "height": 1062
+        },
+        "sidebarContentRight": 239,
+        "title": {
+          "left": 0,
+          "right": 239,
+          "top": 0,
+          "bottom": 69,
+          "width": 239,
+          "height": 69
+        },
+        "titleScrollWidth": 239,
+        "titleClientWidth": 239,
+        "textCell": {
+          "left": 12,
+          "right": 123,
+          "top": 19,
+          "bottom": 49,
+          "width": 111,
+          "height": 30
+        },
+        "actions": {
+          "left": 131,
+          "right": 227,
+          "top": 12,
+          "bottom": 56,
+          "width": 96,
+          "height": 44
+        },
+        "buttons": [
+          {
+            "left": 131,
+            "right": 175,
+            "top": 12,
+            "bottom": 56,
+            "width": 44,
+            "height": 44
+          },
+          {
+            "left": 183,
+            "right": 227,
+            "top": 12,
+            "bottom": 56,
+            "width": 44,
+            "height": 44
+          }
+        ],
+        "badge": {
+          "left": 18,
+          "right": 79.78125,
+          "top": 33.5625,
+          "bottom": 48.5625,
+          "width": 61.78125,
+          "height": 15
+        },
+        "badgeDisplay": "inline",
+        "badgeText": "Remote"
+      },
+      {
+        "sidebarWidth": 160,
+        "sidebar": {
+          "left": 0,
+          "right": 160,
+          "top": 0,
+          "bottom": 1062,
+          "width": 160,
+          "height": 1062
+        },
+        "sidebarContentRight": 159,
+        "title": {
+          "left": 0,
+          "right": 159,
+          "top": 0,
+          "bottom": 85,
+          "width": 159,
+          "height": 85
+        },
+        "titleScrollWidth": 159,
+        "titleClientWidth": 159,
+        "textCell": {
+          "left": 12,
+          "right": 43,
+          "top": 12,
+          "bottom": 72,
+          "width": 31,
+          "height": 60
+        },
+        "actions": {
+          "left": 51,
+          "right": 147,
+          "top": 20,
+          "bottom": 64,
+          "width": 96,
+          "height": 44
+        },
+        "buttons": [
+          {
+            "left": 51,
+            "right": 95,
+            "top": 20,
+            "bottom": 64,
+            "width": 44,
+            "height": 44
+          },
+          {
+            "left": 103,
+            "right": 147,
+            "top": 20,
+            "bottom": 64,
+            "width": 44,
+            "height": 44
+          }
+        ],
+        "badge": {
+          "left": 18,
+          "right": 79.78125,
+          "top": 56.5625,
+          "bottom": 71.5625,
+          "width": 61.78125,
+          "height": 15
+        },
+        "badgeDisplay": "inline",
+        "badgeText": "Remote"
+      }
+    ],
+    "coarse": true
+  },
+  "result": {
+    "verdict": "PASS",
+    "cases": [
+      {
+        "sidebarWidth": 200,
+        "verdict": "PASS",
+        "fail": [],
+        "info": [
+          "sidebar@200px: badge visible 61.78x15.00 \"Remote\"",
+          "sidebar@200px: rightmost button at 187.00, sidebar content ends at 199.00",
+          "sidebar@200px: title row h=69.00 scrollW=199 clientW=199"
+        ]
+      },
+      {
+        "sidebarWidth": 240,
+        "verdict": "PASS",
+        "fail": [],
+        "info": [
+          "sidebar@240px: badge visible 61.78x15.00 \"Remote\"",
+          "sidebar@240px: rightmost button at 227.00, sidebar content ends at 239.00",
+          "sidebar@240px: title row h=69.00 scrollW=239 clientW=239"
+        ]
+      },
+      {
+        "sidebarWidth": 160,
+        "verdict": "PASS",
+        "fail": [],
+        "info": [
+          "sidebar@160px: badge visible 61.78x15.00 \"Remote\"",
+          "sidebar@160px: rightmost button at 147.00, sidebar content ends at 159.00",
+          "sidebar@160px: title row h=85.00 scrollW=159 clientW=159"
+        ]
+      }
+    ],
+    "fail": [],
+    "info": [
+      "sidebar@200px: badge visible 61.78x15.00 \"Remote\"",
+      "sidebar@200px: rightmost button at 187.00, sidebar content ends at 199.00",
+      "sidebar@200px: title row h=69.00 scrollW=199 clientW=199",
+      "sidebar@240px: badge visible 61.78x15.00 \"Remote\"",
+      "sidebar@240px: rightmost button at 227.00, sidebar content ends at 239.00",
+      "sidebar@240px: title row h=69.00 scrollW=239 clientW=239",
+      "sidebar@160px: badge visible 61.78x15.00 \"Remote\"",
+      "sidebar@160px: rightmost button at 147.00, sidebar content ends at 159.00",
+      "sidebar@160px: title row h=85.00 scrollW=159 clientW=159"
+    ]
+  }
+}

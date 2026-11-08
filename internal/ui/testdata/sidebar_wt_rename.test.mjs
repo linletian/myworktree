@@ -202,8 +202,11 @@ const openerFactory = new Function("deps", `
 // call inside focusTerminalIfPossible BEFORE every focus guard, so the
 // sliced function needs the symbol injected, and the case pins that the
 // bridge keeps running for renaming rows (guard skips focus, not the bridge).
+// AUTH-20261105-P3-FOCUS-GUARD-A1 (fixture-only): `document` joins the deps so the new focus guard's
+// `document.activeElement` read resolves; `{ activeElement: null }` short-circuits that guard, so the
+// focus/bridge counts this case pins stay exactly as before — the fixture wiring changed, not the semantics.
 const focusFactory = new Function("deps", `
-  const { state, getActiveTerminalSession, isInstanceLiveStatus, ensureIosImeDirectInputBridge } = deps;
+  const { state, getActiveTerminalSession, isInstanceLiveStatus, ensureIosImeDirectInputBridge, document } = deps;
   let windowHasFocus = true;
   const openDialogs = new Set();
   ${sliceBlock(script, "function focusTerminalIfPossible()")}
@@ -686,6 +689,7 @@ test("issue #122: the terminal does not steal focus from a renaming sidebar row"
     getActiveTerminalSession: () => session,
     isInstanceLiveStatus: (s) => s === "running",
     ensureIosImeDirectInputBridge: (s) => { bridgeCalls.push(s); },
+    document: { activeElement: null },
   });
 
   page.focusTerminalIfPossible();

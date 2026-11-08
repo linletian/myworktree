@@ -1,0 +1,38 @@
+{
+  "url": "http://127.0.0.1:43926/preview-responsive.html",
+  "label": "preview-responsive-shell",
+  "viewport": {
+    "WIDTH": 1194,
+    "HEIGHT": 702
+  },
+  "measured": {
+    "htmlOverflow": "clip",
+    "bodyOverflow": "clip",
+    "htmlPosition": "static",
+    "bodyPosition": "static",
+    "appPosition": "fixed",
+    "appTop": "0px",
+    "appLeft": "0px",
+    "rootScrollHeight": 702,
+    "clientHeight": 702,
+    "vvHeight": 702,
+    "scrollBefore": 0,
+    "scrollAfterScrollTo": 0,
+    "scrollTopAfterWrite": 0,
+    "inner": {
+      "candidate": "#sidebar-top-panel",
+      "before": 0,
+      "scrolled": 35,
+      "rootScrollYDuringInner": 0
+    },
+    "appRect": {
+      "top": 0,
+      "bottom": 702,
+      "height": 702
+    }
+  },
+  "fail": [],
+  "note": [],
+  "inconclusive": [],
+  "verdict": "PASS"
+}

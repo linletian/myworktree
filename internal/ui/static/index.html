@@ -8,13 +8,20 @@
         :root {
             --sidebar-width: 240px;
             --header-height: 40px;
-            --bg-color: #f9f9f9;
-            --border-color: #e1e4e8;
-            --active-color: #005cc5;
+            --bg-color: #f8fafc;
+            --safe-area-bg: #e9edf3;
+            --safe-area-line: rgba(69, 82, 102, 0.34);
+            --safe-area-highlight: rgba(255, 255, 255, 0.72);
+            --content-shell-radius: 18px;
+            --transport-height: 24px;
+            --panel-bg: #ffffff;
+            --sidebar-bg: #f3f5f8;
+            --border-color: #dce1e8;
+            --active-color: #0969da;
             --accent-color: #4a9eff;
-            --active-bg: #f1f8ff;
-            --hover-bg: #f6f8fa;
-            --term-bg: #0b1020;
+            --active-bg: #e7f0fc;
+            --hover-bg: rgba(70, 85, 105, 0.08);
+            --term-bg: #000000;
             --main-accent: #6f42c1;
             --main-accent-bg: #faf8ff;
             --main-accent-hover: #f3eeff;
@@ -23,12 +30,12 @@
             --term-ctrl-btn-size: 32px;
             --term-ctrl-btn-gap: 10px;
 
-            --text-primary: #24292e;
-            --text-secondary: #586069;
+            --text-primary: #242b36;
+            --text-secondary: #657084;
             --text-muted: #6a737d;
-            --tab-bg: #fbfbfb;
-            --tab-active-bg: #fff;
-            --main-bg: #fff;
+            --tab-bg: #ffffff;
+            --tab-active-bg: #f8fafc;
+            --main-bg: #f8fafc;
             --button-bg: #fafbfc;
             --button-hover-bg: #f3f4f6;
             --button-border: #ddd;
@@ -79,15 +86,20 @@
         @media (prefers-color-scheme: dark) {
             :root {
                 --bg-color: #0d1117;
+                --safe-area-bg: #080b10;
+                --safe-area-line: rgba(139, 148, 158, 0.43);
+                --safe-area-highlight: rgba(230, 237, 243, 0.06);
+                --panel-bg: #161b22;
+                --sidebar-bg: #11161d;
                 --border-color: #30363d;
                 --active-color: #58a6ff;
                 --accent-color: #1f6feb;
-                --active-bg: #0f2647;
-                --hover-bg: #161b22;
+                --active-bg: rgba(88, 166, 255, 0.15);
+                --hover-bg: rgba(139, 148, 158, 0.13);
                 --main-accent: #a371f7;
                 --main-accent-bg: #1a1525;
                 --main-accent-hover: #252035;
-                --text-primary: #c9d1d9;
+                --text-primary: #e6edf3;
                 --text-secondary: #8b949e;
                 --text-muted: #6e7681;
                 --tab-bg: #161b22;
@@ -145,19 +157,94 @@
             margin: 0;
             padding: 0;
             height: 100%;
+            /* CONTRACT v3.0 (issue #116) — "out-of-flow FULL-HEIGHT fixed shell +
+               non-scrollable root", declared as a STRUCTURE and not as a repair
+               loop. The structure is carried over from v2.2 unchanged; what v3.0
+               adds is that the shell — and every column inside it — keeps its full
+               height in EVERY keyboard state, and only the PTY hosts inside
+               #terminal-container move (applyVisualViewportOcclusion below):
+                 overflow: hidden  -> the legacy floor (old Safari never learned
+                 clip; hidden still let the root be scrolled programmatically, and
+                 that is precisely the hole this round closes);
+                 overflow: clip    -> the value an engine that knows `clip` settles
+                 on, and it is a different kind of answer: a clipped box has NO
+                 scroll mechanism at all, so there is no scroll range to walk, no
+                 scrollTop to write and no scroll event to chase.
+               Source order is the mechanism (same-origin, equal specificity,
+               last-wins), so `hidden` first and `clip` after — swapping them would
+               silently hand every modern browser back a scrollable root.
+               Why the change: `overflow: hidden` alone did NOT stop iOS from
+               moving this page. Measured (session sop6-3357d50e…, seq23-34), the
+               ROOT scrollTop walked 0 -> 428 (288 by seq30) in step with
+               visualViewport.offsetTop under a focused field even with hidden here,
+               and because getBoundingClientRect is visual-viewport relative, a
+               scrolled root lifts every rect: with scrollY = s the shell's VISIBLE
+               bottom is vv.height - s. The exposed band IS that scroll.
+               v2.1 answered it by PARKING the origin — scrollTo / scrollTop = 0 in
+               a shared pass, re-checked on rAF follow-ups and a 500ms tick. That
+               was the wrong shape of fix and is REMOVED, not renamed: a page that
+               has to be dragged back to the top every frame is still a page the
+               user can scroll, and the recovery was visible as the band appearing
+               and being yanked away. From here the root cannot scroll in the first
+               place, so there is nothing to recover; the user gets a surface that
+               does not move, not one that is pulled back. This is STRICTER than the
+               reference app the user measured (real Gmail on the same iPad): Gmail
+               answers the keyboard by growing a hidden strip below the shell, about
+               a keyboard tall, that the user has to swipe the whole page into and
+               that collapses again when focus leaves. That strip is a root scroll
+               area by another name, and this contract forbids it — `clip` here is
+               exactly what makes such a strip unreachable, and no JS may create one.
+               Height and position of html/body stay EXACTLY as they were: height:
+               100%, no position (body is deliberately NOT fixed — the 2ac6c83
+               combination of body-fixed + clip + a 100vh column bleed was tried
+               and reverted, and this round re-adds ONLY clip, in a different
+               structure), and no JS ever touches either box. What changed is where
+               the application lives: #app below leaves the normal flow entirely, so
+               these two boxes carry no content to overflow — they carry the root
+               background and nothing else.
+               R17 (issue #100 padOS②/common①, PR #110 beta): overscroll-behavior:
+               none is the iOS 16+ rubber-band lock, kept for the same reason it was
+               added (hidden alone never chained Safari's bounce). Accepted
+               consequence: Android pull-to-refresh is disabled too — this UI is a
+               software surface, not a document, and its own scrollers are inside
+               #app. */
             overflow: hidden;
-            /* R17 (issue #100 padOS②/common①, PR #110 beta): overflow:hidden
-               never chained Safari's document rubber-band — it has been on
-               this rule since 2026-05 and the page still bounced on iOS
-               (Chrome honors it, which is why headless Chrome showed
-               nothing). overscroll-behavior:none is the iOS 16+ root-
-               scroller lock. Accepted consequence: Android pull-to-refresh
-               is disabled too — this UI is a software surface, not a
-               document, and its own scrollers are listed below. */
+            overflow: clip;
             overscroll-behavior: none;
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji";
             font-size: 13px;
             color: var(--text-primary);
+            /* issue #116 (iPad Safari white band, A0-calibrated): nothing in
+               the paint chain covered the root canvas. Measured on-device
+               (session 997d18dc…, 263/263 snapshots): html, body and #app all
+               compute to rgba(0,0,0,0), and `color-scheme` was never declared
+               anywhere in this document (only two
+               @media (prefers-color-scheme: dark) blocks), so the UA root
+               canvas rendered WHITE and every unpainted strip showed as a bright
+               band. Fixing that is where the root canvas earns a colour: it is
+               the app's CHROME tone (var(--bg-color), the same ink the sidebar
+               and the rail use), NOT the terminal ink.
+               Why not var(--term-bg): design truth ui/sidebar-states.pen names
+               the safe-area strip $bg-root (#F4F6FA) — a neutral chrome value
+               sitting beside $bg-sidebar (#F7F7F9), never $term-bg (#000000).
+               Painting the terminal colour here turned the strip into a dark slab.
+               The strip must also never be treated as its own painted object: the
+               design rules are "background bleeds fully, content insets" (the
+               background bleeds past the safe area while the content insets) and
+               "drawer / main / workspace backgrounds bleed fully" — each column carries its OWN
+               background down to the physical edge, so under the sidebar the
+               strip reads as sidebar and under the terminal it reads as terminal.
+               Those two bleeds live on #sidebar and #workspace below; this rule
+               only guarantees that anything the columns do not cover (overscroll,
+               zoom-out, the URL-bar gap before dvh settles) is chrome-toned
+               instead of white. */
+            background: var(--safe-area-bg);
+            /* Declares that this document supports both themes off the same
+               signal its @media blocks already use, so the UA canvas, form
+               controls and scrollbars follow the system instead of defaulting
+               to light. Belt to the background braces above: it colors the
+               canvas itself where no element paints (overscroll, zoom-out). */
+            color-scheme: light dark;
         }
 
         * {
@@ -166,41 +253,102 @@
 
         #app {
             display: flex;
-            /* R7 (issue #100 L2): the positioning containing block for the
-               narrow-tier drawer and its mask below — both are absolutely
-               positioned children of #app (the padding box, safe areas
-               included). Verified no-op against every pre-existing
-               ABSOLUTELY or FIXED positioned element, markup OR JS-created
-               — only those can have their containing block re-homed by an
-               ancestor gaining position:relative; a position:relative
-               element like .remote-badge offsets from its own normal-flow
-               position and is unaffected by definition, so it needs no
-               audit. Each audited element's ACTUAL containing block is
-               listed so this stays checkable: #connection-overlay is
-               position:fixed (its containing block is the viewport,
-               ancestors irrelevant); #status-bar, #terminal-controls and
-               #empty-state are direct children of #workspace
-               (position:relative — already their containing block; note
-               #empty-state is #terminal-container's SIBLING, not its
-               child); the JS-created #dsh-remote-mask (created in
-               kinds/dsh_web.js, styled by the rule a few hundred lines
-               below) sits inside #dsh-frames (position:relative); the
-               JS-created measurement span in truncatePath (a body-appended
-               span with position:fixed in its style.cssText) is
-               viewport-positioned like any fixed element, ancestors
-               irrelevant; and the two JS-created per-instance xterm host
-               divs — createTerminalHost in this file and
-               PtyRenderer._createSession in kinds/pty.js — (position:
-               absolute in their style.cssText) are appended to
-               #terminal-container (position:relative), already their
-               containing block. */
-            position: relative;
+            /* CONTRACT v3.0 (issue #116): the shell leaves the normal flow AND
+               stays FULL HEIGHT. `fixed` here is not decoration, it is the
+               structural half of "the root cannot scroll": an out-of-flow #app
+               contributes NOTHING to the document's scrollable overflow, so html/body
+               — clipped above — have no content to scroll and no range to walk. R5's
+               height basis is untouched by the change: the same 100vh / 100dvh pair,
+               the same width:100%, plus a top/left anchor (fixed needs one; the
+               anchor is 0/0, so the box lands exactly where normal flow put it).
+               Why this is NOT the reverted 2ac6c83 combination: that round put
+               `fixed` on BODY, kept the root at overflow:hidden semantics and bled
+               the columns 100vh; the body then stayed a full viewport tall while
+               #app was pinned to the keyboard's top edge, so a keyboard-height slab
+               of canvas showed through. Here the body keeps its normal static box and
+               carries NO application content, the columns keep the env()-sized bleed
+               they had before, and nothing is ever pinned shorter than the viewport.
+               WHAT v3.0 CHANGED AGAINST v2.2: v2.2 pinned the shell ITSELF to
+               `vv.height` whenever the visual viewport came up short. The real-Gmail
+               control the user ran on the iPad says the reference behaves
+               differently: with the soft keyboard or the Magic Keyboard's floating
+               panel up, what is visible THROUGH the keyboard is identical to what
+               was there before it — the keyboard OVERLAPS a page that never moved,
+               it does not resize it. So here the shell, the sidebar, the header and
+               #workspace stay full height in EVERY keyboard state, and the covered
+               strip is lifted by the TERMINAL'S OWN boxes only: each PTY host
+               inside #terminal-container moves its OWN `bottom` up by the occlusion,
+               and the quick-keys control column moves its OWN `bottom` to
+               20px plus the measured host offset. Transport stays fixed at the
+               physical bottom and is deliberately excluded from keyboard avoidance. Gmail also grows a
+               hidden strip under the keyboard that the user can scroll the whole page
+               into; that half is deliberately NOT copied — the user's standing
+               requirement is that this page is never scrollable and never
+               auto-returns to the top, so the root stays clipped and no scroll range
+               is created at all.
+               R7 containing-block audit for the current structure: the positioned
+               #content-shell is the containing block for the narrow-tier drawer and
+               its mask. #app's safe-area padding insets that shell, and the shell's
+               overflow + rounded corners clip both overlays. Transport uses z-index
+               20, below the mask at 25, so an open drawer also masks Transport. Re-audited against every pre-existing positioned element,
+               markup OR JS-created, because fixed — unlike relative — also takes
+               its OWN containing block away from the flow: #connection-overlay is
+               position:fixed (containing block = viewport, ancestors irrelevant);
+               the narrow-tier #sidebar-toggle-btn lift is position:fixed and
+               resolves against the viewport as before — #app carries no
+               transform / filter / perspective, and a fixed ANCESTOR does not
+               capture fixed DESCENDANTS, so the anchor left:
+               calc(env(safe-area-inset-left, 0px) + var(--sidebar-width) - 1px)
+               measures from the viewport and includes the left safe-area inset; #status-bar, #terminal-controls and #empty-state are
+               direct children of #workspace (position:relative — already their
+               containing block; #empty-state is #terminal-container's SIBLING,
+               not its child). Only #terminal-controls joins the hosts in keyboard
+               avoidance; Transport stays bottom-fixed, while the quick-keys panel
+               inherits the shorter column through its `max-height: 100%`; the JS-created
+               #dsh-remote-mask (kinds/dsh_web.js)
+               sits inside #dsh-frames (position:relative); the JS-created
+               measurement span in truncatePath (body-appended, position:fixed in
+               its style.cssText) is viewport-positioned like any fixed element;
+               and the two JS-created per-instance xterm host divs —
+               createTerminalHost in this file and PtyRenderer._createSession in
+               kinds/pty.js — (position:absolute; inset:0 in their style.cssText)
+               are appended to #terminal-container (position:relative), already
+               their containing block — and the hosts plus the control column are
+               exactly the set of boxes this build moves:
+               the PTY-local avoidance writes each box's OWN `bottom`, which
+               resolves against that same #terminal-container / #workspace, so the
+               terminal's content AND its furniture lift off the covered strip while
+               every ancestor keeps the size
+               it had before the keyboard arrived. The one real consequence of
+               leaving the flow is the one this contract wants, and it is auditable:
+               the DIRECT CHILDREN
+               OF <body> are now `#app` (fixed, out of flow), eight closed <dialog>
+               elements (UA `display:none` until `showModal()` moves them to the
+               top layer, which no ancestor overflow clips), and <link> / <script
+               > elements that render nothing — so body has NO in-flow content, its
+               content height is 0, and the root has nothing to scroll. The three
+               body-APPENDED JS children were audited against the same question and
+               none of them adds flow content: the copy fallback's <textarea>
+               (position:fixed, left:-9999em, removed synchronously), truncatePath's
+               measurement <span> (position:fixed;visibility:hidden) and the
+               viewport-debug panel (position:fixed). The known STRUCTURAL cost,
+               recorded rather than hidden: a fixed shell is anchored to the LAYOUT
+               viewport, so if iOS ever pans the visual viewport anyway, the shell
+               does not pan with it — the A0 SOP is what settles that on the device,
+               and no JS here is allowed to paper over it. And because the shell is
+               FULL HEIGHT by contract, the strip iOS covers with the keyboard is
+               covered by the keyboard itself, exactly like the Gmail control; it is
+               never re-painted as a band and never scrolled into view. */
+            position: fixed;
+            top: 0;
+            left: 0;
             /* R5 (issue #100 L1): height basis. 100vh is the legacy
                fallback (old Safari); the @supports block below upgrades it
                to the dynamic viewport height, which tracks the mobile URL
-               bar show/hide without any JS. Width is 100% of body, NOT
-               100vw: vw counts the scrollbar gutter, so a vertical
-               scrollbar would push this flex row into horizontal overflow. */
+               bar show/hide without any JS. Width stays 100% — now resolved
+               against the viewport it is fixed to, NOT 100vw: vw counts the
+               scrollbar gutter, so a vertical scrollbar would push this flex
+               row into horizontal overflow. */
             height: 100vh;
             width: 100%;
             /* R5: keep the row inside the display notch / Home Indicator
@@ -208,7 +356,8 @@
                file-wide, so the insets inset the children instead of
                growing the box; every desktop browser reports all four
                insets as 0, which makes this a literal no-op there. */
-            padding: env(safe-area-inset-top, 0px) env(safe-area-inset-right, 0px) env(safe-area-inset-bottom, 0px) env(safe-area-inset-left, 0px);
+            padding: env(safe-area-inset-top, 0px) env(safe-area-inset-right, 0px) var(--transport-height) env(safe-area-inset-left, 0px);
+            background: var(--safe-area-bg);
         }
 
         /* R5: progressive enhancement — dvh tracks the dynamic toolbars
@@ -226,13 +375,40 @@
             }
         }
 
+        /* Approved visual benchmark: one shared shell clips the rounded content. */
+        #content-shell {
+            position: relative;
+            flex: 1;
+            min-width: 0;
+            min-height: 0;
+            display: flex;
+            overflow: hidden;
+            background: var(--main-bg);
+            border: 1px solid var(--safe-area-line);
+            border-radius: var(--content-shell-radius);
+            box-shadow:
+                0 0 0 1px var(--safe-area-highlight),
+                inset 0 0 0 1px var(--safe-area-highlight);
+        }
+
         /* Sidebar */
         #sidebar {
             width: var(--sidebar-width);
-            background: var(--bg-color);
+            min-height: 0;
+            background: var(--sidebar-bg);
             border-right: 1px solid var(--border-color);
             display: flex;
             flex-direction: column;
+            /* No sidebar color band: the shared shell and Transport own the finish. */
+            /* CONTRACT v3.1 (issue #116): the containing block for the divider
+               ::after below. `relative` with no offsets keeps the box exactly where
+               the flex row already put it and creates no stacking context (no
+               z-index here); it only makes #sidebar — not #app — the box the
+               divider resolves against, so the divider tracks the rail's real right
+               edge and follows its width. None of #sidebar's descendants is
+               absolutely positioned against #app (the drawer mask is a SIBLING of
+               #sidebar, the toggle lives in #header), so nothing re-anchors. */
+            position: relative;
         }
 
         /* Sidebar collapse (issue #99), scoped OFF the narrow tier with the
@@ -269,6 +445,43 @@
             }
         }
 
+        /* CONTRACT v3.1 (issue #116), the divider reaching the PHYSICAL bottom.
+           The rail's `border-right` is the visual divider, but a border is painted on
+           the border box and #sidebar is a flex child inside #app's SAFE-AREA padding
+           (~env(safe-area-inset-bottom) = 20px on this iPad), so the border stopped
+           ~20px above the physical edge: the box-shadow bleeds the FILL across the
+           strip, but a box-shadow cannot carry a 1px HAIRLINE, and the instance divider
+           visibly stopped short. This ::after IS that hairline. It sits exactly on the
+           border column: left:100% is #sidebar's padding-box right edge (= border-box
+           right − 1px), width:1px covers [W-1, W] — the border's own column. Its
+           height:100% + env(safe-area-inset-bottom) runs from the top THROUGH the
+           safe-area strip to the physical bottom, overlaying the existing border for
+           the rail's height (same token, same column — invisible doubling) and NEW
+           only across the strip the border never reached. pointer-events:none; out of
+           flow, so it never widens #sidebar. Kept in its OWN wide-tier complement
+           block (a SEPARATE `not all and max-width:768px`, NOT inside the collapse
+           block) so that block stays the collapse rule alone and this hairline never
+           leaks into a scoped rule it does not belong to; the complement matches only
+           while width > 768px, i.e. only while #sidebar is a flex sibling — on the
+           narrow tier #sidebar is an absolute drawer at bottom:0 and the divider
+           already reaches the physical bottom. Collapsed: the collapse block sets
+           #sidebar visibility:hidden, inherited by this pseudo, so no orphan divider
+           survives. NOT a 100vh bleed — its length is the env() inset (0 on desktop),
+           collapsing to a no-op there. Design: ui/sidebar-states.pen "the
+           sidebar/instance divider runs to the physical bottom". */
+        @media not all and (max-width: 768px) {
+            #sidebar::after {
+                content: "";
+                position: absolute;
+                left: 100%;
+                top: 0;
+                width: 1px;
+                height: 100%;
+                background: var(--border-color);
+                pointer-events: none;
+            }
+        }
+
         /* R7 (issue #100 L2, PRD-CHANGE §3.6): narrow tier, <=768px — the
            sidebar becomes an OVERLAY drawer instead of a flex sibling:
            absolutely positioned across #main (so #main keeps the full
@@ -296,22 +509,9 @@
                 /* Above the mask (25), below the sidebar toggle tab (40); the
                    whole ladder stays under the 9999 modal layer. */
                 z-index: 30;
-                /* PR #110 review (B2): the drawer's containing block is
-                   #app's PADDING box, so top:0/bottom:0 bleed across the
-                   safe-area bands — on a notched iPhone the drawer's first
-                   content (the sidebar title with the New/Import buttons)
-                   sat inside the status-bar band, invisible and untappable,
-                   and the bottom panel pressed into the Home Indicator.
-                   The box itself stays full-bleed (the iOS convention for a
-                   drawer: its background runs edge to edge) and these four
-                   insets inset only the CONTENT — the same padding
-                   declaration #app consumes, so landscape left/right insets
-                   are covered too; border-box keeps the drawer's width at
-                   var(--sidebar-width). The mask deliberately gets NO such
-                   padding: it has no content to protect and must stay
-                   full-bleed so a tap anywhere outside the drawer closes
-                   it. */
-                padding: env(safe-area-inset-top, 0px) env(safe-area-inset-right, 0px) env(safe-area-inset-bottom, 0px) env(safe-area-inset-left, 0px);
+                /* The positioned #content-shell already applies the safe-area
+                   insets and rounded clipping. The drawer adds no second padding. */
+                padding: 0;
             }
             /* Drawer closed: off-canvas, NOT zero-width (that is the wide
                tier's rendering, scoped away from here). */
@@ -391,13 +591,13 @@
                   pointer-typed value and is not worth it. */
             #app:not(.collapsed) #sidebar-toggle-btn {
                 position: fixed;
-                left: calc(var(--sidebar-width) - 1px);
+                left: calc(env(safe-area-inset-left, 0px) + var(--sidebar-width) - 1px);
                 top: calc(env(safe-area-inset-top, 0px) + 6px);
                 z-index: 40;
-                background: var(--bg-color);
+                background: var(--panel-bg);
                 border: 1px solid var(--border-color);
                 border-left: none;
-                border-radius: 0 6px 6px 0;
+                border-radius: 0 7px 7px 0;
             }
             /* PR #110 review: the tab rule's background: var(--bg-color)
                (2,1,0) permanently outranks .icon-btn:hover's background
@@ -544,17 +744,50 @@
             }
         }
 
+        /* Sidebar title row (issue #116). The middle tier caps #sidebar at
+           200px, a remote session adds the "Remote" badge and on a coarse
+           pointer each action button is 44px, so this row had to fit title +
+           badge + 96px of buttons into a 175px content box. The markup is
+           `Worktrees<span id="remote-badge">Remote</span>` with NO whitespace
+           between them, so the two words fuse into ONE unbreakable line and
+           the text cell could not shrink below it — the second button landed
+           outside the rail. Three constraints fix it, and none of them hides
+           anything: the text cell may break (min-width:0 +
+           overflow-wrap:anywhere), the action group is never squeezed
+           (flex:0 0 auto + nowrap, so the 44px hit targets stay 44px), and
+           the row wraps as a floor — where the two cells truly cannot share a
+           line the buttons drop below the title instead of escaping. */
         .sidebar-title {
             padding: 12px;
             font-weight: 600;
             border-bottom: 1px solid var(--border-color);
             display: flex;
+            flex-wrap: wrap;
+            column-gap: 8px;
             justify-content: space-between;
             align-items: center;
+            min-width: 0;
+        }
+
+        /* Basis 0 and not auto: `auto` seeds the flex line with this cell's
+           max-content width, and flex wraps before it shrinks, so the buttons
+           would drop to a second line even at the default 240px rail. */
+        .sidebar-title > span {
+            flex: 1 1 0;
+            min-width: 0;
+            overflow-wrap: anywhere;
+        }
+
+        /* The badge is a single unit: it may move to its own line, never
+           break into "Rem / ote". */
+        .sidebar-title > span > .remote-badge {
+            white-space: nowrap;
         }
 
         .sidebar-actions {
             display: flex;
+            flex-wrap: nowrap;
+            flex: 0 0 auto;
             gap: 8px;
         }
 
@@ -698,7 +931,7 @@
             border-bottom: 1px solid var(--border-color);
             gap: 6px;
             flex-shrink: 0;
-            background: var(--bg-color);
+            background: var(--sidebar-bg);
             cursor: pointer;
             user-select: none;
         }
@@ -1012,6 +1245,7 @@
             display: flex;
             flex-direction: column;
             min-width: 0;
+            min-height: 0;
             background: var(--main-bg);
         }
 
@@ -1088,7 +1322,7 @@
             cursor: pointer;
             border: 1px solid transparent;
             border-bottom: none;
-            border-radius: 4px 4px 0 0;
+            border-radius: 7px 7px 0 0;
             user-select: none;
             color: var(--text-secondary);
             margin-bottom: -1px;
@@ -1120,7 +1354,7 @@
             background: var(--main-bg);
             border-color: var(--border-color);
             color: var(--text-primary);
-            border-top: 2px solid var(--active-color);
+            border-top: 1px solid var(--border-color);
         }
 
         /* Inline rename input */
@@ -1182,7 +1416,15 @@
         .kind-badge-rx { background: var(--badge-bg, rgba(128,128,128,0.25)); color: var(--badge-text, inherit); }
         .kind-badge-dsh { background: var(--badge-dsh-bg, #0969da); color: var(--badge-dsh-text, #fff); }
 
-        #opencode-panel { width: 100%; height: 100%; display: flex; flex-direction: column; }
+        /* issue #116 (AUTH-20261107-P5-IFRAME-BLEED, arbitration: M1-only): the
+           web-kind panels share ONE hosting posture — absolute inset:0 replaces
+           width/height:100%; #workspace (position:relative) stays the containing
+           block, so the panel box is EXACTLY #workspace's padding box and never
+           past it (no negative top, no bottom:-N). The iframe's own bleed INTO
+           the safe-area band is unreachable under #workspace's overflow:hidden,
+           so M2 (frame height/margin extrapolation) is WITHDRAWN by arbitration;
+           the band stays painted by #workspace's --term-bg box-shadow. */
+        #opencode-panel { position: absolute; inset: 0; display: flex; flex-direction: column; }
         #opencode-panel[hidden] { display: none !important; }
         #opencode-frames { flex: 1; min-height: 0; display: flex; flex-direction: column; }
         /* Loading overlay for web-ui kinds (opencode-web and future kinds).
@@ -1195,6 +1437,14 @@
         @keyframes opencode-loading-spin { to { transform: rotate(360deg); } }
         .opencode-loading-title { font-size: 14px; font-weight: 600; }
         .opencode-loading-info { font-family: monospace; font-size: 12px; line-height: 1.6; white-space: pre-wrap; word-break: break-all; background: rgba(0,0,0,0.04); border: 1px solid var(--border-color, #e1e4e8); border-radius: 6px; padding: 8px 12px; max-width: 92%; }
+        /* issue #116, arbitration M1-only: the frame stays a plain flex item —
+           width/flex/min-height/border:0 as before, NO height or margin-bottom
+           extrapolation here. An iframe's bleed past #workspace's padding box is
+           unreachable under its overflow:hidden, and the band is painted by
+           #workspace's --term-bg box-shadow alone — nothing of the iframe is
+           drawn past the padding box. Border:0 stays — a border would repaint
+           the light-theme white band. No background, z-index, transform or
+           filter. Same shape on .reasonix-frame and .dsh-frame below. */
         .opencode-frame { width: 100%; flex: 1; min-height: 0; border: 0; }
         /* The hidden attribute must unconditionally win over any future
            display rule added to .opencode-frame (a flex item), so hide/show
@@ -1208,15 +1458,18 @@
         #opencode-scope-warning.opencode-warning-danger { color: #991b1b; background: #fee2e2; border-color: #fca5a5; }
         /* Reasonix web frame — same per-instance iframe cache pattern as
            opencode-web (kinds/reasonix.js), hosted inside its own panel. */
-        #reasonix-panel { width: 100%; height: 100%; display: flex; flex-direction: column; }
+        /* same hosting posture as #opencode-panel above — absolute inset:0 = #workspace padding box, never past it (arbitration: M1-only) */
+        #reasonix-panel { position: absolute; inset: 0; display: flex; flex-direction: column; }
         #reasonix-panel[hidden] { display: none !important; }
         #reasonix-frames { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+        /* same plain flex-item shape as .opencode-frame above — no extrapolation (M2 withdrawn by arbitration) */
         .reasonix-frame { width: 100%; flex: 1; min-height: 0; border: 0; }
         .reasonix-frame[hidden] { display: none !important; }
         /* dsh web frame — DeepSeek Harness UI on a per-instance dedicated
            origin (kinds/dsh_web.js). Same panel/loading/warning pattern as
            opencode-web, dsh-prefixed ids. */
-        #dsh-panel { width: 100%; height: 100%; display: flex; flex-direction: column; }
+        /* same hosting posture as #opencode-panel above — absolute inset:0 = #workspace padding box, never past it (arbitration: M1-only); #dsh-frames keeps its position:relative so #dsh-remote-mask still anchors to it */
+        #dsh-panel { position: absolute; inset: 0; display: flex; flex-direction: column; }
         #dsh-panel[hidden] { display: none !important; }
         #dsh-frames { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; }
         #dsh-remote-mask {
@@ -1243,6 +1496,7 @@
         .dsh-loading-spinner { width: 26px; height: 26px; border: 3px solid rgba(9,105,218,0.2); border-top-color: #0969da; border-radius: 50%; animation: opencode-loading-spin 0.8s linear infinite; }
         .dsh-loading-title { font-size: 14px; font-weight: 600; }
         .dsh-loading-info { font-family: monospace; font-size: 12px; line-height: 1.6; white-space: pre-wrap; word-break: break-all; background: rgba(0,0,0,0.04); border: 1px solid var(--border-color, #e1e4e8); border-radius: 6px; padding: 8px 12px; max-width: 92%; }
+        /* same plain flex-item shape as .opencode-frame above — no extrapolation (M2 withdrawn by arbitration) */
         .dsh-frame { width: 100%; flex: 1; min-height: 0; border: 0; }
         .dsh-frame[hidden] { display: none !important; }
         #dsh-scope-warning { flex: 0 0 auto; width: 100%; box-sizing: border-box; padding: 6px 12px; font-size: 12px; line-height: 1.4; color: #7c2d12; background: #ffedd5; border-bottom: 1px solid #fdba74; word-break: break-all; }
@@ -1300,16 +1554,23 @@
         #workspace {
             flex: 1;
             position: relative;
-            background: var(--term-bg);
+            background: var(--safe-area-bg);
             overflow: hidden;
             display: flex;
             flex-direction: column;
+            /* The area outside the terminal's rounded card follows the system canvas. */
         }
 
         #terminal-container {
             flex: 1;
-            width: 100%;
-            height: 100%;
+            width: auto;
+            height: auto;
+            min-height: 0;
+            margin: 10px;
+            background: var(--term-bg);
+            border: 1px solid rgba(139, 148, 158, 0.24);
+            border-radius: 10px;
+            overflow: hidden;
             position: relative;
             /* R17 (issue #100 padOS②, PR #110 beta): measured on the
                vendored xterm v6 — touches land on .xterm-screen, the
@@ -1330,6 +1591,11 @@
             touch-action: none;
         }
 
+        #terminal-container .xterm {
+            padding: 8px 10px;
+            background: var(--term-bg);
+        }
+
         #empty-state {
             position: absolute;
             top: 50%;
@@ -1341,21 +1607,58 @@
 
         /* Transport Status */
         #status-bar {
-            position: absolute;
-            bottom: 0;
+            /* CONTRACT v3.1 (issue #116): `fixed`, not `absolute`. As an absolute
+               child of #workspace the strip's bottom resolved against #workspace's
+               padding box, which sits env(safe-area-inset-bottom) (~20px) above the
+               physical edge — so the Transport stopped short of the true bottom
+               while the terminal ink bled past it. `fixed` re-anchors it to the
+               VIEWPORT: with no keyboard its own bottom is the physical bottom
+               (bottom:0), Gmail-style, and it no longer inherits the safe-area
+               inset that #workspace carries. #app carries no transform / filter /
+               perspective, and a fixed ANCESTOR does not capture a fixed DESCENDANT,
+               so this resolves against the viewport even though #status-bar stays a
+               DOM child of #workspace; #workspace's overflow:hidden never clips it
+               (a fixed box is painted outside an untransformed ancestor's clip). The
+               keyboard avoidance never changes this box's bottom: Transport remains
+               at the physical bottom by owner-approved design. */
+            position: fixed;
+            left: 0;
             right: 0;
-            background: var(--status-bar-bg);
-            color: var(--status-bar-text);
-            padding: 2px 8px;
+            bottom: 0;
+            height: var(--transport-height);
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            overflow: hidden;
+            padding: 0 calc(10px + env(safe-area-inset-right, 0px)) 0 calc(10px + env(safe-area-inset-left, 0px));
+            background: var(--safe-area-bg);
+            color: var(--text-secondary);
             font-size: 11px;
-            z-index: 10;
+            z-index: 20;
             pointer-events: auto;
             cursor: pointer;
-            border-top-left-radius: 4px;
+        }
+        #status-bar > span {
+            min-width: 0;
+            min-height: 20px;
+            display: inline-flex;
+            align-items: center;
+            padding: 1px 8px;
+            white-space: nowrap;
+            background: var(--panel-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 999px;
+            line-height: 14px;
+        }
+        #status-bar > span[hidden] { display: none !important; }
+        #status-bar-alerts { flex: none; }
+        #status-bar-transport {
+            overflow: hidden;
+            text-overflow: ellipsis;
         }
         @media (hover: hover) {
         #status-bar:hover {
-            background: var(--hover-bg);
+            background: var(--safe-area-bg);
             color: var(--text-primary);
         }
         }
@@ -1368,20 +1671,24 @@
            set `color` on #status-bar itself, which cascaded to
            #status-bar-transport; the color now lives only on the badge.) */
         #status-bar.status-alert-amber {
-            background: rgba(255, 179, 0, 0.30);
+            background: var(--safe-area-bg);
         }
         #status-bar.status-alert-red {
-            background: rgba(255, 68, 68, 0.34);
+            background: var(--safe-area-bg);
         }
         #status-bar.status-alert-amber #status-bar-alerts {
-            color: #ffd479;
+            color: var(--warning-text);
+            background: var(--warning-bg);
+            border-color: var(--warning-border);
         }
         #status-bar.status-alert-red #status-bar-alerts {
-            color: #ffb0b0;
+            color: var(--danger-text);
+            background: var(--danger-bg);
+            border-color: var(--danger-border);
         }
         #status-bar-alerts {
             font-weight: 600;
-            margin-right: 6px;
+            margin-right: 0;
         }
 
         /* Resource Monitor Modal */
@@ -1912,7 +2219,18 @@
                    pointer-events:none keeps the empty stretches of the
                    now-taller column from swallowing terminal clicks /
                    drags / selections on the right edge; the buttons and
-                   the panel re-enable their own below. */
+                   the panel re-enable their own below.
+                   issue #116 v3.0: this 20px is the AUTHORED bottom, and it is
+                   the value the keyboard avoidance adds the occlusion TO
+                   (applyVisualViewportOcclusion writes bottom = 20 + occlusion and
+                   hands exactly 20px back at occlusion 0). top:20px is NEVER
+                   written, so the quick-keys entry button stays put and only the
+                   column's height shortens — which is exactly what the panel's
+                   max-height above resolves against, so the panel shrinks with the
+                   keyboard instead of sitting under it, and its own
+                   overflow-y:auto keeps the key set reachable. Changing this
+                   offset means changing the constant inside that function: the two
+                   are one contract, stated twice. */
                 bottom: 20px;
                 pointer-events: none;
                 display: flex;
@@ -1988,6 +2306,13 @@
                 position: absolute;
                 top: 0;
                 right: calc(100% + 8px);
+                /* issue #116 v3.0: the percentage resolves against #terminal-controls,
+                   and while the keyboard is up the applier writes THAT box's own
+                   bottom = 20 + occlusion, so its height — the definite containing
+                   block this max-height needs — shortens by exactly the occlusion.
+                   The panel therefore shrinks with the keyboard and its
+                   overflow-y:auto below becomes the reachable scroll instead of a
+                   clipped key row; no JS touches this rule. */
                 max-height: 100%;
                 overflow-y: auto;
                 max-width: calc(100vw - 88px);
@@ -2106,6 +2431,7 @@
             <div class="conn-sub">Backend server unreachable. Retrying...</div>
         </div>
 
+        <div id="content-shell">
         <!-- Sidebar: Worktrees -->
         <div id="sidebar">
             <div class="sidebar-title">
@@ -2244,6 +2570,7 @@
                 </div>
                 <div id="status-bar"><span id="status-bar-alerts" hidden></span><span id="status-bar-transport">Transport: idle</span></div>
             </div>
+        </div>
         </div>
     </div>
 
@@ -2577,6 +2904,7 @@
     <link rel="stylesheet" href="/static/vendor/xterm/xterm.css" />
     <script src="/static/vendor/xterm/xterm.js"></script>
     <script src="/static/vendor/xterm-addon-fit/xterm-addon-fit.js"></script>
+    <!-- viewport-debug -->
     <script src="/static/framework.js"></script>
     <script src="/static/kinds/renderer.js"></script>
     <script src="/static/kinds/pty.js"></script>
@@ -3193,8 +3521,10 @@
                 try { session.fitAddon.fit(); } catch (e) { console.error("xterm fit error:", e); }
             }
             if (session.term.cols > 0 && session.term.rows > 0) {
-                sendResize(session, session.term.cols, session.term.rows);
-                syncTerminalToAppliedSize(session);
+                // issue #116: ask, do not revert. The sendResize +
+                // syncTerminalToAppliedSize pair here repainted the previous ack on
+                // top of the size fit() had just measured in the same tick.
+                queueTTYResize(session, session.term.cols, session.term.rows);
             }
         }
 
@@ -3291,88 +3621,707 @@
 
         document.addEventListener("keydown", handleSidebarToggleKeydown);
 
-        // --- Viewport height & the iOS soft keyboard (issue #100 L1) ---
+        // --- PTY-local occlusion & the non-scrollable root (issue #100 L1; rewritten under issue #116) ---
 
-        // R6: iOS Safari does not resize the layout viewport when the soft
-        // keyboard opens, and we deliberately do NOT use the
+        // R6: iOS Safari does not resize the layout viewport when the keyboard
+        // opens, and we deliberately do NOT use the
         // interactive-widget=resizes-content viewport directive (it is
         // Chromium-only; see plan §3.5/§8) — so the keyboard parks over the
-        // bottom of the page. body/html are overflow:hidden: the page itself
-        // never scrolls, which means the covered strip cannot be scrolled
-        // back into view. The only remedy is to shrink the app to what is
-        // actually visible, and window.visualViewport is the one API that
-        // reports that rectangle. The RESIZE listener runs the full
-        // judgment (keyboard open AND close); the SCROLL listener only
-        // re-pins an existing pin — a pure pan must never introduce one.
-        // While anything is covered, #app's inline height is pinned to the
-        // visual viewport's bottom edge in layout coordinates; the narrowing
-        // walks down the flex column (#workspace is flex:1), the terminal
-        // host's ResizeObserver fires and xterm re-fits, so the input area
-        // stays above the keyboard. When nothing is covered the inline
-        // height is CLEARED, handing sizing back to the CSS cascade
-        // (100dvh, with the 100vh fallback).
-        function applyVisualViewportHeight() {
+        // bottom of the page. The page CANNOT scroll at all under this contract
+        // (html/body are `overflow: clip` above, #app is `position: fixed` and
+        // FULL HEIGHT, so the document owns neither a scroll mechanism nor
+        // scrollable content), which means a covered strip can neither be
+        // scrolled into view nor be scrolled away. The one remedy left is to
+        // move the covered content itself, and window.visualViewport is the
+        // only API that reports the rectangle the covering UI leaves visible.
+        //
+        // CONTRACT v3.2 — "full-height shell, PTY-local avoidance SCOPED TO
+        // SOFT-KEYBOARD SESSIONS". Occlusion is the ONLY thing this layer writes, and
+        // the boxes it writes it to are the TERMINAL'S OWN boxes: the PTY hosts,
+        // the terminal control column that carries the quick-keys entry and panel,
+        // and the transport status strip. Nothing above them — #app, #main,
+        // #workspace, the sidebar, the header — is written at all.
+        //
+        //   1. OCCLUSION, gated by a KEYBOARD-SESSION STATE MACHINE instead of a
+        //      stateless ratio floor. With raw = max(0, clientHeight - vv.height):
+        //        ENTERS   at scale = 1, editable focus (TEXTAREA / INPUT /
+        //                 contenteditable) and raw >= clientHeight * 0.50 — an
+        //                 explicit soft keyboard starting up (measured 702 layout:
+        //                 vv.height 274 -> raw 428 = 61.0% -> host 428, controls
+        //                 448, status 428);
+        //        HOLDS    while scale = 1, editable focus and raw > 1, and the
+        //                 EFFECTIVE occlusion then tracks RAW every pass — 340 /
+        //                 206.1 / 147 retract frames inside one live session are
+        //                 the SAME keyboard leaving, not new overlays to re-judge;
+        //        LEAVES   at raw <= 1 (keyboard closed), at zoom (scale != 1), or
+        //                 the moment focus is no longer editable — effective
+        //                 occlusion 0, every box back at its authored bottom;
+        //        AFTER leaving, a shortfall that does not reach the 50% ENTRY line
+        //                 can never re-open avoidance on its own: the thin floating
+        //                 strip (68.5) and the shallow 147 / 206.1 / 340 states
+        //                 overlap a full-height terminal that no longer moves. A
+        //                 NEW explicit keyboard (editable focus, raw >= 50%) starts
+        //                 a NEW session and avoids again.
+        //      The 0.50 compares ONLY at the entry edge — it NEVER filters a
+        //      session that is already active. The retired v3.1 0.25 small-overlay
+        //      floor is gone, not renamed: 206.1px intermediates measured on the
+        //      device sat ABOVE its 175.5px line and re-lifted the terminal and
+        //      Transport mid-transition — the bounce this round closes. Hosts are
+        //      `position:absolute; inset:0` inside #terminal-container, so writing
+        //      the `bottom` LONGHAND moves the host's own bottom edge UP by that
+        //      amount; #status-bar is `position:fixed` so its bottom resolves
+        //      against the viewport directly. No visualViewport => raw 0 =>
+        //      occlusion 0; zoom restores bottom:0px.
+        //   2. NOTHING ELSE IS WRITTEN. No #app / html / body height, no root
+        //      scroll, no scrollTo / scrollTop, no transform compensation, no
+        //      re-top: the shell is full height in EVERY state and the page is
+        //      never scrollable, so there is nothing to recover and nothing to
+        //      pull back. The reference app grows a HIDDEN strip under the
+        //      keyboard that a full-page swipe reveals and that disappears when
+        //      focus leaves; copying that half is FORBIDDEN here by the user's
+        //      standing requirement — this page never gets a root scroll area —
+        //      so the root stays `overflow: clip`, the shell stays out of flow,
+        //      and the scroll range stays empty. v2.1 parked the origin
+        //      (scrollTo / scrollTop = 0 on every pass, re-checked on rAF
+        //      follow-ups) and was vetoed on-device; v2.2 pinned the whole shell
+        //      to vv.height and is superseded by this round. Neither name
+        //      survives as a code path here: the calls are gone, not renamed.
+        //      What DOES move is the PTY host and the quick-keys control column.
+        //      The host subtracts the measured container chrome so its real bottom
+        //      meets the keyboard top. The column keeps its authored 20px offset
+        //      plus occlusion, with a fixed top and a shrinking panel. Transport
+        //      never joins that write set and remains at the physical bottom.
+        //   3. EVERY HOST, INCLUDING THE HIDDEN AND INACTIVE ONES. The applier
+        //      iterates ALL #terminal-container hosts, not just the active one,
+        //      so a host cannot keep a stale `bottom` and show a band the moment
+        //      the user switches to it. Writes stay per-host and ONLY on
+        //      change, so the 500ms backstop cannot invalidate layout (and
+        //      re-fire every host's ResizeObserver) on a stable page; a hidden
+        //      host costs one string compare until the switch that reads it. The
+        //      control column is guarded the same way, and a missing element
+        //      (a login gate, a page before boot) is skipped, never fatal.
+        //   4. ZOOM opts out entirely (scale != 1 -> bottom:0px): vv.height
+        //      shrinks with the pinch and fires resize, so without the
+        //      short-circuit a pinch would lift the terminal off the bottom of a
+        //      page the user is panning around, and give it back at scale = 1 on
+        //      the next resize. It restores THESE BOTTOMS ONLY — host 0px, status
+        //      0px, controls back to its authored 20px — and a zoom never touches
+        //      the root position, because the root is never written.
+        //   5. NO visualViewport (desktop, old browsers) => occlusion 0, no
+        //      listeners, no writes at all. Full height with nothing covered is
+        //      the CORRECT answer, not a degradation: innerHeight is no
+        //      substitute (it does not report the floating bar either) and no
+        //      fallback would see the keyboard anyway; the terminal's own
+        //      ResizeObserver → fit → sendResize chain stays the single owner of
+        //      the TTY geometry, exactly as before.
+        //   6. Sub-pixel agreement is agreement: the arithmetic is exact and the
+        //      acceptance tolerance is 1 CSS px. It guards layout churn, never
+        //      coverage — a host bottom inside vv.height + 1 is covered-free.
+        //
+        // What a passing capture looks like on THIS build: scrollTop stays 0,
+        // document.scrollingElement.scrollHeight <= clientHeight (no range),
+        // window.scrollTo(0,100) leaves scrollY at 0 (no mechanism),
+        // appRect.bottom == documentElement.clientHeight (the shell is full
+        // height in every state), host style.bottom == occlusion + "px",
+        // hostRect.bottom == 682 - occlusion in the measured layout, the controls
+        // column sits at 20 + occlusion and the status strip at occlusion, and
+        // xtermRows.bottom <= vv.height + 1.
+        // issue #116 v3.3: keyboard avoidance is scoped to an actual input session.
+        // A 25% shortfall may ENTER; after recovery starts, only a fresh 50% keyboard
+        // may re-enter while the same editable remains focused. This prevents a
+        // floating overlay from re-opening avoidance after the keyboard closes.
+        // A same-geometry decrease exits immediately instead of holding the terminal
+        // at 147/206px. Orientation/Split View geometry changes get one settle pass,
+        // because their first resize can otherwise look exactly like a recovery.
+        let terminalAvoidanceActive = false;
+        let terminalAvoidanceRecovering = false;
+        let terminalAvoidanceGeometryGrace = false;
+        let previousTerminalRaw = 0;
+        let previousTerminalLayoutHeight = 0;
+        let previousTerminalVVWidth = 0;
+        // issue #116 D2 (PLAN §4 D2, arbitration commit 6e8a006): the previous
+        // pass's vv.scale, input to "ANY scale change = NEW GEOMETRY" in
+        // applyVisualViewportOcclusion. Like the raw / layout / VV-width history
+        // above it is written once per pass — it is NOT a second ownership or
+        // session state machine (D2 rule 3: the frozen §5 machine stays the only
+        // session truth).
+        let previousTerminalScale = 0;
+        // issue #116 D-C (arbitration commit 6e8a006): the EXECUTABLE definition of
+        // a SETTLED scale. The first draft's single-frame equality
+        // (`scale === previousTerminalScale`) let ONE transition frame through the
+        // gate, which is not a settle; the arbitration counts a settle instead, and
+        // these six variables + two constants are its whole memory. They are the
+        // scale term's settle memory and NOTHING ELSE: no new timer (the counting
+        // rides the EXISTING 500ms self-check tick at
+        // initVisualViewportHandling — see the "scaleSettleTick" token), no new
+        // event source, no second ownership / session machine (the frozen §5
+        // machine stays the only session truth).
+        //   * scaleSettleCandidate — the scale being watched, 0 = no candidate.
+        //     A candidate opens on a scale step (including the trip BACK to 1)
+        //     and re-opens whenever it breaks.
+        //   * scaleSettleBaseline — the candidate's vv.scale at open time: the
+        //     reference a SLOW DRIFT is measured against. A step of < ε between
+        //     two passes is tolerated; the same drift ACCUMULATED past ε against
+        //     this baseline breaks the candidate and it re-enters.
+        //   * scaleSettleTicked — consecutive counting ticks at the candidate.
+        //     Only the 500ms self-check tick increments it; a resize / scroll /
+        //     focus / pageshow / orientationchange / visibilitychange pass or a
+        //     direct call may BREAK a candidate but never counts toward one.
+        //     document.hidden counts nothing at all — the interval itself refuses
+        //     to run the judgment there. Counting SATURATES at
+        //     SCALE_SETTLE_TICKS and is announced once, so an identical settled
+        //     tick is idempotent and does not re-trigger the settle edge.
+        //   * scaleSettleLayoutHeight / scaleSettleVVWidth / scaleSettleRaw —
+        //     the candidate's own geometry. While a candidate is CANDIDATING, a
+        //     change of any of the three voids it and it re-enters. Once the
+        //     scale is SETTLED, the keyboard opening or closing (raw) does NOT
+        //     reset the scale settle — only drift past ε does.
+        // The machine runs only where a scale question exists: scale < 1, the trip
+        // back into the band, or a candidate already in flight. A long scale = 1
+        // steady state therefore never touches these. scale > 1 runs NO scale
+        // question either — it opts out wholesale, and entering that domain DROPS
+        // an in-flight candidate instead of banking it (D-C re-review), so the trip
+        // home counts a full two ticks. The container-missing early return syncs the
+        // same memory too (D-E), so a step taken with no container is not misread
+        // as a return trip on the first frame back.
+        const SCALE_SETTLE_TICKS = 2;
+        const SCALE_SETTLE_EPSILON = 0.001;
+        let scaleSettleCandidate = 0;
+        let scaleSettleBaseline = 0;
+        let scaleSettleTicked = 0;
+        let scaleSettleLayoutHeight = 0;
+        let scaleSettleVVWidth = 0;
+        let scaleSettleRaw = 0;
+
+        function applyVisualViewportOcclusion(scaleSettleTickToken) {
+            const container = document.getElementById("terminal-container");
+            if (!container) {
+                // D-E (arbitration 6e8a006 re-review, PLAN §4 D2 / contract rule 6):
+                // the early return is still a PASS that happened. Whatever scale the
+                // visual viewport reports NOW has to reach the D2 scale history, and
+                // the D-C candidate has to be dropped, or a step taken while the
+                // container was gone would meet the stale previousTerminalScale on
+                // the first frame back and be MISREAD as a zoomReturnFrame — a fake
+                // return trip that pays 0 and banks two more suppressed ticks. The
+                // sync is the SAME two writes the bottom of the function does for
+                // its own scale term and NOTHING more: the frozen active / recovering
+                // flags, the raw / layout / VV-width history and every other
+                // lifecycle meaning of this early return stay exactly as they were.
+                const vvNow = window.visualViewport;
+                previousTerminalScale = vvNow && vvNow.scale ? vvNow.scale : 1;
+                scaleSettleCandidate = 0;
+                scaleSettleBaseline = 0;
+                scaleSettleTicked = 0;
+                scaleSettleLayoutHeight = 0;
+                scaleSettleVVWidth = 0;
+                scaleSettleRaw = 0;
+                return false;
+            }
+            // #terminal-controls' authored `bottom` (the clearance that keeps the
+            // control column above the ~17px transport strip). Declared INSIDE the
+            // function because the test harness slices named functions out of this
+            // document and evaluates them standalone — a module-level const is
+            // outside that slice. It is a CSS constant, read once from the rule this
+            // code must agree with (#terminal-controls { bottom: 20px }), not a
+            // measurement and never a second source of layout truth: the keyboard
+            // adds the occlusion ON TOP of it, occlusion 0 hands exactly 20px
+            // back, and no ratio or threshold is computed from it.
+            const CONTROLS_BOTTOM_OFFSET = 20;
+            // CONTRACT v3.3: the entry ratio is 25% (portrait's measured 340/1062
+            // keyboard must enter). Once recovery starts, re-entry requires a new
+            // 50% keyboard. Neither ratio filters an already-running session.
+            const KEYBOARD_ENTRY_RATIO = 0.25;
+            const KEYBOARD_REENTRY_RATIO = 0.50;
+            const layoutHeight = document.documentElement.clientHeight;
             const vv = window.visualViewport;
-            const app = document.getElementById("app");
-            if (!vv || !app) return;
             // Pinch / double-tap zoom opt-out, spec fact #1: vv.height is
-            // measured in layout-viewport pixels, so it SHRINKS as the scale
-            // grows (and a resize event fires on the change) — without this
-            // guard a pinch would pin #app to the zoomed rectangle and
-            // collapse the whole UI toward half height. The zoomed state
-            // owns no inline height; zooming back to 1 re-runs the full
-            // judgment on the resize event and re-pins if the keyboard is
-            // still up.
-            if (vv.scale && Math.abs(vv.scale - 1) > 0.01) {
-                app.style.height = "";
-                return;
+            // already scaled, so compensating for it would lift the terminal off
+            // the bottom of a page the user is zoomed into. Zoom owns NOTHING
+            // else — it does not touch the root position either, because the
+            // root is NEVER written. Zoom also ENDS any session in flight — with
+            // the one-sided D2 amendment below (arbitration commit 6e8a006), which
+            // keeps that rule for scale > 1 and every scale step, and hands only a
+            // SETTLED scale < 1 to the frozen §5 machine.
+            const zoomed = !!(vv && vv.scale && Math.abs(vv.scale - 1) > 0.01);
+            // issue #116 D2 (PLAN §4 D2, arbitration commit 6e8a006):
+            // the all-zoom opt-out above is now ONE-SIDED. The frozen baseline
+            // (5268869) opted out of EVERY |scale − 1| > 0.01 frame; this block
+            // changes ONLY the scale < 1 half, atomically and revertably:
+            //   * scale > 1 (zoomed && scale > 1): the frozen conservative opt-out
+            //     is KEPT UNCHANGED — every zoomed-in pass still exits any session
+            //     in flight (recovery latch included) and can never enter. The
+            //     release back to 1 is Safari's own behavior; this app never writes
+            //     scale.
+            //   * scale ≈ 1 (inside the existing ±0.01 zoomed tolerance, the
+            //     number unchanged): the whole frozen machine, untouched. Jitter
+            //     inside that band is OWNED BY THE FROZEN THRESHOLD — it is not
+            //     zoomed, it is judged by §5 as always, and the scale settle below
+            //     has nothing to say about it (D-D: in-band jitter stays under the
+            //     frozen tolerance).
+            //   * scale < 1 (zoomed && scale < 1): NO blanket opt-out. A SETTLED
+            //     scale (D-C below: SCALE_SETTLE_TICKS self-check ticks at an
+            //     unchanged scale / layout / VV-width / raw, inside ε of the
+            //     candidate baseline) is handed to the frozen §5 session machine
+            //     below, whose existing gates still all have to be met: eligible
+            //     focus through the existing document.activeElement path — as of
+            //     Phase 3 (AUTH-20261105-P3-OWNERSHIP) the editable-half plus the
+            //     SHOWN foreground-host ownership walk at the focus block below,
+            //     not the former generic editable-only admission (D-A plan B),
+            //     raw > 1 real occlusion, the 25% entry / 50%
+            //     re-entry lines, the click / focusin / geometry unlocks and the
+            //     same-geometry-decrease exit. Nothing is bypassed: raw > 1 alone
+            //     owes nothing.
+            //   * ANY scale change = NEW GEOMETRY (D2 rule 3): a zoomed pass whose
+            //     scale differs from the previous pass is an UNSETTLED transition
+            //     frame — zoomOptOut stays true, so it exits the session through
+            //     the same existing edge as the frozen zoom exit and never enters;
+            //     the scale step also routes through the existing window-geometry-
+            //     change unlock above, so the pre-change layout / raw / recovery
+            //     latch are not reused. What it does NOT get is the frozen zoom
+            //     exit's latch: D-B (and D-D for the trip back to 1) exempts a
+            //     scale-step exit from setting a NEW recovery latch — see
+            //     scaleStepNoLatchExit. Without that guard a single-step scale
+            //     change carried the fresh latch into the settle frame and made
+            //     the re-entry line path-dependent (50% after one step, 25% after
+            //     several). A step now means: old latch cleared by the geometry
+            //     unlock, session exited, occlusion 0, NO new latch; the settle
+            //     then rebuilds the baseline on the unlocked 25% line.
+            // A keyboard-free zoom-out (menu / cmd+'-') still lifts NOTHING: the
+            // layout grows while vv.height == layoutHeight, raw is 0 by arithmetic
+            // (device evidence: A0 0.75 segment, 153 frames, raw 0 closed and
+            // occlusion 0 under the old guard), and raw <= 1 ends / blocks the
+            // session exactly as before.
+            const scale = vv && vv.scale ? vv.scale : 1;
+            const scaleBelowOne = zoomed && vv.scale < 1;
+            // Client space on BOTH sides of the subtraction (the p5
+            // incident: height = clientHeight - offsetTop mixed client and
+            // layout space and pinned to 0 when the keyboard was covered by
+            // panning). vv.offsetTop is NOT an input and cannot reappear
+            // here — the shell is out of flow, cannot be panned, and the
+            // covered/uncovered boundary lives at vv.height in client
+            // coordinates. A gap of exactly 0 (and no visualViewport at all)
+            // is a real floating overlay / closed keyboard: raw 0 ends the
+            // session, nothing moves.
+            const raw = vv ? Math.max(0, layoutHeight - vv.height) : 0;
+            // The focus half of the session — issue #116 Phase 3 (PLAN §5 Phase 3,
+            // AUTH-20261105-P3-OWNERSHIP): an editable owning focus is no longer
+            // enough to own the PTY keyboard. The frozen editable test below stays
+            // the editable HALF, character for character (xterm's helper is a
+            // TEXTAREA; INPUT and contenteditable hosts stay accepted — the helper
+            // identity is NOT narrowed), but to become `focusEditable` — the
+            // session's PTY eligibility read by scaleStepNoLatchExit, the exit edge
+            // and the entry gate below, ONE boolean at the same three sites — this
+            // pass's focused element must ALSO live inside the SHOWN foreground
+            // terminal host. The walk is a pure read of THIS pass's live DOM: from
+            // document.activeElement (the single focus input) up the parentElement
+            // chain, the FIRST ancestor stamped with the EXISTING data-instance-id
+            // (both host factories stamp it — createTerminalHost here,
+            // PtyRenderer._createSession in kinds/pty.js) decides, and it admits
+            // only while displayed: kinds/pty.js shows exactly one host and hides
+            // every other, so the shown host IS this frame's foreground-instance
+            // box — the DOM-observable front correspondence, re-taken fresh on
+            // every pass. No cache across passes, no second ownership machine, no
+            // new event source, no explicit marker written anywhere. A focus inside
+            // a hidden / non-foreground host has no eligibility (contract HO-1 /
+            // B.5); ordinary Web inputs — the rename / settings forms, the
+            // quick-keys PASTE textarea, any editable outside the host — are HO-3
+            // and iframe focus reads as the frozen non-editable IFRAME box (HO-4 /
+            // HO-1): none of them ever rides the PTY avoidance (contract HO-3,
+            // R2). This replaces the D-A plan B transitional wording ("no new
+            // ownership machine" — Phase 3 IS the host split the plan B verdict
+            // deferred to): Web frames passing the generic predicate were the
+            // registered R2 known deviation and are now refused here. Terminal →
+            // Web handoff exits through the UNTOUCHED `!focusEditable` edge below,
+            // recovery latch included; Web → terminal re-entry runs the untouched
+            // §5 entry below on the CURRENT frame — no new exit, no compensation,
+            // no behavior branch added to the handoff itself (F1–F5 / F8–F10).
+            const focus = document.activeElement;
+            const focusEditableElement = !!(focus && (focus.tagName === "TEXTAREA" || focus.tagName === "INPUT" || focus.isContentEditable));
+            let focusEditable = false;
+            if (focusEditableElement) {
+                for (let hostNode = focus.parentElement; hostNode; hostNode = hostNode.parentElement) {
+                    if (hostNode.dataset && hostNode.dataset.instanceId) {
+                        // The FIRST stamped ancestor decides, with NO backtracking:
+                        // a foreground host must be a DIRECT child of
+                        // #terminal-container (the `container` bound at the top of
+                        // this function) AND displayed. The tab template stamps the
+                        // same data-instance-id OUTSIDE the container — a stamped
+                        // element there is NOT a terminal host, and the walk ends
+                        // AT it without climbing further. Real host chains pass
+                        // BOTH tests exactly once (hosts are the container's own
+                        // children); a truthy instanceId keeps an empty-string
+                        // stamp from masquerading as a host.
+                        focusEditable = hostNode.parentElement === container
+                            && hostNode.style.display !== "none";
+                        break;
+                    }
+                }
             }
-            // Visible bottom edge in layout-viewport coordinates. With the
-            // keyboard open this sits keyboardHeight above the layout
-            // bottom (offsetTop stays 0); at rest it equals the layout
-            // height. The sentinel is documentElement.clientHeight, spec
-            // fact #2: vv.height excludes scrollbars pinned to the visual
-            // viewport, while window.innerHeight INCLUDES the classic
-            // scrollbar gutter — comparing against innerHeight would pin
-            // spuriously by the gutter's size on desktops. The 1px slack
-            // absorbs sub-pixel rounding so a closed keyboard does not
-            // leave a 1px-short inline style behind.
-            const visibleBottom = vv.offsetTop + vv.height;
-            if (visibleBottom < document.documentElement.clientHeight - 1) {
-                app.style.height = Math.max(visibleBottom, 0) + "px";
-            } else {
-                app.style.height = "";
+            // D-B / D-D (arbitration commit 6e8a006): the trip BACK into the band
+            // (0.75 → 1, scale > 1 → 1). Like a scale step it exits the session
+            // through the frozen edge below and pays occlusion 0, and it leaves no
+            // NEW recovery latch behind either — the narrow D2 exception to the
+            // frozen §5.6 host exit, noted in the PLAN and the contract (the guard
+            // is scaleStepNoLatchExit, below the counted settle). A frozen scale > 1
+            // pass still sets the latch exactly as before, so `scale > 1` staying
+            // zoomed is deliberately NOT part of that exemption, and an exit owed to
+            // raw <= 1 / focus loss / a same-geometry decrease keeps its latch too:
+            // the exemption covers ONLY the exit the scale step itself causes. The
+            // frame then re-enters the counted scale settle below. Read the 25% line
+            // narrowly: it is the PURE scale<1 / 0.75 → 1 re-judgement. A latch an
+            // earlier scale > 1 exit already booked is NOT erased by the trip home or
+            // by the settle, so after a scale > 1 → 1 the settled frame re-enters on
+            // the latched 50% recovering line unless a click / focusin / geometry
+            // change unlocked it first (D-D; executed by D2-6).
+            const zoomReturnFrame = !zoomed && previousTerminalScale > 0
+                && Math.abs(previousTerminalScale - 1) > 0.01;
+            // D-C (arbitration commit 6e8a006): the counted settle. The gate keeps
+            // the frozen footprint: the machine runs ONLY where a scale question
+            // exists — scale < 1, the trip back into the band, or a candidate
+            // already in flight. A scale = 1 steady state never reads this state,
+            // and in-band jitter is owned by the frozen ±0.01 threshold above, not
+            // by the settle (D-D). Only the 500ms self-check tick counts (see the
+            // "scaleSettleTick" token at initVisualViewportHandling); document.hidden
+            // never reaches this code at all, because the interval itself skips the
+            // judgment there.
+            const selfCheckPass = scaleSettleTickToken === "scaleSettleTick";
+            let scaleBelowOneSettled = false;
+            if (zoomed && !scaleBelowOne) {
+                // D-C (arbitration 6e8a006 re-review): scale > 1 is the CONSERVATIVE
+                // opt-out domain and it runs no scale question — every frame there
+                // already opts out through zoomOptOut. So the domain neither OPENS
+                // nor BANKS a candidate: an in-flight candidate inherited from
+                // scale < 1 is dropped here, which is what makes the trip back to 1
+                // count a FULL two ticks instead of resuming a count earned while the
+                // zoom owed nothing. Six clears, the machine's whole footprint.
+                scaleSettleCandidate = 0;
+                scaleSettleBaseline = 0;
+                scaleSettleTicked = 0;
+                scaleSettleLayoutHeight = 0;
+                scaleSettleVVWidth = 0;
+                scaleSettleRaw = 0;
+            } else if (scaleBelowOne || zoomReturnFrame || scaleSettleCandidate !== 0) {
+                const hasCandidate = scaleSettleCandidate !== 0;
+                const vvWidth = vv ? vv.width : 0;
+                // Drift is measured against the CANDIDATE BASELINE, so a slow crawl
+                // of steps each smaller than ε still breaks once the accumulated
+                // difference exceeds ε.
+                const driftBeyondEpsilon = hasCandidate
+                    && Math.abs(scale - scaleSettleBaseline) > SCALE_SETTLE_EPSILON;
+                const settled = hasCandidate
+                    && scaleSettleTicked >= SCALE_SETTLE_TICKS && !driftBeyondEpsilon;
+                if (!hasCandidate || driftBeyondEpsilon
+                    || (!settled && (Math.abs(scale - previousTerminalScale) > SCALE_SETTLE_EPSILON
+                        || layoutHeight !== scaleSettleLayoutHeight
+                        || vvWidth !== scaleSettleVVWidth
+                        || raw !== scaleSettleRaw))) {
+                    // Open / re-open the candidate on THIS pass: this frame's scale,
+                    // layout, VV width and raw become the new baseline and the count
+                    // restarts. An event-driven pass may land here and break a
+                    // candidate, but it never advances one.
+                    scaleSettleCandidate = scale;
+                    scaleSettleBaseline = scale;
+                    scaleSettleTicked = 0;
+                    scaleSettleLayoutHeight = layoutHeight;
+                    scaleSettleVVWidth = vvWidth;
+                    scaleSettleRaw = raw;
+                } else if (selfCheckPass && scaleSettleTicked < SCALE_SETTLE_TICKS) {
+                    // The ONLY counting site, and it SATURATES: once the two ticks
+                    // are in, further identical ticks are idempotent and the settle
+                    // is announced once instead of re-firing every 500ms.
+                    scaleSettleTicked++;
+                }
+                scaleBelowOneSettled = scaleBelowOne
+                    && scaleSettleTicked >= SCALE_SETTLE_TICKS
+                    && Math.abs(scale - scaleSettleBaseline) <= SCALE_SETTLE_EPSILON;
+                if (!zoomed && scaleSettleTicked >= SCALE_SETTLE_TICKS
+                    && Math.abs(scale - scaleSettleBaseline) <= SCALE_SETTLE_EPSILON) {
+                    // Back inside the band and counted out: the scale question is
+                    // closed, so the candidate is dropped and the scale = 1 steady
+                    // state stops consulting this state entirely.
+                    scaleSettleCandidate = 0;
+                    scaleSettleTicked = 0;
+                }
             }
+            const zoomOptOut = zoomed && !scaleBelowOneSettled;
+            // D-B / D-D (arbitration commit 6e8a006): this pass exits BECAUSE the
+            // scale stepped — an unsettled scale < 1 step, or the trip back into the
+            // band. Such an exit clears the OLD latch (the geometry unlock below)
+            // and pays 0, but does NOT book a NEW one; every other exit edge
+            // (scale > 1, raw <= 1, focus loss, the same-geometry decrease) keeps
+            // the frozen §5.6 latch behaviour character for character.
+            const scaleStepNoLatchExit = ((scaleBelowOne && !scaleBelowOneSettled
+                && scale !== previousTerminalScale) || zoomReturnFrame)
+                && raw > 1 && focusEditable;
+            // A candidate that has not counted its ticks yet is still PENDING: while
+            // it is pending nothing may enter. Above scale < 1 the unsettled verdict
+            // (zoomOptOut) already blocks the entry; this term is what makes the
+            // D-C settle real for the trip BACK into the band (D-D), where
+            // zoomOptOut is by definition false — without it the pass right after a
+            // zoom return would re-enter on a transient raw the candidate exists to
+            // rule out. In-band and saturated, or no zoom question at all, the
+            // candidate is closed and this term is false: the frozen entry machine.
+            const scaleSettlePending = scaleSettleCandidate !== 0
+                && scaleSettleTicked < SCALE_SETTLE_TICKS;
+            // D2 (arbitration commit 6e8a006): "ANY scale change = NEW GEOMETRY"
+            // rides the EXISTING window-geometry-change path below — the scale term
+            // only exists inside the settled-§5 half of D2 (scale < 1): a scale step
+            // there counts as a geometry change, so the STALE recovery latch is
+            // retired through the same existing unlock. What the step does NOT get
+            // is a settle grace: the step frame exits at the zoom edge above, so
+            // `terminalAvoidanceGeometryGrace` (booked from the ACTIVE session at
+            // the bottom of this function) is never set for it — the earlier claim
+            // that a scale step "keeps one settle grace" was false, and the counted
+            // D-C settle replaced it. Outside scale < 1 the term collapses to true
+            // and the expression is the frozen one, character for character.
+            const sameGeometry = layoutHeight === previousTerminalLayoutHeight
+                && !!vv && vv.width === previousTerminalVVWidth
+                && !(scaleBelowOne && scale !== previousTerminalScale);
+            const geometryChanged = !sameGeometry;
+            const activeGeometryChanged = terminalAvoidanceActive && geometryChanged;
+            if (geometryChanged) terminalAvoidanceRecovering = false;
+            const consumeGeometryGrace = terminalAvoidanceGeometryGrace && !geometryChanged;
+            // D2: the zoom term of this frozen exit edge is now zoomOptOut —
+            // scale > 1 every pass, and any UNSETTLED scale step (D2 rule 3),
+            // still exit through THIS existing edge with the recovery latch;
+            // a settled scale < 1 no longer exits here and falls into §5.
+            // D-D adds the trip BACK into the band (zoomReturnFrame) to the same
+            // existing edge, so a 0.75 → 1 / scale > 1 → 1 frame exits and pays 0
+            // instead of carrying the pre-zoom session over; scaleStepNoLatchExit
+            // (D-B / D-D) is the guard that keeps that exit from leaving a NEW
+            // latch, so the re-entry after the D-C settle is judged on the unlocked
+            // 25% line and not on 50% — no path dependence on how many zoom steps
+            // it took to get here.
+            if (zoomOptOut || zoomReturnFrame || raw <= 1 || !focusEditable) {
+                // Only a real session creates a recovery latch. A fresh page sitting
+                // at its baseline must still be allowed to open its first keyboard.
+                if (terminalAvoidanceActive && !scaleStepNoLatchExit) terminalAvoidanceRecovering = true;
+                terminalAvoidanceActive = false;
+            } else if (terminalAvoidanceActive && !activeGeometryChanged
+                && !consumeGeometryGrace && raw < previousTerminalRaw - 1) {
+                // Recovery is an EXIT, not a request to hold a partially occluded
+                // terminal forever. This is the landscape Magic-Keyboard case.
+                terminalAvoidanceActive = false;
+                terminalAvoidanceRecovering = true;
+            }
+            // D2: entry keeps every frozen gate (fresh, focusEditable, raw > 1,
+            // then the 25% / 50% lines below decide inside) and swaps the frozen
+            // `!zoomed` for `!zoomOptOut`: scale > 1 can still never enter, an
+            // UNSETTLED scale step can never enter, and a SETTLED scale < 1 is
+            // judged by the untouched entry machinery. `!zoomReturnFrame` is D-D:
+            // the frame that carries the scale back into the band is the exit frame,
+            // it does not re-enter on the same pass — the counted D-C settle decides
+            // the next one, on the unlocked 25% line (no latch was booked above).
+            // `!scaleSettlePending` is the same rule seen from the other side: an
+            // unsettled candidate holds the entry closed until it counts out.
+            if (!terminalAvoidanceActive && focusEditable && !zoomOptOut
+                && !zoomReturnFrame && !scaleSettlePending && raw > 1) {
+                const entryRatio = terminalAvoidanceRecovering
+                    ? KEYBOARD_REENTRY_RATIO : KEYBOARD_ENTRY_RATIO;
+                if (raw >= layoutHeight * entryRatio) {
+                    terminalAvoidanceActive = true;
+                    terminalAvoidanceRecovering = false;
+                }
+            }
+            terminalAvoidanceGeometryGrace = terminalAvoidanceActive && activeGeometryChanged;
+            const occlusion = terminalAvoidanceActive ? raw : 0;
+            // Mirror of what was OWED this pass, for the diagnostic probe
+            // (viewport_debug.js reads this value; it never re-derives it).
+            window.__mwTerminalOcclusion = occlusion;
+            // AUTH-20261105-D2-SETTLE-READONLY (VALIDATION 2026-11-05, executable
+            // refinement): the read-only settle mirror, published at THIS same
+            // mirror boundary, beside the numeric occlusion mirror above — which it
+            // neither replaces nor touches. Every value in it is a COPY of a number
+            // this pass already computed (the D-C settle memory, its settled /
+            // pending results, the frozen ±0.01 zoom flag): the product judged,
+            // latched and wrote its boxes BEFORE this block, and NOTHING in the
+            // product reads this object back. It carries bounded numbers, booleans
+            // and the two-word pass-source enum only — no text, no DOM, no
+            // timestamps, no identity, no reference into the live settle variables.
+            // The single read it performs is of its OWN last published snapshot,
+            // and only to continue the publish sequence and the bounded tick journal
+            // INSIDE this diagnostic channel: no judgment is re-taken from it and
+            // no number flows back into raw / occlusion / settle / latch. The
+            // published snapshot itself IS the continuity memory — the sequence and
+            // the journal live on the window, not on new module bindings, so the
+            // sliced-evaluated copies of this function (verify-live-choiceA.mjs's
+            // factory mirror among them, untouched under this authorization) run
+            // this block without new bindings to mirror, and "per page runtime"
+            // holds per page runtime: each window gets its own sequence from 1. A
+            // tampered or unreadable previous frame restarts the sequence at 1 with
+            // an empty journal, and if the read or the publish throws (a sealed
+            // page, a frozen stand-in window) the try/catch drops the DIAGNOSTIC
+            // ONLY — this pass has already owed and written everything it owes.
+            try {
+                // The ONLY read of the mirror: its own last published frame, for
+                // sequence / journal continuation. Not a judgment input.
+                const settlePublished = window.__mwTerminalSettle;
+                const settleSeqPrevious = settlePublished && Number.isSafeInteger(settlePublished.scaleSettlePassSeq)
+                    && settlePublished.scaleSettlePassSeq >= 1 ? settlePublished.scaleSettlePassSeq : 0;
+                const settleJournalPrevious = settlePublished && Array.isArray(settlePublished.scaleSettleTickJournal)
+                    ? settlePublished.scaleSettleTickJournal : [];
+                const SCALE_SETTLE_JOURNAL_MAX = 8;
+                const settleSnapshotScalars = {
+                    scaleSettleCandidate: scaleSettleCandidate,
+                    scaleSettleBaseline: scaleSettleBaseline,
+                    scaleSettleTicked: scaleSettleTicked,
+                    scaleSettleLayoutHeight: scaleSettleLayoutHeight,
+                    scaleSettleVVWidth: scaleSettleVVWidth,
+                    scaleSettleRaw: scaleSettleRaw,
+                    // The guard's OWN word, copied — not ticked<2 re-spelled.
+                    scaleSettlePending: scaleSettlePending,
+                    scaleBelowOneSettled: scaleBelowOneSettled,
+                    // Diagnostic projection over the EXISTING D-C memory: the trip
+                    // back into the band is in flight while its candidate still
+                    // counts. This is NOT the zoomReturnFrame const above (that names
+                    // THIS frame's exit edge) and NOT a new product state — it is
+                    // the authorization's formula, read-only, never written back.
+                    zoomReturnFramePending: !zoomed && scaleSettleCandidate !== 0 && scaleSettleTicked < SCALE_SETTLE_TICKS,
+                    // Fixed two-word enum: the existing token or "other". An
+                    // "other" pass is never guessed at being resize / scroll /
+                    // focusout / init — the applier only ever knows the token.
+                    scaleSettlePassSource: selfCheckPass ? "scaleSettleTick" : "other",
+                    scaleSettlePassSeq: settleSeqPrevious + 1,
+                };
+                // Only a product self-check tick enters the journal (never a jitter
+                // pass), the ring is frozen copies capped at 8 — no nested journal,
+                // no new timer, no new event source, no product→probe call.
+                const settleTickJournal = selfCheckPass
+                    ? Object.freeze(settleJournalPrevious.concat([Object.freeze(settleSnapshotScalars)]).slice(-SCALE_SETTLE_JOURNAL_MAX))
+                    : Object.freeze(settleJournalPrevious.slice());
+                window.__mwTerminalSettle = Object.freeze(Object.assign({}, settleSnapshotScalars, {
+                    scaleSettleTickJournal: settleTickJournal,
+                }));
+            } catch (_) { /* the diagnostic is dropped; the product pass is untouched */ }
+            previousTerminalRaw = raw;
+            previousTerminalLayoutHeight = layoutHeight;
+            previousTerminalVVWidth = vv ? vv.width : 0;
+            // D2 (arbitration commit 6e8a006): recorded once per pass, like the
+            // raw / layout / width history — this is the ADJACENT reading the D-C
+            // settle compares against (the candidate baseline above is the other
+            // half), nothing else.
+            previousTerminalScale = scale;
+            // Align the host's real bottom with the keyboard's top edge. The
+            // terminal container already sits above Transport and its own margin /
+            // border, so subtract that measured bottom chrome from the occlusion
+            // instead of leaving a second status-bar-sized blank above the keyboard.
+            const bottomChrome = Math.max(0, layoutHeight - container.getBoundingClientRect().bottom);
+            const target = Math.max(0, occlusion - bottomChrome) + "px";
+            // EVERY host in #terminal-container, hidden and inactive included
+            // (createTerminalHost here, PtyRenderer._createSession in
+            // kinds/pty.js — both stamp data-instance-id and write
+            // position:absolute; inset:0 into the host's own style.cssText, so
+            // this longhand is the LAST word on that box: no other rule in the
+            // document restyles these hosts, and structural-check.mjs
+            // re-measures the resolved bottom in a real engine). The two overlay
+            // boxes written below are in that same set of "terminal's own boxes"
+            // and are guarded the same way; the shell and the root are not in it.
+            const hosts = container.querySelectorAll(":scope > [data-instance-id]");
+            let written = 0;
+            for (let i = 0; i < hosts.length; i++) {
+                // Write ONLY when the value actually changes. `layoutHeight` and
+                // `vv.height` are LIVE here, so a single-frame glitch could
+                // otherwise rewrite an identical value on every pass and re-fire
+                // the host's ResizeObserver — and through it the terminal's fit
+                // and sendResize — for no gain.
+                if (hosts[i].style.bottom !== target) {
+                    hosts[i].style.bottom = target;
+                    written++;
+                }
+            }
+            // Only the quick-keys control column joins the PTY hosts in local
+            // avoidance. Its top stays fixed while its height and panel shrink.
+            // Transport deliberately stays fixed at the physical bottom, including
+            // during keyboard avoidance; it is not part of this write set.
+            // Missing controls are skipped for login/pre-boot pages.
+            const controls = document.getElementById("terminal-controls");
+            if (controls) {
+                const controlsTarget = (CONTROLS_BOTTOM_OFFSET + occlusion) + "px";
+                if (controls.style.bottom !== controlsTarget) {
+                    controls.style.bottom = controlsTarget;
+                    written++;
+                }
+            }
+            return written > 0;
         }
 
-        // R6: the visual viewport also pans (pinch-zoom, or iOS revealing
-        // the focused field above the keyboard) and fires scroll there.
-        // Scroll must never INTRODUCE a pin: while nothing is occluded the
-        // CSS cascade owns the height (a pan alone never proves occlusion),
-        // so an unpinned app gets a no-op. An EXISTING pin, by contrast,
-        // follows the visible bottom edge in BOTH directions — it is a
-        // re-application of the full judgment, bounded above by
-        // documentElement.clientHeight (the visual viewport cannot pan out
-        // of the layout viewport, and a pinch-zoomed scale already
-        // short-circuited to no pin).
-        function reapplyPinnedVisualViewportHeight() {
-            const app = document.getElementById("app");
-            if (!app || !app.style.height) return;
-            applyVisualViewportHeight();
+        // The visualViewport SCROLL listener's anchor. A pan cannot introduce or
+        // remove occlusion here (occlusion is client-space vv.height against the
+        // stable layout height, and the shell is out of flow), so the call stays
+        // a no-op that writes nothing; the anchor is where the structural
+        // guarantee lives, and the name says what this build does — re-AVOID,
+        // never re-TOP. It is NOT the reason the page cannot scroll any more
+        // (that is the root's `overflow: clip`), and no root scroll is written
+        // here.
+        function reapplyVisualViewportOcclusion() {
+            applyVisualViewportOcclusion();
         }
 
-        // Desktop and legacy browsers may have no window.visualViewport at
-        // all: degrade to a no-op — no listeners are registered and the CSS
-        // dvh/fallback pair remains the whole story.
         function initVisualViewportHandling() {
+            // Desktop and legacy browsers may have no window.visualViewport at
+            // all: the static 100dvh / 100vh basis owns the height, nothing is
+            // covered, and nothing is installed. Staying FULL HEIGHT with nothing
+            // covered is the correct answer, not a degradation.
             const vv = window.visualViewport;
             if (!vv) return;
-            // resize: keyboard open/close, URL-bar show/hide, zoom change —
-            // the full judgment, in both directions.
-            vv.addEventListener("resize", applyVisualViewportHeight);
-            // scroll: visual-viewport pan — re-pin only what is pinned.
-            vv.addEventListener("scroll", reapplyPinnedVisualViewportHeight);
-            applyVisualViewportHeight();
+            vv.addEventListener("resize", applyVisualViewportOcclusion);
+            vv.addEventListener("scroll", reapplyVisualViewportOcclusion);
+            // A NEW tap/focus is user intent to start another input session. Clear
+            // the previous recovery latch here, rather than making a second keyboard
+            // opening satisfy a larger ratio. Click (not touchstart) means a scroll
+            // gesture cannot accidentally re-arm the terminal.
+            const intentContainer = document.getElementById("terminal-container");
+            if (intentContainer) {
+                intentContainer.addEventListener("click", () => {
+                    terminalAvoidanceRecovering = false;
+                }, { passive: true });
+            }
+            // THE SILENT-CHANGE BACKSTOP. The contract's own rule — an OPEN
+            // keyboard session pays raw (274 ⇒ 428 on the measured layout) and a
+            // CLOSED session pays 0 — is a
+            // RECOMPUTATION against a live measurement, and Safari is free to
+            // change the height without ever firing an event: the manual
+            // magic-hint frame (b90643be…, seq388) shows the REAL overlay up
+            // while vv.height = 702 with the bar pinned, and the same session's
+            // seq54 shows a recovery with the overlay gone, vv back at 702 and
+            // not ONE resize / scroll event in between. A stale occlusion is a
+            // stale host bottom: either rows sit under the keyboard, or the
+            // terminal stays lifted off a bottom that is visible again. So the
+            // avoidance judgment runs on focus, orientation, resize, pageshow,
+            // visibilitychange and a 500ms tick, and each of those paths runs the
+            // judgment ITSELF (applyVisualViewportOcclusion) rather than a
+            // scroll-shaped wrapper: an occlusion change must be caught without
+            // any scroll semantics being dragged along, and there is no follow-up
+            // rAF because there is no scroll to follow.
+            for (const type of ["pageshow", "orientationchange"]) {
+                window.addEventListener(type, applyVisualViewportOcclusion);
+            }
+            for (const type of ["visibilitychange", "focusout"]) {
+                document.addEventListener(type, applyVisualViewportOcclusion);
+            }
+            document.addEventListener("focusin", () => {
+                terminalAvoidanceRecovering = false;
+                applyVisualViewportOcclusion();
+            });
+            // 500ms: fast enough that a stale host bottom is a blink rather than
+            // a state, slow enough that it costs nothing (every write is a no-op
+            // unless the occlusion actually moved). This is a backstop for the
+            // HOST BOTTOM only; it is not, and must not become, a loop that
+            // drags the root back to the top or sizes the shell.
+            // The "scaleSettleTick" token is the ONE thing that makes this pass
+            // special: it is the only pass allowed to COUNT toward the D-C scale
+            // settle (arbitration commit 6e8a006). No new timer and no new event
+            // source — the same interval, the same judgment, one extra argument.
+            // Every other path (the vv resize / scroll listeners above, which hand
+            // in an Event, pageshow / orientationchange / visibilitychange /
+            // focusout, focusin, and the direct calls) gets an undefined argument
+            // and therefore only ever breaks a candidate, never advances one; and
+            // while document.hidden the judgment does not run at all, so a
+            // background tab accumulates nothing.
+            setInterval(() => {
+                if (!document.hidden) applyVisualViewportOcclusion("scaleSettleTick");
+            }, 500);
+            applyVisualViewportOcclusion();
         }
 
         // R17 touch-scroll state (issue #100 padOS②, PR #110 beta). Module
@@ -3446,6 +4395,102 @@
         // The signed remainder carries across events so sub-line drifts
         // never lose steps or jump; the line-height approximation only
         // affects scroll SPEED, never direction or destination.
+        // issue #116 (contract v2.2): this is a GESTURE BOUNDARY, not the reason
+        // the page cannot scroll — that is structural (html/body `overflow: clip`,
+        // #app out of flow). What this lock still owns is the gesture ARBITRATION
+        // iOS performs before it ever gets there: a drag that starts on the
+        // header, the safe-area strip or the gap around the workspace must not
+        // reach the compositor's page-panning at all, and initTerminalTouchScroll()
+        // only ever hard-locked the document through a touchmove listener bound to
+        // #terminal-container — so every other pixel of the shell was left
+        // unguarded, which is exactly how the shell was panned 69px and how the
+        // canvas band appeared. Deleting this would NOT re-open the scroll range;
+        // it would only let a gesture get as far as asking for one. Two deliberate
+        // exemptions:
+        //
+        //   - native scrollers keep working: walking up from the touch target, if
+        //     any ancestor up to <body> actually overflows AND computes to
+        //     overflow-y auto/scroll, the drag belongs to that scroller (sidebar
+        //     panels, the monitor table, modal bodies, the quick-keys panel), so
+        //     the default is left alone;
+        //   - web-kind iframes are exempt outright. Their content lives in its own
+        //     document and must keep scrolling; blocking here would freeze the
+        //     opencode / reasonix / dsh UIs.
+        //
+        // Multi-finger touches are exempt so pinch-zoom is not swallowed (the
+        // zoom guard in applyVisualViewportOcclusion already handles scale != 1).
+        // The listener is { passive: false } because preventDefault is the whole
+        // point — a passive listener would be ignored.
+        function initShellScrollLock() {
+            const SCROLLABLE = /(auto|scroll)/;
+            // A box that scrolls ITSELF natively — a real scroller (computed
+            // overflow-y auto/scroll AND actual overflow present) or an iframe.
+            // Both keep their own scrolling: swallowing their drag would freeze the
+            // sidebar panels / monitor table / modal bodies / quick-keys panel and
+            // the opencode / reasonix / dsh surfaces. The TERMINAL is deliberately
+            // NOT in this set — see the wheel listener, where a wheel over the
+            // terminal must block the root's default pan.
+            function nativeScrollOwner(target) {
+                let el = target;
+                while (el && el !== document.body && el !== document.documentElement) {
+                    if (el.tagName === "IFRAME") return true;
+                    const style = window.getComputedStyle(el);
+                    if (style && SCROLLABLE.test(style.overflowY || "") && el.scrollHeight > el.clientHeight + 1) {
+                        return true;
+                    }
+                    el = el.parentElement;
+                }
+                return false;
+            }
+            // The TERMINAL's TOUCH gesture owner, the touchmove path only.
+            // #terminal-container already preventDefaults and maps the drag onto
+            // xterm.scrollLines() (initTerminalTouchScroll), so a touch that starts
+            // in the terminal is exempt HERE — that single implementation stays
+            // authoritative instead of double-handling. Native scrollers and iframes
+            // are exempt for the reasons above.
+            function ownsTouchGesture(target) {
+                let el = target;
+                while (el && el !== document.body && el !== document.documentElement) {
+                    if (el.tagName === "IFRAME") return true;
+                    if (el.id === "terminal-container") return true;
+                    if (el.classList && el.classList.contains("xterm")) return true;
+                    const style = window.getComputedStyle(el);
+                    if (style && SCROLLABLE.test(style.overflowY || "") && el.scrollHeight > el.clientHeight + 1) {
+                        return true;
+                    }
+                    el = el.parentElement;
+                }
+                return false;
+            }
+            document.addEventListener("touchmove", (e) => {
+                if (e.touches && e.touches.length > 1) return;
+                if (ownsTouchGesture(e.target)) return;
+                e.preventDefault();
+            }, { passive: false });
+            // Trackpad / mouse-wheel panning is a SECOND door onto the same room.
+            // A Magic Keyboard trackpad two-finger scroll emits `wheel`, not
+            // `touchmove`. Measured (p7, session 854069ba…): on 333 frames with
+            // offsetTop > 0 the document.scrollTop / scrollingElementScrollTop walked
+            // non-zero IN STEP even though rootScrollHeight == clientHeight == 702
+            // and html/body compute to overflow:clip — iPadOS does not honour the
+            // root clip against a trackpad wheel, so the clip alone cannot hold this
+            // door. The terminal can no longer be exempt from it: a two-finger scroll
+            // that lands on the terminal scrolled xterm AND panned the whole shell.
+            // So the wheel path blocks the root default even over the terminal.
+            // This does NOT double-scroll: xterm's own wheel handler is bound closer
+            // to the target than this document listener, so it has already consumed
+            // the terminal scroll by the time the event bubbles here; this listener
+            // owes the page a preventDefault and NOTHING more — it never calls
+            // term.scrollLines. Native scrollers and iframes keep scrolling (they are
+            // in nativeScrollOwner, exempted above); ctrlKey is the browser's
+            // pinch-zoom signal for wheel and stays exempt so zooming still works.
+            document.addEventListener("wheel", (e) => {
+                if (e.ctrlKey) return;
+                if (nativeScrollOwner(e.target)) return;
+                e.preventDefault();
+            }, { passive: false });
+        }
+
         function initTerminalTouchScroll() {
             const container = document.getElementById("terminal-container");
             if (!container) return;
@@ -4423,6 +5468,8 @@
             initVisualViewportHandling();
             // R17: terminal touch-scroll mapping + the touchmove page lock.
             initTerminalTouchScroll();
+            // issue #116: the same page lock, extended past #terminal-container.
+            initShellScrollLock();
             refresh();
             // Polling for status updates (2s)
             if (pollTimer) clearInterval(pollTimer);
@@ -6233,7 +7280,43 @@
             host.dataset.instanceId = id;
             host.style.cssText = "position:absolute; inset:0; display:none;";
             document.getElementById("terminal-container").appendChild(host);
+            // issue #116 contract v3.0: a host born while something already
+            // covers the bottom must not start at inset:0 and wait for the next
+            // visualViewport event or the 500ms backstop to lift off it — the
+            // applier is idempotent and writes ONLY hosts whose bottom differs
+            // from the current occlusion, so this costs one compare per existing
+            // host and nothing at all when nothing is covered. Guarded because
+            // this factory is also sliced out and run in isolation by the
+            // terminal-status harness, where the viewport layer is not loaded —
+            // the same guard kinds/pty.js uses for the same reason.
+            if (typeof applyVisualViewportOcclusion === "function") applyVisualViewportOcclusion();
             return host;
+        }
+
+        function terminalThemeBackground() {
+            return getComputedStyle(document.documentElement).getPropertyValue("--term-bg").trim() || "#000000";
+        }
+
+        // Keep existing PTY canvases on the same system theme as the rounded
+        // shell. New sessions read the same token in both terminal factories.
+        function syncTerminalTheme() {
+            const renderer = window.__ptyRenderer;
+            if (!renderer || typeof renderer.allSessions !== "function") return;
+            const background = terminalThemeBackground();
+            renderer.allSessions().forEach(session => {
+                if (!session.term) return;
+                session.term.options.theme = Object.assign({}, session.term.options.theme, { background });
+            });
+        }
+        const terminalColorScheme = typeof window.matchMedia === "function"
+            ? window.matchMedia("(prefers-color-scheme: dark)")
+            : null;
+        if (terminalColorScheme) {
+            if (typeof terminalColorScheme.addEventListener === "function") {
+                terminalColorScheme.addEventListener("change", syncTerminalTheme);
+            } else if (typeof terminalColorScheme.addListener === "function") {
+                terminalColorScheme.addListener(syncTerminalTheme);
+            }
         }
 
         function createTerminalSession(id) {
@@ -6340,12 +7423,19 @@
                 resizeObserver: null,
                 lastResizeTime: 0,
                 appliedTTYSize: null,
+                // Resize-throttle state (issue #116), identical in the factory in
+                // kinds/pty.js: the newest size collected inside the window, the
+                // ONE timer that delivers it, and the last size that actually
+                // reached the socket — the dedupe key.
+                pendingTTYResize: null,
+                ttyResizeTrailingTimer: null,
+                lastSentTTYResize: null,
             };
 
             session.term = new Terminal({
                 convertEol: true, cursorBlink: true,
                 fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
-                fontSize: 13, theme: { background: "#0b1020" },
+                fontSize: 13, theme: { background: window.terminalThemeBackground ? window.terminalThemeBackground() : "#000000" },
                 scrollback: 10000
             });
 
@@ -6370,11 +7460,14 @@
                     session.term.resize(Math.floor(w / 9), Math.floor(h / 17));
                 }
 
-                const now = Date.now();
-                if (now - session.lastResizeTime > 100 && session.term.cols > 0 && session.term.rows > 0) {
-                    session.lastResizeTime = now;
-                    sendResize(session, session.term.cols, session.term.rows);
-                    syncTerminalToAppliedSize(session);
+                if (session.term.cols > 0 && session.term.rows > 0) {
+                    // issue #116: fit, then ASK for that size through the shared
+                    // throttle. This path used to pair sendResize with
+                    // syncTerminalToAppliedSize, painting the PREVIOUS ack over the
+                    // size fit() had just measured — permanently wherever sendResize
+                    // refused because the socket was not OPEN. The ack is adopted on
+                    // the `resize` control frame that carries it, not here.
+                    queueTTYResize(session, session.term.cols, session.term.rows);
                 }
             });
             session.resizeObserver.observe(host);
@@ -6491,6 +7584,15 @@
                 session.resizeObserver.disconnect();
                 session.resizeObserver = null;
             }
+            // issue #116: disarmed here as well as in disconnectTTY above, so this
+            // pre-renderer teardown cannot leave a trailing timer behind for a
+            // session that no longer exists.
+            if (session.ttyResizeTrailingTimer) {
+                clearTimeout(session.ttyResizeTrailingTimer);
+                session.ttyResizeTrailingTimer = null;
+            }
+            session.pendingTTYResize = null;
+            session.lastSentTTYResize = null;
             if (session.term && typeof session.term.dispose === "function") {
                 session.term.dispose();
                 session.term = null;
@@ -6751,8 +7853,9 @@
                     try { activeSession.fitAddon.fit(); } catch (e) { console.error("xterm fit error:", e); }
                 }
                 if (activeSession.term.cols > 0 && activeSession.term.rows > 0) {
-                    sendResize(activeSession, activeSession.term.cols, activeSession.term.rows);
-                    syncTerminalToAppliedSize(activeSession);
+                    // issue #116: same rule as every other fit path — ask via the
+                    // throttle, adopt an ack only when the server sends one.
+                    queueTTYResize(activeSession, activeSession.term.cols, activeSession.term.rows);
                 }
             }, 0);
         }
@@ -7181,6 +8284,50 @@
             // sidebar worktree row's (issue #122).
             if (state.renamingInst || state.renamingWT) return;
 
+            // AUTH-20261105-P3-FOCUS-GUARD (sanctioned 2026-11-07): the
+            // owner-reported Phase 3 device defect — the quick-keys PASTE
+            // textarea had its focus stolen back to the terminal by this
+            // poll (VALIDATION a22c anomaly A / F5). focusTerminalIfPossible
+            // is a frozen-baseline 5268869 mechanism; this early return is
+            // the ONE authorized deviation, driven ONLY by the owner's
+            // current request and PLAN section AUTH-20261105-P3-FOCUS-GUARD
+            // — it is not a freeze-audit miss, an automatic revert, or a
+            // speculative fix. It reuses the SAME two reads as the Phase 3
+            // ownership predicate in applyVisualViewportOcclusion — the
+            // focusEditableElement trio (TEXTAREA / INPUT / contenteditable)
+            // and the stamp-finding parentElement walk (that predicate and
+            // its three consumers are untouched here). The host test HERE is
+            // DELIBERATELY LOOSE: ANY truthy data-instance-id ancestor counts
+            // as "inside a terminal", whereas the ownership predicate
+            // ADDITIONALLY requires that stamped ancestor to be a DIRECT
+            // child of #terminal-container and NOT display:none. So an
+            // editable (TEXTAREA / INPUT / contenteditable) with NO truthy
+            // data-instance-id ancestor ANYWHERE is an HO-3 Web input and
+            // keeps its focus, and the refusal stays the NARROWER set — an
+            // editable whose stamped ancestor fails those two extra tests
+            // still reaches session.term.focus() exactly as the frozen
+            // baseline did. The poll deliberately NO LONGER corrects that
+            // drift — leaving the focus where the user put it on a page Web
+            // input is the TARGET SEMANTICS of this authorization, not a
+            // regression. The guard is a PURE READ: it calls no focus() and
+            // no ensureIosImeDirectInputBridge (which already ran above,
+            // unchanged), writes no DOM, dispatches no events, so no focusin
+            // ↔ guard re-entry loop can form.
+            // Non-editable focus — with or without a stamped ancestor —
+            // reaches the same outcome as before; only "editable without a
+            // stamped ancestor" is newly refused.
+            const active = document.activeElement;
+            if (active && (active.tagName === "TEXTAREA" || active.tagName === "INPUT" || active.isContentEditable)) {
+                let hostAncestor = null;
+                for (let node = active.parentElement; node; node = node.parentElement) {
+                    if (node.dataset && node.dataset.instanceId) {
+                        hostAncestor = node;
+                        break;
+                    }
+                }
+                if (!hostAncestor) return;
+            }
+
             session.term.focus();
         }
 
@@ -7287,6 +8434,63 @@
             applyTTYSize(session, session.appliedTTYSize.cols, session.appliedTTYSize.rows);
         }
 
+        // issue #116: the fit → resize throttle, shared by every fit path in both
+        // session factories. Leading edge + ONE trailing edge: a size seen inside
+        // the window is remembered (payload replaced, never re-armed, so a stream
+        // of fits cannot postpone the send) and goes out when the window closes —
+        // the retired leading-only gate silently dropped the newest fit, and a
+        // settled host box never re-fired the observer to deliver it. The ack is
+        // never adopted here; applyTTYSize on the `resize` frame does that.
+        //
+        // The window constant lives inside the function because the unit tests
+        // slice named functions out of this document and evaluate them standalone,
+        // and a module-level const sits outside that slice.
+        function queueTTYResize(session, cols, rows) {
+            if (!session || !session.term) return;
+            if (cols <= 0 || rows <= 0) return;
+            const MIN_RESIZE_MS = 100;
+            const now = Date.now();
+            if (session.pendingTTYResize) {
+                session.pendingTTYResize.cols = cols;
+                session.pendingTTYResize.rows = rows;
+                return;
+            }
+            const elapsed = now - (session.lastResizeTime || 0);
+            if (elapsed >= MIN_RESIZE_MS) {
+                session.lastResizeTime = now;
+                dispatchTTYResize(session, cols, rows);
+                return;
+            }
+            session.pendingTTYResize = { cols, rows };
+            session.ttyResizeTrailingTimer = setTimeout(() => {
+                session.ttyResizeTrailingTimer = null;
+                const pending = session.pendingTTYResize;
+                session.pendingTTYResize = null;
+                if (!pending) return;
+                session.lastResizeTime = Date.now();
+                dispatchTTYResize(session, pending.cols, pending.rows);
+            }, MIN_RESIZE_MS - elapsed);
+        }
+
+        // Sends one size unless it is the size already on the wire, and reports
+        // whether anything went out. sendResize's answer decides what is remembered:
+        // a refusal (no OPEN socket) must NOT occupy the dedupe slot, or a
+        // reopened socket would skip the resize it still owes the PTY.
+        function dispatchTTYResize(session, cols, rows) {
+            if (!session || !session.term) return false;
+            if (cols <= 0 || rows <= 0) return false;
+            const last = session.lastSentTTYResize;
+            if (last && last.cols === cols && last.rows === rows) return false;
+            if (!sendResize(session, cols, rows)) {
+                // No request reached the server, so no ack can arrive. Restore the
+                // last applied size instead of leaving the fitted screen mismatched.
+                syncTerminalToAppliedSize(session);
+                return false;
+            }
+            session.lastSentTTYResize = { cols, rows };
+            return true;
+        }
+
         function parseTTYControlMessage(data) {
             if (typeof data !== "string" || data.length === 0 || data[0] !== "{") return null;
             try {
@@ -7334,11 +8538,16 @@
             resetTTYStreamAndReconnect(session, "overflow notice");
         }
 
+        // Reports whether the frame ACTUALLY went out (issue #116): the throttle
+        // remembers a size as sent, and a refusal — the common case on an SSE-only
+        // session and during every reconnect — must not occupy that record, or the
+        // reopened socket would skip the resize it still owes.
         function sendResize(session, cols, rows) {
-            if (!session || !session.ttySocket || session.ttySocket.readyState !== WebSocket.OPEN) return;
-            if (cols <= 0 || rows <= 0) return;
+            if (!session || !session.ttySocket || session.ttySocket.readyState !== WebSocket.OPEN) return false;
+            if (cols <= 0 || rows <= 0) return false;
             const msg = JSON.stringify({ type: "resize", cols, rows });
             session.ttySocket.send(msg);
+            return true;
         }
 
         // Fetches logs from the server and writes them to the terminal.
@@ -7509,6 +8718,18 @@
                 clearTimeout(session.ttyReconnectTimer);
                 session.ttyReconnectTimer = null;
             }
+            // issue #116: the resize throttle's trailing send dies here too. This
+            // is the teardown every path goes through — disconnect, reconnect,
+            // overflow reset, session destroy — so no pending size can fire against
+            // a socket that is already gone. The dedupe key resets with it: a
+            // reopened socket starts with an empty per-connection size table
+            // server-side, so repeating the old cols/rows is a NEW request there.
+            if (session.ttyResizeTrailingTimer) {
+                clearTimeout(session.ttyResizeTrailingTimer);
+                session.ttyResizeTrailingTimer = null;
+            }
+            session.pendingTTYResize = null;
+            session.lastSentTTYResize = null;
             if (session.logStream) {
                 session.logStream.onmessage = null;
                 session.logStream.onerror = null;
@@ -8024,6 +9245,15 @@
                         if (state.activeInst === id) {
                             updateStatus("websocket live");
                         }
+                        // Socket establishment path, one of two (the other is the
+                        // first-data tick below) — the only places
+                        // syncTerminalToAppliedSize still runs (issue #116): a PTY
+                        // that has just reached READY genuinely still has the size it
+                        // last applied, so the screen matching it for one round trip
+                        // is the truthful picture. Not routed through
+                        // queueTTYResize — the handshake waits for this client's
+                        // first resize frame, so it must go now even if it repeats a
+                        // size an earlier socket carried.
                         if (session.term && session.term.cols > 0 && session.term.rows > 0) {
                             sendResize(session, session.term.cols, session.term.rows);
                             syncTerminalToAppliedSize(session);
@@ -8036,6 +9266,14 @@
                         return;
                     }
                     if (controlMsg && controlMsg.type === 'resize') {
+                        // issue #116: this is where an applied size is adopted — on
+                        // the frame that carries it, and nowhere else. Every fit path
+                        // now only ASKS (queueTTYResize), so a screen fitted to a
+                        // bigger box is never pulled back to the previous ack before
+                        // this answer lands; and when the server answers with
+                        // something else than it was asked for — the applied size is
+                        // the minimum across the viewers of one instance — that answer
+                        // wins, the authority it has always had.
                         applyTTYSize(session, controlMsg.cols, controlMsg.rows);
                         return;
                     }
@@ -8161,6 +9399,10 @@
                             if (session.term && ws === session.ttySocket && ws.readyState === WebSocket.OPEN) {
                                 const cols = session.term.cols;
                                 const rows = session.term.rows;
+                                // The second socket-establishment site (issue #116):
+                                // a TUI that just produced its first byte produced it at
+                                // the size the PTY actually has. No fit path reaches
+                                // here — queueTTYResize asks, it does not answer.
                                 if (cols > 0 && rows > 0) {
                                     sendResize(session, cols, rows);
                                     syncTerminalToAppliedSize(session);
@@ -9167,9 +10409,19 @@
         window.reportSessionError = reportSessionError;
         window.sendResize = sendResize;
         window.syncTerminalToAppliedSize = syncTerminalToAppliedSize;
+        // issue #116: the fit paths in kinds/pty.js share THIS throttle, so it is
+        // exported — a second copy of the timing there would be a second thing to
+        // forget to fix.
+        window.queueTTYResize = queueTTYResize;
         window.applyTTYSize = applyTTYSize;
         window.parseTTYControlMessage = parseTTYControlMessage;
         window.renderTerminalSessions = renderTerminalSessions;
+        // issue #116 contract v3.0: kinds/pty.js creates the live PTY hosts and
+        // must be able to lift a host born under a covered bottom immediately
+        // instead of waiting for the next visualViewport event; the callee is
+        // guarded at the call site because that file is unit-tested in
+        // isolation, where this one is not loaded.
+        window.applyVisualViewportOcclusion = applyVisualViewportOcclusion;
 
         // Boot
         init();

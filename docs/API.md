@@ -1253,6 +1253,53 @@ Cache-coherence rule between the two endpoints (stated once, honored by both):
 - `sampled_at_ms=0` means "never sampled yet" (daemon just started, or the pre-first-tick window); the UI reads zero as no-data and shows no alerts rather than dressing up silence as an all-clear.
 - `alerts` is always an array, never `null`.
 
+### Viewport geometry diagnostics (issue #116 A0, opt-in)
+
+**Build gate:** the diagnostic script, asset and report endpoint are compiled only with `-tags viewportdebug`. Untagged stable builds return 404 for `/static/viewport_debug.js` and `/api/viewport-debug/report`, do not inject the script, and retain no report sessions. Beta builds use `-tags ttymetrics,viewportdebug`.
+
+Open the main UI with `?viewport-debug=1` to enable the in-page diagnostic panel. The browser generates a `debug-session` and uploads geometry-only reports; Safari Web Inspector is not required. **Capture starts automatically every second (`periodic`)** and can be toggled with Start/Stop continuous, so state transitions do not depend on a visible Capture button. Buttons use `pointerdown + preventDefault` to avoid moving terminal focus or dismissing the IME floating bar. The panel can also mark the Magic Keyboard floating bar (`magic-hint`) or software keyboard (`keyboard-hint`), pause captures, and copy the latest JSON offline. **When an existing `debug-session` is reused, the client first reads `latestSeq` and resumes numbering from it, so refreshing the page does not reset the report.**
+
+`POST /api/viewport-debug/report` uploads one report. `GET /api/viewport-debug/report?session=<id>&after=<seq>` returns only newer events. Authentication and same-origin checks are the same as the other main APIs, and responses carry `Cache-Control: no-store`.
+
+Upload shape (the static client builds this automatically):
+
+```json
+{
+  "session": "0123456789abcdef0123456789abcdef",
+  "seq": 4,
+  "snapshot": {
+    "capturedAt": "2026-10-27T12:00:00.000Z",
+    "reason": "magic-hint",
+    "innerWidth": 820,
+    "innerHeight": 1180,
+    "clientWidth": 820,
+    "clientHeight": 1180,
+    "dpr": 2,
+    "device": {"userAgent": "…", "platform": "iPad", "touchPoints": 5, "orientation": "portrait-primary", "screenWidth": 820, "screenHeight": 1180, "coarse": true},
+    "document": {"bodyBackground": "rgba(0, 0, 0, 0)", "htmlBackground": "rgba(0, 0, 0, 0)"},
+    "vv": {"width": 820, "height": 1164, "offsetTop": 0, "offsetLeft": 0, "scale": 1},
+    "app": {"top": 0, "bottom": 1164, "width": 820, "height": 1164, "computedHeight": "1164px", "inlineHeight": "1164px", "paddingTop": "0px", "paddingRight": "0px", "paddingBottom": "16px", "paddingLeft": "0px", "background": "rgba(0, 0, 0, 0)"},
+    "main": {"top": 0, "bottom": 1164, "width": 620, "height": 1164},
+    "workspace": {"top": 40, "bottom": 1148, "width": 620, "height": 1108, "background": "rgb(11, 16, 32)"},
+    "terminal": {"top": 40, "bottom": 1148, "width": 620, "height": 1108, "background": "rgb(11, 16, 32)"},
+    "webPanel": null,
+    "xtermScreen": {"top": 40, "bottom": 1147, "width": 620, "height": 1107},
+    "xtermRows": {"top": 40, "bottom": 1138, "width": 620, "height": 1098},
+    "ui": {"collapsed": false, "quickKeysOpen": true, "kind": "pty", "status": "running", "activeElementTag": "TEXTAREA"}
+  }
+}
+```
+
+Privacy and bounds:
+
+- Only the fields above are accepted. Unknown fields, terminal text, tokens, worktree names/paths, and instance IDs are rejected; `vv`, `terminal`, `webPanel`, `xtermScreen`, and `xtermRows` may be `null` when unavailable.
+- Body limit: 64 KiB. At most 8 sessions, 600 events per session, and a 30-minute idle TTL. The oldest session is evicted at capacity; expired sessions return 404. Reports are in-memory only and disappear on daemon restart.
+- `seq` is per-session and must be positive. Duplicate/older retries are idempotent no-ops and never overwrite newer observations; gaps are allowed after offline coalescing.
+- Response to upload: `{"accepted": true, "latestSeq": 4}`. A duplicate/older sequence returns `accepted: false` with the current latest sequence.
+- Download response: `{"session": "…", "updatedAt": "…", "latestSeq": 4, "events": [{"seq": 4, "receivedAt": "…", "snapshot": {…}}]}`. Omitting `after` (or `after=0`) returns the retained history.
+
+This is a temporary A0 measurement channel. It does not change viewport sizing, terminal input, instance lifecycle, or any existing API behavior.
+
 ### 5.9 Instance lifecycle (frontend)
 
 All page close/refresh/navigation events trigger a browser-native confirmation dialog. This is a purely client-side UX feature:

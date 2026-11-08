@@ -76,6 +76,19 @@ class PtyRenderer {
             try { s.fitAddon.fit(); } catch (e) { console.error('xterm fit error:', e); }
         }
 
+        // issue #116 D4②: a fit only ASKS. fit() above measured the size this
+        // foregrounded instance shows the moment it is activated, so deliver
+        // that measurement through the same shared throttle the ResizeObserver
+        // below uses; do NOT revert here — the ack is adopted only on the
+        // `resize` control frame that carries it, in index.html. A refused send
+        // (socket not OPEN) keeps its existing meaning of not occupying the
+        // dedupe slot. The size guard is what keeps this file safe to unit-test
+        // in isolation; the `typeof` guard mirrors the observer's delivery shape.
+        if (s.term.cols > 0 && s.term.rows > 0
+            && typeof window.queueTTYResize === 'function') {
+            window.queueTTYResize(s, s.term.cols, s.term.rows);
+        }
+
         // Hand off the connect / log-load / focus dance to the
         // existing global helpers. These depend on the page-wide
         // `state` and `api` and stay in index.html.
@@ -236,6 +249,17 @@ class PtyRenderer {
         host.dataset.instanceId = id;
         host.style.cssText = 'position:absolute; inset:0; display:none;';
         termContainer.appendChild(host);
+        // issue #116 contract v3.0: the host is born `inset:0`, so a host
+        // created while the keyboard or the floating panel covers the bottom
+        // would sit under it — and stay there, fitted to a height nobody can
+        // see, until the next visualViewport event or the 500ms backstop in
+        // index.html. Lifting it here, at the one moment the box exists, is
+        // the same idempotent, write-only-on-change call the shell uses;
+        // guarded because this file is unit-testable in isolation, where the
+        // shell's function is not loaded.
+        if (typeof window.applyVisualViewportOcclusion === 'function') {
+            window.applyVisualViewportOcclusion();
+        }
 
         const session = {
             id,
@@ -280,6 +304,12 @@ class PtyRenderer {
             ttyLivenessTimer: null,
             appliedTTYSize: null,
             lastResizeTime: 0,
+            // Resize-throttle state (issue #116) — the same three fields, same
+            // meaning, as the legacy factory in index.html. The two session
+            // factories have drifted before; these stay together.
+            pendingTTYResize: null,
+            ttyResizeTrailingTimer: null,
+            lastSentTTYResize: null,
         };
 
         session.term = new window.Terminal({
@@ -287,7 +317,7 @@ class PtyRenderer {
             cursorBlink: true,
             fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
             fontSize: 13,
-            theme: { background: '#0b1020' },
+            theme: { background: window.terminalThemeBackground ? window.terminalThemeBackground() : '#000000' },
             scrollback: 10000,
         });
 
@@ -312,11 +342,20 @@ class PtyRenderer {
                 const h = entry ? entry.contentRect.height : host.clientHeight;
                 session.term.resize(Math.floor(w / 9), Math.floor(h / 17));
             }
-            const now = Date.now();
-            if (now - session.lastResizeTime > 100 && session.term.cols > 0 && session.term.rows > 0) {
-                session.lastResizeTime = now;
-                if (window.sendResize) window.sendResize(session, session.term.cols, session.term.rows);
-                if (window.syncTerminalToAppliedSize) window.syncTerminalToAppliedSize(session);
+            // issue #116: fit, then ASK for that size through the throttle shared
+            // with index.html (leading edge + ONE trailing edge, so the newest size
+            // inside the window is delivered instead of dropped). This path used to
+            // pair sendResize with syncTerminalToAppliedSize, which repainted the
+            // PREVIOUS ack over the box fit() had just measured — permanently on any
+            // path where sendResize refused because the socket was not OPEN. The ack
+            // is adopted on the `resize` control frame that carries it, in
+            // index.html, nowhere else.
+            //
+            // Guarded like every other index.html helper here: this file stays
+            // unit-testable in isolation, where the shell's function is not loaded.
+            if (session.term.cols > 0 && session.term.rows > 0
+                && typeof window.queueTTYResize === 'function') {
+                window.queueTTYResize(session, session.term.cols, session.term.rows);
             }
         });
         session.resizeObserver.observe(host);
@@ -406,6 +445,16 @@ class PtyRenderer {
         if (s.resizeObserver) {
             try { s.resizeObserver.disconnect(); } catch (_) {}
         }
+        // issue #116: the trailing resize is disarmed here too, and cannot depend
+        // on the disconnectTTY call above — that one is guarded by try/catch and
+        // absent when this file is loaded in isolation. A timer outliving its
+        // session would fire a resize for a terminal that no longer exists.
+        if (s.ttyResizeTrailingTimer) {
+            clearTimeout(s.ttyResizeTrailingTimer);
+            s.ttyResizeTrailingTimer = null;
+        }
+        s.pendingTTYResize = null;
+        s.lastSentTTYResize = null;
         if (s.term) {
             try { s.term.dispose(); } catch (_) {}
         }

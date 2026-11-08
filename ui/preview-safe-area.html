@@ -1,0 +1,695 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="system" data-has-safe-area="true" data-show-frame="true">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Issue #116 · Safe-area 弧形外框预览</title>
+<style>
+    :root {
+        color-scheme: light;
+        --sidebar-width: 240px;
+        --header-height: 40px;
+        --control-size: 30px;
+        --safe-radius: 18px;
+        --transport-height: 24px;
+
+        /* 默认直接消费真实设备安全区；预览控制可用内联变量覆盖演示。 */
+        --safe-top: env(safe-area-inset-top, 0px);
+        --safe-right: env(safe-area-inset-right, 0px);
+        --safe-bottom: env(safe-area-inset-bottom, 0px);
+        --safe-left: env(safe-area-inset-left, 0px);
+
+        --bg-color: #f8fafc;
+        --panel-bg: #ffffff;
+        --sidebar-bg: #f3f5f8;
+        --border-color: #dce1e8;
+        --text-primary: #242b36;
+        --text-secondary: #657084;
+        --accent: #0969da;
+        --active-bg: #e7f0fc;
+        --hover-bg: rgba(70, 85, 105, 0.08);
+        --danger: #cb2431;
+        --term-bg: #111826;
+        --term-text: #a9d6b0;
+        --modal-backdrop: rgba(32, 39, 50, 0.32);
+
+        /* 安全区是有意的 chrome 留白，而不是各列背景留下的裸露补丁。 */
+        --safe-area-bg: #e9edf3;
+        --safe-line: rgba(69, 82, 102, 0.34);
+        --safe-highlight: rgba(255, 255, 255, 0.72);
+        --preview-shadow: 0 12px 36px rgba(38, 50, 66, 0.16);
+        --home-indicator: rgba(36, 43, 54, 0.42);
+    }
+
+    @media (prefers-color-scheme: dark) {
+        :root:not([data-theme="light"]) {
+            color-scheme: dark;
+            --bg-color: #0d1117;
+            --panel-bg: #161b22;
+            --sidebar-bg: #11161d;
+            --border-color: #30363d;
+            --text-primary: #e6edf3;
+            --text-secondary: #8b949e;
+            --accent: #58a6ff;
+            --active-bg: rgba(88, 166, 255, 0.15);
+            --hover-bg: rgba(139, 148, 158, 0.13);
+            --danger: #f85149;
+            --term-bg: #010409;
+            --term-text: #7ee787;
+            --modal-backdrop: rgba(1, 4, 9, 0.62);
+            --safe-area-bg: #080b10;
+            --safe-line: rgba(139, 148, 158, 0.43);
+            --safe-highlight: rgba(230, 237, 243, 0.06);
+            --preview-shadow: 0 14px 40px rgba(0, 0, 0, 0.42);
+            --home-indicator: rgba(230, 237, 243, 0.48);
+        }
+    }
+
+    :root[data-theme="dark"] {
+        color-scheme: dark;
+        --bg-color: #0d1117;
+        --panel-bg: #161b22;
+        --sidebar-bg: #11161d;
+        --border-color: #30363d;
+        --text-primary: #e6edf3;
+        --text-secondary: #8b949e;
+        --accent: #58a6ff;
+        --active-bg: rgba(88, 166, 255, 0.15);
+        --hover-bg: rgba(139, 148, 158, 0.13);
+        --danger: #f85149;
+        --term-bg: #010409;
+        --term-text: #7ee787;
+        --modal-backdrop: rgba(1, 4, 9, 0.62);
+        --safe-area-bg: #080b10;
+        --safe-line: rgba(139, 148, 158, 0.43);
+        --safe-highlight: rgba(230, 237, 243, 0.06);
+        --preview-shadow: 0 14px 40px rgba(0, 0, 0, 0.42);
+        --home-indicator: rgba(230, 237, 243, 0.48);
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    [hidden] { display: none !important; }
+    html, body {
+        width: 100%; height: 100%; overflow: hidden; overflow: clip;
+        overscroll-behavior: none; background: var(--safe-area-bg);
+    }
+    body {
+        font: 13px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", sans-serif;
+        color: var(--text-primary);
+    }
+    button, input, select { font: inherit; }
+    button { touch-action: manipulation; }
+
+    /* fixed 满高壳；顶部和左右内缩，底部仅预留 Transport 自身高度。 */
+    #app {
+        display: flex;
+        position: fixed;
+        top: 0; left: 0;
+        width: 100%; height: 100vh;
+        padding: var(--safe-top) var(--safe-right) var(--transport-height) var(--safe-left);
+        background: var(--safe-area-bg);
+    }
+    @supports (height: 100dvh) { #app { height: 100dvh; } }
+
+    /* 圆角必须真实裁切共同内容，而不是只给装饰边框画圆弧。 */
+    #content-shell {
+        position: relative;
+        flex: 1;
+        min-width: 0; min-height: 0;
+        display: flex;
+        overflow: hidden;
+        background: var(--bg-color);
+        border: 1px solid var(--safe-line);
+        border-radius: var(--safe-radius);
+        box-shadow:
+            0 0 0 1px var(--safe-highlight),
+            inset 0 0 0 1px var(--safe-highlight);
+    }
+    :root[data-has-safe-area="false"] #content-shell,
+    :root[data-show-frame="false"] #content-shell {
+        border-color: transparent;
+        border-radius: 0;
+        box-shadow: none;
+    }
+
+    #sidebar {
+        position: relative;
+        flex: none;
+        width: var(--sidebar-width);
+        min-height: 0;
+        display: flex;
+        flex-direction: column;
+        background: var(--sidebar-bg);
+        border-right: 1px solid var(--border-color);
+    }
+    .sidebar-title {
+        height: var(--header-height);
+        flex: 0 0 var(--header-height);
+        display: flex;
+        align-items: center;
+        padding: 0 8px 0 12px;
+        border-bottom: 1px solid var(--border-color);
+        font-weight: 600;
+    }
+    .sidebar-actions { margin-left: auto; display: flex; gap: 4px; }
+    #sidebar-top-panel { flex: none; height: 48%; min-height: 120px; overflow-y: auto; }
+    #sidebar-resize-handle { flex: none; height: 4px; background: transparent; }
+    #sidebar-bottom-panel { flex: 1; min-height: 100px; overflow-y: auto; }
+
+    @media not all and (max-width: 768px) {
+        #app.collapsed #sidebar {
+            width: 0; overflow: hidden; visibility: hidden; border-right: 0;
+        }
+        /* 分隔线止于内容壳底缘；其下已经是 Transport，不再延伸到底部 safe-area。 */
+        #sidebar::after {
+            content: "";
+            position: absolute;
+            left: 100%; top: 0;
+            width: 1px;
+            height: 100%;
+            background: var(--border-color);
+            pointer-events: none;
+        }
+    }
+
+    @media (max-width: 768px) {
+        #sidebar {
+            position: absolute;
+            left: 0; top: 0; bottom: 0;
+            z-index: 30;
+            padding: 0;
+            box-shadow: var(--preview-shadow);
+        }
+        #app.collapsed #sidebar { transform: translateX(-100%); visibility: hidden; }
+        #app:not(.collapsed) #sidebar-mask {
+            display: block;
+            position: absolute;
+            inset: 0;
+            z-index: 25;
+            background: var(--modal-backdrop);
+        }
+        #sidebar-toggle-btn { position: relative; z-index: 40; }
+        #app:not(.collapsed) #sidebar-toggle-btn {
+            position: fixed;
+            left: calc(var(--safe-left) + var(--sidebar-width) - 1px);
+            top: calc(var(--safe-top) + 5px);
+            z-index: 40;
+            background: var(--panel-bg);
+            border: 1px solid var(--border-color);
+            border-left: 0;
+            border-radius: 0 7px 7px 0;
+        }
+    }
+    #sidebar-mask { display: none; }
+    @media (min-width: 769px) and (max-width: 1024px) {
+        :root { --sidebar-width: 200px; }
+    }
+
+    #main {
+        flex: 1;
+        min-width: 0; min-height: 0;
+        display: flex;
+        flex-direction: column;
+        background: var(--bg-color);
+    }
+    #header {
+        height: var(--header-height);
+        flex: 0 0 var(--header-height);
+        display: flex;
+        align-items: center;
+        gap: 4px;
+        padding: 0 8px;
+        background: var(--panel-bg);
+        border-bottom: 1px solid var(--border-color);
+    }
+    .icon-btn, .action-btn {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        border: 1px solid transparent;
+        border-radius: 7px;
+        background: none;
+        color: var(--text-secondary);
+        cursor: pointer;
+        line-height: 1;
+    }
+    .icon-btn { width: var(--control-size); height: var(--control-size); flex: 0 0 var(--control-size); }
+    #new-instance-btn { width: auto; flex: none; gap: 6px; padding: 0 10px; }
+    #new-instance-btn .new-label { font-size: 12px; }
+    #tabs-container {
+        flex: 1 1 auto;
+        min-width: 0;
+        display: flex;
+        gap: 2px;
+        overflow-x: auto;
+        scrollbar-width: none;
+    }
+    #tabs-container::-webkit-scrollbar { display: none; }
+    .tab {
+        flex: none;
+        max-width: 220px;
+        padding: 6px 12px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        color: var(--text-secondary);
+        background: none;
+        border: 1px solid transparent;
+        border-bottom: 0;
+        border-radius: 7px 7px 0 0;
+        cursor: pointer;
+    }
+    .tab.active {
+        color: var(--text-primary);
+        background: var(--bg-color);
+        border-color: var(--border-color);
+    }
+    #instance-actions { flex: none; display: flex; align-items: center; gap: 8px; }
+    .action-btn {
+        min-height: 28px;
+        gap: 6px;
+        padding: 5px 10px;
+        background: var(--panel-bg);
+        border-color: var(--border-color);
+        font-size: 12px;
+    }
+    .action-btn.danger { color: var(--danger); }
+    .action-icon { display: none; }
+    @media (max-width: 1024px) {
+        #new-instance-btn { width: var(--control-size); padding: 0; }
+        #new-instance-btn .new-label, .action-label { display: none; }
+        .action-icon { display: inline-flex; }
+        #instance-actions { gap: 4px; }
+        .action-btn { width: var(--control-size); height: var(--control-size); padding: 0; }
+    }
+
+    #workspace {
+        position: relative;
+        flex: 1;
+        min-height: 0;
+        display: flex;
+        overflow: hidden;
+        background: var(--term-bg);
+    }
+    #terminal {
+        flex: 1;
+        min-height: 0;
+        margin: 10px;
+        padding: 14px;
+        overflow: hidden;
+        white-space: pre-wrap;
+        color: var(--term-text);
+        background: rgba(0, 0, 0, 0.12);
+        border: 1px solid rgba(139, 148, 158, 0.24);
+        border-radius: 10px;
+        font: 12px/1.6 "SF Mono", Menlo, Consolas, monospace;
+    }
+    #terminal-controls { position: absolute; top: 18px; right: 18px; }
+    #terminal-controls .icon-btn { background: rgba(22, 27, 34, 0.76); border-color: rgba(139, 148, 158, 0.35); }
+    #status-bar {
+        position: fixed;
+        left: 0; right: 0; bottom: 0;
+        z-index: 50;
+        height: var(--transport-height);
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        overflow: hidden;
+        padding: 0 calc(10px + var(--safe-right)) 0 calc(10px + var(--safe-left));
+        color: var(--text-secondary);
+        background: var(--safe-area-bg);
+        font-size: 11px;
+    }
+    #status-bar > span {
+        min-width: 0;
+        min-height: 20px;
+        display: inline-flex;
+        align-items: center;
+        padding: 1px 8px;
+        white-space: nowrap;
+        background: var(--panel-bg);
+        border: 1px solid var(--border-color);
+        border-radius: 999px;
+        line-height: 14px;
+    }
+    #status-bar > span:first-child { flex: none; }
+    #status-bar > span:nth-child(2) { overflow: hidden; text-overflow: ellipsis; }
+    #vp { flex: none; margin-left: auto; }
+
+    .wt-item {
+        min-width: 0;
+        padding: 9px 12px;
+        border-left: 3px solid transparent;
+        border-bottom: 1px solid var(--border-color);
+        cursor: pointer;
+    }
+    .wt-item.active { background: var(--active-bg); border-left-color: var(--accent); }
+    .wt-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .wt-branch { margin-top: 3px; color: var(--text-secondary); font-size: 11px; }
+    .git-section-header { display: flex; gap: 6px; padding: 9px 12px; color: var(--text-secondary); font-weight: 600; }
+    .git-change-item { padding: 5px 12px 5px 24px; color: var(--text-secondary); }
+
+    @media (hover: hover) {
+        .icon-btn:hover, .action-btn:hover { color: var(--text-primary); background: var(--hover-bg); }
+        .wt-item:hover { background: var(--hover-bg); }
+        .tab:hover { color: var(--text-primary); }
+    }
+    @media (pointer: coarse) {
+        :root { --header-height: 52px; --control-size: 44px; }
+        .icon-btn, .action-btn, .tab { min-width: 44px; min-height: 44px; }
+    }
+
+    /* Home mock 覆盖在贴底 Transport 上，仅用于预览。 */
+    #home-indicator {
+        position: fixed;
+        left: 50%;
+        bottom: max(5px, calc(var(--safe-bottom) / 2 - 2px));
+        z-index: 70;
+        width: 110px;
+        height: 4px;
+        border-radius: 999px;
+        background: var(--home-indicator);
+        transform: translateX(-50%);
+        pointer-events: none;
+    }
+
+    /* 预览控制台：不属于产品，自身也遵守四向安全区。 */
+    #preview-panel {
+        position: fixed;
+        top: calc(var(--safe-top) + 10px);
+        right: calc(var(--safe-right) + 10px);
+        z-index: 100;
+        width: min(342px, calc(100vw - var(--safe-left) - var(--safe-right) - 20px));
+        max-height: calc(100vh - var(--safe-top) - var(--safe-bottom) - 20px);
+        overflow-y: auto;
+        color: var(--text-primary);
+        background: var(--panel-bg);
+        border: 1px solid var(--border-color);
+        border-radius: 12px;
+        box-shadow: var(--preview-shadow);
+    }
+    @supports (height: 100dvh) {
+        #preview-panel { max-height: calc(100dvh - var(--safe-top) - var(--safe-bottom) - 20px); }
+    }
+    #preview-panel:not([open]) { width: auto; overflow: visible; }
+    #preview-panel summary {
+        padding: 9px 12px;
+        cursor: pointer;
+        color: var(--accent);
+        font-weight: 600;
+        user-select: none;
+    }
+    .preview-body { padding: 0 12px 12px; border-top: 1px solid var(--border-color); }
+    .control-section { padding-top: 11px; }
+    .control-title { display: block; margin-bottom: 6px; color: var(--text-secondary); font-size: 11px; font-weight: 600; }
+    .segmented { display: grid; grid-template-columns: repeat(3, 1fr); gap: 3px; padding: 3px; background: var(--bg-color); border-radius: 8px; }
+    .segmented button {
+        min-height: 30px;
+        color: var(--text-secondary);
+        background: transparent;
+        border: 0;
+        border-radius: 6px;
+        cursor: pointer;
+    }
+    .segmented button[aria-pressed="true"] { color: var(--text-primary); background: var(--panel-bg); box-shadow: 0 1px 4px rgba(0, 0, 0, 0.12); }
+    #safe-preset {
+        width: 100%;
+        min-height: 34px;
+        padding: 5px 8px;
+        color: var(--text-primary);
+        background: var(--bg-color);
+        border: 1px solid var(--border-color);
+        border-radius: 7px;
+    }
+    .inset-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 12px; }
+    .range-label { display: block; color: var(--text-secondary); font-size: 11px; }
+    .range-label span { display: flex; justify-content: space-between; gap: 6px; }
+    .range-label output { color: var(--text-primary); font-variant-numeric: tabular-nums; }
+    input[type="range"] { width: 100%; accent-color: var(--accent); }
+    .check-row { display: flex; align-items: center; gap: 7px; margin-top: 8px; color: var(--text-secondary); font-size: 12px; }
+    .check-row input { accent-color: var(--accent); }
+    #safe-readout {
+        margin-top: 10px;
+        padding: 7px 8px;
+        color: var(--text-secondary);
+        background: var(--bg-color);
+        border-radius: 7px;
+        font: 11px/1.5 "SF Mono", Menlo, Consolas, monospace;
+    }
+    .preview-note { margin-top: 10px; color: var(--text-secondary); font-size: 11px; line-height: 1.55; }
+</style>
+</head>
+<body>
+<div id="app" class="collapsed">
+    <div id="content-shell">
+    <div id="sidebar-mask" onclick="closeSidebar()"></div>
+    <aside id="sidebar" aria-label="Worktrees">
+        <div class="sidebar-title">
+            Worktrees
+            <span class="sidebar-actions">
+                <button class="icon-btn" type="button" title="New Worktree" aria-label="New Worktree">+</button>
+                <button class="icon-btn" type="button" title="Import Worktree" aria-label="Import Worktree">↓</button>
+            </span>
+        </div>
+        <div id="sidebar-top-panel">
+            <div class="wt-item active" tabindex="0">
+                <div class="wt-name">myworktree</div>
+                <div class="wt-branch">⌂ develop</div>
+            </div>
+            <div class="wt-item" tabindex="0">
+                <div class="wt-name">feature/issue116</div>
+                <div class="wt-branch">⑂ fix/fix-issue116</div>
+            </div>
+            <div class="wt-item" tabindex="0">
+                <div class="wt-name">feature/auth</div>
+                <div class="wt-branch">⑂ feature/auth</div>
+            </div>
+            <div class="wt-item" tabindex="0">
+                <div class="wt-name">remote/review</div>
+                <div class="wt-branch">⑂ review</div>
+            </div>
+        </div>
+        <div id="sidebar-resize-handle" aria-hidden="true"></div>
+        <div id="sidebar-bottom-panel">
+            <div class="git-section-header">▾ Staged (2)</div>
+            <div class="git-change-item">M internal/ui/static/index.html</div>
+            <div class="git-change-item">A testdata/touch_interaction.test.mjs</div>
+            <div class="git-section-header">▸ Unstaged (3)</div>
+        </div>
+    </aside>
+
+    <main id="main">
+        <div id="header">
+            <button id="sidebar-toggle-btn" class="icon-btn" type="button" onclick="toggleSidebar()"
+                    aria-label="Toggle sidebar" aria-controls="sidebar" aria-expanded="false">☰</button>
+            <button id="new-instance-btn" class="icon-btn" type="button" title="New Instance" aria-label="New Instance">
+                <span aria-hidden="true">+</span><span class="new-label">New Instance</span>
+            </button>
+            <div id="tabs-container" aria-label="Instances">
+                <button class="tab active" type="button">issue116 · kimi</button>
+                <button class="tab" type="button">feature/auth · opencode</button>
+                <button class="tab" type="button">bugfix/dirty-delete · reasonix</button>
+            </div>
+            <div id="instance-actions" aria-label="Instance actions">
+                <button class="action-btn" type="button" title="Restart" aria-label="Restart"><span class="action-icon">↻</span><span class="action-label">Restart</span></button>
+                <button class="action-btn" type="button" title="Stop" aria-label="Stop"><span class="action-icon">□</span><span class="action-label">Stop</span></button>
+                <button class="action-btn danger" type="button" title="Delete" aria-label="Delete"><span class="action-icon">⌫</span><span class="action-label">Delete</span></button>
+            </div>
+        </div>
+        <div id="workspace">
+            <div id="terminal">$ myworktree
+
+Safe-area visual study / issue #116
+
+• 保留真实 env() 内容内缩，不取消安全区
+• 共同内容容器真实裁切圆角，外侧只露出统一 chrome 色
+• Transport 不保留底部 inset 留白，状态胶囊直接贴近物理底边
+• safe-area 底色替代整条状态栏底色，接受 Home 指示条遮挡
+• 左右 inset 独立处理，状态文字仍避开两侧安全区
+• iPad / iPhone · 竖屏 / 横屏 · 浅色 / 深色
+
+▊</div>
+            <div id="terminal-controls">
+                <button class="icon-btn" type="button" title="Quick keys" aria-label="Quick keys">⌘</button>
+            </div>
+        </div>
+        <div id="status-bar"><span>● connected</span><span>safe-area visual study</span><span id="vp"></span></div>
+    </main>
+    </div>
+</div>
+
+<div id="home-indicator" aria-hidden="true" hidden></div>
+
+<details id="preview-panel" open>
+    <summary>Safe-area 预览控制</summary>
+    <div class="preview-body">
+        <div class="control-section">
+            <span class="control-title">外观</span>
+            <div class="segmented" role="group" aria-label="Theme">
+                <button type="button" data-theme-choice="system" aria-pressed="true">系统</button>
+                <button type="button" data-theme-choice="light" aria-pressed="false">浅色</button>
+                <button type="button" data-theme-choice="dark" aria-pressed="false">深色</button>
+            </div>
+        </div>
+
+        <div class="control-section">
+            <label class="control-title" for="safe-preset">设备 / 方向（演示 inset）</label>
+            <select id="safe-preset">
+                <option value="device">跟随真实设备 env()</option>
+                <option value="ipad-portrait">iPad 竖屏 · 底部 20</option>
+                <option value="ipad-landscape">iPad 横屏 · 底部 20</option>
+                <option value="iphone-portrait">iPhone 竖屏 · 顶 47 / 底 34</option>
+                <option value="iphone-landscape">iPhone 横屏 · 侧 47 / 底 21</option>
+                <option value="none">无安全区 · 对照</option>
+                <option value="custom">自定义</option>
+            </select>
+        </div>
+
+        <div class="control-section inset-grid">
+            <label class="range-label"><span>Top <output id="top-output">0px</output></span><input id="safe-top" type="range" min="0" max="64" value="0" aria-label="Top safe-area"></label>
+            <label class="range-label"><span>Right <output id="right-output">0px</output></span><input id="safe-right" type="range" min="0" max="64" value="0" aria-label="Right safe-area"></label>
+            <label class="range-label"><span>Bottom <output id="bottom-output">20px</output></span><input id="safe-bottom" type="range" min="0" max="64" value="20" aria-label="Bottom safe-area"></label>
+            <label class="range-label"><span>Left <output id="left-output">0px</output></span><input id="safe-left" type="range" min="0" max="64" value="0" aria-label="Left safe-area"></label>
+        </div>
+
+        <div class="control-section">
+            <label class="range-label" for="corner-radius"><span>弧形转角 <output id="radius-output">18px</output></span><input id="corner-radius" type="range" min="0" max="30" value="18"></label>
+            <label class="check-row"><input id="show-frame" type="checkbox" checked>显示细框与圆弧（关闭可对照）</label>
+            <label class="check-row"><input id="show-indicator" type="checkbox" checked>模拟 Home 指示条（仅预览）</label>
+            <div id="safe-readout">T 0 · R 0 · B 20 · L 0 px</div>
+            <div class="preview-note">设备选项只演示典型 inset 组合，不代表所有机型。请配合浏览器设备模拟切换 iPad / iPhone 横竖视口；真机请选择“跟随真实设备 env()”。内容壳细框、真实圆角裁切、贴底 Transport 与状态胶囊是候选产品样式，本控制台和 Home mock 不属于产品。</div>
+        </div>
+    </div>
+</details>
+
+<script>
+    const root = document.documentElement;
+    const app = document.getElementById("app");
+    const toggleButton = document.getElementById("sidebar-toggle-btn");
+    const presetSelect = document.getElementById("safe-preset");
+    const indicatorToggle = document.getElementById("show-indicator");
+    const insetKeys = ["top", "right", "bottom", "left"];
+    const insetInputs = Object.fromEntries(insetKeys.map(key => [key, document.getElementById("safe-" + key)]));
+    let currentInsets = { top: 0, right: 0, bottom: 0, left: 0 };
+    let safeAreaFrameRequest = 0;
+
+    /* 仅作视觉演示的典型值；不是设备能力检测或真机验收常量。 */
+    const safeAreaPresets = {
+        "ipad-portrait": { top: 0, right: 0, bottom: 20, left: 0 },
+        "ipad-landscape": { top: 0, right: 0, bottom: 20, left: 0 },
+        "iphone-portrait": { top: 47, right: 0, bottom: 34, left: 0 },
+        "iphone-landscape": { top: 0, right: 47, bottom: 21, left: 47 },
+        none: { top: 0, right: 0, bottom: 0, left: 0 }
+    };
+
+    function applySidebarCollapsed(collapsed) {
+        app.classList.toggle("collapsed", collapsed);
+        toggleButton.setAttribute("aria-expanded", String(!collapsed));
+    }
+    function toggleSidebar() { applySidebarCollapsed(!app.classList.contains("collapsed")); }
+    function closeSidebar() { applySidebarCollapsed(true); }
+    applySidebarCollapsed(window.matchMedia("(max-width: 768px)").matches);
+
+    document.addEventListener("keydown", event => {
+        if (event.repeat || event.altKey || !(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== "b") return;
+        if (event.target.closest("input, select, textarea, [contenteditable]")) return;
+        event.preventDefault();
+        toggleSidebar();
+    });
+
+    document.querySelectorAll("[data-theme-choice]").forEach(button => {
+        button.addEventListener("click", () => {
+            root.dataset.theme = button.dataset.themeChoice;
+            document.querySelectorAll("[data-theme-choice]").forEach(candidate => {
+                candidate.setAttribute("aria-pressed", String(candidate === button));
+            });
+        });
+    });
+
+    function readAppliedInsets() {
+        const style = getComputedStyle(app);
+        return Object.fromEntries(insetKeys.map(key => {
+            const cssKey = "padding" + key[0].toUpperCase() + key.slice(1);
+            return [key, Math.max(0, Math.round(parseFloat(style[cssKey]) || 0))];
+        }));
+    }
+
+    function renderAppliedInsets() {
+        currentInsets = readAppliedInsets();
+        for (const key of insetKeys) {
+            insetInputs[key].value = currentInsets[key];
+            document.getElementById(key + "-output").value = currentInsets[key] + "px";
+        }
+        const hasSafeArea = insetKeys.some(key => currentInsets[key] > 0);
+        root.dataset.hasSafeArea = String(hasSafeArea);
+        document.getElementById("safe-readout").textContent =
+            "T " + currentInsets.top + " · R " + currentInsets.right +
+            " · B " + currentInsets.bottom + " · L " + currentInsets.left + " px";
+        document.getElementById("home-indicator").hidden =
+            !indicatorToggle.checked || currentInsets.bottom < 12;
+    }
+
+    function scheduleInsetReadout() {
+        cancelAnimationFrame(safeAreaFrameRequest);
+        safeAreaFrameRequest = requestAnimationFrame(renderAppliedInsets);
+    }
+
+    function applySafeAreaPreset(name) {
+        if (name === "device") {
+            insetKeys.forEach(key => root.style.removeProperty("--safe-" + key));
+            indicatorToggle.checked = false;
+        } else {
+            const preset = safeAreaPresets[name] || currentInsets;
+            for (const key of insetKeys) root.style.setProperty("--safe-" + key, preset[key] + "px");
+            indicatorToggle.checked = name !== "none";
+        }
+        scheduleInsetReadout();
+    }
+
+    presetSelect.addEventListener("change", () => applySafeAreaPreset(presetSelect.value));
+    for (const key of insetKeys) {
+        insetInputs[key].addEventListener("input", () => {
+            const next = { ...currentInsets, [key]: Number(insetInputs[key].value) };
+            presetSelect.value = "custom";
+            for (const inset of insetKeys) root.style.setProperty("--safe-" + inset, next[inset] + "px");
+            scheduleInsetReadout();
+        });
+    }
+
+    document.getElementById("corner-radius").addEventListener("input", event => {
+        root.style.setProperty("--safe-radius", event.target.value + "px");
+        document.getElementById("radius-output").value = event.target.value + "px";
+    });
+    document.getElementById("show-frame").addEventListener("change", event => {
+        root.dataset.showFrame = String(event.target.checked);
+    });
+    indicatorToggle.addEventListener("change", renderAppliedInsets);
+
+    document.querySelectorAll(".wt-item").forEach(item => {
+        const activate = () => {
+            document.querySelectorAll(".wt-item").forEach(candidate => candidate.classList.toggle("active", candidate === item));
+        };
+        item.addEventListener("click", activate);
+        item.addEventListener("keydown", event => { if (event.key === "Enter") activate(); });
+    });
+    document.querySelectorAll(".tab").forEach(tab => {
+        tab.addEventListener("click", () => {
+            document.querySelectorAll(".tab").forEach(candidate => candidate.classList.toggle("active", candidate === tab));
+        });
+    });
+
+    function updateViewportLabel() {
+        const orientation = window.innerHeight >= window.innerWidth ? "竖屏" : "横屏";
+        document.getElementById("vp").textContent = window.innerWidth + "×" + window.innerHeight + " · " + orientation;
+        scheduleInsetReadout();
+    }
+    window.addEventListener("resize", updateViewportLabel);
+
+    /* 默认永远使用真实 env()；只有用户主动选择设备档位时才启用演示值。 */
+    presetSelect.value = "device";
+    applySafeAreaPreset("device");
+    if (window.innerWidth <= 768) document.getElementById("preview-panel").open = false;
+    updateViewportLabel();
+</script>
+</body>
+</html>

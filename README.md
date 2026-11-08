@@ -3,7 +3,7 @@
 > **An ORCA-like lightweight agents team orchestrator** — spin up multiple AI coding CLIs side-by-side, each in its own isolated git worktree with a persistent re-attachable terminal, and steer them all from a minimal Web UI.
 
 - 中文说明: [README.zh-CN.md](./README.zh-CN.md)
-- Docs: [PRD](./docs/PRD.md) · [Architecture](./docs/ARCHITECTURE.md) · [API](./docs/API.md)
+- Docs: [PRD](./docs/PRD.md) · [Architecture](./docs/ARCHITECTURE.md) · [API](./docs/API.md) · [Contributing](./CONTRIBUTING.md)
 
 ![](docs/codecliteams.png)
 

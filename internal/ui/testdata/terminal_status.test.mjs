@@ -649,7 +649,7 @@ function ptyHarness({ doc } = {}) {
   return { renderer: window.__ptyRenderer, window, calls, api };
 }
 
-function activateWith(status, extra = {}, { pendingLoad = false } = {}) {
+function activateWith(status, extra = {}, { pendingLoad = false, queueTTYResize = null } = {}) {
   const h = ptyHarness();
   if (pendingLoad) {
     // Hold loadLog open: the window in which the queued retry used to still be
@@ -661,6 +661,11 @@ function activateWith(status, extra = {}, { pendingLoad = false } = {}) {
     };
     h.window.__releaseLoadLog = () => release();
   }
+  // Explicit option, opt-in only: the fake window grows a queueTTYResize
+  // witness for callers that pass one. Every existing caller leaves it null,
+  // so the shipped activation path those tests run stays byte-for-byte the
+  // one they assert against today — no new code path for old callers.
+  if (queueTTYResize) h.window.queueTTYResize = queueTTYResize;
   const session = makeSession("inst1", extra);
   h.window.state.instances = [{ id: "inst1", kind: "pty", status }];
   h.window.state.activeInst = "inst1";
@@ -763,6 +768,69 @@ test("pty activate(): the handover still yields to its own loadLog and its socke
     assert.deepEqual(calls.reset, [], `must not clear the screen with ${label}`);
     assert.deepEqual(calls.connect, [], `must not connect on top of ${label}`);
   }
+});
+
+// issue #116 D4② behaviour witnesses. tty_resize_refit.test.mjs:462-494
+// pins the shipped delivery shape of activate at source level; these three
+// run that same shipped activate() — loaded verbatim through ptyHarness and
+// entered at h.renderer.activate(session, null) — and watch the events land.
+// Size numbers (103x58) are arbitrary; only the guard they cross matters.
+
+test("pty activate(): fits the host it re-showed, then delivers the fitted size once", () => {
+  // One trace array carries both events AND the delivery args, so the whole
+  // contract — fit strictly before queue, each exactly once, the measured
+  // numbers, and the session being the very object activate() was given
+  // (not a copy, not an id) — is asserted in a single deepEqual.
+  const trace = [];
+  let delivered = null;
+  const { session } = activateWith("running", {
+    term: { cols: 103, rows: 58 },
+    fitAddon: { fit() { trace.push("fit"); } },
+  }, {
+    queueTTYResize: (s, cols, rows) => {
+      delivered = s;
+      trace.push(`queue ${cols}x${rows}`);
+    },
+  });
+  assert.deepEqual(
+    trace.map(e => e.startsWith("queue ")
+      ? `${e} ${delivered === session ? "(same session)" : "(COPY!)"}` : e),
+    ["fit", "queue 103x58 (same session)"],
+    "fit, then exactly one delivery of the fitted size for the activated session");
+});
+
+test("pty activate(): a window without queueTTYResize activates without throwing", () => {
+  // The isolation contract: the ptyHarness window ships no queueTTYResize,
+  // like a page whose shell has not published it yet. The shipped `typeof`
+  // guard must swallow the delivery, not throw, and the rest of activate()
+  // must still run to its end.
+  const trace = [];
+  let activated;
+  assert.doesNotThrow(() => {
+    activated = activateWith("running", {
+      term: { cols: 103, rows: 58 },
+      fitAddon: { fit() { trace.push("fit"); } },
+    });
+  });
+  assert.equal(typeof activated.window.queueTTYResize, "undefined", "witness absent, as shipped");
+  assert.deepEqual(trace, ["fit"], "the fit still ran against the sized term");
+  assert.equal(activated.session.lastKnownStatus, "running",
+    "activate() still ran past the guarded delivery to its end");
+});
+
+test("pty activate(): a session whose term carries no size is not reported", () => {
+  // The positive-size guard: a bare {} term (the makeSession default shape,
+  // written explicitly here) has no cols/rows yet, so even with a published
+  // queueTTYResize nothing may be delivered — an unmeasured host must not
+  // pin the tty to a phantom size.
+  const trace = [];
+  activateWith("running", {
+    term: {},
+    fitAddon: { fit() { trace.push("fit"); } },
+  }, {
+    queueTTYResize: () => trace.push("queue"),
+  });
+  assert.deepEqual(trace, ["fit"], "fit ran, the size guard held the delivery back");
 });
 
 test("the poll-driven promotion still stands aside for a queued retry", () => {

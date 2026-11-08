@@ -68,7 +68,7 @@ function sliceStatement(src, header) {
 const sidebarFactory = new Function("deps", `
   const {
     document, localStorage, requestAnimationFrame, console,
-    getActiveTerminalSession, sendResize, syncTerminalToAppliedSize,
+    getActiveTerminalSession, sendResize, syncTerminalToAppliedSize, queueTTYResize,
     renderGitChanges,
   } = deps;
   ${sliceStatement(inlineScript(indexSource), "const SIDEBAR_COLLAPSED_KEY")}
@@ -178,6 +178,7 @@ function sidebarHarness({ throwingStorage = false, storageMap = null } = {}) {
   const document = makeDocument();
   const rafCallbacks = [];
   const resizeCalls = [];
+  const rawSendCalls = [];
   const syncCalls = [];
   const gitRenderCalls = [];
   let activeSession = null;
@@ -187,12 +188,17 @@ function sidebarHarness({ throwingStorage = false, storageMap = null } = {}) {
     requestAnimationFrame: (cb) => { rafCallbacks.push(cb); return rafCallbacks.length; },
     console,
     getActiveTerminalSession: () => activeSession,
-    sendResize: (s, cols, rows) => resizeCalls.push({ id: s.id, cols, rows }),
+    sendResize: (s, cols, rows) => rawSendCalls.push({ id: s.id, cols, rows }),
+    // issue #116 p9: a fit ASKS (queueTTYResize) and never reverts. syncCalls
+    // stays the witness of the retired behaviour — this harness now asserts it
+    // stays empty, so the old "fit, then paint the previous ack back" cannot
+    // return without failing here.
+    queueTTYResize: (s, cols, rows) => resizeCalls.push({ id: s.id, cols, rows }),
     syncTerminalToAppliedSize: (s) => syncCalls.push(s.id),
     renderGitChanges: () => { gitRenderCalls.push(api?.getGitExpandedSection?.() ?? "?"); },
   });
   return {
-    api, localStorage, document, resizeCalls, syncCalls, gitRenderCalls,
+    api, localStorage, document, resizeCalls, rawSendCalls, syncCalls, gitRenderCalls,
     setActiveSession: (s) => { activeSession = s; },
     // Runs the rAF-scheduled refit; the shipped order is class flip (sync)
     // THEN fit (frame), so flushing after the toggle must observe both.
@@ -396,8 +402,9 @@ test("issue #99 R12: the class flip lands first, the xterm fit runs on the next 
 
   h.flushFrames();
   assert.equal(session.fitAddon.fitted, 1, "xterm-addon-fit re-fits once after the toggle");
-  assert.deepEqual(h.resizeCalls, [{ id: "inst1", cols: 80, rows: 24 }], "the new geometry is pushed to the PTY");
-  assert.deepEqual(h.syncCalls, ["inst1"]);
+  assert.deepEqual(h.resizeCalls, [{ id: "inst1", cols: 80, rows: 24 }], "the new geometry is requested of the PTY");
+  assert.deepEqual(h.rawSendCalls, [], "the sidebar refit does not write the socket itself; the throttle owns the wire");
+  assert.deepEqual(h.syncCalls, [], "issue #116 p9: a fresh fit is never repainted at the previous ack");
 
   // A second toggle re-fits for the expanded geometry too.
   h.api.toggleSidebarCollapse();

@@ -1,0 +1,290 @@
+{
+  "url": "http://127.0.0.1:38233/?token=<redacted>&viewport-debug=1",
+  "width": 1194,
+  "results": [
+    {
+      "labels": [
+        true,
+        true,
+        true,
+        true
+      ],
+      "hits": [
+        {
+          "label": "Magic bar",
+          "rect": {
+            "top": 80.6,
+            "bottom": 124.6,
+            "h": 44
+          },
+          "inVisible": true,
+          "clickable": true
+        },
+        {
+          "label": "Soft keyboard",
+          "rect": {
+            "top": 80.6,
+            "bottom": 124.6,
+            "h": 44
+          },
+          "inVisible": true,
+          "clickable": true
+        },
+        {
+          "label": "Capture",
+          "rect": {
+            "top": 80.6,
+            "bottom": 124.6,
+            "h": 44
+          },
+          "inVisible": true,
+          "clickable": true
+        },
+        {
+          "label": "Move",
+          "rect": {
+            "top": 80.6,
+            "bottom": 124.6,
+            "h": 44
+          },
+          "inVisible": true,
+          "clickable": true
+        },
+        {
+          "label": "More",
+          "rect": {
+            "top": 130.6,
+            "bottom": 174.6,
+            "h": 44
+          },
+          "inVisible": true,
+          "clickable": true
+        }
+      ],
+      "panel": {
+        "top": 8,
+        "bottom": 183.6,
+        "height": 175.6,
+        "right": 1138
+      },
+      "visH": 702,
+      "innerHeight": 702,
+      "secondaryVisible": false,
+      "panelMaxHeight": "520px",
+      "requestedHeight": 702
+    },
+    {
+      "labels": [
+        true,
+        true,
+        true,
+        true
+      ],
+      "hits": [
+        {
+          "label": "Magic bar",
+          "rect": {
+            "top": 80.6,
+            "bottom": 124.6,
+            "h": 44
+          },
+          "inVisible": true,
+          "clickable": true
+        },
+        {
+          "label": "Soft keyboard",
+          "rect": {
+            "top": 80.6,
+            "bottom": 124.6,
+            "h": 44
+          },
+          "inVisible": true,
+          "clickable": true
+        },
+        {
+          "label": "Capture",
+          "rect": {
+            "top": 80.6,
+            "bottom": 124.6,
+            "h": 44
+          },
+          "inVisible": true,
+          "clickable": true
+        },
+        {
+          "label": "Move",
+          "rect": {
+            "top": 80.6,
+            "bottom": 124.6,
+            "h": 44
+          },
+          "inVisible": true,
+          "clickable": true
+        },
+        {
+          "label": "More",
+          "rect": {
+            "top": 130.6,
+            "bottom": 174.6,
+            "h": 44
+          },
+          "inVisible": true,
+          "clickable": true
+        }
+      ],
+      "panel": {
+        "top": 8,
+        "bottom": 183.6,
+        "height": 175.6,
+        "right": 1138
+      },
+      "visH": 634,
+      "innerHeight": 634,
+      "secondaryVisible": false,
+      "panelMaxHeight": "520px",
+      "requestedHeight": 633.5
+    },
+    {
+      "labels": [
+        true,
+        true,
+        true,
+        true
+      ],
+      "hits": [
+        {
+          "label": "Magic bar",
+          "rect": {
+            "top": 80.6,
+            "bottom": 124.6,
+            "h": 44
+          },
+          "inVisible": true,
+          "clickable": true
+        },
+        {
+          "label": "Soft keyboard",
+          "rect": {
+            "top": 80.6,
+            "bottom": 124.6,
+            "h": 44
+          },
+          "inVisible": true,
+          "clickable": true
+        },
+        {
+          "label": "Capture",
+          "rect": {
+            "top": 80.6,
+            "bottom": 124.6,
+            "h": 44
+          },
+          "inVisible": true,
+          "clickable": true
+        },
+        {
+          "label": "Move",
+          "rect": {
+            "top": 80.6,
+            "bottom": 124.6,
+            "h": 44
+          },
+          "inVisible": true,
+          "clickable": true
+        },
+        {
+          "label": "More",
+          "rect": {
+            "top": 130.6,
+            "bottom": 174.6,
+            "h": 44
+          },
+          "inVisible": true,
+          "clickable": true
+        }
+      ],
+      "panel": {
+        "top": 8,
+        "bottom": 183.6,
+        "height": 175.6,
+        "right": 1138
+      },
+      "visH": 496,
+      "innerHeight": 496,
+      "secondaryVisible": false,
+      "panelMaxHeight": "480px",
+      "requestedHeight": 495.9
+    },
+    {
+      "labels": [
+        true,
+        true,
+        true,
+        true
+      ],
+      "hits": [
+        {
+          "label": "Magic bar",
+          "rect": {
+            "top": 80.6,
+            "bottom": 124.6,
+            "h": 44
+          },
+          "inVisible": true,
+          "clickable": true
+        },
+        {
+          "label": "Soft keyboard",
+          "rect": {
+            "top": 80.6,
+            "bottom": 124.6,
+            "h": 44
+          },
+          "inVisible": true,
+          "clickable": true
+        },
+        {
+          "label": "Capture",
+          "rect": {
+            "top": 80.6,
+            "bottom": 124.6,
+            "h": 44
+          },
+          "inVisible": true,
+          "clickable": true
+        },
+        {
+          "label": "Move",
+          "rect": {
+            "top": 80.6,
+            "bottom": 124.6,
+            "h": 44
+          },
+          "inVisible": true,
+          "clickable": true
+        },
+        {
+          "label": "More",
+          "rect": {
+            "top": 130.6,
+            "bottom": 174.6,
+            "h": 44
+          },
+          "inVisible": true,
+          "clickable": true
+        }
+      ],
+      "panel": {
+        "top": 8,
+        "bottom": 183.6,
+        "height": 175.6,
+        "right": 1138
+      },
+      "visH": 274,
+      "innerHeight": 274,
+      "secondaryVisible": false,
+      "panelMaxHeight": "258px",
+      "requestedHeight": 274
+    }
+  ]
+}

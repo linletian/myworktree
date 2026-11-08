@@ -1,0 +1,124 @@
+{
+  "url": "http://127.0.0.1:38235/?token=<redacted>&viewport-debug=1&debug-session=p8smoke0123456789ab",
+  "label": "authenticated-shell-p8",
+  "viewport": {
+    "WIDTH": 1194,
+    "HEIGHT": 702
+  },
+  "measured": {
+    "htmlOverflow": "clip",
+    "bodyOverflow": "clip",
+    "htmlPosition": "static",
+    "bodyPosition": "static",
+    "appPosition": "fixed",
+    "appTop": "0px",
+    "appLeft": "0px",
+    "rootScrollHeight": 702,
+    "clientHeight": 702,
+    "vvHeight": 702,
+    "scrollBefore": 0,
+    "scrollAfterScrollTo": 0,
+    "scrollTopAfterWrite": 0,
+    "inner": {
+      "candidate": null,
+      "scrolled": null,
+      "rootScrollYDuringInner": null
+    },
+    "appRect": {
+      "top": 0,
+      "bottom": 702,
+      "height": 702
+    },
+    "layoutClientHeight": 702,
+    "appInlineHeight": "",
+    "host": {
+      "containerFound": true,
+      "containerBottom": 702,
+      "inlineBottoms": [
+        "0px"
+      ],
+      "rectBottoms": [
+        702
+      ],
+      "probe": {
+        "insetBottom": 702,
+        "writtenBottom": "428px",
+        "liftedBottom": 274,
+        "movedBy": 428,
+        "computedBottom": "428px"
+      }
+    },
+    "overlay": {
+      "workspaceFound": true,
+      "controls": {
+        "id": "terminal-controls",
+        "computedPosition": "absolute",
+        "computedTop": "20px",
+        "computedBottom": "20px",
+        "inlineBottom": "20px",
+        "display": "flex",
+        "rect": {
+          "top": 60,
+          "bottom": 682,
+          "height": 622
+        }
+      },
+      "statusBar": {
+        "id": "status-bar",
+        "computedPosition": "fixed",
+        "computedTop": "686px",
+        "computedBottom": "0px",
+        "inlineBottom": "0px",
+        "display": "block",
+        "rect": {
+          "top": 686,
+          "bottom": 702,
+          "height": 16
+        }
+      },
+      "quickKeys": {
+        "id": "quick-keys-panel",
+        "computedPosition": "absolute",
+        "computedTop": "0px",
+        "computedBottom": "auto",
+        "inlineBottom": "",
+        "display": "none",
+        "rect": {
+          "top": 0,
+          "bottom": 0,
+          "height": 0
+        }
+      },
+      "probe": {
+        "writtenBottom": "448px",
+        "restBottom": 682,
+        "restHeight": 622,
+        "liftedBottom": 254,
+        "liftedHeight": 194,
+        "topStaysAt": 60,
+        "restTop": 60,
+        "backBottom": 682,
+        "computedBottom": "448px",
+        "computedTop": "20px",
+        "panelMaxHeight": "100%",
+        "panelScrollable": false,
+        "inlineBottomWhileLifted": "448px",
+        "restoredComputedBottom": "20px",
+        "restoredComputedTop": "20px",
+        "restoredPanelMaxHeight": "100%",
+        "inlineBottomWhileRestored": "20px",
+        "restoredHeight": 622,
+        "panelRestHeight": 622,
+        "panelLiftedHeight": 194,
+        "panelBackHeight": 622
+      }
+    }
+  },
+  "fail": [],
+  "note": [
+    "no overflowing inner scroller was present in this DOM state (S8 unproven, not passed)",
+    "the probe panel was not overflowable in this state (internal scroll unproven, not failed)"
+  ],
+  "inconclusive": [],
+  "verdict": "PASS"
+}

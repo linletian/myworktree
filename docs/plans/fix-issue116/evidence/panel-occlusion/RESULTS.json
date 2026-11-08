@@ -1,0 +1,147 @@
+{
+  "url": "http://127.0.0.1:38233/?token=<redacted>",
+  "width": 1194,
+  "height": 702,
+  "results": [
+    {
+      "forced": false,
+      "corner": "top-right",
+      "panelStyle": {
+        "top": "8px",
+        "left": "auto",
+        "right": "56px",
+        "bottom": "auto"
+      },
+      "col": {
+        "left": 1142,
+        "right": 1174,
+        "top": 60,
+        "bottom": 682
+      },
+      "panel": {
+        "left": 778,
+        "right": 1138,
+        "top": 8,
+        "bottom": 183.6
+      },
+      "overlap": false,
+      "toggleHit": {
+        "label": "quick-keys-toggle",
+        "hit": true,
+        "blocker": "svg.[object SVGAnimatedStrin"
+      },
+      "firstColBtnHit": {
+        "label": "quick-keys-toggle",
+        "hit": true,
+        "blocker": "svg.[object SVGAnimatedStrin"
+      },
+      "visH": 702,
+      "cornerWanted": "tr"
+    },
+    {
+      "forced": false,
+      "corner": "top-left",
+      "panelStyle": {
+        "top": "8px",
+        "left": "8px",
+        "right": "auto",
+        "bottom": "auto"
+      },
+      "col": {
+        "left": 1142,
+        "right": 1174,
+        "top": 60,
+        "bottom": 682
+      },
+      "panel": {
+        "left": 8,
+        "right": 368,
+        "top": 8,
+        "bottom": 183.6
+      },
+      "overlap": false,
+      "toggleHit": {
+        "label": "quick-keys-toggle",
+        "hit": true,
+        "blocker": "svg.[object SVGAnimatedStrin"
+      },
+      "firstColBtnHit": {
+        "label": "quick-keys-toggle",
+        "hit": true,
+        "blocker": "svg.[object SVGAnimatedStrin"
+      },
+      "visH": 702,
+      "cornerWanted": "tl"
+    },
+    {
+      "forced": false,
+      "corner": "bottom-*",
+      "panelStyle": {
+        "top": "auto",
+        "left": "auto",
+        "right": "56px",
+        "bottom": "8px"
+      },
+      "col": {
+        "left": 1142,
+        "right": 1174,
+        "top": 60,
+        "bottom": 682
+      },
+      "panel": {
+        "left": 778,
+        "right": 1138,
+        "top": 518.4,
+        "bottom": 694
+      },
+      "overlap": false,
+      "toggleHit": {
+        "label": "quick-keys-toggle",
+        "hit": true,
+        "blocker": "svg.[object SVGAnimatedStrin"
+      },
+      "firstColBtnHit": {
+        "label": "quick-keys-toggle",
+        "hit": true,
+        "blocker": "svg.[object SVGAnimatedStrin"
+      },
+      "visH": 702,
+      "cornerWanted": "br"
+    },
+    {
+      "forced": false,
+      "corner": "bottom-*",
+      "panelStyle": {
+        "top": "auto",
+        "left": "8px",
+        "right": "auto",
+        "bottom": "8px"
+      },
+      "col": {
+        "left": 1142,
+        "right": 1174,
+        "top": 60,
+        "bottom": 682
+      },
+      "panel": {
+        "left": 8,
+        "right": 368,
+        "top": 518.4,
+        "bottom": 694
+      },
+      "overlap": false,
+      "toggleHit": {
+        "label": "quick-keys-toggle",
+        "hit": true,
+        "blocker": "svg.[object SVGAnimatedStrin"
+      },
+      "firstColBtnHit": {
+        "label": "quick-keys-toggle",
+        "hit": true,
+        "blocker": "svg.[object SVGAnimatedStrin"
+      },
+      "visH": 702,
+      "cornerWanted": "bl"
+    }
+  ]
+}

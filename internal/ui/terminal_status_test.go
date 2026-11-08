@@ -220,6 +220,74 @@ func TestViewportHeightHandling(t *testing.T) {
 	t.Logf("%s", out)
 }
 
+// TestZoomScaleAvoidance runs the Node unit tests for the issue #116 D2
+// signed scale-asymmetric soft-keyboard avoidance (testdata/zoom_scale.test.mjs)
+// under the Phase 2 implementation verdicts of the arbitration commit 6e8a006:
+// scale > 1 keeps the frozen conservative opt-out unchanged (its exit keeps
+// its latch); scale ≈ 1 in-band jitter is the frozen regression red line; a
+// scale < 1 frame enters the untouched §5 session machine only after the D-C
+// COUNTED settle — two consecutive 500ms "scaleSettleTick" self-check ticks
+// inside ε=0.001 of the candidate baseline with layout / vv.width / raw
+// unchanged (resizes and scrolls never count, hidden never accumulates, the
+// count saturates, raw open/close after the settle never resets it); a
+// scale<1 step and the trip BACK into the band exit through the frozen edge
+// paying 0 and book NO new recovery latch (D-B / D-D scaleStepNoLatchExit),
+// so post-settle re-entry rides the unlocked 25% line identically for
+// single- and multi-step arrivals; the raw > 1 entry floor, the same-geometry
+// decrease exit and the 25% / 50% lines stay frozen; and the ownership caliber is
+// the Phase 3 foreground-host admission (AUTH-20261105-P3-OWNERSHIP: the editable
+// test PLUS the in-pass walk to the SHOWN foreground host — the former D-A plan B
+// generic predicate and its registered R2 known-deviation Web-input frames are
+// superseded, bare Web inputs no longer admit; testdata D2-7 / D2-7b).
+// Same slicing harness as TestViewportHeightHandling; skips when node is
+// absent.
+func TestZoomScaleAvoidance(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not on PATH; skipping D2 zoom scale JS tests")
+	}
+	out, err := exec.Command(node, "--test", "testdata/zoom_scale.test.mjs").CombinedOutput()
+	if err != nil {
+		t.Fatalf("node --test testdata/zoom_scale.test.mjs: %v\n%s", err, out)
+	}
+	t.Logf("%s", out)
+}
+
+// TestViewportDebugHandling runs the issue #116 diagnostic client tests
+// (testdata/viewport_debug.test.mjs): geometry-only snapshots, two-frame and
+// settled captures, bounded/coalesced uploads, retry, pause and stop. The Go
+// wrapper makes `go test` enforce the same shipped static asset; Node absence
+// skips here, while CI runs the file directly.
+func TestViewportDebugHandling(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not on PATH; skipping viewport diagnostics JS tests")
+	}
+	out, err := exec.Command(node, "--test", "testdata/viewport_debug.test.mjs").CombinedOutput()
+	if err != nil {
+		t.Fatalf("node --test testdata/viewport_debug.test.mjs: %v\n%s", err, out)
+	}
+	t.Logf("%s", out)
+}
+
+// TestTtyResizeRefit runs the issue #116 PTY resize-timing client tests
+// (testdata/tty_resize_refit.test.mjs): a local fit stays on screen and is never
+// repainted at the previous applied ack, the throttle's trailing edge delivers the
+// newest size, a refusal is not remembered as sent, and every teardown disarms the
+// pending send. The Go wrapper makes `go test` enforce the same shipped static
+// asset; Node absence skips here.
+func TestTtyResizeRefit(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not on PATH; skipping PTY resize refit JS tests")
+	}
+	out, err := exec.Command(node, "--test", "testdata/tty_resize_refit.test.mjs").CombinedOutput()
+	if err != nil {
+		t.Fatalf("node --test testdata/tty_resize_refit.test.mjs: %v\n%s", err, out)
+	}
+	t.Logf("%s", out)
+}
+
 // TestNarrowDrawerHandling runs the Node unit tests for the issue #100 L2
 // breakpoint / drawer layer (testdata/narrow_drawer.test.mjs): the R14
 // viewport-dispatched default for a missing / unparseable persisted value
