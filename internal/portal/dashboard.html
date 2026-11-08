@@ -2,7 +2,9 @@
 <html lang="en">
 <head>
 	<meta charset="UTF-8">
-	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<!-- viewport-fit=cover is required for env(safe-area-inset-*) below to be non-zero.
+	     issue #118: without it the notch/home-indicator insets always read 0px. -->
+	<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 	<title>Portal Dashboard</title>
 	<style>
 		:root {
@@ -31,6 +33,46 @@
 			--input-radius: 8px;
 			--btn-radius: 8px;
 			--overlay-bg: rgba(246, 248, 250, 0.95);
+			/* issue #118: paddings live in variables so the narrow tier can change
+			   them in one place. Desktop values are the pre-fix ones, unchanged.
+			   Without this the five columns need 5 x 32px = 160px of horizontal
+			   padding alone, which leaves nothing for the path on a 390px screen. */
+			--page-pad-y: 40px;
+			--page-pad-x: 20px;
+			--card-pad: 32px;
+			--cell-pad-y: 14px;
+			--cell-pad-x: 16px;
+			--row-gap: 0px;
+			/* ---------- type scale (single source) ----------
+			   Every font-size in this file resolves to one of these tokens; the
+			   narrow tier changes a size by overriding the token, never by adding a
+			   second font-size to the same selector. Roles, not element names, so a
+			   value can never end up with two sizes in two tiers.
+
+			     h1 24/22  display    page title
+			     h2 20     display    login card heading
+			     body 14   content    table cells, inputs, buttons
+			     meta 13   secondary  page description, form label, error, empty/loading
+			     label 12  caption    column header / card field name
+			     path 11   caption    the path value itself
+			     badge 12  caption    status pill
+			     action 12 caption    Open link
+
+			   The path sits ONE STEP BELOW its own label on purpose: at 12px the
+			   monospaced value read larger than the 12px uppercase label it belongs
+			   to, which made the hierarchy look inverted. To trade hierarchy back
+			   for more path pixels, move --fs-path and --fs-label together. */
+			--fs-h1: 24px;
+			--fs-h2: 20px;
+			--fs-body: 14px;
+			--fs-meta: 13px;
+			--fs-label: 12px;
+			--fs-path: 11px;
+			--fs-badge: 12px;
+			--fs-action: 12px;
+			/* iOS Safari auto-zooms the page when a focused input is under 16px;
+			   applied only on coarse pointers (see the media query below). */
+			--fs-input-coarse: 16px;
 		}
 
 		@media (prefers-color-scheme: dark) {
@@ -65,19 +107,47 @@
 			padding: 0;
 			box-sizing: border-box;
 		}
+		/* issue #118: this page is a scrollable document. It deliberately does NOT
+		   inherit the main UI's `overflow: clip` + `#app: fixed` full-height shell
+		   (docs/IPADOS-UI-COMPATIBILITY.md, frozen at 5268869) — that contract exists
+		   for the terminal surface. The portal keeps normal document scrolling and
+		   only adopts the safe-area / dvh / overscroll pieces. */
+		/* The safe-area strips sit OUTSIDE body's box, so they paint with the
+		   canvas (html) colour: html must follow the theme too, and color-scheme
+		   keeps the UA scrollbar/overscroll chrome dark in dark mode. */
+		/* Pin the text size to what the stylesheet says. iOS Safari auto-inflates
+		   small text in some layouts (WebKit text autosizing), which made the SAME
+		   11px path render larger in one orientation than the other. 100% opts out
+		   of that inflation in both orientations. */
+		html {
+			color-scheme: light dark;
+			background-color: var(--bg-color);
+			-webkit-text-size-adjust: 100%;
+			text-size-adjust: 100%;
+		}
 		body {
 			font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji";
 			background-color: var(--bg-color);
 			color: var(--text-primary);
-			padding: 40px 20px;
+			overscroll-behavior: none;
+			padding:
+				calc(var(--page-pad-y) + env(safe-area-inset-top, 0px))
+				calc(var(--page-pad-x) + env(safe-area-inset-right, 0px))
+				calc(var(--page-pad-y) + env(safe-area-inset-bottom, 0px))
+				calc(var(--page-pad-x) + env(safe-area-inset-left, 0px));
+			/* dvh/vh fallback PAIR — the @supports block must stay after this
+			   declaration or the upgrade silently never applies. */
 			min-height: 100vh;
+		}
+		@supports (height: 100dvh) {
+			body { min-height: 100dvh; }
 		}
 		.content-card {
 			background: var(--card-bg);
 			border: 1px solid var(--card-border);
 			border-radius: 12px;
 			box-shadow: var(--card-shadow);
-			padding: 32px;
+			padding: var(--card-pad);
 			max-width: 960px;
 			margin: 0 auto;
 		}
@@ -85,13 +155,17 @@
 			margin-bottom: 24px;
 		}
 		.page-header h1 {
-			font-size: 24px;
+			font-size: var(--fs-h1);
+			line-height: 1.25;
+			/* "myworktree Portal Dashboard" is long enough to wrap on a 320px
+			   phone; balance keeps the break from stranding one word. */
+			text-wrap: balance;
 			font-weight: 700;
 			margin: 0 0 6px 0;
 			color: var(--text-primary);
 		}
 		.page-desc {
-			font-size: 13px;
+			font-size: var(--fs-meta);
 			color: var(--text-secondary);
 			margin: 0;
 		}
@@ -99,17 +173,41 @@
 			display: none;
 			position: fixed;
 			top: 0;
+			right: 0;
+			bottom: 0;
 			left: 0;
 			width: 100%;
-			height: 100%;
+			min-height: 100vh;
+			max-height: 100vh;
+			/* issue #118: iOS does not resize the layout viewport for the soft
+			   keyboard, so a centered card inside a 100% tall overlay can end up
+			   under the keyboard. Over-scrollable + top-aligned on short viewports
+			   (see the max-height query below) keeps the card reachable. */
+			overflow-y: auto;
+			-webkit-overflow-scrolling: touch;
+			overscroll-behavior: contain;
+			padding:
+				calc(16px + env(safe-area-inset-top, 0px))
+				calc(16px + env(safe-area-inset-right, 0px))
+				calc(16px + env(safe-area-inset-bottom, 0px))
+				calc(16px + env(safe-area-inset-left, 0px));
 			background: var(--overlay-bg);
 			backdrop-filter: blur(8px);
+			-webkit-backdrop-filter: blur(8px);
 			z-index: 1000;
 			align-items: center;
 			justify-content: center;
 		}
 		#token-form.visible {
 			display: flex;
+		}
+		@supports (height: 100dvh) {
+			#token-form { min-height: 100dvh; max-height: 100dvh; }
+		}
+		/* Short viewport == keyboard up (or a short landscape window): stop
+		   centering, pin to the top so the card is never fully occluded. */
+		@media (max-height: 620px) {
+			#token-form { align-items: flex-start; }
 		}
 		.login-card {
 			background: var(--card-bg);
@@ -124,21 +222,22 @@
 		}
 		.login-card h2 {
 			margin: 0 0 8px 0;
-			font-size: 20px;
+			font-size: var(--fs-h2);
+			line-height: 1.3;
 			font-weight: 600;
 			color: var(--text-primary);
 			text-align: center;
 		}
 		.login-card .subtitle {
 			margin: 0 0 24px 0;
-			font-size: 13px;
+			font-size: var(--fs-meta);
 			color: var(--text-secondary);
 			text-align: center;
 		}
 		.login-card label {
 			display: block;
 			margin-bottom: 6px;
-			font-size: 13px;
+			font-size: var(--fs-meta);
 			font-weight: 500;
 			color: var(--text-primary);
 		}
@@ -146,7 +245,7 @@
 			width: 100%;
 			padding: 10px 12px;
 			font-family: inherit;
-			font-size: 14px;
+			font-size: var(--fs-body);
 			background: var(--input-bg);
 			border: 1px solid var(--input-border);
 			color: var(--text-primary);
@@ -164,7 +263,7 @@
 			width: 100%;
 			padding: 10px 16px;
 			font-family: inherit;
-			font-size: 14px;
+			font-size: var(--fs-body);
 			font-weight: 500;
 			background: var(--button-bg);
 			color: #ffffff;
@@ -174,12 +273,9 @@
 			box-sizing: border-box;
 			transition: background 0.15s ease;
 		}
-		.login-card button:hover {
-			background: var(--button-hover-bg);
-		}
 		.login-card .error-msg {
 			color: var(--error-text);
-			font-size: 13px;
+			font-size: var(--fs-meta);
 			margin-bottom: 16px;
 			padding: 8px 12px;
 			background: rgba(203, 36, 49, 0.08);
@@ -193,17 +289,36 @@
 		}
 		table {
 			width: 100%;
+			/* issue #118 ROOT CAUSE FIX. Default `auto` sizes every column from its
+			   min-content width, and a filesystem path has almost no break opportunity:
+			   `/` is UAX #14 class SY, which may NOT break before a letter or digit,
+			   so `/home/linletian/SoftwareWorkspace/myworktree-` stayed a single
+			   357px-wide unbreakable chunk. Five such floors pushed the table to
+			   685px against a 348px card content box (+337px, page scrolled
+			   sideways on any phone; measured — see the plan's probe table).
+			   `fixed` makes the table width a property of the CONTAINER instead of
+			   the CONTENT — that is the structural guarantee, not a per-string patch. */
+			table-layout: fixed;
 			border-collapse: separate;
 			border-spacing: 0;
 		}
+		/* Column widths are set here, NOT via <col style="">: the CSP emitted by
+		   handleDashboard is `style-src 'self' <hash>` with no 'unsafe-inline', and
+		   hashes do not cover inline style ATTRIBUTES. Path gets the largest share;
+		   without it a 72-char path wraps to 19+ lines in a 50px column. */
+		.instances-table col.c-repo { width: 20%; }
+		.instances-table col.c-port { width: 10%; }
+		.instances-table col.c-path { width: 42%; }
+		.instances-table col.c-status { width: 14%; }
+		.instances-table col.c-link { width: 14%; }
 		th {
 			background: var(--panel-bg);
 			color: var(--table-header-text);
-			font-size: 11px;
+			font-size: var(--fs-label);
 			font-weight: 600;
 			text-transform: uppercase;
 			letter-spacing: 0.5px;
-			padding: 10px 16px;
+			padding: 10px var(--cell-pad-x);
 			text-align: left;
 			border-bottom: 1px solid var(--border-color);
 		}
@@ -214,34 +329,55 @@
 			border-top-right-radius: 8px;
 		}
 		td {
-			font-size: 14px;
-			padding: 14px 16px;
+			font-size: var(--fs-body);
+			line-height: 1.45;
+			padding: var(--cell-pad-y) var(--cell-pad-x);
 			border-bottom: 1px solid var(--border-color);
 			vertical-align: middle;
 		}
 		tr:last-child td {
 			border-bottom: none;
 		}
-		tr:hover td {
-			background: var(--hover-bg);
-			transition: background 0.1s ease;
+		/* issue #118: hover is desktop semantics. Ungated, a tap on iOS leaves the
+		   row highlight stuck on the last touched row. */
+		@media (hover: hover) {
+			tbody tr:hover td {
+				background: var(--hover-bg);
+				transition: background 0.1s ease;
+			}
 		}
 		.col-repo {
 			font-weight: 500;
+			overflow-wrap: anywhere;
 		}
 		.col-path {
-			font-size: 12px;
+			font-size: var(--fs-path);
+			line-height: 1.45;
 			color: var(--text-secondary);
 			font-family: ui-monospace, "SF Mono", Menlo, Monaco, Consolas, monospace;
+			/* Full path, always readable: `anywhere` (NOT break-word — measured, see
+			   docs/plans/fix-issue118-portal-narrow-path/plan.md) is what actually
+			   shrinks min-content to 0 and lets the column wrap mid-segment;
+			   `break-all` backstops WebKit older than iOS 15.4, where `anywhere`
+			   does not exist. No text-overflow, no -webkit-line-clamp, no
+			   white-space:nowrap here or anywhere below — the path is never elided. */
+			overflow-wrap: anywhere;
+			word-break: break-all;
+		}
+		/* Port keeps the plain td size (--fs-body): no bespoke font-size here. A
+		   per-column size is what made one row render at three different sizes. */
+		.col-port {
+			color: var(--text-secondary);
 		}
 		.status-badge {
 			display: inline-flex;
 			align-items: center;
 			gap: 6px;
-			font-size: 12px;
+			font-size: var(--fs-badge);
 			font-weight: 500;
 			padding: 3px 10px;
 			border-radius: 12px;
+			white-space: nowrap;
 		}
 		.status-badge.alive {
 			background: rgba(40, 167, 69, 0.12);
@@ -266,60 +402,194 @@
 		.action-link {
 			display: inline-flex;
 			align-items: center;
+			justify-content: center;
 			padding: 4px 12px;
-			font-size: 12px;
+			font-size: var(--fs-action);
 			font-weight: 500;
 			color: var(--link-color);
 			background: var(--panel-bg);
 			border: 1px solid var(--border-color);
 			border-radius: 6px;
 			text-decoration: none;
+			/* Transition stays on the base rule (as before): declaring it inside
+			   `:hover` alone would animate the hover-in and snap on hover-out. */
 			transition: background 0.15s ease, border-color 0.15s ease;
 		}
-		.action-link:hover {
-			background: var(--hover-bg);
-			border-color: var(--link-color);
-			text-decoration: none;
-		}
 		#loading {
-			font-size: 13px;
+			font-size: var(--fs-meta);
 			color: var(--text-secondary);
 			padding: 20px 0;
 			text-align: center;
+		}
+		.empty-hint {
+			font-size: var(--fs-meta);
+			color: var(--text-secondary);
+			padding: 16px 0;
+			text-align: center;
+		}
+		.hidden {
+			display: none;
+		}
+		/* The narrow tier below turns the table itself into `display: block`
+		   (.instances-table, .instances-table tr, …). Same specificity as
+		   `.hidden` and later in the file, so it wins the cascade there and the
+		   table would stay visible while "hidden" — e.g. after a 401 leaves stale
+		   rows on screen. This higher-specificity pair is what actually hides it. */
+		.instances-table.hidden {
+			display: none;
+		}
+		.sr-only {
+			position: absolute;
+			width: 1px;
+			height: 1px;
+			margin: -1px;
+			padding: 0;
+			overflow: hidden;
+			clip: rect(0 0 0 0);
+			white-space: nowrap;
+			border: 0;
+		}
+		/* Touch targets: Apple HIG 44pt. Desktop (fine pointer) keeps the compact
+		   chrome because this block does not match there. */
+		@media (pointer: coarse) {
+			.action-link {
+				min-width: 44px;
+				min-height: 44px;
+				padding: 10px 14px;
+			}
+			.login-card button {
+				min-height: 44px;
+			}
+			/* iOS Safari auto-zooms the whole page when a focused input's font-size
+			   is below 16px. That is a second, independent symptom from keyboard
+			   occlusion, and 16px is the only value that prevents it. */
+			.login-card input[type="password"] {
+				font-size: var(--fs-input-coarse);
+			}
+		}
+		@media (hover: hover) {
+			.action-link:hover {
+				background: var(--hover-bg);
+				border-color: var(--link-color);
+			}
+			.login-card button:hover {
+				background: var(--button-hover-bg);
+			}
+		}
+
+		/* ---------- narrow tier (<=768px): a row becomes a card ----------
+		   Chosen over "keep the 5-column table" because at 390px the fixed-layout
+		   table fits but the path column collapses to ~50px and wraps to 19-22
+		   lines: geometrically correct, unreadable. As a card the path owns the full
+		   row: 314px @390 / 244px @320 => 2-3 lines, page never scrolls sideways.
+		   768px matches the main UI's narrow tier (#100); measured floor: 430px is
+		   unusable as a table, 768px is usable as a table. */
+		@media (max-width: 768px) {
+			:root {
+				--page-pad-y: 16px;
+				--page-pad-x: 10px;
+				--card-pad: 14px;
+				--cell-pad-y: 10px;
+				--cell-pad-x: 10px;
+				--row-gap: 10px;
+				/* Card tier: the title text is longer now ("myworktree Portal
+				   Dashboard") and 20px read too small on a portrait phone. 22px is
+				   the card-tier step of the scale; the table tier keeps 24px. */
+				--fs-h1: 22px;
+			}
+			.page-header {
+				margin-bottom: 14px;
+			}
+			.content-card {
+				overflow: hidden;
+			}
+			.instances-table,
+			.instances-table thead,
+			.instances-table tbody,
+			.instances-table tr,
+			.instances-table td {
+				display: block;
+				width: 100%;
+			}
+			.instances-table thead {
+				display: none;
+			}
+			.instances-table td {
+				border-bottom: none;
+				padding: 3px 0;
+			}
+			.instances-table tr {
+				display: grid;
+				grid-template-columns: minmax(0, 1fr) auto;
+				gap: 4px 10px;
+				border: 1px solid var(--card-border);
+				border-radius: 12px;
+				background: var(--card-bg);
+				padding: 10px 12px;
+				margin-bottom: var(--row-gap);
+			}
+			.instances-table td.col-repo { grid-column: 1; grid-row: 1; }
+			.instances-table td.col-status { grid-column: 2; grid-row: 1; justify-self: end; }
+			.instances-table td.col-port { grid-column: 1; grid-row: 2; }
+			.instances-table td.col-link { grid-column: 2; grid-row: 2; justify-self: end; }
+			.instances-table td.col-path {
+				grid-column: 1 / -1;
+				grid-row: 3;
+			}
+			/* Field names come from data-label, because thead is hidden. Same
+			   --fs-label as the desktop <th>: one role, one size. */
+			.instances-table td::before {
+				content: attr(data-label);
+				display: block;
+				font-size: var(--fs-label);
+				font-weight: 600;
+				text-transform: uppercase;
+				letter-spacing: 0.5px;
+				color: var(--text-secondary);
+				margin-bottom: 2px;
+			}
+			.instances-table td.col-path::before {
+				margin-bottom: 4px;
+			}
 		}
 	</style>
 </head>
 <body>
 	<div id="token-form">
 		<div class="login-card">
-			<h2>Portal Dashboard</h2>
+			<h2>myworktree Portal Dashboard</h2>
 			<p class="subtitle">Enter your auth token to continue</p>
-			<div id="error-msg" class="error-msg"></div>
+			<div id="error-msg" class="error-msg" role="alert"></div>
 			<label for="token-input">Auth Token</label>
-			<input type="password" id="token-input" placeholder="Enter auth token">
+			<input type="password" id="token-input" placeholder="Enter auth token" autocomplete="off">
 			<button id="login-btn">Login</button>
 		</div>
 	</div>
 
 	<div class="content-card">
 		<div class="page-header">
-			<h1>Portal Dashboard</h1>
+			<h1>myworktree Portal Dashboard</h1>
 			<p class="page-desc">Running instances across all repositories</p>
 		</div>
 		<div id="loading">Loading instances...</div>
-		<table id="instances-table" style="display: none;">
+		<table id="instances-table" class="instances-table hidden">
+			<caption class="sr-only">Portal instances: repository, port, worktree path, status and link</caption>
+			<colgroup>
+				<col class="c-repo"><col class="c-port"><col class="c-path"><col class="c-status"><col class="c-link">
+			</colgroup>
 			<thead>
 				<tr>
-					<th>Repository</th>
-					<th>Port</th>
-					<th>Path</th>
-					<th>Status</th>
-					<th>Link</th>
+					<th scope="col">Repository</th>
+					<th scope="col">Port</th>
+					<th scope="col">Path</th>
+					<th scope="col">Status</th>
+					<th scope="col">Link</th>
 				</tr>
 			</thead>
 			<tbody id="instances-body">
 			</tbody>
 		</table>
+		<div id="empty-hint" class="empty-hint hidden">No running instances</div>
 	</div>
 
 	<script>
@@ -361,7 +631,9 @@
 				.then(function(r) {
 					if (r.status === 401) {
 						document.getElementById('token-form').classList.add('visible');
-						document.getElementById('instances-table').style.display = 'none';
+						document.getElementById('instances-table').classList.add('hidden');
+						document.getElementById('empty-hint').classList.add('hidden');
+						document.getElementById('loading').classList.remove('hidden');
 						document.getElementById('loading').textContent = 'Please login to view instances';
 						return null;
 					}
@@ -373,32 +645,44 @@
 				});
 		}
 
-		function renderList(data) {
-			document.getElementById('loading').style.display = 'none';
-			document.getElementById('instances-table').style.display = 'table';
+		function cell(className, label, text) {
+			var td = document.createElement('td');
+			td.className = className;
+			// data-label backs the narrow-tier card layout (thead is hidden there).
+			td.setAttribute('data-label', label);
+			if (text !== null && text !== undefined) td.textContent = text;
+			return td;
+		}
 
-			var tbody = document.getElementById('instances-body');
-			tbody.textContent = '';
+		function renderList(data) {
+			document.getElementById('loading').classList.add('hidden');
 
 			var procs = data.processes || [];
+			var tbody = document.getElementById('instances-body');
+			var table = document.getElementById('instances-table');
+			var empty = document.getElementById('empty-hint');
+
+			tbody.textContent = '';
+
+			if (procs.length === 0) {
+				table.classList.add('hidden');
+				empty.classList.remove('hidden');
+				return;
+			}
+			table.classList.remove('hidden');
+			empty.classList.add('hidden');
+
 			procs.forEach(function(p) {
 				var tr = document.createElement('tr');
 
-				var nameTd = document.createElement('td');
-				nameTd.textContent = p.repo_name;
-				nameTd.className = 'col-repo';
-				tr.appendChild(nameTd);
+				tr.appendChild(cell('col-repo', 'Repository', p.repo_name));
+				// port 0 == nothing to point at; render an em dash instead of "0".
+				tr.appendChild(cell('col-port', 'Port', p.port > 0 ? String(p.port) : '\u2014'));
 
-				var portTd = document.createElement('td');
-				portTd.textContent = p.port;
-				tr.appendChild(portTd);
+				var pathTd = cell('col-path', 'Path', p.path);
+				tr.appendChild(pathTd);
 
-				var idTd = document.createElement('td');
-				idTd.textContent = p.path;
-				idTd.className = 'col-path';
-				tr.appendChild(idTd);
-
-				var statusTd = document.createElement('td');
+				var statusTd = cell('col-status', 'Status', null);
 				var badge = document.createElement('span');
 				badge.className = 'status-badge ' + (p.alive ? 'alive' : 'dead');
 				var dot = document.createElement('span');
@@ -408,14 +692,17 @@
 				statusTd.appendChild(badge);
 				tr.appendChild(statusTd);
 
-				var linkTd = document.createElement('td');
+				var linkTd = cell('col-link', 'Link', null);
 				if (p.alive && p.port > 0) {
 					var a = document.createElement('a');
-					a.href = window.location.protocol + '//' + window.location.hostname + ':' + p.port + '/';
 					a.className = 'action-link';
+					a.href = window.location.protocol + '//' + window.location.hostname + ':' + p.port + '/';
 					a.textContent = 'Open';
 					a.target = '_blank';
+					a.rel = 'noopener';
 					linkTd.appendChild(a);
+				} else {
+					linkTd.textContent = '\u2014';
 				}
 				tr.appendChild(linkTd);
 

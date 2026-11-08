@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head><meta charset="UTF-8"><title>#118 预览几何自检（iframe 法，模拟真机视口）</title>
+<style>
+  body { font: 12px ui-monospace, Menlo, monospace; margin: 0; padding: 8px; }
+  iframe { border: 1px solid #999; vertical-align: top; }
+  pre { white-space: pre-wrap; }
+</style>
+</head>
+<body>
+<div id="stage"></div>
+<pre id="out">measuring…</pre>
+<script>
+  // 真机 CSS 像素视口用 iframe 还原：媒体查询按 iframe 自身视口求值，
+  // 而 headless Chrome 的 --window-size 有最小宽度（~500），直接开窗测不到手机档。
+  var CASES = [
+    { w: 320, h: 568, name: 'iPhone SE', qs: '' },
+    { w: 390, h: 844, name: 'iPhone 13/14', qs: '' },
+    { w: 430, h: 932, name: 'iPhone Pro Max', qs: '' },
+    { w: 810, h: 1080, name: 'iPad 竖屏', qs: '' },
+    { w: 390, h: 844, name: 'iPhone 13 · 整改前', qs: '?legacy=1' },
+    { w: 810, h: 1080, name: 'iPad · 整改前', qs: '?legacy=1' }
+  ];
+
+  function lines(doc, node) {
+    var r = doc.createRange();
+    r.selectNodeContents(node);
+    return r.getClientRects().length;
+  }
+
+  function probe(c) {
+    return new Promise(function (resolve) {
+      var f = document.createElement('iframe');
+      f.style.width = c.w + 'px';
+      f.style.height = c.h + 'px';
+      f.src = 'http://127.0.0.1:18800/' + c.qs;
+      document.getElementById('stage').appendChild(f);
+      f.onload = function () {
+        setTimeout(function () {
+          try {
+            var d = f.contentDocument;
+            var win = f.contentWindow;
+            var card = d.querySelector('.content-card');
+            var table = d.getElementById('instances-table');
+            var paths = d.querySelectorAll('.col-path');
+            var maxLines = 0, clipped = 0, minPathW = 1e9;
+            Array.prototype.forEach.call(paths, function (p) {
+              var n = lines(d, p);
+              if (n > maxLines) maxLines = n;
+              if (p.clientWidth < minPathW) minPathW = p.clientWidth;
+              if (p.scrollWidth > p.clientWidth + 1) clipped++;
+            });
+            var ellipsis = /text-overflow|line-clamp/.test(
+              Array.prototype.map.call(d.styleSheets[0].cssRules, function (r) { return r.cssText; }).join('\n')
+            );
+            var legacy = d.documentElement.classList.contains('legacy');
+            resolve({
+              name: c.name, vw: win.innerWidth,
+              legacy: legacy,
+              tier: win.innerWidth <= 768 ? 'card' : 'table',
+              cardW: card.clientWidth,
+              tableW: table.offsetWidth,
+              tblOver: table.offsetWidth - card.clientWidth,
+              docScrollW: d.documentElement.scrollWidth,
+              docOver: d.documentElement.scrollWidth - win.innerWidth,
+              pathColW: minPathW,
+              pathMaxLines: maxLines,
+              clippedCells: clipped,
+              ellipsisInCSS: ellipsis
+            });
+          } catch (e) {
+            resolve({ name: c.name, error: String(e) });
+          }
+        }, 700);
+      };
+    });
+  }
+
+  CASES.reduce(function (chain, c) {
+    return chain.then(function (acc) {
+      return probe(c).then(function (r) { acc.push(r); return acc; });
+    });
+  }, Promise.all([])).then(function (rows) {
+    document.getElementById('out').textContent = 'PROBE' + JSON.stringify(rows) + 'END';
+  });
+</script>
+</body>
+</html>

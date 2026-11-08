@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head><meta charset="UTF-8"><title>#118 生产页字体/几何自检</title>
+<style>body { font: 12px ui-monospace, Menlo, monospace; margin: 0; padding: 8px; } iframe { border: 1px solid #999; vertical-align: top; } pre { white-space: pre-wrap; }</style>
+</head>
+<body>
+<div id="stage"></div>
+<pre id="out">measuring…</pre>
+<script>
+  // 测的是 internal/portal/dashboard.html 本体（通过同目录符号链接被同一个静态服务器端出来），
+  // 不是 preview 复刻稿。iframe 用来还原真机 CSS 像素视口（媒体查询按 iframe 视口求值）。
+  var MOCK = { processes: [
+    { repo_name: 'myworktree', port: 40751, path: '/home/linletian/SoftwareWorkspace/myworktree-myworktree/fix-fix-issue118', alive: true },
+    { repo_name: 'client-very-long-repository-name', port: 41000, path: '/Users/dev/Documents/Client/very-long-repository-name/.worktrees/feature-branch-a', alive: true },
+    { repo_name: 'dsh', port: 0, path: '/home/linletian/SoftwareWorkspace/dsh', alive: false }
+  ] };
+
+  var CASES = [
+    { name: 'iPhone SE 320', w: 320, h: 568 },
+    { name: 'iPhone 13 390', w: 390, h: 844 },
+    { name: 'iPhone Pro Max 430', w: 430, h: 932 },
+    { name: 'iPad 竖屏 810', w: 810, h: 1080 },
+    { name: '桌面 1440', w: 1440, h: 900 }
+  ];
+
+  function lines(doc, node) {
+    // 必须选到文本节点：对 <td> 本身 selectNodeContents 返回的是块盒（1 个 rect），
+    // 不是每行一个 rect，行数会因此被少算。
+    var target = node.firstChild && node.firstChild.nodeType === 3 ? node.firstChild : node;
+    var r = doc.createRange();
+    r.selectNodeContents(target);
+    var n = r.getClientRects().length;
+    if (n > 1) return n;
+    var lh = parseFloat(getComputedStyle(node).lineHeight) || parseFloat(getComputedStyle(node).fontSize) * 1.2;
+    return Math.max(1, Math.round(node.clientHeight / lh));
+  }
+  function fs(doc, sel, pseudo) {
+    var el = doc.querySelector(sel);
+    if (!el) return 'MISSING:' + sel;
+    return getComputedStyle(el, pseudo || null).fontSize;
+  }
+
+  function probe(c) {
+    return new Promise(function (resolve) {
+      var f = document.createElement('iframe');
+      f.style.width = c.w + 'px';
+      f.style.height = c.h + 'px';
+      f.src = '/dashboard-under-test.html';
+      document.getElementById('stage').appendChild(f);
+      f.onload = function () {
+        setTimeout(function () {
+          try {
+            var d = f.contentDocument, win = f.contentWindow;
+            // 静态服务器没有 /api/list，所以直接把 mock 喂给生产页自己的 renderList
+            if (typeof win.renderList === 'function') win.renderList(MOCK);
+            setTimeout(function () {
+              var card = d.querySelector('.content-card');
+              var table = d.getElementById('instances-table');
+              var paths = d.querySelectorAll('.col-path');
+              var maxLines = 0, clipped = 0, minPathW = 1e9;
+              Array.prototype.forEach.call(paths, function (p) {
+                var n = lines(d, p);
+                if (n > maxLines) maxLines = n;
+                if (p.clientWidth < minPathW) minPathW = p.clientWidth;
+                if (p.scrollWidth > p.clientWidth + 1) clipped++;
+              });
+              resolve({
+                name: c.name, vw: win.innerWidth,
+                tier: win.innerWidth <= 768 ? 'card' : 'table',
+                fsH1: fs(d, '.page-header h1'),
+                fsTh: fs(d, 'thead th'),
+                fsLabel: fs(d, '.instances-table td', '::before'),
+                fsRepo: fs(d, '.col-repo'),
+                fsPort: fs(d, '.col-port'),
+                fsPath: fs(d, '.col-path'),
+                fsBadge: fs(d, '.status-badge'),
+                fsLink: fs(d, '.action-link'),
+                fontPath: getComputedStyle(d.querySelector('.col-path')).fontFamily.split(',')[0],
+                cardW: card.clientWidth,
+                tableW: table.offsetWidth,
+                tblOver: table.offsetWidth - card.clientWidth,
+                docOver: d.documentElement.scrollWidth - win.innerWidth,
+                pathColW: minPathW,
+                pathMaxLines: maxLines,
+                clipped: clipped
+              });
+            }, 250);
+          } catch (e) { resolve({ name: c.name, error: String(e) }); }
+        }, 350);
+      };
+    });
+  }
+
+  CASES.reduce(function (chain, c) {
+    return chain.then(function (acc) { return probe(c).then(function (r) { acc.push(r); return acc; }); });
+  }, Promise.all([])).then(function (rows) {
+    document.getElementById('out').textContent = 'PROBE' + JSON.stringify(rows) + 'END';
+  });
+</script>
+</body>
+</html>
