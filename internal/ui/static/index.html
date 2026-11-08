@@ -2088,6 +2088,18 @@
         #connection-overlay .conn-sub {
             color: var(--overlay-text);
         }
+        /* Issue #137: only the credential state gets an action — the
+           unreachable state really does self-heal, so offering a button
+           there would be as misleading as the old single sentence was. */
+        #connection-overlay .conn-action {
+            margin-top: 18px;
+            padding: 8px 18px;
+            font-size: 14px;
+            color: var(--overlay-text);
+            text-decoration: none;
+            border: 1px solid var(--overlay-text);
+            border-radius: 6px;
+        }
 
         /* LLM Settings Dialog overrides */
         #dialog-llm-settings {
@@ -2429,6 +2441,7 @@
         <div id="connection-overlay" style="display:none;">
             <div class="conn-title">Connection Lost</div>
             <div class="conn-sub">Backend server unreachable. Retrying...</div>
+            <a id="conn-login" class="conn-action" href="/login" style="display:none;">Log in again</a>
         </div>
 
         <div id="content-shell">
@@ -3337,10 +3350,121 @@
             return "stopped";
         }
 
+        // ---- connection overlay (issue #137) ------------------------------
+        // The overlay used to say "backend unreachable, retrying" for EVERY
+        // failure, including the one it can never recover from: the client's
+        // credential is gone (cookie expired, token rotated in place, stale
+        // ?token= in the address bar). Those two states need different words
+        // AND different exits, so the poll's catch classifies on the HTTP
+        // status the API wrapper already carries (newAPIError sets err.status)
+        // instead of painting one sentence for all of them.
+        //
+        // The overlay state lives on the shipped page global `state`: one
+        // flag, `state.authExpired`, is the single truth every retry path
+        // reads (the poll below, both transport dials, and — through
+        // window.state — kinds/dsh_web.js's raw-fetch scope poll), so a new
+        // poller cannot reintroduce the retry storm by carrying its own copy.
+        // It is sticky by design: once the credential is known dead, the
+        // follow-up 429 ("too many unauthorized attempts", i.e. the poll
+        // burning the server's limiter window) must not be rewritten as
+        // "unreachable" — the server is up, the credential is not.
+
+        // The address-bar token must NOT survive into /login's `next`: this
+        // page turns it into an Authorization: Bearer header (`headers`
+        // above), and the server prefers that header over the cookie
+        // (extractAuthToken in internal/app/app.go) — so a stale ?token=
+        // keeps 401'ing even after a successful re-login. Landing on a
+        // token-free path is what makes the freshly minted cookie the only
+        // credential in play.
+        function loginNextPath(pathname, search) {
+            const params = new URLSearchParams(search || "");
+            params.delete("token");
+            const qs = params.toString();
+            return (pathname || "/") + (qs ? "?" + qs : "");
+        }
+
+        // While the auth overlay is up no retry can succeed, so the pollers
+        // stop: the server counts failed attempts per IP per minute (authFail
+        // limit 20) and the 2s poll would otherwise drive every request into
+        // 429 — the exact state the issue says must not be reached. Recovery
+        // is a page reload after a successful login, which re-arms everything
+        // from scratch.
+        function stopAuthPolling() {
+            if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+            if (divergeTimer) { clearInterval(divergeTimer); divergeTimer = null; }
+            if (gitChangesTimer) { clearInterval(gitChangesTimer); gitChangesTimer = null; }
+            if (monitorAlertsTimer) { clearInterval(monitorAlertsTimer); monitorAlertsTimer = null; }
+            if (monitorTimer) { clearInterval(monitorTimer); monitorTimer = null; }
+        }
+
+        function showAuthExpired() {
+            state.authExpired = true;
+            const overlay = document.getElementById("connection-overlay");
+            if (overlay) {
+                const title = overlay.querySelector(".conn-title");
+                const sub = overlay.querySelector(".conn-sub");
+                const action = document.getElementById("conn-login");
+                if (title) title.textContent = "Session expired";
+                if (sub) sub.textContent = "This token is no longer valid. The server is running — log in again to continue.";
+                if (action) {
+                    action.href = "/login?next=" + encodeURIComponent(loginNextPath(location.pathname, location.search));
+                    action.style.display = "";
+                }
+                overlay.style.display = "flex";
+            }
+            stopAuthPolling();
+        }
+
+        function showConnectionLost() {
+            state.authExpired = false;
+            const overlay = document.getElementById("connection-overlay");
+            if (!overlay) return;
+            const title = overlay.querySelector(".conn-title");
+            const sub = overlay.querySelector(".conn-sub");
+            const action = document.getElementById("conn-login");
+            if (title) title.textContent = "Connection Lost";
+            if (sub) sub.textContent = "Backend server unreachable. Retrying...";
+            if (action) action.style.display = "none";
+            overlay.style.display = "flex";
+        }
+
+        function hideConnectionOverlay() {
+            state.authExpired = false;
+            const overlay = document.getElementById("connection-overlay");
+            if (overlay) overlay.style.display = "none";
+            const action = document.getElementById("conn-login");
+            if (action) action.style.display = "none";
+        }
+
+        // The poll's catch, in one place (issue #137): classify, then decide.
+        // An auth failure OUTRANKS the liveness split — "websocket live
+        // (status refresh failed)" describes a throttled poll and would tell
+        // the user the session is fine while the credential is dead, which is
+        // the exact misdirection this issue is about.
+        function showConnectionFailure(e) {
+            console.error(e);
+            const status = e && e.status;
+            const authFailure = status === 401 || status === 403
+                || (status === 429 && state.authExpired === true);
+            if (!authFailure) {
+                const inst = getActiveInstance();
+                if (inst && isInstanceLiveStatus(inst.status) && hasLiveTTYConnection(inst.id)) {
+                    updateStatus("websocket live (status refresh failed)");
+                    return;
+                }
+                showConnectionLost();
+                return;
+            }
+            showAuthExpired();
+        }
+
         async function refresh() {
+            // Issue #137: the credential is known-dead. Nothing this poll can
+            // do will succeed and every attempt is charged against the per-IP
+            // auth limiter, so it does not run at all.
+            if (state.authExpired === true) return;
             if (refreshInFlight) return refreshInFlight;
 
-            const overlay = document.getElementById("connection-overlay");
             refreshInFlight = (async () => {
                 try {
                     const [wt, ins, tags, branches] = await Promise.all([
@@ -3377,9 +3501,10 @@
                         // Keep showing the last known value; don't overwrite with null.
                     });
 
-                    const recovered = overlay.style.display !== "none";
+                    const overlay = document.getElementById("connection-overlay");
+                    const recovered = !!(overlay && overlay.style.display !== "none");
                     if (recovered) {
-                        overlay.style.display = "none";
+                        hideConnectionOverlay();
                         reconnectRunningTerminalSessions();
                     }
 
@@ -3396,13 +3521,7 @@
                     // live page down once the instance reads terminal.
                     syncActiveWebStatus();
                 } catch (e) {
-                    console.error(e);
-                    const inst = getActiveInstance();
-                    if (inst && isInstanceLiveStatus(inst.status) && hasLiveTTYConnection(inst.id)) {
-                        updateStatus("websocket live (status refresh failed)");
-                        return;
-                    }
-                    overlay.style.display = "flex";
+                    showConnectionFailure(e);
                 } finally {
                     refreshInFlight = null;
                 }
@@ -8839,6 +8958,11 @@
 
         function connectTTY(session) {
             if (!session) return;
+            // Issue #137: a known-dead credential cannot open a socket — the
+            // handshake carries ?token= / the cookie and 401s — and each
+            // attempt is charged against the auth limiter. Recovery is a page
+            // reload after re-login.
+            if (state.authExpired === true) return;
             disconnectTTY(session);
 
             // disconnectTTY closes and nulls the socket UNCONDITIONALLY
@@ -9507,6 +9631,8 @@
 
         function startSSE(session) {
             if (!session) return;
+            // Issue #137: same no-dial guard as connectTTY above.
+            if (state.authExpired === true) return;
             // SSE replaces the WS transport, so the TTY watchdog must die
             // with it (issue #83): it would self-cancel on its next tick
             // anyway, but clearing here makes "the watchdog never outlives

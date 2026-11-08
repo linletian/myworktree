@@ -531,6 +531,15 @@ class DshWebRenderer {
         const id = session.id;
         const tick = async () => {
             if (abort.aborted) return;
+            // Issue #137: the main page reported the credential dead, and this
+            // poll uses a bare fetch (not window.api), so it has to honour the
+            // same stop signal itself — every request here would 401 and be
+            // charged against the auth limiter. Re-activation after re-login
+            // starts a fresh poll.
+            if (window.state && window.state.authExpired === true) {
+                this._stopMonitoring();
+                return;
+            }
             // Self-stop (issue #120): the backend answers 200 for a
             // stopped instance forever, so the poll must watch the
             // instance status itself. Gone or terminal → clear the
