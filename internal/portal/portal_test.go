@@ -794,6 +794,430 @@ func TestCSPHashes_NoDuplicateTypes(t *testing.T) {
 	}
 }
 
+// stripCSSComments removes /* */ blocks so an anchor never passes because a
+// comment merely mentions the declaration it is supposed to police.
+func stripCSSComments(css string) string {
+	var b strings.Builder
+	for {
+		i := strings.Index(css, "/*")
+		if i < 0 {
+			b.WriteString(css)
+			return b.String()
+		}
+		j := strings.Index(css[i:], "*/")
+		if j < 0 {
+			b.WriteString(css[:i])
+			return b.String()
+		}
+		b.WriteString(css[:i])
+		css = css[i+j+2:]
+	}
+}
+
+// cssRuleBody returns the declarations of the first rule with exactly this
+// selector. Anchoring inside a rule is the point: a bare whole-file Contains
+// would pass while the declaration sat somewhere irrelevant and the real rule
+// stayed broken.
+func cssRuleBody(t *testing.T, css, selector string) string {
+	t.Helper()
+	i := -1
+	for off := 0; ; {
+		j := strings.Index(css[off:], selector+" {")
+		if j < 0 {
+			t.Fatalf("CSS rule %q not found", selector)
+		}
+		j += off
+		// Boundary check: "th" must not match inside ".col-path".
+		prev := byte('\n')
+		if j > 0 {
+			prev = css[j-1]
+		}
+		switch prev {
+		case 'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm',
+			'n', 'o', 'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z',
+			'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M',
+			'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z',
+			'0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '-', '.', ':', '>', '~', '+', '*':
+			off = j + 1
+			continue
+		}
+		i = j
+		break
+	}
+	open := i + len(selector)
+	depth, end := 0, -1
+	for j := open; j < len(css); j++ {
+		switch css[j] {
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				end = j
+			}
+		}
+		if end >= 0 {
+			break
+		}
+	}
+	if end < 0 {
+		t.Fatalf("CSS rule %q is not closed", selector)
+	}
+	return strings.TrimSpace(css[open+1 : end])
+}
+
+// tokenPx reads a px value out of the :root text of the type scale. It is how
+// the ordinal rules (path below its label, path below body) stay checkable
+// without a browser: the tokens ARE the computed sizes.
+func tokenPx(t *testing.T, root, token string) float64 {
+	t.Helper()
+	m := regexp.MustCompile(regexp.QuoteMeta(token) + `:\s*([0-9.]+)px;`).FindStringSubmatch(root)
+	if m == nil {
+		t.Fatalf("%s is not declared as px in :root, got %q", token, root)
+	}
+	v, err := strconv.ParseFloat(m[1], 64)
+	if err != nil {
+		t.Fatalf("%s: cannot parse %q: %v", token, m[1], err)
+	}
+	return v
+}
+
+// mediaBlockRanges returns [start,end) byte ranges of every @media block whose
+// prelude is exactly cond.
+func mediaBlockRanges(css, cond string) [][2]int {
+	var out [][2]int
+	needle := "@media " + cond + " {"
+	off := 0
+	for {
+		i := strings.Index(css[off:], needle)
+		if i < 0 {
+			return out
+		}
+		start := off + i
+		depth, end := 0, -1
+		for j := start + len(needle) - 1; j < len(css); j++ {
+			switch css[j] {
+			case '{':
+				depth++
+			case '}':
+				depth--
+				if depth == 0 {
+					end = j + 1
+				}
+			}
+			if end >= 0 {
+				break
+			}
+		}
+		if end < 0 {
+			return out
+		}
+		out = append(out, [2]int{start, end})
+		off = end
+	}
+}
+
+// TestDashboardResponsiveAnchors anchors the issue #118 fix on the shipped
+// dashboard: the path column must be able to wrap (never elide), the table's
+// width must come from the container rather than its content, the narrow tier
+// must stack rows into cards, and one text role must not carry two font sizes.
+// The overflow arithmetic that motivated it is measured in
+// docs/plans/fix-issue118-portal-narrow-path/ (plan.md and the probes).
+func TestDashboardResponsiveAnchors(t *testing.T) {
+	content := string(DashboardHTML)
+
+	styleStart := strings.Index(content, "<style>")
+	styleEnd := strings.Index(content, "</style>")
+	if styleStart < 0 || styleEnd < 0 {
+		t.Fatal("dashboard.html lost its single inline <style> block")
+	}
+	css := stripCSSComments(content[styleStart+len("<style>") : styleEnd])
+	markup := content[styleEnd+len("</style>"):]
+	markup = stripHTMLComments(markup)
+
+	t.Run("viewport meta opts into cover", func(t *testing.T) {
+		i := strings.Index(content, `<meta name="viewport" content="`)
+		if i < 0 {
+			t.Fatal("dashboard.html lost the viewport meta tag")
+		}
+		meta := content[i : i+strings.IndexByte(content[i:], '>')]
+		for _, want := range []string{"width=device-width", "initial-scale=1", "viewport-fit=cover"} {
+			if !strings.Contains(meta, want) {
+				t.Fatalf("viewport meta should carry %q (without cover, env(safe-area-inset-*) is always 0)", want)
+			}
+		}
+	})
+
+	t.Run("table width comes from the container", func(t *testing.T) {
+		if got := cssRuleBody(t, css, "table"); !strings.Contains(got, "table-layout: fixed;") {
+			t.Fatalf("table rule should declare table-layout: fixed, got %q", got)
+		}
+		var sum float64
+		for _, pair := range [][2]string{{".instances-table col.c-repo", "20%"}, {".instances-table col.c-port", "10%"}, {".instances-table col.c-path", "42%"}, {".instances-table col.c-status", "14%"}, {".instances-table col.c-link", "14%"}} {
+			body := cssRuleBody(t, css, pair[0])
+			if !strings.Contains(body, "width: "+pair[1]+";") {
+				t.Errorf("%s should be width: %s, got %q", pair[0], pair[1], body)
+			}
+			var w float64
+			if _, err := fmt.Sscanf(pair[1], "%g%%", &w); err != nil {
+				t.Fatalf("bad anchor %q: %v", pair[1], err)
+			}
+			sum += w
+		}
+		if sum != 100 {
+			t.Errorf("column widths sum to %v, want 100", sum)
+		}
+		// The widths live in CSS, not in <col style="">: the CSP is
+		// `style-src 'self' <hash>` and hashes do not cover style ATTRIBUTES.
+		if strings.Contains(markup, "<col style=") {
+			t.Error("colgroup widths must not be inline style attributes (blocked by the page's own CSP)")
+		}
+	})
+
+	t.Run("path wraps and is never elided", func(t *testing.T) {
+		body := cssRuleBody(t, css, ".col-path")
+		for _, want := range []string{"overflow-wrap: anywhere", "word-break: break-all"} {
+			if !strings.Contains(body, want+";") {
+				t.Errorf(".col-path should declare %q (overflow-wrap: break-word does NOT shrink min-content — measured, plan.md)", want)
+			}
+		}
+		for _, banned := range []string{"text-overflow", "line-clamp", "white-space: nowrap"} {
+			if strings.Contains(body, banned) {
+				t.Errorf(".col-path must not contain %q — the full path has to stay readable (issue #118 requirement)", banned)
+			}
+		}
+		for _, banned := range []string{"text-overflow", "line-clamp"} {
+			if strings.Contains(css, banned) {
+				t.Errorf("%q appears in the stylesheet at all — nothing on this page may elide text", banned)
+			}
+		}
+		if got := cssRuleBody(t, css, ".col-repo"); !strings.Contains(got, "overflow-wrap: anywhere;") {
+			t.Errorf(".col-repo should wrap too (a long repository name lifts the same floor), got %q", got)
+		}
+	})
+
+	t.Run("type scale is a single source", func(t *testing.T) {
+		root := cssRuleBody(t, css, ":root")
+		// One declaration per role, and every role present: the ramp is the
+		// contract, so a missing token cannot silently fall back to a UA default.
+		tokens := []string{
+			"--fs-h1", "--fs-h2", "--fs-body", "--fs-meta", "--fs-label",
+			"--fs-path", "--fs-badge", "--fs-action", "--fs-input-coarse",
+		}
+		for _, tok := range tokens {
+			if n := strings.Count(root, tok+":"); n != 1 {
+				t.Errorf("%s declared %d times in :root, want exactly 1", tok, n)
+			}
+		}
+		// Every font-size in the stylesheet resolves to a token — no literal px, no
+		// em, anywhere (the title brand used to be the one em exception; the title
+		// is now one uniform run of text).
+		for i := 0; ; {
+			j := strings.Index(css[i:], "font-size:")
+			if j < 0 {
+				break
+			}
+			j += i
+			value := css[j+len("font-size:"):]
+			if k := strings.IndexByte(value, ';'); k >= 0 {
+				value = value[:k]
+			}
+			value = strings.TrimSpace(strings.ReplaceAll(value, "\n", " "))
+			if !strings.HasPrefix(value, "var(--fs-") {
+				t.Errorf("font-size: %s is outside the type scale — every size must be a var(--fs-*) token", value)
+			}
+			i = j + len("font-size:")
+		}
+		// The path value sits one step BELOW its own label (11 vs 12): at equal
+		// px the monospaced value read larger than the uppercase label, which is
+		// the inverted hierarchy the user reported.
+		labelPx := tokenPx(t, root, "--fs-label")
+		pathPx := tokenPx(t, root, "--fs-path")
+		if pathPx > labelPx {
+			t.Errorf("path (%gpx) must not exceed its label (%gpx) — the value would out-shout its own field name", pathPx, labelPx)
+		}
+		if pathPx > tokenPx(t, root, "--fs-body") {
+			t.Errorf("path (%gpx) must stay below body text (%gpx) — it is secondary data", pathPx, tokenPx(t, root, "--fs-body"))
+		}
+		// Each rule resolves through its role token, never a literal px.
+		if got := cssRuleBody(t, css, ".col-path"); !strings.Contains(got, "font-size: var(--fs-path);") {
+			t.Errorf(".col-path font-size should resolve through var(--fs-path), got %q", got)
+		}
+		if got := cssRuleBody(t, css, "th"); !strings.Contains(got, "font-size: var(--fs-label);") {
+			t.Errorf("th font-size should be var(--fs-label), got %q", got)
+		}
+		if got := cssRuleBody(t, css, ".instances-table td::before"); !strings.Contains(got, "font-size: var(--fs-label);") {
+			t.Errorf("card label should reuse var(--fs-label), got %q", got)
+		}
+		// Port keeps the plain td size; a bespoke per-column size is exactly what
+		// made one row render at three sizes.
+		if got := cssRuleBody(t, css, ".col-port"); strings.Contains(got, "font-size") {
+			t.Errorf(".col-port must not declare font-size (inherits --fs-body), got %q", got)
+		}
+		// The card tier changes a size by overriding the token, never by adding a
+		// second font-size to the same selector.
+		blocks := mediaBlockRanges(css, "(max-width: 768px)")
+		if len(blocks) == 0 {
+			t.Fatal("no @media (max-width: 768px) block")
+		}
+		tier := css[blocks[0][0]:blocks[0][1]]
+		if strings.Contains(tier, "--fs-path") {
+			t.Error("narrow tier re-picks the path size — the path would carry two sizes; override --fs-path in :root instead")
+		}
+		if !strings.Contains(tier, "--fs-h1: 22px;") {
+			t.Error("narrow tier should raise the title to 22px via --fs-h1 (it read too small in portrait)")
+		}
+	})
+
+	t.Run("title reads myworktree Portal Dashboard, one uniform style", func(t *testing.T) {
+		// One heading, one run of text, one style: no span-based branding.
+		for _, want := range []string{
+			"<h1>myworktree Portal Dashboard</h1>",
+			"<h2>myworktree Portal Dashboard</h2>",
+		} {
+			if !strings.Contains(markup, want) {
+				t.Errorf("markup should carry %s", want)
+			}
+		}
+		if strings.Contains(markup, "class=\"brand\"") || strings.Contains(css, ".brand {") {
+			t.Error("the title must not special-case \"myworktree\" — same font, size and colour as the rest")
+		}
+	})
+
+	t.Run("orientation differences cannot resize text", func(t *testing.T) {
+		// Measured: --fs-path computes to 11px in EVERY tier (320/390/430 card,
+		// 810/1440 table). iOS Safari's text autosizing was the remaining way the
+		// same 11px could render larger in portrait than in landscape, so the page
+		// opts out of it explicitly.
+		body := cssRuleBody(t, css, "html")
+		if !strings.Contains(body, "-webkit-text-size-adjust: 100%;") || !strings.Contains(body, "text-size-adjust: 100%;") {
+			t.Errorf("html should pin text-size-adjust to 100%% (iOS auto-inflation is orientation-dependent), got %q", body)
+		}
+	})
+
+	t.Run("dvh fallback pair keeps its order", func(t *testing.T) {
+		body := cssRuleBody(t, css, "body")
+		if !strings.Contains(body, "min-height: 100vh;") {
+			t.Errorf("body should keep the 100vh baseline, got %q", body)
+		}
+		if !strings.Contains(body, "overscroll-behavior: none;") {
+			t.Errorf("body should lock rubber-band overscroll, got %q", body)
+		}
+		for _, inset := range []string{"safe-area-inset-top", "safe-area-inset-right", "safe-area-inset-bottom", "safe-area-inset-left"} {
+			if !strings.Contains(body, inset) {
+				t.Errorf("body should consume %s, got %q", inset, body)
+			}
+		}
+		base := strings.Index(css, "min-height: 100vh;")
+		rise := strings.Index(css, "@supports (height: 100dvh)")
+		if rise < 0 {
+			t.Fatal("no @supports (height: 100dvh) block — the vh/dvh fallback pair is half a fix")
+		}
+		if rise < base {
+			t.Error("the @supports dvh block must come AFTER the 100vh baseline or the upgrade never applies")
+		}
+		if !strings.Contains(css[rise:], "min-height: 100dvh;") {
+			t.Error("@supports block should raise min-height to 100dvh")
+		}
+	})
+
+	t.Run("narrow tier stacks rows into cards", func(t *testing.T) {
+		blocks := mediaBlockRanges(css, "(max-width: 768px)")
+		if len(blocks) != 1 {
+			t.Fatalf("found %d @media (max-width: 768px) blocks, want exactly 1", len(blocks))
+		}
+		block := css[blocks[0][0]:blocks[0][1]]
+		for _, want := range []string{"display: grid", "attr(data-label)", "minmax(0, 1fr) auto", "grid-column: 1 / -1"} {
+			if !strings.Contains(block, want) {
+				t.Errorf("narrow tier should contain %q", want)
+			}
+		}
+		// Cascade: the tier has to come after the desktop table rules.
+		if strings.Index(css, "@media (max-width: 768px)") < strings.Index(css, ".col-path {") {
+			t.Error("narrow tier appears before the desktop rules")
+		}
+	})
+
+	t.Run("hover is desktop-only and touch targets are 44pt", func(t *testing.T) {
+		gated := mediaBlockRanges(css, "(hover: hover)")
+		if len(gated) == 0 {
+			t.Fatal("no @media (hover: hover) block")
+		}
+		for _, m := range regexp.MustCompile(":hover").FindAllStringIndex(css, -1) {
+			inside := false
+			for _, b := range gated {
+				if m[0] >= b[0] && m[0] < b[1] {
+					inside = true
+				}
+			}
+			if !inside {
+				t.Errorf(":hover at offset %d sits outside any @media (hover: hover) block — on iOS a tap would leave the highlight stuck", m[0])
+			}
+		}
+		coarse := mediaBlockRanges(css, "(pointer: coarse)")
+		if len(coarse) == 0 {
+			t.Fatal("no @media (pointer: coarse) block")
+		}
+		block := css[coarse[0][0]:coarse[0][1]]
+		for _, want := range []string{"min-width: 44px", "min-height: 44px", "font-size: var(--fs-input-coarse)"} {
+			if !strings.Contains(block, want+";") {
+				t.Errorf("coarse pointer tier should declare %q (44pt hit target / no iOS focus zoom), got %q", want, block)
+			}
+		}
+		// The 16px that prevents iOS focus zoom still has to be 16px.
+		if got := tokenPx(t, cssRuleBody(t, css, ":root"), "--fs-input-coarse"); got != 16 {
+			t.Errorf("--fs-input-coarse = %gpx, want 16px (the only value that stops iOS auto-zoom)", got)
+		}
+	})
+
+	t.Run("visibility toggles are classes, not style attributes", func(t *testing.T) {
+		if strings.Contains(markup, `style="`) {
+			t.Error("markup carries inline style attributes; the page CSP (style-src without unsafe-inline) can drop them")
+		}
+		if strings.Contains(markup, ".style.") {
+			t.Error("script should toggle classes instead of element.style")
+		}
+		if !strings.Contains(markup, `class="instances-table hidden"`) {
+			t.Error("the table should start hidden through the .hidden class")
+		}
+		// The narrow tier turns the table itself into `display: block`
+		// (.instances-table) — same specificity as `.hidden` and later in the
+		// file, so `.hidden` alone loses the cascade at <=768px and the table
+		// stays visible while "hidden" (e.g. stale rows behind the login
+		// overlay after a 401). The hide rule needs the extra class.
+		if got := cssRuleBody(t, css, ".instances-table.hidden"); !strings.Contains(got, "display: none;") {
+			t.Errorf(".instances-table.hidden must declare display: none (it has to outrank the card tier's display: block), got %q", got)
+		}
+		if !strings.Contains(markup, `id="empty-hint"`) {
+			t.Error("missing empty state element")
+		}
+		for _, label := range []string{"'Repository'", "'Port'", "'Path'", "'Status'", "'Link'"} {
+			if !strings.Contains(markup, label) {
+				t.Errorf("cell %s has no data-label for the card tier", label)
+			}
+		}
+		// Nothing here may reach outside this page: the polling and auth flow are
+		// unchanged, and the main UI's frozen shell must not leak in.
+		if strings.Contains(css, "overflow: clip") || strings.Contains(markup, `id="app"`) {
+			t.Error("the portal page must stay a scrollable document — main UI's clip/fixed shell is out of scope (issue #116 contract)")
+		}
+	})
+}
+
+func stripHTMLComments(s string) string {
+	for {
+		i := strings.Index(s, "<!--")
+		if i < 0 {
+			return s
+		}
+		j := strings.Index(s[i:], "-->")
+		if j < 0 {
+			return s[:i]
+		}
+		s = s[:i] + s[i+j+3:]
+	}
+}
+
 func TestPortalPortContention(t *testing.T) {
 	tmpDir := t.TempDir()
 	portalPort := 0

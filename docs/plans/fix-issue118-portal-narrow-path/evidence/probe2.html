@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>probe2</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { font-family: -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif; }
+  .device { overflow: visible; background:#fafafa; }
+  .pagepad { padding: 40px 20px; }            /* current portal body padding */
+  .pagepad-narrow { padding: 16px 10px; }    /* candidate narrow padding */
+  .content-card { border:1px solid #e1e4e8; border-radius:12px; padding:32px; max-width:960px; margin:0 auto; }
+  .content-card-narrow { padding: 14px; }
+  table { width:100%; border-collapse:separate; border-spacing:0; }
+  th { font-size:11px; padding:10px 16px; text-align:left; border-bottom:1px solid #e1e4e8; }
+  td { font-size:14px; padding:14px 16px; border-bottom:1px solid #e1e4e8; vertical-align:middle; }
+  .col-path { font-size:12px; color:#586069; font-family: ui-monospace,"SF Mono",Menlo,Monaco,Consolas,monospace; }
+  .action-link { display:inline-flex; padding:4px 12px; font-size:12px; border:1px solid #e1e4e8; }
+
+  .anywhere .col-path { overflow-wrap: anywhere; }
+  .fixed { table-layout: fixed; }
+
+  /* candidate: stacked cards under a breakpoint */
+  .stack table, .stack tbody, .stack tr, .stack td { display:block; width:100%; }
+  .stack thead { display:none; }
+  .stack tr { border:1px solid #e1e4e8; border-radius:10px; padding:8px 10px; margin-bottom:10px; }
+  .stack td { border-bottom:none; padding:6px 0; }
+  .stack td::before { content: attr(data-label) " "; font-size:11px; text-transform:uppercase; letter-spacing:.5px; color:#586069; display:block; }
+  .stack .col-path { overflow-wrap:anywhere; }
+</style>
+</head>
+<body>
+<div id="out"></div>
+<div id="stage"></div>
+<script>
+  var PATHS = [
+    "/home/linletian/SoftwareWorkspace/myworktree-myworktree/fix-fix-issue118",
+    "/Users/dev/Documents/Client/very-long-repository-name/.worktrees/feature-branch-a"
+  ];
+  function row(path, labels) {
+    var cells = [
+      ['col-repo', 'myworktree'],
+      ['col-port', '34567'],
+      ['col-path', path],
+      ['col-status', 'Alive'],
+      ['col-link', 'Open']
+    ];
+    return '<tr>' + cells.map(function(c){
+      var label = labels ? ' data-label="' + ({'col-repo':'Repository','col-port':'Port','col-path':'Path','col-status':'Status','col-link':'Link'}[c[0]]) + '"' : '';
+      return '<td class="' + c[0] + '"' + label + '>' + (c[0]==='col-link' ? '<a class="action-link" href="#">Open</a>' : c[1]) + '</td>';
+    }).join('') + '</tr>';
+  }
+  function variant(name, path, opts) {
+    var stage = document.getElementById('stage');
+    var host = document.createElement('div');
+    host.className = 'device ' + (opts.cls || '');
+    host.style.width = opts.w + 'px';
+    host.innerHTML = '<div class="' + (opts.pad || 'pagepad') + '"><div class="content-card ' + (opts.card || '') + '">' +
+      '<table class="' + (opts.tl || '') + '">' + (opts.stack ? '' : '<thead><tr><th>Repository</th><th>Port</th><th>Path</th><th>Status</th><th>Link</th></tr></thead>') +
+      '<tbody>' + row(path, !!opts.stack) + '</tbody></table></div></div>';
+    stage.appendChild(host);
+    var card = host.querySelector('.content-card');
+    var t = host.querySelector('table');
+    var cell = host.querySelector('.col-path');
+    var r = {
+      name: name, w: opts.w,
+      cardClientW: card.clientWidth,
+      tableW: t.offsetWidth,
+      tableOverflowsCard: t.offsetWidth > card.clientWidth,
+      overflowPx: t.offsetWidth - card.clientWidth,
+      docScrollW: document.documentElement.scrollWidth,
+      cellContentW: cell.clientWidth,
+      cellH: cell.offsetHeight,
+      pathFullVisible: cell.scrollWidth <= cell.clientWidth + 1,
+      pathLines: null
+    };
+    var range = document.createRange();
+    range.selectNodeContents(cell);
+    r.pathLines = range.getClientRects().length;
+    stage.removeChild(host);
+    return r;
+  }
+  var out = [];
+  [390, 320].forEach(function(w) {
+    PATHS.forEach(function(p, pi) {
+      out.push(variant('A-current', p, {w:w}));
+      out.push(variant('B-anywhere', p, {w:w, cls:'anywhere'}));
+      out.push(variant('C-anywhere-narrowpad', p, {w:w, cls:'anywhere', pad:'pagepad-narrow', card:'content-card-narrow'}));
+      out.push(variant('D-stack-narrowpad', p, {w:w, cls:'stack', pad:'pagepad-narrow', card:'content-card-narrow'}));
+    });
+  });
+  document.getElementById('out').textContent = 'PROBE' + JSON.stringify(out) + 'END';
+</script>
+</body>
+</html>

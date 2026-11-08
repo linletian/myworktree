@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>probe3</title>
+<style>
+  * { box-sizing:border-box;margin:0;padding:0; }
+  body { font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif; }
+  .pagepad { padding:40px 20px; }
+  .content-card { border:1px solid #e1e4e8;border-radius:12px;padding:32px;max-width:960px;margin:0 auto; }
+  .card-narrow { padding:14px; }
+  table { width:100%;border-collapse:separate;border-spacing:0; }
+  th { font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.5px;padding:10px 16px;text-align:left;border-bottom:1px solid #e1e4e8; }
+  td { font-size:14px;padding:14px 16px;border-bottom:1px solid #e1e4e8;vertical-align:middle; }
+  .pad-narrow th { padding:8px 10px; }
+  .pad-narrow td { padding:10px 10px; }
+  .col-repo { font-weight:500; }
+  .col-path { font-size:12px;color:#586069;font-family:ui-monospace,"SF Mono",Menlo,Monaco,Consolas,monospace; }
+  .wrap .col-path { overflow-wrap:anywhere; }
+  .wrap .col-repo { overflow-wrap:anywhere; }
+  .fixed table { table-layout:fixed; }
+  .badge { display:inline-flex;align-items:center;gap:6px;font-size:12px;padding:3px 10px;border-radius:12px; }
+  .action-link { display:inline-flex;padding:4px 12px;font-size:12px;border:1px solid #e1e4e8;border-radius:6px;text-decoration:none; }
+</style>
+</head>
+<body>
+<div id="out"></div>
+<div id="stage"></div>
+<script>
+  var ROWS = [
+    {repo:'myworktree', port:'34567', path:'/home/linletian/SoftwareWorkspace/myworktree-myworktree/fix-fix-issue118'},
+    {repo:'client-very-long-repository-name', port:'41000', path:'/Users/dev/Documents/Client/very-long-repository-name/.worktrees/feature-branch-a'}
+  ];
+  function variant(w, label, opts) {
+    var stage = document.getElementById('stage');
+    var host = document.createElement('div');
+    host.style.width = w + 'px';
+    var cols = opts.fixed ? '<colgroup><col style="width:30%"><col style="width:12%"><col style="width:34%"><col style="width:12%"><col style="width:12%"></colgroup>' : '';
+    host.innerHTML = '<div class="pagepad"><div class="content-card ' + (opts.narrow?'card-narrow pad-narrow':'') + '">' +
+      '<table class="' + (opts.fixed?'fixed':'') + ' ' + (opts.wrap?'wrap':'') + '">' + cols +
+      '<thead><tr><th>Repository</th><th>Port</th><th>Path</th><th>Status</th><th>Link</th></tr></thead><tbody>' +
+      ROWS.map(function(r){ return '<tr><td class="col-repo">'+r.repo+'</td><td>'+r.port+'</td><td class="col-path">'+r.path+'</td>'+
+        '<td><span class="badge">Alive</span></td><td><a class="action-link" href="#">Open</a></td></tr>'; }).join('') +
+      '</tbody></table></div></div>';
+    stage.appendChild(host);
+    var card = host.querySelector('.content-card');
+    var t = host.querySelector('table');
+    var res = { w:w, label:label, cardW:card.clientWidth, tableW:t.offsetWidth,
+      over: t.offsetWidth - card.clientWidth, rows: [] };
+    host.querySelectorAll('.col-path').forEach(function(c){
+      var range=document.createRange(); range.selectNodeContents(c);
+      res.rows.push({cw:c.clientWidth, lines:range.getClientRects().length, full:c.scrollWidth<=c.clientWidth+1});
+    });
+    stage.removeChild(host);
+    return res;
+  }
+  var out=[];
+  [390,430,768,1024].forEach(function(w){
+    out.push(variant(w,'E-fixed-wrap-narrowpad',{fixed:true,wrap:true,narrow:true}));
+    out.push(variant(w,'F-fixed-wrap-deskpad',{fixed:true,wrap:true,narrow:false}));
+    out.push(variant(w,'G-auto-wrap-deskpad',{fixed:false,wrap:true,narrow:false}));
+  });
+  document.getElementById('out').textContent='PROBE'+JSON.stringify(out)+'END';
+</script>
+</body>
+</html>
