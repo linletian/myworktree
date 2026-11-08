@@ -266,7 +266,11 @@ func (d Driver) Status(handle framework.Handle) (framework.Status, string) {
 		return framework.StatusStarting, ""
 	}
 	if h.failCount.Load() >= int32(healthFailThreshold) {
-		return framework.StatusFailed, "opencode health probe failed"
+		// The process is still alive and stoppable; a failed probe is a
+		// degraded state, not a terminal one. Reporting Failed here makes
+		// runLifecycle drop the only handle to a live process (issue #136:
+		// Stop then becomes a 200 no-op and the process leaks).
+		return framework.StatusUnhealthy, "opencode health probe failed"
 	}
 	return framework.StatusRunning, ""
 }
@@ -534,13 +538,10 @@ func (d Driver) healthLoop(ctx context.Context, h *Handle) {
 				h.failCount.Store(0)
 				continue
 			}
-			n := h.failCount.Add(1)
-			if int(n) >= healthFailThreshold {
-				if p := h.loadPublisher(); p != nil {
-					_ = p.MarkFailed("opencode health probe failed")
-				}
-				return
-			}
+			// Keep probing after the threshold: the process is alive and
+			// Stop must stay effective. Status() reports Unhealthy while
+			// the counter stays at/above the threshold.
+			h.failCount.Add(1)
 		}
 	}
 }

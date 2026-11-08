@@ -3,6 +3,8 @@ package opencode_web
 import (
 	"context"
 	"net/http"
+	"os"
+	"os/exec"
 	"strings"
 	"sync"
 	"testing"
@@ -300,5 +302,32 @@ func TestPumpAndWatch_DrainsAfterListening(t *testing.T) {
 	h.mu.Unlock()
 	if host != "127.0.0.1" || port != "4096" {
 		t.Fatalf("parsed host=%q port=%q, want 127.0.0.1 / 4096", host, port)
+	}
+}
+
+// TestDriver_StatusHealthProbeFailureIsUnhealthyNotFailed pins issue #136:
+// a health-probe failure is degraded, not terminal. StatusFailed makes
+// runLifecycle drop the only handle to a still-live process, after which
+// Manager.Stop finds nothing and the process leaks.
+func TestDriver_StatusHealthProbeFailureIsUnhealthyNotFailed(t *testing.T) {
+	h := &Handle{host: "127.0.0.1", port: "1"}
+	// Status checks cmd/Process only to distinguish "spawned" from
+	// "never started"; it does not signal this process.
+	h.cmd = &exec.Cmd{Process: &os.Process{Pid: os.Getpid()}}
+	d := Driver{}
+	handle := framework.NewHandle("opencode-web", h)
+
+	h.failCount.Store(int32(healthFailThreshold - 1))
+	if got, _ := d.Status(handle); got != framework.StatusRunning {
+		t.Fatalf("status below threshold = %v, want running", got)
+	}
+
+	h.failCount.Store(int32(healthFailThreshold))
+	got, reason := d.Status(handle)
+	if got != framework.StatusUnhealthy {
+		t.Fatalf("status at threshold = %v, want unhealthy (not failed)", got)
+	}
+	if reason == "" {
+		t.Fatal("unhealthy status lost its reason")
 	}
 }
