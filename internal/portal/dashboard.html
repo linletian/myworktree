@@ -287,6 +287,15 @@
 		.login-card .error-msg.visible {
 			display: flex;
 		}
+		/* Login failure feedback, shared spec with the daemon's /login page
+		   (issue #137 follow-up): the text carries the meaning, the shake is
+		   decoration and is dropped under prefers-reduced-motion. Same keyframe
+		   name and timings on both pages — the parity test in internal/app
+		   fails if either side drifts. */
+		@keyframes mw-login-shake { 0%, 100% { transform: translateX(0); } 20% { transform: translateX(-8px); } 40% { transform: translateX(8px); } 60% { transform: translateX(-6px); } 80% { transform: translateX(6px); } }
+		.mw-login-shake { animation: mw-login-shake 0.4s ease-in-out; }
+		@media (prefers-reduced-motion: reduce) { .mw-login-shake { animation: none; } }
+		.login-card button:disabled { opacity: 0.7; cursor: default; }
 		table {
 			width: 100%;
 			/* issue #118 ROOT CAUSE FIX. Default `auto` sizes every column from its
@@ -559,9 +568,9 @@
 		<div class="login-card">
 			<h2>myworktree Portal Dashboard</h2>
 			<p class="subtitle">Enter your auth token to continue</p>
-			<div id="error-msg" class="error-msg" role="alert"></div>
+			<div id="error-msg" class="error-msg" role="alert" aria-live="polite"></div>
 			<label for="token-input">Auth Token</label>
-			<input type="password" id="token-input" placeholder="Enter auth token" autocomplete="off">
+			<input type="password" id="token-input" placeholder="Enter auth token" autocomplete="current-password">
 			<button id="login-btn">Login</button>
 		</div>
 	</div>
@@ -604,9 +613,30 @@
 		}
 
 		function login() {
-			var token = document.getElementById('token-input').value;
+			var input = document.getElementById('token-input');
+			var button = document.getElementById('login-btn');
+			var error = document.getElementById('error-msg');
+			var card = document.querySelector('.login-card');
+			var token = input.value.trim();
 			if (!token) return;
 
+			// Same failure state machine as the daemon's /login page: stay on the
+			// form, say what happened, clear + re-focus the field, shake the card.
+			function fail(message) {
+				error.textContent = message;
+				error.classList.add('visible');
+				input.setAttribute('aria-invalid', 'true');
+				input.value = '';
+				input.focus();
+				if (card) {
+					card.classList.remove('mw-login-shake');
+					void card.offsetWidth; // restart the animation on a repeat failure
+					card.classList.add('mw-login-shake');
+				}
+			}
+
+			button.disabled = true;
+			button.textContent = 'Signing in…';
 			getCSRF().then(function() {
 				var body = JSON.stringify({token: token, csrf_token: pendingCsrfToken});
 				return fetch('/api/auth', {
@@ -617,12 +647,17 @@
 			}).then(function(r) {
 				if (r.ok) {
 					document.getElementById('token-form').classList.remove('visible');
-					document.getElementById('error-msg').classList.remove('visible');
+					error.classList.remove('visible');
+					input.removeAttribute('aria-invalid');
 					fetchList();
-				} else {
-					document.getElementById('error-msg').innerHTML = '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1zm0 10a1 1 0 1 1 0 2 1 1 0 0 1 0-2zm0-8a1 1 0 0 1 1 1v5a1 1 0 0 1-2 0V4a1 1 0 0 1 1-1z" fill="currentColor"/></svg> Invalid token';
-					document.getElementById('error-msg').classList.add('visible');
+					return;
 				}
+				fail('Invalid token. Try again.');
+			}).catch(function() {
+				fail('Could not reach the server. Try again.');
+			}).then(function() {
+				button.disabled = false;
+				button.textContent = 'Login';
 			});
 		}
 

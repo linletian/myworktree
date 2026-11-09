@@ -1078,6 +1078,17 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
         input[type="password"]:focus { border-color: var(--input-focus-border); box-shadow: 0 0 0 3px var(--input-focus-shadow); }
         button { width: 100%; padding: 10px 16px; font-size: 14px; font-weight: 500; background: var(--button-bg); color: #ffffff; border: none; border-radius: var(--btn-radius); cursor: pointer; transition: background 0.15s ease; }
         button:hover { background: var(--button-hover-bg); }
+        button:disabled { opacity: 0.7; cursor: default; }
+        /* Login failure feedback (issue #137 follow-up). The text is the real
+           signal — the shake is decoration, so it is dropped entirely for
+           prefers-reduced-motion and the error region stays readable either
+           way. Same copy + same keyframe name in the Portal dashboard; the
+           parity test in this package fails if either side drifts. */
+        .login-error { display: none; color: var(--error-text); font-size: 13px; margin: 0 0 16px 0; padding: 8px 12px; background: rgba(203, 36, 49, 0.08); border-radius: 6px; }
+        .login-error.visible { display: block; }
+        @keyframes mw-login-shake { 0%, 100% { transform: translateX(0); } 20% { transform: translateX(-8px); } 40% { transform: translateX(8px); } 60% { transform: translateX(-6px); } 80% { transform: translateX(6px); } }
+        .mw-login-shake { animation: mw-login-shake 0.4s ease-in-out; }
+        @media (prefers-reduced-motion: reduce) { .mw-login-shake { animation: none; } }
     </style>
 </head>
 <body>
@@ -1087,10 +1098,63 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
         <form id="login-form" method="post" action="/login">
             <input type="hidden" name="next" value="{{NEXT}}">
             <label for="token">Auth Token</label>
-            <input type="password" id="token" name="token" placeholder="Enter auth token" required>
+            <div id="login-error" class="login-error" role="alert" aria-live="polite"></div>
+            <input type="password" id="token" name="token" placeholder="Enter auth token" autocomplete="current-password" required>
             <button type="submit">Login</button>
         </form>
     </div>
+    <script>
+        // Login failure, macOS-style: stay on the form, say what happened, clear
+        // and re-focus the field, and shake the card. Progressive enhancement —
+        // with JS off the form still posts natively (and lands on the plain 401,
+        // which is the pre-existing behaviour). The server side is untouched:
+        // POST /login still answers 401 on a bad token and 302 + Set-Cookie on a
+        // good one; the fetch follows that redirect, so res.ok means "logged in".
+        (function () {
+            var form = document.getElementById("login-form");
+            var input = document.getElementById("token");
+            var button = form.querySelector("button[type=submit]");
+            var error = document.getElementById("login-error");
+            var card = document.querySelector(".login-box");
+            var idleLabel = button.textContent;
+
+            function fail(message) {
+                error.textContent = message;
+                error.classList.add("visible");
+                input.setAttribute("aria-invalid", "true");
+                input.value = "";
+                input.focus();
+                if (card) {
+                    card.classList.remove("mw-login-shake");
+                    void card.offsetWidth; // restart the animation on a repeat failure
+                    card.classList.add("mw-login-shake");
+                }
+            }
+
+            form.addEventListener("submit", function (event) {
+                event.preventDefault();
+                if (!input.value.trim()) return;
+                button.disabled = true;
+                button.textContent = "Signing in…";
+                fetch("/login", { method: "POST", body: new URLSearchParams(new FormData(form)) })
+                    .then(function (res) {
+                        if (res.ok) {
+                            var next = (form.querySelector("input[name=next]") || {}).value || "/";
+                            location.replace(next);
+                            return;
+                        }
+                        fail("Invalid token. Try again.");
+                    })
+                    .catch(function () {
+                        fail("Could not reach the server. Try again.");
+                    })
+                    .then(function () {
+                        button.disabled = false;
+                        button.textContent = idleLabel;
+                    });
+            });
+        })();
+    </script>
 </body>
 </html>`
 		nextURL := r.URL.Query().Get("next")
