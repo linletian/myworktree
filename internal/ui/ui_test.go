@@ -2060,16 +2060,19 @@ func TestTouchInteractionAnchors(t *testing.T) {
 }
 
 // TestTerminalTouchScrollAnchors pins the R17 contract (issue #100 padOS② /
-// common①, PR #110 beta): the page rubber-band lock (root
-// overscroll-behavior:none plus overscroll-behavior:contain on the four
-// legitimate inner scrollers), the terminal container's touch-action:none,
-// and the initTerminalTouchScroll wiring — delegated touch listeners with
-// the passive split, the unconditional touchmove preventDefault (the page
-// lock must hold even with no active session), and the scrollLines mapping
-// with the signed remainder accumulator. Every CSS declaration is asserted
-// INSIDE its rule (anchored at 8-space indentation so a substring hit inside
-// a compound selector cannot satisfy the wrong rule), and stripCSSComments
-// takes only the <style> slice per the §6 house rule.
+// common①, PR #110 beta) plus the issue #117 viewport-ownership split: the
+// page rubber-band lock (root overscroll-behavior:none plus
+// overscroll-behavior:contain on the four legitimate inner scrollers), the
+// terminal container's touch-action:none, and the initTerminalTouchScroll
+// wiring — delegated touch listeners with the passive split, the
+// unconditional touchmove preventDefault (the page lock must hold even with
+// no active session), the normal-buffer scrollLines mapping with the signed
+// remainder accumulator, and the xterm wheel route for alt-screen /
+// mouse-reporting TUIs (opencode/pi) so the app redraws its own scroll view.
+// Every CSS declaration is asserted INSIDE its rule (anchored at 8-space
+// indentation so a substring hit inside a compound selector cannot satisfy
+// the wrong rule), and stripCSSComments takes only the <style> slice per the
+// §6 house rule.
 func TestTerminalTouchScrollAnchors(t *testing.T) {
 	bodyText := fetchIndexHTML(t)
 
@@ -2115,6 +2118,16 @@ func TestTerminalTouchScrollAnchors(t *testing.T) {
 		"getActiveTerminalSession()",
 		"(term.options.fontSize || 13) * (term.options.lineHeight || 1)",
 		"term.scrollLines(lines)",
+		"term.modes.mouseTrackingMode",
+		`mode === "vt200"`,
+		`mode === "drag"`,
+		`mode === "any"`,
+		`bufferType === "alternate"`,
+		"activeTouchScrollRoute",
+		"dispatchTerminalWheel(term, lines, touch.clientX, touch.clientY)",
+		`new WheelEvent("wheel"`,
+		"bubbles: false",
+		"deltaMode: 1",
 		"touchScrollRemainderPx -= lines * linePx",
 	} {
 		if !strings.Contains(ts, check) {

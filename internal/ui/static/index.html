@@ -4475,9 +4475,10 @@
 
         // R17 touch-scroll state (issue #100 padOS②, PR #110 beta). Module
         // level so a session switch never carries half a gesture: touchend/
-        // touchcancel reset all three before the next touchstart.
+        // touchcancel reset all four before the next touchstart.
         let activeTouchId = null;
         let activeTouchLastY = 0;
+        let activeTouchScrollRoute = null;
         let touchScrollRemainderPx = 0;
 
         // R17 (issue #100 padOS②/common①, PR #110 beta): vendored xterm v6
@@ -4643,14 +4644,68 @@
         function initTerminalTouchScroll() {
             const container = document.getElementById("terminal-container");
             if (!container) return;
+            // Only VT200/DRAG/ANY carry xterm's wheel-report event bit (16).
+            // X10 is a click-only protocol: xterm does not bind a protocol
+            // wheel listener for it, and its no-scrollback fallback stays off
+            // in normal buffers. Routing X10 drags here would silently swallow
+            // them instead of preserving the host scrollback path.
+            const mouseWheelTracking = (term) => {
+                const mode = term && term.modes && term.modes.mouseTrackingMode;
+                return mode === "vt200" || mode === "drag" || mode === "any";
+            };
+            // Decide once per gesture and keep it latched on the active touch.
+            // A TUI can switch buffer or mouse mode mid-drag (startup, dialog,
+            // fullscreen transition); changing renderers halfway through one
+            // gesture reintroduces exactly the host/app split this route is
+            // meant to avoid.
+            const touchScrollRoute = (term) => {
+                if (mouseWheelTracking(term)) return "wheel";
+                const bufferType = term && term.buffer && term.buffer.active && term.buffer.active.type;
+                // Alt-screen without a wheel-reporting mouse protocol has no
+                // app-owned scroll target here. Do nothing rather than inject
+                // xterm's alt-screen arrow-key fallback into an application
+                // that never asked for mouse input.
+                return bufferType === "alternate" ? "none" : "host";
+            };
+            // Send a touch drag through xterm's own wheel pipeline when the
+            // running TUI owns the viewport. xterm turns these synthetic wheel
+            // events into the app's negotiated mouse protocol (SGR wheel
+            // reports for opencode/pi). The bytes then travel through
+            // term.onData exactly like a hardware wheel, so the app redraws
+            // its own scroll view in a single coherent frame instead of the
+            // host moving cells underneath it.
+            const dispatchTerminalWheel = (term, lines, clientX, clientY) => {
+                if (!term || !term.element || typeof term.element.dispatchEvent !== "function") return false;
+                if (typeof WheelEvent !== "function") return false;
+                const direction = lines > 0 ? 1 : -1;
+                for (let i = 0; i < Math.abs(lines); i++) {
+                    // No bubbling: xterm's wheel listener is on term.element
+                    // itself; bubbling would only re-enter the document wheel
+                    // lock and walk ancestors for every synthesized line.
+                    term.element.dispatchEvent(new WheelEvent("wheel", {
+                        bubbles: false,
+                        cancelable: true,
+                        clientX,
+                        clientY,
+                        deltaY: direction,
+                        // DOM_DELTA_LINE = 1: one synthesized event means one
+                        // line, matching the linePx-to-lines conversion in the
+                        // touchmove handler below.
+                        deltaMode: 1,
+                    }));
+                }
+                return true;
+            };
             container.addEventListener("touchstart", (e) => {
                 if (e.touches.length === 1) {
                     activeTouchId = e.touches[0].identifier;
                     activeTouchLastY = e.touches[0].clientY;
+                    activeTouchScrollRoute = null;
                     touchScrollRemainderPx = 0;
                 } else {
                     // Multi-finger: abort the mapping (no pinch semantics).
                     activeTouchId = null;
+                    activeTouchScrollRoute = null;
                 }
             }, { passive: true });
             container.addEventListener("touchmove", (e) => {
@@ -4675,8 +4730,29 @@
                 touchScrollRemainderPx += dy;
                 const lines = Math.trunc(touchScrollRemainderPx / linePx);
                 if (lines !== 0) {
-                    term.scrollLines(lines); // content follows the finger
-                    touchScrollRemainderPx -= lines * linePx;
+                    // Normal-buffer, non-mouse TUIs (mcode/kimi) still let the
+                    // host scroll its ordered xterm scrollback. Mouse-reporting
+                    // TUIs with a wheel-capable protocol (opencode/pi) consume
+                    // the gesture themselves: term.scrollLines() only moves the
+                    // host grid while their differential renderer believes
+                    // those cells are unchanged, producing mixed frames.
+                    if (activeTouchScrollRoute === null) activeTouchScrollRoute = touchScrollRoute(term);
+                    if (activeTouchScrollRoute === "wheel") {
+                        // A failed dispatch means no wheel report left the
+                        // page; keep the accumulator so the next move retries
+                        // instead of silently dropping the distance.
+                        if (dispatchTerminalWheel(term, lines, touch.clientX, touch.clientY)) {
+                            touchScrollRemainderPx -= lines * linePx;
+                        }
+                    } else if (activeTouchScrollRoute === "host") {
+                        term.scrollLines(lines); // content follows the finger
+                        touchScrollRemainderPx -= lines * linePx;
+                    } else {
+                        // Deliberate no-op for alt-screen without wheel
+                        // reporting; consume the distance so it cannot build
+                        // into a later gesture.
+                        touchScrollRemainderPx -= lines * linePx;
+                    }
                 }
             }, { passive: false });
             const endTouchScroll = (e) => {
@@ -4685,6 +4761,7 @@
                     if (e.changedTouches[i].identifier === activeTouchId) {
                         activeTouchId = null;
                         activeTouchLastY = 0;
+                        activeTouchScrollRoute = null;
                         touchScrollRemainderPx = 0;
                         break;
                     }

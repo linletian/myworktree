@@ -441,21 +441,29 @@ func TestResponsiveLayerChangelogCounts(t *testing.T) {
 		file string
 		// one capture group: the English number word preceding the phrase
 		phrase string
+		// optional case filter. The default counts the file's TOTAL; the R17
+		// entry claims only its own named scenarios because issue #117 added
+		// sibling cases to the same file without rewriting published history.
+		casePattern string
 	}{
-		{"testdata/sidebar_collapse.test.mjs", `#99 scenarios`},
-		{"testdata/viewport_height.test.mjs", `new issue #100 L1 scenarios`},
-		{"testdata/narrow_drawer.test.mjs", `new issue #100 L2 scenarios`},
-		{"testdata/touch_interaction.test.mjs", `new issue #100 L3 scenarios`},
-		{"testdata/terminal_touch_scroll.test.mjs", `new issue #100 R17 scenarios`},
-		{"testdata/quick_keys.test.mjs", `issue #100 quick-keys scenarios`},            // the file's TOTAL (PR1 subset uses unguarded wording per the house rule)
-		{"testdata/monitor_alerts.test.mjs", `cases — that file's total`},              // #111 P2 entry's total claim (issue #95: a count in prose must be pinned). DIGITS on purpose: 23 has no single English word, and the hyphenated "twenty-three" would make `(\w+)` capture only "three" — which is why the digits branch below exists.
-		{"testdata/ios_ime_direct_input.test.mjs", `new issue #115 ios-ime scenarios`}, // #115 bridge rescue matrix; the phrase is distinct from the seven above, and the entry's count word ("twenty") must equal the file's `^test(` total (issue #95).
+		{"testdata/sidebar_collapse.test.mjs", `#99 scenarios`, ""},
+		{"testdata/viewport_height.test.mjs", `new issue #100 L1 scenarios`, ""},
+		{"testdata/narrow_drawer.test.mjs", `new issue #100 L2 scenarios`, ""},
+		{"testdata/touch_interaction.test.mjs", `new issue #100 L3 scenarios`, ""},
+		{"testdata/terminal_touch_scroll.test.mjs", `new issue #100 R17 scenarios`, `(?m)^test\("issue #100 R17:`},
+		{"testdata/quick_keys.test.mjs", `issue #100 quick-keys scenarios`, ""},            // the file's TOTAL (PR1 subset uses unguarded wording per the house rule)
+		{"testdata/monitor_alerts.test.mjs", `cases — that file's total`, ""},              // #111 P2 entry's total claim (issue #95: a count in prose must be pinned). DIGITS on purpose: 23 has no single English word, and the hyphenated "twenty-three" would make `(\w+)` capture only "three" — which is why the digits branch below exists.
+		{"testdata/ios_ime_direct_input.test.mjs", `new issue #115 ios-ime scenarios`, ""}, // #115 bridge rescue matrix; the phrase is distinct from the seven above, and the entry's count word ("twenty") must equal the file's `^test(` total (issue #95).
 	} {
 		src, err := os.ReadFile(tc.file)
 		if err != nil {
 			t.Fatalf("read %s: %v", tc.file, err)
 		}
-		cases := len(regexp.MustCompile(`(?m)^test\(`).FindAll(src, -1))
+		casePattern := tc.casePattern
+		if casePattern == "" {
+			casePattern = `(?m)^test\(`
+		}
+		cases := len(regexp.MustCompile(casePattern).FindAll(src, -1))
 		if cases == 0 {
 			t.Fatalf("no node --test cases found in %s — the slice anchors probably moved", tc.file)
 		}

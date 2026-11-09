@@ -1,5 +1,6 @@
 // Behavioral tests for the issue #100 R17 terminal touch-scroll mapping
-// (PR #110 beta follow-up): vendored xterm v6 has no working touch scroll
+// (PR #110 beta follow-up) and the issue #117 viewport-ownership split:
+// vendored xterm v6 has no working touch scroll
 // (the .xterm-viewport holds no scrollable content, touches land on
 // .xterm-screen, and the Gesture singleton maps no scroll), so
 // initTerminalTouchScroll() maps a one-finger drag to term.scrollLines()
@@ -8,7 +9,7 @@
 // THE FINGER (iOS/macOS content-follows-finger): an upward finger reveals
 // newer content (positive scrollLines count), a downward finger walks
 // toward older content (negative count). These cases slice the shipped
-// initTerminalTouchScroll AND its three module-level state declarations
+// initTerminalTouchScroll AND its four module-level state declarations
 // straight from the served source — nothing is hand-mirrored (§6) — and
 // drive them against stubbed touch events. Per PRD-CHANGE §5.6-1:
 // direction sign, remainder carry, multi-finger abort, the no-session
@@ -54,7 +55,7 @@ function sliceBlock(src, header) {
   throw new Error(`unbalanced braces while slicing ${JSON.stringify(header)}`);
 }
 
-// The three module-level state declarations, sliced from the served source
+// The four module-level state declarations, sliced from the served source
 // as one contiguous span (never hand-mirrored — §6). The factory body is
 // "use strict" so a rename/missing declaration turns the handlers' writes
 // into a loud ReferenceError instead of a silent implicit global.
@@ -73,7 +74,7 @@ const SLICED_STATE = (() => {
 
 const factory = new Function("deps", `
   "use strict";
-  const { document, getActiveTerminalSession } = deps;
+  const { document, getActiveTerminalSession, WheelEvent } = deps;
   // Sliced from the shipped script (see SLICED_STATE above):
   ${SLICED_STATE}
   ${sliceBlock(inlineScript(indexSource), "function initTerminalTouchScroll")}
@@ -104,23 +105,36 @@ function touchEvent({ touches = [], changedTouches = [] } = {}) {
   };
 }
 
-function touchHarness({ withSession = true } = {}) {
+class FakeWheelEvent {
+  constructor(type, init = {}) {
+    this.type = type;
+    Object.assign(this, init);
+  }
+}
+
+function touchHarness({ withSession = true, termOverrides = {} } = {}) {
   const container = makeContainer();
   const scrollCalls = [];
+  const wheelEvents = [];
   let session = withSession ? {
     term: {
       options: { fontSize: 16, lineHeight: 1.2 }, // linePx = 19.2
+      modes: { mouseTrackingMode: "none" },
+      buffer: { active: { type: "normal" } },
+      element: { dispatchEvent(event) { wheelEvents.push(event); return true; } },
       scrollLines(n) { scrollCalls.push(n); },
+      ...termOverrides,
     },
   } : null;
   const api = factory({
     document: { getElementById: (id) => (id === "terminal-container" ? container : null) },
     getActiveTerminalSession: () => session,
+    WheelEvent: FakeWheelEvent,
   });
   api.initTerminalTouchScroll();
   const fire = (type, ev) => container.listeners.get(type)[0].fn(ev);
   return {
-    api, container, scrollCalls, fire,
+    api, container, scrollCalls, wheelEvents, fire,
     setSession: (s) => { session = s; },
     registration: (type) => container.listeners.get(type).map((l) => l.opts),
   };
@@ -133,6 +147,85 @@ function assertSingleRegistration(h, t) {
     assert.equal(h.container.listeners.get(type).length, 1, `${type}: exactly one delegated listener — a double init must be visible`);
   }
 }
+
+// --- issue #117: viewport ownership -----------------------------------------
+
+test("issue #117: an alt-screen mouse-reporting TUI receives xterm wheel events instead of host scrollLines", () => {
+  const h = touchHarness({ termOverrides: { modes: { mouseTrackingMode: "any" }, buffer: { active: { type: "alternate" } } } });
+  h.fire("touchstart", touchEvent({ touches: [{ identifier: 11, clientX: 44, clientY: 300 }] }));
+  // Finger DOWN: content follows the finger toward older content. xterm's
+  // wheel-up report has deltaY < 0.
+  h.fire("touchmove", touchEvent({ touches: [{ identifier: 11, clientX: 44, clientY: 300 + LINE_PX + 1 }] }));
+  assert.deepEqual(h.scrollCalls, [], "the host must not move grid cells underneath an app-owned viewport");
+  assert.equal(h.wheelEvents.length, 1, "one line of finger travel dispatches one normalized wheel event");
+  assert.equal(h.wheelEvents[0].type, "wheel");
+  assert.equal(h.wheelEvents[0].deltaY, -1, "a downward drag maps to xterm wheel-up");
+  assert.equal(h.wheelEvents[0].deltaMode, 1, "line delta mode keeps one event equal to one line");
+  assert.equal(h.wheelEvents[0].clientX, 44);
+  assert.ok(h.wheelEvents[0].clientY > 300, "the touch coordinate follows the event into xterm's mouse service");
+
+  // Finger UP: reveal newer content via wheel-down, still without touching
+  // the host buffer.
+  h.fire("touchmove", touchEvent({ touches: [{ identifier: 11, clientX: 44, clientY: 300 + LINE_PX + 1 - (LINE_PX * 2 + 2) }] }));
+  assert.deepEqual(h.scrollCalls, []);
+  assert.equal(h.wheelEvents.length, 3, "two more lines dispatch two more wheel events");
+  assert.ok(h.wheelEvents.slice(1).every((event) => event.deltaY === 1), "upward finger maps to wheel-down");
+});
+
+test("issue #117: alt-screen without wheel-reporting mouse does nothing — it must not inject arrow keys", () => {
+  const h = touchHarness({ termOverrides: { modes: { mouseTrackingMode: "none" }, buffer: { active: { type: "alternate" } } } });
+  h.fire("touchstart", touchEvent({ touches: [{ identifier: 12, clientY: 100 }] }));
+  h.fire("touchmove", touchEvent({ touches: [{ identifier: 12, clientY: 100 - LINE_PX }] }));
+  assert.deepEqual(h.scrollCalls, [], "alt-screen ydisp has no scrollback to move; host scrollLines is a no-op at best and a mixed-frame risk at worst");
+  assert.deepEqual(h.wheelEvents, [], "a non-mouse alt-screen app must not receive synthetic wheel events; xterm would turn them into arrow keys");
+});
+
+test("issue #117: normal-buffer non-mouse TUIs (mcode/kimi) keep using host scrollback", () => {
+  const h = touchHarness();
+  h.fire("touchstart", touchEvent({ touches: [{ identifier: 13, clientY: 100 }] }));
+  h.fire("touchmove", touchEvent({ touches: [{ identifier: 13, clientY: 100 - LINE_PX }] }));
+  assert.deepEqual(h.scrollCalls, [1], "an upward finger reveals newer content through the ordered xterm scrollback");
+  assert.deepEqual(h.wheelEvents, [], "there is no app-owned viewport to receive mouse reports");
+});
+
+test("issue #117: normal-buffer X10 mouse mode keeps host scrollback instead of swallowing the drag", () => {
+  const h = touchHarness({ termOverrides: { modes: { mouseTrackingMode: "x10" }, buffer: { active: { type: "normal" } } } });
+  h.fire("touchstart", touchEvent({ touches: [{ identifier: 14, clientY: 100 }] }));
+  h.fire("touchmove", touchEvent({ touches: [{ identifier: 14, clientY: 100 - LINE_PX }] }));
+  assert.deepEqual(h.wheelEvents, [], "xterm's X10 protocol has no wheel event bit, so a synthetic wheel would be dropped");
+  assert.deepEqual(h.scrollCalls, [1], "normal-buffer content remains reachable through the host scrollback");
+});
+
+test("issue #117: the scroll route is latched for the whole touch gesture", () => {
+  const h = touchHarness();
+  const session = {
+    term: {
+      options: { fontSize: 16, lineHeight: 1.2 },
+      modes: { mouseTrackingMode: "none" },
+      buffer: { active: { type: "normal" } },
+      element: { dispatchEvent(event) { h.wheelEvents.push(event); return true; } },
+      scrollLines(n) { h.scrollCalls.push(n); },
+    },
+  };
+  h.setSession(session);
+  h.fire("touchstart", touchEvent({ touches: [{ identifier: 15, clientY: 200 }] }));
+  h.fire("touchmove", touchEvent({ touches: [{ identifier: 15, clientY: 200 - LINE_PX - 1 }] }));
+  assert.deepEqual(h.scrollCalls, [1], "first line chooses the host route");
+
+  // A TUI switching to mouse tracking mid-drag must not split one gesture
+  // across two renderers.
+  session.term.modes.mouseTrackingMode = "any";
+  h.fire("touchmove", touchEvent({ touches: [{ identifier: 15, clientY: 200 - LINE_PX * 2 - 2 }] }));
+  assert.deepEqual(h.scrollCalls, [1, 1], "the latched host route continues");
+  assert.deepEqual(h.wheelEvents, [], "mid-gesture mode changes do not switch to app wheel reports");
+
+  // The next gesture resolves the new mode fresh.
+  h.fire("touchend", touchEvent({ changedTouches: [{ identifier: 15, clientY: 0 }] }));
+  h.fire("touchstart", touchEvent({ touches: [{ identifier: 16, clientY: 200 }] }));
+  h.fire("touchmove", touchEvent({ touches: [{ identifier: 16, clientY: 200 - LINE_PX - 1 }] }));
+  assert.equal(h.wheelEvents.length, 1, "a new gesture after mode change latches to the wheel route");
+  assert.deepEqual(h.scrollCalls, [1, 1], "the new gesture no longer calls host scrollLines");
+});
 
 // --- §5.6-1 cases ------------------------------------------------------------
 
