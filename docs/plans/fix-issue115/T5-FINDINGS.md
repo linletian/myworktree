@@ -116,7 +116,7 @@ iPhone 的候选栏形态不同——前一个字符已经交付并**关掉了�
 
 1. ~~采 iPhone 日志（B-1 / B-2 定性）~~ ✅ **已完成**（A/B 编译对照 + 事件链，归属已定）
 2. ~~iPad 9键 A/B + 26键 A/B~~ ✅ **iPad 26键 A/B 已完成（2026-11-09）**；**iPad 9键＝N/A（设备无法进入该布局）** ⇒ **矩阵设备腿全部走完**
-3. **vim INSERT + 分支 C**（合并一次）—— 🔶 iPhone 的 ASCII 面已过（英文 `i` 进 INSERT / `Esc` / `:q` 均正常）；**只剩 INSERT 内中文/全角**这一半
+3. ~~vim INSERT 内中文/全角~~ ✅ **已过（iPhone 9键，A 腿）**：`/tmp/t5.txt` A 段 31B `中文，。？！，“123”` **逐字节正确**（`raw/s1-vim-decomposition.md`）。**仅剩分支 C（focus-events）**，需真开 `?1004` 的程序触发
 4. **开修 B-2 + B-6（同根因合并）**：桥接需覆盖 composition 路径的**替换与删除**（`compositionstart` / `deleteContentBackward` / `insertFromComposition`）；同时评估 **B-1**：LCP+单 DEL 模型对"光标居中"的中间插入要么正确展开多 DEL，要么整段重发
 5. B-3 / B-4 各自单独立 issue，本 issue 仅登记（**B-8 已撤回**）
 6. 2–3 完成 + 结论回填 plan.md 后 **T5 可签字、#124 可关**；B-1/B-2/B-6 的**修复本身属 #115 后续，不卡 #124**
