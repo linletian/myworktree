@@ -27,7 +27,9 @@
 
 ---
 
-## 二、计数可靠性声明（重要，先读）
+## 二、计数与取流可靠性声明（重要，先读）
+
+> **流的方位先于计数**：`/api/instances/log` 是**输出流**（PTY→浏览器）。凡**客户端→PTY 的输入语义**（bracketed-paste 标记、被 readline 消费的按键序列）**不会出现在这里**——「输出流里没有」**不是**「没发生」。输入侧结论必须由输入侧证据给出。**R5 就是踩了这条。**
 
 PTY 输出流里同一字符会被**终端重绘反复绘制**，所以**次数不是量词**。本轮所有结论只使用两类判据：
 
@@ -133,6 +135,7 @@ BRIDGE deliver → delta = "\x7f 1 ”"      branch=A via=keyup-defer
 | R1 | 「quick-keys `Ctrl+C` 从未送达 PTY」 | **送达**：净化流里字面 `^C`×2、`^[`(Esc)×2、`⇥`(Tab)×2、`ESC[A`(↑)×2；`tap=esc/tab/up/down/ctrl-c` 各 2 次，A/B 都有 | canonical 模式下回显是**字面 `^C`** 两个字符，我拿 raw `0x03` 去数，必然得 0 |
 | R2 | 「野生右引号 100% 由桥接产生」 | **4/5 桥接、1/5 上游**（§4.2 表） | 我只统计了桥接自己的 delta 行数，没统计终端可见内容；且样本里混了不同腿与被粘进终端的 URL |
 | R3 | 「`，` 到达终端 7 个 = 桥接补发 7 次，精确对账」 | **不作数** | 终端重绘会重复绘制同一字符，PTY 字节计数不能当量词（§二） |
+| **R5** | 「quick-keys `Paste` 无 bracketed-paste 包裹（`[200~`＝0）」——**判据用错了流**，缺陷**未证实**，撤回登记 | `\x1b[200~` 是**客户端→PTY 的输入**；bash/readline 收到后**消费且不回显**，故**输出流里本来就不该出现它**，「输出流没有」推不出「没发」。源码侧两处**都有条件包裹**：`index.html:4975` `maybeWrapBracketedPaste`（`:5044` 读 `term.modes.bracketedPasteMode`，该 getter 存在并映射 `coreService.decPrivateModes`）；vendored xterm 自身粘贴路径按 `decPrivateModes.bracketedPasteMode && !ignoreBracketedPasteMode` 包。日志里 `?2004h` 出现 3–7 次＝readline 确实开了这个模式。**真要取证须在输入侧**：探针记 send 前 payload，或在 canonical 回显的 `cat` 下粘贴看 `^[[200~` |
 | **R4** | 「iPad 软键盘**同样复现 B-2** ⇒ 与设备无关」 | **不成立**。B-2 可观测域＝桥接开 **+** 存在符号候选栏 ⇒ 实测**只有 iPhone 9键** | ① **iPad 26键没有符号候选栏**（iPad 段 `deleteContentBackward`＝0、`compositionstart` 仅 1 次＝拼音 `你好`），符号走 `keydown 229 + comp=0` **直提交**，与 iPhone 26键同路径；② **桥接关时终端里连逗号都没有**（B 腿 `，`＝0），「不删逗号」无从谈起 |
 
 **过程性缺陷（已修）**：probe-v1 只收 `[ios-ime]` 前缀 ⇒ **B 腿（桥接关）整段静默、A/B 不可比**。probe-v2 自带独立探针后才有本轮数据。
@@ -142,7 +145,7 @@ BRIDGE deliver → delta = "\x7f 1 ”"      branch=A via=keyup-defer
 ## 七、新增登记
 
 - **B-6｜composition 期间的删除全盲（与 B-2 同根因，合并修）**：连续退格/候选替换都以 `deleteContentBackward` 落在 textarea，窗口外、无 keydown ⇒ 终端一个 DEL 都收不到，失步持续累积。证据：A 腿 `raw/iphone-on.capture.console.txt` 中反复出现的 `deleteContentBackward` + `value` 递减而无任何 `deliver`。
-- **B-8｜quick-keys `Paste` 无 bracketed-paste 包裹**：粘贴内容**到达了**（剪贴板里的 URL 在 A 腿命令行出现多次），但全流 **`[200~` = 0**、`[201~` = 0。bash 下无感；**vim 里粘贴会被当逐键执行**（缩进炸掉、换行被当命令执行）。建议：粘贴路径包 `\x1b[200~ … \x1b[201~`，或在进入 vim 等应用时禁用裸粘贴。
+- ~~**B-8｜quick-keys `Paste` 无 bracketed-paste 包裹**~~ → **已撤回（R5），未证实**。**保留的正向事实：粘贴本身在 A/B 两机都工作正常**，剪贴板内容完整到达终端。
 
 ---
 
@@ -203,7 +206,7 @@ B 桥接关   你好
 | 长按（#4） | ✅ 按设备/布局结案（§八） |
 | **iPad 26键 A/B** | ✅ **已完成（2026-11-09）**（直提交 10 键：A 全达、B 全灭；无候选栏 ⇒ B-2 不可达，见 §九之补） |
 | **iPad 9键 A/B** | 🚫 **N/A（设备限制）** ← 已加九宫格但切换后仍出全键盘，无法进入该布局。**记为不可测，非未执行**；分界线已由「iPhone 9键↔26键同机对照」**加**「iPad 26键同路径」双重锁定 |
-| vim INSERT + 分支 C | ⬜ 未做（前提已改：须**先切英文 ABC 按 `i`**，中文 IME 下按 `i` 会进拼音合成、进不去 INSERT；且本环境 vim **未申请 `?1004`**，focus-events 观察项需换程序触发） |
+| vim INSERT + 分支 C | 🔶 **iPhone 侧 ASCII 面口头确认通过**：`vi` 里按英文 `i` **正常进 INSERT**、正常输入、`Esc` 回命令模式、`:q` 正常退出。**仍未覆盖：INSERT 内输入中文/全角**（矩阵原条目）。**取证性质必须标明**：本沙盒四段 PTY 中 `?1049h`＝0、`?1004h`＝0 ⇒ **vim 在本沙盒从未运行**，故此笔属**维护者口头确认、非本包证据**；原「本环境 vim 未申请 `?1004`」只对本沙盒会话成立，不能算到 vim 头上 |
 | B-3 / B-4 / B-5 | ⬜ 各自单独立 issue（#124 仅登记） |
 
 **#124 关闭条件**：✅ iPad 26键 A/B 已跑完（iPad 9键＝N/A·设备限制）；余下仅 **B-3/B-4/B-5 立单 + vim INSERT + 分支 C**。**B-1/B-2 修复本身不在 #124 范围内**（属 #115 后续），但归属已定，可直接开修。

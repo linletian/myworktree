@@ -393,7 +393,7 @@ flushIosIme(session, via):                        // via ∈ {"keyup-defer","fai
 | **选字栏候选全角符号**（原文明标"必须不回归"） | ✅ **无回归** |
 | **Chrome(iOS)** | ⚠️ **输入本身无回归**，但走查中发现**新的 UI 缺陷**：见下 5.5.1 |
 | **vim INSERT 模式下全角/中文输入** | ⏸ **待补** —— iPad 软键盘无 `Insert` 键导致首轮未能执行；**该障碍可解**：vim 的 INSERT 模式由 `i` / `a` / `o` / `I` / `A` / `O` 等命令进入，无需 `Insert` 键（详见 5.5.2） |
-| **快速连续输入 / 粘贴按钮 / quick-keys 面板按键 / Esc·Ctrl 与桥接共存** | ✅ **iPhone 侧已覆盖（2026-11-09）**：`tap=esc/tab/up/down/ctrl-c` 各 2 次且**全部送达**（`^C`×2、`^[`×2、`⇥`×2、`ESC[A`×2）；粘贴内容送达但**无 bracketed-paste 包裹**（`[200~`=0）→ 新登记 **B-8**。iPad 侧待补 |
+| **快速连续输入 / 粘贴按钮 / quick-keys 面板按键 / Esc·Ctrl 与桥接共存** | ✅ **iPhone 侧已覆盖（2026-11-09）**：`tap=esc/tab/up/down/ctrl-c` 各 2 次且**全部送达**（`^C`×2、`^[`×2、`⇥`×2、`ESC[A`×2）；粘贴内容送达；~~无 bracketed-paste 包裹 → 新登记 B-8~~ **同日撤回（R5）**：`[200~` 是客户端→PTY 的输入、被 readline 消费不回显，输出流的 0 推不出没发；源码两处（`index.html:4975` `maybeWrapBracketedPaste` 与 vendored xterm 自身粘贴路径）都有条件包裹 ⇒ **不立单**。iPad 侧待补 |
 
 **5.5.1 新发现（不在 #115 范围，建议单独立 issue）—— iOS Chrome 底部密码提示条遮挡终端**
 
