@@ -90,8 +90,8 @@ iPhone 的候选栏形态不同——前一个字符已经交付并**关掉了�
 | **Chrome(iOS)** | ✅ 输入无回归 | 但发现 B-4 |
 | **桌面中文 IME 全角符号回归** | ✅ 无回归 | 维护者日常持续使用验证 |
 | **选字栏候选全角符号** | ✅ 无回归 | — |
-| **vim INSERT 模式全角/中文** | 🔶 **ASCII 面已过（iPhone，维护者口头确认）**：英文 `i` 正常进 INSERT、正常输入、`Esc` 回命令模式、`:q` 正常退出 | **仍缺 INSERT 内的中文/全角**（矩阵原条目）。前提仍是先切英文 ABC 按 `i`。**取证性质**：本沙盒四段 PTY 里 `?1049h`/`?1004h`＝0 ⇒ vim 未在本沙盒运行 ⇒ 此笔**属口头确认、非本包证据** |
-| **分支 C 首子句观察项** | ⏳ 待补（**需换程序**） | 本环境 vim **从未申请 `?1004`**（全流 `ESC[?1004h` = 0）⇒ “启用 focus-events 的终端”这一前提不成立，需用真开 focus reporting 的程序触发 |
+| **vim INSERT 模式全角/中文** | ✅ **已过（iPhone 9键，A 腿，落盘为证）** | `vi /tmp/t5.txt` → 英文 `i` → 中文＋全角＋候选引号＋`123` → `:wq` ⇒ A 段 **31 B 逐字节正确**（`raw/s1-vim-t5.txt.saved`／解剖 `raw/s1-vim-decomposition.md`）；B 段仅 `你好“”`＝只有 composition 产物。前提仍是先切英文按 `i` |
+| **分支 C 首子句观察项** | ✅ **已观测并结案** | vim 确实不申请 `?1004`，故改用 `printf '\e[?1004h'; cat -v` 手动开启：获焦 `^[[I`×3 / 失焦 `^[[O`×6 **全部穿透、未混入用户正文**（`raw/s2-c-s3-readout.md`）|
 | **快速连续输入 / 粘贴按钮 / quick-keys 面板 / Esc·Ctrl 共存** | ✅ iPhone 侧已覆盖 | `tap=esc/tab/up/down/ctrl-c` 各 2 次，**全部送达**（`^C`×2、`^[`×2、`⇥`×2、`ESC[A`×2）；粘贴送达（bracketed 包裹一说已撤回，见 §一 B-8）。iPad 侧已过 |
 | 既存问题观察项（等长替换 duplicated/over-sent） | ✅ 未复现 | 空格→。 实测无 duplicated/over-sent |
 

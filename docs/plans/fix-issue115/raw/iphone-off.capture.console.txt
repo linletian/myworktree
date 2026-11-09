@@ -345,3 +345,323 @@
 [probe] beforeinput k=0 key= dp=0 comp=0 tgt=TEXTAREA.- data="、" val="？！（）《》"
 [probe] input k=0 key= dp=0 comp=0 tgt=TEXTAREA.- data="、" val="？！（）《》、"
 [probe] keyup k=0 key=、 dp=0 comp=0 tgt=TEXTAREA.- data="" val="？！（）《》、"
+
+# flush reason=tick ua="Mozilla/5.0 (iPad; CPU OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/27.2 Mobile/15E148 Safari/604.1" bytes=130
+[ios-ime] capture-installed {"probe":"probe-v2","bridge":"OFF","ua":"Mozilla/5.0 (iPad; CPU OS 18_7 like Mac OS X) Ap","lines":0}
+
+# flush reason=tick ua="Mozilla/5.0 (iPad; CPU OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/27.2 Mobile/15E148 Safari/604.1" bytes=288
+[probe] keydown k=229 key=， dp=0 comp=0 tgt=TEXTAREA.- data="" val=""
+[probe] beforeinput k=0 key= dp=0 comp=0 tgt=TEXTAREA.- data="，" val=""
+[probe] input k=0 key= dp=0 comp=0 tgt=TEXTAREA.- data="，" val="，"
+[probe] keyup k=0 key=， dp=0 comp=0 tgt=TEXTAREA.- data="" val="，"
+
+# flush reason=tick ua="Mozilla/5.0 (iPad; CPU OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/27.2 Mobile/15E148 Safari/604.1" bytes=612
+[probe] keydown k=229 key=， dp=0 comp=0 tgt=TEXTAREA.- data="" val="，"
+[probe] beforeinput k=0 key= dp=0 comp=0 tgt=TEXTAREA.- data="，" val="，"
+[probe] input k=0 key= dp=0 comp=0 tgt=TEXTAREA.- data="，" val="，，"
+[probe] keyup k=0 key=， dp=0 comp=0 tgt=TEXTAREA.- data="" val="，，"
+[probe] keydown k=229 key=。 dp=0 comp=0 tgt=TEXTAREA.- data="" val="，，"
+[probe] beforeinput k=0 key= dp=0 comp=0 tgt=TEXTAREA.- data="。" val="，，"
+[probe] input k=0 key= dp=0 comp=0 tgt=TEXTAREA.- data="。" val="，，。"
+[probe] keyup k=0 key=。 dp=0 comp=0 tgt=TEXTAREA.- data="" val="，，。"
+
+# flush reason=tick ua="Mozilla/5.0 (iPad; CPU OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/27.2 Mobile/15E148 Safari/604.1" bytes=660
+[probe] keydown k=229 key=， dp=0 comp=0 tgt=TEXTAREA.- data="" val="，，。"
+[probe] beforeinput k=0 key= dp=0 comp=0 tgt=TEXTAREA.- data="，" val="，，。"
+[probe] input k=0 key= dp=0 comp=0 tgt=TEXTAREA.- data="，" val="，，。，"
+[probe] keyup k=0 key=， dp=0 comp=0 tgt=TEXTAREA.- data="" val="，，。，"
+[probe] keydown k=229 key=。 dp=0 comp=0 tgt=TEXTAREA.- data="" val="，，。，"
+[probe] beforeinput k=0 key= dp=0 comp=0 tgt=TEXTAREA.- data="。" val="，，。，"
+[probe] input k=0 key= dp=0 comp=0 tgt=TEXTAREA.- data="。" val="，，。，。"
+[probe] keyup k=0 key=。 dp=0 comp=0 tgt=TEXTAREA.- data="" val="，，。，。"
+
+# flush reason=hidden ua="Mozilla/5.0 (iPad; CPU OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/27.2 Mobile/15E148 Safari/604.1" bytes=588
+[probe] keydown k=229 key=“ dp=0 comp=0 tgt=TEXTAREA.- data="" val=""
+[probe] beforeinput k=0 key= dp=0 comp=0 tgt=TEXTAREA.- data="“" val=""
+[probe] input k=0 key= dp=0 comp=0 tgt=TEXTAREA.- data="“" val="“"
+[probe] keyup k=0 key=“ dp=0 comp=0 tgt=TEXTAREA.- data="" val="“"
+[probe] keydown k=229 key=” dp=0 comp=0 tgt=TEXTAREA.- data="" val="“"
+[probe] beforeinput k=0 key= dp=0 comp=0 tgt=TEXTAREA.- data="”" val="“"
+[probe] input k=0 key= dp=0 comp=0 tgt=TEXTAREA.- data="”" val="“”"
+[probe] keyup k=0 key=” dp=0 comp=0 tgt=TEXTAREA.- data="" val="“”"
+
+# flush reason=tick ua="Mozilla/5.0 (iPad; CPU OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/27.2 Mobile/15E148 Safari/604.1" bytes=70
+[probe] keydown k=229 key=n dp=0 comp=0 tgt=TEXTAREA.- data="" val=""
+
+# flush reason=hidden ua="Mozilla/5.0 (iPad; CPU OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/27.2 Mobile/15E148 Safari/604.1" bytes=2559
+[probe] compositionstart k=0 key= dp=0 comp=0 tgt=TEXTAREA.- data="" val=""
+[probe] compositionupdate k=0 key= dp=0 comp=0 tgt=TEXTAREA.- data="n" val=""
+[probe] beforeinput k=0 key= dp=0 comp=1 tgt=TEXTAREA.- data="n" val=""
+[probe] input k=0 key= dp=0 comp=1 tgt=TEXTAREA.- data="n" val="n"
+[probe] keyup k=78 key=n dp=0 comp=1 tgt=TEXTAREA.- data="" val="n"
+[probe] keydown k=229 key=i dp=0 comp=1 tgt=TEXTAREA.- data="" val="n"
+[probe] compositionupdate k=0 key= dp=0 comp=0 tgt=TEXTAREA.- data="ni" val="n"
+[probe] beforeinput k=0 key= dp=0 comp=1 tgt=TEXTAREA.- data="ni" val="n"
+[probe] input k=0 key= dp=0 comp=1 tgt=TEXTAREA.- data="ni" val="ni"
+[probe] keyup k=73 key=i dp=0 comp=1 tgt=TEXTAREA.- data="" val="ni"
+[probe] keydown k=229 key=h dp=0 comp=1 tgt=TEXTAREA.- data="" val="ni"
+[probe] compositionupdate k=0 key= dp=0 comp=0 tgt=TEXTAREA.- data="ni h" val="ni"
+[probe] beforeinput k=0 key= dp=0 comp=1 tgt=TEXTAREA.- data="ni h" val="ni"
+[probe] input k=0 key= dp=0 comp=1 tgt=TEXTAREA.- data="ni h" val="ni h"
+[probe] keyup k=72 key=h dp=0 comp=1 tgt=TEXTAREA.- data="" val="ni h"
+[probe] keydown k=229 key=a dp=0 comp=1 tgt=TEXTAREA.- data="" val="ni h"
+[probe] compositionupdate k=0 key= dp=0 comp=0 tgt=TEXTAREA.- data="ni ha" val="ni h"
+[probe] beforeinput k=0 key= dp=0 comp=1 tgt=TEXTAREA.- data="ni ha" val="ni h"
+[probe] input k=0 key= dp=0 comp=1 tgt=TEXTAREA.- data="ni ha" val="ni ha"
+[probe] keyup k=65 key=a dp=0 comp=1 tgt=TEXTAREA.- data="" val="ni ha"
+[probe] keydown k=229 key=o dp=0 comp=1 tgt=TEXTAREA.- data="" val="ni ha"
+[probe] compositionupdate k=0 key= dp=0 comp=0 tgt=TEXTAREA.- data="ni hao" val="ni ha"
+[probe] beforeinput k=0 key= dp=0 comp=1 tgt=TEXTAREA.- data="ni hao" val="ni ha"
+[probe] input k=0 key= dp=0 comp=1 tgt=TEXTAREA.- data="ni hao" val="ni hao"
+[probe] keyup k=79 key=o dp=0 comp=1 tgt=TEXTAREA.- data="" val="ni hao"
+[probe] compositionupdate k=0 key= dp=0 comp=0 tgt=TEXTAREA.- data="你好" val="ni hao"
+[probe] beforeinput k=0 key= dp=0 comp=1 tgt=TEXTAREA.- data="你好" val="ni hao"
+[probe] input k=0 key= dp=0 comp=1 tgt=TEXTAREA.- data="你好" val="你好"
+[probe] beforeinput k=0 key= dp=0 comp=1 tgt=TEXTAREA.- data="" val="你好"
+[probe] input k=0 key= dp=0 comp=1 tgt=TEXTAREA.- data="" val=""
+[probe] beforeinput k=0 key= dp=0 comp=1 tgt=TEXTAREA.- data="你好" val=""
+[probe] input k=0 key= dp=0 comp=1 tgt=TEXTAREA.- data="你好" val="你好"
+[probe] compositionend k=0 key= dp=0 comp=0 tgt=TEXTAREA.- data="你好" val="你好"
+
+# flush reason=tick ua="Mozilla/5.0 (iPad; CPU OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/27.2 Mobile/15E148 Safari/604.1" bytes=896
+[probe] keydown k=16 key=…hift dp=0 comp=0 tgt=TEXTAREA.- data="" val=""
+[probe] keydown k=229 key=？ dp=0 comp=0 tgt=TEXTAREA.- data="" val=""
+[probe] beforeinput k=0 key= dp=0 comp=0 tgt=TEXTAREA.- data="？" val=""
+[probe] input k=0 key= dp=0 comp=0 tgt=TEXTAREA.- data="？" val="？"
+[probe] keyup k=0 key=？ dp=0 comp=0 tgt=TEXTAREA.- data="" val="？"
+[probe] keyup k=16 key=…hift dp=0 comp=0 tgt=TEXTAREA.- data="" val="？"
+[probe] keydown k=16 key=…hift dp=0 comp=0 tgt=TEXTAREA.- data="" val="？"
+[probe] keydown k=229 key=！ dp=0 comp=0 tgt=TEXTAREA.- data="" val="？"
+[probe] beforeinput k=0 key= dp=0 comp=0 tgt=TEXTAREA.- data="！" val="？"
+[probe] input k=0 key= dp=0 comp=0 tgt=TEXTAREA.- data="！" val="？！"
+[probe] keyup k=0 key=！ dp=0 comp=0 tgt=TEXTAREA.- data="" val="？！"
+[probe] keyup k=16 key=…hift dp=0 comp=0 tgt=TEXTAREA.- data="" val="？！"
+
+# flush reason=tick ua="Mozilla/5.0 (iPad; CPU OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/27.2 Mobile/15E148 Safari/604.1" bytes=108
+[quick-keys] tap=esc
+[quick-keys] tap=tab
+[quick-keys] tap=up
+[quick-keys] tap=down
+[quick-keys] tap=ctrl-c
+
+# flush reason=hidden ua="Mozilla/5.0 (iPad; CPU OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/27.2 Mobile/15E148 Safari/604.1" bytes=148
+[probe] keydown k=13 key=…nter dp=0 comp=0 tgt=TEXTAREA.- data="" val=""
+[probe] keyup k=13 key=…nter dp=0 comp=0 tgt=TEXTAREA.- data="" val=""
+
+# flush reason=tick ua="Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/27.3 Mobile/15E148 Safari/604.1" bytes=402
+[ios-ime] capture-installed {"probe":"probe-v2","bridge":"OFF","ua":"Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac","lines":0}
+[probe] keydown k=86 key=v dp=0 comp=0 tgt=TEXTAREA.- data="" val=""
+[probe] keyup k=86 key=v dp=0 comp=0 tgt=TEXTAREA.- data="" val=""
+[probe] keydown k=73 key=i dp=0 comp=0 tgt=TEXTAREA.- data="" val=""
+[probe] keyup k=73 key=i dp=0 comp=0 tgt=TEXTAREA.- data="" val=""
+
+# flush reason=tick ua="Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/27.3 Mobile/15E148 Safari/604.1" bytes=130
+[ios-ime] capture-installed {"probe":"probe-v2","bridge":"OFF","ua":"Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac","lines":0}
+
+# flush reason=tick ua="Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/27.3 Mobile/15E148 Safari/604.1" bytes=982
+[probe] keydown k=32 key=  dp=0 comp=0 tgt=TEXTAREA.- data="" val=""
+[probe] beforeinput k=0 key= dp=0 comp=0 tgt=TEXTAREA.- data=" " val=""
+[probe] input k=0 key= dp=0 comp=0 tgt=TEXTAREA.- data=" " val=" "
+[probe] keyup k=32 key=  dp=0 comp=0 tgt=TEXTAREA.- data="" val=" "
+[probe] keydown k=191 key=/ dp=0 comp=0 tgt=TEXTAREA.- data="" val=" "
+[probe] keyup k=191 key=/ dp=0 comp=0 tgt=TEXTAREA.- data="" val=" "
+[probe] keydown k=84 key=t dp=0 comp=0 tgt=TEXTAREA.- data="" val=" "
+[probe] keyup k=84 key=t dp=0 comp=0 tgt=TEXTAREA.- data="" val=" "
+[probe] keydown k=77 key=m dp=0 comp=0 tgt=TEXTAREA.- data="" val=" "
+[probe] keyup k=77 key=m dp=0 comp=0 tgt=TEXTAREA.- data="" val=" "
+[probe] keydown k=80 key=p dp=0 comp=0 tgt=TEXTAREA.- data="" val=" "
+[probe] keyup k=80 key=p dp=0 comp=0 tgt=TEXTAREA.- data="" val=" "
+[probe] keydown k=191 key=/ dp=0 comp=0 tgt=TEXTAREA.- data="" val=" "
+[probe] keyup k=191 key=/ dp=0 comp=0 tgt=TEXTAREA.- data="" val=" "
+
+# flush reason=tick ua="Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/27.3 Mobile/15E148 Safari/604.1" bytes=842
+[probe] keydown k=84 key=t dp=0 comp=0 tgt=TEXTAREA.- data="" val=" "
+[probe] keyup k=84 key=t dp=0 comp=0 tgt=TEXTAREA.- data="" val=" "
+[probe] keydown k=53 key=5 dp=0 comp=0 tgt=TEXTAREA.- data="" val=" "
+[probe] keyup k=53 key=5 dp=0 comp=0 tgt=TEXTAREA.- data="" val=" "
+[probe] keydown k=190 key=. dp=0 comp=0 tgt=TEXTAREA.- data="" val=" "
+[probe] keyup k=190 key=. dp=0 comp=0 tgt=TEXTAREA.- data="" val=" "
+[probe] keydown k=84 key=t dp=0 comp=0 tgt=TEXTAREA.- data="" val=" "
+[probe] keyup k=84 key=t dp=0 comp=0 tgt=TEXTAREA.- data="" val=" "
+[probe] keydown k=88 key=x dp=0 comp=0 tgt=TEXTAREA.- data="" val=" "
+[probe] keyup k=88 key=x dp=0 comp=0 tgt=TEXTAREA.- data="" val=" "
+[probe] keydown k=84 key=t dp=0 comp=0 tgt=TEXTAREA.- data="" val=" "
+[probe] keyup k=84 key=t dp=0 comp=0 tgt=TEXTAREA.- data="" val=" "
+
+# flush reason=tick ua="Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/27.3 Mobile/15E148 Safari/604.1" bytes=150
+[probe] keydown k=13 key=…nter dp=0 comp=0 tgt=TEXTAREA.- data="" val=" "
+[probe] keyup k=13 key=…nter dp=0 comp=0 tgt=TEXTAREA.- data="" val=""
+
+# flush reason=tick ua="Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/27.3 Mobile/15E148 Safari/604.1" bytes=136
+[probe] keydown k=73 key=i dp=0 comp=0 tgt=TEXTAREA.- data="" val=""
+[probe] keyup k=73 key=i dp=0 comp=0 tgt=TEXTAREA.- data="" val=""
+
+# flush reason=tick ua="Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/27.3 Mobile/15E148 Safari/604.1" bytes=3577
+[probe] keydown k=229 key=➏ dp=0 comp=0 tgt=TEXTAREA.- data="" val=""
+[probe] compositionstart k=0 key= dp=0 comp=0 tgt=TEXTAREA.- data="" val=""
+[probe] compositionupdate k=0 key= dp=0 comp=0 tgt=TEXTAREA.- data="m" val=""
+[probe] beforeinput k=0 key= dp=0 comp=1 tgt=TEXTAREA.- data="m" val=""
+[probe] input k=0 key= dp=0 comp=1 tgt=TEXTAREA.- data="m" val="m"
+[probe] keyup k=0 key=➏ dp=0 comp=1 tgt=TEXTAREA.- data="" val="m"
+[probe] compositionupdate k=0 key= dp=0 comp=0 tgt=TEXTAREA.- data="o" val="m"
+[probe] beforeinput k=0 key= dp=0 comp=1 tgt=TEXTAREA.- data="o" val="m"
+[probe] input k=0 key= dp=0 comp=1 tgt=TEXTAREA.- data="o" val="o"
+[probe] keydown k=229 key=➍ dp=0 comp=1 tgt=TEXTAREA.- data="" val="o"
+[probe] compositionupdate k=0 key= dp=0 comp=0 tgt=TEXTAREA.- data="og" val="o"
+[probe] beforeinput k=0 key= dp=0 comp=1 tgt=TEXTAREA.- data="og" val="o"
+[probe] input k=0 key= dp=0 comp=1 tgt=TEXTAREA.- data="og" val="og"
+[probe] keyup k=0 key=➍ dp=0 comp=1 tgt=TEXTAREA.- data="" val="og"
+[probe] compositionupdate k=0 key= dp=0 comp=0 tgt=TEXTAREA.- data="ni" val="og"
+[probe] beforeinput k=0 key= dp=0 comp=1 tgt=TEXTAREA.- data="ni" val="og"
+[probe] input k=0 key= dp=0 comp=1 tgt=TEXTAREA.- data="ni" val="ni"
+[probe] keydown k=229 key=➍ dp=0 comp=1 tgt=TEXTAREA.- data="" val="ni"
+[probe] compositionupdate k=0 key= dp=0 comp=0 tgt=TEXTAREA.- data="nig" val="ni"
+[probe] beforeinput k=0 key= dp=0 comp=1 tgt=TEXTAREA.- data="nig" val="ni"
+[probe] input k=0 key= dp=0 comp=1 tgt=TEXTAREA.- data="nig" val="nig"
+[probe] keyup k=0 key=➍ dp=0 comp=1 tgt=TEXTAREA.- data="" val="nig"
+[probe] compositionupdate k=0 key= dp=0 comp=0 tgt=TEXTAREA.- data="ni h" val="nig"
+[probe] beforeinput k=0 key= dp=0 comp=1 tgt=TEXTAREA.- data="ni h" val="nig"
+[probe] input k=0 key= dp=0 comp=1 tgt=TEXTAREA.- data="ni h" val="ni h"
+[probe] keydown k=229 key=➋ dp=0 comp=1 tgt=TEXTAREA.- data="" val="ni h"
+[probe] compositionupdate k=0 key= dp=0 comp=0 tgt=TEXTAREA.- data="ni ha" val="ni h"
+[probe] beforeinput k=0 key= dp=0 comp=1 tgt=TEXTAREA.- data="ni ha" val="ni h"
+[probe] input k=0 key= dp=0 comp=1 tgt=TEXTAREA.- data="ni ha" val="ni ha"
+[probe] keyup k=0 key=➋ dp=0 comp=1 tgt=TEXTAREA.- data="" val="ni ha"
+[probe] keydown k=229 key=➏ dp=0 comp=1 tgt=TEXTAREA.- data="" val="ni ha"
+[probe] compositionupdate k=0 key= dp=0 comp=0 tgt=TEXTAREA.- data="ni ham" val="ni ha"
+[probe] beforeinput k=0 key= dp=0 comp=1 tgt=TEXTAREA.- data="ni ham" val="ni ha"
+[probe] input k=0 key= dp=0 comp=1 tgt=TEXTAREA.- data="ni ham" val="ni ham"
+[probe] keyup k=0 key=➏ dp=0 comp=1 tgt=TEXTAREA.- data="" val="ni ham"
+[probe] compositionupdate k=0 key= dp=0 comp=0 tgt=TEXTAREA.- data="ni hao" val="ni ham"
+[probe] beforeinput k=0 key= dp=0 comp=1 tgt=TEXTAREA.- data="ni hao" val="ni ham"
+[probe] input k=0 key= dp=0 comp=1 tgt=TEXTAREA.- data="ni hao" val="ni hao"
+[probe] compositionupdate k=0 key= dp=0 comp=0 tgt=TEXTAREA.- data="你好" val="ni hao"
+[probe] beforeinput k=0 key= dp=0 comp=1 tgt=TEXTAREA.- data="你好" val="ni hao"
+[probe] input k=0 key= dp=0 comp=1 tgt=TEXTAREA.- data="你好" val="你好"
+[probe] beforeinput k=0 key= dp=0 comp=1 tgt=TEXTAREA.- data="" val="你好"
+[probe] input k=0 key= dp=0 comp=1 tgt=TEXTAREA.- data="" val=""
+[probe] beforeinput k=0 key= dp=0 comp=1 tgt=TEXTAREA.- data="你好" val=""
+[probe] input k=0 key= dp=0 comp=1 tgt=TEXTAREA.- data="你好" val="你好"
+[probe] compositionend k=0 key= dp=0 comp=0 tgt=TEXTAREA.- data="你好" val="你好"
+
+# flush reason=tick ua="Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/27.3 Mobile/15E148 Safari/604.1" bytes=312
+[probe] keydown k=229 key=， dp=0 comp=0 tgt=TEXTAREA.- data="" val="你好"
+[probe] beforeinput k=0 key= dp=0 comp=0 tgt=TEXTAREA.- data="，" val="你好"
+[probe] input k=0 key= dp=0 comp=0 tgt=TEXTAREA.- data="，" val="你好，"
+[probe] keyup k=0 key=， dp=0 comp=0 tgt=TEXTAREA.- data="" val="你好，"
+
+# flush reason=tick ua="Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/27.3 Mobile/15E148 Safari/604.1" bytes=324
+[probe] keydown k=229 key=。 dp=0 comp=0 tgt=TEXTAREA.- data="" val="你好，"
+[probe] beforeinput k=0 key= dp=0 comp=0 tgt=TEXTAREA.- data="。" val="你好，"
+[probe] input k=0 key= dp=0 comp=0 tgt=TEXTAREA.- data="。" val="你好，。"
+[probe] keyup k=0 key=。 dp=0 comp=0 tgt=TEXTAREA.- data="" val="你好，。"
+
+# flush reason=tick ua="Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/27.3 Mobile/15E148 Safari/604.1" bytes=336
+[probe] keydown k=229 key=？ dp=0 comp=0 tgt=TEXTAREA.- data="" val="你好，。"
+[probe] beforeinput k=0 key= dp=0 comp=0 tgt=TEXTAREA.- data="？" val="你好，。"
+[probe] input k=0 key= dp=0 comp=0 tgt=TEXTAREA.- data="？" val="你好，。？"
+[probe] keyup k=0 key=？ dp=0 comp=0 tgt=TEXTAREA.- data="" val="你好，。？"
+
+# flush reason=tick ua="Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/27.3 Mobile/15E148 Safari/604.1" bytes=348
+[probe] keydown k=229 key=！ dp=0 comp=0 tgt=TEXTAREA.- data="" val="你好，。？"
+[probe] beforeinput k=0 key= dp=0 comp=0 tgt=TEXTAREA.- data="！" val="你好，。？"
+[probe] input k=0 key= dp=0 comp=0 tgt=TEXTAREA.- data="！" val="你好，。？！"
+[probe] keyup k=0 key=！ dp=0 comp=0 tgt=TEXTAREA.- data="" val="你好，。？！"
+
+# flush reason=tick ua="Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/27.3 Mobile/15E148 Safari/604.1" bytes=1392
+[probe] keydown k=229 key=， dp=0 comp=0 tgt=TEXTAREA.- data="" val="你好，。？！"
+[probe] beforeinput k=0 key= dp=0 comp=0 tgt=TEXTAREA.- data="，" val="你好，。？！"
+[probe] input k=0 key= dp=0 comp=0 tgt=TEXTAREA.- data="，" val="你好，。？！，"
+[probe] keyup k=0 key=， dp=0 comp=0 tgt=TEXTAREA.- data="" val="你好，。？！，"
+[probe] beforeinput k=0 key= dp=0 comp=0 tgt=TEXTAREA.- data="" val="你好，。？！，"
+[probe] input k=0 key= dp=0 comp=0 tgt=TEXTAREA.- data="" val="你好，。？！"
+[probe] compositionstart k=0 key= dp=0 comp=0 tgt=TEXTAREA.- data="" val="你好，。？！"
+[probe] compositionupdate k=0 key= dp=0 comp=0 tgt=TEXTAREA.- data="“”" val="你好，。？！"
+[probe] beforeinput k=0 key= dp=0 comp=1 tgt=TEXTAREA.- data="“”" val="你好，。？！"
+[probe] input k=0 key= dp=0 comp=1 tgt=TEXTAREA.- data="“”" val="你好，。？！“”"
+[probe] beforeinput k=0 key= dp=0 comp=1 tgt=TEXTAREA.- data="" val="你好，。？！“”"
+[probe] input k=0 key= dp=0 comp=1 tgt=TEXTAREA.- data="" val="你好，。？！"
+[probe] beforeinput k=0 key= dp=0 comp=1 tgt=TEXTAREA.- data="“”" val="你好，。？！"
+[probe] input k=0 key= dp=0 comp=1 tgt=TEXTAREA.- data="“”" val="你好，。？！“”"
+[probe] compositionend k=0 key= dp=0 comp=0 tgt=TEXTAREA.- data="“”" val="你好，。？！“”"
+
+# flush reason=tick ua="Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/27.3 Mobile/15E148 Safari/604.1" bytes=1131
+[probe] keydown k=229 key=1 dp=0 comp=0 tgt=TEXTAREA.- data="" val="你好，。？！“”"
+[probe] beforeinput k=0 key= dp=0 comp=0 tgt=TEXTAREA.- data="1" val="你好，。？！“”"
+[probe] input k=0 key= dp=0 comp=0 tgt=TEXTAREA.- data="1" val="你好，。？！“1”"
+[probe] keyup k=49 key=1 dp=0 comp=0 tgt=TEXTAREA.- data="" val="你好，。？！“1”"
+[probe] keydown k=229 key=2 dp=0 comp=0 tgt=TEXTAREA.- data="" val="你好，。？！“1”"
+[probe] beforeinput k=0 key= dp=0 comp=0 tgt=TEXTAREA.- data="2" val="你好，。？！“1”"
+[probe] input k=0 key= dp=0 comp=0 tgt=TEXTAREA.- data="2" val="你好，。？！“12”"
+[probe] keyup k=50 key=2 dp=0 comp=0 tgt=TEXTAREA.- data="" val="你好，。？！“12”"
+[probe] keydown k=229 key=3 dp=0 comp=0 tgt=TEXTAREA.- data="" val="你好，。？！“12”"
+[probe] beforeinput k=0 key= dp=0 comp=0 tgt=TEXTAREA.- data="3" val="你好，。？！“12”"
+[probe] input k=0 key= dp=0 comp=0 tgt=TEXTAREA.- data="3" val="你好，。？！“123”"
+[probe] keyup k=51 key=3 dp=0 comp=0 tgt=TEXTAREA.- data="" val="你好，。？！“123”"
+
+# flush reason=tick ua="Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/27.3 Mobile/15E148 Safari/604.1" bytes=21
+[quick-keys] tap=esc
+
+# flush reason=tick ua="Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/27.3 Mobile/15E148 Safari/604.1" bytes=572
+[probe] keydown k=186 key=: dp=0 comp=0 tgt=TEXTAREA.- data="" val="你好，。？！“123”"
+[probe] keyup k=186 key=: dp=0 comp=0 tgt=TEXTAREA.- data="" val="你好，。？！“123”"
+[probe] keydown k=87 key=w dp=0 comp=0 tgt=TEXTAREA.- data="" val="你好，。？！“123”"
+[probe] keyup k=87 key=w dp=0 comp=0 tgt=TEXTAREA.- data="" val="你好，。？！“123”"
+[probe] keydown k=81 key=q dp=0 comp=0 tgt=TEXTAREA.- data="" val="你好，。？！“123”"
+[probe] keyup k=81 key=q dp=0 comp=0 tgt=TEXTAREA.- data="" val="你好，。？！“123”"
+
+# flush reason=tick ua="Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/27.3 Mobile/15E148 Safari/604.1" bytes=583
+[probe] keydown k=13 key=…nter dp=0 comp=0 tgt=TEXTAREA.- data="" val="你好，。？！“123”"
+[probe] keyup k=13 key=…nter dp=0 comp=0 tgt=TEXTAREA.- data="" val=""
+[probe] keydown k=67 key=c dp=0 comp=0 tgt=TEXTAREA.- data="" val=""
+[probe] keyup k=67 key=c dp=0 comp=0 tgt=TEXTAREA.- data="" val=""
+[probe] keydown k=65 key=a dp=0 comp=0 tgt=TEXTAREA.- data="" val=""
+[probe] keyup k=65 key=a dp=0 comp=0 tgt=TEXTAREA.- data="" val=""
+[probe] keydown k=84 key=t dp=0 comp=0 tgt=TEXTAREA.- data="" val=""
+[probe] keyup k=84 key=t dp=0 comp=0 tgt=TEXTAREA.- data="" val=""
+
+# flush reason=tick ua="Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/27.3 Mobile/15E148 Safari/604.1" bytes=846
+[probe] keydown k=32 key=  dp=0 comp=0 tgt=TEXTAREA.- data="" val=""
+[probe] beforeinput k=0 key= dp=0 comp=0 tgt=TEXTAREA.- data=" " val=""
+[probe] input k=0 key= dp=0 comp=0 tgt=TEXTAREA.- data=" " val=" "
+[probe] keyup k=32 key=  dp=0 comp=0 tgt=TEXTAREA.- data="" val=" "
+[probe] keydown k=189 key=- dp=0 comp=0 tgt=TEXTAREA.- data="" val=" "
+[probe] keyup k=189 key=- dp=0 comp=0 tgt=TEXTAREA.- data="" val=" "
+[probe] keydown k=86 key=v dp=0 comp=0 tgt=TEXTAREA.- data="" val=" "
+[probe] keyup k=86 key=v dp=0 comp=0 tgt=TEXTAREA.- data="" val=" "
+[probe] keydown k=32 key=  dp=0 comp=0 tgt=TEXTAREA.- data="" val=" "
+[probe] beforeinput k=0 key= dp=0 comp=0 tgt=TEXTAREA.- data=" " val=" "
+[probe] input k=0 key= dp=0 comp=0 tgt=TEXTAREA.- data=" " val="  "
+[probe] keyup k=32 key=  dp=0 comp=0 tgt=TEXTAREA.- data="" val="  "
+
+# flush reason=tick ua="Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/27.3 Mobile/15E148 Safari/604.1" bytes=1158
+[probe] keydown k=191 key=/ dp=0 comp=0 tgt=TEXTAREA.- data="" val="  "
+[probe] keyup k=191 key=/ dp=0 comp=0 tgt=TEXTAREA.- data="" val="  "
+[probe] keydown k=84 key=t dp=0 comp=0 tgt=TEXTAREA.- data="" val="  "
+[probe] keyup k=84 key=t dp=0 comp=0 tgt=TEXTAREA.- data="" val="  "
+[probe] keydown k=77 key=m dp=0 comp=0 tgt=TEXTAREA.- data="" val="  "
+[probe] keyup k=77 key=m dp=0 comp=0 tgt=TEXTAREA.- data="" val="  "
+[probe] keydown k=80 key=p dp=0 comp=0 tgt=TEXTAREA.- data="" val="  "
+[probe] keyup k=80 key=p dp=0 comp=0 tgt=TEXTAREA.- data="" val="  "
+[probe] keydown k=191 key=/ dp=0 comp=0 tgt=TEXTAREA.- data="" val="  "
+[probe] keyup k=191 key=/ dp=0 comp=0 tgt=TEXTAREA.- data="" val="  "
+[probe] keydown k=84 key=t dp=0 comp=0 tgt=TEXTAREA.- data="" val="  "
+[probe] keyup k=84 key=t dp=0 comp=0 tgt=TEXTAREA.- data="" val="  "
+[probe] keydown k=53 key=5 dp=0 comp=0 tgt=TEXTAREA.- data="" val="  "
+[probe] keyup k=53 key=5 dp=0 comp=0 tgt=TEXTAREA.- data="" val="  "
+[probe] keydown k=190 key=. dp=0 comp=0 tgt=TEXTAREA.- data="" val="  "
+[probe] keyup k=190 key=. dp=0 comp=0 tgt=TEXTAREA.- data="" val="  "
+
+# flush reason=tick ua="Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/27.3 Mobile/15E148 Safari/604.1" bytes=882
+[probe] keydown k=53 key=5 dp=0 comp=0 tgt=TEXTAREA.- data="" val="  "
+[probe] keyup k=53 key=5 dp=0 comp=0 tgt=TEXTAREA.- data="" val="  "
+[probe] keydown k=8 key=…pace dp=0 comp=0 tgt=TEXTAREA.- data="" val="  "
+[probe] keyup k=8 key=…pace dp=0 comp=0 tgt=TEXTAREA.- data="" val="  "
+[probe] keydown k=84 key=t dp=0 comp=0 tgt=TEXTAREA.- data="" val="  "
+[probe] keyup k=84 key=t dp=0 comp=0 tgt=TEXTAREA.- data="" val="  "
+[probe] keydown k=88 key=x dp=0 comp=0 tgt=TEXTAREA.- data="" val="  "
+[probe] keyup k=88 key=x dp=0 comp=0 tgt=TEXTAREA.- data="" val="  "
+[probe] keydown k=84 key=t dp=0 comp=0 tgt=TEXTAREA.- data="" val="  "
+[probe] keyup k=84 key=t dp=0 comp=0 tgt=TEXTAREA.- data="" val="  "
+[probe] keydown k=13 key=…nter dp=0 comp=0 tgt=TEXTAREA.- data="" val="  "
+[probe] keyup k=13 key=…nter dp=0 comp=0 tgt=TEXTAREA.- data="" val=""
