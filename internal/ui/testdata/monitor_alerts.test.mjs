@@ -77,7 +77,7 @@ const script = inlineScript(indexSource);
 // style as `api` — so fetchMonitorStats's own guard can be pinned without
 // the renderer in scope.
 const monitorFactory = new Function("deps", `
-  const { api, console, document, setInterval, clearInterval, renderMonitorStats } = deps;
+  const { api, console, document, setInterval, clearInterval, renderMonitorStats, state } = deps;
   ${sliceStatement(script, "const MONITOR_ALERTS_POLL_MS")}
   let monitorAlertsTimer = null;
   let monitorTimer = null;
@@ -204,15 +204,19 @@ function harness(doc, { render = () => {}, deferApi = false } = {}) {
   };
   const api = (path, opts) => apiImpl(path, opts);
   const document = doc ?? makeBar();
+  // `state` is the page global the shipped startMonitorAlertsPolling consults
+  // before arming its timer (issue #137: no polling against a dead credential).
+  const state = {};
   const m = monitorFactory({
     api,
     console: { error: () => {}, log: () => {} },
     document,
+    state,
     setInterval: (fn, ms) => { intervals.push({ fn, ms, handle: nextHandle }); return nextHandle++; },
     clearInterval: (h) => { const i = intervals.findIndex(x => x.handle === h); if (i >= 0) intervals.splice(i, 1); },
     renderMonitorStats: render,
   });
-  return { m, intervals, apiCalls, document, resolveApi: (v) => releaseApi(v) };
+  return { m, intervals, apiCalls, document, state, resolveApi: (v) => releaseApi(v) };
 }
 
 const A = (sev, id, extra = {}) => ({
@@ -433,6 +437,21 @@ test("alert poll: ~10s cadence, single timer, stop clears it", async () => {
   assert.equal(intervals.length, 0);
   m.stopMonitorAlertsPolling(); // idempotent
   assert.equal(m.isPolling(), false);
+});
+
+test("issue #137: the alert poll refuses to arm itself against a dead credential", () => {
+  // The poll is restarted from visibilitychange (no click, the overlay cannot
+  // block a tab switch), so the guard has to live in the shipped starter.
+  const { m, intervals, apiCalls, state } = harness();
+  state.authExpired = true;
+  m.startMonitorAlertsPolling();
+  assert.equal(intervals.length, 0, "no interval while the credential is known dead");
+  assert.equal(apiCalls.length, 0, "and no immediate kick either");
+
+  state.authExpired = false;
+  m.startMonitorAlertsPolling();
+  assert.equal(intervals.length, 1, "a live credential arms the poll as before");
+  assert.equal(apiCalls.length, 1);
 });
 
 test("fetchMonitorAlerts paints the endpoint's alerts on the badge", async () => {
