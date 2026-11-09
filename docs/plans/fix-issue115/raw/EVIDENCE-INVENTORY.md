@@ -18,7 +18,8 @@
 | `s1-vim-t5.txt.saved` | 43 | vim 落盘原文 | **按腿切开 A31＋B12**（§4.3） |
 | `s1-vim-decomposition.md` | — | 上述逐字节解剖 | 同上 |
 | `s2-vim-paste-target.txt` | 86 | 粘贴靶文（5 行 4 空格） | **零缩进级联** |
-| `s2-c-s3-readout.md` | — | 三组读数＋诚实边界 | 分支 C 结案、B-3 未复现、粘贴无损 |
+| `s2-c-s3-readout.md` | — | 三组读数＋诚实边界 | 分支 C 结案、B-3 未复现、粘贴无损（**已被下一行修正**） |
+| `e1-e2-readout.md` | — | emoji 与 autoindent 收口轮 | **B-8 复活**（级联 4/8/tab+4/tab+8/2tab+4）、**B-5 emoji 通过＋⚽️ 重复** |
 
 ## 已知边界（不算瑕疵，但读结论必须连着读）
 
