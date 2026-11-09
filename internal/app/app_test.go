@@ -1311,29 +1311,29 @@ func TestHandleWorktreeFileContentBlocksBinaryAndNonUTF8(t *testing.T) {
 	}
 }
 
-func TestHandleWorktreeFileContentBlocksOversizedLine(t *testing.T) {
+func TestHandleWorktreeFileContentAllowsLongLineForFrontendFallback(t *testing.T) {
 	srv, _ := newIsolatedTestServer(t, store.State{Version: 3})
-	body := []byte(strings.Repeat("x", previewMaxLineBytes+1) + "\nnext\n")
+	body := []byte(strings.Repeat("x", 40<<10) + "\nnext\n")
 	writePreviewFixture(t, srv, "long-line.md", body)
 	rec := getPreviewContent(t, srv, "long-line.md")
-	if rec.Code != http.StatusRequestEntityTooLarge {
-		t.Fatalf("status = %d, want 413; body=%s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 so the front-end can offer a bounded excerpt; body=%s", rec.Code, rec.Body.String())
 	}
-	if !strings.Contains(rec.Body.String(), "preview limit") {
-		t.Fatalf("body should name the line limit, got %q", rec.Body.String())
+	if got := rec.Header().Get("X-File-Size"); got != strconv.Itoa(len(body)) {
+		t.Fatalf("X-File-Size = %q, want %d", got, len(body))
 	}
 }
 
 func TestHandleWorktreeFileContentReportsOversizeWithSizeHeader(t *testing.T) {
 	srv, _ := newIsolatedTestServer(t, store.State{Version: 3})
-	body := []byte(strings.Repeat("x", (1<<20)+1))
+	body := []byte(strings.Repeat("x", previewMaxFileBytes+1))
 	writePreviewFixture(t, srv, "too-large.md", body)
 	rec := getPreviewContent(t, srv, "too-large.md")
 	if rec.Code != http.StatusRequestEntityTooLarge {
 		t.Fatalf("status = %d, want 413; body=%s", rec.Code, rec.Body.String())
 	}
-	if got := rec.Header().Get("X-File-Size"); got != strconv.Itoa((1<<20)+1) {
-		t.Fatalf("X-File-Size = %q, want %d", got, (1<<20)+1)
+	if got := rec.Header().Get("X-File-Size"); got != strconv.Itoa(previewMaxFileBytes+1) {
+		t.Fatalf("X-File-Size = %q, want %d", got, previewMaxFileBytes+1)
 	}
 	if got := rec.Header().Get("X-File-Type"); got != "text/markdown" {
 		t.Fatalf("X-File-Type = %q, want text/markdown", got)

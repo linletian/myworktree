@@ -1705,14 +1705,13 @@ func (s *Server) handleWorktreeFileContent(w http.ResponseWriter, r *http.Reques
 		w.Header().Set("X-File-Type", fileType)
 	}
 	w.Header().Set("X-File-Size", strconv.FormatInt(info.Size(), 10))
-	w.Header().Set("X-File-FullPath", fullPath)
 
 	if fileType == "" {
 		http.Error(w, "preview not supported for this file type", http.StatusUnsupportedMediaType)
 		return
 	}
-	if info.Size() > 1<<20 {
-		http.Error(w, "file too large for preview (1 MiB limit)", http.StatusRequestEntityTooLarge)
+	if info.Size() > previewMaxFileBytes {
+		http.Error(w, "file too large for preview (2 MiB transport limit)", http.StatusRequestEntityTooLarge)
 		return
 	}
 	data, err := os.ReadFile(fullPath)
@@ -1730,36 +1729,10 @@ func (s *Server) handleWorktreeFileContent(w http.ResponseWriter, r *http.Reques
 		http.Error(w, "file is not valid UTF-8 text", http.StatusUnsupportedMediaType)
 		return
 	}
-	if line, length, tooLong := firstPreviewLineTooLong(data, previewMaxLineBytes); tooLong {
-		http.Error(w, fmt.Sprintf("line %d is %d bytes; preview limit is %d bytes", line, length, previewMaxLineBytes), http.StatusRequestEntityTooLarge)
-		return
-	}
 	_, _ = w.Write(data)
 }
 
-const previewMaxLineBytes = 32 << 10
-
-// firstPreviewLineTooLong reports whether any line in data exceeds max bytes.
-// The line number is 1-based; the reported length excludes the line ending.
-func firstPreviewLineTooLong(data []byte, max int) (line, length int, tooLong bool) {
-	line = 1
-	start := 0
-	for i := 0; i <= len(data); i++ {
-		if i != len(data) && data[i] != '\n' {
-			continue
-		}
-		end := i
-		if end > start && data[end-1] == '\r' {
-			end--
-		}
-		if end-start > max {
-			return line, end - start, true
-		}
-		line++
-		start = i + 1
-	}
-	return 0, 0, false
-}
+const previewMaxFileBytes = 2 << 20
 
 func (s *Server) handleWorktreesDiverged(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {

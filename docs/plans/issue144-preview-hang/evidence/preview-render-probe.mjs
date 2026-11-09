@@ -29,6 +29,7 @@ const VENDOR_PATHS = {
   '/static/vendor/highlight/github-dark.min.css': 'internal/ui/static/vendor/highlight/github-dark.min.css',
   '/static/vendor/marked/marked.min.js': 'internal/ui/static/vendor/marked/marked.min.js',
   '/static/preview_markdown_worker.js': 'internal/ui/static/preview_markdown_worker.js',
+  '/static/preview_source_highlight_worker.js': 'internal/ui/static/preview_source_highlight_worker.js',
 };
 
 function arg(name, fallback) {

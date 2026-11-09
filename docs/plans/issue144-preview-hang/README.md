@@ -1,75 +1,69 @@
-# Issue #144 Preview 渲染卡死 — 沙盒验证
+# Issue #144 Preview 渲染卡死 — 归因与实现验证
 
-本目录包含 issue #144 的 **归因沙盒** 和 **实施后可中断渲染验证**。
+本目录记录 issue #144 的归因、实现和评审修复证据。
 
-- `RESULTS.md` 第 1–7 节是实施前分析基线；
-- `RESULTS.md` 第 8 节记录前端自适应限流实施后的真实 Chrome 沙盒结果；
-- 产品实现位于 `internal/ui/static/preview.html`，精确文件大小由 `internal/app/app.go` 的 `X-File-Size` 响应头提供；
-- Markdown sanitize、HTML iframe 效果预览和格式扩展不在本轮范围内。
+- `RESULTS.md` §1–§7 是实施前分析基线；
+- `RESULTS.md` §8–§10 是中间轮次（阈值已废弃）；
+- `RESULTS.md` §11 是最终 shipped 实现、测试和非目标；
+- `evidence/README.md` 说明各 JSONL 属于哪一轮，只有 `final-*` 是 shipped 证据。
 
-## 目标与边界
+## 最终实现摘要
 
-沙盒使用：
+Formatted Preview 现在按 renderer 分开保护：
 
-- **真实产品文件**：`internal/ui/static/preview.html`、`internal/app/app.go` 对应的响应契约与仓库内 vendor 的 highlight.js / marked.js；
-- **真实浏览器**：本机 headless Google Chrome，通过 CDP 驱动；
-- **mock 后端**：只提供 `/api/worktree/file/content` 与 `/api/worktree/file/diff`，内容由探针在内存生成；
-- **不启动 `mw serve`**，不建真实 worktree，不写仓库文件，不访问外网。
+- **Markdown**
+  - 上限：1 MiB / 20,000 行 / 32 KiB 单行；
+  - `marked.parse()` 在 `preview_markdown_worker.js` 中执行；
+  - raw HTML 转义，危险 URL scheme 拒绝；
+  - 支持 Stop / 切 tab terminate；
+  - 代码块通过 IntersectionObserver 可见区域懒高亮。
+- **源码 / 纯文本**
+  - 上限：128 KiB / 2,000 行 / 12,000 字符 / 2,000 ms；
+  - `hljs.highlight()` 在 `preview_source_highlight_worker.js` 中执行；
+  - DOM 按片构建，每片后强制布局测量并让出主线程；
+  - 支持 Stop / 切 tab terminate。
+- **通用**
+  - backend text transport cap 2 MiB；超过返回 413；
+  - 未知扩展名、二进制 NUL、非 UTF-8 在读取/解析前阻断；
+  - 超过 renderer 上限但仍在 transport cap 内的文件返回前端，显示 `Preview limited` 和 bounded excerpt；
+  - 不支持类型显示 `Preview not supported`，不强制降级解析；
+  - fetch 支持 AbortController + 15 s timeout；
+  - Markdown HTML 和源码完成 DOM 有 tab 级缓存；
+  - `/preview` 与 `/static/*` 使用 `no-store`，避免页面/Worker 版本错配。
 
-未覆盖：真实 daemon、真实 iPadOS Safari/WebKit、真机低内存/低算力环境。因此沙盒结果不能代替真机验收。
+## 运行沙盒
 
-## 已实现行为
-
-`preview.html` 对 Formatted Preview 增加了：
-
-- 渲染前预检：文件大小 / 行数 / 最长行；
-- 硬限制：128 KiB、2,000 行、12,000 字符/行；
-- 超限时不执行全量源码渲染，展示实际大小、阈值和 **Show safe excerpt** 按钮；
-- bounded excerpt：最多 200 行 / 64 KiB，超长行会被截断并明确提示；
-- 源码渲染按行分片，每片之间让出主线程；
-- 依据实际 DOM 创建耗时和帧等待耗时自适应调整片大小；
-- 2 秒总渲染预算，超时自动停止并保留已渲染内容；
-- 渲染中显示进度与 **Stop** 按钮，点击后停止且不再追加；
-- 切换 tab 会取消进行中的渲染，late fetch/render 不会覆盖新 tab；
-- `data-render-state` 暴露测试状态，不改变用户界面文案。
-
-## 运行方式
-
-前置：`node`（使用 Node 内置模块，无需 npm install）与 `google-chrome`。
+前置：`node`（Node 内置模块，无 npm 依赖）与 `google-chrome`。
 
 ```bash
-# 实施后：长度 / 行数 / 硬限制扫描，6x CPU 节流
+# 源码长度 / 行数 / 硬限制扫描（6x CPU）
 node docs/plans/issue144-preview-hang/evidence/preview-render-probe.mjs \
   --suite=h1 --cpu=6
 
-# 实施后：格式 / 编码 / 错误响应样本
-node docs/plans/issue144-preview-hang/evidence/preview-render-probe.mjs \
-  --suite=h2 --cpu=6
-
-# 交互验证：limit -> safe excerpt，以及 Stop 中断进行中的渲染
+# 交互验证：limit -> safe excerpt，以及 Stop 中断
 node docs/plans/issue144-preview-hang/evidence/preview-render-probe.mjs \
   --suite=interaction --cpu=6
 ```
 
-每个探针会启动一个独立 Chrome 实例，测量完自动关闭浏览器、HTTP server，并删除临时 Chrome profile。输出为 JSONL，每个 fixture 一行。
+每个探针启动一个受控 Chrome，结束后关闭浏览器和 HTTP server，并删除临时 profile。
 
-本目录中的证据：
+## 证据索引
 
-- 实施前基线：`evidence/h1-cpu6.jsonl`、`evidence/h1-cpu1.jsonl`、`evidence/h2-cpu6.jsonl`
-- 实施后：`evidence/post-fix-h1-cpu6.jsonl`、`evidence/post-fix-h2-cpu6.jsonl`
-- 实施后交互：`evidence/interaction-cpu6.jsonl`
+- 实施前基线：`evidence/h1-cpu1.jsonl`、`h1-cpu6.jsonl`、`h2-cpu6.jsonl`
+- 中间轮次（非 shipped）：`post-fix-*`、`interaction-cpu6.jsonl`
+- 最终源码路径：`evidence/final-source-h1-cpu6.jsonl`
+- 最终 Markdown Worker：`evidence/final-markdown-live.jsonl`
+- 探针：`evidence/preview-render-probe.mjs`
 
 ## 指标说明
 
-- `state`：最终 `#content[data-render-state]`，如 `limit`、`running`、`complete`、`excerpt`、`truncated`、`stopped`、`error`。
-- `wallMs`：Node 侧从点击 Formatted tab 到页面进入终态的墙钟时间。
-- `highlightMs`：主线程 `hljs.highlight()` 同步耗时。
-- `rowCount`：最终 `.code-line` 数量。
-- `rowSamples`：渲染过程中观察到的行数变化序列；中间行数证明渲染是分片让出执行的，而不是一次同步 append。
-- `statusText` / `limitStatus`：进度、停止或限流提示的可见文案。
-- `layoutMs`：终端状态下读取 `#content.scrollWidth/scrollHeight` 的布局耗时。
-- `longTasks`：页面内 `PerformanceObserver` 捕获的长任务；部分样本因浏览器上报时序缺失，不代表没有长任务。
-- `iframeCount` / `codeLinesContainer` / `scriptExecuted`：确认 HTML 是否走 iframe 效果预览、源码行渲染路径，以及仓库 HTML 中的脚本是否被执行。
+- `state`：`#content[data-render-state]` 终态。
+- `wallMs`：从点击 Formatted tab 到终态的墙钟时间。
+- `highlightMs`：主线程 highlighter 耗时；最终源码路径应为 0，因为高亮在 Worker。
+- `rowCount` / `rowSamples`：最终与过程中的代码行数。
+- `layoutMs`：终端状态下强制布局耗时。
+- `longTasks`：PerformanceObserver 捕获的长任务；缺失不代表没有长任务。
+- Markdown live evidence 的 `panel` / `perf` 同时记录 Worker round-trip、post-worker commit、DOM→first-frame 和可见主线程 heartbeat；跨前后台时以 commit/first-frame 差值为准。
 
 ## 相关分析
 

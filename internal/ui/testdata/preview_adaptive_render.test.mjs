@@ -22,6 +22,8 @@ import vm from "node:vm";
 const here = dirname(fileURLToPath(import.meta.url));
 const previewSource = readFileSync(join(here, "..", "static", "preview.html"), "utf8");
 const workerSource = readFileSync(join(here, "..", "static", "preview_markdown_worker.js"), "utf8");
+const sourceWorkerSource = readFileSync(join(here, "..", "static", "preview_source_highlight_worker.js"), "utf8");
+const highlightSource = readFileSync(join(here, "..", "static", "vendor", "highlight", "highlight.min.js"), "utf8");
 const markedSource = readFileSync(join(here, "..", "static", "vendor", "marked", "marked.min.js"), "utf8");
 
 function inlineScript(html) {
@@ -53,24 +55,28 @@ const helperFactory = new Function(`
   ${sliceBlock(script, "function previewLimitReasons(")}
   ${sliceBlock(script, "function adaptPreviewChunkSize(")}
   ${sliceBlock(script, "function buildPreviewExcerpt(")}
+  ${sliceBlock(script, "function extToLang(")}
+  ${sliceBlock(script, "function basenameToLang(")}
+  ${sliceBlock(script, "function langForFilePath(")}
   return {
     formatPreviewBytes, formatPreviewCount, measurePreviewContent,
     previewLimitReasons, adaptPreviewChunkSize, buildPreviewExcerpt,
+    extToLang, basenameToLang, langForFilePath,
   };
 `);
 const h = helperFactory();
 
 const LIMITS = {
-  maxBytes: 1024 * 1024,
-  maxLines: 20000,
-  maxLineChars: 32 * 1024,
+  maxBytes: 128 * 1024,
+  maxLines: 2000,
+  maxLineChars: 12000,
   excerptLines: 200,
   excerptBytes: 64 * 1024,
   initialChunkSize: 80,
   minChunkSize: 20,
   maxChunkSize: 400,
   targetChunkMs: 16,
-  maxTotalRenderMs: 10000,
+  maxTotalRenderMs: 2000,
 };
 
 test("issue #144: metrics drop the trailing newline and report the longest line", () => {
@@ -137,34 +143,68 @@ test("issue #144: byte formatting is stable for the preflight notice", () => {
   assert.equal(h.formatPreviewCount(12345), "12,345");
 });
 
+test("issue #144: backend extension/special-name support has a front-end language mapping", () => {
+  assert.equal(h.extToLang(".htm"), "xml");
+  assert.equal(h.extToLang(".mjs"), "javascript");
+  assert.equal(h.extToLang(".kt"), "kotlin");
+  assert.equal(h.extToLang(".sass"), "scss");
+  assert.equal(h.extToLang(".graphql"), "graphql");
+  assert.equal(h.extToLang(".diff"), "diff");
+  assert.equal(h.extToLang(".ini"), "ini");
+  assert.equal(h.langForFilePath("Dockerfile"), "dockerfile");
+  assert.equal(h.langForFilePath("src/Makefile"), "makefile");
+  assert.equal(h.langForFilePath("foo.dockerfile"), "dockerfile");
+  assert.equal(h.langForFilePath("report.htm"), "xml");
+});
+
 test("issue #144: shipped page keeps the interruptible adaptive loop wired", () => {
   for (const anchor of [
-    "var RENDER_LIMITS = {",
+    "var SOURCE_LIMITS = {",
+    "var MARKDOWN_LIMITS = {",
+    "maxBytes: 128 * 1024,",
     "maxBytes: 1024 * 1024,",
     "maxLines: 20000,",
     "maxLineChars: 32 * 1024,",
     "function startPreviewSourceRender(text, fileType, context) {",
     "function startPreviewMarkdownRender(text, metrics) {",
     "new Worker('/static/preview_markdown_worker.js')",
+    "new Worker('/static/preview_source_highlight_worker.js')",
     "worker.terminate()",
+    "function highlightSourceWithWorker(job, text, lang) {",
+    "await highlightSourceWithWorker(job, text, lang);",
     "await yieldToPreviewFrame(job);",
     "if (job.cancelled) return;",
-    "chunkSize = adaptPreviewChunkSize(chunkSize, workMs, frameMs, RENDER_LIMITS);",
+    "void container.scrollHeight;",
+    "chunkSize = adaptPreviewChunkSize(chunkSize, workMs, frameMs, activeLimits);",
     "finishTruncatedPreviewRender(job, 'timeout');",
     "content.setAttribute('data-render-state', 'running');",
     "content.setAttribute('data-render-state', 'limit');",
     "resp.headers.get('X-File-Size')",
     "if (loadSeq !== activeLoadSeq || activeTab !== 'formatted') return;",
-    "showPreviewLimit(text, fileType, sourceBytes, metrics, reasons);",
+    "showPreviewLimit(text, fileType, sourceBytes, metrics, reasons, limits);",
     "function showContentLoadError(err) {",
     "function observeMarkdownCodeBlocks(container) {",
     "IntersectionObserver",
+    "AbortController",
+    "formattedRenderCache",
   ]) {
     assert.ok(script.includes(anchor), `preview.html is missing issue #144 anchor: ${anchor}`);
   }
   assert.ok(
     !script.includes("marked.parse("),
     "Markdown parsing must not run directly on the page main thread",
+  );
+  assert.ok(
+    !script.includes("marked.min.js"),
+    "the main preview page must not load the Markdown parser",
+  );
+  assert.ok(
+    !script.includes("hlLines = splitHighlightedLines(text, lang);"),
+    "source highlighting must not run synchronously on the main thread",
+  );
+  assert.ok(
+    sourceWorkerSource.includes("importScripts('/static/vendor/highlight/highlight.min.js')"),
+    "source highlight worker must load the vendored highlighter",
   );
   assert.ok(
     !script.includes("content.appendChild(renderWithLineNumbers("),
@@ -177,7 +217,35 @@ test("issue #144: shipped page keeps the interruptible adaptive loop wired", () 
   );
 });
 
+test("issue #144: source worker returns per-line highlighted HTML", () => {
+  const messages = [];
+  const context = {
+    console,
+    self: { postMessage: message => messages.push(message) },
+  };
+  context.importScripts = () => vm.runInContext(highlightSource, context);
+  vm.createContext(context);
+  vm.runInContext(sourceWorkerSource, context);
+
+  context.self.onmessage({
+    data: {
+      type: "highlight",
+      id: 9,
+      language: "javascript",
+      text: "const answer = 42;\nfunction add(a, b) { return a + b; }",
+    },
+  });
+  assert.equal(messages.length, 1);
+  assert.equal(messages[0].type, "result");
+  assert.equal(messages[0].id, 9);
+  assert.equal(messages[0].lines.length, 2);
+  assert.match(messages[0].lines[0], /hljs-/);
+});
+
 test("issue #144: Markdown worker escapes raw HTML and unsafe URLs", () => {
+  assert.match(markedSource, /marked v12\.0\.2/);
+  assert.match(workerSource, /typeof html !== 'string'/);
+  assert.match(workerSource, /typeof href !== 'string'/);
   const messages = [];
   const context = {
     console,

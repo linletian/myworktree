@@ -253,11 +253,10 @@
     </div>
 </div>
 
-<!-- highlight.js and marked.js — local vendor only -->
+<!-- highlight.js is used only by the Diff renderer/lazy Markdown code blocks; Markdown parsing lives in a Worker. -->
 <link rel="stylesheet" href="/static/vendor/highlight/github.min.css" id="hljs-light-theme">
 <link rel="stylesheet" href="/static/vendor/highlight/github-dark.min.css" id="hljs-dark-theme" disabled>
 <script src="/static/vendor/highlight/highlight.min.js"></script>
-<script src="/static/vendor/marked/marked.min.js"></script>
 
 <script>
 (function() {
@@ -273,9 +272,8 @@
     var fullPath = params.get('full_path') || '';
     var activeTab = params.get('tab') || 'diff';
 
-    // Vendor library availability
+    // Vendor library availability for the Diff renderer and lazy code highlighting.
     var hljsOk = typeof hljs !== 'undefined';
-    var markedOk = typeof marked !== 'undefined';
 
     // Cache for tab content
     var cachedDiff = null;
@@ -285,14 +283,26 @@
     var activeLoadSeq = 0;
     var activeFormattedJob = null;
     var activeCodeHighlightObserver = null;
+    var activeContentController = null;
+    var formattedRenderCache = null;
 
-    // Front-end safety envelope. The backend 1 MiB cap is far above the
-    // synchronous render cost measured for issue #144, so Formatted Preview
-    // applies its own, lower limits before touching DOM or highlight.js.
-    var RENDER_LIMITS = {
-        // Match the backend's hard 1 MiB text cap. Parsing is off-main-thread
-        // (Worker) and source rendering is chunked/interruptible, so this is
-        // the supported ceiling, not a synchronous-render budget.
+    // The backend accepts up to 2 MiB so files just above the safe render
+    // ceiling can still reach the front-end and receive a bounded excerpt.
+    // Rendering limits remain renderer-specific: Markdown is parsed off-main
+    // in a Worker, while source/code still pays main-thread DOM + layout cost.
+    var SOURCE_LIMITS = {
+        maxBytes: 128 * 1024,
+        maxLines: 2000,
+        maxLineChars: 12000,
+        excerptLines: 200,
+        excerptBytes: 64 * 1024,
+        initialChunkSize: 80,
+        minChunkSize: 20,
+        maxChunkSize: 400,
+        targetChunkMs: 16,
+        maxTotalRenderMs: 2000
+    };
+    var MARKDOWN_LIMITS = {
         maxBytes: 1024 * 1024,
         maxLines: 20000,
         maxLineChars: 32 * 1024,
@@ -328,24 +338,80 @@
         loadTab(tab);
     }
 
-    // Fetch API with auth (same pattern as index.html)
-    function apiFetch(url) {
-        return fetch(url, { credentials: 'include' });
+    // Fetch API with auth, cancellation and a timeout. The caller owns the
+    // controller so a tab switch can abort the in-flight body read.
+    function apiFetch(url, controller) {
+        var timer = null;
+        if (controller) {
+            timer = setTimeout(function() {
+                try { controller.abort(); } catch (err) {}
+            }, 15000);
+        }
+        return fetch(url, { credentials: 'include', signal: controller ? controller.signal : undefined })
+            .finally(function() { if (timer !== null) clearTimeout(timer); });
+    }
+
+    function beginContentRequest() {
+        if (activeContentController) {
+            try { activeContentController.abort(); } catch (err) {}
+        }
+        activeContentController = typeof AbortController !== 'undefined' ? new AbortController() : null;
+        return activeContentController;
+    }
+
+    function endContentRequest(controller) {
+        if (activeContentController === controller) activeContentController = null;
     }
 
     function esc(s) { return (s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
 
-    // Map file extension to highlight.js language
+    // Map file extension to highlight.js language.
     function extToLang(ext) {
-        var m = { '.go': 'go', '.js': 'javascript', '.ts': 'typescript', '.tsx': 'typescript',
-            '.jsx': 'javascript', '.py': 'python',
-            '.rs': 'rust', '.java': 'java', '.json': 'json', '.yaml': 'yaml', '.yml': 'yaml',
-            '.toml': 'ini', '.sh': 'bash', '.bash': 'bash', '.zsh': 'bash',
-            '.html': 'xml', '.css': 'css', '.scss': 'css', '.less': 'css',
-            '.c': 'c', '.cpp': 'cpp', '.h': 'c', '.hpp': 'cpp',
-            '.vue': 'xml', '.svelte': 'xml', '.xml': 'xml', '.svg': 'xml', '.sql': 'sql',
-            '.md': 'markdown', '.markdown': 'markdown' };
-        return m[ext] || '';
+        var m = {
+            '.go': 'go', '.js': 'javascript', '.mjs': 'javascript', '.cjs': 'javascript',
+            '.ts': 'typescript', '.tsx': 'typescript', '.jsx': 'javascript',
+            '.py': 'python', '.rs': 'rust', '.java': 'java', '.kt': 'kotlin', '.kts': 'kotlin',
+            '.swift': 'swift', '.rb': 'ruby', '.php': 'php', '.lua': 'lua', '.dart': 'dart',
+            '.cs': 'csharp', '.r': 'r', '.pl': 'perl', '.pm': 'perl',
+            '.ex': 'elixir', '.exs': 'elixir', '.hs': 'haskell', '.clj': 'clojure', '.cljs': 'clojure',
+            '.json': 'json', '.yaml': 'yaml', '.yml': 'yaml', '.toml': 'ini',
+            '.ini': 'ini', '.cfg': 'ini', '.conf': 'ini',
+            '.sh': 'bash', '.bash': 'bash', '.zsh': 'bash', '.fish': 'bash',
+            '.html': 'xml', '.htm': 'xml', '.css': 'css', '.scss': 'scss', '.sass': 'scss',
+            '.less': 'less', '.vue': 'xml', '.svelte': 'xml', '.xml': 'xml', '.svg': 'xml',
+            '.sql': 'sql', '.graphql': 'graphql', '.gql': 'graphql', '.proto': 'protobuf',
+            '.tf': 'hcl', '.tfvars': 'hcl', '.mk': 'makefile',
+            '.diff': 'diff', '.patch': 'diff',
+            '.c': 'c', '.h': 'c', '.cpp': 'cpp', '.cc': 'cpp', '.cxx': 'cpp', '.hpp': 'cpp', '.hh': 'cpp',
+            '.dockerfile': 'dockerfile',
+            '.md': 'markdown', '.markdown': 'markdown'
+        };
+        return m[String(ext || '').toLowerCase()] || '';
+    }
+
+    // Extensionless files that the backend accepts need a basename mapping.
+    function basenameToLang(name) {
+        var m = {
+            dockerfile: 'dockerfile', containerfile: 'dockerfile',
+            makefile: 'makefile', gnumakefile: 'makefile',
+            rakefile: 'ruby', gemfile: 'ruby', vagrantfile: 'ruby', procfile: 'plaintext',
+            'cmakelists.txt': 'cmake', '.gitignore': 'plaintext',
+            '.dockerignore': 'plaintext', '.editorconfig': 'ini'
+        };
+        var lower = String(name || '').toLowerCase();
+        if (m[lower]) return m[lower];
+        if (lower.indexOf('dockerfile.') === 0) return 'dockerfile';
+        return '';
+    }
+
+    function langForFilePath(path) {
+        var base = String(path || '').split('/').pop();
+        var byName = basenameToLang(base);
+        if (byName) return byName;
+        var slash = String(path || '').lastIndexOf('/');
+        var dot = String(path || '').lastIndexOf('.');
+        var ext = dot > slash ? String(path).substring(dot) : '';
+        return extToLang(ext);
     }
 
     // Formatting/measurement helpers are deliberately independent of the DOM
@@ -473,22 +539,25 @@
         // checks job.cancelled after every yield and stops before the next
         // chunk, so a late response cannot append into the new tab.
         cancelActiveFormattedRender('tab');
+        var requestController = beginContentRequest();
 
         if (tab === 'diff') {
-            if (cachedDiff !== null) { showDiff(cachedDiff); return; }
+            if (cachedDiff !== null) { endContentRequest(requestController); showDiff(cachedDiff); return; }
             content.innerHTML = '<div class="loading-state">Loading diff...</div>';
             content.setAttribute('data-render-state', 'loading');
             var url = '/api/worktree/file/diff?id=' + encodeURIComponent(worktreeId) +
                 '&path=' + encodeURIComponent(filePath) +
                 '&staged=' + staged;
-            apiFetch(url).then(function(resp) {
+            apiFetch(url, requestController).then(function(resp) {
                 if (!resp.ok) return resp.text().then(function(t) { throw new Error(t || resp.statusText); });
                 return resp.text();
             }).then(function(text) {
+                endContentRequest(requestController);
                 cachedDiff = text;
                 if (loadSeq !== activeLoadSeq || activeTab !== 'diff') return;
                 showDiff(text);
             }).catch(function(err) {
+                endContentRequest(requestController);
                 if (loadSeq !== activeLoadSeq || activeTab !== 'diff') return;
                 content.innerHTML = '<div class="error-state">' + esc('Failed to load diff: ' + err.message) + '</div>';
                 content.setAttribute('data-render-state', 'error');
@@ -497,6 +566,7 @@
         }
 
         if (cachedContent !== null) {
+            endContentRequest(requestController);
             if (loadSeq === activeLoadSeq && activeTab === 'formatted') {
                 showFormatted(cachedContent, contentFileType, cachedContentBytes);
             }
@@ -506,7 +576,7 @@
         content.setAttribute('data-render-state', 'loading');
         var url = '/api/worktree/file/content?id=' + encodeURIComponent(worktreeId) +
             '&path=' + encodeURIComponent(filePath);
-        apiFetch(url).then(function(resp) {
+        apiFetch(url, requestController).then(function(resp) {
             if (!resp.ok) return resp.text().then(function(t) {
                 var loadErr = new Error(t || resp.statusText);
                 loadErr.status = resp.status;
@@ -518,20 +588,19 @@
             var ft = resp.headers.get('X-File-Type') || 'text/plain';
             var sizeHeader = parseInt(resp.headers.get('X-File-Size') || '', 10);
             var size = isFinite(sizeHeader) && sizeHeader >= 0 ? sizeHeader : 0;
-            if (!fullPath) {
-                var fp = resp.headers.get('X-File-FullPath');
-                if (fp) { fullPath = fp; renderHeader(); }
-            }
             return resp.text().then(function(t) {
                 return { text: t, fileType: ft, bytes: size || t.length };
             });
         }).then(function(data) {
+            endContentRequest(requestController);
             cachedContent = data.text;
             contentFileType = data.fileType;
             cachedContentBytes = data.bytes;
+            formattedRenderCache = null;
             if (loadSeq !== activeLoadSeq || activeTab !== 'formatted') return;
             showFormatted(data.text, data.fileType, data.bytes);
         }).catch(function(err) {
+            endContentRequest(requestController);
             if (loadSeq !== activeLoadSeq || activeTab !== 'formatted') return;
             showContentLoadError(err);
         });
@@ -620,6 +689,7 @@
             try { job.worker.terminate(); } catch (err) {}
             job.worker = null;
         }
+        if (job.wakeHighlight) job.wakeHighlight();
         if (job.wakeYield) job.wakeYield();
         if (reason !== 'user') return;
 
@@ -684,19 +754,60 @@
         job.label.textContent = 'Rendering stopped after ' +
             formatPreviewCount(job.rendered) + ' of ' +
             formatPreviewCount(job.totalLines) + ' lines to keep the page responsive (' +
-            formatPreviewCount(RENDER_LIMITS.maxTotalRenderMs) + ' ms budget).';
+            formatPreviewCount(job.limits ? job.limits.maxTotalRenderMs : 0) + ' ms budget).';
+    }
+
+    function highlightSourceWithWorker(job, text, lang) {
+        return new Promise(function(resolve) {
+            if (!hljsOk || !lang || typeof Worker === 'undefined') { resolve(null); return; }
+            var worker;
+            try {
+                worker = new Worker('/static/preview_source_highlight_worker.js');
+            } catch (err) {
+                resolve(null);
+                return;
+            }
+            job.worker = worker;
+            var settled = false;
+            function finish(value) {
+                if (settled) return;
+                settled = true;
+                job.wakeHighlight = null;
+                if (job.worker === worker) job.worker = null;
+                try { worker.terminate(); } catch (err) {}
+                resolve(value);
+            }
+            job.wakeHighlight = function() { finish(null); };
+            worker.onmessage = function(event) {
+                var data = event.data || {};
+                if (data.type === 'result' && data.lines) finish(data.lines);
+                else finish(null);
+            };
+            worker.onerror = function() { finish(null); };
+            try {
+                worker.postMessage({ type: 'highlight', id: 1, text: text, language: lang });
+            } catch (err) {
+                finish(null);
+            }
+        });
     }
 
     function startPreviewSourceRender(text, fileType, context) {
         cancelActiveFormattedRender('replace');
+        formattedRenderCache = null;
         var content = document.getElementById('content');
+        var activeLimits = (context && context.limits) || SOURCE_LIMITS;
         var job = {
             kind: 'source',
             cancelled: false,
+            text: text,
+            fileType: fileType,
+            limits: activeLimits,
             excerpt: !!(context && context.excerpt),
             rendered: 0,
             totalLines: 0,
             startedAt: 0,
+            wakeHighlight: null,
             wakeYield: null,
             statusEl: null,
             label: null,
@@ -739,7 +850,7 @@
                     formatPreviewCount(context.excerptLineCount || 0) + ' of ' +
                     formatPreviewCount(context.sourceLineCount || 0) + ' lines';
                 if (context.omittedLines) noteText += '; ' + formatPreviewCount(context.omittedLines) + ' omitted';
-                if (context.lineTruncated) noteText += '; lines longer than ' + formatPreviewCount(RENDER_LIMITS.maxLineChars) + ' characters were shortened';
+                if (context.lineTruncated) noteText += '; lines longer than ' + formatPreviewCount(activeLimits.maxLineChars) + ' characters were shortened';
                 noteText += '. Full file: ' + formatPreviewBytes(context.sourceBytes) + '. Diff Preview and your editor still have the complete content.';
                 note.textContent = noteText;
             }
@@ -756,19 +867,12 @@
             await new Promise(function(resolve) { setTimeout(resolve, 0); });
             if (job.cancelled) return;
 
-            var lang = '';
-            if (fileType === 'text/x-code') {
-                var ext = filePath.substring(filePath.lastIndexOf('.')).toLowerCase();
-                lang = extToLang(ext);
-            }
+            var lang = fileType === 'text/x-code' ? langForFilePath(filePath) : '';
 
             var hlLines = null;
             if (hljsOk && lang) {
-                try {
-                    hlLines = splitHighlightedLines(text, lang);
-                } catch (err) {
-                    hlLines = null;
-                }
+                job.label.textContent = 'Highlighting source in background…';
+                hlLines = await highlightSourceWithWorker(job, text, lang);
             }
             if (job.cancelled) return;
             if (hlLines) {
@@ -781,18 +885,26 @@
             }
 
             job.label.textContent = 'Rendering 0 / ' + formatPreviewCount(lines.length) + ' lines…';
-            var chunkSize = Math.max(1, Math.min(RENDER_LIMITS.initialChunkSize, lines.length));
+            var chunkSize = Math.max(1, Math.min(activeLimits.initialChunkSize, lines.length));
             while (job.rendered < lines.length) {
                 if (job.cancelled) return;
                 var chunkStart = performance.now();
                 var count = Math.min(chunkSize, lines.length - job.rendered);
                 appendPreviewCodeRows(container, lines, hlLines, job.rendered, count);
+                // Force the layout this chunk would need before measuring it;
+                // rAF callback timing alone does not include this cost.
+                void container.scrollHeight;
                 var workMs = performance.now() - chunkStart;
                 job.rendered += count;
                 job.label.textContent = 'Rendering ' + formatPreviewCount(job.rendered) +
                     ' / ' + formatPreviewCount(lines.length) + ' lines…';
 
                 if (job.rendered >= lines.length) {
+                    formattedRenderCache = {
+                        text: text,
+                        fileType: fileType,
+                        sourceContainer: container
+                    };
                     finishPreviewRender(job);
                     return;
                 }
@@ -801,11 +913,11 @@
                 await yieldToPreviewFrame(job);
                 var frameMs = performance.now() - frameStart;
                 if (job.cancelled) return;
-                if (performance.now() - job.startedAt > RENDER_LIMITS.maxTotalRenderMs) {
+                if (performance.now() - job.startedAt > activeLimits.maxTotalRenderMs) {
                     finishTruncatedPreviewRender(job, 'timeout');
                     return;
                 }
-                chunkSize = adaptPreviewChunkSize(chunkSize, workMs, frameMs, RENDER_LIMITS);
+                chunkSize = adaptPreviewChunkSize(chunkSize, workMs, frameMs, activeLimits);
             }
         }
 
@@ -817,6 +929,7 @@
 
     function startPreviewMarkdownRender(text, metrics) {
         cancelActiveFormattedRender('replace');
+        formattedRenderCache = null;
         var content = document.getElementById('content');
         var job = {
             kind: 'markdown',
@@ -887,6 +1000,7 @@
                 // synchronous Markdown path. This runs after the worker result,
                 // so the parser itself is no longer on the main thread.
                 observeMarkdownCodeBlocks(content);
+                formattedRenderCache = { text: text, fileType: 'text/markdown', markdownHtml: html };
                 content.setAttribute('data-render-state', 'complete');
                 cleanupMarkdownWorker();
             } catch (err) {
@@ -925,8 +1039,9 @@
         }
     }
 
-    function showPreviewLimit(text, fileType, bytes, metrics, reasons) {
+    function showPreviewLimit(text, fileType, bytes, metrics, reasons, limits) {
         cancelActiveFormattedRender('limit');
+        formattedRenderCache = null;
         var content = document.getElementById('content');
         content.innerHTML = '';
         content.setAttribute('data-render-state', 'limit');
@@ -946,9 +1061,9 @@
         card.appendChild(actual);
 
         var threshold = document.createElement('p');
-        threshold.textContent = 'Safe source-preview limits: ' + formatPreviewBytes(RENDER_LIMITS.maxBytes) +
-            ', ' + formatPreviewCount(RENDER_LIMITS.maxLines) + ' lines, and ' +
-            formatPreviewCount(RENDER_LIMITS.maxLineChars) + ' characters per line.';
+        threshold.textContent = 'Safe preview limits for this renderer: ' + formatPreviewBytes(limits.maxBytes) +
+            ', ' + formatPreviewCount(limits.maxLines) + ' lines, and ' +
+            formatPreviewCount(limits.maxLineChars) + ' characters per line.';
         card.appendChild(threshold);
 
         var reasonText = document.createElement('p');
@@ -964,9 +1079,9 @@
         var button = document.createElement('button');
         button.type = 'button';
         button.textContent = 'Show safe excerpt (first ' +
-            formatPreviewCount(Math.min(RENDER_LIMITS.excerptLines, metrics.lineCount)) + ' lines)';
+            formatPreviewCount(Math.min(SOURCE_LIMITS.excerptLines, metrics.lineCount)) + ' lines)';
         button.addEventListener('click', function() {
-            var excerpt = buildPreviewExcerpt(metrics.lines, RENDER_LIMITS);
+            var excerpt = buildPreviewExcerpt(metrics.lines, SOURCE_LIMITS);
             if (excerpt.lineCount === 0) {
                 button.disabled = true;
                 button.textContent = 'No safe excerpt available';
@@ -979,7 +1094,8 @@
                 sourceLineCount: metrics.lineCount,
                 excerptLineCount: excerpt.lineCount,
                 omittedLines: excerpt.omittedLines,
-                lineTruncated: excerpt.lineTruncated
+                lineTruncated: excerpt.lineTruncated,
+                limits: SOURCE_LIMITS
             });
         });
         card.appendChild(button);
@@ -988,6 +1104,7 @@
 
     function showContentLoadError(err) {
         cancelActiveFormattedRender('error');
+        formattedRenderCache = null;
         var content = document.getElementById('content');
         content.innerHTML = '';
         var status = err && err.status;
@@ -1113,20 +1230,38 @@
             return;
         }
 
+        if (formattedRenderCache &&
+            formattedRenderCache.text === text &&
+            formattedRenderCache.fileType === fileType) {
+            if (typeof formattedRenderCache.markdownHtml === 'string') {
+                content.innerHTML = '<div class="markdown-body">' + formattedRenderCache.markdownHtml + '</div>';
+                observeMarkdownCodeBlocks(content);
+                content.setAttribute('data-render-state', 'complete');
+                return;
+            }
+            if (formattedRenderCache.sourceContainer) {
+                content.innerHTML = '';
+                content.appendChild(formattedRenderCache.sourceContainer);
+                content.setAttribute('data-render-state', 'complete');
+                return;
+            }
+        }
+
         var sourceBytes = isFinite(bytes) && bytes > 0 ? bytes : text.length;
         var metrics = measurePreviewContent(text);
-        var reasons = previewLimitReasons(metrics, sourceBytes, RENDER_LIMITS);
+        var limits = fileType === 'text/markdown' ? MARKDOWN_LIMITS : SOURCE_LIMITS;
+        var reasons = previewLimitReasons(metrics, sourceBytes, limits);
         if (reasons.length > 0) {
-            showPreviewLimit(text, fileType, sourceBytes, metrics, reasons);
+            showPreviewLimit(text, fileType, sourceBytes, metrics, reasons, limits);
             return;
         }
 
-        if (fileType === 'text/markdown' && markedOk) {
+        if (fileType === 'text/markdown') {
             startPreviewMarkdownRender(text, metrics);
             return;
         }
 
-        startPreviewSourceRender(text, fileType, { lines: metrics.lines });
+        startPreviewSourceRender(text, fileType, { lines: metrics.lines, limits: limits });
     }
 
     // Tab click handlers

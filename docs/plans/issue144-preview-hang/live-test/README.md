@@ -6,39 +6,48 @@ fixtures through a mock content API.
 
 ## Current safety model
 
-- Supported text ceiling: **1 MiB**, matching the backend text cap.
-- Maximum rendered Markdown/source line count: **20,000**.
-- Maximum single-line size: **32 KiB**.
-- Markdown `marked.parse()` runs in a Web Worker; the main thread stays
-  interruptible during parsing.
-- Source/code rendering remains adaptive-chunked and can be stopped.
+- Backend text transport cap: **2 MiB** (overflow returns 413).
+- Markdown render cap: **1 MiB / 20,000 lines / 32 KiB per line**; parsing runs
+  in `preview_markdown_worker.js`.
+- Source/plain render cap: **128 KiB / 2,000 lines / 12,000 characters per
+  line / 2,000 ms**; highlighting runs in `preview_source_highlight_worker.js`
+  and DOM insertion is adaptive-chunked.
+- Files above a renderer's cap but below the backend transport cap reach the
+  front-end and offer a bounded excerpt.
 - Markdown raw HTML is escaped and unsafe link/image protocols are rejected
   inside the Worker.
-- Unsupported file types are rejected by the content API with **415** before
-  any body is returned. The page shows `Preview not supported` and does not
-  fall back to forced text parsing.
+- Unsupported file types, binary NUL and invalid UTF-8 are rejected by the
+  content API before parsing; the page shows `Preview not supported` and does
+  not force text parsing.
 
-## Running instance
+## Running a test instance
 
-Tailscale IPv4: `100.86.87.23`
-Port: `41777`
+The previous Tailscale test instance has been stopped. There is no permanent
+address or running service in this repository.
 
-- Landing page: <http://100.86.87.23:41777/>
-- Small Markdown: <http://100.86.87.23:41777/case/small> — 55,631 bytes / 732 list lines
-- Medium Markdown (perf panel): <http://100.86.87.23:41777/case/medium> — 111,187 bytes / 1,463 list lines
-- Large Markdown: <http://100.86.87.23:41777/case/large> — 1,000,615 bytes / 13,166 list lines
-- Largest local Markdown (perf panel): <http://100.86.87.23:41777/case/largest> — present when the server is started with `LARGEST_MD_PATH`; the measured instance used a 644,083-byte / 2,720-line file with a 29,297-char longest line.
-- Unsupported file: <http://100.86.87.23:41777/case/unsupported> — PNG-like bytes; must show `Preview not supported`
+Start the server on the host that has the markdown fixtures, then open the
+printed URL through that host's Tailscale address (replace `<tailscale-ip>`
+with your own address):
+
+```bash
+cd /path/to/repo
+LARGEST_MD_PATH=/path/to/largest.md \
+  node docs/plans/issue144-preview-hang/live-test/server.mjs
+# open http://<tailscale-ip>:41777/
+```
+
+When `LARGEST_MD_PATH` is set, the server also publishes `/case/largest`.
+Without it, only the three generated cases are available.
 
 Expected behaviour:
 
 | Case | Expected |
 |---|---|
 | Small | Worker-parsed Markdown; should complete quickly. |
-| Medium | Worker-parsed Markdown; main-thread gap should be dominated by DOM/layout, not parsing. |
-| Large | Under the 1 MiB / 20k-line cap; Worker parse may take several seconds on iPad but the page should stay responsive and show progress. |
-| Largest local | Under production limits; Worker parse; panel reports Worker round-trip and main-thread gaps. |
-| Unsupported | API 415; no content rows, no forced source/plain parser; `Preview not supported` card. |
+| Medium | Worker-parsed Markdown; the perf panel reports Worker round-trip and visible main-thread gaps. |
+| Large | Under the Markdown render cap; Worker parsing keeps the main thread responsive while the content may take time to appear. |
+| Largest local | Present only when `LARGEST_MD_PATH` is set; same Worker path as production. |
+| Unsupported | API 415; no content rows; `Preview not supported` card; no forced text parse. |
 
 ## Jank measurement on `/case/medium`, `/case/large`, and `/case/largest`
 
@@ -82,7 +91,7 @@ echo $! > /tmp/issue144-live-test/server.pid
 
 ```bash
 # The host shell may have an HTTP proxy for 100.x addresses; bypass it locally.
-curl --noproxy '*' http://100.86.87.23:41777/healthz
+curl --noproxy '*' http://<tailscale-ip>:41777/healthz
 ```
 
 Expected health JSON when `LARGEST_MD_PATH` is set:

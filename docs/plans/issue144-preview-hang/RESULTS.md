@@ -1,7 +1,9 @@
 # Issue #144 沙盒验证结果
 
 日期：2026-11-09
-状态：**归因分析完成；产品代码未修改，issue 未修复**
+状态：**最终实现完成；评审修复与最终证据见 §11**
+
+> 阅读顺序：§1–§7 是实施前归因；§8–§10 是已废弃的中间轮次，阈值和证据不作为 shipped 依据；§11 是当前实现与最终证据。
 
 ## 1. 环境
 
@@ -165,7 +167,7 @@ marked.parse(text, { sanitize: true })
 - [`evidence/h2-cpu6.jsonl`](./evidence/h2-cpu6.jsonl)
 - [`evidence/preview-render-probe.mjs`](./evidence/preview-render-probe.mjs)
 
-## 8. 实施后的可中断渲染验证（2026-11-09）
+## 8. 中间轮次：可中断源码渲染（历史，128 KiB / 2,000 / 12,000 / 2,000 ms）
 
 第 1–7 节是实施前基线。用户确认“可中断渲染 + 自适应限流”后，本轮只修改了：
 
@@ -231,7 +233,7 @@ GOCACHE=/tmp/issue144-gocache go test ./internal/ui ./internal/app -count=1
 - 实施后交互：`evidence/interaction-cpu6.jsonl`
 - 探针：`evidence/preview-render-probe.mjs`
 
-## 10. 最终安全 + 大文件方案（2026-11-09）
+## 10. 中间轮次：统一宽松阈值（历史，已被 §11 的分离阈值取代）
 
 在 iPad 实测确认普通 111 KB Markdown 的同步 `marked.parse()` 仍需约 0.95–0.96 s、最大主线程空档约 1.01–1.02 s 后，本轮做了最终收敛：
 
@@ -271,3 +273,72 @@ GOCACHE=/tmp/issue144-gocache go test ./internal/ui ./internal/app -count=1
 - 需在 iPad Safari 上重新测 `/case/medium` 与 `/case/largest` 的 Worker 主线程空档；桌面数据不能替代真机。
 - 1 MiB 以上文件仍由后端 413 拦截；未实现 DSH 风格的按页 Range API / Load more。若 iPad 上 1 MiB 的 DOM 注入仍明显卡顿，下一阶段再做分页。
 - Markdown Worker 的 raw-HTML 转义是安全收敛，不是完整的 HTML sanitizer 合同；后续仍建议单独做安全审查。
+
+## 11. 评审修复后的最终实现与证据（2026-11-09）
+
+### 11.1 最终阈值
+
+| 路径 | 文件上限 | 行数上限 | 单行上限 | 渲染预算 |
+|---|---:|---:|---:|---:|
+| Markdown（Worker 解析） | 1 MiB | 20,000 | 32 KiB 字符 | 由 Worker 完成，可 Stop |
+| 源码/纯文本（分片 DOM） | 128 KiB | 2,000 | 12,000 字符 | 2,000 ms |
+| 后端文本传输硬上限 | 2 MiB | — | — | 超出返回 413 |
+
+后端不再对“单行 >32 KiB”直接 413：它在 2 MiB 传输上限内把内容交给前端，前端按对应 renderer 的限制显示 `Preview limited` + bounded excerpt。未知扩展名、二进制 NUL、非 UTF-8、敏感路径仍在读取/解析前阻断（415/403）。前端 `line-length` 与 `size` reason 因此在低阈值 renderer 上可达。
+
+### 11.2 评审修复项
+
+- 源码 `hljs.highlight()` 移入 `preview_source_highlight_worker.js`；Stop / 切 tab 会 terminate Worker。主线程不再同步全文高亮。
+- Markdown 主线程不再加载或求值 marked；只保留 Worker 内的 vendored marked。
+- 源码分片每片强制读取布局（`container.scrollHeight`）后再计算片成本，避免只测 JS 创建时间。
+- Formatted 渲染缓存：
+  - Markdown 缓存 Worker 返回的 HTML；
+  - 源码缓存完成后的 `.code-lines` 容器；
+  - 切 tab 回来不再重跑 Worker/高亮/建 DOM。
+- fetch 增加 `AbortController` + 15 s timeout；切 tab 会 abort 在途请求。
+- 后端扩展名白名单与前端 `extToLang` / basename 映射同步补齐，包括 `.htm`、`.mjs`、`.kt`、`.sass`、`.graphql`、`.diff`、`Dockerfile`、`Makefile`、`foo.dockerfile`。
+- `/preview`、`/static/*` 统一 `Cache-Control: no-store, must-revalidate` + `Pragma: no-cache`，避免页面与 Worker 资产版本错配。
+- 删除 `X-File-FullPath` 绝对路径响应头。
+- Markdown Worker 对 raw HTML 与危险 URL 的转义增加 renderer 形状 guard，并添加 marked v12.0.2 版本测试。
+
+### 11.3 最终 headless 证据
+
+源码路径（`final-source-h1-cpu6.jsonl`，6x CPU）：
+
+| fixture | state | rows | wall |
+|---|---|---:|---:|
+| 50 KB / 732 行 HTML | complete | 732 | ~1.70 s |
+| 100 KB / 1,463 行 HTML | truncated | 880 | ~2.06 s（2 s 预算） |
+| 250 KB+ HTML | limit | 0 | < 220 ms |
+| 100 KB / 10,000 行 | limit | 0 | ~72 ms |
+| 单长行 > 12K 字符 | limit | 0 | 快速 |
+
+Markdown Worker 路径（`final-markdown-live.jsonl`，桌面 headless）：
+
+| fixture | state | worker round-trip | post-worker commit | longest gap | first frame |
+|---|---|---:|---:|---:|---:|
+| 111 KB / 1,463 行 | complete | 85.8 ms | 38.6 ms | 96.8 ms | 217.6 ms |
+| 644 KB / 2,720 行 | complete | 195.5 ms | 69.0 ms | 380.3 ms | 610.7 ms |
+
+iPad Safari 用户实测（按用户报告，不是 headless 推断）：
+
+- 111 KB Markdown：Worker 墙钟约 1.14 s，其中后台 0.76 s；前台可见约 0.38 s。
+- 644 KB Markdown：Worker 墙钟约 12.7 s，其中后台 4.8 s；前台可见约 7.9 s。
+- 后台切换会造成 Safari Worker/timer 节流；`longest visible gap` 在前后台边界仍有噪声，优先看 `post-worker commit` / `DOM -> first frame`。
+
+### 11.4 最终测试
+
+```text
+go test ./... -count=1                 PASS
+node --test internal/ui/testdata/preview_adaptive_render.test.mjs
+                                       9 passed
+gofmt -l .                             clean
+go vet ./internal/app ./internal/ui    PASS
+```
+
+### 11.5 明确非目标与未验证
+
+- 默认 Diff tab 仍是一次性 `splitHighlightedLines(text,'diff')` + 全量建行；本轮只覆盖 Formatted Preview。该路径后续可复用源码分片框架。
+- 不包含 HTML sandbox iframe 效果预览。
+- 未实现 DSH 风格的后端 Range API / Load more；2 MiB 以上文件返回 413 并用编辑器/Diff 作为退路。
+- 未在 iPadOS Safari 上重新跑最终评审修复后的源码 Worker 版本；用户此前的 iPad 数据只覆盖 Markdown Worker 路径。

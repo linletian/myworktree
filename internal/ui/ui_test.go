@@ -3819,13 +3819,19 @@ func TestPreviewUsesMarkdownWorkerAndLazyHighlight(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("GET /preview status: %d", resp.StatusCode)
 	}
+	if got := resp.Header.Get("Cache-Control"); got != "no-store, must-revalidate" {
+		t.Fatalf("GET /preview Cache-Control = %q, want no-store, must-revalidate", got)
+	}
 	page := string(body)
 	for _, anchor := range []string{
 		"new Worker('/static/preview_markdown_worker.js')",
+		"new Worker('/static/preview_source_highlight_worker.js')",
 		"function observeMarkdownCodeBlocks(container) {",
 		"function showContentLoadError(err) {",
+		"AbortController",
 		"maxBytes: 1024 * 1024,",
 		"maxLines: 20000,",
+		"function langForFilePath(path) {",
 	} {
 		if !strings.Contains(page, anchor) {
 			t.Fatalf("/preview should include issue #144 anchor %q", anchor)
@@ -3834,16 +3840,39 @@ func TestPreviewUsesMarkdownWorkerAndLazyHighlight(t *testing.T) {
 	if strings.Contains(page, "marked.parse(") {
 		t.Fatal("/preview must not parse Markdown on the main thread")
 	}
+	if strings.Contains(page, "marked.min.js") {
+		t.Fatal("/preview must not load the Markdown parser on the main thread")
+	}
 
-	worker := fetchStaticAsset(t, "/static/preview_markdown_worker.js")
-	for _, anchor := range []string{
-		"importScripts('/static/vendor/marked/marked.min.js')",
-		"marked.parse(",
-		"renderer.html = function(html) {",
-		"function safePreviewUrl(href) {",
+	for path, anchors := range map[string][]string{
+		"/static/preview_markdown_worker.js": {
+			"importScripts('/static/vendor/marked/marked.min.js')",
+			"marked.parse(",
+			"renderer.html = function(html) {",
+			"function safePreviewUrl(href) {",
+		},
+		"/static/preview_source_highlight_worker.js": {
+			"importScripts('/static/vendor/highlight/highlight.min.js')",
+			"function splitHighlightedLines(text, lang) {",
+		},
 	} {
-		if !strings.Contains(worker, anchor) {
-			t.Fatalf("served Markdown worker should include %q", anchor)
+		assetResp, err := http.Get(srv.URL + path)
+		if err != nil {
+			t.Fatalf("GET %s: %v", path, err)
+		}
+		assetBody, _ := io.ReadAll(assetResp.Body)
+		_ = assetResp.Body.Close()
+		if assetResp.StatusCode != http.StatusOK {
+			t.Fatalf("GET %s status: %d", path, assetResp.StatusCode)
+		}
+		if got := assetResp.Header.Get("Cache-Control"); got != "no-store, must-revalidate" {
+			t.Fatalf("%s Cache-Control = %q, want no-store, must-revalidate", path, got)
+		}
+		asset := string(assetBody)
+		for _, anchor := range anchors {
+			if !strings.Contains(asset, anchor) {
+				t.Fatalf("%s should include %q", path, anchor)
+			}
 		}
 	}
 }

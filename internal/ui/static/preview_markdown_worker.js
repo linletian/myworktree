@@ -5,7 +5,10 @@
  * without blocking the page's main thread; the page still enforces its
  * preflight size/line limits before creating this worker.
  *
- * Safety: marked v12 no longer implements `sanitize`. Raw HTML tokens are
+ * Safety: this worker is pinned to the vendored marked v12.x renderer contract;
+ * marked v13 changes renderer callbacks to token objects, so the shape guards
+ * below fail closed instead of silently escaping `[object Object]`.
+ * marked v12 no longer implements `sanitize`. Raw HTML tokens are
  * escaped here, and link/image destinations are restricted to relative or
  * http(s)/mailto/tel URLs. This keeps repository Markdown from injecting raw
  * markup or javascript:/data: URLs into the same-origin preview page.
@@ -49,18 +52,24 @@ function safePreviewUrl(href) {
 }
 
 function createSafeRenderer() {
+    if (typeof marked.Renderer !== 'function') {
+        throw new Error('unsupported marked renderer API (expected v12.x)');
+    }
     var renderer = new marked.Renderer();
     var fallbackLink = renderer.link.bind(renderer);
     var fallbackImage = renderer.image.bind(renderer);
 
     renderer.html = function(html) {
+        if (typeof html !== 'string') return '';
         return escapeHtml(html);
     };
     renderer.link = function(href, title, text) {
+        if (typeof href !== 'string' || typeof text !== 'string') return escapeHtml(text || '');
         if (!safePreviewUrl(href)) return text;
         return fallbackLink(href, title, text);
     };
     renderer.image = function(href, title, text) {
+        if (typeof href !== 'string' || typeof text !== 'string') return escapeHtml(text || '');
         if (!safePreviewUrl(href)) return text;
         return fallbackImage(href, title, text);
     };
