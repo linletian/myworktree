@@ -19,7 +19,10 @@
 | `s1-vim-decomposition.md` | — | 上述逐字节解剖 | 同上 |
 | `s2-vim-paste-target.txt` | 86 | 粘贴靶文（5 行 4 空格） | **零缩进级联** |
 | `s2-c-s3-readout.md` | — | 三组读数＋诚实边界 | 分支 C 结案、B-3 未复现、粘贴无损（**已被下一行修正**） |
-| `e1-e2-readout.md` | — | emoji 与 autoindent 收口轮 | **B-8 复活**（级联 4/8/tab+4/tab+8/2tab+4）、**B-5 emoji 通过＋⚽️ 重复** |
+| `e1-e2-readout.md` | — | emoji 与 autoindent 收口轮 | **B-5 emoji 通过＋⚽️ 重复**；E2 级联事实（**责任判定见下行**） |
+| `e3-paste-wrapped.raw` | 97 | 粘贴原始输入流（`printf ?2004h` ＋ `cat >` 取证） | **输入侧正证 `[200~`/`[201~` 包裹**，R5 正式关闭 |
+| `e2-vim-p2.txt` | 98 | vim `autoindent` 下粘贴落盘靶文 | **级联证据**：行首 `4/8/tab+4/tab+8/2tab+4` |
+| `iphone-e1e2.pty.bin` | 31,487 | E1/E2 轮 PTY 增量（按基线切点精确截取） | vim 屏内 `?2004h`×2／`?2004l`×3、emoji 到达、焦点回报 |
 
 ## 已知边界（不算瑕疵，但读结论必须连着读）
 
