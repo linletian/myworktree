@@ -62,6 +62,10 @@ func Register(mux *http.ServeMux, repoName string, isRemote func(r *http.Request
 		if isRemote != nil && isRemote(r) {
 			body = bytes.ReplaceAll(body, []byte("<body>"), []byte(`<body class="remote-access">`))
 		}
+		// The preview page and its Worker assets are version-coupled. Never let
+		// Safari reuse a page with a different embedded Worker generation.
+		w.Header().Set("Cache-Control", "no-store, must-revalidate")
+		w.Header().Set("Pragma", "no-cache")
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = w.Write(body)
 	})
@@ -82,6 +86,11 @@ func Register(mux *http.ServeMux, repoName string, isRemote func(r *http.Request
 		_, _ = w.Write(viewportDebugAsset)
 	})
 	fs := http.FS(staticFS)
-	mux.Handle("/static/", http.FileServer(fs))
+	staticHandler := http.FileServer(fs)
+	mux.Handle("/static/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store, must-revalidate")
+		w.Header().Set("Pragma", "no-cache")
+		staticHandler.ServeHTTP(w, r)
+	}))
 	return nil
 }

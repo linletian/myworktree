@@ -189,6 +189,56 @@
         .code-line.diff-add { background: var(--diff-add-bg); }
         .code-line.diff-del { background: var(--diff-del-bg); }
         .code-line.diff-hunk { background: none; }
+
+        /* Adaptive source-render feedback and hard-limit fallback */
+        .preview-render-status {
+            position: sticky; top: 0; z-index: 2;
+            display: flex; align-items: center; gap: 8px;
+            padding: 6px 16px;
+            background: var(--header-bg);
+            border-bottom: 1px solid var(--border-color);
+            color: var(--text-secondary);
+            font-size: 11px;
+        }
+        .preview-render-status .grow {
+            flex: 1; min-width: 0; overflow: hidden;
+            text-overflow: ellipsis; white-space: nowrap;
+        }
+        .preview-render-status button {
+            flex-shrink: 0;
+            min-height: 30px; padding: 3px 10px;
+            border: 1px solid var(--border-color); border-radius: 4px;
+            background: var(--main-bg); color: var(--text-primary);
+            font: inherit; cursor: pointer;
+        }
+        .preview-render-status button:hover { background: var(--hover-bg); }
+        .preview-limit {
+            margin: 16px auto; max-width: 700px; padding: 16px;
+            border: 1px solid var(--border-color); border-radius: 6px;
+            background: var(--header-bg); color: var(--text-primary);
+            font-size: 12px; line-height: 1.6;
+            word-break: break-word;
+        }
+        .preview-limit h2 { margin: 0 0 8px; font-size: 14px; }
+        .preview-limit p { margin: 0 0 8px; }
+        .preview-limit .metrics {
+            color: var(--text-muted);
+            font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+            font-size: 11px;
+        }
+        .preview-limit button {
+            min-height: 32px; margin-top: 4px; padding: 4px 12px;
+            border: 1px solid var(--border-color); border-radius: 4px;
+            background: var(--main-bg); color: var(--text-primary);
+            font: inherit; cursor: pointer;
+        }
+        .preview-limit button:hover { background: var(--hover-bg); }
+        .preview-note {
+            margin: 16px auto 0; max-width: 1100px; padding: 10px 16px;
+            border-left: 3px solid var(--active-color);
+            background: var(--header-bg); color: var(--text-secondary);
+            font-size: 12px; line-height: 1.5;
+        }
     </style>
 </head>
 <body>
@@ -203,11 +253,10 @@
     </div>
 </div>
 
-<!-- highlight.js and marked.js — local vendor only -->
+<!-- highlight.js is used only by the Diff renderer/lazy Markdown code blocks; Markdown parsing lives in a Worker. -->
 <link rel="stylesheet" href="/static/vendor/highlight/github.min.css" id="hljs-light-theme">
 <link rel="stylesheet" href="/static/vendor/highlight/github-dark.min.css" id="hljs-dark-theme" disabled>
 <script src="/static/vendor/highlight/highlight.min.js"></script>
-<script src="/static/vendor/marked/marked.min.js"></script>
 
 <script>
 (function() {
@@ -223,14 +272,48 @@
     var fullPath = params.get('full_path') || '';
     var activeTab = params.get('tab') || 'diff';
 
-    // Vendor library availability
+    // Vendor library availability for the Diff renderer and lazy code highlighting.
     var hljsOk = typeof hljs !== 'undefined';
-    var markedOk = typeof marked !== 'undefined';
 
     // Cache for tab content
     var cachedDiff = null;
     var cachedContent = null;
+    var cachedContentBytes = 0;
     var contentFileType = 'text/plain';
+    var activeLoadSeq = 0;
+    var activeFormattedJob = null;
+    var activeCodeHighlightObserver = null;
+    var activeContentController = null;
+    var formattedRenderCache = null;
+
+    // The backend accepts up to 2 MiB so files just above the safe render
+    // ceiling can still reach the front-end and receive a bounded excerpt.
+    // Rendering limits remain renderer-specific: Markdown is parsed off-main
+    // in a Worker, while source/code still pays main-thread DOM + layout cost.
+    var SOURCE_LIMITS = {
+        maxBytes: 128 * 1024,
+        maxLines: 2000,
+        maxLineChars: 12000,
+        excerptLines: 200,
+        excerptBytes: 64 * 1024,
+        initialChunkSize: 80,
+        minChunkSize: 20,
+        maxChunkSize: 400,
+        targetChunkMs: 16,
+        maxTotalRenderMs: 2000
+    };
+    var MARKDOWN_LIMITS = {
+        maxBytes: 1024 * 1024,
+        maxLines: 20000,
+        maxLineChars: 32 * 1024,
+        excerptLines: 200,
+        excerptBytes: 64 * 1024,
+        initialChunkSize: 80,
+        minChunkSize: 20,
+        maxChunkSize: 400,
+        targetChunkMs: 16,
+        maxTotalRenderMs: 10000
+    };
 
     // Set page title
     document.title = (fileName || 'File Preview') + ' - myworktree';
@@ -255,24 +338,188 @@
         loadTab(tab);
     }
 
-    // Fetch API with auth (same pattern as index.html)
-    function apiFetch(url) {
-        return fetch(url, { credentials: 'include' });
+    // Fetch API with auth, cancellation and a timeout. The caller owns the
+    // controller so a tab switch can abort the in-flight body read.
+    function apiFetch(url, controller) {
+        var timer = null;
+        if (controller) {
+            timer = setTimeout(function() {
+                try { controller.abort(); } catch (err) {}
+            }, 15000);
+        }
+        return fetch(url, { credentials: 'include', signal: controller ? controller.signal : undefined })
+            .finally(function() { if (timer !== null) clearTimeout(timer); });
+    }
+
+    function beginContentRequest() {
+        if (activeContentController) {
+            try { activeContentController.abort(); } catch (err) {}
+        }
+        activeContentController = typeof AbortController !== 'undefined' ? new AbortController() : null;
+        return activeContentController;
+    }
+
+    function endContentRequest(controller) {
+        if (activeContentController === controller) activeContentController = null;
     }
 
     function esc(s) { return (s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
 
-    // Map file extension to highlight.js language
+    // Map file extension to highlight.js language.
     function extToLang(ext) {
-        var m = { '.go': 'go', '.js': 'javascript', '.ts': 'typescript', '.tsx': 'typescript',
-            '.jsx': 'javascript', '.py': 'python',
-            '.rs': 'rust', '.java': 'java', '.json': 'json', '.yaml': 'yaml', '.yml': 'yaml',
-            '.toml': 'ini', '.sh': 'bash', '.bash': 'bash', '.zsh': 'bash',
-            '.html': 'xml', '.css': 'css', '.scss': 'css', '.less': 'css',
-            '.c': 'c', '.cpp': 'cpp', '.h': 'c', '.hpp': 'cpp',
-            '.vue': 'xml', '.svelte': 'xml', '.xml': 'xml', '.svg': 'xml', '.sql': 'sql',
-            '.md': 'markdown', '.markdown': 'markdown' };
-        return m[ext] || '';
+        var m = {
+            '.go': 'go', '.js': 'javascript', '.mjs': 'javascript', '.cjs': 'javascript',
+            '.ts': 'typescript', '.tsx': 'typescript', '.jsx': 'javascript',
+            '.py': 'python', '.rs': 'rust', '.java': 'java', '.kt': 'kotlin', '.kts': 'kotlin',
+            '.swift': 'swift', '.rb': 'ruby', '.php': 'php', '.lua': 'lua', '.dart': 'dart',
+            '.cs': 'csharp', '.r': 'r', '.pl': 'perl', '.pm': 'perl',
+            '.ex': 'elixir', '.exs': 'elixir', '.hs': 'haskell', '.clj': 'clojure', '.cljs': 'clojure',
+            '.json': 'json', '.yaml': 'yaml', '.yml': 'yaml', '.toml': 'ini',
+            '.ini': 'ini', '.cfg': 'ini', '.conf': 'ini',
+            '.sh': 'bash', '.bash': 'bash', '.zsh': 'bash', '.fish': 'bash',
+            '.html': 'xml', '.htm': 'xml', '.css': 'css', '.scss': 'scss', '.sass': 'scss',
+            '.less': 'less', '.vue': 'xml', '.svelte': 'xml', '.xml': 'xml', '.svg': 'xml',
+            '.sql': 'sql', '.graphql': 'graphql', '.gql': 'graphql', '.proto': 'protobuf',
+            '.tf': 'hcl', '.tfvars': 'hcl', '.mk': 'makefile',
+            '.diff': 'diff', '.patch': 'diff',
+            '.c': 'c', '.h': 'c', '.cpp': 'cpp', '.cc': 'cpp', '.cxx': 'cpp', '.hpp': 'cpp', '.hh': 'cpp',
+            '.dockerfile': 'dockerfile',
+            '.md': 'markdown', '.markdown': 'markdown'
+        };
+        return m[String(ext || '').toLowerCase()] || '';
+    }
+
+    // Extensionless files that the backend accepts need a basename mapping.
+    function basenameToLang(name) {
+        var m = {
+            dockerfile: 'dockerfile', containerfile: 'dockerfile',
+            makefile: 'makefile', gnumakefile: 'makefile',
+            rakefile: 'ruby', gemfile: 'ruby', vagrantfile: 'ruby', procfile: 'plaintext',
+            'cmakelists.txt': 'cmake', '.gitignore': 'plaintext',
+            '.dockerignore': 'plaintext', '.editorconfig': 'ini'
+        };
+        var lower = String(name || '').toLowerCase();
+        if (m[lower]) return m[lower];
+        if (lower.indexOf('dockerfile.') === 0) return 'dockerfile';
+        return '';
+    }
+
+    function langForFilePath(path) {
+        var base = String(path || '').split('/').pop();
+        var byName = basenameToLang(base);
+        if (byName) return byName;
+        var slash = String(path || '').lastIndexOf('/');
+        var dot = String(path || '').lastIndexOf('.');
+        var ext = dot > slash ? String(path).substring(dot) : '';
+        return extToLang(ext);
+    }
+
+    // Formatting/measurement helpers are deliberately independent of the DOM
+    // so the preflight contract can be exercised under node --test.
+    function formatPreviewBytes(bytes) {
+        if (!isFinite(bytes) || bytes < 0) return 'unknown';
+        if (bytes < 1024) return bytes + ' B';
+        if (bytes < 1024 * 1024) return (Math.round(bytes / 102.4) / 10) + ' KB';
+        return (Math.round(bytes / (1024 * 1024) * 10) / 10) + ' MB';
+    }
+
+    function formatPreviewCount(n) {
+        return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+    }
+
+    function measurePreviewContent(text) {
+        var lines = text.split('\n');
+        if (lines.length > 0 && lines[lines.length - 1] === '') lines.pop();
+        var longestLine = 0;
+        for (var i = 0; i < lines.length; i++) {
+            if (lines[i].length > longestLine) longestLine = lines[i].length;
+        }
+        return {
+            lines: lines,
+            lineCount: lines.length,
+            longestLine: longestLine,
+            charCount: text.length
+        };
+    }
+
+    function previewLimitReasons(info, bytes, limits) {
+        var reasons = [];
+        if (bytes > limits.maxBytes) reasons.push('size');
+        if (info.lineCount > limits.maxLines) reasons.push('lines');
+        if (info.longestLine > limits.maxLineChars) reasons.push('line-length');
+        return reasons;
+    }
+
+    function adaptPreviewChunkSize(current, workMs, frameMs, limits) {
+        // frameMs includes the browser's normal ~16 ms frame cadence; only the
+        // excess over 24 ms is treated as layout pressure.
+        var framePressure = Math.max(0, frameMs - 24);
+        var pressure = Math.max(workMs, framePressure);
+        if (pressure > limits.targetChunkMs) {
+            return Math.max(limits.minChunkSize, Math.floor(current / 2));
+        }
+        if (pressure < limits.targetChunkMs / 2) {
+            return Math.min(limits.maxChunkSize, current * 2);
+        }
+        return current;
+    }
+
+    function buildPreviewExcerpt(lines, limits) {
+        var out = [];
+        var totalChars = 0;
+        var lineTruncated = false;
+        for (var i = 0; i < lines.length && out.length < limits.excerptLines; i++) {
+            var line = String(lines[i]);
+            if (line.length > limits.maxLineChars) {
+                line = line.slice(0, limits.maxLineChars) + '\u2026';
+                lineTruncated = true;
+            }
+            var add = line.length + (out.length > 0 ? 1 : 0);
+            if (totalChars + add > limits.excerptBytes) break;
+            out.push(line);
+            totalChars += add;
+        }
+        return {
+            text: out.join('\n'),
+            lines: out,
+            lineCount: out.length,
+            omittedLines: Math.max(0, lines.length - out.length),
+            charCount: totalChars,
+            lineTruncated: lineTruncated
+        };
+    }
+
+    function clearCodeHighlightObserver() {
+        if (activeCodeHighlightObserver) {
+            activeCodeHighlightObserver.disconnect();
+            activeCodeHighlightObserver = null;
+        }
+    }
+
+    // Borrowed from dsh-web's viewport highlighting: Markdown can contain many
+    // code fences, and highlighting every fence up front can itself become a
+    // main-thread task. Highlight only as each fence approaches the viewport.
+    function observeMarkdownCodeBlocks(container) {
+        clearCodeHighlightObserver();
+        if (!hljsOk || !container) return;
+        var blocks = Array.prototype.slice.call(container.querySelectorAll('pre code'));
+        if (blocks.length === 0) return;
+        function highlight(block) {
+            try { hljs.highlightElement(block); } catch (err) {}
+        }
+        if (typeof IntersectionObserver === 'undefined') {
+            blocks.forEach(highlight);
+            return;
+        }
+        var root = document.getElementById('content');
+        activeCodeHighlightObserver = new IntersectionObserver(function(entries) {
+            for (var i = 0; i < entries.length; i++) {
+                if (!entries[i].isIntersecting) continue;
+                activeCodeHighlightObserver.unobserve(entries[i].target);
+                highlight(entries[i].target);
+            }
+        }, { root: root, rootMargin: '200px 0px' });
+        blocks.forEach(function(block) { activeCodeHighlightObserver.observe(block); });
     }
 
     // Theme switching for highlight.js
@@ -287,42 +534,76 @@
     // Load tab content
     function loadTab(tab) {
         var content = document.getElementById('content');
+        var loadSeq = ++activeLoadSeq;
+        // Any tab change supersedes an in-flight adaptive render. Its loop
+        // checks job.cancelled after every yield and stops before the next
+        // chunk, so a late response cannot append into the new tab.
+        cancelActiveFormattedRender('tab');
+        var requestController = beginContentRequest();
+
         if (tab === 'diff') {
-            if (cachedDiff !== null) { showDiff(cachedDiff); return; }
+            if (cachedDiff !== null) { endContentRequest(requestController); showDiff(cachedDiff); return; }
             content.innerHTML = '<div class="loading-state">Loading diff...</div>';
+            content.setAttribute('data-render-state', 'loading');
             var url = '/api/worktree/file/diff?id=' + encodeURIComponent(worktreeId) +
                 '&path=' + encodeURIComponent(filePath) +
                 '&staged=' + staged;
-            apiFetch(url).then(function(resp) {
+            apiFetch(url, requestController).then(function(resp) {
                 if (!resp.ok) return resp.text().then(function(t) { throw new Error(t || resp.statusText); });
                 return resp.text();
             }).then(function(text) {
+                endContentRequest(requestController);
                 cachedDiff = text;
+                if (loadSeq !== activeLoadSeq || activeTab !== 'diff') return;
                 showDiff(text);
             }).catch(function(err) {
+                endContentRequest(requestController);
+                if (loadSeq !== activeLoadSeq || activeTab !== 'diff') return;
                 content.innerHTML = '<div class="error-state">' + esc('Failed to load diff: ' + err.message) + '</div>';
+                content.setAttribute('data-render-state', 'error');
             });
-        } else {
-            if (cachedContent !== null) { showFormatted(cachedContent, contentFileType); return; }
-            content.innerHTML = '<div class="loading-state">Loading content...</div>';
-            var url = '/api/worktree/file/content?id=' + encodeURIComponent(worktreeId) +
-                '&path=' + encodeURIComponent(filePath);
-            apiFetch(url).then(function(resp) {
-                if (!resp.ok) return resp.text().then(function(t) { throw new Error(t || resp.statusText); });
-                var ft = resp.headers.get('X-File-Type') || 'text/plain';
-                if (!fullPath) {
-                    var fp = resp.headers.get('X-File-FullPath');
-                    if (fp) { fullPath = fp; renderHeader(); }
-                }
-                return resp.text().then(function(t) { return { text: t, fileType: ft }; });
-            }).then(function(data) {
-                cachedContent = data.text;
-                contentFileType = data.fileType;
-                showFormatted(data.text, data.fileType);
-            }).catch(function(err) {
-                content.innerHTML = '<div class="error-state">' + esc('Failed to load content: ' + err.message) + '</div>';
-            });
+            return;
         }
+
+        if (cachedContent !== null) {
+            endContentRequest(requestController);
+            if (loadSeq === activeLoadSeq && activeTab === 'formatted') {
+                showFormatted(cachedContent, contentFileType, cachedContentBytes);
+            }
+            return;
+        }
+        content.innerHTML = '<div class="loading-state">Loading content...</div>';
+        content.setAttribute('data-render-state', 'loading');
+        var url = '/api/worktree/file/content?id=' + encodeURIComponent(worktreeId) +
+            '&path=' + encodeURIComponent(filePath);
+        apiFetch(url, requestController).then(function(resp) {
+            if (!resp.ok) return resp.text().then(function(t) {
+                var loadErr = new Error(t || resp.statusText);
+                loadErr.status = resp.status;
+                loadErr.fileType = resp.headers.get('X-File-Type') || '';
+                var respSize = parseInt(resp.headers.get('X-File-Size') || '', 10);
+                if (isFinite(respSize) && respSize >= 0) loadErr.fileSize = respSize;
+                throw loadErr;
+            });
+            var ft = resp.headers.get('X-File-Type') || 'text/plain';
+            var sizeHeader = parseInt(resp.headers.get('X-File-Size') || '', 10);
+            var size = isFinite(sizeHeader) && sizeHeader >= 0 ? sizeHeader : 0;
+            return resp.text().then(function(t) {
+                return { text: t, fileType: ft, bytes: size || t.length };
+            });
+        }).then(function(data) {
+            endContentRequest(requestController);
+            cachedContent = data.text;
+            contentFileType = data.fileType;
+            cachedContentBytes = data.bytes;
+            formattedRenderCache = null;
+            if (loadSeq !== activeLoadSeq || activeTab !== 'formatted') return;
+            showFormatted(data.text, data.fileType, data.bytes);
+        }).catch(function(err) {
+            endContentRequest(requestController);
+            if (loadSeq !== activeLoadSeq || activeTab !== 'formatted') return;
+            showContentLoadError(err);
+        });
     }
 
     function splitHighlightedLines(text, lang) {
@@ -372,22 +653,10 @@
         return out;
     }
 
-    function renderWithLineNumbers(text, lang) {
-        var lines = text.split('\n');
-        if (lines.length > 0 && lines[lines.length - 1] === '') lines = lines.slice(0, -1);
-
-        var hlLines = null;
-        if (hljsOk && lang) {
-            hlLines = splitHighlightedLines(text, lang);
-            // Guard against split count mismatch
-            while (hlLines.length < lines.length) hlLines.push('');
-            if (hlLines.length > lines.length) hlLines = hlLines.slice(0, lines.length);
-        }
-
-        var container = document.createElement('div');
-        container.className = 'code-lines';
-
-        for (var i = 0; i < lines.length; i++) {
+    function appendPreviewCodeRows(container, lines, hlLines, start, count) {
+        var frag = document.createDocumentFragment();
+        var end = Math.min(lines.length, start + count);
+        for (var i = start; i < end; i++) {
             var row = document.createElement('div');
             row.className = 'code-line';
 
@@ -398,26 +667,495 @@
             var cd = document.createElement('span');
             cd.className = 'cd';
             if (hlLines) {
-                cd.innerHTML = hlLines[i] || esc(lines[i]);
+                cd.innerHTML = hlLines[i] !== undefined ? hlLines[i] : esc(lines[i]);
             } else {
                 cd.textContent = lines[i];
             }
 
             row.appendChild(ln);
             row.appendChild(cd);
-            container.appendChild(row);
+            frag.appendChild(row);
         }
-        return container;
+        container.appendChild(frag);
+    }
+
+    function cancelActiveFormattedRender(reason) {
+        var job = activeFormattedJob;
+        if (!job || job.cancelled) return;
+        job.cancelled = true;
+        activeFormattedJob = null;
+        clearCodeHighlightObserver();
+        if (job.worker) {
+            try { job.worker.terminate(); } catch (err) {}
+            job.worker = null;
+        }
+        if (job.wakeHighlight) job.wakeHighlight();
+        if (job.wakeYield) job.wakeYield();
+        if (reason !== 'user') return;
+
+        var content = document.getElementById('content');
+        if (content) content.setAttribute('data-render-state', 'stopped');
+        if (job.loadingEl && job.loadingEl.parentNode) job.loadingEl.parentNode.removeChild(job.loadingEl);
+        if (job.label) {
+            if (job.kind === 'markdown') {
+                job.label.textContent = 'Markdown rendering stopped.';
+            } else {
+                job.label.textContent = 'Rendering stopped. Showing ' +
+                    formatPreviewCount(job.rendered) + ' of ' +
+                    formatPreviewCount(job.totalLines) + ' lines.';
+            }
+        }
+        if (job.stopBtn && job.stopBtn.parentNode) job.stopBtn.parentNode.removeChild(job.stopBtn);
+    }
+
+    // Resolve after the browser has had a chance to paint and process input.
+    // The 250 ms safety timer is a hidden-tab fallback: Safari/Chrome may stop
+    // requestAnimationFrame callbacks while the page is backgrounded.
+    function yieldToPreviewFrame(job) {
+        return new Promise(function(resolve) {
+            var settled = false;
+            var safety = setTimeout(finish, 250);
+            function finish() {
+                if (settled) return;
+                settled = true;
+                clearTimeout(safety);
+                if (job) job.wakeYield = null;
+                resolve();
+            }
+            if (job) job.wakeYield = finish;
+            if (job && job.cancelled) { finish(); return; }
+            if (typeof requestAnimationFrame === 'function' && !document.hidden) {
+                requestAnimationFrame(function() { setTimeout(finish, 0); });
+            } else {
+                setTimeout(finish, 0);
+            }
+        });
+    }
+
+    function finishPreviewRender(job) {
+        if (job.cancelled) return;
+        activeFormattedJob = null;
+        if (job.statusEl && job.statusEl.parentNode) job.statusEl.parentNode.removeChild(job.statusEl);
+        var content = document.getElementById('content');
+        if (content) content.setAttribute('data-render-state', job.excerpt ? 'excerpt' : 'complete');
+    }
+
+    function finishTruncatedPreviewRender(job, reason) {
+        if (job.cancelled) return;
+        job.cancelled = true;
+        activeFormattedJob = null;
+        var content = document.getElementById('content');
+        if (content) content.setAttribute('data-render-state', reason === 'error' ? 'error' : 'truncated');
+        if (job.stopBtn && job.stopBtn.parentNode) job.stopBtn.parentNode.removeChild(job.stopBtn);
+        if (reason === 'error') {
+            job.label.textContent = 'Preview rendering failed: ' + (job.renderError || 'unknown error');
+            return;
+        }
+        job.label.textContent = 'Rendering stopped after ' +
+            formatPreviewCount(job.rendered) + ' of ' +
+            formatPreviewCount(job.totalLines) + ' lines to keep the page responsive (' +
+            formatPreviewCount(job.limits ? job.limits.maxTotalRenderMs : 0) + ' ms budget).';
+    }
+
+    function highlightSourceWithWorker(job, text, lang) {
+        return new Promise(function(resolve) {
+            if (!hljsOk || !lang || typeof Worker === 'undefined') { resolve(null); return; }
+            var worker;
+            try {
+                worker = new Worker('/static/preview_source_highlight_worker.js');
+            } catch (err) {
+                resolve(null);
+                return;
+            }
+            job.worker = worker;
+            var settled = false;
+            function finish(value) {
+                if (settled) return;
+                settled = true;
+                job.wakeHighlight = null;
+                if (job.worker === worker) job.worker = null;
+                try { worker.terminate(); } catch (err) {}
+                resolve(value);
+            }
+            job.wakeHighlight = function() { finish(null); };
+            worker.onmessage = function(event) {
+                var data = event.data || {};
+                if (data.type === 'result' && data.lines) finish(data.lines);
+                else finish(null);
+            };
+            worker.onerror = function() { finish(null); };
+            try {
+                worker.postMessage({ type: 'highlight', id: 1, text: text, language: lang });
+            } catch (err) {
+                finish(null);
+            }
+        });
+    }
+
+    function startPreviewSourceRender(text, fileType, context) {
+        cancelActiveFormattedRender('replace');
+        formattedRenderCache = null;
+        var content = document.getElementById('content');
+        var activeLimits = (context && context.limits) || SOURCE_LIMITS;
+        var job = {
+            kind: 'source',
+            cancelled: false,
+            text: text,
+            fileType: fileType,
+            limits: activeLimits,
+            excerpt: !!(context && context.excerpt),
+            rendered: 0,
+            totalLines: 0,
+            startedAt: 0,
+            wakeHighlight: null,
+            wakeYield: null,
+            statusEl: null,
+            label: null,
+            stopBtn: null,
+            renderError: ''
+        };
+        var lines = context && context.lines ? context.lines : text.split('\n');
+        if (lines.length > 0 && lines[lines.length - 1] === '') lines = lines.slice(0, -1);
+        job.totalLines = lines.length;
+        job.startedAt = performance.now();
+        activeFormattedJob = job;
+
+        content.innerHTML = '';
+        content.setAttribute('data-render-state', 'running');
+
+        var status = document.createElement('div');
+        status.className = 'preview-render-status';
+        status.setAttribute('role', 'status');
+        var label = document.createElement('span');
+        label.className = 'grow';
+        label.textContent = 'Preparing preview…';
+        var stopBtn = document.createElement('button');
+        stopBtn.type = 'button';
+        stopBtn.textContent = 'Stop';
+        stopBtn.addEventListener('click', function() { cancelActiveFormattedRender('user'); });
+        status.appendChild(label);
+        status.appendChild(stopBtn);
+        content.appendChild(status);
+        job.statusEl = status;
+        job.label = label;
+        job.stopBtn = stopBtn;
+
+        if (context && (job.excerpt || context.notice)) {
+            var note = document.createElement('div');
+            note.className = 'preview-note';
+            if (context.notice) {
+                note.textContent = context.notice;
+            } else {
+                var noteText = 'Showing a bounded excerpt: ' +
+                    formatPreviewCount(context.excerptLineCount || 0) + ' of ' +
+                    formatPreviewCount(context.sourceLineCount || 0) + ' lines';
+                if (context.omittedLines) noteText += '; ' + formatPreviewCount(context.omittedLines) + ' omitted';
+                if (context.lineTruncated) noteText += '; lines longer than ' + formatPreviewCount(activeLimits.maxLineChars) + ' characters were shortened';
+                noteText += '. Full file: ' + formatPreviewBytes(context.sourceBytes) + '. Diff Preview and your editor still have the complete content.';
+                note.textContent = noteText;
+            }
+            content.appendChild(note);
+        }
+
+        var container = document.createElement('div');
+        container.className = 'code-lines';
+        content.appendChild(container);
+
+        async function run() {
+            // Let the preparing status paint before the bounded, synchronous
+            // highlight step starts.
+            await new Promise(function(resolve) { setTimeout(resolve, 0); });
+            if (job.cancelled) return;
+
+            var lang = fileType === 'text/x-code' ? langForFilePath(filePath) : '';
+
+            var hlLines = null;
+            if (hljsOk && lang) {
+                job.label.textContent = 'Highlighting source in background…';
+                hlLines = await highlightSourceWithWorker(job, text, lang);
+            }
+            if (job.cancelled) return;
+            if (hlLines) {
+                while (hlLines.length < lines.length) hlLines.push('');
+                if (hlLines.length > lines.length) hlLines = hlLines.slice(0, lines.length);
+            }
+            if (lines.length === 0) {
+                finishPreviewRender(job);
+                return;
+            }
+
+            job.label.textContent = 'Rendering 0 / ' + formatPreviewCount(lines.length) + ' lines…';
+            var chunkSize = Math.max(1, Math.min(activeLimits.initialChunkSize, lines.length));
+            while (job.rendered < lines.length) {
+                if (job.cancelled) return;
+                var chunkStart = performance.now();
+                var count = Math.min(chunkSize, lines.length - job.rendered);
+                appendPreviewCodeRows(container, lines, hlLines, job.rendered, count);
+                // Force the layout this chunk would need before measuring it;
+                // rAF callback timing alone does not include this cost.
+                void container.scrollHeight;
+                var workMs = performance.now() - chunkStart;
+                job.rendered += count;
+                job.label.textContent = 'Rendering ' + formatPreviewCount(job.rendered) +
+                    ' / ' + formatPreviewCount(lines.length) + ' lines…';
+
+                if (job.rendered >= lines.length) {
+                    formattedRenderCache = {
+                        text: text,
+                        fileType: fileType,
+                        sourceContainer: container
+                    };
+                    finishPreviewRender(job);
+                    return;
+                }
+
+                var frameStart = performance.now();
+                await yieldToPreviewFrame(job);
+                var frameMs = performance.now() - frameStart;
+                if (job.cancelled) return;
+                if (performance.now() - job.startedAt > activeLimits.maxTotalRenderMs) {
+                    finishTruncatedPreviewRender(job, 'timeout');
+                    return;
+                }
+                chunkSize = adaptPreviewChunkSize(chunkSize, workMs, frameMs, activeLimits);
+            }
+        }
+
+        run().catch(function(err) {
+            job.renderError = err && err.message ? err.message : String(err);
+            finishTruncatedPreviewRender(job, 'error');
+        });
+    }
+
+    function startPreviewMarkdownRender(text, metrics) {
+        cancelActiveFormattedRender('replace');
+        formattedRenderCache = null;
+        var content = document.getElementById('content');
+        var job = {
+            kind: 'markdown',
+            cancelled: false,
+            worker: null,
+            statusEl: null,
+            label: null,
+            stopBtn: null,
+            loadingEl: null,
+            rendered: 0,
+            totalLines: metrics.lineCount,
+            excerpt: false,
+            wakeYield: null
+        };
+        activeFormattedJob = job;
+
+        content.innerHTML = '';
+        content.setAttribute('data-render-state', 'parsing');
+
+        var status = document.createElement('div');
+        status.className = 'preview-render-status';
+        status.setAttribute('role', 'status');
+        var label = document.createElement('span');
+        label.className = 'grow';
+        label.textContent = 'Parsing Markdown in background…';
+        var stopBtn = document.createElement('button');
+        stopBtn.type = 'button';
+        stopBtn.textContent = 'Stop';
+        stopBtn.addEventListener('click', function() { cancelActiveFormattedRender('user'); });
+        status.appendChild(label);
+        status.appendChild(stopBtn);
+        content.appendChild(status);
+        job.statusEl = status;
+        job.label = label;
+        job.stopBtn = stopBtn;
+
+        var loading = document.createElement('div');
+        loading.className = 'loading-state';
+        loading.textContent = 'Parsing Markdown…';
+        content.appendChild(loading);
+        job.loadingEl = loading;
+
+        function cleanupMarkdownWorker() {
+            job.cancelled = true;
+            activeFormattedJob = null;
+            if (job.worker) {
+                try { job.worker.terminate(); } catch (err) {}
+                job.worker = null;
+            }
+        }
+
+        function fallbackToSource(reason) {
+            if (job.cancelled) return;
+            cleanupMarkdownWorker();
+            job.cancelled = true;
+            startPreviewSourceRender(text, 'text/plain', {
+                lines: metrics.lines,
+                notice: 'Background Markdown parsing failed; showing raw Markdown source instead. ' +
+                    (reason ? '(' + reason + ')' : '')
+            });
+        }
+
+        function finishMarkdown(html) {
+            if (job.cancelled) return;
+            try {
+                content.innerHTML = '<div class="markdown-body">' + html + '</div>';
+                // Keep the same code-block highlighting contract as the old
+                // synchronous Markdown path. This runs after the worker result,
+                // so the parser itself is no longer on the main thread.
+                observeMarkdownCodeBlocks(content);
+                formattedRenderCache = { text: text, fileType: 'text/markdown', markdownHtml: html };
+                content.setAttribute('data-render-state', 'complete');
+                cleanupMarkdownWorker();
+            } catch (err) {
+                fallbackToSource(err && err.message ? err.message : String(err));
+            }
+        }
+
+        var worker;
+        try {
+            worker = new Worker('/static/preview_markdown_worker.js');
+        } catch (err) {
+            fallbackToSource(err && err.message ? err.message : String(err));
+            return;
+        }
+        job.worker = worker;
+
+        worker.onmessage = function(event) {
+            if (job.cancelled) return;
+            var data = event.data || {};
+            if (data.type === 'error') {
+                fallbackToSource(data.message || 'Markdown parser error');
+                return;
+            }
+            if (data.type !== 'result') return;
+            finishMarkdown(data.html || '');
+        };
+        worker.onerror = function(event) {
+            if (job.cancelled) return;
+            fallbackToSource(event && event.message ? event.message : 'Markdown worker error');
+        };
+
+        try {
+            worker.postMessage({ type: 'parse', id: 1, text: text });
+        } catch (err) {
+            fallbackToSource(err && err.message ? err.message : String(err));
+        }
+    }
+
+    function showPreviewLimit(text, fileType, bytes, metrics, reasons, limits) {
+        cancelActiveFormattedRender('limit');
+        formattedRenderCache = null;
+        var content = document.getElementById('content');
+        content.innerHTML = '';
+        content.setAttribute('data-render-state', 'limit');
+
+        var card = document.createElement('div');
+        card.className = 'preview-limit';
+        card.setAttribute('role', 'status');
+
+        var title = document.createElement('h2');
+        title.textContent = 'Preview limited';
+        card.appendChild(title);
+
+        var actual = document.createElement('p');
+        actual.textContent = 'This file is ' + formatPreviewBytes(bytes) +
+            ' with ' + formatPreviewCount(metrics.lineCount) + ' lines; the longest line is ' +
+            formatPreviewCount(metrics.longestLine) + ' characters.';
+        card.appendChild(actual);
+
+        var threshold = document.createElement('p');
+        threshold.textContent = 'Safe preview limits for this renderer: ' + formatPreviewBytes(limits.maxBytes) +
+            ', ' + formatPreviewCount(limits.maxLines) + ' lines, and ' +
+            formatPreviewCount(limits.maxLineChars) + ' characters per line.';
+        card.appendChild(threshold);
+
+        var reasonText = document.createElement('p');
+        var exceeded = [];
+        if (reasons.indexOf('size') >= 0) exceeded.push('file size');
+        if (reasons.indexOf('lines') >= 0) exceeded.push('line count');
+        if (reasons.indexOf('line-length') >= 0) exceeded.push('longest line');
+        reasonText.textContent = 'The ' + exceeded.join(' and ') +
+            ' exceeded the safe limit, so the full source was not rendered synchronously. ' +
+            'Diff Preview and your editor still have the complete content.';
+        card.appendChild(reasonText);
+
+        var button = document.createElement('button');
+        button.type = 'button';
+        button.textContent = 'Show safe excerpt (first ' +
+            formatPreviewCount(Math.min(SOURCE_LIMITS.excerptLines, metrics.lineCount)) + ' lines)';
+        button.addEventListener('click', function() {
+            var excerpt = buildPreviewExcerpt(metrics.lines, SOURCE_LIMITS);
+            if (excerpt.lineCount === 0) {
+                button.disabled = true;
+                button.textContent = 'No safe excerpt available';
+                return;
+            }
+            startPreviewSourceRender(excerpt.text, fileType, {
+                lines: excerpt.lines,
+                excerpt: true,
+                sourceBytes: bytes,
+                sourceLineCount: metrics.lineCount,
+                excerptLineCount: excerpt.lineCount,
+                omittedLines: excerpt.omittedLines,
+                lineTruncated: excerpt.lineTruncated,
+                limits: SOURCE_LIMITS
+            });
+        });
+        card.appendChild(button);
+        content.appendChild(card);
+    }
+
+    function showContentLoadError(err) {
+        cancelActiveFormattedRender('error');
+        formattedRenderCache = null;
+        var content = document.getElementById('content');
+        content.innerHTML = '';
+        var status = err && err.status;
+        var titleText = 'Preview unavailable';
+        var state = 'error';
+        var reason = err && err.message ? err.message : 'Unknown load error';
+        var next = 'Use Diff Preview or open the file in an editor for the complete content.';
+        if (status === 415) {
+            titleText = 'Preview not supported';
+            state = 'unsupported';
+            reason = 'This file type has no registered safe preview renderer, so its content was not parsed.';
+            next = 'The file was blocked instead of being guessed or rendered as plain text.';
+        } else if (status === 413) {
+            titleText = 'Preview limited';
+            state = 'limit';
+            next = 'The file was not parsed. Use Diff Preview or open the file in an editor for the complete content.';
+        } else if (status === 403) {
+            titleText = 'Preview blocked';
+            state = 'unsupported';
+            next = 'This path is outside the preview safety policy.';
+        }
+
+        var card = document.createElement('div');
+        card.className = 'preview-limit';
+        card.setAttribute('role', 'alert');
+        var title = document.createElement('h2');
+        title.textContent = titleText;
+        card.appendChild(title);
+
+        if (err && isFinite(err.fileSize) && err.fileSize >= 0) {
+            var actual = document.createElement('p');
+            actual.textContent = 'File size: ' + formatPreviewBytes(err.fileSize) + '.';
+            card.appendChild(actual);
+        }
+        var reasonEl = document.createElement('p');
+        reasonEl.textContent = reason;
+        card.appendChild(reasonEl);
+        var nextEl = document.createElement('p');
+        nextEl.textContent = next;
+        card.appendChild(nextEl);
+        content.appendChild(card);
+        content.setAttribute('data-render-state', state);
     }
 
     function renderDiffWithLineNumbers(text) {
         var lines = text.split('\n');
         if (lines.length > 0 && lines[lines.length - 1] === '') lines = lines.slice(0, -1);
 
-        // Pre-compute highlighted lines via the same splitHighlightedLines path
-        // used by renderWithLineNumbers.  Diff tokens are always intra-line
-        // (every line starts with +, -, or @), so the stack mechanism is a
-        // no-op — the consistency is worth the single call site.
+        // Pre-compute highlighted lines via splitHighlightedLines. Diff tokens
+        // are always intra-line (every line starts with +, -, or @), so the
+        // stack mechanism is a no-op — the consistency is worth the call site.
         var hlLines = null;
         if (hljsOk) {
             hlLines = splitHighlightedLines(text, 'diff');
@@ -475,36 +1213,55 @@
         var content = document.getElementById('content');
         if (!text || text.trim() === '') {
             content.innerHTML = '<div class="empty-state">No changes</div>';
+            content.setAttribute('data-render-state', 'empty');
             return;
         }
         content.innerHTML = '';
         content.appendChild(renderDiffWithLineNumbers(text));
+        content.setAttribute('data-render-state', 'complete');
     }
 
-    function showFormatted(text, fileType) {
+    function showFormatted(text, fileType, bytes) {
+        cancelActiveFormattedRender('replace');
         var content = document.getElementById('content');
         if (!text || text.trim() === '') {
             content.innerHTML = '<div class="empty-state">Empty file</div>';
+            content.setAttribute('data-render-state', 'empty');
             return;
         }
-        if (fileType === 'text/markdown') {
-            if (markedOk) {
-                content.innerHTML = '<div class="markdown-body">' + marked.parse(text, {sanitize: true}) + '</div>';
-                // Highlight code blocks inside markdown
-                if (hljsOk) content.querySelectorAll('pre code').forEach(function(block) { hljs.highlightElement(block); });
-            } else {
-                content.innerHTML = '';
-                content.appendChild(renderWithLineNumbers(text, ''));
+
+        if (formattedRenderCache &&
+            formattedRenderCache.text === text &&
+            formattedRenderCache.fileType === fileType) {
+            if (typeof formattedRenderCache.markdownHtml === 'string') {
+                content.innerHTML = '<div class="markdown-body">' + formattedRenderCache.markdownHtml + '</div>';
+                observeMarkdownCodeBlocks(content);
+                content.setAttribute('data-render-state', 'complete');
+                return;
             }
-        } else if (fileType === 'text/x-code') {
-            var ext = filePath.substring(filePath.lastIndexOf('.')).toLowerCase();
-            var lang = extToLang(ext);
-            content.innerHTML = '';
-            content.appendChild(renderWithLineNumbers(text, lang));
-        } else {
-            content.innerHTML = '';
-            content.appendChild(renderWithLineNumbers(text, ''));
+            if (formattedRenderCache.sourceContainer) {
+                content.innerHTML = '';
+                content.appendChild(formattedRenderCache.sourceContainer);
+                content.setAttribute('data-render-state', 'complete');
+                return;
+            }
         }
+
+        var sourceBytes = isFinite(bytes) && bytes > 0 ? bytes : text.length;
+        var metrics = measurePreviewContent(text);
+        var limits = fileType === 'text/markdown' ? MARKDOWN_LIMITS : SOURCE_LIMITS;
+        var reasons = previewLimitReasons(metrics, sourceBytes, limits);
+        if (reasons.length > 0) {
+            showPreviewLimit(text, fileType, sourceBytes, metrics, reasons, limits);
+            return;
+        }
+
+        if (fileType === 'text/markdown') {
+            startPreviewMarkdownRender(text, metrics);
+            return;
+        }
+
+        startPreviewSourceRender(text, fileType, { lines: metrics.lines, limits: limits });
     }
 
     // Tab click handlers

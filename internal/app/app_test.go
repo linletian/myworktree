@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -1210,5 +1211,131 @@ func TestWithAuth_SyncsURLTokenToCookie(t *testing.T) {
 	}
 	if !got.HttpOnly {
 		t.Fatalf("mw_token cookie must be HttpOnly (embedded documents must not read it via JS)")
+	}
+}
+
+func TestHandleWorktreeFileContentReportsExactSize(t *testing.T) {
+	srv, _ := newIsolatedTestServer(t, store.State{Version: 3})
+	body := []byte("abc\n")
+	if err := os.WriteFile(filepath.Join(srv.root, "sample.txt"), body, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/worktree/file/content?id="+framework.MainWorktreeID+"&path=sample.txt", nil)
+	rec := httptest.NewRecorder()
+
+	srv.handleWorktreeFileContent(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("X-File-Size"); got != "4" {
+		t.Fatalf("X-File-Size = %q, want exact byte size 4", got)
+	}
+	if got := rec.Body.String(); got != string(body) {
+		t.Fatalf("body = %q, want %q", got, string(body))
+	}
+}
+
+func TestDetectFileTypeSupportsKnownAndBlocksUnknown(t *testing.T) {
+	cases := map[string]string{
+		"README.md":              "text/markdown",
+		"main.go":                "text/x-code",
+		"notes.txt":              "text/plain",
+		"Dockerfile":             "text/x-code",
+		"service.dockerfile":     "text/x-code",
+		"photo.png":              "",
+		"archive.tar.gz":         "",
+		"LICENSE_WITHOUT_EXT":    "",
+		"component.tsx":          "text/x-code",
+		"tokens.csv":             "text/plain",
+		"large-changelog.md":     "text/markdown",
+		"missing-extension-file": "",
+	}
+	for path, want := range cases {
+		if got := detectFileType(path); got != want {
+			t.Errorf("detectFileType(%q) = %q, want %q", path, got, want)
+		}
+	}
+}
+
+func writePreviewFixture(t *testing.T, srv *Server, name string, body []byte) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(srv.root, name), body, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func getPreviewContent(t *testing.T, srv *Server, name string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/worktree/file/content?id="+framework.MainWorktreeID+"&path="+name, nil)
+	rec := httptest.NewRecorder()
+	srv.handleWorktreeFileContent(rec, req)
+	return rec
+}
+
+func TestHandleWorktreeFileContentBlocksUnsupportedTypes(t *testing.T) {
+	srv, _ := newIsolatedTestServer(t, store.State{Version: 3})
+	writePreviewFixture(t, srv, "photo.png", []byte{0x89, 'P', 'N', 'G', 0})
+	rec := getPreviewContent(t, srv, "photo.png")
+	if rec.Code != http.StatusUnsupportedMediaType {
+		t.Fatalf("status = %d, want 415; body=%s", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("X-File-Type"); got != "unsupported" {
+		t.Fatalf("X-File-Type = %q, want unsupported", got)
+	}
+	if got := rec.Header().Get("X-File-Size"); got != "5" {
+		t.Fatalf("X-File-Size = %q, want 5", got)
+	}
+}
+
+func TestHandleWorktreeFileContentBlocksBinaryAndNonUTF8(t *testing.T) {
+	srv, _ := newIsolatedTestServer(t, store.State{Version: 3})
+	writePreviewFixture(t, srv, "binary.md", []byte("safe text\x00tail"))
+	rec := getPreviewContent(t, srv, "binary.md")
+	if rec.Code != http.StatusUnsupportedMediaType {
+		t.Fatalf("binary status = %d, want 415; body=%s", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("X-File-Type"); got != "binary" {
+		t.Fatalf("binary X-File-Type = %q, want binary", got)
+	}
+
+	writePreviewFixture(t, srv, "nonutf8.md", []byte{'a', 0xff, 0xfe, 'b'})
+	rec = getPreviewContent(t, srv, "nonutf8.md")
+	if rec.Code != http.StatusUnsupportedMediaType {
+		t.Fatalf("non-UTF8 status = %d, want 415; body=%s", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("X-File-Type"); got != "non-utf8" {
+		t.Fatalf("non-UTF8 X-File-Type = %q, want non-utf8", got)
+	}
+}
+
+func TestHandleWorktreeFileContentAllowsLongLineForFrontendFallback(t *testing.T) {
+	srv, _ := newIsolatedTestServer(t, store.State{Version: 3})
+	body := []byte(strings.Repeat("x", 40<<10) + "\nnext\n")
+	writePreviewFixture(t, srv, "long-line.md", body)
+	rec := getPreviewContent(t, srv, "long-line.md")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 so the front-end can offer a bounded excerpt; body=%s", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("X-File-Size"); got != strconv.Itoa(len(body)) {
+		t.Fatalf("X-File-Size = %q, want %d", got, len(body))
+	}
+}
+
+func TestHandleWorktreeFileContentReportsOversizeWithSizeHeader(t *testing.T) {
+	srv, _ := newIsolatedTestServer(t, store.State{Version: 3})
+	body := []byte(strings.Repeat("x", previewMaxFileBytes+1))
+	writePreviewFixture(t, srv, "too-large.md", body)
+	rec := getPreviewContent(t, srv, "too-large.md")
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want 413; body=%s", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("X-File-Size"); got != strconv.Itoa(previewMaxFileBytes+1) {
+		t.Fatalf("X-File-Size = %q, want %d", got, previewMaxFileBytes+1)
+	}
+	if got := rec.Header().Get("X-File-Type"); got != "text/markdown" {
+		t.Fatalf("X-File-Type = %q, want text/markdown", got)
 	}
 }
