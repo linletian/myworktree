@@ -3801,3 +3801,49 @@ func TestWebPanelsBleedAnchors(t *testing.T) {
 		}
 	}
 }
+
+func TestPreviewUsesMarkdownWorkerAndLazyHighlight(t *testing.T) {
+	mux := http.NewServeMux()
+	if err := Register(mux, "myworktree", nil); err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/preview")
+	if err != nil {
+		t.Fatalf("GET /preview failed: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /preview status: %d", resp.StatusCode)
+	}
+	page := string(body)
+	for _, anchor := range []string{
+		"new Worker('/static/preview_markdown_worker.js')",
+		"function observeMarkdownCodeBlocks(container) {",
+		"function showContentLoadError(err) {",
+		"maxBytes: 1024 * 1024,",
+		"maxLines: 20000,",
+	} {
+		if !strings.Contains(page, anchor) {
+			t.Fatalf("/preview should include issue #144 anchor %q", anchor)
+		}
+	}
+	if strings.Contains(page, "marked.parse(") {
+		t.Fatal("/preview must not parse Markdown on the main thread")
+	}
+
+	worker := fetchStaticAsset(t, "/static/preview_markdown_worker.js")
+	for _, anchor := range []string{
+		"importScripts('/static/vendor/marked/marked.min.js')",
+		"marked.parse(",
+		"renderer.html = function(html) {",
+		"function safePreviewUrl(href) {",
+	} {
+		if !strings.Contains(worker, anchor) {
+			t.Fatalf("served Markdown worker should include %q", anchor)
+		}
+	}
+}

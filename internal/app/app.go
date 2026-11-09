@@ -26,6 +26,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"myworktree/internal/config"
 	"myworktree/internal/framework"
@@ -1696,8 +1697,22 @@ func (s *Server) handleWorktreeFileContent(w http.ResponseWriter, r *http.Reques
 		http.Error(w, "file not found", http.StatusNotFound)
 		return
 	}
+	fileType := detectFileType(filePath)
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	if fileType == "" {
+		w.Header().Set("X-File-Type", "unsupported")
+	} else {
+		w.Header().Set("X-File-Type", fileType)
+	}
+	w.Header().Set("X-File-Size", strconv.FormatInt(info.Size(), 10))
+	w.Header().Set("X-File-FullPath", fullPath)
+
+	if fileType == "" {
+		http.Error(w, "preview not supported for this file type", http.StatusUnsupportedMediaType)
+		return
+	}
 	if info.Size() > 1<<20 {
-		http.Error(w, "file too large", http.StatusRequestEntityTooLarge)
+		http.Error(w, "file too large for preview (1 MiB limit)", http.StatusRequestEntityTooLarge)
 		return
 	}
 	data, err := os.ReadFile(fullPath)
@@ -1705,15 +1720,45 @@ func (s *Server) handleWorktreeFileContent(w http.ResponseWriter, r *http.Reques
 		http.Error(w, "failed to read file", http.StatusInternalServerError)
 		return
 	}
-	if isBinaryData(data) {
+	if bytes.IndexByte(data, 0) >= 0 {
+		w.Header().Set("X-File-Type", "binary")
 		http.Error(w, "binary file not supported", http.StatusUnsupportedMediaType)
 		return
 	}
+	if !utf8.Valid(data) {
+		w.Header().Set("X-File-Type", "non-utf8")
+		http.Error(w, "file is not valid UTF-8 text", http.StatusUnsupportedMediaType)
+		return
+	}
+	if line, length, tooLong := firstPreviewLineTooLong(data, previewMaxLineBytes); tooLong {
+		http.Error(w, fmt.Sprintf("line %d is %d bytes; preview limit is %d bytes", line, length, previewMaxLineBytes), http.StatusRequestEntityTooLarge)
+		return
+	}
+	_, _ = w.Write(data)
+}
 
-	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	w.Header().Set("X-File-Type", detectFileType(filePath))
-	w.Header().Set("X-File-FullPath", fullPath)
-	w.Write(data)
+const previewMaxLineBytes = 32 << 10
+
+// firstPreviewLineTooLong reports whether any line in data exceeds max bytes.
+// The line number is 1-based; the reported length excludes the line ending.
+func firstPreviewLineTooLong(data []byte, max int) (line, length int, tooLong bool) {
+	line = 1
+	start := 0
+	for i := 0; i <= len(data); i++ {
+		if i != len(data) && data[i] != '\n' {
+			continue
+		}
+		end := i
+		if end > start && data[end-1] == '\r' {
+			end--
+		}
+		if end-start > max {
+			return line, end - start, true
+		}
+		line++
+		start = i + 1
+	}
+	return 0, 0, false
 }
 
 func (s *Server) handleWorktreesDiverged(w http.ResponseWriter, r *http.Request) {
@@ -5570,19 +5615,36 @@ func isSensitiveFile(path string) bool {
 	return false
 }
 
-// detectFileType returns a hint about the file type based on its extension.
+// detectFileType returns the preview type for a supported text file, or the
+// empty string when the file has no registered formatter. An empty result is a
+// hard block: the content handler must not send bytes for it and the frontend
+// must not guess a renderer or parse it as plain text.
 func detectFileType(path string) string {
 	ext := strings.ToLower(filepath.Ext(path))
 	switch ext {
 	case ".md", ".markdown":
 		return "text/markdown"
-	case ".go", ".js", ".ts", ".tsx", ".jsx", ".py", ".rs", ".java", ".c", ".cpp", ".h", ".hpp",
-		".html", ".css", ".scss", ".less", ".sass", ".json", ".yaml", ".yml", ".toml", ".sh", ".bash", ".zsh",
-		".vue", ".svelte", ".xml", ".svg", ".sql", ".dockerfile":
+	case ".go", ".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx", ".py", ".rs", ".java",
+		".c", ".cpp", ".cc", ".cxx", ".h", ".hh", ".hpp", ".kt", ".kts", ".swift",
+		".rb", ".php", ".lua", ".dart", ".cs", ".r", ".pl", ".pm", ".ex", ".exs",
+		".hs", ".clj", ".cljs", ".html", ".htm", ".css", ".scss", ".sass", ".less",
+		".json", ".yaml", ".yml", ".toml", ".sh", ".bash", ".zsh", ".fish", ".vue",
+		".svelte", ".xml", ".svg", ".sql", ".graphql", ".gql", ".proto", ".tf",
+		".tfvars", ".mk", ".diff", ".patch", ".ini", ".cfg", ".conf", ".dockerfile":
 		return "text/x-code"
-	default:
+	case ".txt", ".log", ".csv", ".tsv", ".text", ".textproto":
 		return "text/plain"
 	}
+	switch strings.ToLower(filepath.Base(path)) {
+	case "dockerfile", "containerfile", "makefile", "gnumakefile", "rakefile",
+		"gemfile", "procfile", "vagrantfile", "cmakelists.txt", ".gitignore",
+		".dockerignore", ".editorconfig":
+		return "text/x-code"
+	}
+	if strings.HasPrefix(strings.ToLower(filepath.Base(path)), "dockerfile.") {
+		return "text/x-code"
+	}
+	return ""
 }
 
 // unquoteGitPath reverses git's core.quotePath quoting.
