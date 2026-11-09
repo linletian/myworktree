@@ -1,0 +1,229 @@
+[ios-ime] capture-installed {"probe":"probe-v2","bridge":"ON","ua":"Mozilla/5.0 (iPad; CPU OS 18_7 like Mac OS X) Ap","lines":0}
+[ios-ime] bound {"sessionId":"4553fc50bd21"}
+[probe] keydown k=13 key=…nter dp=0 comp=0 tgt=TEXTAREA.- data="" val=""
+[probe] keyup k=13 key=…nter dp=0 comp=0 tgt=TEXTAREA.- data="" val=""
+[ios-ime] keyup {"t":1794230604327,"keyCode":13,"key":"Enter","value":"","len":0}
+
+# flush reason=tick ua="Mozilla/5.0 (iPad; CPU OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/27.2 Mobile/15E148 Safari/604.1" bytes=993
+[probe] keydown k=229 key=， dp=0 comp=0 tgt=TEXTAREA.- data="" val=""
+[ios-ime] keydown {"t":1794230633929,"keyCode":229,"key":"，","value":"","len":0}
+[ios-ime] pending {"baseline":"","len":0,"keptEarliest":false,"rearmed":false}
+[ios-ime] probe {"t0":1794230633929,"t1":1794230633930,"valueAtProbe":""}
+[probe] beforeinput k=0 key= dp=0 comp=0 tgt=TEXTAREA.- data="，" val=""
+[ios-ime] beforeinput {"inputType":"insertText","data":"，","composed":true,"isComposing":false,"value":""}
+[probe] input k=0 key= dp=0 comp=0 tgt=TEXTAREA.- data="，" val="，"
+[ios-ime] input {"inputType":"insertText","data":"，","composed":true,"value":"，","dt":13}
+[probe] keyup k=0 key=， dp=0 comp=0 tgt=TEXTAREA.- data="" val="，"
+[ios-ime] keyup {"t":1794230633952,"keyCode":0,"key":"，","value":"，","len":1}
+[ios-ime] deliver {"baseline":"","current":"，","delta":"，","emissions":[],"branch":"A","payload":"，","via":"keyup-defer","armed":false}
+[ios-ime] clear {"reason":"close-window"}
+
+# flush reason=tick ua="Mozilla/5.0 (iPad; CPU OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/27.2 Mobile/15E148 Safari/604.1" bytes=2094
+[probe] keydown k=229 key=， dp=0 comp=0 tgt=TEXTAREA.- data="" val="，"
+[ios-ime] keydown {"t":1794230641494,"keyCode":229,"key":"，","value":"，","len":1}
+[ios-ime] pending {"baseline":"，","len":1,"keptEarliest":false,"rearmed":false}
+[ios-ime] probe {"t0":1794230641494,"t1":1794230641495,"valueAtProbe":"，"}
+[probe] beforeinput k=0 key= dp=0 comp=0 tgt=TEXTAREA.- data="，" val="，"
+[ios-ime] beforeinput {"inputType":"insertText","data":"，","composed":true,"isComposing":false,"value":"，"}
+[probe] input k=0 key= dp=0 comp=0 tgt=TEXTAREA.- data="，" val="，，"
+[ios-ime] input {"inputType":"insertText","data":"，","composed":true,"value":"，，","dt":10}
+[probe] keyup k=0 key=， dp=0 comp=0 tgt=TEXTAREA.- data="" val="，，"
+[ios-ime] keyup {"t":1794230641516,"keyCode":0,"key":"，","value":"，，","len":2}
+[ios-ime] deliver {"baseline":"，","current":"，，","delta":"，","emissions":[],"branch":"A","payload":"，","via":"keyup-defer","armed":false}
+[ios-ime] clear {"reason":"close-window"}
+[probe] keydown k=229 key=。 dp=0 comp=0 tgt=TEXTAREA.- data="" val="，，"
+[ios-ime] keydown {"t":1794230642559,"keyCode":229,"key":"。","value":"，，","len":2}
+[ios-ime] pending {"baseline":"，，","len":2,"keptEarliest":false,"rearmed":false}
+[ios-ime] probe {"t0":1794230642559,"t1":1794230642559,"valueAtProbe":"，，"}
+[probe] beforeinput k=0 key= dp=0 comp=0 tgt=TEXTAREA.- data="。" val="，，"
+[ios-ime] beforeinput {"inputType":"insertText","data":"。","composed":true,"isComposing":false,"value":"，，"}
+[probe] input k=0 key= dp=0 comp=0 tgt=TEXTAREA.- data="。" val="，，。"
+[ios-ime] input {"inputType":"insertText","data":"。","composed":true,"value":"，，。","dt":10}
+[probe] keyup k=0 key=。 dp=0 comp=0 tgt=TEXTAREA.- data="" val="，，。"
+[ios-ime] keyup {"t":1794230642584,"keyCode":0,"key":"。","value":"，，。","len":3}
+[ios-ime] deliver {"baseline":"，，","current":"，，。","delta":"。","emissions":[],"branch":"A","payload":"。","via":"keyup-defer","armed":false}
+[ios-ime] clear {"reason":"close-window"}
+
+# flush reason=tick ua="Mozilla/5.0 (iPad; CPU OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/27.2 Mobile/15E148 Safari/604.1" bytes=2022
+[probe] keydown k=229 key=， dp=0 comp=0 tgt=TEXTAREA.- data="" val=""
+[ios-ime] keydown {"t":1794230656131,"keyCode":229,"key":"，","value":"","len":0}
+[ios-ime] pending {"baseline":"","len":0,"keptEarliest":false,"rearmed":false}
+[ios-ime] probe {"t0":1794230656131,"t1":1794230656133,"valueAtProbe":""}
+[probe] beforeinput k=0 key= dp=0 comp=0 tgt=TEXTAREA.- data="，" val=""
+[ios-ime] beforeinput {"inputType":"insertText","data":"，","composed":true,"isComposing":false,"value":""}
+[probe] input k=0 key= dp=0 comp=0 tgt=TEXTAREA.- data="，" val="，"
+[ios-ime] input {"inputType":"insertText","data":"，","composed":true,"value":"，","dt":13}
+[probe] keyup k=0 key=， dp=0 comp=0 tgt=TEXTAREA.- data="" val="，"
+[ios-ime] keyup {"t":1794230656157,"keyCode":0,"key":"，","value":"，","len":1}
+[ios-ime] deliver {"baseline":"","current":"，","delta":"，","emissions":[],"branch":"A","payload":"，","via":"keyup-defer","armed":false}
+[ios-ime] clear {"reason":"close-window"}
+[probe] keydown k=229 key=。 dp=0 comp=0 tgt=TEXTAREA.- data="" val="，"
+[ios-ime] keydown {"t":1794230657198,"keyCode":229,"key":"。","value":"，","len":1}
+[ios-ime] pending {"baseline":"，","len":1,"keptEarliest":false,"rearmed":false}
+[ios-ime] probe {"t0":1794230657198,"t1":1794230657199,"valueAtProbe":"，"}
+[probe] beforeinput k=0 key= dp=0 comp=0 tgt=TEXTAREA.- data="。" val="，"
+[ios-ime] beforeinput {"inputType":"insertText","data":"。","composed":true,"isComposing":false,"value":"，"}
+[probe] input k=0 key= dp=0 comp=0 tgt=TEXTAREA.- data="。" val="，。"
+[ios-ime] input {"inputType":"insertText","data":"。","composed":true,"value":"，。","dt":10}
+[probe] keyup k=0 key=。 dp=0 comp=0 tgt=TEXTAREA.- data="" val="，。"
+[ios-ime] keyup {"t":1794230657225,"keyCode":0,"key":"。","value":"，。","len":2}
+[ios-ime] deliver {"baseline":"，","current":"，。","delta":"。","emissions":[],"branch":"A","payload":"。","via":"keyup-defer","armed":false}
+[ios-ime] clear {"reason":"close-window"}
+
+# flush reason=tick ua="Mozilla/5.0 (iPad; CPU OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/27.2 Mobile/15E148 Safari/604.1" bytes=2022
+[probe] keydown k=229 key=“ dp=0 comp=0 tgt=TEXTAREA.- data="" val=""
+[ios-ime] keydown {"t":1794230669448,"keyCode":229,"key":"“","value":"","len":0}
+[ios-ime] pending {"baseline":"","len":0,"keptEarliest":false,"rearmed":false}
+[ios-ime] probe {"t0":1794230669448,"t1":1794230669449,"valueAtProbe":""}
+[probe] beforeinput k=0 key= dp=0 comp=0 tgt=TEXTAREA.- data="“" val=""
+[ios-ime] beforeinput {"inputType":"insertText","data":"“","composed":true,"isComposing":false,"value":""}
+[probe] input k=0 key= dp=0 comp=0 tgt=TEXTAREA.- data="“" val="“"
+[ios-ime] input {"inputType":"insertText","data":"“","composed":true,"value":"“","dt":23}
+[probe] keyup k=0 key=“ dp=0 comp=0 tgt=TEXTAREA.- data="" val="“"
+[ios-ime] keyup {"t":1794230669479,"keyCode":0,"key":"“","value":"“","len":1}
+[ios-ime] deliver {"baseline":"","current":"“","delta":"“","emissions":[],"branch":"A","payload":"“","via":"keyup-defer","armed":false}
+[ios-ime] clear {"reason":"close-window"}
+[probe] keydown k=229 key=” dp=0 comp=0 tgt=TEXTAREA.- data="" val="“"
+[ios-ime] keydown {"t":1794230671775,"keyCode":229,"key":"”","value":"“","len":1}
+[ios-ime] pending {"baseline":"“","len":1,"keptEarliest":false,"rearmed":false}
+[ios-ime] probe {"t0":1794230671775,"t1":1794230671776,"valueAtProbe":"“"}
+[probe] beforeinput k=0 key= dp=0 comp=0 tgt=TEXTAREA.- data="”" val="“"
+[ios-ime] beforeinput {"inputType":"insertText","data":"”","composed":true,"isComposing":false,"value":"“"}
+[probe] input k=0 key= dp=0 comp=0 tgt=TEXTAREA.- data="”" val="“”"
+[ios-ime] input {"inputType":"insertText","data":"”","composed":true,"value":"“”","dt":19}
+[probe] keyup k=0 key=” dp=0 comp=0 tgt=TEXTAREA.- data="" val="“”"
+[ios-ime] keyup {"t":1794230671800,"keyCode":0,"key":"”","value":"“”","len":2}
+[ios-ime] deliver {"baseline":"“","current":"“”","delta":"”","emissions":[],"branch":"A","payload":"”","via":"keyup-defer","armed":false}
+[ios-ime] clear {"reason":"close-window"}
+
+# flush reason=hidden ua="Mozilla/5.0 (iPad; CPU OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/27.2 Mobile/15E148 Safari/604.1" bytes=5937
+[probe] keydown k=229 key=n dp=0 comp=0 tgt=TEXTAREA.- data="" val=""
+[ios-ime] keydown {"t":1794230679404,"keyCode":229,"key":"n","value":"","len":0}
+[ios-ime] pending {"baseline":"","len":0,"keptEarliest":false,"rearmed":false}
+[ios-ime] probe {"t0":1794230679404,"t1":1794230679405,"valueAtProbe":""}
+[probe] compositionstart k=0 key= dp=0 comp=0 tgt=TEXTAREA.- data="" val=""
+[ios-ime] compositionstart {"value":""}
+[ios-ime] clear {"reason":"compositionstart"}
+[probe] compositionupdate k=0 key= dp=0 comp=0 tgt=TEXTAREA.- data="n" val=""
+[probe] beforeinput k=0 key= dp=0 comp=1 tgt=TEXTAREA.- data="n" val=""
+[ios-ime] beforeinput {"inputType":"insertCompositionText","data":"n","composed":true,"isComposing":true,"value":""}
+[probe] input k=0 key= dp=0 comp=1 tgt=TEXTAREA.- data="n" val="n"
+[ios-ime] input {"inputType":"insertCompositionText","data":"n","composed":true,"value":"n","dt":15}
+[probe] keyup k=78 key=n dp=0 comp=1 tgt=TEXTAREA.- data="" val="n"
+[ios-ime] keyup {"t":1794230679431,"keyCode":78,"key":"n","value":"n","len":1}
+[probe] keydown k=229 key=i dp=0 comp=1 tgt=TEXTAREA.- data="" val="n"
+[ios-ime] keydown {"t":1794230679686,"keyCode":229,"key":"i","value":"n","len":1}
+[ios-ime] probe {"t0":1794230679686,"t1":1794230679686,"valueAtProbe":"n"}
+[probe] compositionupdate k=0 key= dp=0 comp=0 tgt=TEXTAREA.- data="ni" val="n"
+[probe] beforeinput k=0 key= dp=0 comp=1 tgt=TEXTAREA.- data="ni" val="n"
+[ios-ime] beforeinput {"inputType":"insertCompositionText","data":"ni","composed":true,"isComposing":true,"value":"n"}
+[probe] input k=0 key= dp=0 comp=1 tgt=TEXTAREA.- data="ni" val="ni"
+[ios-ime] input {"inputType":"insertCompositionText","data":"ni","composed":true,"value":"ni","dt":8}
+[probe] keyup k=73 key=i dp=0 comp=1 tgt=TEXTAREA.- data="" val="ni"
+[ios-ime] keyup {"t":1794230679700,"keyCode":73,"key":"i","value":"ni","len":2}
+[probe] keydown k=229 key=h dp=0 comp=1 tgt=TEXTAREA.- data="" val="ni"
+[ios-ime] keydown {"t":1794230679969,"keyCode":229,"key":"h","value":"ni","len":2}
+[ios-ime] probe {"t0":1794230679969,"t1":1794230679969,"valueAtProbe":"ni"}
+[probe] compositionupdate k=0 key= dp=0 comp=0 tgt=TEXTAREA.- data="ni h" val="ni"
+[probe] beforeinput k=0 key= dp=0 comp=1 tgt=TEXTAREA.- data="ni h" val="ni"
+[ios-ime] beforeinput {"inputType":"insertCompositionText","data":"ni h","composed":true,"isComposing":true,"value":"ni"}
+[probe] input k=0 key= dp=0 comp=1 tgt=TEXTAREA.- data="ni h" val="ni h"
+[ios-ime] input {"inputType":"insertCompositionText","data":"ni h","composed":true,"value":"ni h","dt":9}
+[probe] keyup k=72 key=h dp=0 comp=1 tgt=TEXTAREA.- data="" val="ni h"
+[ios-ime] keyup {"t":1794230679984,"keyCode":72,"key":"h","value":"ni h","len":4}
+[probe] keydown k=229 key=a dp=0 comp=1 tgt=TEXTAREA.- data="" val="ni h"
+[ios-ime] keydown {"t":1794230680454,"keyCode":229,"key":"a","value":"ni h","len":4}
+[ios-ime] probe {"t0":1794230680454,"t1":1794230680454,"valueAtProbe":"ni h"}
+[probe] compositionupdate k=0 key= dp=0 comp=0 tgt=TEXTAREA.- data="ni ha" val="ni h"
+[probe] beforeinput k=0 key= dp=0 comp=1 tgt=TEXTAREA.- data="ni ha" val="ni h"
+[ios-ime] beforeinput {"inputType":"insertCompositionText","data":"ni ha","composed":true,"isComposing":true,"value":"ni h"}
+[probe] input k=0 key= dp=0 comp=1 tgt=TEXTAREA.- data="ni ha" val="ni ha"
+[ios-ime] input {"inputType":"insertCompositionText","data":"ni ha","composed":true,"value":"ni ha","dt":12}
+[probe] keyup k=65 key=a dp=0 comp=1 tgt=TEXTAREA.- data="" val="ni ha"
+[ios-ime] keyup {"t":1794230680474,"keyCode":65,"key":"a","value":"ni ha","len":5}
+[probe] keydown k=229 key=o dp=0 comp=1 tgt=TEXTAREA.- data="" val="ni ha"
+[ios-ime] keydown {"t":1794230681010,"keyCode":229,"key":"o","value":"ni ha","len":5}
+[ios-ime] probe {"t0":1794230681010,"t1":1794230681010,"valueAtProbe":"ni ha"}
+[probe] compositionupdate k=0 key= dp=0 comp=0 tgt=TEXTAREA.- data="ni hao" val="ni ha"
+[probe] beforeinput k=0 key= dp=0 comp=1 tgt=TEXTAREA.- data="ni hao" val="ni ha"
+[ios-ime] beforeinput {"inputType":"insertCompositionText","data":"ni hao","composed":true,"isComposing":true,"value":"ni ha"}
+[probe] input k=0 key= dp=0 comp=1 tgt=TEXTAREA.- data="ni hao" val="ni hao"
+[ios-ime] input {"inputType":"insertCompositionText","data":"ni hao","composed":true,"value":"ni hao","dt":9}
+[probe] keyup k=79 key=o dp=0 comp=1 tgt=TEXTAREA.- data="" val="ni hao"
+[ios-ime] keyup {"t":1794230681024,"keyCode":79,"key":"o","value":"ni hao","len":6}
+[probe] compositionupdate k=0 key= dp=0 comp=0 tgt=TEXTAREA.- data="你好" val="ni hao"
+[probe] beforeinput k=0 key= dp=0 comp=1 tgt=TEXTAREA.- data="你好" val="ni hao"
+[ios-ime] beforeinput {"inputType":"insertCompositionText","data":"你好","composed":true,"isComposing":true,"value":"ni hao"}
+[probe] input k=0 key= dp=0 comp=1 tgt=TEXTAREA.- data="你好" val="你好"
+[ios-ime] input {"inputType":"insertCompositionText","data":"你好","composed":true,"value":"你好","dt":634}
+[probe] beforeinput k=0 key= dp=0 comp=1 tgt=TEXTAREA.- data="" val="你好"
+[ios-ime] beforeinput {"inputType":"deleteCompositionText","data":null,"composed":true,"isComposing":true,"value":"你好"}
+[probe] input k=0 key= dp=0 comp=1 tgt=TEXTAREA.- data="" val=""
+[ios-ime] input {"inputType":"deleteCompositionText","data":null,"composed":true,"value":"","dt":636}
+[probe] beforeinput k=0 key= dp=0 comp=1 tgt=TEXTAREA.- data="你好" val=""
+[ios-ime] beforeinput {"inputType":"insertFromComposition","data":"你好","composed":true,"isComposing":true,"value":""}
+[probe] input k=0 key= dp=0 comp=1 tgt=TEXTAREA.- data="你好" val="你好"
+[ios-ime] input {"inputType":"insertFromComposition","data":"你好","composed":true,"value":"你好","dt":636}
+[probe] compositionend k=0 key= dp=0 comp=0 tgt=TEXTAREA.- data="你好" val="你好"
+[ios-ime] compositionend {"data":"你好","value":"你好"}
+
+# flush reason=tick ua="Mozilla/5.0 (iPad; CPU OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/27.2 Mobile/15E148 Safari/604.1" bytes=233
+[probe] keydown k=16 key=…hift dp=0 comp=0 tgt=TEXTAREA.- data="" val=""
+[ios-ime] keydown {"t":1794230692234,"keyCode":16,"key":"Shift","value":"","len":0}
+[ios-ime] probe {"t0":1794230692234,"t1":1794230692242,"valueAtProbe":""}
+
+# flush reason=tick ua="Mozilla/5.0 (iPad; CPU OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/27.2 Mobile/15E148 Safari/604.1" bytes=2592
+[probe] keydown k=229 key=？ dp=0 comp=0 tgt=TEXTAREA.- data="" val=""
+[ios-ime] keydown {"t":1794230693611,"keyCode":229,"key":"？","value":"","len":0}
+[ios-ime] pending {"baseline":"","len":0,"keptEarliest":false,"rearmed":false}
+[ios-ime] probe {"t0":1794230693611,"t1":1794230693612,"valueAtProbe":""}
+[probe] beforeinput k=0 key= dp=0 comp=0 tgt=TEXTAREA.- data="？" val=""
+[ios-ime] beforeinput {"inputType":"insertText","data":"？","composed":true,"isComposing":false,"value":""}
+[probe] input k=0 key= dp=0 comp=0 tgt=TEXTAREA.- data="？" val="？"
+[ios-ime] input {"inputType":"insertText","data":"？","composed":true,"value":"？","dt":71}
+[probe] keyup k=0 key=？ dp=0 comp=0 tgt=TEXTAREA.- data="" val="？"
+[ios-ime] keyup {"t":1794230693692,"keyCode":0,"key":"？","value":"？","len":1}
+[ios-ime] deliver {"baseline":"","current":"？","delta":"？","emissions":[],"branch":"A","payload":"？","via":"keyup-defer","armed":false}
+[ios-ime] clear {"reason":"close-window"}
+[probe] keyup k=16 key=…hift dp=0 comp=0 tgt=TEXTAREA.- data="" val="？"
+[ios-ime] keyup {"t":1794230693693,"keyCode":16,"key":"Shift","value":"？","len":1}
+[probe] keydown k=16 key=…hift dp=0 comp=0 tgt=TEXTAREA.- data="" val="？"
+[ios-ime] keydown {"t":1794230696257,"keyCode":16,"key":"Shift","value":"？","len":1}
+[ios-ime] probe {"t0":1794230696257,"t1":1794230696258,"valueAtProbe":"？"}
+[probe] keydown k=229 key=！ dp=0 comp=0 tgt=TEXTAREA.- data="" val="？"
+[ios-ime] keydown {"t":1794230697097,"keyCode":229,"key":"！","value":"？","len":1}
+[ios-ime] pending {"baseline":"？","len":1,"keptEarliest":false,"rearmed":false}
+[ios-ime] probe {"t0":1794230697097,"t1":1794230697097,"valueAtProbe":"？"}
+[probe] beforeinput k=0 key= dp=0 comp=0 tgt=TEXTAREA.- data="！" val="？"
+[ios-ime] beforeinput {"inputType":"insertText","data":"！","composed":true,"isComposing":false,"value":"？"}
+[probe] input k=0 key= dp=0 comp=0 tgt=TEXTAREA.- data="！" val="？！"
+[ios-ime] input {"inputType":"insertText","data":"！","composed":true,"value":"？！","dt":23}
+[probe] keyup k=0 key=！ dp=0 comp=0 tgt=TEXTAREA.- data="" val="？！"
+[ios-ime] keyup {"t":1794230697125,"keyCode":0,"key":"！","value":"？！","len":2}
+[ios-ime] deliver {"baseline":"？","current":"？！","delta":"！","emissions":[],"branch":"A","payload":"！","via":"keyup-defer","armed":false}
+[ios-ime] clear {"reason":"close-window"}
+[probe] keyup k=16 key=…hift dp=0 comp=0 tgt=TEXTAREA.- data="" val="？！"
+[ios-ime] keyup {"t":1794230697130,"keyCode":16,"key":"Shift","value":"？！","len":2}
+
+# flush reason=tick ua="Mozilla/5.0 (iPad; CPU OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/27.2 Mobile/15E148 Safari/604.1" bytes=84
+[quick-keys] tap=esc
+[quick-keys] tap=tab
+[quick-keys] tap=up
+[quick-keys] tap=down
+
+# flush reason=tick ua="Mozilla/5.0 (iPad; CPU OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/27.2 Mobile/15E148 Safari/604.1" bytes=24
+[quick-keys] tap=ctrl-c
+
+# flush reason=hidden ua="Mozilla/5.0 (iPad; CPU OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/27.2 Mobile/15E148 Safari/604.1" bytes=230
+[probe] keydown k=13 key=…nter dp=0 comp=0 tgt=TEXTAREA.- data="" val=""
+[probe] keyup k=13 key=…nter dp=0 comp=0 tgt=TEXTAREA.- data="" val=""
+[ios-ime] keyup {"t":1794230722838,"keyCode":13,"key":"Enter","value":"","len":0}
+
+# flush reason=tick ua="Mozilla/5.0 (iPad; CPU OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/27.2 Mobile/15E148 Safari/604.1" bytes=462
+[probe] keydown k=8 key=…pace dp=0 comp=0 tgt=TEXTAREA.- data="" val=""
+[probe] keyup k=8 key=…pace dp=0 comp=0 tgt=TEXTAREA.- data="" val=""
+[ios-ime] keyup {"t":1794230746621,"keyCode":8,"key":"Backspace","value":"","len":0}
+[probe] keydown k=8 key=…pace dp=0 comp=0 tgt=TEXTAREA.- data="" val=""
+[probe] keyup k=8 key=…pace dp=0 comp=0 tgt=TEXTAREA.- data="" val=""
+[ios-ime] keyup {"t":1794230746845,"keyCode":8,"key":"Backspace","value":"","len":0}
+
