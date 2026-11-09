@@ -4643,6 +4643,31 @@
         function initTerminalTouchScroll() {
             const container = document.getElementById("terminal-container");
             if (!container) return;
+            // Send a touch drag through xterm's own wheel pipeline when the
+            // running TUI owns the viewport. xterm turns these synthetic wheel
+            // events into the app's negotiated mouse protocol (SGR wheel
+            // reports for opencode/pi), or into its alt-screen arrow-key
+            // fallback when the app did not request mouse tracking. The bytes
+            // then travel through term.onData exactly like a hardware wheel,
+            // so the app redraws its own scroll view in a single coherent
+            // frame instead of the host moving cells underneath it.
+            const dispatchTerminalWheel = (term, lines, clientX, clientY) => {
+                if (!term || !term.element || typeof term.element.dispatchEvent !== "function") return;
+                if (typeof WheelEvent !== "function") return;
+                const direction = lines > 0 ? 1 : -1;
+                for (let i = 0; i < Math.abs(lines); i++) {
+                    term.element.dispatchEvent(new WheelEvent("wheel", {
+                        bubbles: true,
+                        cancelable: true,
+                        clientX,
+                        clientY,
+                        deltaY: direction,
+                        // DOM_DELTA_LINE = 1: one synthesized event means one
+                        // line, matching the linePx-to-lines conversion below.
+                        deltaMode: 1,
+                    }));
+                }
+            };
             container.addEventListener("touchstart", (e) => {
                 if (e.touches.length === 1) {
                     activeTouchId = e.touches[0].identifier;
@@ -4675,7 +4700,20 @@
                 touchScrollRemainderPx += dy;
                 const lines = Math.trunc(touchScrollRemainderPx / linePx);
                 if (lines !== 0) {
-                    term.scrollLines(lines); // content follows the finger
+                    // Normal-buffer, non-mouse TUIs (mcode/kimi) still let the
+                    // host scroll its ordered xterm scrollback. Alt-screen or
+                    // mouse-reporting TUIs (opencode/pi) must consume the
+                    // gesture themselves: term.scrollLines() only moves the
+                    // host grid while their differential renderer believes
+                    // those cells are unchanged, producing mixed frames.
+                    const mouseTracking = !!(term.modes && term.modes.mouseTrackingMode
+                        && term.modes.mouseTrackingMode !== "none");
+                    const bufferType = term.buffer && term.buffer.active && term.buffer.active.type;
+                    if (mouseTracking || bufferType === "alternate") {
+                        dispatchTerminalWheel(term, lines, touch.clientX, touch.clientY);
+                    } else {
+                        term.scrollLines(lines); // content follows the finger
+                    }
                     touchScrollRemainderPx -= lines * linePx;
                 }
             }, { passive: false });

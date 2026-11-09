@@ -73,7 +73,7 @@ const SLICED_STATE = (() => {
 
 const factory = new Function("deps", `
   "use strict";
-  const { document, getActiveTerminalSession } = deps;
+  const { document, getActiveTerminalSession, WheelEvent } = deps;
   // Sliced from the shipped script (see SLICED_STATE above):
   ${SLICED_STATE}
   ${sliceBlock(inlineScript(indexSource), "function initTerminalTouchScroll")}
@@ -104,23 +104,36 @@ function touchEvent({ touches = [], changedTouches = [] } = {}) {
   };
 }
 
-function touchHarness({ withSession = true } = {}) {
+class FakeWheelEvent {
+  constructor(type, init = {}) {
+    this.type = type;
+    Object.assign(this, init);
+  }
+}
+
+function touchHarness({ withSession = true, termOverrides = {} } = {}) {
   const container = makeContainer();
   const scrollCalls = [];
+  const wheelEvents = [];
   let session = withSession ? {
     term: {
       options: { fontSize: 16, lineHeight: 1.2 }, // linePx = 19.2
+      modes: { mouseTrackingMode: "none" },
+      buffer: { active: { type: "normal" } },
+      element: { dispatchEvent(event) { wheelEvents.push(event); return true; } },
       scrollLines(n) { scrollCalls.push(n); },
+      ...termOverrides,
     },
   } : null;
   const api = factory({
     document: { getElementById: (id) => (id === "terminal-container" ? container : null) },
     getActiveTerminalSession: () => session,
+    WheelEvent: FakeWheelEvent,
   });
   api.initTerminalTouchScroll();
   const fire = (type, ev) => container.listeners.get(type)[0].fn(ev);
   return {
-    api, container, scrollCalls, fire,
+    api, container, scrollCalls, wheelEvents, fire,
     setSession: (s) => { session = s; },
     registration: (type) => container.listeners.get(type).map((l) => l.opts),
   };
@@ -133,6 +146,46 @@ function assertSingleRegistration(h, t) {
     assert.equal(h.container.listeners.get(type).length, 1, `${type}: exactly one delegated listener — a double init must be visible`);
   }
 }
+
+// --- issue #117: viewport ownership -----------------------------------------
+
+test("issue #117: an alt-screen mouse-reporting TUI receives xterm wheel events instead of host scrollLines", () => {
+  const h = touchHarness({ termOverrides: { modes: { mouseTrackingMode: "any" }, buffer: { active: { type: "alternate" } } } });
+  h.fire("touchstart", touchEvent({ touches: [{ identifier: 11, clientX: 44, clientY: 300 }] }));
+  // Finger DOWN: content follows the finger toward older content. xterm's
+  // wheel-up report has deltaY < 0.
+  h.fire("touchmove", touchEvent({ touches: [{ identifier: 11, clientX: 44, clientY: 300 + LINE_PX + 1 }] }));
+  assert.deepEqual(h.scrollCalls, [], "the host must not move grid cells underneath an app-owned viewport");
+  assert.equal(h.wheelEvents.length, 1, "one line of finger travel dispatches one normalized wheel event");
+  assert.equal(h.wheelEvents[0].type, "wheel");
+  assert.equal(h.wheelEvents[0].deltaY, -1, "a downward drag maps to xterm wheel-up");
+  assert.equal(h.wheelEvents[0].deltaMode, 1, "line delta mode keeps one event equal to one line");
+  assert.equal(h.wheelEvents[0].clientX, 44);
+  assert.ok(h.wheelEvents[0].clientY > 300, "the touch coordinate follows the event into xterm's mouse service");
+
+  // Finger UP: reveal newer content via wheel-down, still without touching
+  // the host buffer.
+  h.fire("touchmove", touchEvent({ touches: [{ identifier: 11, clientX: 44, clientY: 300 + LINE_PX + 1 - (LINE_PX * 2 + 2) }] }));
+  assert.deepEqual(h.scrollCalls, []);
+  assert.equal(h.wheelEvents.length, 3, "two more lines dispatch two more wheel events");
+  assert.ok(h.wheelEvents.slice(1).every((event) => event.deltaY === 1), "upward finger maps to wheel-down");
+});
+
+test("issue #117: alt-screen without mouse tracking also uses the wheel path, never host scrollLines", () => {
+  const h = touchHarness({ termOverrides: { modes: { mouseTrackingMode: "none" }, buffer: { active: { type: "alternate" } } } });
+  h.fire("touchstart", touchEvent({ touches: [{ identifier: 12, clientY: 100 }] }));
+  h.fire("touchmove", touchEvent({ touches: [{ identifier: 12, clientY: 100 - LINE_PX }] }));
+  assert.deepEqual(h.scrollCalls, [], "alt-screen ydisp has no scrollback to move; host scrollLines is a no-op at best and a mixed-frame risk at worst");
+  assert.equal(h.wheelEvents.length, 1, "xterm's own fallback decides how an alt-screen wheel is reported");
+});
+
+test("issue #117: normal-buffer non-mouse TUIs (mcode/kimi) keep using host scrollback", () => {
+  const h = touchHarness();
+  h.fire("touchstart", touchEvent({ touches: [{ identifier: 13, clientY: 100 }] }));
+  h.fire("touchmove", touchEvent({ touches: [{ identifier: 13, clientY: 100 - LINE_PX }] }));
+  assert.deepEqual(h.scrollCalls, [1], "an upward finger reveals newer content through the ordered xterm scrollback");
+  assert.deepEqual(h.wheelEvents, [], "there is no app-owned viewport to receive mouse reports");
+});
 
 // --- §5.6-1 cases ------------------------------------------------------------
 
