@@ -5400,24 +5400,38 @@
         // caret in the MIDDLE of the line leaves xterm appending at the end
         // while the textarea keeps the text in the middle; the next 229 diff
         // then deletes the wrong tail (B-1).
+        function iosImeReconcileComposition(session) {
+            if (!session.term) { session.iosImeCompositionPrefix = null; return; }
+            if (session.iosImeComposing) return;   // a NEW composition owns the prefix; its own end will reconcile it
+            const prefix = session.iosImeCompositionPrefix;
+            if (typeof prefix !== "string") return;
+            if (session.iosImeTermText == null || session.iosImeTermText.length < prefix.length) {
+                session.iosImeCompositionPrefix = null;   // unaligned: never rewrite blind
+                return;
+            }
+            // A next 229 tap may already have opened a window (user input can
+            // beat the 0 ms timers). The textarea has moved past the window's
+            // baseline, so the correction targets THAT baseline; the window's
+            // own flush then applies the tap delta on top of it.
+            const current = session.iosImePending ? session.iosImePending.baseline : session.iosImeSeen;
+            if (typeof current !== "string") { session.iosImeCompositionPrefix = null; return; }
+            const baseline = session.iosImeTermText.slice(prefix.length);
+            const payload = iosImeReconcileBytes(baseline, current);
+            session.iosImeCompositionPrefix = null;
+            if (!payload) {
+                session.iosImeTermText = prefix + current;   // already in sync; anchor the model
+                return;
+            }
+            if (iosImeDebugEnabled()) iosImeLog("reconcile", { kind: "composition", baseline: baseline, current: current, delta: payload });
+            const sent = iosImeSendPayload(session, payload);
+            session.iosImeTermText = sent ? prefix + current : null;
+        }
+
         function iosImeScheduleCompositionReconcile(session) {
             if (session.iosImeReconcileTimer) { clearTimeout(session.iosImeReconcileTimer); session.iosImeReconcileTimer = null; }
             session.iosImeReconcileTimer = setTimeout(function iosImeCompositionReconcile() {
                 session.iosImeReconcileTimer = null;
-                if (!session.term) return;
-                if (session.iosImePending || session.iosImeComposing) return;   // a newer writer owns the diff
-                if (session.iosImeTermText == null) return;
-                const prefix = session.iosImeCompositionPrefix;
-                session.iosImeCompositionPrefix = null;
-                if (typeof prefix !== "string" || session.iosImeTermText.length < prefix.length) return;   // unaligned: never rewrite blind
-                const current = session.iosImeSeen;
-                if (typeof current !== "string") return;
-                const baseline = session.iosImeTermText.slice(prefix.length);
-                const payload = iosImeReconcileBytes(baseline, current);
-                if (!payload) return;
-                if (iosImeDebugEnabled()) iosImeLog("reconcile", { kind: "composition", baseline: baseline, current: current, delta: payload });
-                const sent = iosImeSendPayload(session, payload);
-                session.iosImeTermText = sent ? prefix + current : null;
+                iosImeReconcileComposition(session);   // fallback when xterm sends nothing
             }, 0);
         }
 
@@ -5808,12 +5822,24 @@
                 try { session.iosImeDataDisposable.dispose(); } catch (e) { }
             }
             session.iosImeDataDisposable = session.term.onData(function iosImeWatermark(data) {
-                // The terminal model follows xterm's OWN sends only while no
+                // A composition send is the one onData that belongs to the
+                // reconcile, not to a 229 window. It can arrive AFTER the user
+                // already started the next tap (user input outranks 0 ms
+                // timers), so reconcile HERE, synchronously: the app's
+                // forwarder has already sent this chunk, and the correction
+                // targets the open window's baseline when one exists. Returning
+                // here also keeps this chunk OUT of the window's emissions --
+                // it is the composition's delivery, not the tap's own.
+                if (!session.iosImeSending && session.iosImeCompositionPrefix !== null && !session.iosImeComposing) {
+                    session.iosImeTermText = iosImeApplyBytes(session.iosImeTermText, data);
+                    iosImeReconcileComposition(session);
+                    return;
+                }
+                // The terminal model follows xterm's OTHER sends only while no
                 // 229 window is open: inside a window the flush is the single
                 // writer and sets the model to the textarea value (the
                 // watermark's data there is the branch-B/C suppress target,
-                // not an append). Composition sends land here because
-                // compositionstart already closed any window.
+                // not an append).
                 if (!session.iosImeSending && !session.iosImePending) {
                     session.iosImeTermText = iosImeApplyBytes(session.iosImeTermText, data);
                 }

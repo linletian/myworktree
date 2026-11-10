@@ -385,6 +385,29 @@ test("ios-ime 3: composition never intercepted — taps are inert and compositio
   h3.textarea.value = "z";
   h3.input({ inputType: "deleteContentBackward" });
   assert.deepEqual(h3.term.inputCalls, [], "an unaligned model is not deleted blind");
+
+  // stage six (B-1 race): the next 229 tap can be processed BEFORE xterm's
+  // composition-send timer (user input has priority over 0 ms timers). The
+  // composition send then lands while the tap's window is open; it must
+  // correct the terminal against the window's baseline instead of being
+  // recorded as the tap's own delivery (which would skip the correction and
+  // leave the pair before the composed text).
+  const h4 = makeHarness({ debug: true });
+  h4.textarea.value = "“”";
+  h4.bind();                             // model == textarea
+  h4.keydown(229);                       // the composition's opening key
+  h4.compositionstart();
+  h4.textarea.value = "“你好”";            // caret between the quotes
+  h4.input({ inputType: "insertCompositionText", data: "你好" });
+  h4.compositionend("你好");               // queues the reconcile fallback
+  h4.keydown(229);                       // RACE: next tap before that timer
+  h4.textarea.value = "“你好1”";
+  h4.input();
+  h4.keyup();
+  h4.fireWatermark("你好");               // xterm's delayed composition send
+  h4.runAllZero();                       // composition fallback + keyup flush
+  assert.deepEqual(h4.term.inputCalls, ["\x7f", "\x7f", "\x7f", "你", "好", "”", "\x7f", "1", "”"],
+    "the composition send is corrected against the tap baseline, then the tap delta lands");
 });
 
 test("ios-ime 4: multi-tap keeps the EARLIEST baseline and re-arms every 229", () => {

@@ -239,7 +239,8 @@ T5 证据暴露了两类发生在 229 窗口**之外**的改写，原状态机�
    - blur 置 UNKNOWN，下一次 229 建窗或 compositionstart 从 textarea 重新同步；
    - 外部重写（^C/ETX clear）在建窗时把模型同步到 live 值。
 2. **无 keydown 的删除**（B-2/B-6）：候选栏点选只发 `deleteContentBackward`，窗口已关。`input` 处理器在 `!pending && !composing && 无 8/46/13 keydown` 时，先确认**模型仍以 textarea 的上一值为结尾**（被删字符确实已投递），再按 textarea 的 previous→current 发**精确多 DEL + 存活后缀**；模型对不齐时不动，宁可少修也不删掉未投递文本。窗口内的删除仍由 flush 的 `iosImeDeltaBytes`（纯缩短单 DEL，上游 parity）处理，二者不重叠。
-3. **compositionend 的 0ms reconcile**（B-1）：xterm 的 `_finalizeComposition` 用 `setTimeout(0)` 把合成文本**追加到终端末尾**；桥接在 compositionend 再排一个 0ms timer（FIFO 在后），此时水印已把合成文本应用到模型，`iosImeReconcileBytes` 用“DEL×removed + 后缀”把 textarea 的中间态写成终态。这是无 caret 终端上表达中间插入的唯一方式；正常末尾合成时 delta 为空，不产生任何额外字节。
+3. **composition send 触发的 reconcile**（B-1）：xterm 的 `_finalizeComposition` 用 `setTimeout(0)` 把合成文本**追加到终端末尾**。桥接的 onData 水印在**收到这段合成 send 的当下**把它应用到模型并立即 reconcile（`iosImeReconcileBytes` 用“DEL×removed + 后缀”把 textarea 的中间态写成终态）；compositionend 另排一个 0ms timer 只作**无 send 时的兜底**。这样既不依赖 timer 顺序，也不会把合成 send 记进 229 窗口的 emissions。
+   - **输入优先于 0ms timer**：下一次 229 tap 可能先于合成 send 的 timer 到达并已开窗。此时 correction 的目标是**该窗口的 baseline**（textarea 已越过它），窗口自己的 flush 再把 tap 的 delta 叠上去；合成 send 仍然不记 emissions。真机首轮复验中“成对引号跑到合成文本前面”即此竞态，已由该顺序与场景 3 的 stage six 钉住。
    - **前缀锚定**：模型是 textarea 的**后缀模型**——English/emoji/paste 由 xterm 直接投递、不进 textarea。compositionstart 记录“模型中位于 textarea 值之前的前缀”，reconcile 只重写前缀之后的后缀；模型与 textarea 对不齐（`mirror` 不以 textarea 值结尾）时**放弃改写**，宁可少修也不删掉 textarea 看不见的已投递文本。
 4. **不变量**：所有发送仍走逐码点 + `iosImeSending` 重入旗标；term 中途死亡时发送返回 false，模型置 UNKNOWN，不虚报同步。**验证等级**：Node 切片场景（scenario 3/11）+ Go 包裹；**本轮未上真机**，设备侧最小复验见 `T5-FINDINGS.md` §七。
 5. **已知边界**：若删除发生在 229 窗口尚未 flush、且 xterm 已自行投递该字符的极窄窗口内，本次 `input` 因 pending 而跳过 reconcile，由窗口 flush 的 emissions 分支裁决；与既有窗口内语义一致，未新增路径。
