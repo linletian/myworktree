@@ -32,17 +32,18 @@
 ## 安全核验
 | 项 | 结果 |
 | --- | --- |
-| `auth.json` 是否被改写 | **未改写**，mtime 仍为 `17:11:33`、长度 32、前缀 `<redacted>…` ⇒ **token 未重新生成** |
+| `auth.json` 是否被改写 | **未改写**，mtime 仍为 `17:11:33`、长度 32、前缀已脱敏 ⇒ **token 未重新生成** |
 | 已入库证据中 token 命中 | **0**（`docs/`、`CHANGELOG.md`、`internal/` 全扫） |
 | `ps` 中 token 明文 | **0 行** |
 | 门户注册 | 仅生产的 `4179735-*`／`4179911-*`＋`portal.json`；**沙箱痕迹 0**（全程 `-portal-port 0`） |
 | 生产端口/进程 | `:40751` HTTP 200，pid 4179735 存活 |
-| 仓库状态 | `git status` 仅剩两个**与本次无关的既有未跟踪文件**；`git diff --check` 干净；changelog 契约测试 `ok` |
+| 分支内敏感信息 | 私网 IP / 主机名 / 用户名 / token 前缀已全分支等长替换，`MANIFEST` 重算，旧提交对象已清除（见 `REDACTION.md`） |
+| 仓库状态 | `git status` 仅剩**一个与本次无关**的未跟踪文件（OOM 取证报告，属 #111/#114）；本 issue 的采集 SOP 已入库为 `COLLECT-SNIPPETS.md`；`git diff --check` 干净；changelog 契约测试 `ok` |
 
-## 遗留风险（不属本次会话，建议单独立单）
+## 遗留风险（不属本次会话，已立单 **#153**）
 `grep -rlF <token> /tmp` 仍命中 **9 个文件**，均非本次产物，最大 2.6 MB：
 `/tmp/mw-tty6.log`（**写入者＝生产进程 4179735**）、`/tmp/mw-tty5.log`、`/tmp/mw-opendsh3.log`、`/tmp/issue117/*`、`/tmp/mypserve.log`、`/tmp/p3-app-47231.log`、`/tmp/sess.jsonl`、`/tmp/sessread/6b9a.jsonl`。
 
-⇒ **产品级密钥卫生问题**：token 会落进 tty 日志明文，且用 `-auth <token>` 启动时进 argv（同机所有用户可见）。建议：日志脱敏 ＋ 支持从环境变量/文件读 token 而非命令行。**因涉及生产数据，本次未代删。**
+⇒ **产品级密钥卫生问题**：token 会落进 tty 日志明文，且用 `-auth <token>` 启动时进 argv（同机所有用户可见）。建议：日志脱敏 ＋ 支持从环境变量/文件读 token 而非命令行。**因涉及生产数据，本次未代删。已立单 #153。**
 
 **另建议**：本次沙箱曾以 `-auth` 把该 token 带在命令行数小时，虽现已清空 `ps`，稳妥起见可考虑**轮换全局 token**（依你此前指示，我未执行）。

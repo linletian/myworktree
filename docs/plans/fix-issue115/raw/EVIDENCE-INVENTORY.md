@@ -1,33 +1,98 @@
 # 证据清单（EVIDENCE-INVENTORY）
 
-所有文件均在 `docs/plans/fix-issue115/raw/`，校验用 `md5sum -c MANIFEST.md5`（在仓库根目录执行）。
-**证据里不含 token**（已核：token 出现次数＝0）。
+所有文件均在 `docs/plans/fix-issue115/raw/`。**受校验文件 38 个 + `MANIFEST.md5` 本身**。
 
-| 文件 | 字节 | 覆盖范围 | 支撑的结论 |
-| --- | --- | --- | --- |
-| `iphone-on.capture.console.txt` | 204,728 | iPhone A 腿**全部 13 段**（自装探针起） | B-1 / B-2 / B-6 / 桥接必要性 / 分支 C / S2 / S3 |
-| `iphone-off.capture.console.txt` | 54,330 | iPhone B 腿**全部 9 段** | 关桥基线（直提交全灭） |
-| `iphone-on.pty.full.bin` | 145,373 | 环缓冲**全量**输出流（含 vim alt-screen 进出） | 终端侧可见行、`?2004` 开关次数、焦点回报 |
-| `iphone-off.pty.full.bin` | 53,616 | 同上（B 腿） | 同上 |
-| `iphone-on.pty.bin` / `iphone-off.pty.bin` | 6,272 / 4,356 | 早期快照（21:00 前） | **iPad 切片的字节切点参照**（勿删） |
-| `iphone-on.visible.txt` / `iphone-off.visible.txt` | — | 净化后可见行 | 一行级硬判据（0 vs 非 0） |
-| `ipad-on/off.capture.console.txt` | 18,898 / 7,533 | iPad 段（自装探针起） | iPad 与 iPhone 同路径、无候选栏 |
-| `ipad-on/off.pty.bin`、`.visible.txt` | — | iPad 终端切片与可见行 | iPad 桥接必要性 |
-| `iphone-datapack.txt` | 4,002 | 首轮量化指标包 | 交付/到达计数 |
-| `round-index-iphone-on/off.tsv` | — | 逐轮时间戳＋按键签名 | 本索引的机读版 |
-| `s1-vim-t5.txt.saved` | 43 | vim 落盘原文 | **按腿切开 A31＋B12**（§4.3） |
-| `s1-vim-decomposition.md` | — | 上述逐字节解剖 | 同上 |
-| `s2-vim-paste-target.txt` | 86 | 粘贴靶文（5 行 4 空格） | **零缩进级联** |
-| `s2-c-s3-readout.md` | — | 三组读数＋诚实边界 | 分支 C 结案、B-3 未复现、粘贴无损（**已被下一行修正**） |
-| `e1-e2-readout.md` | — | emoji 与 autoindent 收口轮 | **B-5 emoji 通过＋⚽️ 重复**；E2 级联事实（**责任判定见下行**） |
-| `e3-paste-wrapped.raw` | 97 | 粘贴原始输入流（`printf ?2004h` ＋ `cat >` 取证） | **输入侧正证 `[200~`/`[201~` 包裹**，R5 正式关闭 |
-| `e2-vim-p2.txt` | 98 | vim `autoindent` 下粘贴落盘靶文 | **级联证据**：行首 `4/8/tab+4/tab+8/2tab+4` |
-| `iphone-e1e2.pty.bin` | 31,487 | E1/E2 轮 PTY 增量（按基线切点精确截取） | vim 屏内 `?2004h`×2／`?2004l`×3、emoji 到达、焦点回报 |
+校验（仓库根目录）：
 
-## 已知边界（不算瑕疵，但读结论必须连着读）
+```sh
+md5sum -c docs/plans/fix-issue115/raw/MANIFEST.md5
+```
 
-1. **PTY 是环形缓冲**——全量已在本清单内（145,373 / 53,616），但**缓冲区满之后旧数据会滚动丢失**，故后续任何补测须**当天回传归档**，不能"下次再取"。
-2. **控制台采集只收 `[ios-ime]` / `[probe]` / `[quick-keys]` 前缀**；页面自身其它 `console.log` 不在内。
+**脱敏**：私网 IP、主机名/用户名、token 前缀已替换为**等长占位符**（PTY 字节偏移不变），`MANIFEST.md5` 按脱敏后内容重算。映射、分支重写与校验记录见 `../REDACTION.md`。**证据中不含真实 token**（全分支扫描命中 0；完整 token 在任何提交中都未出现）。
+
+---
+
+## 一、批次与目录
+
+| 批次 | 文件 | 覆盖 |
+| --- | --- | --- |
+| 2026-11-09 iPhone **A 腿（桥接开）** | `iphone-on.capture.console.txt`（13 段）、`final-on.capture.console.txt`（拆机前 14 段，超集） | B-1 / B-2 / B-3 / B-5 / B-6 / B-8 / 分支 C / 桥接必要性 / S2 / S3 / E1 / E2 |
+| 2026-11-09 iPhone **B 腿（桥接整块编掉）** | `iphone-off.capture.console.txt`（9 段）、`final-off.capture.console.txt`（逐字节相同） | 关桥基线（直提交全灭） |
+| 2026-11-09 **iPad 26键** | `ipad-on/off.capture.console.txt` | 同路径、无符号候选栏、B-2 不可达 |
+| 2026-11-09 **F1 独立实例** `306fe8fa9254` | `final-hook-instance.capture.console.txt`、`f1-hook.pty.bin`、`f1-attribution.md` | 发送时刻 `mode=OFF` + 粘贴落点时间轴 |
+| PTY 环缓冲 | `iphone-*.pty.*.bin`、`ipad-*.pty.bin`、`iphone-e1e2.pty.bin` | 终端侧原始字节（主判据） |
+
+> **PTY 是环形缓冲**：`iphone-on.pty.full.bin`（145,373B）与拆机前的 `iphone-on.pty.final-before-hookrestart.bin`（181,408B）都是当时的全量窗口；**缓冲满后旧数据会滚动丢失**，后续补测必须当天回传归档。
+
+---
+
+## 二、文件表
+
+| 文件 | 字节 | 覆盖 / 支撑 |
+| --- | ---: | --- |
+| `e1-e2-readout.md` | 3,574 | E1 emoji 到达 + `⚽️` 双写；E2 autoindent 级联与责任排除 |
+| `e2-vim-p2.txt` | 98 | E2 落盘靶文（行首 `4/8/tab+4/tab+8/2tab+4`） |
+| `e3-paste-wrapped.raw` | 97 | **输入侧正证**：`033[200~` 在首字节、`033[201~` 在末尾，6+85+6 |
+| `e3-paste-wrapped.readout.md` | 2,715 | E3 判读 + R5/R6 闭环 |
+| `f1-attribution.md` | 3,045 | F1 发送时刻读数、PTY 模式时间轴、B-8 定责、R7 |
+| `f1-hook.pty.bin` | 9,970 | F1 实例 PTY 全量（模式时间轴可复算） |
+| `f1-vim-cascade.txt` | 98 | F1 vim 级联落盘（与 `e2-vim-p2.txt` 逐字节相同） |
+| `f2-cat-raw.txt` | 85 | F1 对照组裸文本（首字节空格、无 `033[`） |
+| `final-A-instance306fe8fa9254.pty.bin` | 9,970 | 拆机前快照；**与 `f1-hook.pty.bin` 相同** |
+| `final-B-instance227ff8642158.pty.bin` | 53,616 | 拆机前快照；**与 `iphone-off.pty.full.bin` 相同** |
+| `final-hook-instance.capture.console.txt` | 23,551 | F1 实例控制台（2 段；含 `tap=paste` + `bytes mode=OFF`） |
+| `final-off.capture.console.txt` | 54,330 | 拆机前快照；**与 `iphone-off.capture.console.txt` 相同** |
+| `final-on.capture.console.txt` | 285,376 | 拆机前快照；`iphone-on` 的超集（第 14 段为探针重装） |
+| `ipad-off.capture.console.txt` | 7,533 | iPad B 腿（仅 composition 产物 + 粘贴 URL） |
+| `ipad-off.pty.bin` | 2,166 | iPad B 腿 PTY 切片 |
+| `ipad-off.visible.txt` | 164 | iPad B 腿净化可见行（全角标点 0） |
+| `ipad-on.capture.console.txt` | 18,898 | iPad A 腿（直提交 10 键、`deleteContentBackward`=0） |
+| `ipad-on.pty.bin` | 6,218 | iPad A 腿 PTY 切片 |
+| `ipad-on.visible.txt` | 255 | iPad A 腿净化可见行（逐字同步、零野引号） |
+| `iphone-datapack.txt` | 4,002 | 首轮量化指标包 |
+| `iphone-e1e2.pty.bin` | 31,628 | E1/E2 PTY 增量：emoji 5 个全达、`⚽`×2 + `VS16`×1、`?2004h/l` |
+| `iphone-off.capture.console.txt` | 54,330 | iPhone B 腿 9 段 |
+| `iphone-off.pty.bin` | 4,356 | 21:00 早期快照（iPad 切片切点参照） |
+| `iphone-off.pty.full.bin` | 53,616 | iPhone B 腿 PTY 全量 |
+| `iphone-off.visible.txt` | 1,672 | B 腿净化可见行（`，`=0、野引号 1） |
+| `iphone-on.capture.console.txt` | 204,728 | iPhone A 腿 13 段（B-1/B-2/B-6/必要性/分支 C/S2/S3） |
+| `iphone-on.pty.bin` | 6,272 | 21:00 早期快照（同上） |
+| `iphone-on.pty.final-before-hookrestart.bin` | 181,408 | 重启钩子前的 PTY 全量（焦点回报可复算） |
+| `iphone-on.pty.full.bin` | 145,373 | A 腿 PTY 全量（vim alt-screen、`?2004`、`^[[I/O`） |
+| `iphone-on.visible.txt` | 2,679 | A 腿净化可见行（9键野引号 4 / 26键 0） |
+| `round-index-iphone-off.tsv` | 481 | B 腿逐段机读索引（见 §四 的字段边界） |
+| `round-index-iphone-on.tsv` | 650 | A 腿逐段机读索引（同上） |
+| `ROUND-INDEX.md` | 2,627 | 轮次索引与时间锚点 |
+| `s1-vim-decomposition.md` | 1,806 | `/tmp/t5.txt` 43B 按腿解剖（A31 + B12） |
+| `s1-vim-t5.txt.saved` | 43 | vim 落盘原文 |
+| `s2-c-s3-readout.md` | 2,278 | 分支 C 结案、B-3 未复现、S2 无损 |
+| `s2-vim-paste-target.txt` | 86 | S2 粘贴靶文（5 行 4 空格） |
+
+> `EVIDENCE-INVENTORY.md` 与 `MANIFEST.md5` 自身不计入上表的证据文件。
+
+---
+
+## 三、等价副本（不是独立证据）
+
+| 副本 | 与谁相同 |
+| --- | --- |
+| `final-A-instance306fe8fa9254.pty.bin` | `f1-hook.pty.bin` |
+| `final-B-instance227ff8642158.pty.bin` | `iphone-off.pty.full.bin` |
+| `final-off.capture.console.txt` | `iphone-off.capture.console.txt` |
+| `f1-vim-cascade.txt` | `e2-vim-p2.txt` |
+
+`final-on.capture.console.txt` 是 `iphone-on.capture.console.txt` 的**超集**（多第 14 段：一次探针重装），不是独立轮次。拆机前另存 `final-*` 只为“归档先于删除”。
+
+---
+
+## 四、已知边界（读结论必须连着读）
+
+1. **PTY 是环形缓冲**——全量见 `iphone-on.pty.full.bin` / `final-before-hookrestart`，但缓冲满后旧数据会滚动丢失；补测须当天回传。
+2. **控制台采集只收 `[ios-ime]` / `[probe]` / `[quick-keys]` 前缀**；页面其它 `console.log` 不在内。
 3. **B 腿无桥接埋点**（桥已被编掉）⇒ B 腿段没有桥接时间戳，先后靠 PTY 顺序与文件 mtime 锚定。
-4. **`iphone-{on,off}.pty.bin`（21:00 快照）已被 `.full.bin` 涵盖**，保留仅为 iPad 切片的字节切点参照；`/tmp` 里被替换掉的旧副本已在回收站。
-5. **一次误操作**：文档正文曾被写进 shell 反引号导致其中命令被误执行、误开一个 vim。已核查 `/tmp/t5.txt`、`/tmp/p.txt` 与 git 均无损；**残留孤儿 swap `/tmp/.p.txt.swp` 未删**（担心有活跃 vim 持有该文件）。
+4. **`iphone-{on,off}.pty.bin`（21:00 快照）已被 `.full.bin` 涵盖**，保留仅为 iPad 切片的字节切点参照。
+5. **TSV 的“按键序列”字段是近似摘要**：生成时丢了若干字符（如 `ntercatpace`），**不能当逐键证据**；以 `capture.console.txt` 为准。
+6. **焦点回报是 `cat -v` 渲染后的字面 `^[[I` / `^[[O`**，不是 `ESC[I`；用 `ESC` 去搜会得 0。
+7. **F1 的状态条文案不在采集范围**，`tap=paste` 2 次中只有 1 次产生 `bytes` 行（首次疑似 iOS 剪贴板读取在手势外被拒）。
+8. **一次误操作**：文档正文曾被写进 shell 反引号导致命令被误执行、误开一个 vim；已核查 `/tmp/t5.txt`、`/tmp/p.txt` 与 git 均无损，残留 swp 已随拆机清理。
+9. **脱敏后 md5 已重算**：与脱敏前的副本不通用；本清单与 `MANIFEST.md5` 只描述当前分支内容。

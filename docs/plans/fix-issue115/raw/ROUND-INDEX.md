@@ -30,3 +30,13 @@
 | 8 / 9 | iPhone 9键 | **S1（B 腿）**：`vi /tmp/t5.txt` → `i` → 同串 | 落盘仅 `你好“”`（12 B）＝**只有 composition 产物**（§4.3） |
 
 > **两段共用一个文件**：A 先写（vim 状态行自证 31 bytes），B 后插 ⇒ 文件＝`[B 12B][A 31B]`＝43 B，算术吻合。
+
+> **拆机前快照 `final-on.capture.console.txt` 比 `iphone-on` 多第 14 段**（一次探针重装），前 13 段逐字节不变。上表只覆盖前 13 段。
+
+## F1 轮（独立实例 `306fe8fa9254`，`raw/final-hook-instance.capture.console.txt`）
+
+| 轮 | 时刻 | 设备 | 干了什么 | 对应结论 |
+| --- | --- | --- | --- | --- |
+| 1–2 | 23:42 | iPhone | `vi /tmp/f1.txt`（`set autoindent`）INSERT 粘贴 5 行；`cat > /tmp/f2.txt` 对照粘贴 | `mode=OFF wrapped=no`；PTY 时间轴证明粘贴落点晚于 `?2004l` ⇒ **B-8 非我方缺陷**（`raw/f1-attribution.md`） |
+
+> **TSV 边界**：`round-index-*.tsv` 的“按键序列”字段在生成时丢了若干字符（如 `ntercatpace`），只能用作轮次索引，**不能当逐键证据**；逐键以 `capture.console.txt` / `probe` 行为准。
