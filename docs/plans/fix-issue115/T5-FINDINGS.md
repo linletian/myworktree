@@ -167,3 +167,4 @@ BRIDGE deliver → delta = "\x7f1”"      branch=A via=keyup-defer
 6. **astral 收缩方向**、**iPad 9键**、**F1 状态条文案** 属“未构造/未采集”，不记作“已验证”。
 7. **等价副本**：`final-A-instance306fe8fa9254.pty.bin` ≡ `f1-hook.pty.bin`；`final-B-instance227ff8642158.pty.bin` ≡ `iphone-off.pty.full.bin`；`final-off.capture.console.txt` ≡ `iphone-off.capture.console.txt`；`f1-vim-cascade.txt` ≡ `e2-vim-p2.txt`。拆机前快照 `final-on` 是 `iphone-on` 的超集（多第 14 段：一次探针重装）。
 8. **脱敏**：私网 IP、主机名/用户名与 token 前缀已在全分支替换为等长占位符（字节偏移不变）；`MANIFEST.md5` 已按脱敏后内容重算。详见 `REDACTION.md`。
+9. **修复的验证等级**：B-1/B-2/B-6 的修复由 20 个 node 场景（scenario 3/11 扩展）+ Go 包裹验证；**本轮未上真机复验**。设备侧最小复验：iPhone 9键先 `，` 再从候选栏选 `。`，以及 `“”` 后接中文各一次，检查终端不出现 `,。`、不出现野引号；vim INSERT 内重复同一串并 `:wq` 后比对落盘。
