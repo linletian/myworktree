@@ -101,7 +101,7 @@ BRIDGE deliver → delta = "\x7f 1 ”"      branch=A via=keyup-defer
 | B · 9键（无桥接） | `。。。“”好”⇥↑↓^C` | **1** |
 
 ⇒ **野生右引号只在「成对符号经候选栏/composition 进入、光标居中」时出现**；26键直提交那一对是 `“` 与 `”` 分两次投递、光标在末尾，**不触发**。
-⇒ **归属：桥接是放大器（4/5），vendored xterm + iOS IME 有既有基数（1/5）。** 不是纯上游、也不是纯桥接。
+⇒ **归属：桥接是放大器（本次抓取 4:1：桥接 4 / 上游 1），vendored xterm + iOS IME 有既有基数。** 不是纯上游、也不是纯桥接；4:1 是单次抓取的描述统计，不是发生率。
 ⇒ 根因边界：**桥接的 LCP + 单 DEL 模型无法处理"光标不在末尾的中间插入"**（即 §六"未投递残留 + 转换的 over-delete"的放大形态）。
 
 ### 4.3 触发条件再收窄（S1 vim 轮 2026-11-09 22:00，**落盘文件为证**）
@@ -153,7 +153,7 @@ vim 状态行自证先后：B 打开时屏显 `="/tmp/t5.txt" 1 line, 31 bytes` 
 | # | 撤回的论断 | 事实 | 错在哪 |
 | --- | --- | --- | --- |
 | R1 | 「quick-keys `Ctrl+C` 从未送达 PTY」 | **送达**：净化流里字面 `^C`×2、`^[`(Esc)×2、`⇥`(Tab)×2、`ESC[A`(↑)×2；`tap=esc/tab/up/down/ctrl-c` 各 2 次，A/B 都有 | canonical 模式下回显是**字面 `^C`** 两个字符，我拿 raw `0x03` 去数，必然得 0 |
-| R2 | 「野生右引号 100% 由桥接产生」 | **4/5 桥接、1/5 上游**（§4.2 表） | 我只统计了桥接自己的 delta 行数，没统计终端可见内容；且样本里混了不同腿与被粘进终端的 URL |
+| R2 | 「野生右引号 100% 由桥接产生」 | **本次抓取 4:1（桥接 4 / 上游 1）**（§4.2 表） | 我只统计了桥接自己的 delta 行数，没统计终端可见内容；且样本里混了不同腿与被粘进终端的 URL |
 | R3 | 「`，` 到达终端 7 个 = 桥接补发 7 次，精确对账」 | **不作数** | 终端重绘会重复绘制同一字符，PTY 字节计数不能当量词（§二） |
 | **R5** | 「quick-keys `Paste` 无 bracketed-paste 包裹（`[200~`＝0）」——**判据用错了流**，缺陷**未证实**，撤回登记 | `\x1b[200~` 是**客户端→PTY 的输入**；bash/readline 收到后**消费且不回显**，故**输出流里本来就不该出现它**，「输出流没有」推不出「没发」。源码侧两处**都有条件包裹**：`index.html:4975` `maybeWrapBracketedPaste`（`:5044` 读 `term.modes.bracketedPasteMode`，该 getter 存在并映射 `coreService.decPrivateModes`）；vendored xterm 自身粘贴路径按 `decPrivateModes.bracketedPasteMode && !ignoreBracketedPasteMode` 包。日志里 `?2004h` 出现 3–7 次＝readline 确实开了这个模式。**真要取证须在输入侧**：探针记 send 前 payload，或在 canonical 回显的 `cat` 下粘贴看 `^[[200~` |
 | **R4** | 「iPad 软键盘**同样复现 B-2** ⇒ 与设备无关」 | **不成立**。B-2 可观测域＝桥接开 **+** 存在符号候选栏 ⇒ 实测**只有 iPhone 9键** | ① **iPad 26键没有符号候选栏**（iPad 段 `deleteContentBackward`＝0、`compositionstart` 仅 1 次＝拼音 `你好`），符号走 `keydown 229 + comp=0` **直提交**，与 iPhone 26键同路径；② **桥接关时终端里连逗号都没有**（B 腿 `，`＝0），「不删逗号」无从谈起 |
