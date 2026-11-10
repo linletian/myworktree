@@ -2,7 +2,7 @@
 
 **对应 issue**：#124（PR #123 合并后收尾）
 **最后更新**：2026-11-10（T5 收口）
-**状态**：**T5 矩阵已签字，无未执行项。** B-1 / B-2 / B-6 归属桥接（修复属 #115 后续，不卡 #124）；B-8 定案**非我方缺陷**并关闭；B-5 降级为上游基线双写；B-3 本轮未复现、B-4 属浏览器 UI——两者与 B-5 均已单独立单。
+**状态**：**T5 矩阵已签字，无未执行项。** B-1 / B-2 / B-6 归属桥接，**已在本分支修复**；B-8 定案**非我方缺陷**并关闭；B-5 降级为上游基线双写；B-3 本轮未复现、B-4 属浏览器 UI——两者与 B-5 均已单独立单。
 
 > 证据归档：`raw/`（38 个证据文件 + `MANIFEST.md5`，共 39 个）。脱敏映射、校验方式与分支重写说明见 `REDACTION.md`；本分支 fork 后的 13 个既有提交由 2026-11-10 的脱敏重写生成；其后收口提交为新增。
 
@@ -10,7 +10,7 @@
 
 ## 一句话结论
 
-iPhone（9键 / 26键）与 iPad（26键）的 A/B 编译对照、S1 vim 落盘、S2/C/S3（粘贴 / 焦点 / 重连）、E1（emoji）、E2/E3/F1（autoindent 粘贴级联）全部跑完并归档。桥接必要性区间、B-1/B-2 归属、B-8 责任均已钉死；**剩余工作只有 #115 后续的桥接修复本身**（B-2+B-6 合并修、B-1 的中间插入多 DEL 展开），不属 #124。
+iPhone（9键 / 26键）与 iPad（26键）的 A/B 编译对照、S1 vim 落盘、S2/C/S3（粘贴 / 焦点 / 重连）、E1（emoji）、E2/E3/F1（autoindent 粘贴级联）全部跑完并归档。桥接必要性区间、B-1/B-2 归属、B-8 责任均已钉死；**桥接修复已在本分支落地**（B-2+B-6 的窗口外删除、B-1 的中间插入多 DEL 展开；见 `CHANGELOG` 与 `plan.md` §3.5）。
 
 ---
 
@@ -18,9 +18,9 @@ iPhone（9键 / 26键）与 iPad（26键）的 A/B 编译对照、S1 vim 落盘�
 
 | ID | 问题 | 终态 | 归属 | 证据 |
 | --- | --- | --- | --- | --- |
-| **B-1** | 候选栏选中**成对双引号**后，后续输入被扰乱（每个字符后冒一个右引号） | **已定案**：本次观测 **4:1**（桥接 4 / 上游基数 1）；触发＝成对符号经候选栏进入 + 光标居中 **+ 其后又走 composition 的双写** | 桥接为主 + 上游既有基数 | `T5-IPHONE-AB.md` §四、`raw/s1-vim-decomposition.md` |
-| **B-2** | 候选栏选句号时**不删除前置逗号**，终端留 `,。` | **已定案**：桥接覆盖缺口；候选栏点选只发 composition、无 keydown，删除动作无人翻译成终端 DEL | **纯桥接**（不补无解） | `T5-IPHONE-AB.md` §三 |
-| **B-6** | composition 期间的删除全盲（连续退格 / 候选替换落在窗口外） | **已登记**：与 B-2 同根因，合并修 | 桥接 | `T5-IPHONE-AB.md` §七 |
+| **B-1** | 候选栏选中**成对双引号**后，后续输入被扰乱（每个字符后冒一个右引号） | **已定案、已修复**：本次观测 **4:1**（桥接 4 / 上游基数 1）；触发＝成对符号经候选栏进入 + 光标居中 **+ 其后又走 composition 的双写** | 桥接为主 + 上游既有基数 | `T5-IPHONE-AB.md` §四、`raw/s1-vim-decomposition.md` |
+| **B-2** | 候选栏选句号时**不删除前置逗号**，终端留 `,。` | **已定案、已修复**：桥接覆盖缺口；候选栏点选只发 composition、无 keydown，删除动作无人翻译成终端 DEL | **纯桥接**（不补无解） | `T5-IPHONE-AB.md` §三 |
+| **B-6** | composition 期间的删除全盲（连续退格 / 候选替换落在窗口外） | **已登记、已修复**：与 B-2 同根因，合并修 | 桥接 | `T5-IPHONE-AB.md` §七 |
 | **B-3** | `tty ws closed: 1005` 重连间隙内键入的字符整段丢失 | **本轮未复现**；已立单 **#150** | 终端连接层（与桥接无关） | `raw/s2-c-s3-readout.md`、`plan.md` §5.2 |
 | **B-4** | iOS Chrome 终端页底部常驻密码/自动填充提示条，遮挡终端 | **已立单 #151** | 浏览器 UI 层（与桥接无关） | `plan.md` §5.5.1 |
 | **B-5** | emoji 键盘插入走 `keydown keyCode 0`，疑似未抵达 PTY | **已降级并立单 #152**：5 个 emoji **全部到达**、之后中文不失步；`⚽️` 被写成 `⚽` + `⚽️`（上游基线双写，低危） | vendored xterm / iOS IME 基线 | `raw/e1-e2-readout.md` §E1、`raw/iphone-e1e2.pty.bin` |
@@ -28,7 +28,7 @@ iPhone（9键 / 26键）与 iPad（26键）的 A/B 编译对照、S1 vim 落盘�
 | ~~**B-8**~~ | ~~quick-keys `Paste` 无 bracketed-paste 包裹~~ | **关闭：非我方缺陷**。E3 输入侧正证模式为真时发 `\x1b[200~…\x1b[201~`（6+85+6=97）；F1 发送时刻读到 `mode=OFF`，PTY 时间轴证明粘贴落在 vim 的 `?2004l` 之后 ⇒ 不包裹是协议正确行为 | 应用侧（vim）mode 时序 + 用户 `autoindent` | `raw/e3-paste-wrapped.readout.md`、`raw/f1-attribution.md` |
 
 > **B-3 / B-4 / B-5 已单独立单，本文档只作登记与证据留存。**
-> **B-1 / B-2 的修复本身属 #115 后续**：B-2 + B-6 同根因合并修；B-1 的 LCP+单 DEL 模型需按 textarea/终端 caret 之差展开多 DEL，并保证 composition 期间桥接完全让位。
+> **B-1 / B-2 / B-6 已在本分支修复**：桥接新增终端行模型，覆盖窗口外 `deleteContentBackward`（B-2/B-6）与 compositionend 后的 mid-line 精确多 DEL 重写（B-1）；设计见 `plan.md` §3.5，测试见 `testdata/ios_ime_direct_input.test.mjs`。
 
 ---
 
@@ -137,7 +137,7 @@ BRIDGE deliver → delta = "\x7f1”"      branch=A via=keyup-defer
 
 ## 五、后续动作
 
-1. **#115 后续（不属 #124）**：B-2 + B-6 同根因合并修——桥接需覆盖 `compositionstart` / `deleteContentBackward` / `insertFromComposition` 触发的替换与删除；同时评估 **B-1** 的“中间插入多 DEL 展开”，并确保 composition 期间桥接完全让位。
+1. **已修复（本分支）**：桥接新增终端行模型 `iosImeTermText`，覆盖无 keydown 的 `deleteContentBackward`（B-2/B-6）与 compositionend 后的 mid-line 精确多 DEL 重写（B-1）；`plan.md` §3.5 记录设计，20 个 ios-ime 场景全部通过。
 2. **已单独立单**：#150（B-3 断连丢字）、#151（B-4 iOS Chrome 遮挡）、#152（B-5 emoji 变体双写）。
 3. **#124 可关**：本文档、`T5-IPHONE-AB.md`、`plan.md` §5.5.5、`DATA-COLLECTION.md` §4.1 已回填；关闭核对见 §六。
 
@@ -153,6 +153,7 @@ BRIDGE deliver → delta = "\x7f1”"      branch=A via=keyup-defer
 | 迟到 input 观察项（A-6/R2-MINOR-1） | ✅ 正面作答（无丢字） | `plan.md` §5.1 |
 | astral `cat -v` 观察项（A-6/R2-MINOR-2） | ✅ 追加方向通过；收缩方向设备不可构造，由单测 scenario 11/14 覆盖 | `plan.md` §5.3.2 |
 | 分支 C 观察项 | ✅ 结案 | `raw/s2-c-s3-readout.md` |
+| B-1/B-2/B-6 桥接修复 | ✅ 已在本分支落地（终端行模型 + 窗口外删除 + compositionend reconcile） | `CHANGELOG`、`plan.md` §3.5、`testdata/ios_ime_direct_input.test.mjs` |
 
 ---
 

@@ -229,6 +229,21 @@ flushIosIme(session, via):                        // via ∈ {"keyup-defer","fai
 - composition 全程（候选选字）由 xterm 自有路径投递，桥接零行为；**仲裁修订（T1 实现轮评审 BLOCKER）**：v4 原表述"水印命中分支 C 或 delta 为空"为假——合成期间 xterm 不投递（仅 `_finalizeComposition` 投），水印为空，且合成文本逐键增长使 delta 非空，无守卫的桥接会走分支 A 泄漏拼音中间态（harness 实测终端流 `"ihao你好"`）。实际保证零行为的机制是 **composing 守卫**（§3.2）：合成中的 229 tap 根本不建窗、不臂 timer、不调度 flush，合成文本完全留给 xterm 自有路径；
 - **上游既有缺陷披露**（评审 m16）：`_handleAnyTextareaChanges` 的等长分支 `t.length===e.length&&t!==e&&triggerDataEvent(t,!0)` 发送的是**整个 textarea 内容**（bundle 实证），上游 #5835 称其 "duplicated or over-sent data"。本桥接的分支 C 会正确静默——既不制造也不修复它；T5 验证时记为**既存问题**，避免误判为本次回归。
 
+### 3.5 后续修复（issue #124）：窗口外删除与 mid-line reconcile
+
+T5 证据暴露了两类发生在 229 窗口**之外**的改写，原状态机结构上看不见；本节记录修复后的不变式（实现：`index.html` 的 ios-ime 区块；测试：scenario 3 / 11）。
+
+1. **终端行模型**（`iosImeTermText`）：桥接不再只记 textarea 的 lastSeen，而是记“终端当前行已收到的内容”。
+   - 229 flush 结束时置为 `current`（分支 A/B/D 使终端等于 current；C 表示 xterm 已投递）；
+   - 窗口外的 xterm `onData` 应用到模型：DEL 弹一个码点，可打印文本追加；`\r`/`\n`/^C 清空；ESC/Tab 等控制字节置为 UNKNOWN（null），避免拿错模型做删除；
+   - blur 置 UNKNOWN，下一次 229 建窗或 compositionstart 从 textarea 重新同步；
+   - 外部重写（^C/ETX clear）在建窗时把模型同步到 live 值。
+2. **无 keydown 的删除**（B-2/B-6）：候选栏点选只发 `deleteContentBackward`，窗口已关。`input` 处理器在 `!pending && !composing && 无 8/46/13 keydown` 时，先确认**模型仍以 textarea 的上一值为结尾**（被删字符确实已投递），再按 textarea 的 previous→current 发**精确多 DEL + 存活后缀**；模型对不齐时不动，宁可少修也不删掉未投递文本。窗口内的删除仍由 flush 的 `iosImeDeltaBytes`（纯缩短单 DEL，上游 parity）处理，二者不重叠。
+3. **compositionend 的 0ms reconcile**（B-1）：xterm 的 `_finalizeComposition` 用 `setTimeout(0)` 把合成文本**追加到终端末尾**；桥接在 compositionend 再排一个 0ms timer（FIFO 在后），此时水印已把合成文本应用到模型，`iosImeReconcileBytes` 用“DEL×removed + 后缀”把 textarea 的中间态写成终态。这是无 caret 终端上表达中间插入的唯一方式；正常末尾合成时 delta 为空，不产生任何额外字节。
+   - **前缀锚定**：模型是 textarea 的**后缀模型**——English/emoji/paste 由 xterm 直接投递、不进 textarea。compositionstart 记录“模型中位于 textarea 值之前的前缀”，reconcile 只重写前缀之后的后缀；模型与 textarea 对不齐（`mirror` 不以 textarea 值结尾）时**放弃改写**，宁可少修也不删掉 textarea 看不见的已投递文本。
+4. **不变量**：所有发送仍走逐码点 + `iosImeSending` 重入旗标；term 中途死亡时发送返回 false，模型置 UNKNOWN，不虚报同步。
+5. **已知边界**：若删除发生在 229 窗口尚未 flush、且 xterm 已自行投递该字符的极窄窗口内，本次 `input` 因 pending 而跳过 reconcile，由窗口 flush 的 emissions 分支裁决；与既有窗口内语义一致，未新增路径。
+
 ## 四、开发任务清单
 
 | # | 任务 | 落点 | 产出 |
@@ -457,7 +472,7 @@ A/B 之后又完成五轮真机采集，归属与责任全部闭合；**没有�
 | 2. failsafe 750ms 校准 | ✅ 维持 750ms（合并 n=73，max 246ms，`failsafe` 零触发；§5.2 / `DATA-COLLECTION.md` §4.1） |
 | 3. §五 矩阵签字 | ✅ 通过 / 不适用 / 不可构造 / N/A 均有结论（§5.3.4、§5.5、§5.5.4、本节） |
 
-**后续（不卡 #124）**：B-2 + B-6 同根因合并修、B-1 的多 DEL 展开属 #115 后续；B-3 / B-4 / B-5 已立单 #150 / #151 / #152。证据归档、等价副本与脱敏口径见 `raw/EVIDENCE-INVENTORY.md`、`T5-FINDINGS.md` §七、`REDACTION.md`。
+**后续**：B-2 + B-6（窗口外删除）与 B-1（mid-line 精确多 DEL）**已在本分支修复**，设计见 §3.5；B-3 / B-4 / B-5 已立单 #150 / #151 / #152。证据归档、等价副本与脱敏口径见 `raw/EVIDENCE-INVENTORY.md`、`T5-FINDINGS.md` §七、`REDACTION.md`。
 
 ---
 
