@@ -1,0 +1,13 @@
+%                                                                                workstation-VM01% b⌫bash
+Your user’s .npmrc file (${HOME}/.npmrc)
+has a `globalconfig` and/or a `prefix` setting, which are incompatible with nvm.
+Run `nvm use --delete-prefix v24.19.0 --silent` to unset it.
+developer@workstation-VM01:/tmp/mw-sandbox-off$ developer@workstation-VM01:/tmp/mw-sandbox-off$ developer@workstation-VM01:/tmp/mw-sandbox-off$ developer@workstation-VM01:/tmp/mw-sandbox-off$ cat -v
+。。。“”好”^[	^[[A^[[B^C
+developer@workstation-VM01:/tmp/mw-sandbox-off$ developer@workstation-VM01:/tmp/mw-sandbox-off$ 203.0.113.23:40251/?iosime-debug=1developer@workstation-VM01:/tmp/mw-sandbox-off$ 203.0.113.23:40251/?iosime-debug=1developer@workstation-VM01:/tmp/mw-sandbox-off$ 203.0.113.23:40251/?iosime-debug=1
+bash: 203.0.113.23:40251/?iosime-debug=1: 没有那个文件或目录
+developer@workstation-VM01:/tmp/mw-sandbox-off$ developer@workstation-VM01:/tmp/mw-sandbox-off$ cat -v
+你好^[	^[[A^[[B^C
+developer@workstation-VM01:/tmp/mw-sandbox-off$ 203.0.113.23:40251/?iosime-debug=1developer@workstation-VM01:/tmp/mw-sandbox-off$ 203.0.113.23:40251/?iosime-debug=1developer@workstation-VM01:/tmp/mw-sandbox-off$ 203.0.113.23:40251/?iosime-debug=1
+bash: 203.0.113.23:40251/?iosime-debug=1: 没有那个文件或目录
+developer@workstation-VM01:/tmp/mw-sandbox-off$ developer@workstation-VM01:/tmp/mw-sandbox-off$ developer@workstation-VM01:/tmp/mw-sandbox-off$ developer@workstation-VM01:/tmp/mw-sandbox-off$ developer@workstation-VM01:/tmp/mw-sandbox-off$ developer@workstation-VM01:/tmp/mw-sandbox-off$ 

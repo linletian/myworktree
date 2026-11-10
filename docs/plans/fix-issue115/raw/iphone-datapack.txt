@@ -1,0 +1,63 @@
+== 1. 采集器验明正身 ==
+  ON: 安装 6 次, 首次 "probe":"probe-v2","bridge":"ON","ua":"Mozilla/5.0 (iPhone; 
+  OFF: 安装 6 次, 首次 "probe":"probe-v2","bridge":"OFF","ua":"Mozilla/5.0 (iPhone;
+
+== 2. 事件计数 ==
+  ON: ios-ime/beforeinput=76, ios-ime/bound=6, ios-ime/capture-installed=6, ios-ime/clear=35, ios-ime/compositionend=7, ios-ime/compositionstart=7, ios-ime/deliver=32, ios-ime/input=76, ios-ime/keydown=54, ios-ime/keyup=70, ios-ime/pending=35, ios-ime/probe=54, probe/beforeinput=76, probe/compositionend=7, probe/compositionstart=7, probe/compositionupdate=25, probe/input=76, probe/keydown=70, probe/keyup=70, quick-keys/tap=ctrl-c=2, quick-keys/tap=down=2, quick-keys/tap=esc=2, quick-keys/tap=tab=2, quick-keys/tap=up=2
+  OFF: ios-ime/capture-installed=6, probe/beforeinput=62, probe/compositionend=6, probe/compositionstart=6, probe/compositionupdate=19, probe/input=62, probe/keydown=53, probe/keyup=53, quick-keys/tap=ctrl-c=2, quick-keys/tap=down=2, quick-keys/tap=esc=2, quick-keys/tap=tab=2, quick-keys/tap=up=2
+
+== 3. 桥接 deliver delta 分布 (ON) ==
+   '，' x7
+   '。' x3
+   '？' x2
+   '！' x2
+   '（' x2
+   '）' x2
+   '《' x2
+   '》' x2
+   '、' x2
+   '[DEL]1”' x1
+   '[DEL]2”' x1
+   '[DEL]3”' x1
+   '“' x1
+   '”' x1
+   '1' x1
+   '2' x1
+   '3' x1
+
+== 4. PTY 计数（扣 URL / 扣 'cat -v'） ==
+   ON raw=6272 净=5954 URL粘贴=9 ，=7 。=6 ？=4 ！=4 （=4 ）=4 《=4 》=4 、=4 “=2 ”=6 ,=1 !=11 ^C=2 [200~=0 raw0x09=2
+   OFF raw=4356 净=4208 URL粘贴=4 ，=0 。=3 ？=0 ！=0 （=0 ）=0 《=0 》=0 、=0 “=1 ”=2 ,=1 !=9 ^C=2 [200~=0 raw0x09=2
+
+== 5. 键盘布局 × composition（ON，keydown 229 的 comp 标志） ==
+   ON: 229且comp=0 → 35 ; 229且comp=1 → 13
+   OFF: 229且comp=0 → 27 ; 229且comp=1 → 8
+
+== 6. quick-keys tap 记录 ==
+    ON {'esc': 2, 'tab': 2, 'up': 2, 'down': 2, 'ctrl-c': 2}
+    OFF {'esc': 2, 'tab': 2, 'up': 2, 'down': 2, 'ctrl-c': 2}
+
+== 7. 候选栏点选完整事件链（ON，第一次 ，→候选。 ==
+    [ios-ime] pending {"baseline":"","len":0,"keptEarliest":false,"rearmed":false}
+    [probe] beforeinput k=0 key= dp=0 comp=0 tgt=TEXTAREA.- data="" val="，"
+    [ios-ime] beforeinput {"inputType":"deleteContentBackward","data":null,"composed":true,"isComposing":false,"value":"，"
+    [probe] input k=0 key= dp=0 comp=0 tgt=TEXTAREA.- data="" val=""
+    [ios-ime] input {"inputType":"deleteContentBackward","data":null,"composed":true,"value":"","dt":4368}
+    [probe] compositionstart k=0 key= dp=0 comp=0 tgt=TEXTAREA.- data="" val=""
+    [ios-ime] compositionstart {"value":""}
+    [probe] compositionupdate k=0 key= dp=0 comp=0 tgt=TEXTAREA.- data="。" val=""
+    [probe] beforeinput k=0 key= dp=0 comp=1 tgt=TEXTAREA.- data="。" val=""
+    [ios-ime] beforeinput {"inputType":"insertCompositionText","data":"。","composed":true,"isComposing":true,"value":""}
+    [probe] input k=0 key= dp=0 comp=1 tgt=TEXTAREA.- data="。" val="。"
+    [ios-ime] input {"inputType":"insertCompositionText","data":"。","composed":true,"value":"。","dt":4388}
+    [probe] beforeinput k=0 key= dp=0 comp=1 tgt=TEXTAREA.- data="" val="。"
+    [ios-ime] beforeinput {"inputType":"deleteCompositionText","data":null,"composed":true,"isComposing":true,"value":"。"}
+    [probe] input k=0 key= dp=0 comp=1 tgt=TEXTAREA.- data="" val=""
+    [ios-ime] input {"inputType":"deleteCompositionText","data":null,"composed":true,"value":"","dt":4389}
+    [probe] beforeinput k=0 key= dp=0 comp=1 tgt=TEXTAREA.- data="。" val=""
+    [ios-ime] beforeinput {"inputType":"insertFromComposition","data":"。","composed":true,"isComposing":true,"value":""}
+    [probe] input k=0 key= dp=0 comp=1 tgt=TEXTAREA.- data="。" val="。"
+    [ios-ime] input {"inputType":"insertFromComposition","data":"。","composed":true,"value":"。","dt":4390}
+    [probe] compositionend k=0 key= dp=0 comp=0 tgt=TEXTAREA.- data="。" val="。"
+    [ios-ime] compositionend {"data":"。","value":"。"}
+    

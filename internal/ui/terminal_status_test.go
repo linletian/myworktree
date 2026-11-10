@@ -824,8 +824,10 @@ func TestTerminalStatusPollReconnectsStaleSocket(t *testing.T) {
 // then-clear, the lastSeen guard against xterm's external textarea clears, per-
 // code-point term.input so a whole multi-tap delta can never match
 // isTerminalQueryResponse, the reentrancy flag excluding the bridge's own echo,
-// term-scoped binding idempotency and re-bind after a term rebuild, and the
-// composing taps staying entirely out of the state machine.
+// term-scoped binding idempotency and re-bind after a term rebuild, the
+// composing taps staying entirely out of the state machine, and the follow-up
+// terminal-line model that reconciles windowless IME deletions (B-2/B-6) and
+// mid-line compositions (B-1) with exact code-point DELs.
 //
 // Same arrangement as the seven wrappers above: the cases slice the shipped
 // index.html and run against stubbed browser state, this wrapper makes `go test`

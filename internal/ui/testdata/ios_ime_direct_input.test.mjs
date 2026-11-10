@@ -14,6 +14,9 @@
 // 229 guard (flag-only tap), blur self-heal of the missed-compositionend latch,
 // the deliver-before-clear log order, the armed-at-entry value on every deliver
 // row, and the iosImeSending flag excluding the bridge's OWN mid-send echo.
+// The 2026-11-10 bridge follow-up folds the composition-side deletion
+// (B-2/B-6) and mid-line composition reconcile (B-1) stages into scenarios 3
+// and 11 — no new `^test(` rows, so the count stays twenty.
 // Run: node --test testdata/ios_ime_direct_input.test.mjs
 // (the Go wrapper wiring is T3's job; the wrapper skips only when node absent).
 import test from "node:test";
@@ -92,7 +95,7 @@ const iosImeBlock = sliceIosImeBlock(indexSource);
 // guard, so the debug gate is driven via globalThis.location per test).
 function buildBridge(consoleStub, setTimeoutStub, clearTimeoutStub) {
   return new Function("session", "console", "Date", "setTimeout", "clearTimeout",
-    iosImeBlock + "\n;return { ensureIosImeDirectInputBridge, iosImeDeltaBytes, iosImeResidualPayload, flushIosIme, iosImeResidualBranch, iosImeFailsafeMs, iosImeEmissionsMaxCount, iosImeEmissionsMaxChars };"
+    iosImeBlock + "\n;return { ensureIosImeDirectInputBridge, iosImeDeltaBytes, iosImeReconcileBytes, iosImeResidualPayload, flushIosIme, iosImeResidualBranch, iosImeFailsafeMs, iosImeEmissionsMaxCount, iosImeEmissionsMaxChars };"
   )(null, consoleStub, Date, setTimeoutStub, clearTimeoutStub);
 }
 
@@ -309,9 +312,127 @@ test("ios-ime 3: composition never intercepted — taps are inert and compositio
   }
   assert.equal(h.session.iosImePending, null, "composing taps never open a window");
   assert.equal(h.bridgeTimers().length, failsafesBefore, "composing taps never arm a failsafe");
+  h.textarea.value = "你好";              // the IME's final composition value
+  h.fireWatermark("你好");                // xterm owns composition delivery (onData)
   h.compositionend("你好");
   assert.equal(h.session.iosImeComposing, false, "compositionend unlatches the composing flag");
+  h.runDeferred();                        // composition reconcile: model and textarea agree
   assert.deepEqual(h.term.inputCalls, [], "the bridge delivered nothing — the xterm path is untouched");
+
+  // stage two (B-2/B-6): the candidate bar deletes a DELIVERED character with
+  // NO keydown while the 229 window is already closed. The bridge must turn
+  // that textarea deletion into a terminal DEL; the composition text itself
+  // still belongs to xterm, so the reconcile must not re-send it.
+  h.tapAndGrow(229, "，");
+  h.keyup();
+  h.runDeferred();
+  assert.deepEqual(h.term.inputCalls, ["，"], "the comma is delivered by the 229 window");
+  h.textarea.value = "你好";              // the IME deleted the delivered comma in the textarea
+  h.input({ inputType: "deleteContentBackward" });
+  assert.deepEqual(h.term.inputCalls, ["，", "\x7f"], "the windowless deletion becomes exactly one DEL");
+  h.compositionstart();
+  h.textarea.value = "你好。";
+  h.input({ inputType: "insertCompositionText", data: "。" });
+  h.fireWatermark("。");                    // xterm owns composition delivery
+  h.compositionend("。");
+  h.runDeferred();
+  assert.deepEqual(h.term.inputCalls, ["，", "\x7f"], "the composition text is NOT re-sent — the model already has it");
+
+  // stage three (B-1): the composition is inserted with the caret BETWEEN a
+  // delivered pair. xterm appends the composed text at the terminal END; the
+  // reconcile must delete back to the divergence and re-type the surviving
+  // suffix, otherwise the next 229 diff eats the wrong tail.
+  h.tapAndGrow(229, "“");
+  h.keyup();
+  h.runDeferred();
+  h.tapAndGrow(229, "”");
+  h.keyup();
+  h.runDeferred();
+  assert.deepEqual(h.term.inputCalls.slice(-2), ["“", "”"], "the pair is delivered by two direct taps");
+  h.compositionstart();
+  h.textarea.value = "你好。“好”";          // caret between the quotes
+  h.input({ inputType: "insertCompositionText", data: "好" });
+  h.fireWatermark("好");                    // xterm appends at the terminal end
+  h.compositionend("好");
+  h.runDeferred();
+  assert.deepEqual(h.term.inputCalls.slice(-4), ["\x7f", "\x7f", "好", "”"],
+    "mid-line composition: delete the stale tail, then re-type the composed text + closing quote");
+  assert.equal(h.session.iosImeSeen, "你好。“好”", "the textarea value is the final state");
+
+  // stage four (B-1 regression guard): the textarea is only a SUFFIX of the
+  // terminal line when English/emoji/paste was delivered by xterm without
+  // touching it. The reconcile must keep that prefix and rewrite only the
+  // suffix; a full-mirror LCP would delete the delivered English text.
+  const h2 = makeHarness({ debug: true });
+  h2.bind();
+  h2.fireWatermark("abc");              // xterm delivered English; the textarea stayed ""
+  h2.compositionstart();                // records the "abc" prefix
+  h2.textarea.value = "你好";
+  h2.input({ inputType: "insertCompositionText", data: "你好" });
+  h2.fireWatermark("你好");             // xterm appends the composition at the terminal end
+  h2.compositionend("你好");
+  h2.runDeferred();
+  assert.deepEqual(h2.term.inputCalls, [], "the delivered English prefix is preserved — only the textarea suffix is reconciled");
+
+  // stage five (safety): when the model does NOT end with the textarea's
+  // previous value, the deleted characters are not provably delivered. The
+  // delete reconcile must leave the model alone instead of deleting blind.
+  const h3 = makeHarness({ debug: true });
+  h3.bind();
+  h3.fireWatermark("abc");              // model holds delivered text
+  h3.textarea.value = "zz";
+  h3.input();                           // seen "zz", no delete reconcile (insert)
+  h3.textarea.value = "z";
+  h3.input({ inputType: "deleteContentBackward" });
+  assert.deepEqual(h3.term.inputCalls, [], "an unaligned model is not deleted blind");
+
+  // stage six (B-1 race): the next 229 tap can be processed BEFORE xterm's
+  // composition-send timer (user input has priority over 0 ms timers). The
+  // composition send then lands while the tap's window is open; it must
+  // correct the terminal against the window's baseline instead of being
+  // recorded as the tap's own delivery (which would skip the correction and
+  // leave the pair before the composed text).
+  const h4 = makeHarness({ debug: true });
+  h4.textarea.value = "“”";
+  h4.bind();                             // model == textarea
+  h4.keydown(229);                       // the composition's opening key
+  h4.compositionstart();
+  h4.textarea.value = "“你好”";            // caret between the quotes
+  h4.input({ inputType: "insertCompositionText", data: "你好" });
+  h4.compositionend("你好");               // queues the reconcile fallback
+  h4.keydown(229);                       // RACE: next tap before that timer
+  h4.textarea.value = "“你好1”";
+  h4.input();
+  h4.keyup();
+  h4.fireWatermark("你好");               // xterm's delayed composition send
+  h4.runAllZero();                       // composition fallback + keyup flush
+  assert.deepEqual(h4.term.inputCalls, ["\x7f", "\x7f", "\x7f", "你", "好", "”", "\x7f", "1", "”"],
+    "the composition send is corrected against the tap baseline, then the tap delta lands");
+
+  // stage seven (B-1 cross-composition race): the PREVIOUS composition's send
+  // can still be in flight when the next composition starts (input outranks
+  // the pair's 0 ms send timer). The model is then missing the pair at the
+  // next compositionstart, so the prefix cannot be computed yet; when the
+  // pair send lands during the new composition, the prefix must be resolved
+  // from the model's new tail before the new composition's send arrives.
+  const h5 = makeHarness({ debug: true });
+  h5.textarea.value = "。";              // anchor: existing line
+  h5.bind();
+  h5.keydown(229);                      // pair composition's opening key
+  h5.compositionstart();
+  h5.textarea.value = "。“”";
+  h5.input({ inputType: "insertCompositionText", data: "“”" });
+  h5.compositionend("“”");               // pair send timer queued, NOT run yet
+  h5.keydown(229);                      // next composition's opening key
+  h5.compositionstart();                // model still "。", base "。“”" -> prefix unknown
+  h5.textarea.value = "。“你好”";         // caret between the pair
+  h5.input({ inputType: "insertCompositionText", data: "你好" });
+  h5.fireWatermark("“”");               // the PAIR's delayed send lands mid-composition
+  h5.compositionend("你好");
+  h5.fireWatermark("你好");              // the new composition's send
+  h5.runAllZero();
+  assert.deepEqual(h5.term.inputCalls, ["\x7f", "\x7f", "\x7f", "你", "好", "”"],
+    "the delayed pair send is absorbed, then the mid-line composition is corrected");
 });
 
 test("ios-ime 4: multi-tap keeps the EARLIEST baseline and re-arms every 229", () => {
@@ -560,6 +681,13 @@ test("ios-ime 11: iosImeDeltaBytes — pure shrink is ONE DEL, replace and appen
   assert.equal(d("abc", "a"), "\x7f", "pure shrink is exactly ONE DEL");
   assert.equal(d("abc", "axc"), "\x7f\x7fxc", "replace: DEL×removed + appended");
   assert.equal(d("abc", "abcd"), "d", "pure append: only the suffix");
+  // The reconcile helper is the exact-removal counterpart used by the
+  // composition/deletion paths: a mid-line edit deletes back to the
+  // divergence and re-types the surviving suffix.
+  const r = (b, c) => makeHarness().api.iosImeReconcileBytes(b, c);
+  assert.equal(r("abc", "abc"), "", "identical states need no bytes");
+  assert.equal(r("abc", "a"), "\x7f\x7f", "an exact shrink deletes EVERY removed code point (unlike the 229-window single-DEL parity)");
+  assert.equal(r("“”好", "“好”"), "\x7f\x7f好”", "mid-line composition: delete the tail, re-type the suffix");
 });
 
 test("ios-ime 12: emissions scope resets — baseline creation and closing flush, armed keeps", () => {
@@ -580,6 +708,7 @@ test("ios-ime 12: emissions scope resets — baseline creation and closing flush
   assert.deepEqual(h.session.iosImeEmissions, ["stale"], "compositionstart keeps emissions — the next baseline resets them");
   h.compositionend("你好"); // unlatch; emissions untouched
   assert.deepEqual(h.session.iosImeEmissions, ["stale"], "compositionend keeps emissions too");
+  h.runDeferred(); // drain the composition reconcile: clears the composition prefix/base
   h.keydown(229); // new baseline -> reset ①
   assert.deepEqual(h.session.iosImeEmissions, [], "reset ①: baseline creation emptied the emissions");
   h.keyup();

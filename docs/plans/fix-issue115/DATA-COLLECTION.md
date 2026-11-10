@@ -99,6 +99,7 @@ flag 的两个独立决定（评审 LOW-3 拆分，勿再混为一谈）：
    - ⑥ 长按连删（backspace 重复）；
    - ⑦ 实体键盘接入后重复 ①②（对照组）。
 4. 每项同时在终端里 `cat -v` 观察字节是否到达（另一实例或先跑 `cat -v` 再切回）。
+   > **多字节行级校验不要用 `cat -v` 的行编辑结果作判据**（2026-11-11 真机复验）：canonical line discipline 的 DEL 按**字节**擦除，桥接按**码点**发 DEL；删除中文/全角字符时 `cat -v` 的行缓冲会留下半截 UTF-8，屏幕可能出现“成对引号跑到合成文本前”的假象。验证行内容用 shell 提示符下的 `echo` / `printf '%s\n'`（readline/ZLE 按字符处理 DEL）；`cat -v` 只用于 ASCII / 字节到达验证。
 
 ## 三、预期结论 → 方案校准映射
 
@@ -143,7 +144,7 @@ flag 的两个独立决定（评审 LOW-3 拆分，勿再混为一谈）：
 
 **定案理由**：① 降到 250ms 会让 failsafe 抢在 keyup 前跑，而 failsafe 是"无条件关窗"，有界第二次机会（空 delta → armed → 等插入）会被饿死；② 本轮 53 次敲击 **failsafe 一次都没触发**（所有 `deliver` 均紧随同拍 keyup 出现），750ms 是纯安全网、未为 UX 付出代价；③ 插入恒在 keydown+5~37ms 落地，远早于 keyup，有界第二次机会保护的正是"keyup 正常但插入迟到"的 50–200ms 窗口，下调等于压缩它。
 
-> `via` 字段在本轮 Safari 控制台显示中被截断，"failsafe 未触发"为时序推断；坐实需 `deliver` 行的 `via` 值（见 plan.md §五 待补项 4）。
+> `via` 字段在首轮 Safari 控制台显示中被截断——**已在 §4.4 第二轮由 `{"keyup-defer": 10}` 直接坐实**，不再是待补项。
 
 ### 4.2 第 3 环假设 —— 成立，但非不变式
 
@@ -160,7 +161,7 @@ flag 的两个独立决定（评审 LOW-3 拆分，勿再混为一谈）：
 - **选字栏合成**：`nihao`→`你好` 全程 `compositionstart → insertCompositionText → deleteCompositionText → insertFromComposition → compositionend`，**零 deliver 行、零 branch A 补发**，与 §一 预测一致；229 窗口在 `compositionstart` 即被 `clear{reason:"compositionstart"}` 关闭。
 - **死键路径**：`CapsLock`（keyCode 20）/ `Shift`（keyCode 16）keydown 有 probe 但 keyCode ≠ 229，**状态机完全未介入**（无 pending 行、无 failsafe timer）。
 - **`keyup.keyCode` 实测分布推翻本手册 §三 的"标点类 0"**：空格 = 32 ✅；标点实测为 **186–222**（`，`188 `。`190 `《`188 `》`190 `？`191 `/`191 `"`222 `'`222 `：`186 `；`186），Shift 符号键为 48–54（`！`49 `@`50 `#`51 `¥`52 `%`53 `0`48）。**flush 不按 keyCode 过滤的设计因此更加必要**——若当初按"标点类 0"设了过滤规则，本机实测分布会与之全部错配。
-- **英文直输**：本轮 `abc` 仅见 keyup（keyCode 65/66/67），无 keydown 229、无 bridge 事件，未复现失败路径——与"英文无 keydown 时走 `composed=false` 的 input 路径"的代码分析预期一致，但本轮样本不足以定论，需补测。
+- **英文直输**：本轮 `abc` 仅见 keyup（keyCode 65/66/67），无 keydown 229、无 bridge 事件。**后续已定论**（`plan.md` §5.2）：该路径根本不经过 textarea，不存在桥接失败路径，判据只能是终端回显。
 
 ### 4.4 第二轮复验（2026-10-17，session `1d13eeebd40b` / `docs`）
 
@@ -177,6 +178,8 @@ flag 的两个独立决定（评审 LOW-3 拆分，勿再混为一谈）：
 **§4.1 的 failsafe 定案由此从单轮观察升级为两轮独立验证**：750ms 对合并 max 246ms 恒为 3.0×，250ms 恒为 1.0×。
 
 **failsafe 零触发已直接证据化**：`via` 分布全为 `keyup-defer`、无一项 `failsafe`。§4.1 中"750ms 是纯安全网"的判断由时序推断升级为实测。
+
+> **n 的口径**：上表 `n=63` 是 **2026-10-17 iPad 两轮**合并；其后 iPhone/iPad A/B 轮继续贡献 229 敲击，**四轮合并 n=73**（见 `T5-FINDINGS.md` §四；结论仍为 max 246ms、>750ms 为 0）。**2026-10-17 两轮的原始日志未归档**；`raw/` 归档的是 2026-11-09 A/B 及后续轮次。
 
 **长按重复发 keyCode 32，不发 229** —— 本轮最反预期的发现。长按空格 1939ms 内 17 次 keydown、keyCode 全为 32、间隔稳定 102ms、末尾仅 1 次 keyup，**229 状态机窗口数 0**。对照首轮空格**点按**有 keydown 229 ⇒ **点按发 229，自动重复发 32**。故 DATA-COLLECTION §三 末行"长按出现连续 229 keydown"这一校准项在本设备**未出现**；plan §3.2 的 M17 重臂语义相应为**防御性代码，真机不可达**（单测 T2 scenario 4/7 仍钉住该语义）。
 
@@ -201,6 +204,6 @@ flag 的两个独立决定（评审 LOW-3 拆分，勿再混为一谈）：
 
 ⇒ 该方向由 T2 scenario 11（纯收缩恰好 1 个 DEL）与 scenario 14（astral 按码点单发）承担覆盖。**记为"未构造出该场景"，不记作"已验证"。**
 
-**附带发现（登记备查，不属本 issue）**：① emoji 键盘插入走 `keydown` keyCode 0，非 229 ⇒ 桥接不开窗，疑似未抵达 PTY（vendored xterm 既有缺口，非 #115 回归）；② `tty ws closed: 1005` 重连间隙内键入的字符整段丢失。
+**附带发现（已单独立单，不属本 issue）**：① emoji 键盘插入走 `keydown` keyCode 0，非 229 ⇒ 桥接不开窗。**2026-11-09 E1 轮已定案**：5 个 emoji 全部到达、后续中文不失步；`⚽️` 双写属上游基线（**#152**）。② `tty ws closed: 1005` 重连间隙内键入的字符整段丢失（**#150**；2026-11-09 S3 轮未复现）。
 
 **合并统计（全部四轮）**：229 直提交敲击 **n=73**，keydown→keyup **max 246ms**，**>750ms 的敲击 0 次**，750ms 余量恒为 **3.0×**。`deliver.via` 全程 `keyup-defer`，`failsafe` 零触发。

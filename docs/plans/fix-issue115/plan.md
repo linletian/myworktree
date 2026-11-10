@@ -1,9 +1,9 @@
 # Issue #115 修复计划：iPadOS/iOS 中文输入法直接键入无法输入终端
 
-**日期**：2026-10-17（v8：**T0 真机数据已采集并回填——failsafe 定值维持 750ms 不下调**（实测 keydown→keyup 63–246ms，远高于 DATA-COLLECTION §三 假定的 10–40ms 量级，issue #124 的"降至 200–300ms"前提被证伪）；第 3 环假设在 47/50 例成立，3 例 `dt:null` 全部由分支 B 正确抑制、无丢字；§五 矩阵首轮已过，直输/标点/合成/死键四路全绿。v7：PR #123 第二轮评审仲裁落地——外部改写终结改 flush-then-terminate（via 增补 "external-rewrite"）、真值表坍缩对齐、终结者 clear 日志；v6 一轮仲裁（外部改写检测、current 坍缩、码点 LCP、T5 政策调整）见 A-5；三轮评审 53 条 + 实现轮 + PR 一/二轮全部落账）
+**日期**：2026-10-17（v8：**T0 真机数据已采集并回填——failsafe 定值维持 750ms 不下调**（实测 keydown→keyup 63–246ms，远高于 DATA-COLLECTION §三 假定的 10–40ms 量级，issue #124 的"降至 200–300ms"前提被证伪）；第 3 环假设在 47/50 例成立，3 例 `dt:null` 全部由分支 B 正确抑制、无丢字；§五 矩阵首轮已过，直输/标点/合成/死键四路全绿。v7：PR #123 第二轮评审仲裁落地——外部改写终结改 flush-then-terminate（via 增补 "external-rewrite"）、真值表坍缩对齐、终结者 clear 日志；v6 一轮仲裁（外部改写检测、current 坍缩、码点 LCP、T5 政策调整）见 A-5；三轮评审 53 条 + 实现轮 + PR 一/二轮全部落账。**v9（2026-11-10）：T5 收口签字，见 §5.5.5；证据归档与脱敏见 `raw/EVIDENCE-INVENTORY.md` / `REDACTION.md`。v10（2026-11-11）：B-1 shell 路径真机复验 + `cat -v` canonical 限制，见 §3.5 / §5.5.5**）
 **状态**：**T0 真机数据已落地，T1/T2/T3/T4 代码与文档已完成；failsafe 取值已定（维持 750ms，合并 n=73 敲击独立验证，`via` 直接证据为零触发）**；**T5 真机验证矩阵改为合并后（beta 渠道）执行——按维护者决定，不作为 PR 的合并门槛**（PR #123 评审更正评论）。**2026-10-17 四轮采集（iPad + Safari + Tailscale 远端 + Safari Web Inspector）已覆盖 §五 中与 iOS 中文输入法直提交相关的核心项，结论见 §5.1 / §5.2 / §5.3**：直输数字/标点、英文软键盘定性、空格→。转换、选字栏合成、死键、`cat -v` 端到端字节、`via` 坐实、硬件键盘对照组全部有结论（6 项通过、3 项定性为不适用/不可构造）。**failsafe 定案：维持 750ms 不下调。**
 
-> ⚠️ **§五 矩阵尚未跑完，以下项仍未执行**（详见 §5.4 覆盖度对照）：iPhone、Chrome(iOS)、**vim INSERT 模式全角/中文**、**选字栏候选全角符号（原文明标"必须不回归"）**、**桌面中文 IME（sogou/系统）全角符号回归（v0.3.0 桌面修复不回归）**、**快速连续输入 / 粘贴按钮 / quick-keys 面板按键 / Esc·Ctrl 与桥接共存**、分支 C 首子句观察项。**T5 不应签字关闭。**
+> ✅ **T5 已于 2026-11-10 签字**：iPhone（9键/26键）与 iPad（26键）A/B、vim INSERT、Chrome(iOS)、选字栏候选、桌面 IME、quick-keys/粘贴、分支 C 全部有结论。终态表、已知边界与 #124 关闭核对见 §5.5.5 与 `T5-FINDINGS.md`。
 **Issue**：#115（bug，v0.6.0 develop / mwbeta）
 **评审记录**：三轮评审共六份临时文档（两位评审各三轮），按其自身约定不提交、不忽略，已在
 linletian 确认后删除；**逐条判定与处置完整落账于本文档附录**：附录 A（一轮 27 条）、
@@ -211,7 +211,7 @@ flushIosIme(session, via):                        // via ∈ {"keyup-defer","fai
     finally { session.iosImeSending = false; }
 ```
 
-**码点 DEL 计数的终端侧依据（PR 二轮 R2-MINOR-2 补证）**：PTY/shell 侧 DEL 的擦除单位是**字符**而非字节或码元——readline 对多字节（含 astral 4 字节）字符一次 DEL 擦除整个字符，故按码点计 DEL 与终端行为对齐；上游意志只覆盖 BMP 场景（bundle 缩短分支单 DEL），astral 属本补丁在码点粒度下的自然延伸。T5 矩阵增 `cat -v` 观察 astral 替换项（`a😀`→`a😃` 实测擦除/插入对数）。
+**码点 DEL 计数的终端侧依据（PR 二轮 R2-MINOR-2 补证；2026-11-11 收窄）**：**readline/ZLE（raw 模式，UTF-8 感知）**一次 DEL 擦除整个多字节字符，故按码点计 DEL 与 shell 行为对齐；**canonical line discipline（`cat -v` 这类程序）按字节擦除**，多字节字符的 DEL 计数不能用码点，`cat -v` 的行缓冲会留下半截 UTF-8——**它不是多字节行级判据**，只用于 ASCII/字节到达验证；多字节行内容用 shell 提示符下的 `echo` / `printf` 验证。上游意志只覆盖 BMP 场景（bundle 缩短分支单 DEL），astral 属本补丁在码点粒度下的自然延伸。
 
 **emissions 边界对齐不变式（PR 二轮 R2-MINOR-3 补注）**：分支 B 的 `delta.slice(joined.length)` 按 UTF-16 码元切——安全前提是 emissions 以**整串**入队（水印 push 的是 term.onData 的完整 data 参数、cap 拒收也是整元），`delta.startsWith(joined)` 成立时 joined 的边界落在 delta 的码点边界上（xterm 不投递断代理串）；该前提若破坏（未来有人按码元截断 emissions），分支 B 可能产出断代理——锁定为注释级不变式。
 
@@ -228,6 +228,23 @@ flushIosIme(session, via):                        // via ∈ {"keyup-defer","fai
 - `composed=false` 的普通输入根本不进入桥接逻辑；
 - composition 全程（候选选字）由 xterm 自有路径投递，桥接零行为；**仲裁修订（T1 实现轮评审 BLOCKER）**：v4 原表述"水印命中分支 C 或 delta 为空"为假——合成期间 xterm 不投递（仅 `_finalizeComposition` 投），水印为空，且合成文本逐键增长使 delta 非空，无守卫的桥接会走分支 A 泄漏拼音中间态（harness 实测终端流 `"ihao你好"`）。实际保证零行为的机制是 **composing 守卫**（§3.2）：合成中的 229 tap 根本不建窗、不臂 timer、不调度 flush，合成文本完全留给 xterm 自有路径；
 - **上游既有缺陷披露**（评审 m16）：`_handleAnyTextareaChanges` 的等长分支 `t.length===e.length&&t!==e&&triggerDataEvent(t,!0)` 发送的是**整个 textarea 内容**（bundle 实证），上游 #5835 称其 "duplicated or over-sent data"。本桥接的分支 C 会正确静默——既不制造也不修复它；T5 验证时记为**既存问题**，避免误判为本次回归。
+
+### 3.5 后续修复（issue #124）：窗口外删除与 mid-line reconcile
+
+T5 证据暴露了两类发生在 229 窗口**之外**的改写，原状态机结构上看不见；本节记录修复后的不变式（实现：`index.html` 的 ios-ime 区块；测试：scenario 3 / 11）。
+
+1. **终端行模型**（`iosImeTermText`）：桥接不再只记 textarea 的 lastSeen，而是记“终端当前行已收到的内容”。
+   - 229 flush 结束时置为 `current`（分支 A/B/D 使终端等于 current；C 表示 xterm 已投递）；
+   - 窗口外的 xterm `onData` 应用到模型：DEL 弹一个码点，可打印文本追加；`\r`/`\n`/^C 清空；ESC/Tab 等控制字节置为 UNKNOWN（null），避免拿错模型做删除；
+   - blur 置 UNKNOWN，下一次 229 建窗或 compositionstart 从 textarea 重新同步；
+   - 外部重写（^C/ETX clear）在建窗时把模型同步到 live 值。
+2. **无 keydown 的删除**（B-2/B-6）：候选栏点选只发 `deleteContentBackward`，窗口已关。`input` 处理器在 `!pending && !composing && 无 8/46/13 keydown` 时，先确认**模型仍以 textarea 的上一值为结尾**（被删字符确实已投递），再按 textarea 的 previous→current 发**精确多 DEL + 存活后缀**；模型对不齐时不动，宁可少修也不删掉未投递文本。窗口内的删除仍由 flush 的 `iosImeDeltaBytes`（纯缩短单 DEL，上游 parity）处理，二者不重叠。
+3. **composition send 触发的 reconcile**（B-1）：xterm 的 `_finalizeComposition` 用 `setTimeout(0)` 把合成文本**追加到终端末尾**。桥接的 onData 水印在**收到这段合成 send 的当下**把它应用到模型并立即 reconcile（`iosImeReconcileBytes` 用“DEL×removed + 后缀”把 textarea 的中间态写成终态）；compositionend 另排一个 0ms timer 只作**无 send 时的兜底**。这样既不依赖 timer 顺序，也不会把合成 send 记进 229 窗口的 emissions。
+   - **输入优先于 0ms timer**：下一次 229 tap 可能先于合成 send 的 timer 到达并已开窗。此时 correction 的目标是**该窗口的 baseline**（textarea 已越过它），窗口自己的 flush 再把 tap 的 delta 叠上去；合成 send 仍然不记 emissions。真机首轮复验中“成对引号跑到合成文本前面”即此竞态，已由该顺序与场景 3 的 stage six 钉住。
+   - **跨 composition 的前一笔 send**：compositionstart 时镜像可能还没收到上一笔 send（同一输入优先级），此时 prefix 暂不可算。桥接记录 `iosImeCompositionBase`，在后续 onData 把镜像补到该 base 时再解析 prefix（延迟到达的上一笔 send 正好在这一步被吸收）；兜底 timer 若仍未解析则丢弃 anchor，防止下一 tap 的 onData 被误当成 composition send。真机第二轮复验的 pair→你好 即此竞态，场景 3 的 stage seven 钉住。
+   - **前缀锚定**：模型是 textarea 的**后缀模型**——English/emoji/paste 由 xterm 直接投递、不进 textarea。compositionstart 记录“模型中位于 textarea 值之前的前缀”，reconcile 只重写前缀之后的后缀；模型与 textarea 对不齐（`mirror` 不以 textarea 值结尾）时**放弃改写**，宁可少修也不删掉 textarea 看不见的已投递文本。
+4. **不变量**：所有发送仍走逐码点 + `iosImeSending` 重入旗标；term 中途死亡时发送返回 false，模型置 UNKNOWN，不虚报同步。**验证等级**：Node 切片场景（scenario 3/11）+ Go 包裹；**B-1 的真机 iPhone 9键 shell 路径已复验（目视）**（`echo ` + `“”` + `你好` + `123` → `“你好123”`）；B-2/B-6 的 ASCII 删除在 `cat -v` 路径通过，shell 路径未单独复验。**`cat -v` 不是多字节行级判据**：canonical DEL 按字节擦除，删除中文/全角字符会留下半截 UTF-8，屏幕上的“三个引号”是这条测试路径的假象；多字节行内容用 `echo` / `printf` 验证。
+5. **已知边界**：若删除发生在 229 窗口尚未 flush、且 xterm 已自行投递该字符的极窄窗口内，本次 `input` 因 pending 而跳过 reconcile，由窗口 flush 的 emissions 分支裁决；与既有窗口内语义一致，未新增路径。
 
 ## 四、开发任务清单
 
@@ -262,7 +279,7 @@ flushIosIme(session, via):                        // via ∈ {"keyup-defer","fai
 
 ### 5.1 首轮矩阵执行结果（2026-10-17）
 
-**环境**：iPad + Safari，远端访问 `100.86.87.23:40751/?iosime-debug=1`（Tailscale），Mac Safari Web Inspector 观察；采集落在 session `89b67bf9642a`（`dev` 实例）；daemon `mwbeta` 构建于当日 14:16，晚于 PR #123 合并。
+**环境**：iPad + Safari，远端访问 `203.0.113.23:40751/?iosime-debug=1`（Tailscale），Mac Safari Web Inspector 观察；采集落在 session `89b67bf9642a`（`dev` 实例）；daemon `mwbeta` 构建于当日 14:16，晚于 PR #123 合并。
 
 | 矩阵项 | 结果 | 证据要点 |
 | --- | --- | --- |
@@ -338,8 +355,8 @@ flushIosIme(session, via):                        // via ∈ {"keyup-defer","fai
 
 #### 5.3.3 附带发现（不在 #115 范围，登记备查）
 
-- **emoji 键盘插入走 `keydown` keyCode 0**，非 229 ⇒ 桥接不开窗；配合终端表现看，该字符**疑似未抵达 PTY**。属 vendored xterm 自身的既有缺口（#115 之前即存在，非本次修复引入的回归），建议单独立 issue。
-- **`tty ws closed: 1005` 重连间隙内键入的字符整段丢失**（见 §5.2）：终端未重新 focus，键盘输入静默丢弃。属终端连接层缺陷。
+- **emoji 键盘插入走 `keydown` keyCode 0**，非 229 ⇒ 桥接不开窗。**2026-11-09 E1 轮已定案**：5 个 emoji **全部到达终端**、之后中文不失步；`⚽️` 被写成 `⚽` + `⚽️`（基字符 2 次、`VS16` 1 次），桥接全程零 `deliver` ⇒ **上游基线双写（低危）**，见 `T5-IPHONE-AB.md` §九、`raw/e1-e2-readout.md`，已立单 #152。
+- **`tty ws closed: 1005` 重连间隙内键入的字符整段丢失**（见 §5.2）：终端未重新 focus，键盘输入静默丢弃。属终端连接层缺陷。2026-11-09 S3 轮**未复现**（`abc123` 完整到达），已立单 #150。
 
 #### 5.3.4 矩阵终态
 
@@ -370,17 +387,19 @@ flushIosIme(session, via):                        // via ∈ {"keyup-defer","fai
 | T0 探针结论回填 / failsafe 校准 | ✅ 已覆盖（§3.2 / §4.1） |
 | **实体键盘对照组**（§五 ⑦） | ✅ 已补做（§5.3.1） |
 
-**以下条目四轮采集未覆盖，T5 仍需在其它环境补齐**：
+**以下条目在 2026-11-09 的 iPhone/iPad A/B 与后续轮次中补齐**：
 
-| §五 原条目 | 未覆盖原因 / 补齐环境 |
+| §五 原条目 | 补齐轮次 / 结论 |
 | --- | --- |
-| **iPhone** | 只测了 iPad；需另一台 iPhone |
-| **Chrome(iOS)** | 只测了 Safari；需 iPad/iPhone 上改用 Chrome |
-| **vim INSERT 模式下全角/中文输入** | 未构造 vim 场景；iPad 终端内 `vim` 即可 |
-| **选字栏候选全角符号（原文明标"必须不回归"）** | 只验了选字栏输出中文（`你好`），**未验全角符号候选** |
-| **桌面中文 IME（sogou / 系统）全角符号回归（v0.3.0 桌面修复不回归）** | 四轮全在 iPad；**回归风险最高的一条**，桌面浏览器 + 中文 IME 即可验 |
-| **快速连续输入 / 粘贴按钮 / quick-keys 面板按键 / Esc·Ctrl 组合与桥接共存** | 未测；桥接与 quick-keys 均向 `term.input` 送字节，存在互相干扰面 |
-| 分支 C 首子句观察项（focus-events 终端里的无关投递） | 理论面窄、未观测到；与 vim 项同批做 |
+| **iPhone** | ✅ **已补（2026-11-09 A/B 编译对照，见 §5.5.4）** —— B-1 / B-2 归属已定案 |
+| **iOS 键盘布局（9键 T9 / 26键）** | ✅ iPhone 两布局均已覆盖；iPad 26键已补、9键＝N/A（设备限制）—— 布局不是分界线，composition 才是（§5.5.4 定案 3） |
+| **长按语义（空格 / 数字）** | ✅ **已定案并分叉记录** —— iPad 长按空格=自动重复、iPhone 长按空格=光标移动；iPad 长按数字=选择器、iPhone 长按数字=该数字（§5.5.4） |
+| **Chrome(iOS)** | ✅ 输入无回归；发现底部密码/自动填充提示条遮挡（B-4），已立单 #151 |
+| **vim INSERT 模式下全角/中文输入** | ✅ iPhone 9键 A 腿落盘 31B 逐字节正确（`raw/s1-vim-decomposition.md`）；前提仍是先切英文 ABC 按 `i` |
+| **选字栏候选全角符号（原文明标"必须不回归"）** | ✅ 无回归：候选引号/候选句号路径已覆盖（§5.5.4），桌面选字栏日常使用验证 |
+| **桌面中文 IME（sogou / 系统）全角符号回归（v0.3.0 桌面修复不回归）** | ✅ 无回归（维护者日常使用验证，无采集快照） |
+| **快速连续输入 / 粘贴按钮 / quick-keys 面板按键 / Esc·Ctrl 组合与桥接共存** | ✅ iPhone 与 iPad 均已覆盖；`tap=esc/tab/up/down/ctrl-c` 全部送达，粘贴经 E3/F1 定案 |
+| 分支 C 首子句观察项（focus-events 终端里的无关投递） | ✅ 结案：手动 `?1004h` 后 `^[[I`×3 / `^[[O`×6 穿透，`abc123` 独立到达（`raw/s2-c-s3-readout.md`） |
 | 既存问题观察项（等长替换 xterm 自发整个 textarea） | 空格→。 实测未复现 duplicated/over-sent |
 
 ### 5.5 补测轮次结果（2026-10-17 晚，维护者口头确认 + Chrome(iOS) 走查）
@@ -391,7 +410,7 @@ flushIosIme(session, via):                        // via ∈ {"keyup-defer","fai
 | **选字栏候选全角符号**（原文明标"必须不回归"） | ✅ **无回归** |
 | **Chrome(iOS)** | ⚠️ **输入本身无回归**，但走查中发现**新的 UI 缺陷**：见下 5.5.1 |
 | **vim INSERT 模式下全角/中文输入** | ⏸ **待补** —— iPad 软键盘无 `Insert` 键导致首轮未能执行；**该障碍可解**：vim 的 INSERT 模式由 `i` / `a` / `o` / `I` / `A` / `O` 等命令进入，无需 `Insert` 键（详见 5.5.2） |
-| **快速连续输入 / 粘贴按钮 / quick-keys 面板按键 / Esc·Ctrl 与桥接共存** | ⏸ **待补** —— 本轮未回复，仍未执行；两条代码路径均向 `term.input` 送字节，是真实干扰面，建议优先 |
+| **快速连续输入 / 粘贴按钮 / quick-keys 面板按键 / Esc·Ctrl 与桥接共存** | ✅ **iPhone 侧已覆盖（2026-11-09）**：`tap=esc/tab/up/down/ctrl-c` 各 2 次且**全部送达**（`^C`×2、`^[`×2、`⇥`×2、`ESC[A`×2）；粘贴内容送达；~~无 bracketed-paste 包裹 → 新登记 B-8~~ **同日撤回（R5）**：`[200~` 是客户端→PTY 的输入、被 readline 消费不回显，输出流的 0 推不出没发；源码两处（`index.html:4975` `maybeWrapBracketedPaste` 与 vendored xterm 自身粘贴路径）都有条件包裹 ⇒ **不立单**。iPad 侧待补 |
 
 **5.5.1 新发现（不在 #115 范围，建议单独立 issue）—— iOS Chrome 底部密码提示条遮挡终端**
 
@@ -405,7 +424,7 @@ flushIosIme(session, via):                        // via ∈ {"keyup-defer","fai
 4. `<Esc>` 回正常模式，确认无残留窗口影响（对应 §3.2 的关窗规则）
 5. 同时可覆盖**分支 C 首子句观察项**：vim 是启用 focus-events 的终端，若窗口内出现焦点回报等无关投递，确认用户直提交的单字符不被静默吞
 
-**5.5.3 iPhone 发现严重缺陷（2026-10-17 晚，阻塞 T5 签字）——候选栏路径下的替换与成对符号**
+**5.5.3 iPhone 发现严重缺陷（2026-10-17 晚；**归属已于 §5.5.4 定案，不再阻塞签字**）——候选栏路径下的替换与成对符号**
 
 维护者在 **iPhone** 上走查发现两类问题，**均为 iPad 四轮采集未覆盖的交互形态**：
 
@@ -416,8 +435,48 @@ flushIosIme(session, via):                        // via ∈ {"keyup-defer","fai
 
 **关联的已知边界**：§六「未投递残留 + 转换的 over-delete」记录的是同一形态在**窗口内**的表现；此处则是**窗口外**的改写，桥接按设计不感知。计划 §3.3 分支 B/C 的已知局限、以及 §5.3 中"桥接只在 229 开窗"的作用域限制，都指向同一处盲区。
 
-**处置**：**T5 不得签字**；需在 iPhone 上按 5.5.4 采日志后定性——判定是 vendored xterm 的既有缺口、还是本桥接的覆盖不足，二者修复归属不同（前者记上游观察项，后者需扩 §3.1 入口或 §3.2 状态机触发条件）。
+**处置**：~~T5 不得签字，需按 5.5.4 采日志后定性~~ → ✅ **2026-11-09 已采并定案（§5.5.4）**：**属桥接覆盖不足**，需扩 §3.1 入口 / §3.2 开窗条件以覆盖 composition 路径的**替换与删除**。
 
+**5.5.4 iPhone A/B 编译对照（2026-11-09，沙盒，本轮定案）**
+
+同一台 iPhone（iOS 18.7）、同一输入法、同一串动作，两个二进制**只差「桥接是否在编译期存在」**（A `:40251` 桥接开 / B `:40252` 整块 `index.html:5264–5675` + 两个调用点编掉，差 414 行，difflib 相似度 `0.9758`）。采集**不需要 Mac Web Inspector**：页面自带 `probe-v2` 独立探针 + quick-keys 挂钩，每 5s 回传服务端。**完整事件链、计数表、净化可见行、原始日志与 `MANIFEST.md5` 见 `T5-IPHONE-AB.md` 与 `raw/`。**
+
+1. **B-2 定案＝桥接覆盖缺口**：候选栏点选**零 `keydown`**（对应 `input` 的 `dt` 距上次 keydown **4368–4390ms**），且发生在桥接 `clear` **之后**；IME 已在 textarea 里用 `deleteContentBackward` 删掉逗号，但**没有任何一方发出终端 DEL**（vendored xterm 不监听 `beforeinput`，§七 实证 0 处）⇒ **只能桥接侧补，不补无解**。**（本节最初写「iPad 软键盘同样复现」已撤回，见 §六 R4：可观测域只有「桥接开 + 存在符号候选栏」，实测唯一落点是 iPhone 9键。）**
+2. **B-1 定案＝桥接为主**：**本次观测**野右引号 **4:1**（桥接 4 / 上游基数 1；`baseline=…“你好”` / `current=…“你好1”` ⇒ `delta="\x7f1”"`，成对符号经候选栏进入时**光标停在引号中间**，LCP 反复把右引号卷进 delta 尾部重发而只配一个 DEL）。**26键直提交那一对不触发**（`“` 与 `”` 分两次投递、光标在末尾）。**S1 vim 轮再收窄**：`“”` 之后**只敲直提交字符**时单写者自洽、终态 `“123”` 正确；**只有其后又走 composition（中文）时**，xterm `CompositionHelper` 与桥接两个写者同时下手才错乱 ⇒ **触发＝双写冲突**（证据：`/tmp/t5.txt` 43B 按腿切 A31+B12，见 `raw/s1-vim-decomposition.md`）。
+3. **桥接必要性区间＝「`keydown 229` 且 `comp=0` 且无 composition」**：该区间内 vendored xterm 完全不投递——B 腿的 26键全角标点 `？！（）《》、` 在终端**零字节**，A 腿同一串终端可见 `？！（）《》、：未找到命令`（**7/7**）。composition 路径（拼音合成、候选栏）由 xterm 于 `compositionend` 自行投递，桥接必须静默（A 腿 11 个 composition 窗口**逐条核对为零 `deliver`**）。**分界线不是键盘布局、也不是设备，而是 composition 有没有参与**；9键"看起来没问题"只是因为它恰好把标点也推进了 composition。
+4. **长按语义分叉（修正 §5.2）**：iPad 软键盘长按空格＝自动重复（`keyCode 32`）；**iPhone 长按空格＝光标移动，不产生字符**；iPad 长按数字＝弹字符选择器（默认中文「一」），iPhone 长按数字＝就是该数字。**原「长按数字键看是否与 §5.2 同为 32」的收口判据作废**，改为「观察长按选择器/光标移动那一次提交走的是 `keydown 229` 还是一次裸 `input`」。
+5. **§5.5.2 vim 前提补齐**：须**先切英文 ABC 按 `i`** 才进得了 INSERT；本环境 vim 自身**未申请 `?1004`**，「vim 是启用 focus-events 的终端」这一前提不成立——分支 C 改用 `printf '\e[?1004h'; cat -v` 手动开启后**已结案**（`^[[I`×3 / `^[[O`×6 穿透、`abc123` 独立到达，见 `raw/s2-c-s3-readout.md`）。
+
+6. **iPad 26键 A/B（同日补测）—— B-2 可观测域收窄、桥接必要性加强**：iPad 软键盘 26键**没有符号候选栏**，符号走 `keydown 229 + comp=0` 直提交，与 iPhone 26键**同一条路径**（iPad 段 `deleteContentBackward`＝0、`compositionstart` 仅 1 次＝拼音 `你好`）。A 腿 10 个直提交键**逐字同步、零野字符**；B 腿**全角标点全灭**。⇒ ① 桥接必要性在 iPad 上更彻底；② **B-2 在 iPad 上不可达**（无候选栏即无替换、无「不删逗号」），且**它只在桥接开时才可见**（B 腿连逗号都没进终端）⇒ **B-2 归属收窄为纯桥接，实测唯一落点＝iPhone 9键**；③ **iPad 9键＝N/A（设备限制）**：已加九宫格但切换后仍出全键盘，无法进入该布局，记为**不可测**而非未执行，不再作为 #124 关闭前置。
+> **本轮撤回五条早先论断**（详见 `T5-IPHONE-AB.md` §六）：① 拿 raw `0x03` 数 `Ctrl+C` ⇒ 误判"未送达"，实际 canonical 回显是字面 `^C`、**已送达**；② "野引号 100% 出自桥接" ⇒ 本次观测为 4:1，上游仍有基数；③ 把 PTY 字节数当量词 ⇒ 终端重绘会重复绘制同一字符，**只有「0 vs 非 0」与净化后的可见行是硬判据**；④ "iPad 同样复现 B-2" ⇒ iPad 26键无符号候选栏，B-2 不可达；⑤ "粘贴无 bracketed 包裹"（B-8）⇒ 判据用错流，E3 输入侧正证包裹有效、F1 定责为 vim 侧 mode 时序。
+
+> **文档事故记录（2026-11-09）**：rebase 前执行过 `git checkout develop -- .`，把**未提交**的 plan.md 批注（前几轮 §5.5.1/§5.5.2 修订、§六 行更新、原始日志粘贴）与 CHANGELOG 一条文档条目一并回滚。**无任何已提交内容丢失**（`git diff develop HEAD` 仅 `T5-FINDINGS.md`，plan.md 与 develop 逐字节一致）。本节是重建后的最终版；**教训：文档类改动随做随提交，不要用 `checkout -- .` 清工作区。**
+
+
+**5.5.5 T5 签字（2026-11-10）—— 全部条目已有结论**
+
+A/B 之后又完成五轮真机采集，归属与责任全部闭合；**没有未执行项**，其余为已单独立单的后续或设备不可构造项。
+
+| 轮次 | 动作 | 结论 |
+| --- | --- | --- |
+| S1 | `vi /tmp/t5.txt` → `i` → 中文＋全角＋候选引号＋`123` | A 腿 31B 逐字节正确；B-1 收窄为“候选栏成对符号 + 其后又走 composition”的双写冲突 |
+| S2 | `vi` INSERT 粘贴 5 行 4 空格 | 默认（`autoindent` 关闭）无损 |
+| C | `printf '\e[?1004h'; cat -v` + 切后台 | 获焦 `^[[I`×3 / 失焦 `^[[O`×6 穿透、未混入正文 ⇒ 分支 C 结案 |
+| S3 | 关页 30s 重开 → `abc123` | 完整到达 ⇒ B-3 本轮未复现 |
+| E1 | emoji 连点 5 个 | 全部到达、后续中文不失步；`⚽️` 上游基线双写（#152） |
+| E2/E3/F1 | `set autoindent` 下粘贴 + 输入侧取证 | E2 级联（`4/8/tab+4/tab+8/2tab+4`）；E3 正证 `\x1b[200~…\x1b[201~`（6+85+6=97）；F1 发送时刻 `mode=OFF`、粘贴落点在 `?2004l` 之后 ⇒ **B-8 非我方缺陷、关闭** |
+
+**#124 关闭核对：三条子项全部满足。**
+
+| #124 子项 | 结果 |
+| --- | --- |
+| 1. T0 探针 + 第 3 环假设 | ✅ 47/50；3 例 `dt:null` 由 branch B 抑制、无丢字（§5.1） |
+| 2. failsafe 750ms 校准 | ✅ 维持 750ms（合并 n=73，max 246ms，`failsafe` 零触发；§5.2 / `DATA-COLLECTION.md` §4.1） |
+| 3. §五 矩阵签字 | ✅ 通过 / 不适用 / 不可构造 / N/A 均有结论（§5.3.4、§5.5、§5.5.4、本节） |
+
+**后续**：B-2 + B-6（窗口外删除）与 B-1（mid-line 精确多 DEL）**已在本分支修复**，设计见 §3.5；B-3 / B-4 / B-5 已立单 #150 / #151 / #152。证据归档、等价副本与脱敏口径见 `raw/EVIDENCE-INVENTORY.md`、`T5-FINDINGS.md` §七、`REDACTION.md`。
+
+---
 
 ## 六、风险与边界（显式记录）
 

@@ -5332,6 +5332,148 @@
             return appended;                                               // pure append
         }
 
+        // Exact reconcile delta for the bridge's MODEL of the current terminal
+        // line. Unlike iosImeDeltaBytes (whose pure-shrink branch deliberately
+        // sends ONE DEL for xterm parity inside a 229 window), this must remove
+        // EXACTLY the code points the terminal is believed to hold and re-type
+        // the surviving suffix. A terminal has no caret, so a mid-line edit can
+        // only be expressed as "delete back to the divergence, then type the
+        // wanted suffix" (issue #124 follow-up: B-1/B-2/B-6 on issue #115 data).
+        function iosImeReconcileBytes(baseline, current) {
+            if (current === baseline) return "";
+            const cpsB = Array.from(baseline);
+            const cpsC = Array.from(current);
+            let p = 0;
+            const n = Math.min(cpsB.length, cpsC.length);
+            while (p < n && cpsB[p] === cpsC[p]) p++;
+            const appended = cpsC.slice(p).join("");
+            const removed = cpsB.length - p;
+            if (removed > 0) return "\x7f".repeat(removed) + appended;
+            return appended;
+        }
+
+        // Apply bytes the bridge did NOT send itself (xterm's own onData) to
+        // the model. DEL pops one code point; printable text appends. A line
+        // break or ^C resets the model (xterm clears the textarea with them);
+        // any other control byte (ESC sequences, Tab) makes it UNKNOWN (null)
+        // rather than wrong -- those do not change the line's TEXT, and a
+        // wrong model would poison the next reconcile. null is re-synced from
+        // the textarea at the next 229 window / composition start.
+        function iosImeApplyBytes(text, bytes) {
+            if (text == null || typeof bytes !== "string") return text;
+            if (/[\r\n\x03]/.test(bytes)) return "";
+            if (/[\x00-\x08\x0b\x0c\x0e-\x1f]/.test(bytes)) return null;
+            const out = Array.from(text);
+            const cps = Array.from(bytes);
+            for (let i = 0; i < cps.length; i++) {
+                if (cps[i] === "\x7f") out.pop();
+                else out.push(cps[i]);
+            }
+            return out.join("");
+        }
+
+        // Prefix of the model that sits BEFORE the textarea value, when the
+        // model still ends with it. The textarea may be only a suffix of what
+        // the terminal has (English/emoji/paste delivered by xterm); a null
+        // return means the model is unaligned and must not be rewritten blind.
+        function iosImeCompositionPrefixFor(mirror, base) {
+            if (mirror == null || typeof base !== "string") return null;
+            if (base === "") return mirror;
+            if (mirror.length < base.length) return null;
+            return mirror.slice(mirror.length - base.length) === base
+                ? mirror.slice(0, mirror.length - base.length)
+                : null;
+        }
+
+        // A composition start can happen while the PREVIOUS composition's
+        // xterm send is still in flight (user input outranks the 0 ms send
+        // timer): the model is then missing that send, so the prefix could not
+        // be computed yet. Whenever a later onData brings the model up to the
+        // recorded base, resolve the prefix then; the pending composition's
+        // send will use it. This is what keeps a fast pair -> composition
+        // sequence from landing with the pair stuck before the composed text.
+        function iosImeMaybeResolveCompositionPrefix(session) {
+            if (typeof session.iosImeCompositionPrefix === "string") return;
+            const base = session.iosImeCompositionBase;
+            if (typeof base !== "string") return;
+            const prefix = iosImeCompositionPrefixFor(session.iosImeTermText, base);
+            if (prefix !== null) session.iosImeCompositionPrefix = prefix;
+        }
+
+        // One send path for every bridge delivery (229 flush, composition
+        // reconcile, deletion reconcile): PER CODE POINT (plan.md 3.3, review
+        // M6) with the reentrancy flag that keeps the watermark from recording
+        // our own echo. false = the term died mid-send; the caller then marks
+        // the terminal model UNKNOWN instead of claiming bytes that never left.
+        function iosImeSendPayload(session, payload) {
+            if (!payload) return true;
+            if (!session.term) return false;
+            session.iosImeSending = true;
+            try {
+                const cps = Array.from(payload);
+                for (let i = 0; i < cps.length; i++) session.term.input(cps[i]);
+                return true;
+            } catch (e) {
+                return false;
+            } finally {
+                session.iosImeSending = false;
+            }
+        }
+
+        // compositionend is delivered by xterm through a setTimeout(0)
+        // (vendored _finalizeComposition). Our listener runs after xterm's has
+        // QUEUED that send, so a 0ms reconcile runs after the watermark saw the
+        // composed text and can translate the textarea's final state into an
+        // exact suffix rewrite. Without it, a composition inserted with the
+        // caret in the MIDDLE of the line leaves xterm appending at the end
+        // while the textarea keeps the text in the middle; the next 229 diff
+        // then deletes the wrong tail (B-1).
+        function iosImeReconcileComposition(session) {
+            if (!session.term) { session.iosImeCompositionPrefix = null; session.iosImeCompositionBase = null; return; }
+            if (session.iosImeComposing) return;   // a NEW composition owns the prefix; its own end will reconcile it
+            if (typeof session.iosImeCompositionPrefix !== "string") iosImeMaybeResolveCompositionPrefix(session);
+            const prefix = session.iosImeCompositionPrefix;
+            if (typeof prefix !== "string") {
+                // The fallback timer ran and the model never caught up (the
+                // composition send never arrived / the base is unaligned).
+                // Drop the anchor so a later tap's onData cannot be mistaken
+                // for a composition send; a new compositionstart records a
+                // fresh base.
+                session.iosImeCompositionBase = null;
+                return;
+            }
+            if (session.iosImeTermText == null || session.iosImeTermText.length < prefix.length) {
+                session.iosImeCompositionPrefix = null;   // unaligned: never rewrite blind
+                session.iosImeCompositionBase = null;
+                return;
+            }
+            // A next 229 tap may already have opened a window (user input can
+            // beat the 0 ms timers). The textarea has moved past the window's
+            // baseline, so the correction targets THAT baseline; the window's
+            // own flush then applies the tap delta on top of it.
+            const current = session.iosImePending ? session.iosImePending.baseline : session.iosImeSeen;
+            if (typeof current !== "string") { session.iosImeCompositionPrefix = null; session.iosImeCompositionBase = null; return; }
+            const baseline = session.iosImeTermText.slice(prefix.length);
+            const payload = iosImeReconcileBytes(baseline, current);
+            session.iosImeCompositionPrefix = null;
+            session.iosImeCompositionBase = null;
+            if (!payload) {
+                session.iosImeTermText = prefix + current;   // already in sync; anchor the model
+                return;
+            }
+            if (iosImeDebugEnabled()) iosImeLog("reconcile", { kind: "composition", baseline: baseline, current: current, delta: payload });
+            const sent = iosImeSendPayload(session, payload);
+            session.iosImeTermText = sent ? prefix + current : null;
+        }
+
+        function iosImeScheduleCompositionReconcile(session) {
+            if (session.iosImeReconcileTimer) { clearTimeout(session.iosImeReconcileTimer); session.iosImeReconcileTimer = null; }
+            session.iosImeReconcileTimer = setTimeout(function iosImeCompositionReconcile() {
+                session.iosImeReconcileTimer = null;
+                iosImeReconcileComposition(session);   // fallback when xterm sends nothing
+            }, 0);
+        }
+
         // Residual branch, in A/B/C/D order (plan.md 3.3). current is
         // threaded through for branch C's guard (see iosImeResidualBranch).
         // Branch-B boundary invariant (plan.md 3.3, PR round 2 R2-MINOR-3):
@@ -5402,6 +5544,12 @@
             const baseline = session.iosImePending.baseline;
             const emissionsSnapshot = (session.iosImeEmissions || []).slice();
             const armedAtEntry = !!session.iosImeFailsafeArmed;
+            // The terminal model is the textarea value EXCEPT while a
+            // composition is being reconciled (below). Setting it here covers
+            // every flush outcome: branch A/B/D make the terminal equal to
+            // current, branch C means xterm already did, and the empty-delta
+            // arm/close paths leave the line where it was.
+            session.iosImeTermText = current;
 
             if (delta === "") {
                 if (via === "failsafe") {            // unconditional close (N2)
@@ -5424,18 +5572,8 @@
             if (iosImeDebugEnabled()) iosImeLog("deliver", { baseline: baseline, current: current, delta: delta, emissions: emissionsSnapshot, branch: branch, payload: payload, via: via, armed: armedAtEntry });
             closeIosImeWindow(session);              // close BEFORE send, always for a non-empty delta
             if (!payload) return;                    // branch C silence
-            session.iosImeSending = true;            // reentrancy: the watermark must ignore our own echo
-            try {
-                // PER CODE POINT (plan.md 3.3, review M6), never a bulk send:
-                // a multi-tap delta could match isTerminalQueryResponse whole.
-                const cps = Array.from(payload);
-                for (let i = 0; i < cps.length; i++) session.term.input(cps[i]);
-            } catch (e) {
-                // term destroyed mid-send: drop the remainder silently
-                // (flushQuickKeysQueue precedent)
-            } finally {
-                session.iosImeSending = false;
-            }
+            const sent = iosImeSendPayload(session, payload);
+            if (!sent) session.iosImeTermText = null; // dead term: the model is now UNKNOWN, not a lie
         }
 
         // The single binding function for the whole issue (plan.md 3.1):
@@ -5454,6 +5592,11 @@
             const textarea = session.term.textarea;
             // Defensive init; the state machine maintains it afterwards.
             session.iosImeSeen = textarea.value;
+            session.iosImeTermText = textarea.value;   // model of the current terminal line
+            session.iosImeCompositionPrefix = null;
+            session.iosImeCompositionBase = null;
+            session.iosImeLineKeySeen = false;
+            if (session.iosImeReconcileTimer) { clearTimeout(session.iosImeReconcileTimer); session.iosImeReconcileTimer = null; }
             // Bind is term-scoped: stale window state from a dead term must
             // not leak into the new one -- an old baseline vs the freshly
             // re-initialized iosImeSeen is a pure shrink (ghost \x7f into
@@ -5468,6 +5611,12 @@
             // #5835); keyCode/key are observation only, never filtered.
             function iosImeHandleKeydown(event) {
                 session.iosImeProbeT1 = null;
+                // A delete/Enter key owns its own textarea edit (xterm's key
+                // path already sends the DEL); the input handler must not
+                // reconcile it a second time. 229 is NOT listed: its edits are
+                // the window flush's job, and a candidate-bar deletion that
+                // follows a 229 tap has no keydown at all.
+                if (event.keyCode === 8 || event.keyCode === 46 || event.keyCode === 13) session.iosImeLineKeySeen = true;
                 if (iosImeDebugEnabled()) {
                     const t0 = Date.now();
                     iosImeLog("keydown", { t: t0, keyCode: event.keyCode, key: event.key, value: textarea.value, len: textarea.value.length });
@@ -5534,6 +5683,10 @@
                             session.iosImeFailsafeArmed = false;
                             if (iosImeDebugEnabled()) iosImeLog("clear", { reason: "external-rewrite" });
                         }
+                        // An external ^C/ETX clear means the old line is gone;
+                        // the model follows the LIVE value or the next
+                        // composition would delete characters off the new line.
+                        session.iosImeTermText = textarea.value;
                     }
                     // normal path: refresh seen, then create/keep the baseline
                     // (a terminated window means "no pending" -> fresh baseline
@@ -5542,6 +5695,7 @@
                     let keptEarliest = false;
                     if (!session.iosImePending) {
                         session.iosImePending = { baseline: textarea.value };
+                        if (session.iosImeTermText == null) session.iosImeTermText = textarea.value;   // re-sync an UNKNOWN model on a fresh window
                         session.iosImeEmissions = [];   // emissions reset (1): baseline creation
                         keptEarliest = false;
                     } else {
@@ -5556,6 +5710,7 @@
                 }
             }
             function iosImeHandleInput(event) {
+                const previousSeen = session.iosImeSeen;   // textarea value BEFORE this edit (for the delete reconcile)
                 session.iosImeSeen = textarea.value;   // lastSeen refresh (plan.md 3.2)
                 if (iosImeDebugEnabled()) {
                     // dt pins the input against the CURRENT tap's probe t1
@@ -5569,8 +5724,39 @@
                     // meaningless and must be ignored by the transcriber.
                     iosImeLog("input", { inputType: event.inputType, data: event.data, composed: event.composed, value: textarea.value, dt: session.iosImeProbeT1 == null ? null : Date.now() - session.iosImeProbeT1 });
                 }
+                // Composition-side deletions (B-2/B-6): the candidate bar and
+                // the IME delete INSIDE the textarea with NO keydown and with
+                // the 229 window already closed; vendored xterm never listens
+                // to beforeinput, so without this the terminal keeps a
+                // character the textarea no longer has. DELETIONS only --
+                // insertions stay with the 229 window or xterm's own
+                // composition delivery -- and an edit owned by a delete/Enter
+                // key is left to xterm's key path (iosImeLineKeySeen).
+                const lineKeySeen = !!session.iosImeLineKeySeen;
+                session.iosImeLineKeySeen = false;
+                if (!session.iosImePending && !session.iosImeComposing && !lineKeySeen &&
+                    typeof event.inputType === "string" && event.inputType.indexOf("delete") === 0 &&
+                    typeof previousSeen === "string" && session.iosImeSeen.length < previousSeen.length &&
+                    session.iosImeTermText != null &&
+                    session.iosImeTermText.length >= previousSeen.length &&
+                    session.iosImeTermText.slice(session.iosImeTermText.length - previousSeen.length) === previousSeen) {
+                    // Only when the model still ENDS WITH the textarea value:
+                    // the deleted characters are then provably delivered. An
+                    // undelivered tail (model shorter / different suffix) is
+                    // left alone -- deleting blind would eat a real character.
+                    const baseline = previousSeen;
+                    const payload = iosImeReconcileBytes(baseline, session.iosImeSeen);
+                    if (payload) {
+                        if (iosImeDebugEnabled()) iosImeLog("reconcile", { kind: "delete", baseline: baseline, current: session.iosImeSeen, delta: payload });
+                        const sent = iosImeSendPayload(session, payload);
+                        session.iosImeTermText = sent
+                            ? session.iosImeTermText.slice(0, session.iosImeTermText.length - previousSeen.length) + session.iosImeSeen
+                            : null;
+                    }
+                }
             }
             function iosImeHandleKeyUp(event) {
+                session.iosImeLineKeySeen = false;
                 if (iosImeDebugEnabled()) iosImeLog("keyup", { t: Date.now(), keyCode: event.keyCode, key: event.key, value: textarea.value, len: textarea.value.length });
                 // NEVER flush synchronously (review HIGH-2): xterm's keydown
                 // timer is queued first, FIFO lets it finish, the watermark
@@ -5590,6 +5776,16 @@
                 // close/blur - hence the failsafeArmed reset (arbitrator-
                 // approved, recorded for the T4 plan amendment).
                 session.iosImeComposing = true;
+                if (session.iosImeTermText == null) session.iosImeTermText = textarea.value;   // re-sync an UNKNOWN model; composition sends appends we can then correct
+                // Anchor the model to the textarea. The textarea is the IME's
+                // line buffer, which may be only a SUFFIX of what the terminal
+                // already has (English/emoji/paste delivered by xterm without
+                // touching the textarea). Record that prefix so the reconcile
+                // rewrites only the suffix and never deletes delivered text it
+                // cannot see in the textarea. Unaligned => null => no rewrite.
+                const compBase = textarea.value;
+                session.iosImeCompositionBase = compBase;
+                session.iosImeCompositionPrefix = iosImeCompositionPrefixFor(session.iosImeTermText, compBase);
                 if (iosImeDebugEnabled()) iosImeLog("compositionstart", { value: textarea.value });
                 if (session.iosImePending) {
                     // composition self-delivers; do NOT touch emissions here -
@@ -5609,7 +5805,9 @@
                 // window would take branch A and leak the interim pinyin. The
                 // log row stays debug-gated.
                 session.iosImeComposing = false;
+                session.iosImeSeen = textarea.value;   // final composition state (the input events should already have done this)
                 if (iosImeDebugEnabled()) iosImeLog("compositionend", { data: event.data, value: textarea.value });
+                iosImeScheduleCompositionReconcile(session);
             }
             function iosImeHandleBlur(event) {
                 // flush-then-clear (review M7): flush first so a blur does
@@ -5635,6 +5833,12 @@
                 // pending branch -- same precedent as ensureQuickKeysImeBinding's
                 // blur listener clearing session.composing.
                 session.iosImeComposing = false;
+                // Focus loss makes the terminal-line model UNKNOWN (xterm's
+                // own blur handler clears the textarea; the PTY line itself
+                // persists). Re-sync from the textarea at the next 229 window
+                // or composition start rather than trusting a stale model.
+                session.iosImeTermText = null;
+                session.iosImeLineKeySeen = false;
             }
             textarea.addEventListener("keydown", iosImeHandleKeydown);
             textarea.addEventListener("input", iosImeHandleInput);
@@ -5651,6 +5855,29 @@
                 try { session.iosImeDataDisposable.dispose(); } catch (e) { }
             }
             session.iosImeDataDisposable = session.term.onData(function iosImeWatermark(data) {
+                if (!session.iosImeSending) iosImeMaybeResolveCompositionPrefix(session);
+                // A composition send is the one onData that belongs to the
+                // reconcile, not to a 229 window. It can arrive AFTER the user
+                // already started the next tap (user input outranks 0 ms
+                // timers), so reconcile HERE, synchronously: the app's
+                // forwarder has already sent this chunk, and the correction
+                // targets the open window's baseline when one exists. Returning
+                // here also keeps this chunk OUT of the window's emissions --
+                // it is the composition's delivery, not the tap's own.
+                if (!session.iosImeSending && session.iosImeCompositionPrefix !== null && !session.iosImeComposing) {
+                    session.iosImeTermText = iosImeApplyBytes(session.iosImeTermText, data);
+                    iosImeReconcileComposition(session);
+                    return;
+                }
+                // The terminal model follows xterm's OTHER sends only while no
+                // 229 window is open: inside a window the flush is the single
+                // writer and sets the model to the textarea value (the
+                // watermark's data there is the branch-B/C suppress target,
+                // not an append).
+                if (!session.iosImeSending && !session.iosImePending) {
+                    session.iosImeTermText = iosImeApplyBytes(session.iosImeTermText, data);
+                    iosImeMaybeResolveCompositionPrefix(session);
+                }
                 if (!session.iosImePending) return;
                 if (session.iosImeSending) return;   // exclude our own term.input echo (review HIGH-1/M5)
                 if (!session.iosImeEmissions) session.iosImeEmissions = [];
