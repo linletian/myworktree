@@ -1,8 +1,8 @@
 # Issue #115 T5 真机走查 —— 遗留问题清单
 
 **对应 issue**：#124（PR #123 合并后收尾）
-**最后更新**：2026-11-10（T5 收口）
-**状态**：**T5 矩阵已签字，无未执行项。** B-1 / B-2 / B-6 归属桥接，**已在本分支修复**；B-8 定案**非我方缺陷**并关闭；B-5 降级为上游基线双写；B-3 本轮未复现、B-4 属浏览器 UI——两者与 B-5 均已单独立单。
+**最后更新**：2026-11-11（T5 收口 + 桥接修复 shell 复验）
+**状态**：**T5 矩阵已签字，无未执行项。** B-1 / B-2 / B-6 归属桥接，**已在本分支修复，B-1 已做真机 shell 目视复验**；B-8 定案**非我方缺陷**并关闭；B-5 降级为上游基线双写；B-3 本轮未复现、B-4 属浏览器 UI——两者与 B-5 均已单独立单。
 
 > 证据归档：`raw/`（38 个证据文件 + `MANIFEST.md5`，共 39 个）。脱敏映射、校验方式与分支重写说明见 `REDACTION.md`；本分支 fork 后的 13 个既有提交由 2026-11-10 的脱敏重写生成；其后收口提交为新增。
 
@@ -153,7 +153,7 @@ BRIDGE deliver → delta = "\x7f1”"      branch=A via=keyup-defer
 | 迟到 input 观察项（A-6/R2-MINOR-1） | ✅ 正面作答（无丢字） | `plan.md` §5.1 |
 | astral `cat -v` 观察项（A-6/R2-MINOR-2） | ✅ 追加方向通过；收缩方向设备不可构造，由单测 scenario 11/14 覆盖 | `plan.md` §5.3.2 |
 | 分支 C 观察项 | ✅ 结案 | `raw/s2-c-s3-readout.md` |
-| B-1/B-2/B-6 桥接修复 | ✅ 已在本分支落地（终端行模型 + 窗口外删除 + compositionend reconcile） | `CHANGELOG`、`plan.md` §3.5、`testdata/ios_ime_direct_input.test.mjs` |
+| B-1/B-2/B-6 桥接修复 | ✅ 已在本分支落地（终端行模型 + 窗口外删除 + compositionend reconcile）；B-1 真机 iPhone 9键 shell 路径已复验（`echo` 目视） | `CHANGELOG`、`plan.md` §3.5、`testdata/ios_ime_direct_input.test.mjs` |
 
 ---
 
@@ -167,4 +167,5 @@ BRIDGE deliver → delta = "\x7f1”"      branch=A via=keyup-defer
 6. **astral 收缩方向**、**iPad 9键**、**F1 状态条文案** 属“未构造/未采集”，不记作“已验证”。
 7. **等价副本**：`final-A-instance306fe8fa9254.pty.bin` ≡ `f1-hook.pty.bin`；`final-B-instance227ff8642158.pty.bin` ≡ `iphone-off.pty.full.bin`；`final-off.capture.console.txt` ≡ `iphone-off.capture.console.txt`；`f1-vim-cascade.txt` ≡ `e2-vim-p2.txt`。拆机前快照 `final-on` 是 `iphone-on` 的超集（多第 14 段：一次探针重装）。
 8. **脱敏**：私网 IP、主机名/用户名与 token 前缀已在全分支替换为等长占位符（字节偏移不变）；`MANIFEST.md5` 已按脱敏后内容重算。详见 `REDACTION.md`。
-9. **修复的验证等级**：B-1/B-2/B-6 的修复由 20 个 node 场景（scenario 3/11 扩展）+ Go 包裹验证；**本轮未上真机复验**。设备侧最小复验：iPhone 9键先 `，` 再从候选栏选 `。`，以及 `“”` 后接中文各一次，检查终端不出现 `,。`、不出现野引号；vim INSERT 内重复同一串并 `:wq` 后比对落盘。
+9. **修复的验证等级**：B-1/B-2/B-6 的修复由 20 个 node 场景（scenario 3/11 扩展）+ Go 包裹验证；**B-1 的真机 iPhone 9键 shell 路径已复验（目视）**——`echo ` + `“”` + `你好` + `123` 回车后输出正常（`“你好123”`）；**B-2/B-6** 的 ASCII 删除在 `cat -v` 路径通过（逗号/句号各 1 字节，canonical 无多字节问题），shell 路径未单独复验。**`cat -v` 不是多字节行级判据**：canonical line discipline 的 DEL 按字节擦除，而桥接按码点发 DEL；删除中文/全角字符时行缓冲会留下半截 UTF-8（本次复验的 `cat -v` 输出可解码出 `ef bc e2 80 9c...` 一类残片），屏幕上的“成对引号跑到你好前面”是这条测试路径的假象。`cat -v` 只保留给 ASCII / 字节到达验证；多字节行内容用 shell 提示符下的 `echo` / `printf '%s\n'` 验证（readline/ZLE 按字符处理 DEL）。
+10. **本轮 timing 竞态的实证**：真机复验确认了两条顺序依赖——下一 229 tap 可能先于 composition send 的 0ms timer、上一笔 composition send 可能仍在飞行中；两者分别由 scenario 3 stage six / stage seven 钉住。采集也证明 reconcile 确实发出（`baseline=“”好” → current=“你好” → DEL×3 你好”`），`cat -v` 的失败只发生在 canonical 行编辑。

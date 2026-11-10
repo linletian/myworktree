@@ -1,6 +1,6 @@
 # Issue #115 修复计划：iPadOS/iOS 中文输入法直接键入无法输入终端
 
-**日期**：2026-10-17（v8：**T0 真机数据已采集并回填——failsafe 定值维持 750ms 不下调**（实测 keydown→keyup 63–246ms，远高于 DATA-COLLECTION §三 假定的 10–40ms 量级，issue #124 的"降至 200–300ms"前提被证伪）；第 3 环假设在 47/50 例成立，3 例 `dt:null` 全部由分支 B 正确抑制、无丢字；§五 矩阵首轮已过，直输/标点/合成/死键四路全绿。v7：PR #123 第二轮评审仲裁落地——外部改写终结改 flush-then-terminate（via 增补 "external-rewrite"）、真值表坍缩对齐、终结者 clear 日志；v6 一轮仲裁（外部改写检测、current 坍缩、码点 LCP、T5 政策调整）见 A-5；三轮评审 53 条 + 实现轮 + PR 一/二轮全部落账。**v9（2026-11-10）：T5 收口签字，见 §5.5.5；证据归档与脱敏见 `raw/EVIDENCE-INVENTORY.md` / `REDACTION.md`**）
+**日期**：2026-10-17（v8：**T0 真机数据已采集并回填——failsafe 定值维持 750ms 不下调**（实测 keydown→keyup 63–246ms，远高于 DATA-COLLECTION §三 假定的 10–40ms 量级，issue #124 的"降至 200–300ms"前提被证伪）；第 3 环假设在 47/50 例成立，3 例 `dt:null` 全部由分支 B 正确抑制、无丢字；§五 矩阵首轮已过，直输/标点/合成/死键四路全绿。v7：PR #123 第二轮评审仲裁落地——外部改写终结改 flush-then-terminate（via 增补 "external-rewrite"）、真值表坍缩对齐、终结者 clear 日志；v6 一轮仲裁（外部改写检测、current 坍缩、码点 LCP、T5 政策调整）见 A-5；三轮评审 53 条 + 实现轮 + PR 一/二轮全部落账。**v9（2026-11-10）：T5 收口签字，见 §5.5.5；证据归档与脱敏见 `raw/EVIDENCE-INVENTORY.md` / `REDACTION.md`。v10（2026-11-11）：B-1 shell 路径真机复验 + `cat -v` canonical 限制，见 §3.5 / §5.5.5**）
 **状态**：**T0 真机数据已落地，T1/T2/T3/T4 代码与文档已完成；failsafe 取值已定（维持 750ms，合并 n=73 敲击独立验证，`via` 直接证据为零触发）**；**T5 真机验证矩阵改为合并后（beta 渠道）执行——按维护者决定，不作为 PR 的合并门槛**（PR #123 评审更正评论）。**2026-10-17 四轮采集（iPad + Safari + Tailscale 远端 + Safari Web Inspector）已覆盖 §五 中与 iOS 中文输入法直提交相关的核心项，结论见 §5.1 / §5.2 / §5.3**：直输数字/标点、英文软键盘定性、空格→。转换、选字栏合成、死键、`cat -v` 端到端字节、`via` 坐实、硬件键盘对照组全部有结论（6 项通过、3 项定性为不适用/不可构造）。**failsafe 定案：维持 750ms 不下调。**
 
 > ✅ **T5 已于 2026-11-10 签字**：iPhone（9键/26键）与 iPad（26键）A/B、vim INSERT、Chrome(iOS)、选字栏候选、桌面 IME、quick-keys/粘贴、分支 C 全部有结论。终态表、已知边界与 #124 关闭核对见 §5.5.5 与 `T5-FINDINGS.md`。
@@ -211,7 +211,7 @@ flushIosIme(session, via):                        // via ∈ {"keyup-defer","fai
     finally { session.iosImeSending = false; }
 ```
 
-**码点 DEL 计数的终端侧依据（PR 二轮 R2-MINOR-2 补证）**：PTY/shell 侧 DEL 的擦除单位是**字符**而非字节或码元——readline 对多字节（含 astral 4 字节）字符一次 DEL 擦除整个字符，故按码点计 DEL 与终端行为对齐；上游意志只覆盖 BMP 场景（bundle 缩短分支单 DEL），astral 属本补丁在码点粒度下的自然延伸。T5 矩阵增 `cat -v` 观察 astral 替换项（`a😀`→`a😃` 实测擦除/插入对数）。
+**码点 DEL 计数的终端侧依据（PR 二轮 R2-MINOR-2 补证；2026-11-11 收窄）**：**readline/ZLE（raw 模式，UTF-8 感知）**一次 DEL 擦除整个多字节字符，故按码点计 DEL 与 shell 行为对齐；**canonical line discipline（`cat -v` 这类程序）按字节擦除**，多字节字符的 DEL 计数不能用码点，`cat -v` 的行缓冲会留下半截 UTF-8——**它不是多字节行级判据**，只用于 ASCII/字节到达验证；多字节行内容用 shell 提示符下的 `echo` / `printf` 验证。上游意志只覆盖 BMP 场景（bundle 缩短分支单 DEL），astral 属本补丁在码点粒度下的自然延伸。
 
 **emissions 边界对齐不变式（PR 二轮 R2-MINOR-3 补注）**：分支 B 的 `delta.slice(joined.length)` 按 UTF-16 码元切——安全前提是 emissions 以**整串**入队（水印 push 的是 term.onData 的完整 data 参数、cap 拒收也是整元），`delta.startsWith(joined)` 成立时 joined 的边界落在 delta 的码点边界上（xterm 不投递断代理串）；该前提若破坏（未来有人按码元截断 emissions），分支 B 可能产出断代理——锁定为注释级不变式。
 
@@ -243,7 +243,7 @@ T5 证据暴露了两类发生在 229 窗口**之外**的改写，原状态机�
    - **输入优先于 0ms timer**：下一次 229 tap 可能先于合成 send 的 timer 到达并已开窗。此时 correction 的目标是**该窗口的 baseline**（textarea 已越过它），窗口自己的 flush 再把 tap 的 delta 叠上去；合成 send 仍然不记 emissions。真机首轮复验中“成对引号跑到合成文本前面”即此竞态，已由该顺序与场景 3 的 stage six 钉住。
    - **跨 composition 的前一笔 send**：compositionstart 时镜像可能还没收到上一笔 send（同一输入优先级），此时 prefix 暂不可算。桥接记录 `iosImeCompositionBase`，在后续 onData 把镜像补到该 base 时再解析 prefix（延迟到达的上一笔 send 正好在这一步被吸收）；兜底 timer 若仍未解析则丢弃 anchor，防止下一 tap 的 onData 被误当成 composition send。真机第二轮复验的 pair→你好 即此竞态，场景 3 的 stage seven 钉住。
    - **前缀锚定**：模型是 textarea 的**后缀模型**——English/emoji/paste 由 xterm 直接投递、不进 textarea。compositionstart 记录“模型中位于 textarea 值之前的前缀”，reconcile 只重写前缀之后的后缀；模型与 textarea 对不齐（`mirror` 不以 textarea 值结尾）时**放弃改写**，宁可少修也不删掉 textarea 看不见的已投递文本。
-4. **不变量**：所有发送仍走逐码点 + `iosImeSending` 重入旗标；term 中途死亡时发送返回 false，模型置 UNKNOWN，不虚报同步。**验证等级**：Node 切片场景（scenario 3/11）+ Go 包裹；**本轮未上真机**，设备侧最小复验见 `T5-FINDINGS.md` §七。
+4. **不变量**：所有发送仍走逐码点 + `iosImeSending` 重入旗标；term 中途死亡时发送返回 false，模型置 UNKNOWN，不虚报同步。**验证等级**：Node 切片场景（scenario 3/11）+ Go 包裹；**B-1 的真机 iPhone 9键 shell 路径已复验（目视）**（`echo ` + `“”` + `你好` + `123` → `“你好123”`）；B-2/B-6 的 ASCII 删除在 `cat -v` 路径通过，shell 路径未单独复验。**`cat -v` 不是多字节行级判据**：canonical DEL 按字节擦除，删除中文/全角字符会留下半截 UTF-8，屏幕上的“三个引号”是这条测试路径的假象；多字节行内容用 `echo` / `printf` 验证。
 5. **已知边界**：若删除发生在 229 窗口尚未 flush、且 xterm 已自行投递该字符的极窄窗口内，本次 `input` 因 pending 而跳过 reconcile，由窗口 flush 的 emissions 分支裁决；与既有窗口内语义一致，未新增路径。
 
 ## 四、开发任务清单

@@ -47,3 +47,11 @@
 ⇒ **产品级密钥卫生问题**：token 会落进 tty 日志明文，且用 `-auth <token>` 启动时进 argv（同机所有用户可见）。建议：日志脱敏 ＋ 支持从环境变量/文件读 token 而非命令行。**因涉及生产数据，本次未代删。已立单 #153。**
 
 **另建议**：本次沙箱曾以 `-auth` 把该 token 带在命令行数小时，虽现已清空 `ps`，稳妥起见可考虑**轮换全局 token**（依你此前指示，我未执行）。
+
+## 2026-11-11 收尾（诊断构建拆除）
+
+- 停止诊断 daemon `1393679`（`:40261`）与同源采集服务器 `1368881`（`:40262`）；`ss` 确认两端口已释放。
+- `git worktree remove --force /tmp/mw-issue124-sandbox/repo`，并删除 `/tmp/mw-issue124-sandbox`（含 token 副本与采集日志，0600）。
+- 诊断构建的临时改动（强制 `iosImeDebugEnabled`、页面 capture、`/__sandbox_iosime_capture` 路由）只存在于该沙盒 worktree，**未提交**；主工作区无残留。
+- `auth.json` 未改（mtime/长度/md5 不变）；生产 `:40751` 仍在监听；主工作区仅剩既有的未跟踪 OOM 取证报告。
+- B-1 真机 shell 路径目视复验：iPhone 9键 `echo ` + `“”` + `你好` + `123` 输出正常；`cat -v` 的 canonical 多字节行编辑**不作判据**（见 `T5-FINDINGS.md` §七、`plan.md` §3.5）。
