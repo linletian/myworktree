@@ -2,7 +2,7 @@
 
 **对应 issue**：#124
 **执行日期**：2026-11-10
-**范围**：`develop..fix/issue-124-t5-followups` 的全部 13 个提交（仅 docs / CHANGELOG）
+**范围**：`develop..fix/issue-124-t5-followups` 中 fork 后既有的 **13 个提交**（仅 docs / CHANGELOG）；其后的收口提交为新增，不再需要重写。
 
 ---
 
@@ -12,7 +12,7 @@
 | --- | --- | --- |
 | 完整 auth token（32 字符） | **0**（逐提交全树 `git grep -F`，并与本机 `auth.json` 比对） | 无需处理 |
 | token 前 4 位（TEARDOWN 的核验记录） | 1 处（`TEARDOWN.md`） | 删除，改为“前缀已脱敏” |
-| 私网 / Tailscale IP | 18 个文件、50 处（`plan.md`、`T5-IPHONE-AB.md`、raw 捕获与 PTY） | 等长替换为 RFC 5737 TEST-NET-3 占位 |
+| 私网 / Tailscale IP | 12 个文件、50 处（`plan.md`、`T5-IPHONE-AB.md`、raw 捕获与 PTY） | 等长替换为 RFC 5737 TEST-NET-3 占位 |
 | 本机主机名 | raw 捕获与 PTY 的 shell 提示符 | 等长替换 |
 | 本机账户名 | raw 捕获与 PTY 的 shell 提示符 | 等长替换 |
 | 密码 / API key / 私钥 / Bearer | 0 | 无需处理 |
