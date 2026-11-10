@@ -5372,6 +5372,34 @@
             return out.join("");
         }
 
+        // Prefix of the model that sits BEFORE the textarea value, when the
+        // model still ends with it. The textarea may be only a suffix of what
+        // the terminal has (English/emoji/paste delivered by xterm); a null
+        // return means the model is unaligned and must not be rewritten blind.
+        function iosImeCompositionPrefixFor(mirror, base) {
+            if (mirror == null || typeof base !== "string") return null;
+            if (base === "") return mirror;
+            if (mirror.length < base.length) return null;
+            return mirror.slice(mirror.length - base.length) === base
+                ? mirror.slice(0, mirror.length - base.length)
+                : null;
+        }
+
+        // A composition start can happen while the PREVIOUS composition's
+        // xterm send is still in flight (user input outranks the 0 ms send
+        // timer): the model is then missing that send, so the prefix could not
+        // be computed yet. Whenever a later onData brings the model up to the
+        // recorded base, resolve the prefix then; the pending composition's
+        // send will use it. This is what keeps a fast pair -> composition
+        // sequence from landing with the pair stuck before the composed text.
+        function iosImeMaybeResolveCompositionPrefix(session) {
+            if (typeof session.iosImeCompositionPrefix === "string") return;
+            const base = session.iosImeCompositionBase;
+            if (typeof base !== "string") return;
+            const prefix = iosImeCompositionPrefixFor(session.iosImeTermText, base);
+            if (prefix !== null) session.iosImeCompositionPrefix = prefix;
+        }
+
         // One send path for every bridge delivery (229 flush, composition
         // reconcile, deletion reconcile): PER CODE POINT (plan.md 3.3, review
         // M6) with the reentrancy flag that keeps the watermark from recording
@@ -5401,12 +5429,22 @@
         // while the textarea keeps the text in the middle; the next 229 diff
         // then deletes the wrong tail (B-1).
         function iosImeReconcileComposition(session) {
-            if (!session.term) { session.iosImeCompositionPrefix = null; return; }
+            if (!session.term) { session.iosImeCompositionPrefix = null; session.iosImeCompositionBase = null; return; }
             if (session.iosImeComposing) return;   // a NEW composition owns the prefix; its own end will reconcile it
+            if (typeof session.iosImeCompositionPrefix !== "string") iosImeMaybeResolveCompositionPrefix(session);
             const prefix = session.iosImeCompositionPrefix;
-            if (typeof prefix !== "string") return;
+            if (typeof prefix !== "string") {
+                // The fallback timer ran and the model never caught up (the
+                // composition send never arrived / the base is unaligned).
+                // Drop the anchor so a later tap's onData cannot be mistaken
+                // for a composition send; a new compositionstart records a
+                // fresh base.
+                session.iosImeCompositionBase = null;
+                return;
+            }
             if (session.iosImeTermText == null || session.iosImeTermText.length < prefix.length) {
                 session.iosImeCompositionPrefix = null;   // unaligned: never rewrite blind
+                session.iosImeCompositionBase = null;
                 return;
             }
             // A next 229 tap may already have opened a window (user input can
@@ -5414,10 +5452,11 @@
             // baseline, so the correction targets THAT baseline; the window's
             // own flush then applies the tap delta on top of it.
             const current = session.iosImePending ? session.iosImePending.baseline : session.iosImeSeen;
-            if (typeof current !== "string") { session.iosImeCompositionPrefix = null; return; }
+            if (typeof current !== "string") { session.iosImeCompositionPrefix = null; session.iosImeCompositionBase = null; return; }
             const baseline = session.iosImeTermText.slice(prefix.length);
             const payload = iosImeReconcileBytes(baseline, current);
             session.iosImeCompositionPrefix = null;
+            session.iosImeCompositionBase = null;
             if (!payload) {
                 session.iosImeTermText = prefix + current;   // already in sync; anchor the model
                 return;
@@ -5555,6 +5594,7 @@
             session.iosImeSeen = textarea.value;
             session.iosImeTermText = textarea.value;   // model of the current terminal line
             session.iosImeCompositionPrefix = null;
+            session.iosImeCompositionBase = null;
             session.iosImeLineKeySeen = false;
             if (session.iosImeReconcileTimer) { clearTimeout(session.iosImeReconcileTimer); session.iosImeReconcileTimer = null; }
             // Bind is term-scoped: stale window state from a dead term must
@@ -5744,15 +5784,8 @@
                 // rewrites only the suffix and never deletes delivered text it
                 // cannot see in the textarea. Unaligned => null => no rewrite.
                 const compBase = textarea.value;
-                let compPrefix = null;
-                if (session.iosImeTermText != null) {
-                    if (compBase === "") compPrefix = session.iosImeTermText;
-                    else if (session.iosImeTermText.length >= compBase.length &&
-                             session.iosImeTermText.slice(session.iosImeTermText.length - compBase.length) === compBase) {
-                        compPrefix = session.iosImeTermText.slice(0, session.iosImeTermText.length - compBase.length);
-                    }
-                }
-                session.iosImeCompositionPrefix = compPrefix;
+                session.iosImeCompositionBase = compBase;
+                session.iosImeCompositionPrefix = iosImeCompositionPrefixFor(session.iosImeTermText, compBase);
                 if (iosImeDebugEnabled()) iosImeLog("compositionstart", { value: textarea.value });
                 if (session.iosImePending) {
                     // composition self-delivers; do NOT touch emissions here -
@@ -5822,6 +5855,7 @@
                 try { session.iosImeDataDisposable.dispose(); } catch (e) { }
             }
             session.iosImeDataDisposable = session.term.onData(function iosImeWatermark(data) {
+                if (!session.iosImeSending) iosImeMaybeResolveCompositionPrefix(session);
                 // A composition send is the one onData that belongs to the
                 // reconcile, not to a 229 window. It can arrive AFTER the user
                 // already started the next tap (user input outranks 0 ms
@@ -5842,6 +5876,7 @@
                 // not an append).
                 if (!session.iosImeSending && !session.iosImePending) {
                     session.iosImeTermText = iosImeApplyBytes(session.iosImeTermText, data);
+                    iosImeMaybeResolveCompositionPrefix(session);
                 }
                 if (!session.iosImePending) return;
                 if (session.iosImeSending) return;   // exclude our own term.input echo (review HIGH-1/M5)

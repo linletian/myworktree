@@ -408,6 +408,31 @@ test("ios-ime 3: composition never intercepted — taps are inert and compositio
   h4.runAllZero();                       // composition fallback + keyup flush
   assert.deepEqual(h4.term.inputCalls, ["\x7f", "\x7f", "\x7f", "你", "好", "”", "\x7f", "1", "”"],
     "the composition send is corrected against the tap baseline, then the tap delta lands");
+
+  // stage seven (B-1 cross-composition race): the PREVIOUS composition's send
+  // can still be in flight when the next composition starts (input outranks
+  // the pair's 0 ms send timer). The model is then missing the pair at the
+  // next compositionstart, so the prefix cannot be computed yet; when the
+  // pair send lands during the new composition, the prefix must be resolved
+  // from the model's new tail before the new composition's send arrives.
+  const h5 = makeHarness({ debug: true });
+  h5.textarea.value = "。";              // anchor: existing line
+  h5.bind();
+  h5.keydown(229);                      // pair composition's opening key
+  h5.compositionstart();
+  h5.textarea.value = "。“”";
+  h5.input({ inputType: "insertCompositionText", data: "“”" });
+  h5.compositionend("“”");               // pair send timer queued, NOT run yet
+  h5.keydown(229);                      // next composition's opening key
+  h5.compositionstart();                // model still "。", base "。“”" -> prefix unknown
+  h5.textarea.value = "。“你好”";         // caret between the pair
+  h5.input({ inputType: "insertCompositionText", data: "你好" });
+  h5.fireWatermark("“”");               // the PAIR's delayed send lands mid-composition
+  h5.compositionend("你好");
+  h5.fireWatermark("你好");              // the new composition's send
+  h5.runAllZero();
+  assert.deepEqual(h5.term.inputCalls, ["\x7f", "\x7f", "\x7f", "你", "好", "”"],
+    "the delayed pair send is absorbed, then the mid-line composition is corrected");
 });
 
 test("ios-ime 4: multi-tap keeps the EARLIEST baseline and re-arms every 229", () => {
@@ -683,6 +708,7 @@ test("ios-ime 12: emissions scope resets — baseline creation and closing flush
   assert.deepEqual(h.session.iosImeEmissions, ["stale"], "compositionstart keeps emissions — the next baseline resets them");
   h.compositionend("你好"); // unlatch; emissions untouched
   assert.deepEqual(h.session.iosImeEmissions, ["stale"], "compositionend keeps emissions too");
+  h.runDeferred(); // drain the composition reconcile: clears the composition prefix/base
   h.keydown(229); // new baseline -> reset ①
   assert.deepEqual(h.session.iosImeEmissions, [], "reset ①: baseline creation emptied the emissions");
   h.keyup();
