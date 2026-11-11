@@ -26,11 +26,13 @@
 
 | 来源 | VS16 敲击 | 双写 | `keypress` charCode | 未双写 |
 | --- | --- | --- | --- | --- |
-| iPhone（iOS 18.7 / Safari 27.3） | 9 | **7（100%）** | U+2764 ×4、U+26BD ×3 | `⭐️`、`⛄️`（无 keydown/keypress） |
-| iPad（iPadOS 18.7 / Safari） | 2 | **2（100%）** | U+2764 ×2 | — |
+| iPhone（iOS 27.3 / Safari 27.3） | 9 | **7（100%）** | U+2764 ×4、U+26BD ×3 | `⭐️`、`⛄️`（无 keydown/keypress） |
+| iPad（iPadOS 27.2 / Safari 27.2） | 2 | **2（100%）** | U+2764 ×2 | — |
 | 真机合计 | 11 | **9** | **9** | **2，两次都无 keypress** |
 | headless Chrome 157（CDP 合成序） | 2 | **2** | 4（A 段 2 + B 段 2） | B 段 2 次 = VS16 被吞 |
 | 全部 | 13 | **11** | **13** | 另有 2 次 VS16 丢失 |
+
+> 设备版本为操作者确认的实际测试版本；capture 的 UA 报 `CPU iPhone OS 18_7` / `CPU OS 18_7`，与设备设置版本不一致，故此处不采用 UA 的 OS 版本。
 
 `attribute.py` 输出：`BMP-charCode keypress(13) == 双写(11) + VS16 丢失(2)`；每次带 BMP `charCode` 的 `keypress` 都产生一次碎片发送。真机侧 `9 : 9` 零例外。
 
