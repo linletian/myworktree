@@ -360,6 +360,18 @@ type RestartSurvivor interface {
 	Reattach(ctx context.Context, instanceID string) (Handle, *ReadySignal, error)
 }
 
+// TerminalPreambleProvider is an optional extension for terminal kinds
+// whose output carries DEC private modes that a fresh client must restore
+// before it replays a tail. The returned string is a synthetic escape
+// sequence (possibly empty) written to the client BEFORE the tail; it does
+// not change the ring cursor.
+//
+// The framework only asks for it on a cursorless (tail) attach. Kinds
+// without terminal modes (web-UI kinds) simply do not implement it.
+type TerminalPreambleProvider interface {
+	TerminalPreamble(handle Handle) string
+}
+
 // ResourceCleaner is an optional extension kinds implement to release
 // per-instance resources that are NOT covered by Stop (e.g. a state
 // dir that only Delete/Restart should wipe). The framework calls

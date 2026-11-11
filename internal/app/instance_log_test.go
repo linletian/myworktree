@@ -3,6 +3,7 @@ package app
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -49,6 +50,12 @@ func (k *logReplayKind) ReadLogs(h framework.Handle, since, max int64) (string, 
 	return "chunk-from-cursor", since + 5, nil
 }
 
+// TerminalPreamble makes this fake a terminal kind for the issue #117
+// follow-up: a cursorless tail attach may carry a mode preamble.
+func (k *logReplayKind) TerminalPreamble(h framework.Handle) string {
+	return "\x1b[?1003h"
+}
+
 func (k *logReplayKind) KindBlob(h framework.Handle) (json.RawMessage, error) {
 	return json.RawMessage(`{}`), nil
 }
@@ -74,6 +81,9 @@ func (k *emptyLogsKind) Spawn(ctx context.Context, p framework.SpawnParams) (fra
 func (k *emptyLogsKind) ReadLogs(h framework.Handle, since, max int64) (string, int64, error) {
 	return "", since, nil
 }
+
+// Empty (web-UI) kinds have no terminal modes to restore.
+func (k *emptyLogsKind) TerminalPreamble(h framework.Handle) string { return "" }
 
 // syncStreamWriter is a goroutine-safe http.ResponseWriter +
 // http.Flusher for streaming handler tests (httptest.ResponseRecorder
@@ -212,6 +222,76 @@ func TestHandleInstanceLog_TailReturnsNewestBytes(t *testing.T) {
 	}
 	if off := w.Header().Get("X-Log-Offset"); off != "12" {
 		t.Fatalf("X-Log-Offset = %q, want 12", off)
+	}
+}
+
+func TestHandleInstanceLog_TailCarriesPreambleOnlyWhenOptedIn(t *testing.T) {
+	t.Parallel()
+	k := &logReplayKind{}
+	srv, m := newLogTestServer(t, k)
+	instID := startKindInstance(t, m, "log-replay")
+
+	// Opt-in, cursorless (tail): preamble header + pure body.
+	req := httptest.NewRequest(http.MethodGet, "/api/instances/log?id="+instID+"&preamble=1", nil)
+	w := httptest.NewRecorder()
+	srv.handleInstanceLog(w, req)
+	if body := w.Body.String(); body != "newest-bytes" {
+		t.Fatalf("tail body = %q, want the pure ring tail", body)
+	}
+	raw := w.Header().Get("X-Terminal-Preamble")
+	if raw == "" {
+		t.Fatal("X-Terminal-Preamble missing on an opted-in tail")
+	}
+	decoded, err := base64.StdEncoding.DecodeString(raw)
+	if err != nil {
+		t.Fatalf("X-Terminal-Preamble is not base64: %v", err)
+	}
+	if string(decoded) != "\x1b[?1003h" {
+		t.Fatalf("preamble = %q, want the kind's mode sequence", decoded)
+	}
+
+	// No opt-in: byte-for-byte legacy response.
+	req = httptest.NewRequest(http.MethodGet, "/api/instances/log?id="+instID, nil)
+	w = httptest.NewRecorder()
+	srv.handleInstanceLog(w, req)
+	if got := w.Header().Get("X-Terminal-Preamble"); got != "" {
+		t.Fatalf("unexpected preamble without opt-in: %q", got)
+	}
+
+	// Explicit cursor: incremental read onto a screen that already exists.
+	req = httptest.NewRequest(http.MethodGet, "/api/instances/log?id="+instID+"&since=7&preamble=1", nil)
+	w = httptest.NewRecorder()
+	srv.handleInstanceLog(w, req)
+	if got := w.Header().Get("X-Terminal-Preamble"); got != "" {
+		t.Fatalf("incremental read must not carry a preamble: %q", got)
+	}
+	if body := w.Body.String(); body != "chunk-from-cursor" {
+		t.Fatalf("incremental body = %q", body)
+	}
+}
+
+func TestHandleInstanceLogStream_TailCarriesPreambleOnlyWhenOptedIn(t *testing.T) {
+	t.Parallel()
+	k := &logReplayKind{}
+	srv, m := newLogTestServer(t, k)
+	instID := startKindInstance(t, m, "log-replay")
+
+	body := runStreamUntilCancel(t, srv, "/api/instances/log/stream?id="+instID+"&preamble=1", `"preamble"`)
+	if !strings.Contains(body, `"preamble":"\u001b[?1003h"`) {
+		t.Fatalf("first SSE frame = %q, want the JSON-escaped preamble field", body)
+	}
+	if !strings.Contains(body, `"chunk":"newest-bytes"`) {
+		t.Fatalf("first SSE frame = %q, want the pure tail chunk", body)
+	}
+
+	body = runStreamUntilCancel(t, srv, "/api/instances/log/stream?id="+instID, `"chunk":"newest-bytes"`)
+	if strings.Contains(body, `"preamble"`) {
+		t.Fatalf("SSE without opt-in must not carry a preamble: %q", body)
+	}
+
+	body = runStreamUntilCancel(t, srv, "/api/instances/log/stream?id="+instID+"&since=7&preamble=1", `"chunk":"chunk-from-cursor"`)
+	if strings.Contains(body, `"preamble"`) {
+		t.Fatalf("incremental SSE must not carry a preamble: %q", body)
 	}
 }
 

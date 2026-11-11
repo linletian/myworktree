@@ -412,6 +412,28 @@ func (m *Manager) List() ([]store.ManagedInstance, error) {
 	return st.Instances, nil
 }
 
+// TerminalPreamble returns the synthetic terminal-mode preamble a
+// cursorless (tail) client should receive before the replay bytes. It is
+// empty for kinds that do not implement TerminalPreambleProvider, for
+// non-running instances, and when the kind has no state to restore.
+func (m *Manager) TerminalPreamble(id string) string {
+	m.mu.Lock()
+	ri, ok := m.running[id]
+	m.mu.Unlock()
+	if !ok {
+		return ""
+	}
+	k, err := m.Registry.Get(ri.handle.KindName)
+	if err != nil {
+		return ""
+	}
+	p, ok := k.(TerminalPreambleProvider)
+	if !ok {
+		return ""
+	}
+	return p.TerminalPreamble(ri.handle)
+}
+
 // Tail returns up to n bytes of the newest captured log and the
 // current end offset (usable as a follow-up ReadSince cursor).
 func (m *Manager) Tail(id string, n int64) (string, int64, error) {

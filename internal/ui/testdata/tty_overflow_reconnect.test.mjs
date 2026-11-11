@@ -588,13 +588,13 @@ function consumeHarness({
 test("issue #114 B1: caps declare overflow-notice always and compress only when deflate-raw inflates", () => {
   const yes = consumeHarness();
   yes.connect();
-  assert.ok(yes.sockets[0].url.includes("caps=ping,sync,overflow-notice,compress"),
+  assert.ok(yes.sockets[0].url.includes("caps=ping,sync,overflow-notice,preamble,compress"),
     `full caps string expected, got ${yes.sockets[0].url}`);
 
   const no = consumeHarness({ compressCapable: false });
   no.connect();
-  assert.ok(no.sockets[0].url.includes("caps=ping,sync,overflow-notice"),
-    `overflow-notice must survive the probe failure, got ${no.sockets[0].url}`);
+  assert.ok(no.sockets[0].url.includes("caps=ping,sync,overflow-notice,preamble"),
+    `overflow-notice and preamble must survive the probe failure, got ${no.sockets[0].url}`);
   assert.ok(!no.sockets[0].url.includes("compress"),
     "no deflate-raw -> no compress cap (pin 2 graceful degradation)");
 

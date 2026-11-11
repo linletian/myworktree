@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -3264,6 +3265,15 @@ func (s *Server) handleInstanceTTYWSLiveness(w http.ResponseWriter, r *http.Requ
 	// terminal) and keeps the #82 contract verbatim — overflow closes the
 	// subscription, and the !ok teardown below answers 1013.
 	overflowNoticeCap := ttyClientHasCap(caps, "overflow-notice")
+	// "preamble": the client whitelists the optional `preamble` field in
+	// the ready frame. It is sent ONLY on a cursorless (tail) attach, where
+	// the client is about to paint bytes onto a fresh/default terminal. A
+	// reconnect that already carries a `since` has a screen whose modes are
+	// already in the right state (or will be fixed by the bytes it
+	// requests); re-applying a preamble there could switch buffers under a
+	// live screen. The field is additive JSON, so a legacy page that does
+	// not declare the cap keeps the byte-identical ready frame it knows.
+	preambleCap := ttyClientHasCap(caps, "preamble")
 	// "compress" (issue #114, decision 5a): a whole-token cap only. A
 	// client that declares it gets app-layer compression: every BINARY
 	// frame this handler writes is fed through one persistent per-connection
@@ -3358,6 +3368,17 @@ func (s *Server) handleInstanceTTYWSLiveness(w http.ResponseWriter, r *http.Requ
 	defer s.instanceMgr.SetConnectionType(id, "")
 
 	// Step 1: Send handshake ready message
+	//
+	// A cursorless (tail) attach is the one path that paints a fresh
+	// terminal from bytes that may no longer contain the application's
+	// startup mode sequences (issue #117 follow-up). The preamble restores
+	// only the mode bits (alt screen, mouse protocol/encoding, autowrap,
+	// cursor, bracketed paste, application cursor/keypad); it changes no
+	// ring offset, so the client's cursor remains the tail's end offset.
+	var preamble string
+	if preambleCap && since < 0 && since != sinceFollowLiveEnd {
+		preamble = s.instanceMgr.TerminalPreamble(id)
+	}
 	readyMsg := []byte(`{"type":"ready"}`)
 	// compress echo (issue #114, decision 5a, arbitration gap fix): a
 	// compressed connection's ready frame carries "compress":true so the
@@ -3369,6 +3390,16 @@ func (s *Server) handleInstanceTTYWSLiveness(w http.ResponseWriter, r *http.Requ
 	// field falls back to the plaintext path).
 	if compressCap {
 		readyMsg = []byte(`{"type":"ready","compress":true}`)
+	}
+	if preamble != "" {
+		type readyFrame struct {
+			Type     string `json:"type"`
+			Compress bool   `json:"compress,omitempty"`
+			Preamble string `json:"preamble"`
+		}
+		if b, merr := json.Marshal(readyFrame{Type: "ready", Compress: compressCap, Preamble: preamble}); merr == nil {
+			readyMsg = b
+		}
 	}
 	if err := conn.WriteText(readyMsg); err != nil {
 		return
@@ -4554,6 +4585,16 @@ func (s *Server) handleInstanceLog(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, fmt.Errorf("since=%d (follow from the live end) is only valid on /api/instances/log/stream and /api/instances/tty/ws", sinceFollowLiveEnd))
 		return
 	}
+	// Opt-in terminal-mode preamble (issue #117 follow-up). Only a
+	// cursorless (tail) read can be painting a fresh terminal; an explicit
+	// `since` is an incremental read onto a screen that already exists.
+	// The preamble rides a header, NOT the body: writeSanitizedTerminalOutput
+	// counts the body to decide CURSOR_FOLLOW_LIVE_END, and external log
+	// consumers must keep receiving pure ring bytes.
+	preamble := ""
+	if r.URL.Query().Get("preamble") == "1" && since < 0 {
+		preamble = s.instanceMgr.TerminalPreamble(id)
+	}
 	if since >= 0 {
 		body, next, err := s.instanceMgr.ReadSince(id, since, 64*1024)
 		if err != nil {
@@ -4571,6 +4612,11 @@ func (s *Server) handleInstanceLog(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("X-Log-Offset", strconv.FormatInt(next, 10))
+	if preamble != "" {
+		// Base64 keeps the ESC bytes out of the HTTP header grammar; the
+		// preamble is ASCII-only, so the client's atob() round-trips it.
+		w.Header().Set("X-Terminal-Preamble", base64.StdEncoding.EncodeToString([]byte(preamble)))
+	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	_, _ = io.WriteString(w, body)
 }
@@ -4582,6 +4628,13 @@ func (s *Server) handleInstanceLogStream(w http.ResponseWriter, r *http.Request)
 	}
 	id := strings.TrimSpace(r.URL.Query().Get("id"))
 	since := parseInt64Default(r.URL.Query().Get("since"), -1)
+	// Same opt-in as GET /api/instances/log: only a cursorless (tail)
+	// attach gets the mode preamble. `-2` means the screen is already
+	// painted, and `since>=0` is an incremental stream onto that screen.
+	preamble := ""
+	if r.URL.Query().Get("preamble") == "1" && since < 0 && since != sinceFollowLiveEnd {
+		preamble = s.instanceMgr.TerminalPreamble(id)
+	}
 
 	var initial string
 	var next int64
@@ -4633,7 +4686,7 @@ func (s *Server) handleInstanceLogStream(w http.ResponseWriter, r *http.Request)
 	cleanupSSE := s.instanceMgr.RegisterSSEConnection(id)
 	defer cleanupSSE()
 
-	if err := writeSSELogEvent(w, initial, next); err != nil {
+	if err := writeSSELogEventWithPreamble(w, initial, next, preamble); err != nil {
 		return
 	}
 	flusher.Flush()
@@ -5188,9 +5241,20 @@ func decodeArgs(raw json.RawMessage, out any) error {
 }
 
 func writeSSELogEvent(w io.Writer, chunk string, next int64) error {
+	return writeSSELogEventWithPreamble(w, chunk, next, "")
+}
+
+// writeSSELogEventWithPreamble is writeSSELogEvent plus the OPTIONAL
+// terminal-mode preamble on the first tail frame. It is a separate field
+// (not part of `chunk`) so the client can write it before the tail without
+// advancing its ring cursor and without counting it as painted log bytes.
+func writeSSELogEventWithPreamble(w io.Writer, chunk string, next int64, preamble string) error {
 	payload := map[string]any{
 		"chunk": chunk,
 		"next":  next,
+	}
+	if preamble != "" {
+		payload["preamble"] = preamble
 	}
 	b, err := json.Marshal(payload)
 	if err != nil {
