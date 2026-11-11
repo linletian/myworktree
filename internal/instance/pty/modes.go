@@ -58,9 +58,7 @@ const (
 	stateEsc
 	stateCSI
 	stateOSC
-	stateOSCEsc
 	stateDCS
-	stateDCSEsc
 )
 
 // csiMax bounds the parameter bytes retained for one CSI sequence. Real
@@ -115,6 +113,19 @@ func (t *modeTracker) consume(b byte) {
 			t.state = stateGround
 		}
 	case stateCSI:
+		// DEC/xterm cancel a CSI on ESC (the ESC starts a new sequence) and
+		// on CAN/SUB/ST (abort to ground). Treating these as parameter bytes
+		// would swallow the next real sequence after a truncated CSI.
+		switch b {
+		case 0x1b:
+			t.csi = t.csi[:0]
+			t.state = stateEsc
+			return
+		case 0x18, 0x1a, 0x9c:
+			t.csi = t.csi[:0]
+			t.state = stateGround
+			return
+		}
 		if b >= 0x40 && b <= 0x7e {
 			t.applyCSI(string(t.csi), b)
 			t.csi = t.csi[:0]
@@ -125,33 +136,25 @@ func (t *modeTracker) consume(b byte) {
 			t.csi = append(t.csi, b)
 		}
 	case stateOSC:
+		// xterm's OSC_STRING ends on BEL, ST, CAN/SUB, and ESC. ESC is not
+		// just an end marker: xterm transitions to ESCAPE and parses the
+		// following bytes as a NEW sequence. Keep that behavior so a real
+		// `ESC[?1003h` after an OSC (or after a truncated OSC) is not lost.
 		switch b {
-		case 0x07:
+		case 0x07, 0x9c, 0x18, 0x1a:
 			t.state = stateGround
 		case 0x1b:
-			t.state = stateOSCEsc
-		}
-	case stateOSCEsc:
-		switch b {
-		case '\\':
-			t.state = stateGround
-		case 0x1b:
-			// Stay in the escape tail; a later backslash still terminates.
-		default:
-			t.state = stateOSC
+			t.state = stateEsc
 		}
 	case stateDCS:
-		if b == 0x1b {
-			t.state = stateDCSEsc
-		}
-	case stateDCSEsc:
+		// DCS_PASSTHROUGH (and the SOS/PM/APC string states that share this
+		// scanner) end on ST, CAN/SUB, or ESC; ESC is re-parsed as the start
+		// of a new sequence, exactly as in xterm's parser table.
 		switch b {
-		case '\\':
+		case 0x9c, 0x18, 0x1a:
 			t.state = stateGround
 		case 0x1b:
-			// Stay; see stateOSCEsc.
-		default:
-			t.state = stateDCS
+			t.state = stateEsc
 		}
 	}
 }
@@ -242,6 +245,8 @@ func (t *modeTracker) applyMode(n int, set bool) {
 		t.bracketedPaste = set
 	}
 	// Deliberately ignored:
+	//   1005/1015 legacy mouse encodings (xterm.js removed support in
+	//        #2507; not tracked or restored),
 	//   1007 alternate scroll (the client strips it; re-enabling would
 	//        turn wheels into arrow keys in a shell),
 	//   2026 synchronized output (the preamble always releases it; the
@@ -264,10 +269,13 @@ func (t *modeTracker) reset() {
 }
 
 // Preamble returns a synthetic escape sequence that puts a fresh xterm in
-// the mode state the running application expects. It is deterministic and
-// idempotent: it first releases synchronized output, switches to the
-// correct buffer, resets every viewport-affecting mode, then re-applies
-// the modes that are actually active.
+// the mode state the running application expects. It is deterministic; on
+// the MODE STATE it is idempotent (re-applying the same bits is a no-op),
+// though `1049h` can clear a fresh alternate buffer, so the visible effect
+// is not idempotent when the client was not already on the alt screen.
+// It first releases synchronized output, switches to the correct buffer,
+// resets every viewport-affecting mode, then re-applies the modes that are
+// actually active.
 //
 // It deliberately does NOT try to restore screen cells, scrollback,
 // cursor position, scroll regions or character sets. Those are the parts

@@ -569,7 +569,7 @@ Bi-directional stream for terminal output/input with PTY support.
 `caps` is an optional, comma-separated capability list (issue #98), and the
 parameter may be **repeated** (`?caps=pong&caps=ping` — every value is
 scanned, not just the first). Matching is by whole, case-sensitive token:
-`caps=pinger` and `caps=PING` do NOT opt in. Six capabilities are defined.
+`caps=pinger` and `caps=PING` do NOT opt in. Seven capabilities are defined.
 One of them, `replay-window`, carries a value (`replay-window=<bytes>`), so
 it is matched by key up to the first `=` rather than as a whole token —
 whitespace around the key and the value is trimmed, an empty value
@@ -678,6 +678,16 @@ connection; where a list declares the same key more than once the first
   compressed and plaintext connections has to read the LOGICAL family
   (`replayLogicalBytes` / `liveLogicalBytes`), which is the one unit the
   client's cursor speaks.
+- **`preamble`** (issue #117 follow-up) — the client whitelists an optional
+  `preamble` string in the `ready` frame. It is sent ONLY on a cursorless
+  (tail) attach: `since` omitted, or a negative `since` other than `-2`.
+  A catch-up replay (`since>=0`) and the follow-from-live-end mode (`-2`)
+  never carry it. The value is a synthetic DEC mode sequence that the
+  client must write BEFORE the first binary replay frame; it is not ring
+  output, so it MUST NOT advance the cursor or count as painted bytes. A
+  client that does not declare the cap keeps the byte-identical legacy
+  `{"type":"ready"}` frame. The token is whole and case-sensitive; unlike
+  `replay-window`, it carries no value.
 - **`replay-window=<bytes>`** (issue #114) — the client asks for a **smaller**
   handshake replay window than the operator's default. The window bounds a
   catch-up replay at both ends: the replay starts no earlier than
@@ -692,8 +702,11 @@ connection; where a list declares the same key more than once the first
   Malformed values are ignored, never refused. See the replay section below
   for the cursor semantics, which need no new frame type.
 
-The four capabilities compose independently; the resulting wire contract per
-combination (issue #114 review R12), each cell pinned by its own test:
+The four streaming capabilities compose independently; the resulting wire
+contract per combination (issue #114 review R12), each cell pinned by its own
+test. `preamble` is orthogonal to this table: it changes only the ready frame's
+optional field on a cursorless tail, never the overflow, binary-wire or cursor
+column.
 
 | caps | overflow behaviour | binary wire | cursor unit |
 | --- | --- | --- | --- |
@@ -710,7 +723,7 @@ TEXT ping unconditionally, and the new client whitelists it).
 
 **The client consumption contract (issue #114 Phase B).** The shipped web
 client (`internal/ui/static/index.html`) now declares
-`caps=ping,sync,overflow-notice` always, and appends `compress` only when
+`caps=ping,sync,overflow-notice,preamble` always, and appends `compress` only when
 `new DecompressionStream('deflate-raw')` constructs successfully — a platform
 without the format (pre-Chrome 103 / pre-Safari 16.4, decision 5a pin 2)
 declares no `compress` cap and stays on the plaintext wire, console-noted. It
@@ -1112,10 +1125,11 @@ Body:
 Deletes a stopped (non-running) instance record. The instance's in-memory log buffer is also released, decrementing the global log-buffer accounting.
 
 ### Log replay (tail / incremental)
-`GET /api/instances/log?id=<instanceId>[&since=<byteOffset>]`
+`GET /api/instances/log?id=<instanceId>[&since=<byteOffset>][&preamble=1]`
 
 - Without `since`: returns the recent tail (newest bytes) as `text/plain`; the response also includes `X-Log-Offset: <endOffset>` — the cursor at the end of the tail, usable as `since` on a follow-up incremental read.
 - With `since`: returns incremental content from byte offset and includes response header `X-Log-Offset: <nextByteOffset>`.
+- With `preamble=1` on a tail read (no `since`, or a negative `since` other than `-2`), the response also includes `X-Terminal-Preamble: <base64>`. It is a synthetic terminal-mode restore sequence to write BEFORE the response body; it is not part of the log body and does not change `X-Log-Offset`. The query opts in only when its value is exactly `1`; other values are ignored. The response carries `Cache-Control: no-store` because both the tail and the terminal state are time-varying.
 - This endpoint has no follow-from-the-live-end mode, and it does not pretend to have one: `since=-2` returns **400** (issue #86). The sentinel means "I already painted the tail, do not send it", while this endpoint's answer to any negative `since` is the tail — the exact inversion that caused the duplication in the first place, so serving it silently would resurrect the bug invisibly. Follow-from-the-live-end is a property of a long-lived stream, so it exists only on `/api/instances/log/stream` and `/api/instances/tty/ws`. Every other negative `since` (and an omitted one) keeps its tail semantics untouched; the shipped UI never sends `since` here at all, because `loadLog` deliberately omits it so the response is always the tail plus its `X-Log-Offset` — that header being present is what lets the client keep a real cursor, and its being stripped is what makes the client fall back to `since=-2` on the streams.
 - Logs live in an in-memory ring buffer attached to the **running** instance (see `docs/ARCHITECTURE.md` §4.1 *Instance log buffer*). After the instance stops, exits, or fails — or after the daemon restarts — the buffer is released and this endpoint returns `200 OK` with an empty body (tail reads carry `X-Log-Offset: 0`; incremental reads echo the requested `since`). Unknown / never-started instance IDs behave the same.
 - The `byteOffset` cursor is the running total of bytes the instance has produced (monotonic; never decreases). When `since` points to data that has already been evicted from the ring (oldest-byte > since), the response silently clamps to the oldest live byte and `X-Log-Offset` advances accordingly.
@@ -1123,13 +1137,14 @@ Deletes a stopped (non-running) instance record. The instance's in-memory log bu
 Response: `text/plain`
 
 ### Live log stream (SSE)
-`GET /api/instances/log/stream?id=<instanceId>[&since=<byteOffset>]`
+`GET /api/instances/log/stream?id=<instanceId>[&since=<byteOffset>][&preamble=1]`
 
 - Server-Sent Events stream.
 - Emits `event: log` with JSON payload:
 ```json
-{"chunk":"...","next":12345}
+{"chunk":"...","next":12345,"preamble":"..."}
 ```
+- `preamble` is optional. With `preamble=1` on a tail start (no `since`, or a negative `since` other than `-2`), the first `log` event carries it; write it BEFORE the chunk. It is not a ring-buffer chunk, so it does not advance `next`. It is omitted for `-2`, incremental streams, and clients that did not opt in.
 - Same in-memory backing as the tail endpoint above. Without `since` (or with any negative `since` other than the `-2` sentinel below), the stream starts from the tail (newest bytes), same as the log endpoint. The cursor `next` is the same monotonic byte counter; clients should echo it as `since` on the next request to receive only new chunks.
 - **`since=-2` — follow from the live end (issue #86).** For a client whose screen ALREADY holds the tail but which never learned its end offset (a reverse proxy stripped `X-Log-Offset` off the tail response): the server sends NO body, opens the stream with one EMPTY `log` event carrying the current head — `{"chunk":"","next":<head>}` — and then delivers only bytes produced after that instant. A tail here would be painted a second time under the screen that already shows it, which was the bug. The sentinel is branched on explicitly, ahead of the `since < 0` tail branch (`parseInt64Default` passes any negative value through untouched), so it can never be mistaken for an omitted `since`. Client side: `CURSOR_FOLLOW_LIVE_END` in `index.html`; its only assignment site is `loadLog`, and it is taken only after tail content actually reached the screen — `writeSanitizedTerminalOutput` returns the number of characters it wrote (`.length`, not bytes) and is consumed only as a `> 0` gate, and an empty tail (or one that sanitizing emptied) keeps `CURSOR_UNKNOWN` and keeps asking for the tail, because there is nothing on screen to duplicate and suppressing the replay would hide output instead. Server side: `sinceFollowLiveEnd` in `internal/app/app.go`, with the head read by `Manager.EndOffset` (a zero-length tail read, not a 64KB copy that gets thrown away). Because this endpoint polls from the published cursor rather than subscribing, nothing produced AFTER that read is lost — it arrives as an ordinary frame. What is lost is the window BEFORE it: `[H1, <head>)`, where `H1` is the end of the tail the client actually painted. That range is in no replay, no painted body and no frame, and the client's cursor now sits past it, so no reconnect asks for it again — it is gone from that client's screen for good. See the TTY WebSocket section above for the same asymmetry, its size, and why it is accepted. A cursor of exactly `0` is still treated as "no cursor" by the client's `> 0` guards, so a proxy that REWROTE the header to `0` instead of stripping it gets the tail again; that is harmless only if the `0` is truthful (a genuine head of 0 means the ring is empty), and a fabricated `0` over a non-empty ring does restore the duplicate — no client-side rule can distinguish them without a second, independently sourced length, which is the very datum the proxy is already lying about.
 - Polling cadence: 1 s. When no new data is available, the server emits an SSE comment line (`: ping`) as a keep-alive — no `log` event, no cursor update. Clients should treat the absence of a `log` event as "no progress" and keep using the last `next` they saw.

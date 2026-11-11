@@ -164,24 +164,98 @@ func TestModeTracker_CombinedParameters(t *testing.T) {
 	}
 }
 
-func TestModeTracker_IgnoresControlStringContents(t *testing.T) {
+func TestModeTracker_ControlStringTerminationMatchesXterm(t *testing.T) {
 	t.Parallel()
-	// OSC title containing what looks like a mouse DECSET, then a real
-	// DECSET. The title must not arm the mouse; the real one must.
-	p := preambleAfter("\x1b]0;title \x1b[?1003h\x07", "\x1b[?1002h")
+
+	// Plain OSC content (no ESC/CAN/SUB/ST/BEL) is ignored. The `?1003h`
+	// inside the title has no ESC, so it is not a DECSET.
+	p := preambleAfter("\x1b]0;title ?1003h\x07", "\x1b[?1002h")
 	if !strings.Contains(p, "\x1b[?1002h") {
 		t.Fatalf("real DECSET after OSC was not tracked: %q", p)
 	}
 	if strings.Contains(p, "\x1b[?1003h") {
-		t.Fatalf("DECSET inside OSC was incorrectly tracked: %q", p)
+		t.Fatalf("DECSET text inside OSC was incorrectly tracked: %q", p)
+	}
+
+	// ESC ends OSC and starts a NEW sequence, as in xterm's OSC_END ->
+	// ESCAPE transition. The following CSI is real and must be tracked.
+	p = preambleAfter("\x1b]0;title \x1b[?1003h\x07")
+	if !strings.Contains(p, "\x1b[?1003h") {
+		t.Fatalf("CSI after ESC-terminated OSC was not tracked: %q", p)
+	}
+
+	// CAN/SUB terminate OSC too (xterm's OSC_END abort path).
+	for _, term := range []string{"\x18", "\x1a", "\x9c"} {
+		p = preambleAfter("\x1b]0;title" + term + "\x1b[?1003h")
+		if !strings.Contains(p, "\x1b[?1003h") {
+			t.Fatalf("CSI after OSC terminator %q was not tracked: %q", term, p)
+		}
 	}
 }
 
-func TestModeTracker_IgnoresDCSAndAPC(t *testing.T) {
+func TestModeTracker_DCSAndAPCStringTerminationMatchesXterm(t *testing.T) {
 	t.Parallel()
-	p := preambleAfter("\x1bP1$r\x1b[?1003h\x1b\\", "\x1b_some\x1b[?1002h\x1b\\")
-	if strings.Contains(p, "\x1b[?1003h") || strings.Contains(p, "\x1b[?1002h") {
-		t.Fatalf("DECSET inside DCS/APC was incorrectly tracked: %q", p)
+
+	// Plain DCS content is ignored until a terminator.
+	p := preambleAfter("\x1bPjunk ?1003h\x9c", "\x1b[?1002h")
+	if strings.Contains(p, "\x1b[?1003h") {
+		t.Fatalf("DECSET text inside DCS was incorrectly tracked: %q", p)
+	}
+	if !strings.Contains(p, "\x1b[?1002h") {
+		t.Fatalf("real DECSET after DCS was not tracked: %q", p)
+	}
+
+	// ESC/CAN/SUB end DCS (xterm's DCS_UNHOOK path); the following CSI is
+	// a new sequence and must be tracked.
+	// ESC is both the DCS terminator and the ESCAPE-state introducer, so
+	// the CSI that follows starts at `[`, not at a second ESC.
+	p = preambleAfter("\x1bPjunk\x1b[?1003h")
+	if !strings.Contains(p, "\x1b[?1003h") {
+		t.Fatalf("CSI after ESC-terminated DCS was not tracked: %q", p)
+	}
+	for _, term := range []string{"\x18", "\x1a", "\x9c"} {
+		p = preambleAfter("\x1bPjunk" + term + "\x1b[?1003h")
+		if !strings.Contains(p, "\x1b[?1003h") {
+			t.Fatalf("CSI after DCS terminator %q was not tracked: %q", term, p)
+		}
+	}
+
+	// APC (ESC _) shares the same string-state handling. Plain content is
+	// ignored; ESC/CAN/SUB return to ground and the next CSI is tracked.
+	p = preambleAfter("\x1b_junk ?1003h\x9c", "\x1b[?1002h")
+	if strings.Contains(p, "\x1b[?1003h") {
+		t.Fatalf("DECSET text inside APC was incorrectly tracked: %q", p)
+	}
+	if !strings.Contains(p, "\x1b[?1002h") {
+		t.Fatalf("real DECSET after APC was not tracked: %q", p)
+	}
+	p = preambleAfter("\x1b_junk\x1b[?1003h")
+	if !strings.Contains(p, "\x1b[?1003h") {
+		t.Fatalf("CSI after ESC-terminated APC was not tracked: %q", p)
+	}
+	for _, term := range []string{"\x18", "\x1a", "\x9c"} {
+		p = preambleAfter("\x1b_junk" + term + "\x1b[?1003h")
+		if !strings.Contains(p, "\x1b[?1003h") {
+			t.Fatalf("CSI after APC terminator %q was not tracked: %q", term, p)
+		}
+	}
+}
+
+func TestModeTracker_CSIAbortMatchesXterm(t *testing.T) {
+	t.Parallel()
+	// A truncated CSI must not swallow the next sequence. ESC restarts the
+	// parser; CAN/SUB/ST abort it.
+	// ESC is both the abort and the ESCAPE-state introducer, so the next
+	// CSI starts at `[`.
+	p := preambleAfter("\x1b[?100\x1b[?1049h")
+	if !strings.Contains(p, "\x1b[?1049h") {
+		t.Fatalf("ESC abort swallowed the following DECSET: %q", p)
+	}
+	for _, abort := range []string{"\x18", "\x1a", "\x9c"} {
+		p := preambleAfter("\x1b[?100" + abort + "\x1b[?1049h")
+		if !strings.Contains(p, "\x1b[?1049h") {
+			t.Fatalf("CSI abort %q swallowed the following DECSET: %q", abort, p)
+		}
 	}
 }
 
@@ -219,5 +293,21 @@ func TestModeTracker_IgnoresNonDECModes(t *testing.T) {
 	p := preambleAfter("\x1b[4h\x1b[1;31m\x1b[?1003h")
 	if !strings.Contains(p, "\x1b[?1003h") {
 		t.Fatalf("real DECSET after ANSI/SGR was not tracked: %q", p)
+	}
+}
+
+func TestModeTracker_PreambleIsASCII(t *testing.T) {
+	t.Parallel()
+	// The GET path transports the preamble as base64 and the browser decodes
+	// it with atob(); that round-trip is only sound while every emitted byte
+	// is ASCII. Keep the invariant pinned at the source.
+	p := preambleAfter(
+		"\x1b[?1049h\x1b[?1003h\x1b[?1006h\x1b[?1004h\x1b[?2004h" +
+			"\x1b[?1h\x1b[?66h\x1b[?7l\x1b[?25l",
+	)
+	for i := 0; i < len(p); i++ {
+		if p[i] >= 0x80 {
+			t.Fatalf("preamble byte %d = 0x%02x is non-ASCII: %q", i, p[i], p)
+		}
 	}
 }

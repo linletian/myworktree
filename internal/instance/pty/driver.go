@@ -58,8 +58,8 @@ func (Driver) TerminalPreamble(handle framework.Handle) string {
 }
 
 // TerminalPreamble returns the current mode preamble for this PTY. The
-// method is intentionally on the kind-private Handle: the framework only
-// reaches it through TerminalPreambleProvider.
+// method lives on the kind's Handle (exported because the framework needs
+// it at the boundary, but only reached through TerminalPreambleProvider).
 func (h *Handle) TerminalPreamble() string {
 	if h == nil || h.modes == nil {
 		return ""

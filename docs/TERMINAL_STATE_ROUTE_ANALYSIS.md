@@ -3,7 +3,8 @@
 > 状态：分析记录，未决策，不含实现承诺。
 >
 > 基线：`develop` = `5f4be0e`（2026-11-11）。文中仓库行号均以该提交为准；
-> 后续代码变动需要重新核对。
+> 后续代码变动（包括本 PR 给 `app.go` 增加的行）会让行号漂移，届时以函数名/
+> 锚点为准并重新核对。
 >
 > 本文记录一次围绕 issue #117 后续观察展开的路线分析：late attach 到
 > 长时间运行的 fullscreen TUI 时，滚动为什么只滚 xterm 缓存、为什么不与
@@ -499,7 +500,8 @@ TUI 场景天然共享（app 的 ScrollView 只有一份）；普通 shell 场�
   - `since=-2` → follow live end，不重放
   - `since=0` → 从 oldest live 开始，受 W_eff 前端 clamp 和 8MB budget 限制
   - `since>0` → catch-up，最多 8MB，start/closing `sync` 帧
-  - `caps`: `ping,sync,overflow-notice,compress,replay-window,slow-link`
+  - `caps`: `ping,sync,overflow-notice,compress,replay-window,slow-link`；
+    本 PR 另加 `preamble`（只用于 cursorless tail attach，不改 cursor）
   - 压缩：deflate-raw，按帧
   - 溢出：`overflow` notice + reset + tail reconnect
 
@@ -588,8 +590,14 @@ TUI 场景天然共享（app 的 ScrollView 只有一份）；普通 shell 场�
   pending escape、屏幕几何。
 - **代价**：需要能跨 chunk 边界的小型增量解析器；`1049` 的进入/退出语义；
   所有“清屏 + tail 重放”路径都要覆盖。
-- **风险**：恢复 alt screen 后，tail 只有 diff 时画面可能比现在更空；
+- **风险**：恢复 alt screen 时，如果客户端本来不在 alt，`1049h` 会切到一块
+  新的空 alt screen，tail 只有 diff 时画面可能比现在更空；如果客户端已经在
+  alt，xterm 的 `activateAltBuffer` 会直接返回，不会清掉现有 live 屏幕。
   是否需要“强制全量重绘”的辅助手段，需要单独评估。
+- **落地状态**：P0 已随本 PR 落地，实现见
+  `internal/instance/pty/modes.go` 的 `Preamble()`、`driver.go` 的 tracker
+  接入，以及 GET/SSE/WS 三条 opt-in 下发路径。本节保留作路线对照，不表示
+  其他阶段已决策或排期。
 
 ### 8.2 P1：全量 ring 重放
 

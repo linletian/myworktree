@@ -2834,6 +2834,44 @@ func TestIndexHTMLCoversPerSessionConnectionManagement(t *testing.T) {
 	}
 }
 
+// TestTerminalPreambleOptInHooks pins the three additive delivery paths
+// for the issue #117 follow-up mode preamble: GET header, SSE frame field,
+// and WS ready field. The server tests pin the wire; this pins that the
+// page actually opts in and writes what it receives without counting it as
+// ring bytes.
+func TestTerminalPreambleOptInHooks(t *testing.T) {
+	bodyText := fetchIndexHTML(t)
+	checks := []string{
+		"/api/instances/log?id=${session.id}&preamble=1",
+		"const preambleB64 = res.headers.get(\"X-Terminal-Preamble\");",
+		"session.term.write(atob(preambleB64));",
+		"&preamble=1`;",
+		`if (typeof msg.preamble === "string" && msg.preamble && session.term) {`,
+		`session.term.write(msg.preamble);`,
+		"url += `,preamble`;",
+		`if (typeof controlMsg.preamble === "string" && controlMsg.preamble && session.term) {`,
+		"session.term.write(controlMsg.preamble);",
+	}
+	for _, check := range checks {
+		if !strings.Contains(bodyText, check) {
+			t.Fatalf("GET / should include terminal preamble hook %q", check)
+		}
+	}
+	// The preamble must be written before the tail on both paths. This is a
+	// source-order pin; the server-side replay order is pinned by the WS/SSE
+	// handler tests.
+	getPreamble := strings.Index(bodyText, "session.term.write(atob(preambleB64));")
+	getTail := strings.Index(bodyText, "painted = writeSanitizedTerminalOutput(session, text);")
+	if getPreamble < 0 || getTail < 0 || getPreamble > getTail {
+		t.Fatalf("loadLog must write the preamble before the tail (preamble=%d tail=%d)", getPreamble, getTail)
+	}
+	ssePreamble := strings.Index(bodyText, `session.term.write(msg.preamble);`)
+	sseTail := strings.Index(bodyText, `if (msg.chunk && session.term) writeSanitizedTerminalOutput(session, msg.chunk);`)
+	if ssePreamble < 0 || sseTail < 0 || ssePreamble > sseTail {
+		t.Fatalf("SSE must write the preamble before the chunk (preamble=%d chunk=%d)", ssePreamble, sseTail)
+	}
+}
+
 // TestLogCursorBootstrapNeverRequestsOldestBytes pins the client half of
 // the issue #81 tail contract. The server treats an omitted `since` as a
 // tail request and `since=0` as "read from the oldest live byte", so the
@@ -2859,31 +2897,6 @@ func TestIndexHTMLCoversPerSessionConnectionManagement(t *testing.T) {
 // renderer's own bootstrap is pinned by TestPtyRendererResetsCursorAfter-
 // TerminalReset; the two together are the complete picture, and neither
 // test alone is.
-// TestTerminalPreambleOptInHooks pins the three additive delivery paths
-// for the issue #117 follow-up mode preamble: GET header, SSE frame field,
-// and WS ready field. The server tests pin the wire; this pins that the
-// page actually opts in and writes what it receives without counting it as
-// ring bytes.
-func TestTerminalPreambleOptInHooks(t *testing.T) {
-	bodyText := fetchIndexHTML(t)
-	checks := []string{
-		"/api/instances/log?id=${session.id}&preamble=1",
-		"const preambleB64 = res.headers.get(\"X-Terminal-Preamble\");",
-		"session.term.write(atob(preambleB64));",
-		"&preamble=1`;",
-		`if (typeof msg.preamble === "string" && msg.preamble && session.term) {`,
-		`session.term.write(msg.preamble);`,
-		"url += `,preamble`;",
-		`if (typeof controlMsg.preamble === "string" && controlMsg.preamble && session.term) {`,
-		"session.term.write(controlMsg.preamble);",
-	}
-	for _, check := range checks {
-		if !strings.Contains(bodyText, check) {
-			t.Fatalf("GET / should include terminal preamble hook %q", check)
-		}
-	}
-}
-
 func TestLogCursorBootstrapNeverRequestsOldestBytes(t *testing.T) {
 	bodyText := fetchIndexHTML(t)
 	checks := []string{

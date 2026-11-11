@@ -2673,6 +2673,19 @@ func (s *Server) handleInstanceInput(w http.ResponseWriter, r *http.Request) {
 // kinds/pty.js, which is what puts the value on the wire.
 const sinceFollowLiveEnd int64 = -2
 
+// terminalPreambleWanted reports whether a connection should receive the
+// opt-in terminal-mode preamble (issue #117 follow-up). It is deliberately
+// one helper for all three transports: only a cursorless (tail) attach, and
+// only when the client opted in. since=-2 is excluded because the client
+// already painted a screen from the tail; if that screen is in the wrong
+// buffer, a 1049h preamble would switch away and hide the painted tail
+// instead of repairing it. GET rejects -2 before this point
+// (handleInstanceLog's 400), but keeping the exclusion here makes the
+// dependency explicit and keeps the three call sites identical.
+func terminalPreambleWanted(since int64, optIn bool) bool {
+	return optIn && since < 0 && since != sinceFollowLiveEnd
+}
+
 // Liveness knobs for the TTY WebSocket path (issue #83).
 //
 // The problem: a half-open TCP socket — laptop sleep, NAT/proxy idle
@@ -3375,8 +3388,14 @@ func (s *Server) handleInstanceTTYWSLiveness(w http.ResponseWriter, r *http.Requ
 	// only the mode bits (alt screen, mouse protocol/encoding, autowrap,
 	// cursor, bracketed paste, application cursor/keypad); it changes no
 	// ring offset, so the client's cursor remains the tail's end offset.
+	//
+	// The mode snapshot is taken BEFORE the tail read in completeHandshake.
+	// That order is the safe side: a mode change landing between the two is
+	// still inside the tail, so it is applied after this preamble and wins.
+	// The reverse order would let the client adopt a mode the tail has not
+	// reached yet.
 	var preamble string
-	if preambleCap && since < 0 && since != sinceFollowLiveEnd {
+	if terminalPreambleWanted(since, preambleCap) {
 		preamble = s.instanceMgr.TerminalPreamble(id)
 	}
 	readyMsg := []byte(`{"type":"ready"}`)
@@ -4592,9 +4611,12 @@ func (s *Server) handleInstanceLog(w http.ResponseWriter, r *http.Request) {
 	// counts the body to decide CURSOR_FOLLOW_LIVE_END, and external log
 	// consumers must keep receiving pure ring bytes.
 	preamble := ""
-	if r.URL.Query().Get("preamble") == "1" && since < 0 {
+	if terminalPreambleWanted(since, r.URL.Query().Get("preamble") == "1") {
 		preamble = s.instanceMgr.TerminalPreamble(id)
 	}
+	// Both the log body and the preamble are time-varying; a cached
+	// response would hand a later client a stale tail and stale modes.
+	w.Header().Set("Cache-Control", "no-store")
 	if since >= 0 {
 		body, next, err := s.instanceMgr.ReadSince(id, since, 64*1024)
 		if err != nil {
@@ -4632,7 +4654,7 @@ func (s *Server) handleInstanceLogStream(w http.ResponseWriter, r *http.Request)
 	// attach gets the mode preamble. `-2` means the screen is already
 	// painted, and `since>=0` is an incremental stream onto that screen.
 	preamble := ""
-	if r.URL.Query().Get("preamble") == "1" && since < 0 && since != sinceFollowLiveEnd {
+	if terminalPreambleWanted(since, r.URL.Query().Get("preamble") == "1") {
 		preamble = s.instanceMgr.TerminalPreamble(id)
 	}
 

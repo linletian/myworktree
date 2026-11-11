@@ -144,3 +144,19 @@ func TestManager_TailClampsShortKindCursor(t *testing.T) {
 		t.Fatalf("Tail cursor = %d, want %d (clamped to the end of the returned body)", off, len(body))
 	}
 }
+
+func TestManager_TerminalPreambleUnsupportedKindIsEmpty(t *testing.T) {
+	t.Parallel()
+	k := &recordingLogsKind{}
+	reg := NewRegistry()
+	reg.Register(k)
+	mgr, _ := newTestManager(t, reg, t.TempDir())
+	instID := startRecordingInstance(t, mgr)
+
+	if got := mgr.TerminalPreamble(instID); got != "" {
+		t.Fatalf("TerminalPreamble = %q, want empty for a kind without TerminalPreambleProvider", got)
+	}
+	if got := mgr.TerminalPreamble("missing"); got != "" {
+		t.Fatalf("TerminalPreamble(missing) = %q, want empty", got)
+	}
+}

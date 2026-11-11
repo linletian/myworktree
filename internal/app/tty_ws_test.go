@@ -716,9 +716,6 @@ func TestHandleInstanceTTYWS_ReconnectWithSinceDoesNotRedeliverSeenBytes(t *test
 	}
 }
 
-// TestHandleInstanceTTYWS_OmittedSinceReplaysTail is AC2: a first connect
-// — no `since`, an empty `since`, or an unparsable one — keeps the
-// existing tail semantics.
 // TerminalPreamble makes this fake a terminal kind for the issue #117
 // follow-up. The value is deliberately distinguishable from any ring bytes.
 func (k *ttyHandshakeKind) TerminalPreamble(h framework.Handle) string {
@@ -812,6 +809,17 @@ func TestHandleInstanceTTYWS_TailCarriesPreambleOnlyWhenOptedIn(t *testing.T) {
 	}
 	_ = conn.Close()
 
+	// Follow-from-live-end: the screen is already painted; no preamble.
+	conn, p = dialTTYReady(t, addr, ttyWSPath(instID, "since=-2&caps=preamble,sync"))
+	ready = readyFrame{}
+	if err := json.Unmarshal(p, &ready); err != nil {
+		t.Fatalf("ready frame %q is not JSON: %v", p, err)
+	}
+	if ready.Preamble != "" {
+		t.Fatalf("follow-live-end ready must not carry a preamble: %q", p)
+	}
+	_ = conn.Close()
+
 	// No cap: the legacy ready shape is byte-for-byte unchanged.
 	conn, p = dialTTYReady(t, addr, ttyWSPath(instID, "caps=sync"))
 	if string(p) != `{"type":"ready"}` {
@@ -820,6 +828,9 @@ func TestHandleInstanceTTYWS_TailCarriesPreambleOnlyWhenOptedIn(t *testing.T) {
 	_ = conn.Close()
 }
 
+// TestHandleInstanceTTYWS_OmittedSinceReplaysTail is AC2: a first connect
+// — no `since`, an empty `since`, or an unparsable one — keeps the
+// existing tail semantics.
 func TestHandleInstanceTTYWS_OmittedSinceReplaysTail(t *testing.T) {
 	t.Parallel()
 	k := newTTYHandshakeKind(1024)
