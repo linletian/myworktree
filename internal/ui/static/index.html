@@ -9029,7 +9029,7 @@
             session.lastLogLoadAttemptAt = Date.now();
 
             try {
-                const res = await fetch(`/api/instances/log?id=${session.id}`, { 
+                const res = await fetch(`/api/instances/log?id=${session.id}&preamble=1`, {
                     headers, 
                     signal: controller.signal 
                 });
@@ -9038,6 +9038,12 @@
                 let text = await res.text();
                 const rawOffset = res.headers.get("X-Log-Offset");
                 const next = rawOffset === null ? NaN : parseInt(rawOffset, 10);
+                // issue #117 follow-up: the server returns the terminal-mode
+                // preamble in a header, NOT in the body, so `painted` below
+                // still counts only ring-buffer content. Write it after any
+                // reset and before the tail; xterm's write queue preserves
+                // the order.
+                const preambleB64 = res.headers.get("X-Terminal-Preamble");
                 // Paint first. A cursor is a claim about what this screen
                 // holds, so the screen has to hold it before the claim is
                 // made (issue #86 review): setting the sentinel here, before
@@ -9076,6 +9082,13 @@
                     const isPending = inst && isInstancePendingStatus(inst.status);
                     if (!isLive && !isPending) {
                         session.term.reset();
+                    }
+                    if (preambleB64 && typeof atob === "function") {
+                        try {
+                            session.term.write(atob(preambleB64));
+                        } catch (e) {
+                            console.warn("terminal preamble decode failed:", e && e.message);
+                        }
                     }
                     painted = writeSanitizedTerminalOutput(session, text);
                     if (inst && isInstanceTerminalStatus(inst.status)) {
@@ -9438,6 +9451,11 @@
                 // greppable; the new caps ride on the end.
                 url += `&caps=ping,sync`;
                 url += `,overflow-notice`;
+                // issue #117 follow-up: opt in to the terminal-mode preamble
+                // on a cursorless (tail) attach. Older servers ignore the
+                // token; the ready frame's optional `preamble` field is the
+                // only new wire shape.
+                url += `,preamble`;
                 try {
                     if (typeof DecompressionStream !== "undefined") {
                         const deflateRawProbe = new DecompressionStream("deflate-raw");
@@ -9618,6 +9636,16 @@
                         // ready runs it in full.
                         if (controlMsg.compress === true && !startTTYCompressedPipe(session, ws)) {
                             return;
+                        }
+                        // issue #117 follow-up: restore the application's
+                        // terminal modes BEFORE any replay bytes are written.
+                        // The ready frame is the first text frame; the binary
+                        // tail follows, and term.write preserves this order.
+                        // The preamble is not ring output, so it must not move
+                        // session.ttyOffset (it does not: only binary frame
+                        // accounting and sync frames do).
+                        if (typeof controlMsg.preamble === "string" && controlMsg.preamble && session.term) {
+                            session.term.write(controlMsg.preamble);
                         }
                         // Arm the liveness watchdog (issue #83) once READY
                         // (the 5s handshake timeout above owns the window
@@ -9988,7 +10016,7 @@
                 session.ttyLivenessTimer = null;
             }
             if (state.activeInst === session.id) updateStatus("sse live");
-            let url = `/api/instances/log/stream?id=${encodeURIComponent(session.id)}`;
+            let url = `/api/instances/log/stream?id=${encodeURIComponent(session.id)}&preamble=1`;
             // Three cursor states, one URL (issue #86), over two sibling
             // cursors (issue #87). A real positive cursor is echoed so the
             // server sends only newer bytes; the unknown cursor
@@ -10040,6 +10068,12 @@
             const onLog = (ev) => {
                 try {
                     const msg = JSON.parse(ev.data);
+                    // issue #117 follow-up: write the mode preamble before
+                    // the tail. It is not a ring-buffer chunk, so it must not
+                    // advance the cursor; `next` below still owns the cursor.
+                    if (typeof msg.preamble === "string" && msg.preamble && session.term) {
+                        session.term.write(msg.preamble);
+                    }
                     if (msg.chunk && session.term) writeSanitizedTerminalOutput(session, msg.chunk);
                     // One ring-buffer end offset, two consumers (issue #87):
                     // SSE and WS advance over the same ring-buffer offsets,

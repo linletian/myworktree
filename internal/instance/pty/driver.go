@@ -49,15 +49,34 @@ func (Driver) Manifest() framework.KindInfo {
 	}
 }
 
+// TerminalPreamble implements framework.TerminalPreambleProvider. It
+// returns the synthetic mode-restore sequence for a client that is about
+// to receive this instance's tail. It is empty when the handle has no
+// tracker (defensive; Spawn always installs one).
+func (Driver) TerminalPreamble(handle framework.Handle) string {
+	return mustHandle(handle).TerminalPreamble()
+}
+
+// TerminalPreamble returns the current mode preamble for this PTY. The
+// method lives on the kind's Handle (exported because the framework needs
+// it at the boundary, but only reached through TerminalPreambleProvider).
+func (h *Handle) TerminalPreamble() string {
+	if h == nil || h.modes == nil {
+		return ""
+	}
+	return h.modes.Preamble()
+}
+
 // Handle is the per-instance state owned by the PTY kind. The
 // framework holds onto it via framework.Handle; the PTY kind is the
 // only code that ever reads its fields.
 type Handle struct {
-	id   string
-	cmd  *exec.Cmd
-	ptmx *os.File
-	buf  *framework.RingBuffer
-	pub  framework.Publisher
+	id    string
+	cmd   *exec.Cmd
+	ptmx  *os.File
+	buf   *framework.RingBuffer
+	modes *modeTracker
+	pub   framework.Publisher
 
 	cancel context.CancelFunc
 	wg     *sync.WaitGroup
@@ -126,6 +145,7 @@ func (d Driver) Spawn(ctx context.Context, params framework.SpawnParams) (framew
 		cmd:    cmd,
 		ptmx:   ptmx,
 		buf:    buf,
+		modes:  newModeTracker(),
 		cancel: cancel,
 		wg:     wg,
 	}
@@ -304,6 +324,14 @@ func (h *Handle) pumpLogs() {
 		n, err := h.ptmx.Read(readBuf)
 		if n > 0 {
 			chunk := redact.Text(string(readBuf[:n]))
+			// Feed the mode tracker before the ring/broadcast: the
+			// preamble returned to a late-attaching client must describe
+			// the same redacted stream that the tail replay carries.
+			// A mode sequence split across reads is retained by the
+			// tracker, not by this loop.
+			if h.modes != nil {
+				h.modes.Write(chunk)
+			}
 			// This ordering — ring buffer FIRST, broadcast second — is
 			// load-bearing, not stylistic: it is the entire reason an
 			// overflowing subscriber may have its backlog discarded at the

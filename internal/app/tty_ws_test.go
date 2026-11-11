@@ -716,6 +716,118 @@ func TestHandleInstanceTTYWS_ReconnectWithSinceDoesNotRedeliverSeenBytes(t *test
 	}
 }
 
+// TerminalPreamble makes this fake a terminal kind for the issue #117
+// follow-up. The value is deliberately distinguishable from any ring bytes.
+func (k *ttyHandshakeKind) TerminalPreamble(h framework.Handle) string {
+	return "\x1b[?1003h"
+}
+
+// dialTTYReady dials the TTY endpoint and returns the raw ready frame
+// (instead of pinning it to the legacy shape like dialTTY).
+func dialTTYReady(t *testing.T, addr, path string) (*ws.Conn, []byte) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, err := ws.Dial(ctx, addr, path, nil)
+	if err != nil {
+		t.Fatalf("dial %s: %v", path, err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	op, p := readFrame(t, conn, 5*time.Second)
+	if op != wsOpText {
+		t.Fatalf("first frame op=%d payload=%q, want text ready", op, p)
+	}
+	return conn, p
+}
+
+// readTailReplay consumes frames after a resize until the closing sync and
+// returns the concatenated binary replay.
+func readTailReplay(t *testing.T, conn *ws.Conn) string {
+	t.Helper()
+	var replay strings.Builder
+	for {
+		op, p := readFrame(t, conn, 5*time.Second)
+		switch op {
+		case wsOpBinary:
+			replay.Write(p)
+		case wsOpText:
+			var ctl struct {
+				Type  string `json:"type"`
+				Start bool   `json:"start"`
+			}
+			if err := json.Unmarshal(p, &ctl); err != nil {
+				t.Fatalf("control frame %q is not JSON: %v", p, err)
+			}
+			if ctl.Type == "sync" && !ctl.Start {
+				return replay.String()
+			}
+		default:
+			t.Fatalf("unexpected opcode %d during tail replay", op)
+		}
+	}
+}
+
+func TestHandleInstanceTTYWS_TailCarriesPreambleOnlyWhenOptedIn(t *testing.T) {
+	t.Parallel()
+	k := newTTYHandshakeKind(1024)
+	addr, _, instID, _ := ttyWSTestServer(t, k)
+	k.buf.WriteString("tail-body") // 9 bytes
+
+	type readyFrame struct {
+		Type     string `json:"type"`
+		Preamble string `json:"preamble"`
+		Compress bool   `json:"compress"`
+	}
+
+	// Cursorless + opt-in: preamble in ready, replay still pure ring bytes.
+	conn, p := dialTTYReady(t, addr, ttyWSPath(instID, "caps=preamble,sync"))
+	var ready readyFrame
+	if err := json.Unmarshal(p, &ready); err != nil {
+		t.Fatalf("ready frame %q is not JSON: %v", p, err)
+	}
+	if ready.Type != "ready" || ready.Preamble != "\x1b[?1003h" {
+		t.Fatalf("ready = %+v, want type=ready preamble=mode sequence", ready)
+	}
+	sendResize(t, conn)
+	if replay := readTailReplay(t, conn); replay != "tail-body" {
+		t.Fatalf("tail replay = %q, want pure ring bytes (preamble must not be counted)", replay)
+	}
+	_ = conn.Close()
+
+	// Cursor-bearing: no preamble, even when opted in.
+	conn, p = dialTTYReady(t, addr, ttyWSPath(instID, "since=5&caps=preamble,sync"))
+	ready = readyFrame{}
+	if err := json.Unmarshal(p, &ready); err != nil {
+		t.Fatalf("ready frame %q is not JSON: %v", p, err)
+	}
+	if ready.Preamble != "" {
+		t.Fatalf("cursor-bearing ready must not carry a preamble: %q", p)
+	}
+	sendResize(t, conn)
+	if replay := readTailReplay(t, conn); replay != "body" {
+		t.Fatalf("catch-up replay = %q, want only the bytes after since=5", replay)
+	}
+	_ = conn.Close()
+
+	// Follow-from-live-end: the screen is already painted; no preamble.
+	conn, p = dialTTYReady(t, addr, ttyWSPath(instID, "since=-2&caps=preamble,sync"))
+	ready = readyFrame{}
+	if err := json.Unmarshal(p, &ready); err != nil {
+		t.Fatalf("ready frame %q is not JSON: %v", p, err)
+	}
+	if ready.Preamble != "" {
+		t.Fatalf("follow-live-end ready must not carry a preamble: %q", p)
+	}
+	_ = conn.Close()
+
+	// No cap: the legacy ready shape is byte-for-byte unchanged.
+	conn, p = dialTTYReady(t, addr, ttyWSPath(instID, "caps=sync"))
+	if string(p) != `{"type":"ready"}` {
+		t.Fatalf("legacy ready frame = %q, want {\"type\":\"ready\"}", p)
+	}
+	_ = conn.Close()
+}
+
 // TestHandleInstanceTTYWS_OmittedSinceReplaysTail is AC2: a first connect
 // — no `since`, an empty `since`, or an unparsable one — keeps the
 // existing tail semantics.
