@@ -337,7 +337,7 @@ echo -e "${MUTED}If 'command not found', open a new shell (PATH was added to you
 # binary (in-memory code page is unaffected by the file replacement — the
 # kernel keeps the old inode until the process exits). Restart the daemon
 # to pick up the new binary. We do NOT auto-stop: that could hard-kill
-# long-running PTY / opencode / reasonix sessions and discard the
+# long-running PTY / opencode sessions and discard the
 # in-memory ring buffer + WebSocket state.
 #
 # Detection must check BOTH the binary name and the alias: the process
@@ -367,14 +367,13 @@ if [ -n "${daemon_pids// /}" ]; then
   echo "work and restart the daemon (steps below)."
   echo ""
   echo -e "${MUTED}Before you restart:${NC}"
-  echo "  - Save anything in the Web UI you haven't sent yet (reasonix chat"
-  echo "    drafts, new-session prompts, in-page text). Restarting closes"
-  echo "    the WebSocket; the in-memory ring buffer for PTY sessions is"
-  echo "    also discarded."
+  echo "  - Save anything in the Web UI you haven't sent yet (new-session"
+  echo "    prompts, in-page text). Restarting closes the WebSocket; the"
+  echo "    in-memory ring buffer for PTY sessions is also discarded."
   echo "  - Decide whether long-running instances can keep going. '${APP} stop'"
-  echo "    asks each running kind to wind down gracefully (PTY/exec sessions"
-  echo "    receive a stop signal; reasonix / opencode serve get a clean"
-  echo "    shutdown). 'pkill -x myworktree' does NOT — it kills the daemon"
+  echo "    asks each running instance to wind down gracefully (PTY/exec"
+  echo "    sessions receive a stop signal)."
+  echo "    'pkill -x myworktree' does NOT — it kills the daemon"
   echo "    immediately and any subprocess the kind had spawned (e.g. an"
   echo "    opencode serve) is orphaned until you kill it by hand."
   echo ""

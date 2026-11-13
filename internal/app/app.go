@@ -35,7 +35,6 @@ import (
 	"myworktree/internal/instance/dsh_web"
 	"myworktree/internal/instance/opencode_web"
 	"myworktree/internal/instance/pty"
-	"myworktree/internal/instance/reasonix"
 	"myworktree/internal/llm"
 	"myworktree/internal/mcp"
 	"myworktree/internal/monitor"
@@ -75,17 +74,6 @@ type Server struct {
 
 	portal  *portal.Portal
 	httpSrv *http.Server
-
-	// Independent loopback listener serving only the reasonix reverse proxy,
-	// so embedded reasonix pages are cross-origin with the myworktree API
-	// (issue #44). Empty when not enabled (TLS mode → mixed content, falls
-	// back to the same-origin /rx/ route).
-	rxAddr string
-	rxSrv  *http.Server
-
-	// rxDriver owns the reasonix serve subprocesses and is shared by the
-	// reasonix kind (registered below) and the /rx/ reverse proxy.
-	rxDriver *reasonix.Driver
 
 	store       store.FileStore
 	worktreeMgr worktree.Manager
@@ -357,13 +345,6 @@ func New(cfg Config, logger *log.Logger) (*Server, error) {
 	reg.Register(pty.Driver{})
 	reg.Register(opencode_web.Driver{})
 
-	// The reasonix serve driver and its framework kind.
-	rxDriver := &reasonix.Driver{
-		DataDir: dataDir,
-		Logger:  logger,
-	}
-	reg.Register(reasonix.NewKind(rxDriver))
-
 	// The dsh web driver and its framework kind. The per-instance
 	// reverse proxy binds 127.0.0.1 locally (loopback trust model, no
 	// token); when the main listener is non-loopback or TLS it binds
@@ -421,7 +402,6 @@ func New(cfg Config, logger *log.Logger) (*Server, error) {
 		dshScope:    dshScope,
 		dshWatch:    dshWatch,
 		dshDrv:      dshDrv,
-		rxDriver:    rxDriver,
 		mcpAdapter: mcp.Adapter{
 			Worktrees: worktreeMgr,
 			Instances: instanceMgr,
@@ -628,6 +608,7 @@ func (s *Server) Start() (string, error) {
 	if err := os.MkdirAll(s.dataDir, 0o755); err != nil {
 		return "", err
 	}
+	s.retireLegacyReasonixOnStartup() // issue #160 one-time retirement; must precede the reconcile below
 	if n, err := s.instanceMgr.ReconcileRunningOnStartup(); err != nil {
 		s.logger.Printf("reconcile running instances failed: %v", err)
 	} else if n > 0 {
@@ -659,51 +640,6 @@ func (s *Server) Start() (string, error) {
 		return "", err
 	}
 	s.ln = ln
-
-	// Independent loopback listener serving only /rx/ (issue #44): embedded
-	// reasonix pages become cross-origin with the myworktree API, so content
-	// rendered inside the chat iframe cannot silently call /api/* with the
-	// user's session.
-	//
-	// It is enabled only when the main listener is loopback-only: the
-	// reported web_url is an absolute http://127.0.0.1:<port>, which is only
-	// reachable from the same machine. When the main listener is open to the
-	// network (default 0.0.0.0, or an explicit LAN IP) a remote browser would
-	// resolve that 127.0.0.1 to ITSELF and the iframe would fail — so we fall
-	// back to the same-origin /rx/ route (the frontend then uses the relative
-	// path /rx/<id>/, which follows whatever host the browser is on, and LAN
-	// access works). TLS mode also falls back (an http iframe inside an https
-	// page is blocked as mixed content). In both fallback cases web_url stays
-	// empty and the frontend keeps working via /rx/<id>/.
-	listenHost, _, _ := net.SplitHostPort(s.cfg.ListenAddr) // "" on error → not loopback → fallback
-	if s.cfg.TLSCert == "" && s.cfg.TLSKey == "" && isLoopbackHost(listenHost) {
-		rxLn, err := net.Listen("tcp", "127.0.0.1:0")
-		if err != nil {
-			s.logger.Printf("[reasonix] warning: independent listener failed, falling back to same-origin /rx/: %v", err)
-		} else {
-			rxMux := http.NewServeMux()
-			rxMux.Handle("/rx/", &reasonixProxy{manager: s.instanceMgr, driver: s.rxDriver})
-			// Issue #130 (review P3): the rx listener gets the SAME two
-			// middlewares as the main listener, at the top of ITS chain —
-			// withPanicOnFault so rx connection goroutines are armed too,
-			// and withRuntimeHealth keyed by rxMux itself (NOT s.mux: rx
-			// requests dispatch against rxMux's table, which registers only
-			// /rx/, so every rx traffic lands in the /rx/ bucket). Both
-			// listeners share the one runtimeHealth — one 64-key cap, one
-			// meter, one sampling loop, no second ticker. Auth/CORS/cookie
-			// and proxy behaviour are untouched; this only meters and arms.
-			s.rxSrv = &http.Server{Handler: s.withPanicOnFault(s.withRuntimeHealthOn(rxMux, rxMux))}
-			s.rxAddr = rxLn.Addr().String()
-			go func() {
-				// A non-ErrServerClosed failure would leave web_url pointing
-				// at a dead port with the iframe failing silently — log it.
-				if err := s.rxSrv.Serve(rxLn); err != nil && !errors.Is(err, http.ErrServerClosed) {
-					s.logger.Printf("[reasonix] independent listener error: %v", err)
-				}
-			}()
-			s.logger.Printf("[reasonix] independent web-ui listener on %s", s.rxAddr)
-		}
-	}
 
 	if s.cfg.PortalPort > 0 {
 		base, err := os.UserConfigDir()
@@ -826,13 +762,10 @@ func (s *Server) Shutdown() {
 	if s.portal != nil {
 		s.portal.Stop()
 	}
-	// Stop reasonix serve processes first (behavior parity with tty
+	// Stop dsh-web serve processes first (behavior parity with tty
 	// instances, which die when their PTY hangs up): their SSE connections
-	// then close, so the HTTP servers below shut down promptly. State dirs
-	// (token/port/pid/serve.log) are kept; sessions live in the shared
-	// ~/.reasonix pool and are unaffected by instance lifecycle.
+	// then close, so the HTTP servers below shut down promptly.
 	if s.instanceMgr != nil {
-		s.instanceMgr.StopAllKind(store.KindReasonix)
 		s.instanceMgr.StopAllKind(store.KindDsh)
 	}
 	if s.dshWatch != nil {
@@ -850,11 +783,6 @@ func (s *Server) Shutdown() {
 	// no goroutine-profile dump survives it. A dump in flight during
 	// Shutdown would otherwise write into a log the process is closing.
 	s.runtimeHealth.Stop()
-	if s.rxSrv != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		_ = s.rxSrv.Shutdown(ctx)
-	}
 	if s.httpSrv != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -965,7 +893,6 @@ func (s *Server) registerAPIs(mux *http.ServeMux) {
 	mux.HandleFunc("/api/instances/dsh/launch", s.handleInstanceDshLaunch)
 	mux.HandleFunc("/api/instances/dsh/install", s.handleInstanceDshInstall)
 	mux.HandleFunc("/api/dsh/capability", s.handleDshCapability)
-	mux.Handle("/rx/", &reasonixProxy{manager: s.instanceMgr, driver: s.rxDriver})
 	mux.HandleFunc("/api/tags", s.handleTags)
 	mux.HandleFunc("/api/tags/open-dir", s.handleTagsOpenDir)
 	mux.HandleFunc("/api/branches", s.handleBranches)
@@ -1857,9 +1784,7 @@ func (s *Server) handleWorktreeDiverged(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, map[string]any{"items": result})
 }
 
-// instanceView renders a ManagedInstance for the API, attaching a web_url for
-// reasonix instances pointing at the independent listener (issue #44). The
-// field is intentionally not part of the persisted store schema.
+// instanceView renders a ManagedInstance for the API.
 //
 // The map is built explicitly (no JSON round-trip) so the API response shape
 // stays stable and cheap; keep the keys and the omitempty conditions in sync
@@ -1906,23 +1831,7 @@ func (s *Server) instanceView(it store.ManagedInstance) map[string]any {
 	if it.StoppedAt != "" {
 		m["stopped_at"] = it.StoppedAt
 	}
-	if it.Kind == store.KindReasonix {
-		if u := s.reasonixWebURL(it.ID); u != "" {
-			m["web_url"] = u
-		}
-	}
 	return m
-}
-
-// reasonixWebURL returns the cross-origin base for a reasonix instance's web
-// UI, or "" when the independent listener is not enabled (TLS mode, or a
-// non-loopback main listener — see Server.Start), in which case the frontend
-// falls back to the same-origin /rx/<id>/ route.
-func (s *Server) reasonixWebURL(id string) string {
-	if s.rxAddr == "" {
-		return ""
-	}
-	return "http://" + s.rxAddr + "/rx/" + id + "/"
 }
 
 func (s *Server) handleInstances(w http.ResponseWriter, r *http.Request) {
@@ -5077,8 +4986,8 @@ func (s *Server) withAuth(next http.Handler) http.Handler {
 		}
 		s.resetAuthAttempts(clientIP(r.RemoteAddr))
 		// Sync the address-bar token into the session cookie (remote
-		// access / portal pattern). Same-origin iframes (reasonix /rx/,
-		// opencode /__opencode/) navigate with relative URLs that carry
+		// access / portal pattern). Same-origin iframes (opencode
+		// /__opencode/) navigate with relative URLs that carry
 		// no query, so they can only authenticate via the cookie — the
 		// server must hand it out. Refreshing it on every page
 		// navigation that carries ?token= also makes auth-token

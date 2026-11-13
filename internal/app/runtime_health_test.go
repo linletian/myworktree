@@ -10,7 +10,6 @@ import (
 	"reflect"
 	"regexp"
 	"runtime"
-	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -757,113 +756,6 @@ func TestRuntimeHealthTickCarriesMeteredTraffic(t *testing.T) {
 	// the exact `pattern inflight/total` shape the collector parses.
 	if !strings.Contains(line, "top=(/api/worktrees 0/4, /api/instances 0/1)") {
 		t.Fatalf("tick line = %q, want top=(pattern inflight/total, …) with the busier endpoint first", line)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// D2 × rx listener — the independent listener is covered too (review P3).
-// ---------------------------------------------------------------------------
-
-// The independent loopback rx listener (app.go rxSrv) must run the SAME two
-// middlewares as the main listener, keyed against ITS OWN mux: a request
-// that never touches the main listener must still raise the shared reqTotal
-// and land in the /rx/ bucket. This goes to the real listener over TCP and
-// picks a path that completes without any upstream (the reasonix proxy 404s
-// an unknown instance id), so the test proves the mount, not an upstream.
-func TestRuntimeHealthCoversRxListener(t *testing.T) {
-	t.Setenv(envPanicOnFault, "1")
-	srv, _ := newIsolatedTestServer(t, store.State{})
-	// The shared sampler, tick loop OFF (interval 0): the meter and the
-	// arming ride the request path and must stay live with the ticker off,
-	// and no second ticker is what P3 demands.
-	srv.runtimeHealth = newRuntimeHealth(srv.logger)
-	srv.runtimeHealth.interval = 0
-
-	// The arm seam, installed BEFORE Start so the write happens-before every
-	// reader (Start spawns the accept loops, the accept loops spawn the
-	// connection goroutines that read it). It DELEGATES to the real
-	// debug.SetPanicOnFault — the rx goroutines really are armed — and only
-	// counts what passes through, so the rx chain's arming can be asserted
-	// directly instead of inferred from the resolved flag.
-	var arms atomic.Int64
-	var armsSeeingTrue atomic.Int64
-	srv.setPanicOnFault = func(b bool) bool {
-		arms.Add(1)
-		prev := debug.SetPanicOnFault(b)
-		if prev {
-			armsSeeingTrue.Add(1)
-		}
-		return prev
-	}
-
-	url, err := srv.Start()
-	if err != nil {
-		t.Fatalf("Start failed: %v", err)
-	}
-	defer srv.Shutdown()
-	if srv.rxAddr == "" {
-		t.Fatal("no independent rx listener came up (loopback, no TLS) — nothing to test against")
-	}
-	if !strings.Contains(url, "127.0.0.1") {
-		t.Fatalf("main listener %q should be loopback so rx is enabled", url)
-	}
-	// Baselines: Start's own arm of the calling goroutine is already counted;
-	// everything below is attributed to the rx request alone.
-	armedBeforeRx := arms.Load()
-	sawTrueBeforeRx := armsSeeingTrue.Load()
-
-	_, totalBefore, _ := srv.runtimeHealth.snapshot()
-
-	// DisableKeepAlives so this request is served by a FRESH connection
-	// goroutine: the arming assertions below are about who armed THE
-	// GOROUTINE THAT RUNS THIS REQUEST, and a pooled connection reused from an
-	// earlier test would make prev=false a matter of luck.
-	rxClient := &http.Client{Transport: &http.Transport{DisableKeepAlives: true}}
-	resp, err := rxClient.Get("http://" + srv.rxAddr + "/rx/nope/")
-	if err != nil {
-		t.Fatalf("GET through the real rx listener failed: %v", err)
-	}
-	// 404 from the reasonix proxy (unknown instance id) — completed without
-	// any upstream, exactly the shape the acceptance names.
-	if resp.StatusCode != http.StatusNotFound {
-		t.Fatalf("rx status=%d, want 404 from reasonixProxy with no such instance", resp.StatusCode)
-	}
-	_ = resp.Body.Close()
-
-	_, totalAfter, top := srv.runtimeHealth.snapshot()
-	if totalAfter != totalBefore+1 {
-		t.Fatalf("reqTotal went %d → %d, want +1 — the rx listener shares the ONE meter with the main listener", totalBefore, totalAfter)
-	}
-	if !strings.Contains(top, "/rx/ ") {
-		t.Fatalf("top=%q, want the /rx/ bucket visible — rx traffic must be keyed by rxMux's registered pattern /rx/, not mislabelled through s.mux", top)
-	}
-
-	// The fault arming is on the rx chain too, and it is asserted on the
-	// chain ITSELF rather than inferred from the resolved flag:
-	//
-	//   - STRUCTURE: the handler net/http calls FIRST for an rx request is
-	//     withPanicOnFault's closure (same check on the main listener). A
-	//     bare mux there would answer "" and pass nothing.
-	//   - BEHAVIOUR: exactly one arm call happened for this one rx request,
-	//     and it saw prev=false — the flag was OFF on that connection
-	//     goroutine until this middleware set it, which is the direct
-	//     evidence that the arm ran ON the rx goroutine instead of being
-	//     inherited (debug.SetPanicOnFault is per-goroutine: rdebug.go sets
-	//     it on getg(), newproc1 resets it for a new goroutine).
-	if got, want := arms.Load(), armedBeforeRx+1; got != want {
-		t.Fatalf("arm calls = %d after one rx request (baseline %d at Start), want %d — withPanicOnFault must arm once per rx request", got, armedBeforeRx, want)
-	}
-	if got := armsSeeingTrue.Load() - sawTrueBeforeRx; got != 0 {
-		t.Fatalf("rx-request arm calls that found the flag ALREADY armed = %d, want 0 — prev=false is what proves the arm happened on this fresh rx connection goroutine", got)
-	}
-	if name := handlerChainHeadName(srv.rxSrv.Handler); !strings.Contains(name, "(*Server).withPanicOnFault.func") {
-		t.Fatalf("the rx listener's outermost handler is %q, want (*Server).withPanicOnFault.func… — an rx connection must be armed before any other part of its chain runs", name)
-	}
-	if name := handlerChainHeadName(srv.httpSrv.Handler); !strings.Contains(name, "(*Server).withPanicOnFault.func") {
-		t.Fatalf("the main listener's outermost handler is %q, want (*Server).withPanicOnFault.func… — same mount, both listeners", name)
-	}
-	if !srv.panicOnFault {
-		t.Fatal("panicOnFault is off, so neither listener's goroutines are armed")
 	}
 }
 

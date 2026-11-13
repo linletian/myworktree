@@ -19,10 +19,10 @@ curl -fsSL https://raw.githubusercontent.com/linletian/myworktree/main/scripts/i
 
 ## 核心能力
 
-- **隔离的工作区，git 帮你隔开** —— 每个 worktree 都是一个独立的 git checkout（通常一个分支/工作场景对应一个），半成品改动、依赖安装、临时实验互不污染。一个 worktree 可以同时跑多个受管 instance（PTY + opencode-web + reasonix + dsh-web），粒度由你决定。
+- **隔离的工作区，git 帮你隔开** —— 每个 worktree 都是一个独立的 git checkout（通常一个分支/工作场景对应一个），半成品改动、依赖安装、临时实验互不污染。一个 worktree 可以同时跑多个受管 instance（PTY + opencode-web + dsh-web），粒度由你决定。
 - **持久化、可重连的终端** —— 每个 agent 跑在一个受管 instance 里，页面刷新、浏览器关闭都不影响；随时重连、完整回滚输出、继续交互。
 - **输出回放，告别磁盘写放大** —— 每个按键都进有界内存环形缓冲（不写盘），随时回放 agent 之前做了什么。
-- **自带工具，按模板接入** —— OpenCode 和 Reasonix 开箱即跑（Reasonix 还把原生 Web 聊天界面内嵌到侧栏）；其它 Claude Code、Codex、GLM、Qwen 等任意 CLI 用 Tag 模板（`command/env/preStart/cwd`）一键拉起。
+- **自带工具，按模板接入** —— OpenCode 开箱即跑（原生 Web 界面内嵌到侧栏）；其它 Claude Code、Codex、GLM、Qwen 等任意 CLI（包括自行安装的 Reasonix CLI/TUI）用 Tag 模板（`command/env/preStart/cwd`）一键拉起。
 - **一站式查看运行态** —— worktree、instance、输出、PTY 状态全在一个最小 Web UI 里完成 —— 不绑 IDE、不绑编辑器。
 
 ## myworktree 的特色
@@ -33,7 +33,6 @@ curl -fsSL https://raw.githubusercontent.com/linletian/myworktree/main/scripts/i
 - **开箱即用的全局认证 + CSRF** —— HttpOnly Cookie + double-submit CSRF，首次启动自动生成 32 字符 hex token。
 - **配置热加载** —— `mw config regen` 重新生成 token / 重新载入配置，无需重启 daemon。
 - **Changes 面板里的文件预览 & 差异** —— 点击任意已变更或未跟踪文件即可看带行号的预览和 diff。
-- **Reasonix Web 聊天实例** —— 勾选一下就能在 worktree 里跑 `reasonix serve`，其 Web 聊天界面内嵌在同一个侧栏。
 - **dsh Web 实例** —— 把 DeepSeek Harness 浏览器 UI 作为受管实例内嵌（工作区注册表按 worktree 隔离、会话池共享、越界只提醒；见 `docs/plans/dsh-native-ui/`）。**需要 dsh 0.2.x**（`[0.2.0, 0.3.0)`；**不再支持 0.1.x**——0.2 起 RPC 方法名改为 `<namespace>/<method>` 斜线端点，参数嵌套在 `payload.args.request`）。支持远程访问（LAN/Tailnet）：每实例反代上的 WS↔SSE 桥（`/api/remote.mux`）+ 注入式连接 shim；loopback 访问在整个受支持的 0.2.x 区间均可用。
 - **分支 divergence 徽标** —— 一眼看清分支相对上游 ahead / behind 状态，支持定时刷新。
 
@@ -48,7 +47,7 @@ curl -fsSL https://raw.githubusercontent.com/linletian/myworktree/main/scripts/i
 ## myworktree 的做法
 myworktree 只做管理，不碰项目具体内容：
 - 用 **git worktree** 给你一个隔离目录（通常一个 worktree 对应一个分支/工作场景，半成品改动、依赖安装、临时实验互不污染）
-- 在每个 worktree 下托管多个 **instance**（PTY / opencode-web / reasonix 可共存），后端持续运行，可随时重连
+- 在每个 worktree 下托管多个 **instance**（PTY / opencode-web / dsh-web 可共存），后端持续运行，可随时重连
 - 提供最小 Web UI：统一查看、停止、以及**输出回放**
 - 通过 **Tag** 模板（`command/env/preStart/cwd`）启动 instance，方便为不同类型工具准备环境
 
@@ -66,7 +65,6 @@ myworktree 只做管理，不碰项目具体内容：
 - Portal 仪表板：共享入口端口，跨仓库自动发现运行实例
 - 全局认证 Token（HttpOnly Cookie、CSRF 防护、Tailscale Serve 自动集成）
 - 侧栏主工作区项目名旁在仓库 remote 指向 `github.com` 时渲染 GitHub 图标；点击在新窗口打开 `https://github.com/<owner>/<repo>` 规范 URL。GitHub Enterprise 与非 GitHub remote 不展示。
-- **Reasonix Web 聊天实例（MVP）** — 启动实例时勾选 *Reasonix (web chat UI)*，即可在该 worktree 中运行 `reasonix serve` 智能体，并通过 iframe 渲染其 Web 聊天界面（`/rx/<id>/`，同源反向代理，注入 token cookie 并重写 URL 前缀）。serve 使用你真实的 `~/.reasonix`（不做 per-instance 隔离）：会话/历史/配置/凭据按项目与终端运行的 `reasonix` 完全共享，同一项目的历史（含终端会话）可在内嵌侧栏中查看/切换。每次 Start 打开全新会话（无 `--resume`）；删除实例绝不触碰共享会话池。需要在 `PATH` 中提供 `reasonix` 二进制；该 MVP 有意保留 reasonix UI 侧栏（项目切换）。
 - **PTY 日志改为内存环形缓冲** — 每个实例的 PTY 日志存放在有界的内存环形缓冲（默认每实例 32 MB、硬上限 256 MB、全局预算不超过系统内存的 25%）而不是磁盘日志文件，消除长时间 PTY 重负载会话的磁盘写放大。`LogBufferBytes` 可覆盖单实例上限；启动后若超出全局预算，接口返回 `503` 及结构化 `log_buffer_budget_exceeded` 响应体。
 - **Changes 面板文件预览** — 点击任意已变更或未跟踪文件即可预览：带行号、格式化视图与差异视图（未跟踪文件提供合成 diff，已处理 `quotePath`）。
 - **分支 divergence 徽标** — 侧栏在分支相对上游 ahead/behind 时显示分歧徽标，支持定时刷新。
@@ -357,13 +355,11 @@ mw config
 
 ## 已知限制
 
-### Reasonix 实例与 `REASONIX_HOME`
+### 专用 Reasonix Web 实例已移除（issue #160）
 
-Reasonix 实例运行 `reasonix serve` 时**不设置** `REASONIX_HOME`，嵌入式 web UI 直接使用你的真实 `~/.reasonix`——与终端里直接运行的 `reasonix` 完全一致。driver 会从宿主环境**剥离**继承的 `REASONIX_HOME` / `REASONIX_STATE_HOME`（并输出一条日志提示），确保实例与终端始终共享同一项目会话池；项目间隔离由 reasonix 自身按 cwd 完成。
+专用的 `kind: "reasonix"` Web 实例**已移除**：创建实例对话框不再有 Reasonix 页签，`POST /api/instances` 的 `kind: "reasonix"` 由既有 unknown-kind 路径拒绝（`400`），`GET /rx/<id>/…` 返回 `404`，实例响应也不再带 reasonix 的 `web_url`。移除前遗留的 `kind: "reasonix"` 记录会在下一次 daemon 启动时一次性退休，退休前先把 `state.json` 复制为 `state.json.reasonix-removal.backup`；`~/.reasonix` 与自定义 Reasonix home 一律不触碰（机制见 `docs/ARCHITECTURE.md` §4.2）。
 
-需要留意的后果：如果你的 shell 导出了自定义 `REASONIX_HOME`（例如 `~/.custom-reasonix`），终端里运行的 reasonix 会使用该自定义 home，而 myworktree 实例使用默认 `~/.reasonix`——两者将**看不到彼此的**历史会话。这是刻意行为。如需让某个实例指向自定义 home，可在实例 tag 的 `env` 中设置 `REASONIX_HOME`（在剥离之后追加，后值生效）。
-
-实例生命周期不会触碰共享会话池：Start / Stop / Restart / Delete 只管理 `serve` 子进程及其管理文件（实例状态目录下的 `token`/`port`/`pid`/`serve.log`）。会话存放在 `~/.reasonix/projects/<cwd-slug>/sessions`，因此重启实例会打开一个**全新会话**（无 `--resume`），而你的历史会话仍可在侧边栏切换。
+自行安装的 Reasonix CLI/TUI 仍可用普通终端实例（带该命令的 Tag 模板）运行——这条路径没有变化，移除的只是专用 Web 集成。
 
 ### dsh-web 远程访问
 

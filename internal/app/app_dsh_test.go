@@ -16,7 +16,6 @@ import (
 	"myworktree/internal/instance/dsh_web"
 	"myworktree/internal/instance/opencode_web"
 	"myworktree/internal/instance/pty"
-	"myworktree/internal/instance/reasonix"
 	"myworktree/internal/store"
 	"myworktree/internal/worktree"
 )
@@ -33,8 +32,6 @@ func newIsolatedTestServerWithDsh(t *testing.T, st store.State) (*Server, store.
 	reg := framework.NewRegistry()
 	reg.Register(pty.Driver{})
 	reg.Register(opencode_web.Driver{})
-	rxDriver := &reasonix.Driver{DataDir: dataDir}
-	reg.Register(reasonix.NewKind(rxDriver))
 	dshDrv := &dsh_web.Driver{DataDir: dataDir}
 	dshScope := dsh_web.NewScopeTracker()
 	dshDrv.Tracker = dshScope
@@ -51,7 +48,6 @@ func newIsolatedTestServerWithDsh(t *testing.T, st store.State) (*Server, store.
 		root:        dataDir,
 		store:       fs,
 		instanceMgr: m,
-		rxDriver:    rxDriver,
 		dshDrv:      dshDrv,
 		dshScope:    dshScope,
 		mux:         http.NewServeMux(),

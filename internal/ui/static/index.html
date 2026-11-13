@@ -1425,7 +1425,6 @@
             vertical-align: middle;
         }
         .kind-badge-oc { background: var(--accent-color); color: #fff; }
-        .kind-badge-rx { background: var(--badge-bg, rgba(128,128,128,0.25)); color: var(--badge-text, inherit); }
         .kind-badge-dsh { background: var(--badge-dsh-bg, #0969da); color: var(--badge-dsh-text, #fff); }
 
         /* issue #116 (AUTH-20261107-P5-IFRAME-BLEED, arbitration: M1-only): the
@@ -1456,7 +1455,7 @@
            #workspace's --term-bg box-shadow alone — nothing of the iframe is
            drawn past the padding box. Border:0 stays — a border would repaint
            the light-theme white band. No background, z-index, transform or
-           filter. Same shape on .reasonix-frame and .dsh-frame below. */
+           filter. Same shape on .dsh-frame below. */
         .opencode-frame { width: 100%; flex: 1; min-height: 0; border: 0; }
         /* The hidden attribute must unconditionally win over any future
            display rule added to .opencode-frame (a flex item), so hide/show
@@ -1468,15 +1467,6 @@
         #opencode-scope-warning { flex: 0 0 auto; width: 100%; box-sizing: border-box; padding: 6px 12px; font-size: 12px; line-height: 1.4; color: #7c2d12; background: #ffedd5; border-bottom: 1px solid #fdba74; word-break: break-all; }
         #opencode-scope-warning[hidden] { display: none !important; }
         #opencode-scope-warning.opencode-warning-danger { color: #991b1b; background: #fee2e2; border-color: #fca5a5; }
-        /* Reasonix web frame — same per-instance iframe cache pattern as
-           opencode-web (kinds/reasonix.js), hosted inside its own panel. */
-        /* same hosting posture as #opencode-panel above — absolute inset:0 = #workspace padding box, never past it (arbitration: M1-only) */
-        #reasonix-panel { position: absolute; inset: 0; display: flex; flex-direction: column; }
-        #reasonix-panel[hidden] { display: none !important; }
-        #reasonix-frames { flex: 1; min-height: 0; display: flex; flex-direction: column; }
-        /* same plain flex-item shape as .opencode-frame above — no extrapolation (M2 withdrawn by arbitration) */
-        .reasonix-frame { width: 100%; flex: 1; min-height: 0; border: 0; }
-        .reasonix-frame[hidden] { display: none !important; }
         /* dsh web frame — DeepSeek Harness UI on a per-instance dedicated
            origin (kinds/dsh_web.js). Same panel/loading/warning pattern as
            opencode-web, dsh-prefixed ids. */
@@ -2534,9 +2524,6 @@
                     <div id="dsh-scope-warning" hidden></div>
                     <div id="dsh-frames"></div>
                 </div>
-                <div id="reasonix-panel" hidden>
-                    <div id="reasonix-frames"></div>
-                </div>
                 <div id="terminal-controls">
                     <!-- R18 entry button: FIRST child (DOM order above the
                          Refresh button = visually topmost, per the product
@@ -2727,7 +2714,6 @@
         <div class="modal-tabs" role="tablist">
             <button type="button" class="modal-tab active" data-tab="terminal" role="tab" aria-selected="true" onclick="switchStartInstanceTab('terminal')">Terminal</button>
             <button type="button" class="modal-tab" data-tab="opencode-web" role="tab" aria-selected="false" onclick="switchStartInstanceTab('opencode-web')">OpenCode-Web</button>
-            <button type="button" class="modal-tab" data-tab="reasonix" role="tab" aria-selected="false" onclick="switchStartInstanceTab('reasonix')">Reasonix-Web</button>
             <button type="button" class="modal-tab" data-tab="dsh-web" role="tab" aria-selected="false" onclick="switchStartInstanceTab('dsh-web')">DSH-Web</button>
         </div>
         <div class="modal-body">
@@ -2757,16 +2743,6 @@
                 <div class="form-group">
                     <label>Name (Optional)</label>
                     <input id="instNameOc" placeholder="e.g. opencode-web" />
-                </div>
-            </div>
-            <div id="modal-tab-reasonix" class="modal-tab-panel" hidden>
-                <div class="form-info">
-                    <strong>Use the Reasonix web chat UI in your browser.</strong>
-                    Starts <code>reasonix serve</code> in the selected worktree and embeds its web chat UI in the instance tab. The launch command is fixed at <code>reasonix serve</code> — session history is shared with the terminal-launched reasonix via the <code>~/.reasonix</code> session pool.
-                </div>
-                <div class="form-group">
-                    <label>Name (Optional)</label>
-                    <input id="instNameRx" placeholder="e.g. reasonix" />
                 </div>
             </div>
             <div id="modal-tab-dsh-web" class="modal-tab-panel" hidden>
@@ -2934,7 +2910,6 @@
     <script src="/static/kinds/renderer.js"></script>
     <script src="/static/kinds/pty.js"></script>
     <script src="/static/kinds/opencode_web.js"></script>
-    <script src="/static/kinds/reasonix.js"></script>
     <script src="/static/kinds/dsh_web.js"></script>
     <script>
         const token = new URLSearchParams(location.search).get("token") || "";
@@ -2945,7 +2920,7 @@
         // Every kind with an embedded web UI (iframe renderer). New web-ui
         // kinds must be appended here — the shared panels/badges/cleanup
         // loops iterate this list.
-        const WEB_UI_KINDS = ['opencode-web', 'reasonix', 'dsh-web'];
+        const WEB_UI_KINDS = ['opencode-web', 'dsh-web'];
         let knownServerRev = "";
         let serverRevReloading = false;
 
@@ -3661,7 +3636,7 @@
         // order is: flip the `.collapsed` class FIRST, then fit inside one
         // requestAnimationFrame — fitting reads the post-reflow box, and a
         // frame boundary guarantees the flex row has settled. The embedded
-        // web-UI iframes (opencode / reasonix / dsh) need no counterpart:
+        // web-UI iframes (opencode / dsh) need no counterpart:
         // they are ordinary documents and reflow with their container.
         function refitActiveTerminal() {
             const session = getActiveTerminalSession();
@@ -3737,7 +3712,7 @@
         // is an intended toggle (Caps Lock). The terminal is also
         // same-document, not an iframe: the pty renderer draws xterm into a
         // plain div (kinds/pty.js). True cross-frame isolation exists only
-        // for the opencode / reasonix / dsh web UIs: their iframes never
+        // for the opencode / dsh web UIs: their iframes never
         // deliver keydown to the parent document, a security-model boundary
         // we deliberately do not route around with postMessage.
         function handleSidebarToggleKeydown(event) {
@@ -4565,7 +4540,7 @@
         //     the default is left alone;
         //   - web-kind iframes are exempt outright. Their content lives in its own
         //     document and must keep scrolling; blocking here would freeze the
-        //     opencode / reasonix / dsh UIs.
+        //     opencode / dsh UIs.
         //
         // Multi-finger touches are exempt so pinch-zoom is not swallowed (the
         // zoom guard in applyVisualViewportOcclusion already handles scale != 1).
@@ -4577,7 +4552,7 @@
             // overflow-y auto/scroll AND actual overflow present) or an iframe.
             // Both keep their own scrolling: swallowing their drag would freeze the
             // sidebar panels / monitor table / modal bodies / quick-keys panel and
-            // the opencode / reasonix / dsh surfaces. The TERMINAL is deliberately
+            // the opencode / dsh surfaces. The TERMINAL is deliberately
             // NOT in this set — see the wheel listener, where a wheel over the
             // terminal must block the root's default pan.
             function nativeScrollOwner(target) {
@@ -6668,7 +6643,6 @@
                  title="Drag to reorder; double-click to rename">
               <span class="tab-status ${statusClass}"></span>
               ${i.kind === 'opencode-web' ? '<span class="kind-badge kind-badge-oc">OC</span>' : ''}
-              ${i.kind === "reasonix" ? '<span class="kind-badge kind-badge-rx" title="Reasonix web UI">RX</span>' : ""}
               ${i.kind === 'dsh-web' ? '<span class="kind-badge kind-badge-dsh" title="DeepSeek Harness web UI">DS</span>' : ''}
                ${escapeHtml(displayName)}
             </div>
@@ -6838,10 +6812,8 @@
         // so the next kind cannot be forgotten here.
         function hideWebPanels() {
             const ocPanel = document.getElementById('opencode-panel');
-            const rxPanel = document.getElementById('reasonix-panel');
             const dshPanel = document.getElementById('dsh-panel');
             if (ocPanel) ocPanel.hidden = true;
-            if (rxPanel) rxPanel.hidden = true;
             if (dshPanel) dshPanel.hidden = true;
         }
 
@@ -6854,9 +6826,8 @@
             if (state.activeInst) {
                 const inst = state.instances.find(i => i.id === state.activeInst);
                 const isOC = inst && inst.kind === 'opencode-web';
-                const isRX = inst && inst.kind === 'reasonix';
                 const isDSH = inst && inst.kind === 'dsh-web';
-                const isWeb = !!(isOC || isRX || isDSH);
+                const isWeb = !!(isOC || isDSH);
                 empty.style.display = "none";
                 // The refresh / scroll-to-bottom shortcuts overlay the
                 // terminal's top-right corner; they are meaningless for the
@@ -6867,7 +6838,7 @@
                 // branches — keep the forms identical so future edge
                 // conditions (e.g. hide while loading) can't mis-match.
                 if (controls) controls.classList.toggle("oc-hidden", isWeb);
-                // For opencode-web / reasonix / dsh-web instances the kind
+                // For opencode-web / dsh-web instances the kind
                 // renderers own the visibility of their panels and the
                 // terminal container. renderWorkspace must NOT overwrite
                 // them, or the 8-second refresh cycle will fight the
@@ -7013,11 +6984,6 @@
             refresh();
         }
 
-        // Web-UI (Reasonix) instance rendering lives in
-        // kinds/reasonix.js (ReasonixRenderer), following the
-        // opencode-web renderer pattern: per-instance iframe cache,
-        // dataset id/src navigation guard, web_url vs same-origin
-        // /rx/<id>/ fallback, and xterm host/container-style cleanup.
 
         function selectInstance(id) {
             if (state.activeInst === id) return;
@@ -7129,14 +7095,6 @@
                 renderer.activate(session, document.getElementById('workspace'));
                 if (kind === 'opencode-web') {
                     updateStatus('opencode web ui');
-                }
-                if (kind === 'reasonix') {
-                    // Bucket, not `=== 'running'`: a freshly created reasonix
-                    // instance reads `starting` for seconds, and
-                    // kinds/reasonix.js already keeps its iframe navigating
-                    // through that window — a "stopped" label next to a live
-                    // page is self-contradicting (issue #80 review).
-                    updateStatus(instanceStatusLabel(inst, 'reasonix web'));
                 }
                 if (kind === 'dsh-web') {
                     updateStatus(instanceStatusLabel(inst, 'dsh web ui'));
@@ -7309,7 +7267,6 @@
             document.getElementById("cmd").value = "";
             document.getElementById("instName").value = "";
             document.getElementById("instNameOc").value = "";
-            document.getElementById("instNameRx").value = "";
             document.getElementById("instNameDsh").value = "";
             document.getElementById("tagSelect").value = "";
             openModal("modal-start-instance");
@@ -7570,7 +7527,7 @@
             try {
                 // Determine which tab is active and what kind to send.
                 // The Terminal tab always sends kind="" (backend
-                // normalises to "pty"); the OpenCode-Web / Reasonix-Web tabs
+                // normalises to "pty"); the OpenCode-Web / DSH-Web tabs
                 // always send their kind regardless of any tag selection
                 // (the kind is a UI decision, not a tag selection —
                 // that's the whole point of the tab split).
@@ -7601,16 +7558,6 @@
                         command: '',
                         name: document.getElementById("instNameOc").value || 'opencode-web',
                         kind: 'opencode-web',
-                    };
-                } else if (tabName === 'reasonix') {
-                    // Fixed command, no template entry in the UI (decision B:
-                    // tag env/preStart remain available via API/CLI tag_id).
-                    body = {
-                        worktree_id: state.activeWT,
-                        tag_id: '',
-                        command: '',
-                        name: document.getElementById("instNameRx").value || 'reasonix',
-                        kind: 'reasonix',
                     };
                 } else if (tabName === 'dsh-web') {
                     body = {
@@ -8141,9 +8088,7 @@
         // activate() from re-running and the live iframe would never be
         // torn down. refresh() calls this after render() on every tick;
         // the renderer's own syncStatus applies the entering-terminal-
-        // bucket gate and does nothing on every other status. reasonix
-        // self-heals through its own 2s tick and exposes no syncStatus,
-        // so the guard below skips it by design.
+        // bucket gate and does nothing on every other status.
         function syncActiveWebStatus() {
             const inst = getActiveInstance();
             if (!inst || !WEB_UI_KINDS.includes(inst.kind)) return;

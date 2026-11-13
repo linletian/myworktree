@@ -19,10 +19,10 @@ macOS and Linux · `~/.local/bin` · no `sudo` · see [Install (full reference)]
 
 ## Features
 
-- **Isolated workspaces, kept apart by git** — every worktree is its own git checkout (typically one per branch or working context), so half-finished changes, dependency installs, and experiments never collide. A worktree can run multiple managed instances side-by-side (PTY + opencode-web + reasonix + dsh-web); you decide the granularity.
+- **Isolated workspaces, kept apart by git** — every worktree is its own git checkout (typically one per branch or working context), so half-finished changes, dependency installs, and experiments never collide. A worktree can run multiple managed instances side-by-side (PTY + opencode-web + dsh-web); you decide the granularity.
 - **Persistent, re-attachable terminals** — every agent runs in a managed instance that survives page reloads and browser closes; reopen anytime, scroll back the full output, and keep going.
 - **Output replay without disk writes** — every keystroke lands in a bounded in-memory ring buffer, so you can scrub back through what an agent did while you were away.
-- **Bring your own agents** — OpenCode and Reasonix run out of the box (Reasonix even with its native web chat UI embedded in the sidebar); for everything else, drop a Tag template (`command/env/preStart/cwd`) and bring up Claude Code, Codex, GLM, Qwen, or any other CLI.
+- **Bring your own agents** — OpenCode runs out of the box with its native web UI embedded in the sidebar; for everything else, drop a Tag template (`command/env/preStart/cwd`) and bring up Claude Code, Codex, GLM, Qwen, or any other CLI (a user-installed Reasonix CLI/TUI included — Tag instances run whatever command you give them).
 - **One place to see what's running** — worktrees, instances, output, and PTY state in a single minimal Web UI — no IDE, no editor, no context switch.
 
 ## What makes myworktree different
@@ -33,7 +33,6 @@ macOS and Linux · `~/.local/bin` · no `sudo` · see [Install (full reference)]
 - **Global auth & CSRF out of the box** — HttpOnly Cookie + double-submit CSRF, plus an auto-generated 32-char hex token on first run.
 - **Hot config reload** — `mw config regen` rotates the auth token and reapplies settings without restarting the daemon.
 - **File preview & diff in the Changes panel** — click any changed or untracked file for a line-numbered, diff-aware preview.
-- **Reasonix web-chat instances** — tick one box to run `reasonix serve` in a worktree, with its web chat UI embedded in the same sidebar.
 - **dsh web instances** — embed the DeepSeek Harness browser UI as a managed instance (per-worktree workspace registry, shared session pool, out-of-scope warning; see `docs/plans/dsh-native-ui/`). Requires **dsh 0.2.x** (`[0.2.0, 0.3.0)`; 0.1.x is no longer supported — 0.2 replaced the dotted RPC method names with `<namespace>/<method>` endpoints and nested every verb's arguments at `payload.args.request`). Remote access (LAN/Tailnet) works via a WS↔SSE bridge on the per-instance proxy (`/api/remote.mux`) plus an injected connection shim; loopback access works across the supported 0.2.x range.
 - **Branch divergence badge** — see at a glance when a branch is ahead of or behind its upstream, with scheduled refresh.
 
@@ -48,7 +47,7 @@ A common workflow looks like: GPT/GLM drafts docs, Claude/MiniMax implements cha
 ## What myworktree does
 myworktree is a thin management layer that:
 - Uses **git worktrees** to give you an isolated working directory (typically one per branch or work context, so half-finished changes, dependency installs, and temporary experiments never collide)
-- Runs multiple managed **instances** per worktree (PTY / opencode-web / reasonix can run side-by-side) and keeps them alive on the backend
+- Runs multiple managed **instances** per worktree (PTY / opencode-web / dsh-web can run side-by-side) and keeps them alive on the backend
 - Provides a minimal Web UI to list worktrees/instances and **replay/follow output**
 - Supports **Tag** templates (`command/env/preStart/cwd`) to start instances with the right setup, without baking project-specific logic into the manager
 
@@ -65,7 +64,6 @@ myworktree is a thin management layer that:
 - Portal Dashboard with shared entry port, auto-discovery of running instances across repos
 - Global auth token (HttpOnly Cookie, CSRF protection, tailscale serve integration)
 - Sidebar main workspace shows a GitHub icon next to the project name when the repo's git remote points at `github.com`; clicking opens the canonical `https://github.com/<owner>/<repo>` URL in a new tab. GitHub Enterprise and non-GitHub remotes are intentionally not surfaced.
-- **Reasonix web chat instances (MVP)** — check *Reasonix (web chat UI)* when starting an instance to run a `reasonix serve` agent in that worktree and render its web chat UI in an iframe (`/rx/<id>/`, same-origin reverse proxy with token cookie injection and URL-prefix rewrite). The serve uses the user's real `~/.reasonix` (no per-instance isolation): sessions/history/config/credentials are shared per project exactly like a terminal-run `reasonix`, so the same project's history (including terminal sessions) is visible/switchable in the embedded sidebar. Each Start opens a fresh session (no `--resume`); deleting an instance never touches the shared session pool. Requires a `reasonix` binary on `PATH`; the reasonix UI sidebar (project switching) is intentionally left visible in this MVP.
 - **In-memory PTY log ring buffer** — per-instance PTY logs live in a bounded in-memory ring buffer (default 32 MB per instance, hard ceiling 256 MB, total budget capped at 25% of system RAM) instead of on-disk log files, eliminating disk write amplification on long-running PTY-heavy sessions. `LogBufferBytes` overrides the per-instance cap; a start that would exceed the global budget returns `503` with a structured `log_buffer_budget_exceeded` body.
 - **File preview in the Changes panel** — click any changed or untracked file to preview it with line numbers, a formatted view, and a diff view (synthetic diff for untracked files, `quotePath` handled).
 - **Branch divergence badge** — the sidebar shows a diverge badge when a branch is ahead of / behind its upstream, backed by scheduled refresh.
@@ -363,13 +361,11 @@ Set `--portal-port 0` to disable the Portal.
 
 ## Known Limitations
 
-### Reasonix instances and `REASONIX_HOME`
+### Reasonix web instances removed (issue #160)
 
-Reasonix instances run `reasonix serve` **without** a `REASONIX_HOME` override, so the embedded web UI uses your real `~/.reasonix` — exactly like a terminal-run `reasonix`. The driver strips any `REASONIX_HOME` / `REASONIX_STATE_HOME` inherited from the host environment (logging a hint), so the instance and your terminal always share the same per-project session pool; project isolation is done by reasonix itself, per cwd.
+The dedicated `kind: "reasonix"` web instance is **removed**: no Reasonix tab in the Start Instance dialog, `POST /api/instances` with `kind: "reasonix"` is refused by the existing unknown-kind path (`400`), `GET /rx/<id>/…` returns `404`, and instance responses carry no reasonix `web_url`. Persisted `kind: "reasonix"` records from before the removal are retired once on the next daemon start, after a local `state.json.reasonix-removal.backup` copy; `~/.reasonix` and any custom Reasonix home are never touched (`docs/ARCHITECTURE.md` §4.2).
 
-Consequence to be aware of: if your shell exports a custom `REASONIX_HOME` (e.g. `~/.custom-reasonix`), a terminal-run `reasonix` uses that custom home while myworktree instances use the default `~/.reasonix` — the two will **not** see each other's history. This is deliberate. To point an instance at a custom home, set `REASONIX_HOME` via the instance tag's `env` (applied after stripping).
-
-Instance lifecycle never touches the shared session pool: Start / Stop / Restart / Delete only manage the `serve` subprocess and its management files (`token`/`port`/`pid`/`serve.log` in the instance state dir). Sessions live in `~/.reasonix/projects/<cwd-slug>/sessions`, so restarting an instance opens a **fresh** session (no `--resume`) while your history stays available in the sidebar.
+To run a Reasonix CLI/TUI you installed yourself, start a normal terminal instance (a Tag template with the command you want) — that path is unchanged; only the dedicated web integration is gone.
 
 ### dsh-web remote access
 

@@ -82,7 +82,7 @@ func (m *Manager) Delete(id string) error {
 		return err
 	}
 	// Out of the state lock: kind-owned per-instance resources that only
-	// Delete should wipe (reasonix state dir). Best-effort; the id is
+	// Delete should wipe. Best-effort; the id is
 	// never reused after teardown.
 	m.cleanupKind(kindName, id)
 	return nil
@@ -131,7 +131,7 @@ func (m *Manager) Restart(id string) (store.ManagedInstance, error) {
 
 	// The restart migrates onto a fresh id, so the old kind-managed
 	// state dir is dropped rather than left to accumulate under the old
-	// id (parity with pre-refactor reasonix cleanup).
+	// id.
 	m.cleanupKind(old.Kind, id)
 
 	// Save the RestartedFrom link. The runLifecycle goroutine may
@@ -234,7 +234,7 @@ func (m *Manager) ReorderInstances(worktreeID string, orderIDs []string, expecte
 
 // ReconcileRunningOnStartup marks stale "running" / "starting"
 // instances as "stopped". The previous server's PIDs are dead — with
-// one exception: kinds implementing RestartSurvivor (reasonix) may
+// one exception: kinds implementing RestartSurvivor may
 // keep a live subprocess across restarts, so the framework asks the
 // kind to re-attach; on success the record stays "running" and gets an
 // in-memory handle, on failure it is marked stopped like any other.
@@ -282,7 +282,7 @@ func (m *Manager) ReconcileRunningOnStartup() (int, error) {
 
 // StopAllKind best-effort stops every in-memory running instance of
 // the given kind. Called on server shutdown for kinds whose processes
-// would otherwise outlive myworktree (reasonix serve has no PTY to die
+// would otherwise outlive myworktree (dsh-web serve has no PTY to die
 // with). Kinds whose processes die with the server need no call.
 func (m *Manager) StopAllKind(kindName string) {
 	m.mu.Lock()

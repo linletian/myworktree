@@ -18,8 +18,8 @@ import (
 	"myworktree/internal/gitx"
 	"myworktree/internal/instance/opencode_web"
 	"myworktree/internal/instance/pty"
-	"myworktree/internal/instance/reasonix"
 	"myworktree/internal/store"
+	"myworktree/internal/ui"
 )
 
 func TestParseInt64Default(t *testing.T) {
@@ -237,8 +237,6 @@ func newIsolatedTestServer(t *testing.T, st store.State) (*Server, store.FileSto
 	reg := framework.NewRegistry()
 	reg.Register(pty.Driver{})
 	reg.Register(opencode_web.Driver{})
-	rxDriver := &reasonix.Driver{DataDir: dataDir}
-	reg.Register(reasonix.NewKind(rxDriver))
 	m := framework.NewManager(reg, fs, log.New(os.Stderr, "", 0))
 	m.DataDir = dataDir
 	m.Root = dataDir
@@ -249,7 +247,6 @@ func newIsolatedTestServer(t *testing.T, st store.State) (*Server, store.FileSto
 		root:        dataDir,
 		store:       fs,
 		instanceMgr: m,
-		rxDriver:    rxDriver,
 		mux:         http.NewServeMux(),
 		authFails:   map[string]authFail{},
 	}, fs
@@ -328,39 +325,64 @@ func TestHandleInstanceUpdate(t *testing.T) {
 	}
 }
 
-func TestPatchReturnsWebURLForReasonixInstance(t *testing.T) {
-	// PATCH must render through instanceView (like GET/POST) so reasonix
-	// instances keep their web_url in the response; previously it wrote the
-	// bare ManagedInstance and dropped web_url.
-	srv, _ := newIsolatedTestServer(t, store.State{
+func TestCreateInstanceWithRemovedReasonixKindReturns400(t *testing.T) {
+	// Issue #160: the reasonix kind is no longer registered; POST
+	// /api/instances with kind="reasonix" must fall through to the existing
+	// unknown-kind rejection in framework.Registry and return 400 — no
+	// record created, no process started. The DoD anchor is the status code
+	// only, so this pins 400 + empty state, not a specific error string.
+	srv, fs := newIsolatedTestServer(t, store.State{
 		Version: 3,
 		Worktrees: []store.ManagedWorktree{
 			{ID: "wt1", Name: "wt1", Path: t.TempDir()},
 		},
-		Instances: []store.ManagedInstance{
-			{ID: "rx-1", WorktreeID: "wt1", Name: "orig", Kind: store.KindReasonix, Status: "running"},
-		},
 	})
-	srv.rxAddr = "127.0.0.1:9999"
-
-	body := map[string]any{"id": "rx-1", "name": "renamed"}
+	body := map[string]any{"worktree_id": "wt1", "kind": store.KindReasonix, "name": "rx-try"}
 	bodyBytes, _ := json.Marshal(body)
-	req := httptest.NewRequest(http.MethodPatch, "/api/instances", bytes.NewReader(bodyBytes))
+	req := httptest.NewRequest(http.MethodPost, "/api/instances", bytes.NewReader(bodyBytes))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	srv.handleInstances(w, req)
-	if w.Code != http.StatusOK {
-		t.Fatalf("PATCH: expected 200, got %d", w.Code)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("POST kind=reasonix: expected 400 from the existing unknown-kind path, got %d: %s", w.Code, w.Body.String())
 	}
-	var resp map[string]any
-	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("invalid JSON: %v", err)
+	st, err := fs.Load()
+	if err != nil {
+		t.Fatalf("load state after rejected create: %v", err)
 	}
-	if resp["name"] != "renamed" {
-		t.Fatalf("name = %v, want renamed", resp["name"])
+	if len(st.Instances) != 0 {
+		t.Fatalf("instances after rejected create = %d, want 0 — no record may be persisted", len(st.Instances))
 	}
-	if got, want := resp["web_url"], "http://127.0.0.1:9999/rx/rx-1/"; got != want {
-		t.Fatalf("web_url = %v, want %v", got, want)
+}
+
+// TestRemovedReasonixProxyReturns404 pins the `/rx/` half of the issue #160
+// API-deletion anchor (PLAN §4.1「API 删除结果」: 「`/rx/` 和旧 JS 返回 404」;
+// the 「旧 JS」 leg is a UI-asset assertion and is NOT covered here).
+// The deleted reasonix_proxy.go owned the `/rx/<id>/` reverse proxy; nothing
+// in the Go tests proved the route was actually gone. The mux is rebuilt the
+// way New() wires production — registerAPIs + ui.Register — so the pin covers
+// the REAL routing table: the UI catch-all must 404 a `/rx/` path instead of
+// serving the SPA shell, and no future re-registration may pass silently.
+func TestRemovedReasonixProxyReturns404(t *testing.T) {
+	srv, _ := newIsolatedTestServer(t, store.State{})
+	mux := http.NewServeMux()
+	srv.registerAPIs(mux)
+	// Same wiring order as New(); isRemote is nil-safe inside ui.Register.
+	if err := ui.Register(mux, filepath.Base(filepath.Clean(srv.root)), nil); err != nil {
+		t.Fatalf("ui.Register: %v", err)
+	}
+	for _, path := range []string{
+		"/rx/",
+		"/rx/rxlegacy0001/",
+		"/rx/rxlegacy0001",
+		"/rx/rxlegacy0001/api/session",
+	} {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, req)
+		if w.Code != http.StatusNotFound {
+			t.Errorf("GET %s = %d, want 404 — the reasonix proxy route must stay removed: %s", path, w.Code, truncateText(w.Body.String(), 120))
+		}
 	}
 }
 
@@ -1163,8 +1185,8 @@ func TestIsValidRedirectPath(t *testing.T) {
 
 // TestWithAuth_SyncsURLTokenToCookie pins the remote-access bridge: a
 // browser request authenticated by the address-bar token must receive
-// the mw_token cookie in the response, so same-origin iframes (reasonix
-// /rx/, opencode /__opencode/) authenticate on their plain relative
+// the mw_token cookie in the response, so same-origin iframes (opencode
+// /__opencode/) authenticate on their plain relative
 // navigations without ever carrying the token in their own URL.
 func TestWithAuth_SyncsURLTokenToCookie(t *testing.T) {
 	tmpDir := t.TempDir()

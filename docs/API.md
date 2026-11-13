@@ -416,7 +416,7 @@ Body:
 ```
 
 - `worktree_id` can be a regular worktree ID, or `"__main__"` to run an instance in the main (host) git repository. For `"__main__"`, the instance starts in the main repo root directory.
-- `kind`: `""`/`"pty"` (default) starts a PTY terminal instance; `"opencode-web"` starts an `opencode serve` subprocess embedded via `/__opencode/<id>/` (see section 5.11); `"reasonix"` starts a `reasonix serve` subprocess in the worktree and exposes its web chat UI under `/rx/<id>/` (see section 5.10). For `"reasonix"` the tag's `command` is ignored; tag `env` / `preStart` are applied.
+- `kind`: `""`/`"pty"` (default) starts a PTY terminal instance; `"opencode-web"` starts an `opencode serve` subprocess embedded via `/__opencode/<id>/` (see section 5.11); `"dsh-web"` starts a `dsh web` subprocess embedded through its per-instance proxy (see section 5.14 and `docs/ARCHITECTURE.md` §9). Any other value — including the retired `"reasonix"` (issue #160) — is refused by the existing unknown-kind path with `400`; no record is created and no process starts.
 
 If both `tag_id` and `command` are empty, the server starts an **interactive shell** instance in the worktree.
 If `command` is provided, it is sent to the shell as the initial command and the shell remains available for further input.
@@ -1324,24 +1324,20 @@ All page close/refresh/navigation events trigger a browser-native confirmation d
 - **No backend involvement**: Instances continue running regardless of the user's choice
 - **Condition**: Always triggered on any close action — no dependency on instance state
 
-### 5.10 Reasonix web UI proxy
+### 5.10 Reasonix web UI proxy (removed — issue #160)
 
-For `kind: "reasonix"` instances the web chat UI is served under:
+The dedicated Reasonix web instance is **removed**; there is no `/rx/` route any more.
 
 ```
-GET /rx/<instanceId>/...
+GET /rx/<instanceId>/...   → 404
 ```
 
-- **Independent origin (loopback only)**: when the main listener is loopback-only (`127.0.0.1` / `localhost`, and no TLS), the proxy is mounted on a dedicated loopback listener (`127.0.0.1:<random>`), reported to the frontend as `web_url` in `GET/POST /api/instances` responses (view-only field, not persisted). The iframe loads that URL, so the embedded reasonix page is **cross-origin** with the myworktree API — a script inside the chat iframe cannot silently call `/api/*` with the user's session (issue #44).
-- **Same-origin fallback (network / TLS)**: when TLS is configured (`--tls-cert/--tls-key`, an `http://127.0.0.1` iframe inside an https page would be blocked as mixed content) **or the main listener is open to the network** (default `0.0.0.0`, or an explicit LAN IP — a remote browser would resolve `127.0.0.1` to itself and the iframe would fail), the independent listener is skipped; `web_url` is empty and the frontend falls back to the **relative** same-origin path `/rx/<id>/`, which follows the browser's current origin — so LAN/remote access works (same as the pre-#44 behavior).
-- The proxy forwards to the instance's `reasonix serve` at `http://127.0.0.1:<port>` (port/token cached in memory by the driver — issue #46), injecting `Cookie: reasonix_token=<token>` (name from `reasonix.CookieName`, single source — issue #45) for auth.
-- HTML responses get a script injected (single injection point before `</head>`) that prefixes the page's root-relative `fetch` / `EventSource` / `XMLHttpRequest` calls with `/rx/<id>/`, plus the issue #48 layout injection: the 220px sidebar is **collapsed by default** on desktop with a dedicated toggle button (`--mw-sidebar-w` CSS var makes the expanded width configurable); narrow screens keep the native mobile sidebar.
-- The `Accept-Encoding` header is forced to `identity`; only the myworktree auth `?token=` parameter is stripped from the query before forwarding upstream (`authq.StripToken` — every other query parameter, e.g. `?session=`, passes through; parse-failed queries are still token-scrubbed rather than forwarded raw).
-- **Remote-access authentication**: when the UI is opened with `?token=` in the address bar (portal jump / remote access), the server syncs the token into the HttpOnly `mw_token` cookie on the response (`withAuth`); the iframe then navigates with a plain relative `/rx/<id>/` URL and authenticates via the cookie — the token never appears in the embedded document's `location.search`, and a rotated token self-heals on the next cookie refresh.
-- SSE (`/events`) is streamed through (`FlushInterval=-1`); the upstream sends its own 15s `: ping` keepalive.
-- Returns `404` for unknown/non-reasonix instance ids, `503` when the instance is not running, `502` when the backend is unreachable.
-- Driver version gate: `Start` runs `reasonix --version` and rejects CLIs older than `1.22.0` (configurable via `Driver.MinVersion`); readiness failures include the tail of the instance `serve.log` (issue #45).
-- Tag semantics apply like other kinds: `tag.Env` is injected into the serve environment, `tag.preStart` runs before serve (with `REASONIX_HOME` / `REASONIX_STATE_HOME` stripped exactly like serve), and `tag.Command` is ignored (a reasonix instance runs the agent, not a shell command).
+- **No handler, no listener, no cookie**: `/rx/` is not registered on any mux, so every path under it returns `404`. There is no dedicated loopback listener, no `reasonix_token` cookie injection, no URL-prefix / layout script injection, no SSE passthrough, and no upstream `http://127.0.0.1:<port>` forward — the `503` / `502` responses this section used to document no longer occur, because nothing is proxied.
+- **Creating one fails**: `POST /api/instances` with `kind: "reasonix"` goes through the existing registry lookup, which answers with its unknown-kind error, and the endpoint returns `400`. No record is written and no process is started; `POST /api/instances/restart` resolves the kind through the same registry, so a retired kind cannot be brought back.
+- **No `web_url`**: instance responses (`GET/POST/PATCH /api/instances`, `POST /api/instances/restart`) no longer carry a reasonix `web_url`; that field existed only for the retired kind, and the remaining web kinds report their iframe source through their own info endpoints (sections 5.11 and 5.14).
+- **Frontend asset**: `GET /static/kinds/reasonix.js` returns `404` and the main page no longer references it.
+- **Legacy records**: `kind: "reasonix"` entries persisted before the removal are retired once on the next daemon start (local `state.json.reasonix-removal.backup` first, bounded stop of a serve whose own pid + port both validate, only the known management files deleted); `~/.reasonix` and any custom Reasonix home are never touched. The contract and its failure semantics are in `docs/ARCHITECTURE.md` §4.2.
+- **What still works**: a Reasonix CLI/TUI you installed yourself runs as an ordinary PTY instance (a Tag with the command you want). Only the dedicated web integration is gone.
 
 ### 5.11 opencode-web info (instance proxy metadata)
 
@@ -1514,7 +1510,7 @@ Supported tool names:
 ### `instance_log_tail`
 Args: `{ "id": "<instanceId>", "n": 65536 }` — `n` is the max bytes to return (defaults to `4096` when absent or non-positive).
 
-Returns the **newest** `n` bytes of the instance's ring buffer (tail semantics, same bytes as `GET /api/instances/log` without `since`), not the oldest. Instances that are stopped, exited, or unknown return an empty string, since the buffer is released with the running instance. Instances whose kind does not capture logs (`reasonix`, `opencode-web`, `dsh-web`) also return an empty string.
+Returns the **newest** `n` bytes of the instance's ring buffer (tail semantics, same bytes as `GET /api/instances/log` without `since`), not the oldest. Instances that are stopped, exited, or unknown return an empty string, since the buffer is released with the running instance. Instances whose kind does not capture logs (`opencode-web`, `dsh-web`) also return an empty string.
 
 ## 7) Portal Dashboard
 
