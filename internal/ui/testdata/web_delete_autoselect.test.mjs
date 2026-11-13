@@ -93,7 +93,6 @@ function makeEl(id) {
 const PANEL_OF = {
   "dsh-web": "dsh-panel",
   "opencode-web": "opencode-panel",
-  reasonix: "reasonix-panel",
 };
 
 function harness() {
@@ -101,7 +100,7 @@ function harness() {
   for (const id of [
     "tabs-container", "workspace", "empty-state", "terminal-container",
     "instance-actions", "terminal-controls", "opencode-panel",
-    "reasonix-panel", "dsh-panel",
+    "dsh-panel",
   ]) {
     els[id] = makeEl(id);
   }
@@ -259,7 +258,7 @@ test("deleting the active web instance onto a terminal auto-select keeps panels 
 test("deleting the active web instance onto a DIFFERENT web kind shows only the new kind's panel", () => {
   const h = harness();
   const A = { id: "A", kind: "dsh-web", status: "running", worktree_id: "wt1" };
-  const B = { id: "B", kind: "reasonix", status: "running", worktree_id: "wt1" };
+  const B = { id: "B", kind: "opencode-web", status: "running", worktree_id: "wt1" };
   h.state.instances = [A, B];
   h.api.selectInstance("A");
   assert.deepEqual(visiblePanels(h), ["dsh-panel"]);
@@ -268,8 +267,8 @@ test("deleting the active web instance onto a DIFFERENT web kind shows only the 
   h.api.renderTabs();
 
   assert.equal(h.state.activeInst, "B");
-  assert.deepEqual(h.renderers.reasonix.calls, ["B"], "the reasonix renderer activated once");
-  assert.deepEqual(visiblePanels(h), ["reasonix-panel"],
+  assert.deepEqual(h.renderers["opencode-web"].calls, ["B"], "the opencode-web renderer activated once");
+  assert.deepEqual(visiblePanels(h), ["opencode-panel"],
     "cross-kind delete pins BOTH directions at once — the new kind's panel shown AND the old kind's hidden; the same-kind delete cases cannot tell those apart because dsh-panel.hidden=false is equally satisfied by A's panel never having been hidden (PR #126 review)");
 });
 
@@ -290,11 +289,11 @@ test("switching between web kinds shows only the newly activated panel", () => {
 
 test("switching a web foreground to a terminal hides every web panel", () => {
   const h = harness();
-  const A = { id: "A", kind: "reasonix", status: "running", worktree_id: "wt1" };
+  const A = { id: "A", kind: "opencode-web", status: "running", worktree_id: "wt1" };
   const B = { id: "B", kind: "pty", status: "running", worktree_id: "wt1" };
   h.state.instances = [A, B];
   h.api.selectInstance("A");
-  assert.deepEqual(visiblePanels(h), ["reasonix-panel"]);
+  assert.deepEqual(visiblePanels(h), ["opencode-panel"]);
 
   h.api.selectInstance("B");
   assert.deepEqual(visiblePanels(h), [],

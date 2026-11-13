@@ -315,7 +315,7 @@ test("the shell lock prevents the default unless a native scroller owns the gest
     body,
     /IFRAME/,
     "web-kind iframes must be exempt — blocking their drags would freeze the " +
-      "opencode / reasonix / dsh surfaces",
+      "opencode / dsh surfaces",
   );
   assert.match(
     body,

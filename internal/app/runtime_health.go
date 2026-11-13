@@ -756,8 +756,8 @@ func (h *runtimeHealth) snapshot() (inflight, total int64, top string) {
 // that DOES declare a method carries it verbatim, because that is what was
 // registered. That pass-through — delimiters included, nothing rewritten — is
 // a checked claim, not an assumption: all 41 registrations on the main mux
-// plus the one on rxMux are `/api/…`, `/rx/`, `/login` or `/__opencode/`
-// forms, and a grep over `mux\.Handle` in internal/app/app.go finds zero
+// are `/api/…`, `/login` or `/__opencode/` forms, and a grep over
+// `mux\.Handle` in internal/app/app.go finds zero
 // commas and zero parentheses inside a pattern. Cleaning them would rewrite
 // facts the route table owns, to fix a hazard that does not exist there.
 //
@@ -845,12 +845,12 @@ func (s *Server) withRuntimeHealth(next http.Handler) http.Handler {
 
 // withRuntimeHealthOn is the per-listener form (issue #130 review P3): the
 // pattern pre-lookup must run against the mux THAT ACTUALLY DISPATCHES the
-// request — the main listener passes s.mux, the independent rx listener
-// passes its own rxMux. Querying s.mux for an rx request would mislabel
-// every rx 404 as a main-listener miss, because rxMux registers only
-// /rx/ and its routing table is different. Both listeners share ONE
-// runtimeHealth — one 64-key cap, one meter, one sampling loop, no second
-// ticker.
+// request — the main listener passes s.mux. Querying the wrong mux would
+// mislabel every miss as a main-listener miss, because a different mux has
+// a different routing table. Every listener shares ONE runtimeHealth — one
+// 64-key cap, one meter, one sampling loop, no second ticker. (Historical:
+// issue #160 removed the second, reasonix-only listener; the generalized
+// form stays so any future second listener meters correctly.)
 func (s *Server) withRuntimeHealthOn(mux *http.ServeMux, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		st := s.runtimeHealth.enter(runtimeHealthKey(mux, r))

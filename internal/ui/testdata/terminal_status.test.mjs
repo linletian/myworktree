@@ -212,11 +212,11 @@ function indexHarness({ instances = [], activeInst = null, sessions = [] } = {})
 
 test("the status-bar label follows the buckets for the web-UI kinds", () => {
   const { api } = indexHarness();
-  // reasonix / dsh-web renderers keep their iframe navigating while the
-  // instance is `starting`, so "stopped" next to a live page was a lie.
-  assert.equal(api.instanceStatusLabel({ status: "running" }, "reasonix web"), "reasonix web");
-  assert.equal(api.instanceStatusLabel({ status: "unhealthy" }, "reasonix web"), "reasonix web");
-  assert.equal(api.instanceStatusLabel({ status: "starting" }, "reasonix web"), "starting...");
+  // opencode-web / dsh-web renderers keep their iframes navigating while
+  // the instance is `starting`, so "stopped" next to a live page was a lie.
+  assert.equal(api.instanceStatusLabel({ status: "running" }, "opencode web ui"), "opencode web ui");
+  assert.equal(api.instanceStatusLabel({ status: "unhealthy" }, "opencode web ui"), "opencode web ui");
+  assert.equal(api.instanceStatusLabel({ status: "starting" }, "opencode web ui"), "starting...");
   assert.equal(api.instanceStatusLabel({ status: "stopping" }, "dsh web ui"), "stopping...");
   assert.equal(api.instanceStatusLabel({ status: "stopped" }, "dsh web ui"), "stopped");
   assert.equal(api.instanceStatusLabel({ status: "failed" }, "dsh web ui"), "stopped");
@@ -2684,7 +2684,7 @@ test("no two classic scripts declare the same top-level name", () => {
   // the files. Without this a selector typo would silently scan nothing.
   assert.ok(!/type\s*=\s*["']module["']/i.test(indexSource), "index.html now loads a module; the shared-global-scope assumption needs revisiting");
   const labels = scripts.map(s => s.label);
-  for (const want of ["static/framework.js", "static/kinds/renderer.js", "static/kinds/pty.js", "static/kinds/opencode_web.js", "static/kinds/reasonix.js", "static/kinds/dsh_web.js", "index.html (inline)"]) {
+  for (const want of ["static/framework.js", "static/kinds/renderer.js", "static/kinds/pty.js", "static/kinds/opencode_web.js", "static/kinds/dsh_web.js", "index.html (inline)"]) {
     assert.ok(labels.includes(want), `guard did not scan ${want}; loaded scripts: ${labels.join(", ")}`);
   }
 

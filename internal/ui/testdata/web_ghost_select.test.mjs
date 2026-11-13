@@ -101,7 +101,6 @@ function makeEl(id) {
 const PANEL_OF = {
   "dsh-web": "dsh-panel",
   "opencode-web": "opencode-panel",
-  reasonix: "reasonix-panel",
 };
 
 function harness() {
@@ -109,7 +108,7 @@ function harness() {
   for (const id of [
     "tabs-container", "workspace", "empty-state", "terminal-container",
     "instance-actions", "terminal-controls", "opencode-panel",
-    "reasonix-panel", "dsh-panel",
+    "dsh-panel",
   ]) {
     els[id] = makeEl(id);
   }
@@ -272,7 +271,7 @@ test("selectInstance(GHOST) on two web instances keeps the auto-selected panel a
 test("a normal valid switch still deactivates the previous renderer before activating the new one", () => {
   const h = harness();
   const A = { id: "A", kind: "dsh-web", status: "running", worktree_id: "wt1" };
-  const B = { id: "B", kind: "reasonix", status: "running", worktree_id: "wt1" };
+  const B = { id: "B", kind: "opencode-web", status: "running", worktree_id: "wt1" };
   h.state.instances = [A, B];
   h.api.selectInstance("A");
   assert.deepEqual(visiblePanels(h), ["dsh-panel"]);
@@ -280,11 +279,11 @@ test("a normal valid switch still deactivates the previous renderer before activ
   h.api.selectInstance("B");
 
   assert.equal(h.state.activeInst, "B", "the takeover guard is inert for a valid id — render() does not re-point the selection");
-  assert.deepEqual(visiblePanels(h), ["reasonix-panel"],
+  assert.deepEqual(visiblePanels(h), ["opencode-panel"],
     "the previous web kind's panel is hidden before the new renderer activates (the #96/#101 mutual exclusion)");
   assert.ok(h.lastIndexOf("deactivate:dsh-web") > h.lastIndexOf("activate:dsh-web:A"),
     "prevRenderer.deactivate() still runs on the honest switch path");
-  assert.ok(h.lastIndexOf("activate:reasonix:B") > h.lastIndexOf("deactivate:dsh-web"),
+  assert.ok(h.lastIndexOf("activate:opencode-web:B") > h.lastIndexOf("deactivate:dsh-web"),
     "deactivate precedes activate in the event order");
 });
 
@@ -293,7 +292,7 @@ test("a normal valid switch still deactivates the previous renderer before activ
 test("selectInstance(null) with remaining instances keeps the auto-selected panel visible", () => {
   const h = harness();
   const A = { id: "A", kind: "dsh-web", status: "running", worktree_id: "wt1" };
-  const B = { id: "B", kind: "reasonix", status: "running", worktree_id: "wt1" };
+  const B = { id: "B", kind: "opencode-web", status: "running", worktree_id: "wt1" };
   h.state.instances = [A, B];
   h.api.selectInstance("A");
 
@@ -303,9 +302,9 @@ test("selectInstance(null) with remaining instances keeps the auto-selected pane
   h.api.selectInstance(null);
 
   assert.equal(h.state.activeInst, "B", "the null frame's takeover guard fired and left the auto-select's pick alone");
-  assert.deepEqual(visiblePanels(h), ["reasonix-panel"],
+  assert.deepEqual(visiblePanels(h), ["opencode-panel"],
     "the panel the nested auto-select showed survives the outer selectInstance(null) — #120/#126's contract, now enforced by the guard too");
-  assert.ok(h.lastIndexOf("activate:reasonix:B") > h.lastIndexOf("deactivate:reasonix"),
+  assert.ok(h.lastIndexOf("activate:opencode-web:B") > h.lastIndexOf("deactivate:opencode-web"),
     "nothing deactivated B's panel after it was activated");
 });
 

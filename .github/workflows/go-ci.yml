@@ -72,13 +72,6 @@ jobs:
       - name: Run tests with race detector (app + ws + dsh_web)
         run: go test -race -count=1 ./internal/app/ ./internal/ws/ ./internal/instance/dsh_web/
 
-      # Reasonix upstream contract check (opt-in, see
-      # internal/instance/reasonix/contract_test.go): runners without a
-      # reasonix binary skip it (green); once a binary is installed on the
-      # runner this runs the full contract check on every push/PR.
-      - name: Verify reasonix upstream contract (SKIPs when reasonix is absent)
-        run: REASONIX_CONTRACT=1 go test ./internal/instance/reasonix/ -run TestReasonixUpstreamContract -v
-
       # The ttymetrics build tag (beta releases carry it; stable does not)
       # switches internal/app/tty_metrics_*.go between the real
       # instrumentation and passthrough stubs, so both variants must stay

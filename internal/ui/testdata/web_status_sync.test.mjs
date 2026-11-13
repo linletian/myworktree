@@ -831,12 +831,12 @@ test("index.html: syncActiveWebStatus skips non-web kinds and renderers without 
   pty.api.syncActiveWebStatus();
   assert.deepEqual(pty.calls, [], "a pty instance is not a web kind");
 
-  // reasonix is deliberately NOT wired (its own 2s tick self-heals): a
-  // renderer without syncStatus must be skipped, not crash the dispatch.
-  const rx = indexSyncHarness({ kind: "reasonix", renderer: null });
-  rx.window.KindRenderers.reasonix = {}; // registered, but exposes no syncStatus
-  assert.doesNotThrow(() => rx.api.syncActiveWebStatus(), "no syncStatus must be a silent no-op");
-  assert.deepEqual(rx.errors, [], "and no error is even logged");
+  // A web kind whose renderer is registered but exposes no syncStatus
+  // must be skipped, not crash the dispatch.
+  const unwired = indexSyncHarness({ kind: "opencode-web", renderer: null });
+  unwired.window.KindRenderers["opencode-web"] = {}; // registered, but exposes no syncStatus
+  assert.doesNotThrow(() => unwired.api.syncActiveWebStatus(), "no syncStatus must be a silent no-op");
+  assert.deepEqual(unwired.errors, [], "and no error is even logged");
 
   const none = indexSyncHarness({ kind: "dsh-web", renderer: null });
   assert.doesNotThrow(() => none.api.syncActiveWebStatus(), "a missing renderer is a no-op");

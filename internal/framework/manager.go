@@ -161,7 +161,7 @@ func (m *Manager) Start(ctx context.Context, in StartParams) (store.ManagedInsta
 	// the tag and resolves its command / cwd / preStart / env; an empty
 	// TagID with a Command is an ad-hoc start; both empty is an idle
 	// shell. Tag command-required enforcement is left to the kind (PTY
-	// requires one; opencode-web / reasonix deliberately ignore it).
+	// requires one; the web-UI kinds deliberately ignore it).
 	tagID := strings.TrimSpace(in.TagID)
 	if tagID == "adhoc" || tagID == "idle" {
 		// Pre-refactor sentinel values persisted on the record and passed
@@ -248,7 +248,7 @@ func (m *Manager) Start(ctx context.Context, in StartParams) (store.ManagedInsta
 	// AllocateBuffer already adds capBytes to totalBufBytes; the
 	// explicit m.totalBufBytes.Add below was the old (pre-AllocateBuffer)
 	// bookkeeping and would double-count if left in place.
-	// Web-UI kinds (reasonix / opencode-web / dsh-web) never capture
+	// Web-UI kinds (opencode-web / dsh-web) never capture
 	// output: skip the 16–256 MB pre-allocation for them (BufferConsumer).
 	var buf *RingBuffer
 	if bc, ok := k.(BufferConsumer); ok && !bc.NeedsOutputBuffer() {

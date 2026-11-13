@@ -277,8 +277,7 @@ func TestOpencodeWebRendererKeepsFrameAlive(t *testing.T) {
 // syncStatus can reuse it for a cross-browser stop). The hide-all guarantee
 // did not move, only its location: the branch must now call
 // this.teardownStopped(session), and teardownStopped's body must contain
-// this._showOnly(null). reasonix.js was NOT refactored, so it keeps its
-// inline assertion — the same guarantee, checked where each file now keeps it.
+// this._showOnly(null).
 func TestWebRenderersStoppedSwitchHidesAllFrames(t *testing.T) {
 	// The dispatch-side invariant that makes the renderer-side fix
 	// necessary: same-kind switches never deactivate. If this guard ever
@@ -293,7 +292,6 @@ func TestWebRenderersStoppedSwitchHidesAllFrames(t *testing.T) {
 		// asset → opener of the stopped / not-running branch to inspect
 		"/static/kinds/dsh_web.js":      "inst && inst.status === 'stopped'",
 		"/static/kinds/opencode_web.js": "inst && inst.status === 'stopped'",
-		"/static/kinds/reasonix.js":     "inst.status !== 'running' && inst.status !== 'starting'",
 	}
 	for asset, branchOpen := range cases {
 		js := fetchStaticAsset(t, asset)
@@ -306,12 +304,6 @@ func TestWebRenderersStoppedSwitchHidesAllFrames(t *testing.T) {
 			t.Fatalf("%s: no return; after %q", asset, branchOpen)
 		}
 		branch := js[start : start+end]
-		if asset == "/static/kinds/reasonix.js" {
-			if !strings.Contains(branch, "this._showOnly(null)") {
-				t.Fatalf("%s: stopped branch does not hide every cached frame (this._showOnly(null)) — switching to a stopped same-kind instance stacks iframes half/half (issue #96)", asset)
-			}
-			continue
-		}
 		// The refactored web renderers delegate the whole teardown — hide-all
 		// included — to teardownStopped(session); assert both halves so a
 		// branch that forgot the call, or a teardownStopped that dropped the
@@ -607,7 +599,7 @@ func stripCSSComments(css string) string {
 // TestEmptyWorktreeSwitchHidesAllWebPanels pins the issue #101 fix: switching
 // to a worktree with ZERO instances must not leave the previous worktree's
 // dsh-web iframe on screen. Three defects combined: (A) renderWorkspace's
-// no-active-instance branch hid only the opencode/reasonix panels and forgot
+// no-active-instance branch hid only the opencode panel and forgot
 // #dsh-panel (whose CSS keeps it full-size until [hidden] is set); (B)
 // selectWorktree never called the previous renderer's deactivate()
 // (maybeDestroyInactiveStoppedSession's terminal-bucket guard returns early
@@ -626,7 +618,7 @@ func TestEmptyWorktreeSwitchHidesAllWebPanels(t *testing.T) {
 	// (A) One helper hides ALL three web panels — adding a kind and hiding
 	// only the older panels is exactly how #dsh-panel was forgotten.
 	helper := sliceJSFunction(t, indexJS, "hideWebPanels")
-	for _, panelID := range []string{"'opencode-panel'", "'reasonix-panel'", "'dsh-panel'"} {
+	for _, panelID := range []string{"'opencode-panel'", "'dsh-panel'"} {
 		if !strings.Contains(helper, panelID) {
 			t.Fatalf("hideWebPanels() does not hide %s — a forgotten panel stays visible over the empty state (issue #101)", panelID)
 		}
@@ -2456,105 +2448,61 @@ func TestQuickKeysAnchors(t *testing.T) {
 	}
 }
 
-func TestReasonixRendererKeepsFrameAlive(t *testing.T) {
+// TestIndexHTMLHasNoReasonixEntryPoint pins the issue #160 UI removal: the
+// served shell carries no Reasonix entry at all — no start tab, no panel, no
+// RX badge, no renderer script — while the surviving OpenCode/DSH web kinds
+// keep their shared wiring, and the retired renderer asset 404s instead of
+// being served.
+func TestIndexHTMLHasNoReasonixEntryPoint(t *testing.T) {
+	bodyText := fetchIndexHTML(t)
+	for _, banned := range []string{
+		"reasonix",
+		"Reasonix",
+		"REASONIX",
+		"instNameRx",
+		"kind-badge-rx",
+	} {
+		if strings.Contains(bodyText, banned) {
+			t.Fatalf("GET / must not contain the removed Reasonix UI token %q (issue #160)", banned)
+		}
+	}
+	if strings.Contains(bodyText, `<script src="/static/kinds/reasonix.js">`) {
+		t.Fatal("GET / must not reference the retired reasonix renderer script (issue #160)")
+	}
+	// The shared web-kind list and the two surviving panels/tabs stay intact.
+	for _, must := range []string{
+		"const WEB_UI_KINDS = ['opencode-web', 'dsh-web'];",
+		`id="opencode-panel"`,
+		`id="dsh-panel"`,
+		`switchStartInstanceTab('opencode-web')`,
+		`switchStartInstanceTab('dsh-web')`,
+	} {
+		if !strings.Contains(bodyText, must) {
+			t.Fatalf("GET / lost the surviving web-UI hook %q (issue #160 must not regress OpenCode/DSH)", must)
+		}
+	}
+
 	mux := http.NewServeMux()
 	if err := Register(mux, "myworktree", nil); err != nil {
 		t.Fatal(err)
 	}
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
-
 	resp, err := http.Get(srv.URL + "/static/kinds/reasonix.js")
 	if err != nil {
 		t.Fatalf("GET /static/kinds/reasonix.js failed: %v", err)
 	}
-	body, _ := io.ReadAll(resp.Body)
 	_ = resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("GET /static/kinds/reasonix.js status: %d", resp.StatusCode)
-	}
-	js := string(body)
-
-	checks := []string{
-		// issue #53: re-navigation is guarded by the dataset (id + src);
-		// assigning the same src would reload the embedded page.
-		"frame.dataset.instance !== id || frame.dataset.src !== src",
-		// hide instead of destroying the iframe on tab switch so the
-		// embedded page (chat draft, scroll, sidebar) survives.
-		"this._currentFrame.hidden = true",
-		// per-instance iframe cache: cross-instance switches only
-		// hide/show frames instead of re-navigating, so instance A's
-		// draft survives even after switching to B and back (goes
-		// beyond main's single shared frame, which reloaded).
-		"this._frames = new Map()",
-		"this._frames.set(id, frame)",
-		"this._showOnly(frame)",
-		// a fresh iframe starts with an empty navigation cache, so the
-		// first activation navigates; the same clearing covers the
-		// stop→start same-src fallback.
-		"frame.dataset.instance = '';",
-		"frame.dataset.src = '';",
-		// only a running (or still-flipping starting) instance has a
-		// live page to load.
-		"inst.status !== 'running' && inst.status !== 'starting'",
-		// 2s self-healing poll: re-navigates on web_url port changes
-		// (daemon restart) and invalidates on stop/failure — main ran
-		// the same check on every render tick.
-		"setInterval",
-		// issue #54: hide leftover xterm hosts so they cannot overlay the
-		// static iframe.
-		"renderTerminalSessions();",
-		// issue #55: normalize container styles left behind by xterm so the
-		// web UI is never rendered greyed out.
-		`termContainer.style.opacity = "1";`,
-		`termContainer.style.filter = "none";`,
-		// web_url (cross-origin listener) preferred, same-origin /rx/ fallback.
-		`"/rx/" + id + "/"`,
-		"inst.web_url",
-		// shell hook: stop/delete releases the instance's frame.
-		"destroyFrame(id) {",
-		// panel mutual exclusion (no stacked half/half layout).
-		"rxPanel.hidden = true",
-		// lifecycle diagnostics for white-screen reports.
-		"[reasonix-renderer]",
-	}
-	for _, check := range checks {
-		if !strings.Contains(js, check) {
-			t.Fatalf("reasonix.js should include keep-alive hook %q", check)
-		}
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("GET /static/kinds/reasonix.js status: %d, want 404 (issue #160 removed the asset)", resp.StatusCode)
 	}
 }
 
-// TestReasonixTabIsFixedCommandNoTemplate pins decision B: the Reasonix
-// start tab has no template picker — the serve command is fixed and the
-// UI sends an empty tag_id (tag env/preStart remain reachable via the
-// API/CLI tag_id parameter, backend support is intentionally kept).
-func TestReasonixTabIsFixedCommandNoTemplate(t *testing.T) {
-	bodyText := fetchIndexHTML(t)
-	checks := []string{
-		`data-tab="reasonix"`,
-		"kind: 'reasonix',",
-		"tag_id: '',",
-		// The renderer must actually be loaded, or selectInstance falls
-		// back to the PTY path (TTY WS → "does not support output
-		// subscription" loop) and the web UI never renders.
-		`<script src="/static/kinds/reasonix.js">`,
-	}
-	for _, check := range checks {
-		if !strings.Contains(bodyText, check) {
-			t.Fatalf("GET / should include reasonix fixed-command hook %q", check)
-		}
-	}
-	if strings.Contains(bodyText, "tagSelectRx") {
-		t.Fatalf("GET / must not contain the removed reasonix template select (decision B)")
-	}
-}
-
-// TestStartInstanceModalTabLabelsAndWrap pins issues #68 and #69: the four
+// TestStartInstanceModalTabLabelsAndWrap pins issues #68 and #69: the three
 // Start Instance tabs follow one naming scheme (Title Case + consistent
 // -Web suffix for the web kinds) while the data-tab values (the backend
 // kind mapping) stay unchanged, and the tab bar never wraps — the dialog
-// width follows its content (max-content) so all four tabs fit on one
+// width follows its content (max-content) so all three tabs fit on one
 // line, with min/max caps so it neither shrinks below the other dialogs
 // nor blows up on long form-info text.
 func TestStartInstanceModalTabLabelsAndWrap(t *testing.T) {
@@ -2562,7 +2510,6 @@ func TestStartInstanceModalTabLabelsAndWrap(t *testing.T) {
 	checks := []string{
 		`switchStartInstanceTab('terminal')">Terminal</button>`,
 		`switchStartInstanceTab('opencode-web')">OpenCode-Web</button>`,
-		`switchStartInstanceTab('reasonix')">Reasonix-Web</button>`,
 		`switchStartInstanceTab('dsh-web')">DSH-Web</button>`,
 	}
 	for _, check := range checks {
@@ -2592,7 +2539,6 @@ func TestStartInstanceModalTabLabelsAndWrap(t *testing.T) {
 	for _, check := range []string{
 		`data-tab="terminal"`,
 		`data-tab="opencode-web"`,
-		`data-tab="reasonix"`,
 		`data-tab="dsh-web"`,
 	} {
 		if !strings.Contains(bodyText, check) {
@@ -2612,7 +2558,6 @@ func TestStartInstanceModalFormInfosAreEnglish(t *testing.T) {
 		"this tab starts no web service and embeds no iframe",
 		// Web tab form-infos (issue #73, English drafts).
 		"Use the opencode native web UI in your browser.",
-		"Use the Reasonix web chat UI in your browser.",
 		"Use the DeepSeek Harness official web UI in your browser.",
 		"session pool",
 		"out-of-scope actions only warn",
@@ -2629,14 +2574,13 @@ func TestStartInstanceModalFormInfosAreEnglish(t *testing.T) {
 	}
 }
 
-// TestKindBadgesUnified pins issue #70: the OC / RX / DS instance-tab
+// TestKindBadgesUnified pins issue #70: the OC / DS instance-tab
 // badges share one .kind-badge base style, per-kind rules only set colors
 // (through CSS variables), and the old divergent classes are gone.
 func TestKindBadgesUnified(t *testing.T) {
 	bodyText := fetchIndexHTML(t)
 	checks := []string{
 		`class="kind-badge kind-badge-oc"`,
-		`class="kind-badge kind-badge-rx"`,
 		`class="kind-badge kind-badge-dsh"`,
 		"--badge-dsh-bg",
 		"--badge-dsh-text",
@@ -2669,7 +2613,7 @@ func TestKindBadgesUnified(t *testing.T) {
 //
 // TestUICopyIsEnglishOnly pins the single-language English UI direction
 // (issue #73) across the whole served UI, not just index.html: the web-kind
-// renderer JS files (dsh_web.js / opencode_web.js / reasonix.js) and
+// renderer JS files (dsh_web.js / opencode_web.js) and
 // framework.js must contain no CJK characters at all — warning bars,
 // loading titles, the missing-dependency dialog and any future copy are
 // covered even when they live in JS. Key user-visible strings are also
@@ -2737,7 +2681,6 @@ func TestUICopyIsEnglishOnly(t *testing.T) {
 		"/": {
 			"Open a PTY terminal in the selected worktree.",
 			"Use the opencode native web UI in your browser.",
-			"Use the Reasonix web chat UI in your browser.",
 			"Use the DeepSeek Harness official web UI in your browser.",
 			"Launch with npx (recommended)",
 			"dsh is not installed",
@@ -2756,8 +2699,7 @@ func TestUICopyIsEnglishOnly(t *testing.T) {
 			"Startup timed out (60s)",
 			"opencode has left the worktree scope",
 		},
-		"/static/kinds/reasonix.js": nil,
-		"/static/framework.js":      nil,
+		"/static/framework.js": nil,
 	}
 	for path, mustContain := range paths {
 		body := fetchStaticPath(t, path)
@@ -3184,11 +3126,10 @@ func TestTerminalStatusBucketsReplaceRunningEquality(t *testing.T) {
 	}
 
 	// The status-bar label for the renderer-owned kinds goes through the same
-	// buckets: kinds/reasonix.js keeps its iframe navigating while the
+	// buckets: the web renderers keep their iframes navigating while the
 	// instance is `starting`, so "stopped" was self-contradicting.
 	for _, check := range []string{
 		"function instanceStatusLabel(inst, liveLabel)",
-		"updateStatus(instanceStatusLabel(inst, 'reasonix web'))",
 		"updateStatus(instanceStatusLabel(inst, 'dsh web ui'))",
 	} {
 		if !strings.Contains(bodyText, check) {
@@ -3803,7 +3744,7 @@ func TestWebPanelsBleedAnchors(t *testing.T) {
 	// stays the containing block; the panel box is exactly its padding box
 	// (no negative top, no bottom:-N). The [hidden] rules are separate rules
 	// and stay untouched.
-	for _, sel := range []string{"#opencode-panel {", "#reasonix-panel {", "#dsh-panel {"} {
+	for _, sel := range []string{"#opencode-panel {", "#dsh-panel {"} {
 		rule := ruleFor(sel)
 		for _, decl := range []string{"position: absolute;", "inset: 0;", "display: flex;", "flex-direction: column;"} {
 			if !strings.Contains(rule, decl) {
@@ -3825,7 +3766,7 @@ func TestWebPanelsBleedAnchors(t *testing.T) {
 	// because the bleed it claimed is unreachable under #workspace's
 	// overflow:hidden.
 	bannedFrameBits := []string{"height: calc(100% +", "margin-bottom: calc(-1", "env("}
-	for _, sel := range []string{".opencode-frame {", ".reasonix-frame {", ".dsh-frame {"} {
+	for _, sel := range []string{".opencode-frame {", ".dsh-frame {"} {
 		rule := ruleFor(sel)
 		for _, decl := range []string{"width: 100%;", "flex: 1;", "min-height: 0;", "border: 0;"} {
 			if !strings.Contains(rule, decl) {

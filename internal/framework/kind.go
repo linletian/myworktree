@@ -43,13 +43,13 @@ type SpawnParams struct {
 
 	// Command is the tag command (or the ad-hoc command) resolved by the
 	// framework. Kinds that run an interactive shell (PTY) send it as the
-	// initial input; HTTP-backed kinds (opencode-web, reasonix) ignore it.
+	// initial input; HTTP-backed kinds (opencode-web, dsh-web) ignore it.
 	Command string
 
 	// PreStart is the tag's preStart script. The framework does NOT run
 	// it: each kind executes it right before spawning its process, using
 	// the same environment the process will get, so per-kind environment
-	// handling (e.g. reasonix's REASONIX_HOME stripping) stays consistent
+	// handling stays consistent
 	// between preStart and the real process. Empty means no-op.
 	PreStart string
 
@@ -229,8 +229,8 @@ type Kind interface { // Manifest returns static metadata. Called once at regist
 // BufferConsumer is an optional interface kinds may implement to tell
 // the framework whether they capture output into the per-instance ring
 // buffer. Kinds that do not implement it default to allocating a
-// buffer (the historical behaviour); web-UI kinds (reasonix /
-// opencode-web / dsh-web) implement it returning false so Start skips
+// buffer (the historical behaviour); web-UI kinds (opencode-web /
+// dsh-web) implement it returning false so Start skips
 // the 16–256 MB pre-allocation for instances that never write output.
 type BufferConsumer interface {
 	NeedsOutputBuffer() bool
