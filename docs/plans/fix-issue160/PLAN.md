@@ -183,4 +183,6 @@ bash -n scripts/install.sh
 - 原问题已复现，见 [EVIDENCE.md](EVIDENCE.md)。
 - 上游停维护已核实，具体动机未公开，不能写成已知原因。
 - 目标调整评论已追加并通过 API 读回确认：[issue #160 评论](https://github.com/linletian/myworktree/issues/160#issuecomment-6845396285)。
-- **当前仅完成方向调整、计划更新与 issue 评论；功能删除、存量退休和所有实现验证均未执行。**
+- **实现已完成（2026-11-13）**：§3.A–D 全部落地于单一原子提交 `9a91be6`（分支 `fix/fix-issue160`，基线 `a57200a`；36 文件，+2268/−5435）。存量退休实现于 `internal/app/reasonix_retirement.go` 及其测试；`kind=reasonix` 创建返回 400、`/rx/` 与 `static/kinds/reasonix.js` 返回 404、无 Reasonix listener 与 `web_url`；冻结的 iPadOS 机制两文件与基线逐字节一致。
+- **验证状态**：定向测试（app/framework/store/ui/cli）全绿；`node --test` 472/472；交付门禁 `go test ./...` 21 ok/0 fail；§4.2 独立沙盒迁移验收 7 项全过（fake legacy serve 有界停止、状态逐项保留、备份 0600 幂等、哨兵逐字节不变、幂等重跑）；独立双评审（评审1号 `opencode-go/muse-spark-1.3-contributor`、评审2号 `minimax-cn/MiniMax-M3.1-Flash`）对同一冻结对象均 APPROVE，剩余发现均为 nit/INFO（FREEZE 文档数字、raw 标签可读性、`reused-open-perms` 备份告警与进程组语义为既有语义的后续建议项）。
+- **未执行/边界**：未做真实 Studio 验收（该路线已取消）；`go test -race` 与 CI race 变体未在本轮复跑（CI 既有步骤保持）；`instance_log_test.go`/`manager_endoffset_test.go`/`kinds/opencode_web.js` 中历史 reasonix 注释按"不做全仓字符串清洗"保留。
